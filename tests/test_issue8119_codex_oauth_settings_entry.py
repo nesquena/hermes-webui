@@ -114,6 +114,45 @@ eval(src);
     result.domText = walk(card).map((el) => el.innerHTML + '|' + el.textContent).join('\n');
   }
 
+  if (scenario.race) {
+    // Flow f1 (profile "default") has a poll in flight when the user switches to
+    // "work" and starts f2 from the rebuilt card; then f1's poll answers late.
+    let starts = 0;
+    let releaseF1 = null;
+    globalThis.api = async (url, opts) => {
+      calls.push({ url, body: opts && opts.body ? JSON.parse(opts.body) : null });
+      if (url === '/api/onboarding/oauth/start') {
+        starts += 1;
+        return Object.assign({}, startResponse, starts === 1
+          ? { flow_id: 'f1', user_code: 'CODE-ONE' }
+          : { flow_id: 'f2', user_code: 'CODE-TWO' });
+      }
+      if (url === '/api/onboarding/oauth/poll?flow_id=f1') {
+        return new Promise((resolve) => { releaseF1 = () => resolve({ status: scenario.lateStatus }); });
+      }
+      if (url === '/api/onboarding/oauth/poll?flow_id=f2') return { status: 'success' };
+      return { ok: true };
+    };
+    const codex = scenario.providers.find((p) => p.id === 'openai-codex');
+    const open = async () => {
+      const card = _buildProviderCard(codex);
+      const login = walk(card).find((el) => el.dataset.codexOauthLogin === '1');
+      await walk(login).find((el) => el.tag === 'button').listeners.click();
+      return login.children[login.children.length - 1];
+    };
+    await open();
+    const f1Poll = timers.shift()();  // f1 poll now awaiting the server
+    S.activeProfile = 'work';
+    const flowB = await open();
+    releaseF1();
+    await f1Poll;
+    result.flowBAfterLate = flowB.innerHTML;
+    result.reloadsAfterLate = providersReloads;
+    result.timersAfterLate = timers.length;
+    while (timers.length) await timers.shift()();
+    result.flowBFinal = flowB.innerHTML;
+  }
+
   if (scenario.wizard) {
     await startCodexOAuth();
     result.wizardShowsCode = wizardFlow.innerHTML.includes('ABCD-1234');
@@ -323,3 +362,22 @@ def test_flow_started_under_one_profile_persists_there_after_a_profile_switch(mo
     assert not (home_b / "auth.json").exists()
     stored = json.loads((home_a / "auth.json").read_text(encoding="utf-8"))
     assert stored["credential_pool"]["openai-codex"][0]["access_token"] == "ACCESS"
+
+
+@pytest.mark.parametrize("late_status", ["success", "pending", "expired"])
+def test_late_poll_from_an_abandoned_flow_does_not_touch_the_new_one(tmp_path, late_status):
+    result = _run(tmp_path, {
+        "race": True,
+        "lateStatus": late_status,
+        "providers": [_oauth_provider("openai-codex", auth_error="No Codex credentials stored.")],
+    })
+    # The new flow (f2) still shows its own code and nothing reloaded.
+    assert "CODE-TWO" in result["flowBAfterLate"]
+    assert result["reloadsAfterLate"] == 0
+    # Only f2's poll tick is scheduled: no orphan timer from f1.
+    assert result["timersAfterLate"] == 1
+    # f2 keeps polling and completes on its own.
+    assert "oauth_codex_success" in result["flowBFinal"]
+    assert result["providersReloads"] == 1
+    polled = [c["url"] for c in result["calls"] if "/oauth/poll" in c["url"]]
+    assert polled == ["/api/onboarding/oauth/poll?flow_id=f1", "/api/onboarding/oauth/poll?flow_id=f2"]

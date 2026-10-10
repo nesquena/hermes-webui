@@ -608,6 +608,9 @@ let _codexOAuthFlowId=null;
 // caller-supplied surface (Settings -> Providers). Getters, not elements, so the
 // wizard keeps resolving its nodes by id the way it always has.
 let _codexOAuthUi=null;
+// Bumped on every start: a response that arrives after a newer start (another
+// profile, another surface) belongs to an abandoned flow and must not touch it.
+let _codexOAuthStartSeq=0;
 
 function _codexOAuthWizardUi(){
   return {
@@ -673,6 +676,7 @@ async function _pollCodexOAuth(){
   if(!flowId)return;
   try{
     const resp=await api('/api/onboarding/oauth/poll?flow_id='+encodeURIComponent(flowId));
+    if(_codexOAuthFlowId!==flowId)return;
     const status=(resp&&resp.status)||'error';
     if(status==='pending'){
       _codexOAuthPollTimer=setTimeout(_pollCodexOAuth,3000);
@@ -693,6 +697,7 @@ async function _pollCodexOAuth(){
       _renderCodexOAuthTerminal('error',(resp&&resp.error)||'OAuth login failed. Please try again.');
     }
   }catch(e){
+    if(_codexOAuthFlowId!==flowId)return;
     _clearCodexOAuthPoll();
     _codexOAuthFlowId=null;
     _setCodexOAuthButton(true);
@@ -704,6 +709,7 @@ async function startCodexOAuth(ui){
   _codexOAuthUi=ui||null;
   const flowDiv=_codexOAuthCurrentUi().flow();
   if(!flowDiv)return;
+  const seq=++_codexOAuthStartSeq;
   _clearCodexOAuthPoll();
   _codexOAuthFlowId=null;
   _setCodexOAuthButton(false);
@@ -711,6 +717,7 @@ async function startCodexOAuth(ui){
   flowDiv.innerHTML=`<div class="onboarding-oauth-card onboarding-oauth-pending"><div class="onboarding-oauth-icon">⏳</div><div><strong>${t('oauth_codex_polling')}</strong><p>Starting device-code flow…</p></div></div>`;
   try{
     const resp=await api('/api/onboarding/oauth/start',{method:'POST',body:JSON.stringify({provider:'openai-codex'})});
+    if(seq!==_codexOAuthStartSeq)return;
     if(resp.error) throw new Error(resp.error);
     const{flow_id,user_code,verification_uri}=resp;
     if(!flow_id||!user_code||!verification_uri) throw new Error('Invalid OAuth response');
@@ -732,6 +739,7 @@ async function startCodexOAuth(ui){
       </div>`;
     _codexOAuthPollTimer=setTimeout(_pollCodexOAuth,Math.max(1000,Number(resp.poll_interval_seconds||3)*1000));
   }catch(e){
+    if(seq!==_codexOAuthStartSeq)return;
     _clearCodexOAuthPoll();
     _codexOAuthFlowId=null;
     _renderCodexOAuthTerminal('error',(e&&e.message)||String(e));
