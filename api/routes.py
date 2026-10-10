@@ -837,9 +837,20 @@ def _auto_assign_live_binding(project_id):
 
     ``None`` is deliberately shared by both "gone" and "unknown": the caller
     fails CLOSED (AGENTS.md - unknown is not allowed to file a chat).
+
+    The read shares ``_PROJECTS_CATALOG_LOCK`` with every catalog mutation
+    (create / rename / bind / delete), because each of those does
+    load -> modify -> save and ``save_projects`` TRUNCATES the file before it
+    rewrites it: a reader that slipped in between observed an empty catalog and
+    the sweep stopped as though its project had been deleted, leaving chats
+    unassigned while automatic filing was still on (Greptile P1
+    2026-10-10T08:08:52Z "Another save stops filing"). Lock order is
+    CATALOG -> LOCK (see ``_clear_cached_sessions_for_project``); this call site
+    holds neither lock.
     """
     try:
-        projects = load_projects()
+        with _PROJECTS_CATALOG_LOCK:
+            projects = load_projects()
     except Exception:
         return None
     for p in projects:
