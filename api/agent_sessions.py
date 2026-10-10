@@ -8,6 +8,11 @@ from contextlib import closing
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, quote_from_bytes
 
+from api.compression_anchor import (
+    is_user_originated_turn,
+    user_turn_sql_exclusions,
+)
+
 logger = logging.getLogger(__name__)
 
 # state.db paths that already produced the "no 'source' column" warning below.
@@ -259,16 +264,28 @@ def _as_score(*values) -> float:
 
 
 def _count_user_turns(row: dict) -> int:
-    user_turns = row.get("actual_user_message_count")
+    # #7681 finding 1: the collapsed-lineage row nulls its DISPLAYED count, but
+    # the count it had is still the right answer for "does this row have any
+    # user turn at all". Read the internal field first so an ACP chain with real
+    # turns stays visible.
+    user_turns = row.get("lineage_user_message_count")
+    if user_turns is None:
+        user_turns = row.get("actual_user_message_count")
     if user_turns is None:
         user_turns = row.get("user_message_count")
     if user_turns is None:
         messages = row.get("messages") or []
         if isinstance(messages, list):
+            # #7681: count only genuine human-authored user turns. The agent
+            # persists synthetic compression cards, the continuation marker,
+            # process-wakeup notifications, async-delegation rows, blank echoes
+            # and the max-iterations request with role='user' for alternation,
+            # but is_user_originated_turn() classifies them all as NOT user
+            # turns — mirroring api/compression_anchor.
             return sum(
                 1
                 for msg in messages
-                if _safe_lower(msg.get("role") if isinstance(msg, dict) else msg) == "user"
+                if is_user_originated_turn(msg)
             )
         return 0
     return _as_positive_int(user_turns)
@@ -371,6 +388,32 @@ def is_cli_session_row_visible(row: dict) -> bool:
         return True
 
     if not _looks_like_default_cli_title(row):
+        return True
+
+    # An UNKNOWN turn count must not be read as a known zero here. When the
+    # state.db schema has no `role` column on the messages table, #7681 finding 2
+    # keeps `actual_user_message_count` NULL ("unknown", not a confident wrong
+    # number), so such a row can never clear this untitled threshold. Hiding it
+    # would silently drop a real session from the sidebar because an old
+    # schema lacks a column — an unseen data loss. Surface it instead.
+    #
+    # The escape keys on an EXPLICIT "count is unknown" marker set by the SQL
+    # branches that could not determine roles (no `role` column, or no usable
+    # messages table) — never on the *value* being absent. A WebUI sidecar/index
+    # row that simply doesn't carry `actual_user_message_count` is not
+    # "unknown" the same way: it has an accurate count in its own metadata, so
+    # it must not bypass the threshold via a coincidentally-missing field.
+    #
+    # But the escape must only apply while the total message count is itself
+    # ambiguous enough to hold the two user turns the threshold requires. A row
+    # that provably carries a single message cannot contain two user turns, so
+    # surfacing it would wrongly let a legacy one-turn stub pass the interactivity
+    # gate.
+    if (
+        row.get("user_message_count_unknown")
+        and not row.get("messages")
+        and message_count >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
+    ):
         return True
 
     return _count_user_turns(row) >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
@@ -644,11 +687,26 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         # touched standalone sessions — exactly the inverse of what a user
         # expects from "Show agent sessions" sorted by activity.
         for key in (
-            'id', 'model', 'message_count', 'actual_message_count', 'actual_user_message_count',
+            'id', 'model', 'message_count', 'actual_message_count',
             'ended_at', 'end_reason', 'last_activity', 'archived',
         ):
             if key in tip:
                 merged[key] = tip[key]
+        # #7681 finding 1: the collapsed lineage row must NOT inherit the chosen
+        # tip segment's `actual_user_message_count` — a compressed chain keeps
+        # several segments and the tip slice alone is never the whole-lineage
+        # user-turn total (the agent's own lineage count differs). A stale tip
+        # count shown as the lineage total actively misleads, so null only the
+        # DISPLAYED count and let the client omit the label for collapsed rows.
+        #
+        # The count used for VISIBILITY is a separate field: nulling the display
+        # count must not make an ACP chain with real user turns vanish from the
+        # sidebar (`_acp_row_is_visible` runs `_count_user_turns(row) > 0`
+        # BEFORE the lineage check, and `_count_user_turns` falls back through
+        # `user_message_count` → `messages` → 0).
+        if merged.get('actual_user_message_count') is not None:
+            merged['lineage_user_message_count'] = merged['actual_user_message_count']
+        merged['actual_user_message_count'] = None
         if lineage_project_id:
             merged['project_id'] = lineage_project_id
         if str(tip.get('source') or '').strip().lower() == 'tui':
@@ -831,18 +889,99 @@ def read_importable_agent_session_rows(
 
         if use_messages_join:
             actual_count_expr = f"COUNT(m.{count_col})"
+            # #7681: the no-messages-table fallback keeps its conservative
+            # total in this separate internal field; the messages-join paths
+            # know the real count, so nothing to estimate there.
+            user_message_count_estimate_expr = "NULL"
+            user_message_count_unknown_expr = "0"
+            # Default: no messages table reachable → no inactive-row evidence.
+            inactive_user_rows_expr = "0"
             if 'role' in message_cols:
-                user_message_count_expr = "COUNT(CASE WHEN LOWER(m.role) = 'user' THEN 1 END)"
+                # #7681: exclude EVERY synthetic user-role row, not just the
+                # durable compression flag. The agent persists the continuation
+                # marker, process-wakeup notifications, blank echoes, the
+                # max-iterations request and legacy "[CONTEXT SUMMARY]:" rows
+                # with role='user' but none are user turns. The exclusion SQL
+                # below is generated from the same content rules the sidecar
+                # producer classifies with (api/compression_anchor), so the two
+                # counters can never drift apart.
+                marker_guard = (
+                    " AND COALESCE(m._compressed_summary, 0) = 0"
+                    if '_compressed_summary' in message_cols
+                    else ""
+                )
+                # #7681 finding 3: the default compaction mode is in-place, so a
+                # compacted session stays ONE segment and the client's
+                # `_sidebarUserTurnCountRenderOK` still renders its count. That
+                # count includes rows the agent has already compacted away (and
+                # rows removed by /undo), so it over-reports. Emit a flag saying
+                # "this session has inactive (compacted or rewound) user rows"
+                # and let the client null the DISPLAYED count for it.
+                inactive_user_rows_expr = (
+                    "MAX(CASE WHEN COALESCE(m._compressed_summary, 0) <> 0"
+                    " AND LOWER(m.role) = 'user' THEN 1 ELSE 0 END)"
+                    if '_compressed_summary' in message_cols
+                    else "0"
+                )
+                # #7681 finding 2: `display_kind` is the agent's own marker for
+                # scaffolding rows that carry role='user' but are not human
+                # input (async-delegation, hidden operational notices). The
+                # Python classifier rejects every non-empty value except
+                # 'steer'; the SQL must do the same or the two counters drift.
+                display_kind_guard = (
+                    " AND COALESCE(m.display_kind, '') IN ('', 'steer')"
+                    if 'display_kind' in message_cols
+                    else ""
+                )
+                if 'content' in message_cols:
+                    content_expr = "LOWER(LTRIM(COALESCE(m.content, '')))"
+                    internal_exclusions = user_turn_sql_exclusions(content_expr)
+                    # #7681 finding 2: SQLite's TRIM() strips SPACES only, so a
+                    # whitespace-only row holding a tab or a newline used to
+                    # count as a user turn. Trim the full ASCII whitespace set.
+                    content_guard = (
+                        " AND TRIM(COALESCE(m.content, ''), ' ' || char(9)"
+                        " || char(10) || char(13)) != ''"
+                    )
+                    user_message_count_expr = (
+                        "COUNT(CASE WHEN LOWER(m.role) = 'user'"
+                        f"{marker_guard}"
+                        f"{display_kind_guard}"
+                        f"{content_guard}"
+                        f" AND NOT ({internal_exclusions})"
+                        " THEN 1 END)"
+                    )
+                else:
+                    # No ``content`` column (minimal/legacy schema): the synthetic
+                    # content heuristics cannot run, so count role-bearing user
+                    # rows minus the durable compression flag only.
+                    user_message_count_expr = (
+                        "COUNT(CASE WHEN LOWER(m.role) = 'user'"
+                        f"{marker_guard} THEN 1 END)"
+                    )
             else:
-                user_message_count_expr = f"COUNT(m.{count_col})"
+                # No ``role`` column: roles are unavailable, so we cannot
+                # distinguish user turns from assistant/tool rows. Emit NULL
+                # rather than the total message count — a count derived from
+                # roles that aren't there roughly doubles every imported
+                # session's turn count. The explicit unknown marker lets the
+                # visibility gate key on the *column*, not on a missing value.
+                user_message_count_expr = "NULL"
+                user_message_count_unknown_expr = "1"
             last_activity_expr = "MAX(m.timestamp)" if messages_has_timestamp else "NULL"
             join_clause = "LEFT JOIN messages m ON m.session_id = s.id"
             group_by_clause = "GROUP BY s.id"
         else:
             # No usable messages table: use the denormalized per-session counts
             # and ``started_at`` so the rows still surface in the sidebar.
+            # ``s.message_count`` is a denormalized total with no role
+            # information, so the user-turn count is genuinely unknown here —
+            # emit NULL and keep a conservative estimate in a separate field.
             actual_count_expr = "s.message_count"
-            user_message_count_expr = "s.message_count"
+            user_message_count_expr = "NULL"
+            user_message_count_estimate_expr = "s.message_count"
+            user_message_count_unknown_expr = "1"
+            inactive_user_rows_expr = "0"
             last_activity_expr = "NULL"
             join_clause = ""
             group_by_clause = ""
@@ -1002,6 +1141,9 @@ def read_importable_agent_session_rows(
                    {archived_expr},
                    {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
+                   {inactive_user_rows_expr} AS has_inactive_user_rows,
+                   {user_message_count_estimate_expr} AS user_message_count_estimate,
+                   {user_message_count_unknown_expr} AS user_message_count_unknown,
                    {last_activity_expr} AS last_activity
         """
 

@@ -6200,6 +6200,20 @@ function _mergeOptimisticFirstTurnSessions(fetchedSessions){
         ...fetched,
         title:keepLocalOptimistic?(local.title||fetched.title):fetched.title,
         message_count:keepLocalOptimistic?Math.max(localCount,fetchedCount):fetchedCount,
+        // #7681: same rule for the user-turn count. While the local optimistic
+        // row is authoritative the server row may still report a stale (or
+        // absent) count for the in-flight turn, so keep the larger value.
+        user_message_count:(()=>{
+          const localTurns=Number(local.user_message_count);
+          const fetchedTurns=Number(fetched.user_message_count);
+          const localKnown=Number.isFinite(localTurns)&&localTurns>=0;
+          const fetchedKnown=Number.isFinite(fetchedTurns)&&fetchedTurns>=0;
+          if(keepLocalOptimistic){
+            if(localKnown&&fetchedKnown) return Math.max(localTurns,fetchedTurns);
+            return localKnown?localTurns:(fetchedKnown?fetchedTurns:undefined);
+          }
+          return fetchedKnown?fetchedTurns:undefined;
+        })(),
         last_message_at:keepLocalOptimistic?Math.max(localTs,fetchedTs):fetchedTs,
         updated_at:keepLocalOptimistic?Math.max(Number(local.updated_at||0),Number(fetched.updated_at||0),localTs,fetchedTs):Number(fetched.updated_at||fetchedTs||0),
         active_stream_id:fetchedIsServerIdle?null:(keepLocalOptimistic?(fetched.active_stream_id||local.active_stream_id||null):null),
@@ -8244,9 +8258,48 @@ function _collapseSessionLineageForSidebar(sessions){
       ? _authoritativeLineageTipId(item)
       : item&&(item._lineage_tip_id||item._parent_lineage_tip_id)||null).filter(Boolean));
     const chosen=sorted.find(item=>tipIds.has(item&&item.session_id))||sorted[0];
-    result.push({...chosen,_lineage_key:key,_lineage_collapsed_count:items.length,_lineage_segments:sorted});
+    // #7681 finding 1: a collapsed lineage row must NOT fabricate a whole-lineage
+    // user-turn total by summing each segment's private `user_message_count`.
+    // Compression snapshot/continuation segments overlap (the carried tail is
+    // duplicated across them), so a naive sum over-counts (7 + 2 = 9 against a
+    // real stitched count of 6), and a segment with an unknown count silently
+    // degrades the sum into a partial total. The backend rules on it: a
+    // multi-segment row's user-turn count is *unknown* (api/agent_sessions.py
+    // emits NULL for collapsed lineages), so the collapsed row keeps only the
+    // tip's own user_message_count and the _renderer_ omits the label when the
+    // row is collapsed (see _sidebarUserTurnCountRenderOK).
+    result.push({
+      ...chosen,
+      _lineage_key:key,
+      _lineage_collapsed_count:items.length,
+      _lineage_segments:sorted,
+    });
   }
   return result;
+}
+
+function _sidebarUserTurnCountRenderOK(s){
+  // #7681 finding 1 (smaller option): render the user-turn label ONLY when the
+  // count is known to be accurate. A multi-segment compressed lineage has no
+  // single authoritative count on the client (the backend emits NULL for such
+  // rows — api/agent_sessions.py), and a sidecar snapshot/continuation pair's
+  // summed count would be undeduplicated, so omit the label for collapsed rows.
+  // A row that is mid-stream or carries a pending local turn also has a count
+  // that is about to change, so omit until the server lands. Everything else
+  // (single segment, known roles, not pending) renders its user_message_count.
+  if(!s) return false;
+  const seg=Number(s._compression_segment_count||0);
+  const collapsed=Number(s._lineage_collapsed_count||0);
+  if(s._lineage_root_id||s.pre_compression_snapshot||seg>1||collapsed>1)return false;
+  if(s.active_stream_id||s.pending_user_message)return false;
+  // #7681 finding 3: the default compaction mode is in-place, so a compacted
+  // session stays ONE segment and would otherwise render a total that still
+  // counts rows the agent has compacted away (and rows removed by /undo). The
+  // backend flags such rows; omit the label rather than show a wrong number.
+  if(s.has_inactive_user_rows)return false;
+  if(typeof s.user_message_count==='undefined'||s.user_message_count===null)return false;
+  const turns=Number(s.user_message_count);
+  return Number.isFinite(turns)&&turns>=0;
 }
 
 function _sessionDisplayTitle(s){
@@ -8283,6 +8336,50 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   S.session.message_count=count;
   S.session.last_message_at=nowSec;
   S.session.updated_at=nowSec;
+  // #7681: the optimistic row must also advance the user-turn count, or the
+  // just-sent turn renders stale until the next /api/sessions poll lands.
+  // Only count REAL user messages — synthetic compression/task-summary cards
+  // carry role='user' but are not user turns (mirrors
+  // api/compression_anchor.is_user_originated_turn()).
+  const optimisticUserTurns=(Array.isArray(S.messages)?S.messages:[])
+    .filter(m=>m&&m.role==='user'&&!(
+      typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(m)
+    )).length;
+  if(optimisticUserTurns>0){
+    const serverUserTurns=Number(S.session.user_message_count||0);
+    let userTurns=Math.max(serverUserTurns,optimisticUserTurns);
+    // #7681 finding 3 (minor): S.messages is windowed (last ~30), so for a
+    // long session the optimistic window undercounts and max(server, window)
+    // never advances past the server total after the next send. Detect the
+    // windowed case (server already knows more user turns than the window) and,
+    // when a genuine user turn is in flight, advance to server+1 for the
+    // pending turn. Short sessions where the window already reflects the new
+    // turn (optimisticUserTurns >= server) skip this so we never double-bump.
+    const inFlight=typeof _sendInProgress!=='undefined'&&!!_sendInProgress
+      && (typeof _sendInProgressSid==='undefined'||_sendInProgressSid===null
+        || _sendInProgressSid===S.session.session_id);
+    // #7681 finding 4 (should fix): the +1 must be IDEMPOTENT per pending turn.
+    // send() runs three update passes and the second one fires before the
+    // stream id exists, so an unconditional +1 compounded 41 → 42 → 43 and the
+    // sidebar briefly showed a number two turns too high. Remember which
+    // session already received the optimistic bump and only apply it once.
+    if(userTurns===serverUserTurns&&serverUserTurns>0&&optimisticUserTurns<serverUserTurns&&inFlight){
+      const _bumpSid=(typeof _optimisticTurnBumpSid!=='undefined')?_optimisticTurnBumpSid:null;
+      const _bumpBase=(typeof _optimisticTurnBumpBase!=='undefined')?_optimisticTurnBumpBase:null;
+      const alreadyBumped=_bumpSid===sid&&_bumpBase===serverUserTurns;
+      if(!alreadyBumped){
+        userTurns=serverUserTurns+1;
+        _optimisticTurnBumpSid=sid;
+        _optimisticTurnBumpBase=serverUserTurns;
+      }
+    } else if(!inFlight){
+      // A turn that is no longer in flight clears the marker so the NEXT send
+      // can bump again.
+      if(typeof _optimisticTurnBumpSid!=='undefined') _optimisticTurnBumpSid=null;
+      if(typeof _optimisticTurnBumpBase!=='undefined') _optimisticTurnBumpBase=null;
+    }
+    S.session.user_message_count=userTurns;
+  }
   if((S.session.title==='Untitled'||!S.session.title)&&title){
     S.session.title=title;
   }
@@ -8297,8 +8394,18 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
     profile:S.session.profile||S.activeProfile||'default',
     is_streaming:true,
   };
-  if(existingIdx>=0) _allSessions[existingIdx]={..._allSessions[existingIdx],...row};
-  else _allSessions.unshift(row);
+  if(existingIdx>=0){
+    // Keep the pre-existing row's user-turn count when the local transcript
+    // has no user message yet (a re-render mid-send must not drop it), and
+    // keep the larger of the two when it does.
+    const existingUserTurns=Number(_allSessions[existingIdx].user_message_count);
+    if(Number.isFinite(existingUserTurns)&&existingUserTurns>=0){
+      row.user_message_count=Math.max(existingUserTurns,Number(row.user_message_count)||0);
+    }
+    _allSessions[existingIdx]={..._allSessions[existingIdx],...row};
+  }else{
+    _allSessions.unshift(row);
+  }
   renderSessionListFromCache();
 }
 
@@ -9379,6 +9486,28 @@ function renderSessionListFromCache(){
       if(sourceLabel&&(s.is_cli_session||_isMessagingSession(s))) metaBits.push(sourceLabel);
       if(readOnly) metaBits.push('read-only');
       if(_showAllProfiles&&s.profile) metaBits.push(s.profile);
+      // #6519 / #7681: also surface the user-turn count so a
+      // one-question/one-answer session, a cron run, and a long interactive
+      // conversation triage differently in the sidebar. The backend already
+      // exposes ``user_message_count`` on the list payload; the existing
+      // ``session_meta_messages`` row alone is ambiguous for cleanup.
+      //
+      // Appended AFTER the existing metadata on purpose: style.css:1663 forces
+      // the meta row onto a single ellipsized line and boot.js permits a 180px
+      // sidebar, so prepending this label would push previously visible
+      // model/source/profile information out of view at narrow widths.
+      //
+      // #7681 finding 1 (smaller option): render ONLY when the count is known
+      // to be accurate — a single segment, known roles, not pending. Collapsed
+      // lineages and in-flight rows omit the label, and the lineage total is
+      // left for a follow-up.
+      if(_sidebarUserTurnCountRenderOK(s)){
+        const userTurns=Number(s.user_message_count);
+        const userTurnLabel=(typeof t==='function')
+          ? t('session_meta_user_turns', userTurns)
+          : `${userTurns} user turn${userTurns===1?'':'s'}`;
+        metaBits.push(userTurnLabel);
+      }
       const meta=document.createElement('div');
       meta.className='session-meta';
       meta.textContent=metaBits.join(' · ');
