@@ -580,13 +580,17 @@ _AUTO_ASSIGN_SWEEPS: dict = {}
 _AUTO_ASSIGN_SWEEPS_LOCK = threading.Lock()
 _AUTO_ASSIGN_DELETING: set = set()
 
-# Catalog mutation lock. Every project-list mutation (create / rename / bind /
-# delete) does load → modify → save, and each of those read-modify-write pairs
-# must be atomic against the others: a delete that waits several seconds for
-# sweeps used to save the list it read BEFORE the wait, erasing any project
-# created meanwhile (`api/routes.py:19127`). Reentrant so a mutation may call
-# helpers that take it again.
-_PROJECTS_CATALOG_LOCK = threading.RLock()
+# Catalog mutation lock — ONE lock for every load → modify → save pair of the
+# projects catalog. It is DEFINED in the catalog layer (``api/models.py``)
+# because the pairs are not all in this module: the cron / webhook system-project
+# bookkeeping (``ensure_cron_project`` / ``ensure_webhook_project``) rewrites the
+# same file from background scans, and a scan that read first and saved last
+# wrote back its stale copy — erasing the workspace / model / auto_assign the
+# user had just saved through /api/projects/bind, under a success toast
+# (Greptile P1 2026-10-10T13:00:52Z). This module keeps the historical private
+# alias, so every existing call site (and the tests that patch it) reads the
+# same object. Reentrant so a mutation may call helpers that take it again.
+from api.models import PROJECTS_CATALOG_LOCK as _PROJECTS_CATALOG_LOCK
 
 
 def _auto_assign_sweep_begin(project_id, thread=None) -> bool:
@@ -751,7 +755,7 @@ def _project_row_exists(project_id) -> bool:
 _CLEAR_CACHED_SESSION_LOCK_TIMEOUT = 5.0
 
 
-def _clear_cached_sessions_for_project(project_id, lock_timeout=None) -> int:
+def _clear_cached_sessions_for_project(project_id, lock_timeout=None, cleared_ids=None) -> int:
     """Drop ``project_id`` from every cached session that still carries it.
 
     Returns the number of cached sessions cleared. ``/api/projects/delete``
@@ -763,19 +767,18 @@ def _clear_cached_sessions_for_project(project_id, lock_timeout=None) -> int:
     Callers hold ``_PROJECTS_CATALOG_LOCK`` so this scan cannot interleave with
     the implicit assignment + cache publication it competes with.
 
-    Each clear is taken under the session's OWN agent lock, and a session that
-    already has a sidecar is re-saved there. Clearing only the cache was not
-    enough: a ``save()`` that had already serialized ``project_id`` could still
-    land its file (and its index row) AFTER this scan, so the deleted project
-    stayed written on disk and the association came back on reload. Taking the
-    lock every "mutate + save" pair takes orders the two writes — either the
-    other save finished first and the re-save below overwrites it, or it starts
-    afterwards and reads the value cleared here — and the re-save leaves the
-    persisted row naming no project at all. Cache-only chats (no sidecar) are
-    still never written: a delete must not materialize an empty draft the user
-    never sent. (Greptile P1 2026-10-10T12:11:07Z.)
+    Each clear is taken under the session's OWN agent lock: clearing outside it
+    let a ``save()`` that had already serialized ``project_id`` land its file
+    (and its index row) AFTER this scan, and the deleted project came back on
+    reload. Holding the lock every "mutate + save" pair takes orders the two
+    writes, and the ids are handed to ``_persist_cleared_project_ids`` — called
+    by the delete handler AFTER it releases the catalog lock — so the disk half
+    of the fix never runs behind that shared lock (Greptile P1s 2026-10-10T12:11:07Z
+    and 2026-10-10T12:41:25Z).
 
-    ``lock_timeout`` overrides the bounded wait for a session lock (tests).
+    ``cleared_ids`` (optional list) collects the session ids whose persisted row
+    still needs the unlink written through. ``lock_timeout`` overrides the
+    bounded wait for a session lock (tests).
     """
     if not project_id:
         return 0
@@ -821,20 +824,10 @@ def _clear_cached_sessions_for_project(project_id, lock_timeout=None) -> int:
                 cached = SESSIONS.get(sid)
                 if cached is None or getattr(cached, "project_id", None) != project_id:
                     continue
-            persisted = (SESSION_DIR / f"{sid}.json").exists()
-            if persisted:
-                # A metadata-only stub refuses save() by design (#1558);
-                # upgrade it the way every other metadata mutation does.
-                cached = _ensure_full_session_before_mutation(sid, cached)
-            cached.project_id = None
-            with LOCK:
-                SESSIONS[sid] = cached
-                SESSIONS.move_to_end(sid)
-            cleared += 1
-            if persisted:
-                # Not touch_updated_at: a delete must not re-date the chat it
-                # was just un-filed from (same rule as the backfill sweep).
-                cached.save(touch_updated_at=False)
+                cached.project_id = None
+                cleared += 1
+            if cleared_ids is not None:
+                cleared_ids.append(sid)
         except Exception:
             logger.debug(
                 "projects/delete: could not clear project_id on %s", sid,
@@ -843,6 +836,79 @@ def _clear_cached_sessions_for_project(project_id, lock_timeout=None) -> int:
         finally:
             lock.release()
     return cleared
+
+
+def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
+    """Write a cleared ``project_id`` through to each session's sidecar.
+
+    Split from ``_clear_cached_sessions_for_project`` on purpose: the clear runs
+    under ``_PROJECTS_CATALOG_LOCK`` (atomic against the implicit assignment and
+    the cache publication it competes with), while these are FULL-HISTORY
+    writes. Doing them there stalled New Chat and every workspace edit behind a
+    delete of a project with large cached chats (Greptile P1 2026-10-10T12:41:25Z),
+    so the handler calls this after releasing that lock.
+
+    Each write still holds the session's own agent lock — that is what makes the
+    ordering safe: a concurrent save either finished before it (and this
+    overwrite wins) or starts afterwards and reads the cleared value. A session
+    without a sidecar is skipped (a "+ New Chat" draft must not be materialized
+    by a delete), and an actively streaming session is left to its worker, whose
+    next checkpoint/final save persists the cleared value (the same deferral the
+    handler's index pass uses). A row re-filed under ANOTHER project meanwhile is
+    left alone.
+    """
+    if not project_id or not sids:
+        return 0
+    try:
+        active_ids = _active_stream_ids()
+    except Exception:
+        active_ids = set()
+    written = 0
+    for sid in sids:
+        if not sid or not (SESSION_DIR / f"{sid}.json").exists():
+            continue
+        try:
+            lock = _get_session_agent_lock(sid)
+        except Exception:
+            continue
+        timeout = (
+            _CLEAR_CACHED_SESSION_LOCK_TIMEOUT if lock_timeout is None else lock_timeout
+        )
+        if not lock.acquire(timeout=timeout):
+            logger.debug(
+                "projects/delete: session %s is busy; its unlink stays in cache",
+                sid,
+            )
+            continue
+        try:
+            with LOCK:
+                cached = SESSIONS.get(sid)
+                if cached is None:
+                    continue
+                if str(getattr(cached, "active_stream_id", "") or "") in active_ids:
+                    continue
+                if getattr(cached, "project_id", None) not in (None, project_id):
+                    # Re-filed under another project while we waited: leave it.
+                    continue
+            # A metadata-only stub refuses save() by design (#1558); upgrade it
+            # the way every other metadata mutation does.
+            cached = _ensure_full_session_before_mutation(sid, cached)
+            cached.project_id = None
+            with LOCK:
+                SESSIONS[sid] = cached
+                SESSIONS.move_to_end(sid)
+            # Not touch_updated_at: a delete must not re-date the chat it was
+            # just un-filed from (same rule as the backfill sweep).
+            cached.save(touch_updated_at=False)
+            written += 1
+        except Exception:
+            logger.debug(
+                "projects/delete: could not persist the unlink on %s", sid,
+                exc_info=True,
+            )
+        finally:
+            lock.release()
+    return written
 
 
 def _auto_assign_target_is_view_only(session, sid: str) -> bool:
@@ -19812,6 +19878,10 @@ def handle_post(handler, parsed) -> bool:
                 503,
             )
         try:
+            # Ids the in-memory clear unlinked from the cache; their SIDECARS are
+            # written through below, OUTSIDE the catalog lock (full-history
+            # writes must not stall New Chat / workspace edits behind a delete).
+            cleared_ids: list = []
             with _PROJECTS_CATALOG_LOCK:
                 # Reload AFTER the drain: `projects` was read before the (up to
                 # 10 s) join above, and saving that stale list erased a project
@@ -19834,12 +19904,26 @@ def handle_post(handler, parsed) -> bool:
                 # gone (so it is created unassigned) — never an orphan
                 # (re-gate 2026-10-07, api/routes.py:16855).
                 cleared_cached = _clear_cached_sessions_for_project(
-                    body["project_id"]
+                    body["project_id"], cleared_ids=cleared_ids
                 )
             if cleared_cached:
                 logger.info(
-                    "projects/delete: cleared project_id on %d cached session(s) "
-                    "(sessions with a sidecar were re-saved)", cleared_cached,
+                    "projects/delete: cleared project_id on %d cached session(s)",
+                    cleared_cached,
+                )
+            # The catalog lock is now released: write the unlink through to the
+            # sidecars of the cached sessions that have one. A session without a
+            # sidecar is a "+ New Chat" draft and stays cache-only, and an
+            # actively streaming one is left to its worker's next save — both are
+            # skipped inside the helper (Greptile P1 2026-10-10T12:41:25Z: no
+            # full-history write may run while the catalog lock is held).
+            persisted_cleared = _persist_cleared_project_ids(
+                body["project_id"], cleared_ids
+            )
+            if persisted_cleared:
+                logger.info(
+                    "projects/delete: persisted the unlink on %d session file(s)",
+                    persisted_cleared,
                 )
             # Unassign all sessions that belonged to this project.
             # #3746: this loop is O(N) full-JSON read+save per session, and each
