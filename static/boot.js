@@ -2893,6 +2893,21 @@ $('msg').addEventListener('keydown',e=>{
   }
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
+// True when Enter belongs to the focused element rather than to a page-level
+// shortcut: text entry, and anything a keyboard user activates with Enter
+// (buttons, links, menu rows, tabs, options, ...). The approval shortcut below
+// uses it so Enter never approves a pending action out from under a control.
+const _ENTER_CONTROL_ROLES=/^(button|link|menuitem|menuitemradio|menuitemcheckbox|option|tab|switch|checkbox|radio|combobox|treeitem|textbox|searchbox|spinbutton|slider)$/;
+function _enterBelongsToFocusedControl(el){
+  if(!el||el===document.body||el===document.documentElement) return false;
+  if(el.isContentEditable) return true;
+  const tag=el.tagName||'';
+  if(tag==='TEXTAREA'||tag==='INPUT'||tag==='SELECT'||tag==='BUTTON'||tag==='SUMMARY') return true;
+  if(tag==='A'&&el.hasAttribute('href')) return true;
+  const role=(el.getAttribute&&el.getAttribute('role'))||'';
+  return _ENTER_CONTROL_ROLES.test(role);
+}
+
 document.addEventListener('keydown',async e=>{
   // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
   // Skip when typing in an input/textarea/contenteditable so text-edit
@@ -2919,12 +2934,14 @@ document.addEventListener('keydown',async e=>{
     if(composer){e.preventDefault();composer.focus();}
     return;
   }
-  // Enter on approval card = Allow once (when a button inside the card is focused or
-  // card is visible and focus is not on an input/textarea/select)
+  // Enter while the approval card is on screen = Allow once, but only when no
+  // control has focus. A focused button, link or menu item (one of the card's own
+  // buttons included) keeps its own Enter: Enter on "Deny" denies, and Enter on the
+  // ⋮ trigger, a menu row or the project picker activates that control instead of
+  // approving the pending action and cancelling the key (#8130).
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
     const card=$('approvalCard');
-    const tag=(document.activeElement||{}).tagName||'';
-    if(card&&card.classList.contains('visible')&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
+    if(card&&card.classList.contains('visible')&&!_enterBelongsToFocusedControl(document.activeElement)){
       e.preventDefault();
       if(typeof respondApproval==='function') respondApproval('once');
       return;

@@ -124,3 +124,7 @@ jobs:
       - name: Run new-chat focus gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_new_chat_focus.py
+
+      - name: Run approval Enter-shortcut gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_approval_enter_shortcut.py
