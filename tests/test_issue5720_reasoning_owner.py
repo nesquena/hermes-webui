@@ -466,7 +466,7 @@ global._firstValidTimestampSeconds=()=>null;
 eval(anchorsSrc);
 for(const name of [
   'chatActivityMode','isTransparentStream','isFinalAnswerOnlyMode','isCompactWorklogMode','isSimplifiedToolCalling',
-  '_anchorSceneIsSettledSuccessfulCompression','_anchorSceneRowsForRendering',
+  '_anchorSceneIsSettledSuccessfulCompression','_anchorSceneSourceRows','_anchorSceneRowsForRendering',
   '_anchorSceneRowTimestampSeconds','_anchorSceneTransparentNodeForRow',
   '_transparentLiveRowKey','_transparentLiveRowsCompatible',
   '_transparentLiveRowAttributePairs','_transparentLiveRowInteractiveState',
@@ -474,7 +474,8 @@ for(const name of [
   '_thinkingMarkup','_renderThinkingInto',
   '_resetMismatchedLiveAssistantTurnForSession',
   '_liveAnchorReasoningRowForFallback','_updateLiveAnchorReasoningRowForFallback',
-  '_anchorSceneNodeForRow','_anchorSceneWorklogGroup','_renderAnchorSceneRowsIntoWorklog',
+  '_anchorSceneNodeForRow','_anchorSceneWorklogGroup','_anchorSceneWorklogState',
+  '_anchorSceneWorklogRowKey','_anchorSceneWorklogAppendRow','_renderAnchorSceneRowsIntoWorklog',
   'isLiveAnchorActivitySceneOwner','_projectLiveAnchorActivitySceneForStream',
   '_restoreLiveAnchorScrollSnapshotAfterRebuild',
   '_renderLiveAnchorActivitySceneTransparent','renderLiveAnchorActivityScene',
@@ -531,6 +532,7 @@ global.EventSource=FakeEventSource;
 const attachStart=messagesSrc.indexOf('function attachLiveStream(');
 const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);
 if(attachStart<0||attachEnd<0) throw new Error('attachLiveStream source boundary not found');
+eval(messagesSrc.slice(messagesSrc.indexOf('const _thinkPairs='),messagesSrc.indexOf('function _thinkingFenceMarkerAt('))+extractFunc(messagesSrc,'_createIncrementalSemanticState'));
 eval(extractFunc(messagesSrc,'_dispatchExtensionTurnLifecycle'));
 eval(messagesSrc.slice(attachStart,attachEnd));
 attachLiveStream('sid-1','stream-1');

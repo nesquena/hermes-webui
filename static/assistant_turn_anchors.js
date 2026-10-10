@@ -402,6 +402,8 @@
       run_id:runId,
       stream_id:streamId,
       seq,
+      // Local producer ordinals and server journal offsets are incomparable.
+      order_domain:_own(ctx,'order_domain')==='local'?'local':'transport',
       kind:meta.kind,
       source_event_type:sourceType,
       created_at:_own(event,'created_at')||_own(event,'timestamp')||_own(payload,'created_at')||_own(payload,'ts')||_own(ctx,'created_at')||null,
@@ -640,6 +642,11 @@
     }
     _syncAnchorIdentity(anchor,event);
     _routeAnchorEvent(anchor,item);
+    if(_cleanString(_own(item,'classification'))==='activity'){
+      _activityProjectionMark(registry,event,anchor.activity_events.length-1,'activity');
+    }else{
+      _activityProjectionMark(registry,event,-1,_cleanString(_own(item,'classification')));
+    }
     registry.stats.applied+=1;
     return Object.freeze({applied:true,reason:null,normalized:item});
   }
@@ -1000,6 +1007,7 @@
       run_id:_cleanString(_own(event,'run_id'))||null,
       stream_id:_cleanString(_own(event,'stream_id'))||null,
       seq:_own(event,'seq')??null,
+      order_domain:_own(event,'order_domain')==='local'?'local':'transport',
       status,
       created_at:_own(event,'created_at')??null,
       identity:Object.freeze({
@@ -1018,13 +1026,241 @@
     });
   }
 
+  function _activityProjectionState(registry){
+    if(!registry||typeof registry!=='object') return null;
+    let state=registry._activity_projection_state;
+    if(state&&typeof state==='object') return state;
+    state={
+      revision:0,
+      dirty_full:true,
+      dirty_reason:'initial',
+      dirty_indices:[],
+      dirty_row_keys:[],
+      dirty_metadata:false,
+      dirty_aux:false,
+      last_activity_count:0,
+      last_order_seq:null,
+      cache:null,
+    };
+    Object.defineProperty(registry,'_activity_projection_state',{
+      value:state,
+      enumerable:false,
+      configurable:true,
+      writable:true,
+    });
+    return state;
+  }
+
+  function _activityProjectionEventIdentity(event){
+    if(!event||typeof event!=='object') return '';
+    const eventId=_cleanString(_own(event,'event_id'));
+    if(eventId) return 'event:'+eventId;
+    const runId=_cleanString(_own(event,'run_id'));
+    const seq=_own(event,'seq');
+    if(runId&&seq!==undefined&&seq!==null&&seq!=='') return 'run:'+runId+':'+String(seq);
+    const localId=_cleanString(_own(event,'local_id'));
+    const sourceType=_cleanString(_own(event,'source_event_type'));
+    if(localId&&sourceType&&seq!==undefined&&seq!==null&&seq!==''){
+      return 'local:'+localId+':'+sourceType+':'+String(seq);
+    }
+    return '';
+  }
+
+  function _activityProjectionOrderToken(event){
+    if(!event||typeof event!=='object') return null;
+    const seq=_own(event,'seq');
+    if(seq===undefined||seq===null||seq==='') return null;
+    const numeric=Number(seq);
+    return Number.isFinite(numeric)?numeric:String(seq);
+  }
+
+  function _activityProjectionMark(registry, event, index, classification){
+    const state=_activityProjectionState(registry);
+    if(!state) return;
+    state.revision+=1;
+    if(classification!=='activity'){
+      if(classification==='artifact'||classification==='side_effect') state.dirty_aux=true;
+      if(classification==='metadata') state.dirty_metadata=true;
+      return;
+    }
+    const key=_activityProjectionEventIdentity(event);
+    const orderToken=_activityProjectionOrderToken(event);
+    const domain=event.order_domain==='local'?'local':'transport';
+    if(!state.last_order_by_domain) state.last_order_by_domain=Object.create(null);
+    const priorOrder=state.last_order_by_domain[domain];
+    const knownOrder=typeof orderToken==='number';
+    const numericOrder=knownOrder&&typeof priorOrder==='number';
+    // Stable identity is not evidence of sequence order. Opaque/missing tokens
+    // must fail closed without erasing the last comparable domain sequence.
+    if(!key||!knownOrder|| (numericOrder&&orderToken<priorOrder)){
+      state.dirty_full=true;
+      state.dirty_reason=key?'uncertain_order':'uncertain_identity_or_order';
+    }else if(state.dirty_full!==true){
+      const expectedTail=state.last_activity_count;
+      if(index!==expectedTail){
+        state.dirty_full=true;
+        state.dirty_reason='uncertain_order';
+      }else{
+        state.dirty_indices.push(index);
+        state.dirty_row_keys.push(key);
+      }
+    }
+    state.last_activity_count=index+1;
+    if(knownOrder){
+      state.last_order_seq=orderToken;
+      state.last_order_by_domain[domain]=orderToken;
+    }
+  }
+
+  function invalidateAssistantTurnAnchorActivityProjection(registry, options){
+    const state=_activityProjectionState(registry);
+    if(!state) return Object.freeze({invalidated:false,reason:'missing_registry'});
+    const opts=(options&&typeof options==='object')?options:{};
+    state.revision+=1;
+    const reason=_cleanString(_own(opts,'reason'))||'external_activity_replacement';
+    const indices=Array.isArray(_own(opts,'indices'))?_own(opts,'indices'):[];
+    const orderUncertain=_own(opts,'order_uncertain')===true||_own(opts,'identity_uncertain')===true;
+    if(orderUncertain||!indices.length){
+      state.dirty_full=true;
+      state.dirty_reason=orderUncertain?'uncertain_identity_or_order':reason;
+    }else if(!state.dirty_full){
+      indices.forEach((value)=>{
+        const index=Number(value);
+        if(Number.isInteger(index)&&index>=0){
+          state.dirty_indices.push(index);
+          state.dirty_row_keys.push('external:'+String(index));
+        }else{
+          state.dirty_full=true;
+          state.dirty_reason='uncertain_identity_or_order';
+        }
+      });
+    }
+    return Object.freeze({invalidated:true,reason:state.dirty_reason||reason});
+  }
+
+  function _projectionAuxRows(anchor, key){
+    const events=Array.isArray(anchor&&anchor[key])?anchor[key]:[];
+    return events.map(event=>Object.freeze({
+      ..._copyObject(event),
+      payload:Object.freeze(_copyObject(_own(event,'payload'))),
+    }));
+  }
+
+  // A persistent 32-way row index shares unchanged history between immutable
+  // scene snapshots. Each dirty row copies five small index nodes, not N rows.
+  function _projectionRowIndexSet(node, index, row, level=4){
+    const next=node?node.slice():[];
+    const slot=Math.floor(index/Math.pow(32,level))%32;
+    next[slot]=level===0?row:_projectionRowIndexSet(next[slot],index,row,level-1);
+    return Object.freeze(next);
+  }
+  function _projectionRowSnapshot(cache){
+    const root=cache.row_index;
+    const length=cache.rows.length;
+    if(cache.row_view&&cache.row_view_root===root&&cache.row_view.length===length) return cache.row_view;
+    const indexOf=key=>typeof key==='string'&&/^(0|[1-9][0-9]*)$/.test(key)?Number(key):-1;
+    // Frozen sparse array preserves Array.isArray, length and native iteration.
+    // The get/has view supplies values without copying the historical row list.
+    const view=new Proxy(Object.freeze(new Array(length)),{
+      get(target,key,receiver){
+        const index=indexOf(key);
+        if(index>=0&&index<length){
+          let node=root;
+          for(let level=4;level>=0;level--) node=node[Math.floor(index/Math.pow(32,level))%32];
+          return node;
+        }
+        return Reflect.get(target,key,receiver);
+      },
+      has(target,key){
+        const index=indexOf(key);
+        return index>=0&&index<length||Reflect.has(target,key);
+      },
+    });
+    cache.row_view_root=root;
+    cache.row_view=view;
+    cache.row_view_record={public_rows:null};
+    return view;
+  }
+  function _projectionStats(state, cache, fullRebuild, fallbackReason, eventsScanned, rowsRebuilt){
+    return Object.freeze({
+      revision:state.revision,
+      events_scanned:eventsScanned,
+      rows_rebuilt:rowsRebuilt,
+      historical_rows_copied:0,
+      row_index_nodes_copied:cache.row_index_nodes_copied||0,
+      full_rebuild:!!fullRebuild,
+      fallback_reason:fallbackReason||null,
+      order_uncertain:fallbackReason==='uncertain_order'||fallbackReason==='uncertain_identity_or_order',
+      rows_cached:cache&&cache.rows?cache.rows.length:0,
+    });
+  }
+
+  function _activityProjectionRenderKey(row, index, fallback){
+    if(row&&row.role==='tool'&&_cleanString(_own(row,'tool_call_id'))){
+      return 'tool:call:'+_cleanString(_own(row,'tool_call_id'));
+    }
+    const role=_cleanString(_own(row,'role'))||'activity';
+    const stable=_cleanString(_own(row,'row_id'))||_cleanString(_own(row,'local_id'))||_cleanString(_own(row,'event_id'));
+    return stable?role+':'+stable:String(fallback===undefined?index:fallback);
+  }
+
+  // Live-only diagnostics must not alter serialized activity_scene_v1 payloads.
+  function _freezeActivityProjectionScene(scene){
+    Object.defineProperty(scene,'_activity_rows_view',{value:scene._activity_rows_view,enumerable:false});
+    Object.defineProperty(scene,'projection',{value:scene.projection,enumerable:false});
+    Object.defineProperty(scene,'projection_stats',{value:scene.projection_stats,enumerable:false});
+    return Object.freeze(scene);
+  }
+
+  function _projectionSceneFromCache(anchor, mode, cache, stats){
+    const liveRows=_projectionRowSnapshot(cache);
+    const rowViewRecord=cache.row_view_record;
+    let rowsCopied=0;
+    stats=Object.freeze({...stats,
+      get historical_rows_copied(){return rowsCopied;},
+    });
+    const lifecycle=_copyObject(anchor.lifecycle);
+    const content=anchor.content&&typeof anchor.content==='object'?anchor.content:{};
+    const projection=Object.freeze({
+      revision:stats.revision,
+      full_rebuild:stats.full_rebuild,
+      fallback_reason:stats.fallback_reason,
+      order_uncertain:stats.order_uncertain,
+      changed_row_keys:Object.freeze(cache.changed_row_keys.slice()),
+      changed_row_indices:Object.freeze(cache.changed_row_indices.slice()),
+    });
+    return _freezeActivityProjectionScene({
+      version:'activity_scene_v1',
+      mode,
+      identity:_frozenIdentityCopy(anchor.identity||{}),
+      lifecycle:Object.freeze(lifecycle),
+      final_answer:typeof content.final_answer==='string'?content.final_answer:'',
+      final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
+      terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
+      // A private read view is for live rendering only. Public consumers retain
+      // a normal dense immutable array, materialized once when requested.
+      _activity_rows_view:liveRows,
+      get activity_rows(){
+        if(!rowViewRecord.public_rows){
+          rowViewRecord.public_rows=Object.freeze(Array.from(liveRows));
+          rowsCopied=rowViewRecord.public_rows.length;
+        }
+        return rowViewRecord.public_rows;
+      },
+      artifacts:Object.freeze(cache.artifacts),
+      side_effects:Object.freeze(cache.side_effects),
+      projection,
+      projection_stats:stats,
+    });
+  }
+
   function projectAssistantTurnAnchorActivityScene(input, options){
     const anchor=_anchorFromProjectionInput(input);
     const opts=(options&&typeof options==='object')?options:{};
     const requestedMode=_cleanString(_own(opts,'mode'));
     const mode=_activityDisplayMode(requestedMode);
     if(!anchor){
-      return Object.freeze({
+      return _freezeActivityProjectionScene({
         version:'activity_scene_v1',
         mode,
         identity:Object.freeze({source_message_refs:Object.freeze([])}),
@@ -1035,30 +1271,140 @@
         activity_rows:Object.freeze([]),
         artifacts:Object.freeze([]),
         side_effects:Object.freeze([]),
+        projection:Object.freeze({revision:0,full_rebuild:true,fallback_reason:'missing_anchor',order_uncertain:true}),
+        projection_stats:Object.freeze({revision:0,events_scanned:0,rows_rebuilt:0,full_rebuild:true,fallback_reason:'missing_anchor',order_uncertain:true,rows_cached:0}),
       });
     }
-    const rows=(Array.isArray(anchor.activity_events)?anchor.activity_events:[])
-      .map((event,index)=>_activitySceneRow(event,index,mode));
-    const lifecycle=_copyObject(anchor.lifecycle);
-    const content=anchor.content&&typeof anchor.content==='object'?anchor.content:{};
-    return Object.freeze({
-      version:'activity_scene_v1',
-      mode,
-      identity:_frozenIdentityCopy(anchor.identity||{}),
-      lifecycle:Object.freeze(lifecycle),
-      final_answer:typeof content.final_answer==='string'?content.final_answer:'',
-      final_message_ref:typeof content.final_message_ref==='string'?content.final_message_ref:null,
-      terminal_state:_cleanString(_own(lifecycle,'terminal_state'))||null,
-      activity_rows:Object.freeze(rows),
-      artifacts:Object.freeze((Array.isArray(anchor.artifacts)?anchor.artifacts:[]).map(event=>Object.freeze({
-        ..._copyObject(event),
-        payload:Object.freeze(_copyObject(_own(event,'payload'))),
-      }))),
-      side_effects:Object.freeze((Array.isArray(anchor.side_effects)?anchor.side_effects:[]).map(event=>Object.freeze({
-        ..._copyObject(event),
-        payload:Object.freeze(_copyObject(_own(event,'payload'))),
-      }))),
-    });
+    const state=_activityProjectionState(input&&typeof input==='object'?input:null);
+    const events=Array.isArray(anchor.activity_events)?anchor.activity_events:[];
+    let cache=state.cache;
+    const cleanProjection=!!(
+      cache&&cache.scene&&cache.mode===mode&&
+      state.dirty_full!==true&&state.dirty_indices.length===0&&
+      !state.dirty_metadata&&!state.dirty_aux&&cache.event_refs.length===events.length
+    );
+    if(cleanProjection){
+      const cleanStats=_projectionStats(state,cache,false,null,0,0);
+      state.last_stats=cleanStats;
+      if(input&&typeof input==='object') Object.defineProperty(input,'projection_stats',{value:cleanStats,writable:true,configurable:true,enumerable:false});
+      if(cache.scene.projection.full_rebuild||cache.scene.projection_stats.events_scanned!==0){
+        cache.changed_row_keys=[];
+        cache.changed_row_indices=[];
+        cache.scene=_projectionSceneFromCache(anchor,mode,cache,cleanStats);
+      }
+      return cache.scene;
+    }
+    let fullRebuild=!cache||cache.mode!==mode||state.dirty_full===true;
+    let fallbackReason=fullRebuild
+      ? (cache&&cache.mode!==mode?'mode_changed':(state.dirty_reason||'initial'))
+      : null;
+    let eventsScanned=0;
+    let rowsRebuilt=0;
+    const changedIndices=[];
+    const changedKeys=[];
+    if(!fullRebuild&&cache.event_refs.length>events.length){
+      fullRebuild=true;
+      fallbackReason='uncertain_order';
+    }
+    if(!fullRebuild&&state.dirty_indices.length===0&&cache.event_refs.length!==events.length){
+      fullRebuild=true;
+      fallbackReason='uncertain_order';
+    }
+    if(fullRebuild){
+      const rows=[];
+      const refs=[];
+      const keys=[];
+      for(let index=0;index<events.length;index+=1){
+        const event=events[index];
+        rows.push(_activitySceneRow(event,index,mode));
+        refs.push(event);
+        keys.push(_activityProjectionEventIdentity(event)||'');
+      }
+      cache={
+        mode,
+        rows,
+        event_refs:refs,
+        event_keys:keys,
+        artifacts:_projectionAuxRows(anchor,'artifacts'),
+        side_effects:_projectionAuxRows(anchor,'side_effects'),
+        changed_row_keys:[],
+        changed_row_indices:[],
+        scene:null,
+      };
+      state.cache=cache;
+      eventsScanned=events.length;
+      rowsRebuilt=events.length;
+      for(let index=0;index<events.length;index+=1){
+        const row=rows[index];
+        changedIndices.push(index);
+        changedKeys.push(_activityProjectionRenderKey(row,index,keys[index]||index));
+      }
+    }else{
+      const dirtyIndices=Array.from(new Set(state.dirty_indices)).sort((a,b)=>a-b);
+      let validatedLength=cache.rows.length;
+      for(const index of dirtyIndices){
+        if(index<0||index>=events.length||index>validatedLength){
+          fullRebuild=true;
+          fallbackReason='uncertain_order';
+          break;
+        }
+        if(index===validatedLength) validatedLength+=1;
+        const event=events[index];
+        const key=_activityProjectionEventIdentity(event);
+        if(!key||(
+          index<cache.event_keys.length&&cache.event_keys[index]&&cache.event_keys[index]!==key
+        )){
+          fullRebuild=true;
+          fallbackReason='uncertain_identity_or_order';
+          break;
+        }
+      }
+      if(fullRebuild){
+        state.dirty_full=true;
+        state.dirty_reason=fallbackReason;
+        return projectAssistantTurnAnchorActivityScene(input,options);
+      }
+      for(const index of dirtyIndices){
+        const event=events[index];
+        const row=_activitySceneRow(event,index,mode);
+        if(index===cache.rows.length){
+          cache.rows.push(row);
+          cache.event_refs.push(event);
+          cache.event_keys.push(_activityProjectionEventIdentity(event));
+        }else{
+          cache.rows[index]=row;
+          cache.event_refs[index]=event;
+          cache.event_keys[index]=_activityProjectionEventIdentity(event);
+        }
+        changedIndices.push(index);
+        changedKeys.push(_activityProjectionRenderKey(row,index,cache.event_keys[index]||index));
+      }
+      eventsScanned=dirtyIndices.length;
+      rowsRebuilt=dirtyIndices.length;
+    }
+    if(state.dirty_aux&&!fullRebuild){
+      cache.artifacts=_projectionAuxRows(anchor,'artifacts');
+      cache.side_effects=_projectionAuxRows(anchor,'side_effects');
+    }
+    cache.changed_row_keys=changedKeys;
+    cache.changed_row_indices=changedIndices;
+    const snapshotIndices=fullRebuild?cache.rows.map((_,index)=>index):changedIndices;
+    if(fullRebuild) cache.row_index=null;
+    for(const index of snapshotIndices) cache.row_index=_projectionRowIndexSet(cache.row_index,index,cache.rows[index]);
+    cache.row_index_nodes_copied=snapshotIndices.length*5;
+    const stats=_projectionStats(state,cache,fullRebuild,fallbackReason,eventsScanned,rowsRebuilt);
+    state.last_stats=stats;
+    state.last_activity_count=events.length;
+    state.dirty_full=false;
+    state.dirty_reason=null;
+    state.dirty_indices=[];
+    state.dirty_row_keys=[];
+    state.dirty_metadata=false;
+    state.dirty_aux=false;
+    const scene=_projectionSceneFromCache(anchor,mode,cache,stats);
+    cache.scene=scene;
+    if(input&&typeof input==='object') Object.defineProperty(input,'projection_stats',{value:stats,writable:true,configurable:true,enumerable:false});
+    return scene;
   }
 
   function projectAssistantTurnAnchorHistoricalTranscriptScene(input, options){
@@ -1703,6 +2049,7 @@
     applyAssistantTurnAnchorNormalizedEvent,
     applyAssistantTurnAnchorSourceEvent,
     applyAssistantTurnAnchorSourceEvents,
+    invalidateAssistantTurnAnchorActivityProjection,
     createAssistantTurnAnchorShadowSnapshot,
     projectAssistantTurnAnchorSettledMessageFinalAnswer,
     projectAssistantTurnAnchorActivityScene,

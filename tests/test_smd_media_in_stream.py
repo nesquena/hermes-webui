@@ -76,6 +76,7 @@ def _run_real_smd_media_cases() -> dict:
             _extract_js_function(MESSAGES_JS, "_smdMediaAwareAddText"),
             _extract_js_function(MESSAGES_JS, "_smdAppendMediaNode"),
             _extract_js_function(MESSAGES_JS, "_smdScheduleMediaPostProcess"),
+            _extract_js_function(MESSAGES_JS, "_flushStreamingMediaPostProcess"),
             _extract_js_function(MESSAGES_JS, "_smdParserKey"),
             _extract_js_function(MESSAGES_JS, "_smdBindParserIdentity"),
             _extract_js_function(MESSAGES_JS, "_smdMediaTailClear"),
@@ -92,6 +93,8 @@ def _run_real_smd_media_cases() -> dict:
         "import * as smd from './static/vendor/smd.min.js';\n"
         "globalThis.window = { smd };\n"
         "globalThis.requestAnimationFrame = cb => cb();\n"
+        "const _anchorPaintDisposed=false;const _pendingMediaPaintRoots=new Set();\n"
+        "function _renderAnchorLiveScene(){_flushStreamingMediaPostProcess();}\n"
         "const _MEDIA_TAIL_MAX = 4096;\n"
         "const _SMD_MEDIA_PREFIX = 'MEDIA:';\n"
         "const _SMD_MEDIA_TAIL = new WeakMap();\n"
@@ -120,6 +123,7 @@ def _run_real_smd_media_cases() -> dict:
         "  constructor(type, tag='', text=''){\n"
         "    this.nodeType=type; this.tagName=tag; this.children=[]; this.parentNode=null; this.attributes={}; this.data=text;\n"
         "    this.style={ setProperty:()=>{} };\n"
+        "    this.dataset={};\n"
         "    this.classList={ contains:name=>(this.attributes.class||'').split(/\\s+/).includes(name), add:name=>this.setAttribute('class', ((this.attributes.class||'')+' '+name).trim()) };\n"
         "  }\n"
         "  get childNodes(){ return this.children; }\n"

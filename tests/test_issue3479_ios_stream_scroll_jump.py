@@ -67,7 +67,7 @@ def test_live_compression_card_replacement_restores_snapshot_before_follow_settl
 def test_live_anchor_worklog_rebuild_restores_snapshot_before_follow_settle():
     body = _function_body(UI_JS, "renderLiveAnchorActivityScene")
 
-    capture_idx = body.index("const scrollSnapshot=_captureMessageScrollSnapshot();")
+    capture_idx = body.index("const scrollSnapshot=opts.scrollOwned?null:_captureMessageScrollSnapshot();")
     guard_idx = body.index("const scrollRebuildGuard=_prepareLiveAnchorScrollRebuildGuard(scrollSnapshot);")
     remove_idx = body.index("blocks.querySelectorAll('[data-anchor-scene-owner=\"1\"],[data-anchor-scene-row=\"1\"]')")
     restore_detail_idx = body.index("_restoreWorklogDetailDisclosureState(blocks, liveDisclosureState);")

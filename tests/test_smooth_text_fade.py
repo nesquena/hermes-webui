@@ -179,7 +179,8 @@ def test_stream_fade_uses_incremental_renderer_without_changing_default_path():
         [
             "_renderStreamingFadeMarkdown(displayText)",
             "_smdWrite(displayText)",
-            "?33:66",
+            "_pendingProsePaint=_doRender",
+            "_renderAnchorLiveScene()",
         ],
     )
     assert_contains_all(
@@ -501,16 +502,12 @@ def test_transparent_anchor_prose_receives_revealed_fade_text():
             "const caughtUp=_renderStreamingFadeMarkdown(displayText)",
             "if(_shouldUseLiveProseFade())",
             "anchorProcessText=_streamFadeDomText||''",
-            "if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText)",
+            "// Producer callbacks own semantic prose; fade/paint only project it.",
         ],
     )
     assert render_section.index("let anchorProcessText=displayText") < render_section.index("if(assistantBody){")
-    assert render_section.index("anchorProcessText=_streamFadeDomText||''") < render_section.index(
-        "_upsertAnchorProcessProse(anchorProcessText)"
-    )
-    assert render_section.index("if(assistantBody){") < render_section.rindex(
-        "if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText)"
-    )
+    assert "_upsertAnchorProcessProse(" not in render_section
+    # Executable read-only paint contracts live in test_issue6391_paint_readonly.py.
 
 
 def test_stream_fade_done_drain_has_hard_cap_for_large_buffered_responses():
@@ -523,15 +520,13 @@ def test_stream_fade_done_drain_has_hard_cap_for_large_buffered_responses():
             "const target=_streamFadeCurrentDisplayText();",
             "const caughtUp=_renderStreamingFadeMarkdown(target);",
             "const anchorProcessText=_streamFadeDomText||target;",
-            "if(anchorProcessText) _upsertAnchorProcessProse(anchorProcessText);",
+            "// Producer callbacks own semantic prose; fade/paint only project it.",
             "performance.now()-drainStartedAt>=_STREAM_FADE_DONE_DRAIN_MAX_MS",
             "if(_smdParser) _smdEndParser();",
             "onDone();",
         ],
     )
-    assert drain_block.index("_renderStreamingFadeMarkdown(target)") < drain_block.index(
-        "_upsertAnchorProcessProse(anchorProcessText)"
-    )
+    assert "_upsertAnchorProcessProse(" not in drain_block
 
 
 def test_live_streaming_assistant_content_opts_out_of_global_theme_transitions():
