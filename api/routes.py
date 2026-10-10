@@ -12727,7 +12727,26 @@ def _handle_insights(handler, parsed) -> bool:
             start_ts = start_ts_v
             end_ts = now
             end_from_clock = True
-        if start_ts > end_ts:
+        # Reversal test.  A DATE `end` means the WHOLE calendar day and is
+        # served as an exclusive bound at the NEXT local midnight
+        # (``end_cutoff`` below), so the comparison must use that SAME resolved
+        # bound: measured against the date's local MIDNIGHT, a numeric start
+        # later the same day looked reversed and the swap served the day's
+        # EARLIER hours instead of the requested tail (Greptile P1
+        # 2026-10-10T02:20:04Z: start = May 2 noon with end = 2026-05-02
+        # returned midnight..noon).  Equality counts as reversed for a
+        # whole-day end - a start at exactly the end day's exclusive close
+        # means "all of that day", which is what the old swap produced.
+        _cmp_end = end_ts
+        _end_is_whole_day = False
+        if end_kind == "date" and end_ts is not None:
+            try:
+                _cmp_day = _datetime.fromtimestamp(end_ts).date()
+                _cmp_end = _time.mktime((_cmp_day + _timedelta(days=1)).timetuple())
+                _end_is_whole_day = True
+            except (OverflowError, ValueError, OSError):
+                _cmp_end = end_ts
+        if start_ts > _cmp_end or (_end_is_whole_day and start_ts == _cmp_end):
             start_ts, end_ts = end_ts, start_ts
             start_kind, end_kind = end_kind, start_kind
             # The value that lands in the `end` slot is the OLD start, which is

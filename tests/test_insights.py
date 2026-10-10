@@ -209,6 +209,40 @@ def test_insights_absolute_range_reports_swapped_effective_bounds(monkeypatch, t
     assert data["daily_tokens"][-1]["date"] == "2026-04-25"
 
 
+def test_insights_same_day_numeric_start_with_date_end_keeps_the_day_tail(monkeypatch, tmp_path):
+    """Greptile P1 (2026-10-10T02:20:04Z): a DATE `end` means the whole calendar
+    day and is served as an exclusive bound at the NEXT local midnight, but the
+    reversal test compared against the date's MIDNIGHT.  `start=<May 2 noon>`
+    with `end=2026-05-02` therefore looked reversed, was swapped, and the server
+    served midnight..noon — the day's EARLIER activity instead of the requested
+    tail."""
+    now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
+    morning = time.mktime((2026, 5, 2, 9, 0, 0, 0, 0, -1))
+    noon = time.mktime((2026, 5, 2, 12, 0, 0, 0, 0, -1))
+    evening = time.mktime((2026, 5, 2, 18, 0, 0, 0, 0, -1))
+    entries = [
+        {
+            "session_id": "before_noon", "updated_at": morning, "created_at": morning,
+            "message_count": 1, "input_tokens": 11, "output_tokens": 5,
+            "estimated_cost": "0.0001", "model": "gpt-x",
+        },
+        {
+            "session_id": "after_noon", "updated_at": evening, "created_at": evening,
+            "message_count": 1, "input_tokens": 22, "output_tokens": 5,
+            "estimated_cost": "0.0002", "model": "gpt-x",
+        },
+    ]
+    data = _call_insights(monkeypatch, tmp_path, entries,
+                          query=f"start={int(noon)}&end=2026-05-02", now=now)
+    assert data["mode"] == "custom"
+    assert data["effective_start"] == "2026-05-02"
+    assert data["effective_end"] == "2026-05-02"
+    # Only the post-noon session lies inside [May 2 noon, end of May 2).
+    assert data["total_sessions"] == 1
+    assert data["total_input_tokens"] == 22, "the day's morning activity must stay out"
+    assert data["daily_tokens"][-1]["date"] == "2026-05-02"
+
+
 def test_insights_absolute_range_valid_epoch_still_supported(monkeypatch, tmp_path):
     # Numeric epoch seconds remain a supported input contract (backward
     # compat for CLI/scripting callers); effective bounds are still reported.
@@ -1962,12 +1996,20 @@ def _local_midnight_raises(y, m, d):
     pre-epoch (``mktime`` raises) in a positive-offset zone such as Windows
     UTC+08. Shared by the derived-start boundary test below so it asserts the
     platform's own contract instead of a UTC-only expectation.
+
+    East of UTC, ``mktime`` does NOT raise for 1970-01-01 — it happily returns
+    a NEGATIVE timestamp (UTC+8 -> -28800).  The endpoint rejects a negative
+    derived start exactly like an unrepresentable one (the post-arithmetic
+    ``0 <= start_ts`` guard), so a negative result must count as
+    "cannot represent" here too, or the assertion below expects ``custom``
+    while the server correctly serves ``trailing`` and the suite fails on
+    Linux/macOS east of UTC (Greptile P1 2026-10-10T02:20:04Z).
     """
     try:
-        time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))
+        ts = time.mktime((y, m, d, 0, 0, 0, 0, 0, -1))
     except (OverflowError, OSError, ValueError):
         return True
-    return False
+    return ts < 0
 
 
 def test_insights_absolute_range_derived_start_pre_epoch_fails_closed(monkeypatch, tmp_path):
