@@ -842,7 +842,7 @@ def test_tagged_inline_rename_preserves_input_width_in_narrow_sidebar():
 
 
 def test_pointer_focus_releases_passive_refresh_but_keyboard_focus_defers_it():
-    from playwright.sync_api import sync_playwright
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -884,7 +884,7 @@ def test_pointer_focus_releases_passive_refresh_but_keyboard_focus_defers_it():
 
 
 def test_forced_colors_preserves_keyboard_outline_across_skins():
-    from playwright.sync_api import sync_playwright
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
 
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
@@ -902,4 +902,67 @@ def test_forced_colors_preserves_keyboard_outline_across_skins():
                 assert state["width"] >= 2, (skin, dark, state)
                 assert state["color"] != "rgba(0, 0, 0, 0)", (skin, dark, state)
                 assert state["shadow"] == "none"
+        browser.close()
+
+
+
+def test_j_k_navigation_from_pointer_opened_title_preserves_other_controls():
+    sync_playwright = pytest.importorskip("playwright.sync_api").sync_playwright
+    helper_start = BOOT_JS.index("function _isInteractiveSwipeTarget(")
+    helper_end = BOOT_JS.index("\n}\n", helper_start) + 2
+    nav_start = SESSIONS_JS.index("function navigateSession(")
+    listener_start = SESSIONS_JS.index("document.addEventListener('keydown'", nav_start)
+    listener_end = SESSIONS_JS.index("\n});", listener_start) + 4
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+        page = browser.new_page()
+        page.set_content("""
+            <aside class="sidebar"><input id="search">
+              <div id="sessionList">
+                <div class="session-item" data-sid="a"><button id="open-a" class="session-open-control">Alpha</button></div>
+                <div class="session-item" data-sid="b"><button id="open-b" class="session-open-control">Beta</button></div>
+                <div class="session-item" data-sid="c"><button id="open-c" class="session-open-control">Gamma</button></div>
+              </div>
+              <input id="rename"><button id="actions">Actions</button>
+              <button id="tag" class="session-tag">#tag</button>
+              <input id="checkbox" type="checkbox"><div id="sidebar-space" tabindex="0">Sidebar</div>
+            </aside>
+            <textarea id="composer"></textarea><select id="select"><option>Option</option></select>
+            <a id="link" href="#">Link</a><div id="editable" contenteditable="true">Edit</div>
+            <div id="chips" class="topbar-chips" tabindex="0">Chips</div>
+            <div id="composer-left" class="composer-left" tabindex="0">Composer controls</div>
+            <div id="right-panel" class="rightpanel" tabindex="0">Right panel</div>
+        """)
+        page.add_script_tag(content="\n".join([
+            "const S = {session:{session_id:'a'}}; const opens = [];",
+            "function loadSession(sid){ S.session={session_id:sid}; opens.push(sid); }",
+            BOOT_JS[helper_start:helper_end],
+            _function_source("navigateSession"),
+            SESSIONS_JS[listener_start:listener_end],
+            "document.querySelectorAll('.session-open-control').forEach(button=>{button.onclick=()=>loadSession(button.parentElement.dataset.sid);});",
+            "window.__opens=()=>opens.slice();",
+        ]))
+        page.locator("#open-b").click()
+        assert page.locator("#open-b").evaluate("el=>el===document.activeElement && !el.matches(':focus-visible')")
+        for key in ("j", "k", "k", "k", "j", "j", "j"):
+            page.keyboard.press(key)
+        assert page.evaluate("window.__opens()") == ["b", "c", "b", "a", "b", "c"]
+
+        protected = ("search", "rename", "actions", "tag", "checkbox", "sidebar-space",
+                     "composer", "select", "link", "editable", "chips", "composer-left", "right-panel")
+        for element_id in protected:
+            page.locator(f"#{element_id}").focus()
+            page.keyboard.press("j")
+            page.keyboard.press("k")
+            assert page.evaluate("window.__opens()") == ["b", "c", "b", "a", "b", "c"], element_id
+
+        page.locator("#search").click()
+        page.keyboard.press("Tab")
+        assert page.locator("#open-a").evaluate("el=>el.matches(':focus-visible')")
+        page.keyboard.press("k")
+        page.keyboard.press("j")
+        assert page.evaluate("window.__opens()")[-2:] == ["b", "c"]
+        for key in ("Control+k", "Meta+k", "Alt+k"):
+            page.keyboard.press(key)
+            assert page.evaluate("window.__opens()")[-2:] == ["b", "c"]
         browser.close()
