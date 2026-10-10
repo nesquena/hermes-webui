@@ -15704,6 +15704,11 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == "/api/mcp/servers":
         return _handle_mcp_servers_list(handler)
 
+    # ── Custom .env keys (GET) ──
+    if parsed.path == "/api/env/keys":
+        from api.env_keys import handle_env_keys_get
+        return handle_env_keys_get(handler, parsed)
+
     # ── MCP Tools (GET) ──
     if parsed.path == "/api/mcp/tools":
         return _handle_mcp_tools_list(handler)
@@ -18931,6 +18936,9 @@ def handle_delete(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
+    if parsed.path.startswith("/api/env/keys/"):
+        from api.env_keys import handle_env_key_delete
+        return handle_env_key_delete(handler, parsed.path[len("/api/env/keys/"):], parsed)
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
         if not pid:
@@ -18971,7 +18979,11 @@ def handle_put(handler, parsed) -> bool:
     if parsed.path.startswith("/api/mcp/servers/"):
         name = parsed.path[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
+    if parsed.path == "/api/env/keys":
+        from api.env_keys import handle_env_keys_put
+        return handle_env_keys_put(handler, parsed, body)
     return False
+
 
 # ── GET route helpers ─────────────────────────────────────────────────────────
 
