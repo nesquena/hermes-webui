@@ -1043,6 +1043,160 @@ async function loadCronGatewayNotice() {
   }
 }
 
+// #2316: Scripts subtab -- list and read-only view of the profile's
+// ~/.hermes/scripts/ directory. Read-only is the first slice.
+//
+// #7685 finding 3: the pane is PROFILE-OWNED. Every reply is published only
+// if the request was issued for the profile and generation that are still
+// current (the same discipline switchProfile() applies to the conversation
+// list and workspace tree), and an accepted profile switch clears the rows
+// immediately so a newer profile never shows an earlier profile's scripts.
+let _scriptsOwnerProfile='';
+let _scriptsRequestSeq=0;
+let _scriptsLastDir=null;
+// ── #7685 finding 4/5: a transition GENERATION the switch paths bump. A
+// reply's owner key can still equal the current active profile while the
+// switch is in flight (the caller flips S.activeProfile optimistically), so
+// publication must also match this generation. Both switch paths share
+// _invalidateScriptsForProfileSwitch()/_refreshScriptsAfterProfileSwitch()
+// and no path may duplicate the clear/refresh logic below.
+let _scriptsInvalidateSeq=0;
+// Set by the invalidate helper when the Scripts pane was the visible subtab,
+// so the accepted switch can refresh it for the new owner instead of leaving
+// it empty.
+let _scriptsSwitchNeedsRefresh=false;
+
+function _scriptsOwnerKey(){
+  // The server resolves the list against the active profile, so the client's
+  // notion of "who is active" is what ownership means here.
+  return (typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+}
+
+function clearScriptsList(){
+  // Used by the profile-switch path: drop the previous owner's rows without
+  // issuing a fetch that would race the switch.
+  const box=$('scriptsList');
+  if(box) box.innerHTML='';
+  _scriptsOwnerProfile='';
+  _scriptsLastDir=null;
+}
+
+// Shared invalidate: called at the START of EVERY switch path (canonical
+// switchToProfile and the alternate session-load switch). It empties the
+// pane immediately and bumps the generation so a reply still on the wire
+// (success OR error) is refused at publication, so the old profile's rows
+// can neither stay up nor overwrite the new owner's.
+function _invalidateScriptsForProfileSwitch(){
+  _scriptsSwitchNeedsRefresh = _currentTasksSubtab === 'scripts';
+  ++_scriptsInvalidateSeq;
+  clearScriptsList();
+}
+
+// Shared refresh: called when a switch is ACCEPTED (new owner is now the
+// current profile) AND when a switch is REFUSED (we are still on the old
+// profile — restoring beats leaving the pane blank, #7685 finding 5).
+//
+// #7685 finding 1 (MUST-FIX): the refresh decision is made HERE, from the
+// subtab's visibility AT THIS MOMENT, not from a flag captured at switch
+// start. Opening Scripts while a switch is still pending used to leave the
+// flag false, so nothing repainted the pane for the new owner.
+//
+// The load is silent-on-error ONLY when the pane is not visible: a background
+// switch refresh must not paint a banner over a pane we are deliberately
+// repopulating, but a VISIBLE pane that fails to reload must keep showing
+// "Could not load scripts." instead of going blank (#7685 finding 2).
+function _refreshScriptsAfterProfileSwitch(){
+  if (_currentTasksSubtab !== 'scripts') return;
+  _scriptsSwitchNeedsRefresh = false;
+  if (typeof loadScriptsList !== 'function') return;
+  // `silent` is false for a visible pane so a failed reload keeps its error
+  // state; the pane is dimmed while the load is in flight.
+  loadScriptsList(false, false);
+}
+
+// The publication gate every Scripts reply must pass. A reply is current
+// only if the owner it was issued for is STILL the active profile AND no
+// switch has invalidated the pane since AND no newer request superseded it.
+function _scriptsReplyIsCurrent(owner, gen, seq){
+  return owner===_scriptsOwnerKey() && gen===_scriptsInvalidateSeq && seq===_scriptsRequestSeq;
+}
+
+async function loadScriptsList(animate, silent){
+  const box=$('scriptsList');
+  if(!box) return;
+  const owner=_scriptsOwnerKey();
+  const gen=_scriptsInvalidateSeq;
+  const seq=++_scriptsRequestSeq;
+  if(animate&&box) box.style.opacity='0.5';
+  let data;
+  try{
+    data=await api('/api/scripts/list');
+  }catch(_e){
+    // Late reply for a superseded owner/generation, or a silent background
+    // refresh: do not paint either way.
+    if(!_scriptsReplyIsCurrent(owner,gen,seq)) return;
+    if(animate) box.style.opacity='';
+    if(!silent){
+      box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_load_failed')||'Could not load scripts.')}</div>`;
+    }
+    return;
+  }
+  // Stale-owner guard: a profile switch (or a newer request) superseded this
+  // one while it was in flight. Publishing would overwrite the current
+  // owner's result with the previous profile's scripts (or an error).
+  if(!_scriptsReplyIsCurrent(owner,gen,seq)) return;
+  if(animate) box.style.opacity='';
+  if(!data.exists){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_no_directory')||'No scripts directory yet.')}</div>`;
+    _scriptsLastDir=null;
+    return;
+  }
+  if(!data.scripts.length){
+    box.innerHTML=`<div style="padding:12px;color:var(--muted);font-size:12px">${esc(t('scripts_empty')||'No scripts in this profile yet.')}</div>`;
+    _scriptsLastDir=data.directory||null;
+    return;
+  }
+  _scriptsLastDir=data.directory||null;
+  box.innerHTML=data.scripts.map(s=>_renderScriptItem(s)).join('');
+}
+
+function _renderScriptItem(s){
+  const name=esc(s.name||'');
+  const desc=s.description?`<div class="scripts-item-desc">${esc(s.description)}</div>`:'';
+  const size=s.size!=null?`<span class="scripts-item-size">${_formatScriptSize(s.size)}</span>`:'';
+  return `<div class="scripts-item" data-script-name="${name}">
+    <div class="scripts-item-head">
+      <span class="scripts-item-name">${name}</span>
+      ${size}
+    </div>
+    ${desc}
+  </div>`;
+}
+
+function _formatScriptSize(bytes){
+  if(bytes==null) return '';
+  if(bytes<1024) return `${bytes} B`;
+  if(bytes<1024*1024) return `${Math.round(bytes/1024)} KB`;
+  return `${(bytes/1024/1024).toFixed(1)} MB`;
+}
+
+let _currentTasksSubtab='jobs';
+function switchTasksSubtab(name){
+  if(name!=='jobs'&&name!=='scripts') return;
+  _currentTasksSubtab=name;
+  const jobsBtn=$('tasksTabJobs');
+  const scriptsBtn=$('tasksTabScripts');
+  if(jobsBtn) jobsBtn.classList.toggle('active',name==='jobs');
+  if(scriptsBtn) scriptsBtn.classList.toggle('active',name==='scripts');
+  if(jobsBtn) jobsBtn.setAttribute('aria-selected',String(name==='jobs'));
+  if(scriptsBtn) scriptsBtn.setAttribute('aria-selected',String(name==='scripts'));
+  const cronList=$('cronList');
+  const scriptsList=$('scriptsList');
+  if(cronList) cronList.hidden=(name!=='jobs');
+  if(scriptsList) scriptsList.hidden=(name!=='scripts');
+  if(name==='scripts') loadScriptsList(true);
+}
+
 async function loadCrons(animate) {
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
@@ -7131,6 +7285,15 @@ async function switchToProfile(name) {
   // context change where dismissing those transient affordances is correct.
   if (typeof _renamingSid !== 'undefined' && _renamingSid) _renamingSid = null;
   if (typeof closeSessionActionMenu === 'function') closeSessionActionMenu();
+  // #7685 finding 3/4/5: drop the previous profile's Scripts rows now.
+  // Without this the next profile kept showing the earlier profile's scripts
+  // until the user clicked the subtab, and a late reply from the old owner
+  // could then overwrite the new one's list. The shared invalidate helper
+  // bumps the pane's transition generation so requests already in flight are
+  // refused at publication, and marks the visible pane for refresh.
+  if (typeof _invalidateScriptsForProfileSwitch === 'function') {
+    _invalidateScriptsForProfileSwitch();
+  }
   // Determine whether the current session must be replaced instead of being
   // retagged in place. A session with messages/active runtime belongs to the
   // current profile. After the profile-switch POST returns, we also treat an
@@ -7181,6 +7344,25 @@ async function switchToProfile(name) {
     S.activeProfileIsDefault = !!data.is_default;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
+    }
+    // #7685 finding 3/4/5: the switch is accepted, so the Scripts pane's
+    // owner is now this profile. If it was the visible subtab, refresh it for
+    // the new owner (its rows were cleared at switch start). The load's own
+    // owner/generation gate drops any still-in-flight reply from the old
+    // owner.
+    //
+    // #7685 finding 1 (MUST-FIX): invalidate AGAIN here, at accept. The
+    // canonical switch does not change S.activeProfile until its POST
+    // returns, so a list load issued while the switch was PENDING captured
+    // the OLD owner key and passed its gate — it repainted the previous
+    // profile's rows under the new profile. Bumping the generation at accept
+    // retires that in-flight reply, and the refresh below repopulates the
+    // pane for the owner that is now current.
+    if (typeof _invalidateScriptsForProfileSwitch === 'function') {
+      _invalidateScriptsForProfileSwitch();
+    }
+    if (typeof _refreshScriptsAfterProfileSwitch === 'function') {
+      _refreshScriptsAfterProfileSwitch();
     }
     // #7509: the slash-skill caches hold the previous profile's disabled-filtered
     // /api/skills payload, so drop them once the switch has actually succeeded —
@@ -7390,9 +7572,16 @@ async function switchToProfile(name) {
         loadDir('.');
       } else if (_workspaceVisibleAtStart && typeof clearWorkspaceTreeSkeleton === 'function') {
         // No workspace to restore on the (still-current) previous profile —
-        // clear the up-front workspace skeleton so it doesn't strand on a switch
+        // clear the up-front workspace skeleton so it can't strand on a switch
         // failure, mirroring the success-path no-workspace handling (#4662).
         clearWorkspaceTreeSkeleton();
+      }
+      // #7685 finding 5: the Scripts pane was cleared at switch start but the
+      // switch never took effect, so the old profile is still active. Restore
+      // it for that profile instead of leaving the pane blank. The refresh is
+      // silent-on-error so a failed restore cannot paint a spurious banner.
+      if (typeof _refreshScriptsAfterProfileSwitch === 'function') {
+        _refreshScriptsAfterProfileSwitch();
       }
     }
     return false;
