@@ -513,6 +513,17 @@ def test_auto_assign_live_binding_takes_the_lock_in_source():
     end = src.index("\ndef ", start + 1)
     body = src[start:end]
     assert "with _PROJECTS_CATALOG_LOCK:" in body, "the live read does not take the shared lock"
-    assert body.index("with _PROJECTS_CATALOG_LOCK:") < body.index("load_projects()"), (
-        "the catalog is read before the lock is acquired"
+    assert "_auto_assign_live_binding_locked(project_id)" in body, (
+        "the wrapper must do its catalog read inside the shared lock"
+    )
+    # The reader itself is the function that touches the catalog, and it must
+    # NOT take the lock: its callers (this wrapper, and
+    # _auto_assign_claim_session's read+assign critical section) hold it.
+    l_start = src.index("def _auto_assign_live_binding_locked(")
+    l_end = src.index("\ndef ", l_start + 1)
+    reader = src[l_start:l_end]
+    assert "load_projects()" in reader, "the catalog read must live in the reader"
+    assert "with _PROJECTS_CATALOG_LOCK:" not in reader, (
+        "the reader must not take the lock itself - it runs inside the caller's "
+        "critical section"
     )

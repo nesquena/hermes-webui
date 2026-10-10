@@ -968,6 +968,26 @@ def _apply_project_auto_assign(proj) -> int:
         _auto_assign_sweep_end(pid)
 
 
+def _auto_assign_live_binding_locked(project_id):
+    """``_auto_assign_live_binding`` with ``_PROJECTS_CATALOG_LOCK`` ALREADY held.
+
+    Split out for the per-assignment re-check: the sweep has to read the live
+    row AND make the ``project_id`` assignment inside ONE catalog critical
+    section (maintainer re-gate 2026-10-10T18:19:55Z), so the reader cannot
+    take the lock itself there. ``_PROJECTS_CATALOG_LOCK`` is a
+    ``threading.RLock`` (api/models.py), so the public wrapper and this helper
+    may be nested in the same thread.
+    """
+    try:
+        projects = load_projects()
+    except Exception:
+        return None
+    for p in projects:
+        if isinstance(p, dict) and p.get("project_id") == project_id:
+            return bool(p.get("auto_assign")), set(_project_workspaces(p))
+    return None
+
+
 def _auto_assign_live_binding(project_id):
     """The CURRENT (auto_assign, bound workspaces) for ``project_id``.
 
@@ -997,13 +1017,55 @@ def _auto_assign_live_binding(project_id):
     """
     try:
         with _PROJECTS_CATALOG_LOCK:
-            projects = load_projects()
+            return _auto_assign_live_binding_locked(project_id)
     except Exception:
         return None
-    for p in projects:
-        if isinstance(p, dict) and p.get("project_id") == project_id:
-            return bool(p.get("auto_assign")), set(_project_workspaces(p))
-    return None
+
+
+def _auto_assign_claim_session(project_id, session, workspace) -> bool:
+    """File ``session`` under ``project_id`` iff the LIVE binding still allows it.
+
+    Call with the session's own agent lock held; the caller saves AFTER this
+    returns. This is the ONLY place the sweep may write a project id.
+
+    Why it exists (maintainer re-gate 2026-10-10T18:19:55Z, "[SILENT]
+    api/routes.py:1069 — chats are filed after auto-assign is turned off or the
+    workspace is detached"): the loop's cheap binding check runs BEFORE the
+    sweep waits for the session lock, so a bind that switched ``auto_assign``
+    off (or saved ``workspaces: null``, or deleted the project) while the sweep
+    waited on a held lock used to be acted on with the stale answer, and the
+    chat gained the project id anyway. Verified over real HTTP by holding an
+    unassigned chat's lock, enabling auto-assign, letting the sweep reach that
+    lock, disabling auto-assign successfully, then releasing the lock.
+
+    The re-read and the assignment therefore share ONE
+    ``_PROJECTS_CATALOG_LOCK`` critical section: a catalog mutation either
+    completes before it (and this sees the new row) or starts after it (and
+    this already filed under the binding that was live). The catalog lock is
+    released BEFORE the caller's ``save()`` — that write is full-history I/O
+    and must never run behind the shared lock (Greptile P1 2026-10-10T12:41:25Z,
+    maintainer re-gate 2026-10-10T15:11:33Z).
+
+    Lock order is SESSION -> CATALOG here, and CATALOG is a LEAF in this path
+    (nothing below it takes a session lock), so it cannot deadlock against the
+    CATALOG -> LOCK order documented on ``_clear_cached_sessions_for_project``:
+    no other call site holds the catalog lock while acquiring a session lock.
+    ``_auto_assign_live_binding`` re-acquires the same RLock (re-entrant, same
+    thread) so the stubbed readers in tests keep working and the read above
+    stays inside this critical section.
+
+    Returns True when the assignment was made, False when the live binding no
+    longer covers ``workspace`` (auto_assign off, workspace detached, project
+    deleted/unknown, or an unreadable catalog — fail CLOSED, AGENTS.md).
+    """
+    with _PROJECTS_CATALOG_LOCK:
+        live = _auto_assign_live_binding(project_id)
+        if live is None or not live[0]:
+            return False
+        if not workspace or str(workspace) not in live[1]:
+            return False
+        session.project_id = project_id
+    return True
 
 
 def _auto_assign_sweep_body(proj) -> int:
@@ -1017,6 +1079,13 @@ def _auto_assign_sweep_body(proj) -> int:
 
     Returns the number of sessions reassigned. Runs in a background thread
     from /api/projects/bind so a large index never stalls the response.
+
+    Every project-id write goes through ``_auto_assign_claim_session``, which
+    re-reads the live binding and files inside one ``_PROJECTS_CATALOG_LOCK``
+    critical section while the caller holds the session's agent lock — that is
+    the rule for this sweep (maintainer re-gate 2026-10-10T18:19:55Z), so the
+    snapshot this function was handed can never file a chat the user has just
+    un-bound, disabled auto-assign for, or detached the workspace from.
     """
     if not SESSION_INDEX_FILE.exists():
         return 0
@@ -1109,10 +1178,18 @@ def _auto_assign_sweep_body(proj) -> int:
                                 if c_ws and str(c_ws) in bound:
                                     c_active = getattr(cached, "active_stream_id", None)
                                     if c_active in active_ids:
-                                        cached.project_id = pid
-                                        changed += 1
-                                        deferred_to_stream += 1
-                                        assigned_via_stream = True
+                                        # The loop's binding check above ran
+                                        # BEFORE this session lock was taken: a
+                                        # bind that switched auto_assign off /
+                                        # detached this workspace / deleted the
+                                        # project while we waited must win, so
+                                        # re-read and file inside the catalog
+                                        # critical section (maintainer re-gate
+                                        # 2026-10-10T18:19:55Z).
+                                        if _auto_assign_claim_session(pid, cached, c_ws):
+                                            changed += 1
+                                            deferred_to_stream += 1
+                                            assigned_via_stream = True
                 if assigned_via_stream:
                     continue
                 # Stale/missing cache or ended stream — fall through to
@@ -1147,7 +1224,13 @@ def _auto_assign_sweep_body(proj) -> int:
                 s_ws = getattr(s, "workspace", None)  # noqa: B009
                 if not s_ws or str(s_ws) not in bound:
                     continue
-                s.project_id = pid
+                # Same stale-answer hole as the cached path above: the live
+                # binding was read before this session lock was acquired, so
+                # re-read it and file inside the catalog critical section
+                # (maintainer re-gate 2026-10-10T18:19:55Z). A binding that no
+                # longer covers this workspace is skipped, not filed.
+                if not _auto_assign_claim_session(pid, s, s_ws):
+                    continue
                 # Backfill must not rewrite historical activity dates: a plain
                 # save() stamps updated_at=now, so an imported/legacy session
                 # without message timestamps would jump into "Today".
