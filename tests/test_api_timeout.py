@@ -228,12 +228,14 @@ def test_update_flows_keep_explicit_longer_timeouts():
 def test_session_message_loads_keep_explicit_longer_timeouts():
     """Large state.db installs can take longer than the generic 30s API timeout."""
     src = _source(SESSIONS_JS)
-    assert (
-        "api(\n"
-        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,\n"
-        "      {timeoutMs:120000}\n"
-        "    )"
-    ) in src
+    body = _extract_js_function(src, "_ensureMessagesLoaded")
+    # Both the bounded load and its full-transcript retry need the same longer
+    # budget. Anchor on the two actual API calls, not the old one-call URL shape.
+    assert re.search(
+        r"api\(\s*`\$\{sessionUrl\}\$\{reloadLimitParam\}\$\{expandParam\}`,\s*\{timeoutMs:120000\}\s*\)",
+        body,
+    )
+    assert re.search(r"api\(\s*sessionUrl,\s*\{timeoutMs:120000\}\s*\)", body)
     # _loadOlderMessages now picks between two strategies (tail-growth vs
     # msg_before paging) via a useBeforePaging ternary, but both keep the long
     # timeoutMs:120000. Assert each URL + timeout survives in the source.
