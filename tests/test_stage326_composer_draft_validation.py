@@ -81,12 +81,24 @@ def test_draft_validation_appears_before_persist():
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
     # Anchor on the unique POST-validation comment marker.
     marker_idx = src.find("Stage-326 hardening (per Opus advisor)")
-    persist_idx = src.find("s.composer_draft = next_draft\n                # Draft persistence is not conversation activity")
+    # The persist site lives in the per-session coalescing worker since #7839
+    # (the handler publishes the intent; the worker performs the save).
+    persist_idx = src.find("s.composer_draft = next_draft\n                        # Draft persistence is not conversation activity")
     assert marker_idx != -1 and persist_idx != -1, (
         "could not locate validation marker or persist site"
     )
-    assert marker_idx < persist_idx, (
-        "validation block must run before composer_draft persist"
+    worker_start = src.find("def _draft_save_worker(")
+    worker_end = src.find("def _session_is_subagent_view_only(")
+    assert worker_start < persist_idx < worker_end, (
+        "composer_draft persist must live inside the coalescing worker"
+    )
+    handler_body = src[
+        src.find('if parsed.path == "/api/session/draft":'):
+        src.find('if parsed.path == "/api/session/update":')
+    ]
+    assert "s.save(" not in handler_body, "draft POST handler must not persist inline anymore"
+    assert marker_idx < src.index("Publish the save intent", marker_idx), (
+        "validation block must run before the save intent is published"
     )
 
 
