@@ -8492,7 +8492,9 @@ def _session_context_length_lookup_state(
         from api.config import resolve_model_provider
 
         model_for_resolution = model_with_provider_context(model_for_lookup, provider_for_lookup or None)
-        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(model_for_resolution)
+        resolved_model, resolved_provider, resolved_base_url = resolve_model_provider(
+            model_for_resolution, session_provider=provider_for_lookup or None
+        )
         model_for_lookup = str(resolved_model or model_for_lookup).strip()
         provider_for_lookup = str(resolved_provider or provider_for_lookup or "").strip()
         base_url_for_lookup = str(resolved_base_url or "").strip()
@@ -26970,7 +26972,8 @@ def _handle_chat_sync(handler, body):
             from api.config import resolve_model_provider
 
             _model, _provider, _base_url = resolve_model_provider(
-                model_with_provider_context(s.model, getattr(s, "model_provider", None))
+                model_with_provider_context(s.model, getattr(s, "model_provider", None)),
+                session_provider=getattr(s, "model_provider", None),
             )
             # Resolve API key via Hermes runtime provider (matches gateway behaviour)
             _api_key = None
@@ -27675,7 +27678,9 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
             if session_model
             else get_effective_default_model()
         )
-        _main_model, _main_provider, _main_base_url = resolve_model_provider(model_for_resolution)
+        _main_model, _main_provider, _main_base_url = resolve_model_provider(
+            model_for_resolution, session_provider=session_provider
+        )
         _main_api_key = None
         _rt = None
         try:
@@ -29749,7 +29754,8 @@ def _handle_session_compress(handler, body):
         AIAgent = require_ai_agent_class()
 
         resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(
-            _cfg.model_with_provider_context(s.model, getattr(s, "model_provider", None))
+            _cfg.model_with_provider_context(s.model, getattr(s, "model_provider", None)),
+            session_provider=getattr(s, "model_provider", None),
         )
 
         resolved_api_key = None
@@ -30442,7 +30448,9 @@ def _handle_handoff_summary(handler, body):
         model_for_resolution = _cfg.model_with_provider_context(
             resolved_model, session_model_provider
         )
-        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(model_for_resolution)
+        resolved_model, resolved_provider, resolved_base_url = _cfg.resolve_model_provider(
+            model_for_resolution, session_provider=session_model_provider
+        )
 
         resolved_api_key = None
         _rt = None

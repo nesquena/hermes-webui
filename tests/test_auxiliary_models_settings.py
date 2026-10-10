@@ -998,7 +998,7 @@ class TestAuxiliaryModelsBackend:
         monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
         monkeypatch.setattr(config, "reload_config", lambda: None)
         monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
-        monkeypatch.setattr(config, "resolve_model_provider", lambda model: (model, "openai", None))
+        monkeypatch.setattr(config, "resolve_model_provider", lambda model, **_kwargs: (model, "openai", None))
 
         result = config.set_hermes_default_model(
             "gpt-5.5",
@@ -1029,7 +1029,7 @@ class TestAuxiliaryModelsBackend:
         monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
         monkeypatch.setattr(config, "reload_config", lambda: None)
         monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
-        monkeypatch.setattr(config, "resolve_model_provider", lambda model: (model, "", None))
+        monkeypatch.setattr(config, "resolve_model_provider", lambda model, **_kwargs: (model, "", None))
 
         result = config.set_hermes_default_model("gpt-5.5", provider="anthropic")
 
@@ -1046,7 +1046,7 @@ class TestAuxiliaryModelsBackend:
         monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
         monkeypatch.setattr(config, "reload_config", lambda: None)
         monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
-        monkeypatch.setattr(config, "resolve_model_provider", lambda model: (model, "custom", "http://old.local/v1"))
+        monkeypatch.setattr(config, "resolve_model_provider", lambda model, **_kwargs: (model, "custom", "http://old.local/v1"))
 
         result = config.set_hermes_default_model("gpt-5.5", provider="openai")
 
@@ -1099,7 +1099,7 @@ class TestAuxiliaryModelsBackend:
         monkeypatch.setattr(
             config,
             "resolve_model_provider",
-            lambda model: (model, "custom:demo", "https://resolved.invalid/v1"),
+            lambda model, **_kwargs: (model, "custom:demo", "https://resolved.invalid/v1"),
         )
 
         result = config.set_auxiliary_model(
@@ -1145,7 +1145,7 @@ class TestAuxiliaryModelsBackend:
         monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
         monkeypatch.setattr(config, "reload_config", lambda: None)
         monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
-        monkeypatch.setattr(config, "resolve_model_provider", lambda model: (model, "openai", None))
+        monkeypatch.setattr(config, "resolve_model_provider", lambda model, **_kwargs: (model, "openai", None))
 
         result = config.set_hermes_default_model(
             "gpt-5.5",
