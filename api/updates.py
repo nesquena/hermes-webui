@@ -747,6 +747,65 @@ _CHANNEL_TAG_GLOBS = {
 # build-metadata prereleases (``v0.21.6+canary.20261010T070026Z``) which are
 # NOT published releases — _release_tags filters them out of the stable list.
 _STABLE_RELEASE_TAG_RE = re.compile(r'^v\d+(?:\.\d+)+$')
+# The major-version SERIES a stable tag belongs to (``v0.52.114`` -> ``v0``,
+# legacy ``v2026.9.24`` -> ``v2026``). The Agent repo renamed its stable series
+# from ``v2026.9.x`` to ``v0.21.x`` in Oct 2026, so ordering has to compare
+# SERIES by recency and VERSIONS inside a series by number.
+_STABLE_SERIES_RE = re.compile(r'^(v\d+)\.')
+
+
+def _stable_series(tag: str) -> str:
+    """Return the major-version series of a stable release tag."""
+    match = _STABLE_SERIES_RE.match(tag)
+    return match.group(1) if match else tag
+
+
+def _release_version_key(tag: str):
+    """Numeric version tuple of a release tag (``v0.52.114`` -> ``(0, 52, 114)``).
+
+    Compare NUMERICALLY, not lexically: ``v0.52.5`` must outrank ``v0.52.2``
+    and ``v0.52.114`` must outrank ``v0.52.5``.
+    """
+    return tuple(int(part) for part in tag[1:].split('.'))
+
+
+def _order_stable_tags(tags):
+    """Group stable release tags by series (newest series first) and order each
+    group by DESCENDING NUMERIC VERSION.
+
+    Creation date stays the OUTER key — that is the whole point of the original
+    fix: the rename from ``v2026.9.x`` to ``v0.21.x`` means name order ranks the
+    LEGACY series first, resolving "latest" to an ancestor of HEAD and firing
+    the branch-comparison fallback. Since the tags arrive already sorted by
+    creatordate, the first appearance of each series in the list is its newest
+    tag, which orders the groups.
+
+    The numeric version is the INNER key, and it is what removes the two
+    remaining date hazards:
+
+    * ``git`` breaks creatordate TIES by refname ascending, so two releases
+      tagged in the same second list the OLDER one first and the update check
+      reports ``behind=0`` on an install that is one release behind;
+    * creatordate is the tagger date for an ANNOTATED tag but the COMMIT date
+      for a lightweight one, so a mixed pair can rank an older release ahead of
+      a newer one even without a tie.
+
+    Neither hazard can reorder anything inside a series once the inner key is
+    the version number, and neither can move a series past a newer one because
+    the outer key only compares series.
+    """
+    ordem_dos_grupos = []
+    por_grupo = {}
+    for tag in tags:
+        serie = _stable_series(tag)
+        if serie not in por_grupo:
+            por_grupo[serie] = []
+            ordem_dos_grupos.append(serie)
+        por_grupo[serie].append(tag)
+    ordenados = []
+    for serie in ordem_dos_grupos:
+        ordenados.extend(sorted(por_grupo[serie], key=_release_version_key, reverse=True))
+    return ordenados
 
 
 def _normalize_channel(channel) -> str:
@@ -811,27 +870,44 @@ def channel_version_badge(channel=None) -> str:
 
 
 def _release_tags(path, channel=DEFAULT_UPDATE_CHANNEL):
-    """Return the channel's release tags newest-first, by tag creation date.
+    """Return the channel's release tags newest-first.
 
-    Creation-date order, NOT name order: the Agent repo renamed its stable
-    series from ``v2026.9.x`` to ``v0.21.x`` (Oct 2026) and name-sort ranks
-    ``v2026.9.24`` above ``v0.21.6`` (2026 > 0). The "latest" tag then resolves
-    to an ANCESTOR of HEAD, the release check bails out (HEAD contains the
-    advertised tag), and the check falls through to the branch-comparison
-    fallback — advertising hundreds of untagged master commits to an install
-    that is already on the latest stable release.
+    **Experimental** tags stay in plain name order (``--sort=-v:refname``):
+    they are a single series that has never been renamed, so numeric name order
+    IS release order.
+
+    **Stable** tags are ordered by SERIES recency and then by NUMERIC VERSION
+    inside each series (see ``_order_stable_tags``), because:
+
+    * the Agent repo renamed its stable series from ``v2026.9.x`` to
+      ``v0.21.x`` (Oct 2026) and name order ranks ``v2026.9.24`` above
+      ``v0.21.6`` (2026 > 0). The "latest" tag then resolves to an ANCESTOR of
+      HEAD, the release check bails out (HEAD contains the advertised tag), and
+      the check falls through to the branch-comparison fallback — advertising
+      hundreds of untagged master commits to an install that is already on the
+      latest stable release;
+    * pure creation-date order has two defects of its own: ``git`` breaks
+      creatordate ties by refname ASCENDING (two releases tagged in the same
+      second rank the OLDER one first, hiding a real update), and creatordate
+      is the tagger date for annotated tags but the commit date for lightweight
+      ones (a mixed pair can rank an older release above a newer one).
+
     Build-metadata prerelease tags (``v0.21.6+canary.*``, ``rc.*``,
     ``abandoned-*``) are excluded from the stable channel: they are not
     published releases and would otherwise outrank the release itself.
     """
     glob = _channel_tag_glob(channel)
+    if _normalize_channel(channel) != 'stable':
+        out, ok = _run_git(['tag', '--list', glob, '--sort=-v:refname'], path)
+        if not (ok and out):
+            return []
+        return [line.strip() for line in out.splitlines() if line.strip()]
     out, ok = _run_git(['tag', '--list', glob, '--sort=-creatordate'], path)
     if not (ok and out):
         return []
     tags = [line.strip() for line in out.splitlines() if line.strip()]
-    if channel == 'stable':
-        tags = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
-    return tags
+    tags = [t for t in tags if _STABLE_RELEASE_TAG_RE.match(t)]
+    return _order_stable_tags(tags)
 
 
 def _current_release_tag(path, channel=DEFAULT_UPDATE_CHANNEL):

@@ -12,6 +12,7 @@ Both tag families live on the SAME linear master line; a channel is only a tag
 glob. The critical property under test: a STABLE user with an unpromoted
 `exp-v*` tag ahead of them reports up-to-date, NOT the master firehose.
 """
+import os
 import subprocess
 
 import pytest
@@ -422,3 +423,91 @@ def test_stable_pinned_experimental_current_sha_is_verified_ref_only(stable_pinn
     # ...but current_sha is the git-verified exact tag, NOT the dirty display string.
     assert info['current_sha'] == 'v0.52.0'
     assert 'dirty' not in (info['current_sha'] or '')
+
+
+# ── Stable ordering: creatordate is the OUTER key only ───────────────────────
+# Two hazards that pure `--sort=-creatordate` ordering gets wrong. Both were
+# reproduced in real git repositories during the re-gate of #8147:
+#
+#   1. git breaks creatordate TIES by refname ascending, so two releases
+#      tagged in the same second rank the OLDER one first;
+#   2. creatordate is the TAGGER date for an annotated tag but the COMMIT date
+#      for a lightweight one, so a mixed pair can rank an older release ahead
+#      of a newer one even with no tie at all.
+#
+# In both cases the update check reports behind=0 on an install that is one
+# release behind: the banner and the Update button disappear.
+def _tag_repo_at(tmp_path, name, tags):
+    """Build a repo whose stable tags carry EXACTLY the given creation dates.
+
+    Each entry is `(tag, commit_date, tag_date)`. `tag_date` is applied as the
+    tagger date for annotated tags (`-a`) and as the commit date for lightweight
+    ones, matching how `creatordate` is derived for each tag type.
+    """
+    repo = tmp_path / name
+    repo.mkdir()
+    _git(repo, 'init', '-q')
+    _git(repo, 'config', 'user.email', 't@t.co')
+    _git(repo, 'config', 'user.name', 'Test')
+    for tag, commit_date, tag_date in tags:
+        env = dict(os.environ, GIT_AUTHOR_DATE=commit_date, GIT_COMMITTER_DATE=commit_date)
+        subprocess.run(
+            ['git', 'commit', '-q', '--allow-empty', '-m', tag],
+            cwd=str(repo), check=True, env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        if tag_date:
+            # Annotated: the tagger date IS the tag's creatordate.
+            env = dict(os.environ, GIT_COMMITTER_DATE=tag_date)
+            subprocess.run(
+                ['git', 'tag', '-a', tag, '-m', tag],
+                cwd=str(repo), check=True, env=env,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        else:
+            # Lightweight: the tag inherits its COMMIT's date.
+            _git(repo, 'tag', tag)
+    return repo
+
+
+def test_stable_tags_tagged_in_the_same_second_rank_the_newer_release_first(tmp_path):
+    """creatordate ties break by refname ASCENDING — the version is the tie-break."""
+    repo = _tag_repo_at(tmp_path, 'tied', [
+        # Both tagged within the same second; git lists v0.52.113 first.
+        ('v0.52.113', '2026-10-10T12:00:00Z', None),
+        ('v0.52.114', '2026-10-10T12:00:02Z', None),
+    ])
+    same_second = _tag_repo_at(tmp_path, 'tied-same', [
+        ('v0.52.113', '2026-10-10T12:00:00Z', None),
+        ('v0.52.114', '2026-10-10T12:00:00Z', None),
+    ])
+
+    # The tie is real: git's own ordering puts the OLDER release first.
+    raw = subprocess.run(
+        ['git', 'tag', '--list', 'v*', '--sort=-creatordate'],
+        cwd=str(same_second), check=True, capture_output=True, text=True,
+    ).stdout.split()
+    assert raw[0] == 'v0.52.113', f'fixture must reproduce the tie, got {raw}'
+
+    assert updates._release_tags(repo, 'stable') == ['v0.52.114', 'v0.52.113']
+    assert updates._release_tags(same_second, 'stable') == ['v0.52.114', 'v0.52.113']
+
+
+def test_stable_annotated_and_lightweight_tags_rank_by_version_not_by_date(tmp_path):
+    """An OLDER annotated release with a NEWER tagger date must not outrank a
+    newer lightweight release whose commit date is earlier."""
+    repo = _tag_repo_at(tmp_path, 'mixed', [
+        # v0.52.1 is OLDER but was annotated on Oct 3 (tagger date = Oct 3).
+        ('v0.52.1', '2026-10-03T09:00:00Z', '2026-10-03T09:00:00Z'),
+        # v0.52.2 is NEWER, on a descendant commit, but lightweight: its
+        # creatordate is the commit date, Oct 2 — earlier than v0.52.1's.
+        ('v0.52.2', '2026-10-02T08:00:00Z', None),
+    ])
+
+    raw = subprocess.run(
+        ['git', 'tag', '--list', 'v*', '--sort=-creatordate'],
+        cwd=str(repo), check=True, capture_output=True, text=True,
+    ).stdout.split()
+    assert raw[0] == 'v0.52.1', f'fixture must reproduce the inversion, got {raw}'
+
+    assert updates._release_tags(repo, 'stable') == ['v0.52.2', 'v0.52.1']
