@@ -78,8 +78,15 @@ def _configure_pin_route(monkeypatch, sessions, persisted, source, active_profil
     names = sorted({"default", *(session.profile for session in sessions)})
     monkeypatch.setattr(routes, "LOCK", threading.Lock())
     monkeypatch.setattr(routes, "SESSIONS", OrderedDict(by_id if source == "memory" else {}))
-    monkeypatch.setattr(routes, "all_sessions", lambda: list(persisted) if source == "persisted" else [])
+    # all_sessions() yields compact rows; state.db reads/writes are stubbed so the
+    # cached flags under test are what the quota sees.
+    monkeypatch.setattr(routes, "all_sessions", lambda: [_PinSession.compact(s) for s in persisted] if source == "persisted" else [])
     monkeypatch.setattr(routes, "get_session", lambda sid, **_: by_id[sid])
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda sid, **_: by_id[sid])
+    monkeypatch.setattr(routes, "_ensure_full_session_before_mutation", lambda _sid, s: s)
+    monkeypatch.setattr(routes, "_pin_quota_rows_from_state_db", lambda rows, *_a: [dict(r) for r in rows])
+    monkeypatch.setattr(routes, "_write_pin_to_state_db", lambda *_: True)
+    monkeypatch.setattr(routes, "_PIN_QUOTA_RESERVATIONS", {})
     monkeypatch.setattr(routes, "list_profiles_api", lambda **_: [
         {"name": name, "is_default": name == "default"} for name in names])
     monkeypatch.setattr(profiles, "_root_profile_name_cache", set(root_names or {"default"}))
@@ -302,8 +309,10 @@ def test_pin_quota_uses_target_owner_and_keeps_post_profile_guard(monkeypatch, s
     assert responses[-1][0] == 400 and not targets[3].pinned
     for pin in pinned_a:
         pin.pinned = False
+    # Lineage links are profile-scoped (session ids are unique only per state.db),
+    # so B's pinned parents fold B's three pins into one lineage.
     for parent in parents:
-        parent.profile, parent.pinned = "default", True
+        parent.pinned = True
     routes.handle_post(None, SimpleNamespace(path="/api/session/pin", query=""))
     assert responses[-1][0] == 200 and targets[3].pinned
 
@@ -494,9 +503,9 @@ def test_session_pin_cap_has_backend_and_frontend_guards():
     # unchanged.
     assert 'persisted_rows = [' in ROUTES_PY
     assert 'candidate_rows.extend(' in ROUTES_PY
-    assert 'pinned_lineage_ids = _visible_pinned_lineage_ids(candidate_rows, profiles=quota_profile_names)' in ROUTES_PY
+    assert 'pinned_count = len(_visible_pinned_lineage_ids(candidate_rows, target_row, quota_profiles))' in ROUTES_PY
     assert 'pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)' in ROUTES_PY
-    assert 'if (own_count if uncertain_owner else pinned_count) >= pinned_sessions_limit:' in ROUTES_PY
+    assert 'if pinned_count >= pinned_sessions_limit:' in ROUTES_PY
     assert 'Up to {pinned_sessions_limit} sessions can be pinned' in ROUTES_PY
 
     assert 'function _pinnedSessionCount()' in SESSIONS_JS
