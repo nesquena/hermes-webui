@@ -60,6 +60,42 @@ def main():
                 failures = ['stale offscreen height survives own state transition'] if retained else []
                 results.append(dict(kind='cache', state=state, reverse=reverse, initial=initial, retained=retained, estimate=estimate, actual=actual, failures=failures))
         page.close()
+        page = browser.new_page(viewport={'width': 1440, 'height': 900})
+        page.on('pageerror', lambda e: errors.append(str(e)))
+        page.set_content('<input id="sessionSearch" hidden><div id="sessionList" style="width:300px;height:320px;overflow:auto"></div>')
+        page.add_style_tag(content=source('static/style.css'))
+        component = geometry_script(source('static/sessions.js')).replace(
+            'const _showArchived=false, _sessionSelectMode=false, _showAllProfiles=false;',
+            'const _showArchived=false, _showAllProfiles=false;let _sessionSelectMode=false;')
+        page.add_script_tag(content=component)
+        page.add_script_tag(content='const _selectedSessions=new Set();')
+        for sid, select in [('prior100-0', False), ('prior100-79', False), ('p100', True)]:
+            page.evaluate('''()=>{
+              activeSidForSidebar='other';_sessionSelectMode=false;scene('detailed','children');
+              const parent=groups[0].items[100];parent._compression_segment_count=80;
+              parent._lineage_segments=Array.from({length:80},(_,i)=>({session_id:'prior100-'+i,title:'Earlier turn '+i,updated_at:i+1}));
+              _expandedLineageKeys.add('p100');repaint();
+            }''')
+            page.wait_for_timeout(100)
+            page.evaluate('''([sid,select])=>{
+              activeSidForSidebar=sid;_sessionSelectMode=select;
+              delete $('sessionList').dataset.sessionVirtualActiveAnchor;repaint();
+            }''', [sid, select])
+            page.wait_for_timeout(150)
+            data = page.evaluate('''sid=>{
+              const l=$('sessionList'),parent=l.querySelector('.session-item[data-sid="p100"]');
+              const target=sid==='p100'?parent?.querySelector('.session-title-row'):
+                parent?.querySelector('.session-lineage-segment[data-sid="'+sid+'"]');
+              const r=target?.getBoundingClientRect(),top=l.getBoundingClientRect().top;
+              return {top:r?r.top-top:null,bottom:r?r.bottom-top:null,height:l.clientHeight,
+                targetHeight:r?.height,rows:l.querySelectorAll('.session-date-body>.session-item').length};
+            }''', sid)
+            failures = []
+            if data['top'] is None or abs(data['top']-(data['height']-data['targetHeight'])/2) > 1:
+                failures.append('lineage row or parent title is not the measured active target')
+            page.screenshot(path=str(args.output/f'anchor-{sid}.png'))
+            results.append(dict(kind='anchor-adversarial', sid=sid, select=select, data=data, failures=failures))
+        page.close()
         page = browser.new_page(viewport={'width': 900, 'height': 800})
         page.on('pageerror', lambda e: errors.append(str(e)))
         page.set_content('<main id="fixture" style="width:300px;padding:8px;background:var(--sidebar)"></main>')
@@ -68,7 +104,7 @@ def main():
         page.add_script_tag(content='''
           const _loadingSessionId=null;
           function repaint(){
-            const parent={session_id:'parent',title:'Parent conversation',message_count:3,attention:{kind:'clarify',count:1}};
+            const parent={session_id:'parent',title:'Parent conversation',message_count:3,attention:{kind:'clarify',count:1},_child_session_hidden_streaming:true};
             const visible={session_id:'visible',title:'Visible approval child',message_count:3,parent_session_id:'parent',relationship_type:'child_session',raw_source:'subagent',session_source:'other',attention:{kind:'approval',count:1},is_streaming:window.visibleRunning};
             const hidden={session_id:'hidden',title:'Archived running child',message_count:3,parent_session_id:'parent',relationship_type:'child_session',raw_source:'subagent',session_source:'other',archived:true,is_streaming:!window.visibleRunning};
             const expanded=_expandedChildSessionKeys.has('parent');

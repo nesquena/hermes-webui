@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.parametrize(('driver', 'cases'), [
     ('browser_session_child_restore.py', 16),
-    ('browser_session_state_projection.py', 12),
+    ('browser_session_state_projection.py', 15),
 ])
 @pytest.mark.timeout(120)
 def test_sidebar_restore_and_state_projection(tmp_path, driver, cases):

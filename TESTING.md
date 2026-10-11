@@ -317,11 +317,13 @@ the real list viewport and bounded virtual DOM. Mobile screenshots open the
 production drawer; `--repo PATH` replays the same probe against a control tree.
 A failure on master is control evidence, not automatically a candidate regression.
 
-The 12-case state-projection gate uses production rendering and CSS: it caches a
+The 15-case state-projection gate uses production rendering and CSS: it caches a
 Russian prior-turns summary at 180px with 1,000 segments, scrolls it offscreen,
 and changes the parent's running/unread/approval gutter in both directions.
 It demonstrates the real height change and requires stale measurements to be
-invalidated. Separate collapsed→expanded→collapsed scenes pair a visible approval
+invalidated. Adversarial scenes restore first/last of 80 expanded lineage
+segments and a parent in batch-selection mode, requiring the actual title/segment
+rather than a checkbox to be centered. Separate collapsed→expanded→collapsed scenes pair a visible approval
 child with reference-only archived running work; the chip keeps that activity,
 without duplicating supplemental activity when only visible children run. Both
 scripts have exact-count pytest wrappers in `test_session_child_restore_browser.py`.

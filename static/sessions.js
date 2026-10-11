@@ -9308,7 +9308,7 @@ function renderSessionListFromCache(){
     const activeRow=renderedVirtualRows.find(row=>row.index===activeIndex);
     list.scrollTop=listScrollTopBeforeRender;
     if(activeRow){
-      const target=Array.from(activeRow.el.querySelectorAll('[data-sid]')).find(el=>el.dataset.sid===activeSidForSidebar)
+      const target=Array.from(activeRow.el.querySelectorAll('.session-child-session[data-sid],.session-lineage-segment[data-sid]')).find(el=>el.dataset.sid===activeSidForSidebar)
         ||activeRow.el.querySelector('.session-title-row')||activeRow.el;
       const rect=target.getBoundingClientRect(),top=list.getBoundingClientRect().top;
       const alreadyVisible=rect.top>=top&&rect.bottom<=top+list.clientHeight;
@@ -9621,6 +9621,7 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-lineage-segment'+(activeSidForSidebar&&seg.session_id===activeSidForSidebar?' active':'');
+        row.dataset.sid=seg.session_id;
         const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');
         const segTime=_formatRelativeSessionTime(_sessionTimestampMs(seg));
         row.textContent=`-> ${segTitle} - ${segTime}`;
