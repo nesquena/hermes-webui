@@ -236,10 +236,25 @@ chown_home_hermeswebui() {
   # source — prune the entire hermes-agent path from the chown walk so a
   # read-only or partially-read-only mount doesn't break the rest of the home
   # ownership alignment.
-  find /home/hermeswebui \
+  #
+  # Two-container compose shares ~/.hermes with a running agent that replaces
+  # files atomically (write temp + rename), so an entry listed by find can be
+  # gone before find stats it or chown reaches it (#8106). Only that vanished
+  # entry is tolerated: any other chown failure (EACCES, EROFS outside the
+  # pruned path) still fails startup.
+  find /home/hermeswebui -ignore_readdir_race \
     -path "/home/hermeswebui/.hermes/hermes-agent" -prune \
     -o -name ".git" -prune \
-    -o -exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +
+    -o -exec sh -c '
+      owner=$1; shift
+      chown -h "$owner" "$@" 2>/dev/null && exit 0
+      for f in "$@"; do
+        err=$(chown -h "$owner" "$f" 2>&1) && continue
+        [ -e "$f" ] || [ -L "$f" ] || continue
+        printf "%s\n" "$err" >&2
+        exit 1
+      done
+    ' chown_home_hermeswebui "${WANTED_UID}:${WANTED_GID}" {} +
 }
 
 # The production image does not ship sudo. The entrypoint starts as root only
@@ -267,7 +282,17 @@ if [ "A${whoami}" == "Aroot" ]; then
     fi
   else
     groupmod -o -g "${WANTED_GID}" hermeswebui || error_exit "Failed to set GID of hermeswebui user"
-    usermod -o -u "${WANTED_UID}" hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+    # usermod -u also walks the home directory to chown the old UID's files,
+    # and aborts on the first entry that vanishes mid-walk — which happens
+    # when a running agent replaces files in the shared ~/.hermes (#8106).
+    # Pointing the home at a path that does not exist for that one call skips
+    # usermod's walk; the real home is restored right after, and
+    # chown_home_hermeswebui below performs the ownership walk with
+    # race-tolerant error handling.
+    _usermod_nohome="/nonexistent-hermeswebui-home.$$"
+    [ ! -e "$_usermod_nohome" ] || error_exit "Unexpected path $_usermod_nohome exists"
+    usermod -o -u "${WANTED_UID}" -d "$_usermod_nohome" hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+    usermod -d /home/hermeswebui hermeswebui || error_exit "Failed to restore home directory of hermeswebui user"
   fi
 
   chown_home_hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
