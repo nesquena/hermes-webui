@@ -7651,7 +7651,7 @@ function filterSessions(){
       const directAndTitleMatches=_sessionSearchDirectAndTitleMatches(_allSessions,currentQ);
       const directOrTitleIds=new Set(directAndTitleMatches.map(s=>s.session_id));
       _contentSearchResults = (data.sessions||[]).filter(s => s.match_type === 'content' && !directOrTitleIds.has(s.session_id));
-      renderSessionListFromCache();
+      _repaintSidebarForBackgroundChurn();
     } catch(e) { /* ignore */ }
   }, 350);
 }
@@ -8566,7 +8566,7 @@ function _scheduleSessionVirtualizedRender(){
       const currentEnd=Number(liveList.dataset.sessionVirtualEnd||0);
       if(nextWindow.virtualized&&nextWindow.start===currentStart&&nextWindow.end===currentEnd) return;
     }
-    renderSessionListFromCache();
+    _repaintSidebarForBackgroundChurn();
   });
 }
 
@@ -9442,7 +9442,7 @@ function renderSessionListFromCache(){
     const canExpandLineageSegments=showLineageMetadata&&Boolean(lineageKey&&segmentCount>1&&(lineageSegments.length>0||needsLineageReport||_lineageReportInflight.has(lineageReportKey)));
     const lineageSegmentsExpanded=canExpandLineageSegments&&_expandedLineageKeys.has(lineageKey);
     if(lineageSegmentsExpanded&&needsLineageReport){
-      _fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());
+      _fetchLineageReportForRow(s,lineageKey).then(()=>_repaintSidebarForBackgroundChurn());
     }
     if(segmentCount>0){
       const segmentCountEl=document.createElement('span');
@@ -9461,7 +9461,7 @@ function renderSessionListFromCache(){
           if(_expandedLineageKeys.has(lineageKey)) _expandedLineageKeys.delete(lineageKey);
           else {
             _expandedLineageKeys.add(lineageKey);
-            if(needsLineageReport) _fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());
+            if(needsLineageReport) _fetchLineageReportForRow(s,lineageKey).then(()=>_repaintSidebarForBackgroundChurn());
           }
           renderSessionListFromCache();
         };

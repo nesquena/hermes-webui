@@ -1430,6 +1430,33 @@ console.log(JSON.stringify({wrapper, noPicker, background, userIntent}));
     }
 
 
+def test_automatic_repaints_route_through_the_background_wrapper():
+    """Greptile P1 on the first push: automatic repaints must defer, not retire.
+
+    The lineage-report callbacks, the content-search reply and the scroll-driven
+    virtual-window rebuild repaint from automatic updates; with the inverted
+    guard an unmarked call would retire an open picker while the user is
+    choosing a project. All of them must run through the background wrapper.
+    """
+    js = SESSIONS_JS
+    assert js.count("_fetchLineageReportForRow(s,lineageKey).then(()=>_repaintSidebarForBackgroundChurn());") == 2
+    assert "_fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache())" not in js
+
+    filter_start = js.index("function filterSessions(){")
+    filter_end = js.index("\nfunction ", filter_start + 1)
+    filter_body = js[filter_start:filter_end]
+    # The synchronous first paint stays user intent; the debounced content
+    # search reply is an automatic update and must defer.
+    assert filter_body.count("renderSessionListFromCache();") == 1
+    assert filter_body.count("_repaintSidebarForBackgroundChurn();") == 1
+
+    scroll_start = js.index("function _scheduleSessionVirtualizedRender(){")
+    scroll_end = js.index("\nfunction ", scroll_start + 1)
+    scroll_body = js[scroll_start:scroll_end]
+    assert "_repaintSidebarForBackgroundChurn();" in scroll_body
+    assert "renderSessionListFromCache();" not in scroll_body
+
+
 def test_picker_handoff_resolves_current_state_for_a_menu_opened_during_a_kept_deferral():
     """A second menu opened while a held-gesture menu keeps the repaint deferred.
 
