@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import contextlib
 import os
 import threading
 import time
@@ -1644,15 +1645,91 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
     return ids
 
 
-def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
-    """URL and key of the session's own profile, root included, never the process-active profile."""
+def _gateway_home_for_profile(profile_name):
+    """Home directory of the session's own profile; the default profile's for no name."""
     from api import profiles as _profiles
+
+    return _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
+
+
+def _gateway_runtime_env_for_profile(profile_name) -> dict[str, str]:
+    """What the session profile itself supplies to its environment (its ``.env`` and terminal config)."""
+    from api import profiles as _profiles
+
+    return _profiles.filter_runtime_env_for_gateway_parity(
+        _profiles.get_profile_runtime_env(_gateway_home_for_profile(profile_name))
+    )
+
+
+def _gateway_environment_for_profile(
+    profile_name, runtime_env: dict[str, str] | None = None
+) -> dict[str, str]:
+    """The session profile's own environment, as a snapshot.
+
+    The process environment without the values another profile's ``.env``
+    loaded into it, with the session profile's runtime environment on top.
+    ``os.environ`` is not touched.
+    """
+    from api import profiles as _profiles
+
+    if runtime_env is None:
+        runtime_env = _gateway_runtime_env_for_profile(profile_name)
+    environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
+    environ.update(runtime_env)
+    return environ
+
+
+@contextlib.contextmanager
+def _gateway_profile_environment(environ: dict[str, str]):
+    """Settings read on this thread come from ``environ`` and nowhere else.
+
+    Inside it, a ``${VAR}`` in a config file is expanded from the snapshot, and
+    so is every setting read through ``_thread_local_env_value``. The process
+    environment is not consulted, so a name the profile does not have cannot be
+    filled from another profile's. Thread-local only: nothing global changes,
+    and it is not meant to be held across network calls.
+    """
+    from api.config import _clear_thread_env, _set_thread_env, _thread_ctx
+
+    previous_env = dict(getattr(_thread_ctx, "env", {}) or {})
+    previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+    try:
+        _set_thread_env(**environ)
+        _thread_ctx.block_process_env_fallback = True
+        yield
+    finally:
+        _thread_ctx.block_process_env_fallback = previous_block
+        if previous_env:
+            _set_thread_env(**previous_env)
+        else:
+            _clear_thread_env()
+
+
+def _gateway_config_for_profile(profile_name, environ: dict[str, str] | None = None) -> dict:
+    """Config of the session's own profile, root included, never the process-active profile.
+
+    The Gateway worker runs on a detached thread with no request-profile
+    context, so the ambient ``get_config()`` resolves the process-default
+    profile there (#8152, the #3294 pattern). ``${VAR}`` references are expanded
+    from the same environment snapshot the Gateway URL and key are chosen from,
+    so the two cannot come from different profiles.
+    """
     from api.config import get_config_for_profile_home
 
-    home = _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
-    environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
-    environ.update(_profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home)))
-    return _gateway_base_url(get_config_for_profile_home(home), environ), _gateway_api_key(environ)
+    if environ is None:
+        environ = _gateway_environment_for_profile(profile_name)
+    with _gateway_profile_environment(environ):
+        return get_config_for_profile_home(_gateway_home_for_profile(profile_name))
+
+
+def _gateway_endpoint_for_profile(
+    profile_name, environ: dict[str, str] | None = None
+) -> tuple[str, str]:
+    """URL and key of the session's own profile, root included, never the process-active profile."""
+    if environ is None:
+        environ = _gateway_environment_for_profile(profile_name)
+    cfg = _gateway_config_for_profile(profile_name, environ)
+    return _gateway_base_url(cfg, environ), _gateway_api_key(environ)
 
 
 def _resume_gateway_run_for_session(session) -> bool:
@@ -2060,18 +2137,31 @@ def _run_gateway_chat_streaming(
     s = None
     final_text = ""
     terminal_error = ""
+    gateway_api_key = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        from api.config import get_config  # imported lazily to avoid config-cycle churn
-
-        cfg = get_config()
+        # #8152: this thread has no request-profile context, so the ambient
+        # get_config() and os.environ are the process-default profile's. Read
+        # the session's own profile: its config for everything below, and its
+        # Gateway URL and key, as a resumed run already does.
+        _session_profile = getattr(s, "profile", None)
+        # One snapshot for the whole prelude: the config's ${VAR} expansion,
+        # the Gateway URL and key, and the settings read from the environment
+        # all come from it, so they cannot belong to different profiles.
+        _profile_runtime_env = _gateway_runtime_env_for_profile(_session_profile)
+        _profile_environ = _gateway_environment_for_profile(_session_profile, _profile_runtime_env)
+        cfg = _gateway_config_for_profile(_session_profile, _profile_environ)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
             model_provider=model_provider,
         )
-        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
+        base_url, api_key = reattach_endpoint or (
+            _gateway_base_url(cfg, _profile_environ),
+            _gateway_api_key(_profile_environ),
+        )
+        gateway_api_key = api_key
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:
@@ -2083,7 +2173,7 @@ def _run_gateway_chat_streaming(
             )
         except Exception:
             _gw_overrides = {}
-        _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
+        _runs_api_enabled = _gateway_use_runs_api_enabled(cfg, _profile_environ)
         _use_runs_api = bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")
@@ -2091,13 +2181,22 @@ def _run_gateway_chat_streaming(
         try:
             from api.streaming import (
                 _load_webui_prefill_context,
+                _prefill_profile_scope,
                 _prefill_messages_with_webui_context,
                 _normalize_prefill_messages_before_user_turn,
                 _public_prefill_context_status,
                 _webui_ephemeral_system_prompt,
             )
 
-            prefill_context = _load_webui_prefill_context(cfg)
+            # The prefill loaders take their settings, their relative paths
+            # and a recall script's environment from the profile's snapshot
+            # here, not from the process.
+            with _prefill_profile_scope(
+                _gateway_home_for_profile(_session_profile),
+                _profile_environ,
+                _profile_runtime_env,
+            ):
+                prefill_context = _load_webui_prefill_context(cfg)
             # #3324: the WebUI session/delivery context (connected platforms,
             # home channels, delivery hints, session framing) is now carried in
             # the ephemeral system prompt rather than a prefill `user` message.
@@ -2112,6 +2211,7 @@ def _run_gateway_chat_streaming(
                     "workspace": s.workspace if s is not None else str(workspace),
                 },
                 config_data=cfg,
+                hermes_home=_gateway_home_for_profile(_session_profile),
             )
             prefill_messages = _prefill_messages_with_webui_context(prefill_context, cfg)
             prefill_messages = _normalize_prefill_messages_before_user_turn(prefill_messages)
@@ -2586,7 +2686,7 @@ def _run_gateway_chat_streaming(
             err_body = ""
         put_gateway_event(
             "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+            _gateway_http_error_event(exc, err_body, api_key_configured=bool(gateway_api_key)),
         )
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]

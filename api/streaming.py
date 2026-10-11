@@ -1377,6 +1377,7 @@ def _webui_ephemeral_system_prompt(
     personality_prompt: Optional[str],
     surface_context: Optional[dict] = None,
     config_data: Optional[dict] = None,
+    hermes_home=None,
 ) -> str:
     """Build WebUI-only runtime instructions that are not persisted to history."""
     parts = []
@@ -1386,7 +1387,7 @@ def _webui_ephemeral_system_prompt(
     if surface_prompt:
         parts.append(surface_prompt)
     parts.append(_WEBUI_PROGRESS_PROMPT)
-    delivery_prompt = _webui_delivery_context_prompt(config_data)
+    delivery_prompt = _webui_delivery_context_prompt(config_data, hermes_home)
     if delivery_prompt:
         parts.append(delivery_prompt)
     # Last on purpose (#8148): the only per-session text in this prompt.
@@ -1424,9 +1425,98 @@ def _valid_prefill_messages(value) -> list[dict]:
     return messages
 
 
-def _resolve_prefill_path(raw: str) -> Path:
+# ── Prefill for a named profile (worker threads) ─────────────────────────────
+# The prefill loaders take three things from their surroundings: the directory
+# a relative path is looked up in, the environment a setting is read from, and
+# the environment a recall script runs with. On a request thread all three are
+# the active profile's. A worker thread that serves another profile's session
+# binds that profile's instead, for the duration of the load (#8152).
+_prefill_ctx = threading.local()
+
+
+def _prefill_bound() -> Optional[dict]:
+    return getattr(_prefill_ctx, "bound", None)
+
+
+def _prefill_base_for_home(home) -> Path:
+    """Directory a profile's relative prefill paths are looked up in.
+
+    Its home, except for the ambient profile: that one's have always been
+    looked up beside its config file, which ``HERMES_CONFIG_PATH`` may put
+    outside the home.
+    """
+    from api.workspace import _safe_resolve
+
+    base = _safe_resolve(Path(home).expanduser())
+    try:
+        from api.config import _get_config_path
+        from api.profiles import get_active_hermes_home
+
+        if base == _safe_resolve(Path(get_active_hermes_home()).expanduser()):
+            base = _safe_resolve(_get_config_path().parent)
+    except Exception:
+        logger.debug("Could not compare the prefill home with the ambient one", exc_info=True)
+    return base
+
+
+@contextlib.contextmanager
+def _prefill_profile_scope(home, environ, profile_keys=()):
+    """Load prefill on this thread for the profile whose home is ``home``.
+
+    ``environ`` is that profile's environment snapshot: the prefill settings are
+    read from it and a recall script runs with it, so neither sees another
+    profile's values. ``profile_keys`` are the names the profile itself
+    supplied (its ``.env``): a relative path given under one of them is the
+    profile's and is looked up with its other relative paths; a relative path
+    in a variable exported for the whole process keeps the place it always had.
+    Thread-local; ``os.environ`` is not touched.
+    """
+    previous = _prefill_bound()
+    _prefill_ctx.bound = {
+        "base": _prefill_base_for_home(home),
+        "environ": {str(k): str(v) for k, v in dict(environ).items() if v is not None},
+        "profile_keys": frozenset(profile_keys),
+    }
+    try:
+        yield
+    finally:
+        _prefill_ctx.bound = previous
+
+
+def _prefill_env(name: str) -> str:
+    """A prefill setting from the environment: the bound profile's, else the process's."""
+    bound = _prefill_bound()
+    if bound is not None:
+        return bound["environ"].get(name, "")
+    return os.getenv(name, "")
+
+
+def _prefill_base(env_name: Optional[str] = None) -> Optional[Path]:
+    """Where a relative path is looked up, or None for the ambient rule.
+
+    ``env_name`` is the variable the path came from, None for a config value.
+    """
+    bound = _prefill_bound()
+    if bound is None:
+        return None
+    if env_name is not None and env_name not in bound["profile_keys"]:
+        return None
+    return bound["base"]
+
+
+def _prefill_file_setting(config_data: dict) -> tuple[str, Optional[Path]]:
+    """The prefill file to read and the directory a relative one is looked up in."""
+    env_value = _prefill_env("HERMES_PREFILL_MESSAGES_FILE")
+    if env_value:
+        return env_value, _prefill_base("HERMES_PREFILL_MESSAGES_FILE")
+    return str(config_data.get("prefill_messages_file") or ""), _prefill_base()
+
+
+def _resolve_prefill_path(raw: str, base: Optional[Path] = None) -> Path:
     path = Path(str(raw)).expanduser()
     if not path.is_absolute():
+        if base is not None:
+            return base / path
         try:
             from api.config import _get_config_path
             path = _get_config_path().parent / path
@@ -1440,7 +1530,7 @@ _PREFILL_CONTEXT_DEFAULT_MAX_CHARS = 12_000
 
 
 def _prefill_context_max_chars(config_data: dict) -> int:
-    raw = os.getenv("HERMES_WEBUI_PREFILL_CONTEXT_MAX_CHARS", "") or str(
+    raw = _prefill_env("HERMES_WEBUI_PREFILL_CONTEXT_MAX_CHARS") or str(
         config_data.get("webui_prefill_context_max_chars") or ""
     )
     try:
@@ -1489,9 +1579,9 @@ def _apply_prefill_context_budget(context: dict, config_data: dict) -> dict:
     if char_count <= max_chars:
         return context
 
-    file_raw = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or str(config_data.get("prefill_messages_file") or "")
+    file_raw, file_base = _prefill_file_setting(config_data)
     if context.get("source") == "script" and file_raw:
-        fallback = _load_prefill_messages_file(file_raw, source="file_budget_fallback")
+        fallback = _load_prefill_messages_file(file_raw, source="file_budget_fallback", base=file_base)
         fallback_messages = fallback.get("messages") if isinstance(fallback, dict) else []
         fallback_chars = _prefill_context_char_count(fallback_messages if isinstance(fallback_messages, list) else [])
         if fallback.get("status") == "loaded" and fallback_chars <= max_chars:
@@ -1510,8 +1600,10 @@ def _prefill_not_configured() -> dict:
     return {"status": "not_configured", "source": "none", "label": "", "messages": [], "message_count": 0}
 
 
-def _load_prefill_messages_file(file_raw: str, *, source: str = "file", status: str = "loaded") -> dict:
-    path = _resolve_prefill_path(file_raw)
+def _load_prefill_messages_file(
+    file_raw: str, *, source: str = "file", status: str = "loaded", base: Optional[Path] = None
+) -> dict:
+    path = _resolve_prefill_path(file_raw, base)
     label = path.name or "prefill file"
     if not path.exists():
         return {"status": "error", "source": source, "label": label, "messages": [], "message_count": 0, "error": "prefill file not found"}
@@ -1523,14 +1615,14 @@ def _load_prefill_messages_file(file_raw: str, *, source: str = "file", status: 
 
 
 def _prefill_script_timeout(config_data: dict) -> float:
-    raw = os.getenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT", "") or str(config_data.get("webui_prefill_messages_script_timeout") or "")
+    raw = _prefill_env("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT") or str(config_data.get("webui_prefill_messages_script_timeout") or "")
     try:
         return max(0.1, min(float(raw or 5), 30.0))
     except Exception:
         return 5.0
 
 
-def _prefill_script_command(raw) -> list[str]:
+def _prefill_script_command(raw, base: Optional[Path] = None) -> list[str]:
     if isinstance(raw, (list, tuple)):
         return [str(part) for part in raw if str(part)]
     parts = shlex.split(str(raw or ""))
@@ -1539,7 +1631,7 @@ def _prefill_script_command(raw) -> list[str]:
     # A single script path mirrors prefill_messages_file path resolution.  More
     # complex commands keep their argv untouched so admins can pass arguments.
     if len(parts) == 1:
-        parts[0] = str(_resolve_prefill_path(parts[0]))
+        parts[0] = str(_resolve_prefill_path(parts[0], base))
     return parts
 
 
@@ -1560,10 +1652,18 @@ def _messages_from_prefill_script_output(text: str) -> list[dict]:
 
 
 def _load_prefill_messages_script(config_data: dict) -> dict:
-    script_raw = os.getenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", "") or config_data.get("webui_prefill_messages_script")
+    script_raw = _prefill_env("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT")
+    script_base = _prefill_base("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT")
+    if not script_raw:
+        script_raw = config_data.get("webui_prefill_messages_script")
+        script_base = _prefill_base()
     if not script_raw:
         return _prefill_not_configured()
-    command = _prefill_script_command(script_raw)
+    command = _prefill_script_command(script_raw, script_base)
+    # A script run for a bound profile gets that profile's environment; without
+    # one it inherits the process's, as before.
+    bound = _prefill_bound()
+    script_env = dict(bound["environ"]) if bound is not None else None
     label = Path(command[0]).name if command else "prefill script"
     if not command:
         return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script is empty"}
@@ -1575,6 +1675,7 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
             stderr=subprocess.PIPE,
             timeout=_prefill_script_timeout(config_data),
             check=False,
+            env=script_env,
         )
     except subprocess.TimeoutExpired:
         return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script timed out"}
@@ -1608,13 +1709,15 @@ def _load_webui_prefill_context(
     """
     cfg = config_data if isinstance(config_data, dict) else get_config()
     script_context = _load_prefill_messages_script(cfg)
-    file_raw = os.getenv("HERMES_PREFILL_MESSAGES_FILE", "") or str(cfg.get("prefill_messages_file") or "")
+    file_raw, file_base = _prefill_file_setting(cfg)
     if script_context.get("status") == "not_configured":
         if file_raw:
-            return _apply_prefill_context_budget(_load_prefill_messages_file(file_raw), cfg)
+            return _apply_prefill_context_budget(
+                _load_prefill_messages_file(file_raw, base=file_base), cfg
+            )
         return _prefill_not_configured()
     if script_context.get("status") == "error" and file_raw:
-        file_context = _load_prefill_messages_file(file_raw, source="file_fallback")
+        file_context = _load_prefill_messages_file(file_raw, source="file_fallback", base=file_base)
         if file_context.get("status") == "loaded":
             file_context["script_error"] = script_context.get("error", "")
             return _apply_prefill_context_budget(file_context, cfg)
@@ -1637,7 +1740,9 @@ def _public_prefill_context_status(prefill_context: dict) -> dict:
     }
 
 
-def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
+def _webui_delivery_context_prompt(
+    config_data: Optional[dict] = None, hermes_home=None
+) -> str:
     """Return platform/delivery context for the ephemeral system prompt.
 
     Connected platforms, home channels, and scheduled-task delivery hints
@@ -1651,6 +1756,11 @@ def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
     ``_webui_ephemeral_system_prompt()`` before this helper.  If you
     refactor this area, keep that surface call in place — the two helpers
     together produce the full session context block.
+
+    ``hermes_home`` names the profile home whose ``gateway_state.json`` lists
+    the connected platforms. The Gateway worker passes the session's own: its
+    thread has no profile context, so ``get_hermes_home()`` is the process
+    profile's there (#8152). Left out, the ambient home is used as before.
     """
     cfg = config_data if isinstance(config_data, dict) else get_config()
     lines: list[str] = []
@@ -1664,8 +1774,11 @@ def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
 
     connected = ["local (files on this machine)"]
     try:
-        if get_hermes_home is not None:
-            state_path = get_hermes_home() / "gateway_state.json"
+        state_home = Path(hermes_home) if hermes_home is not None else None
+        if state_home is None and get_hermes_home is not None:
+            state_home = get_hermes_home()
+        if state_home is not None:
+            state_path = state_home / "gateway_state.json"
             if state_path.exists():
                 raw_state = json.loads(state_path.read_text(encoding="utf-8"))
                 platforms = raw_state.get("platforms") if isinstance(raw_state, dict) else {}
