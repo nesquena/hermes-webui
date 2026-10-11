@@ -864,6 +864,11 @@ def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
     next checkpoint/final save persists the cleared value (the same deferral the
     handler's index pass uses). A row re-filed under ANOTHER project meanwhile is
     left alone.
+
+    The session is resolved through the canonical freshness path
+    (``get_session``) rather than read straight out of the LRU: a FULL but STALE
+    cached object must not be written back over a sidecar that is ahead of it
+    (maintainer re-gate 2026-10-10T23:49:54Z — see the loop comment).
     """
     if not project_id or not sids:
         return 0
@@ -889,20 +894,37 @@ def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
             )
             continue
         try:
+            # Resolve through the canonical freshness path instead of reading the
+            # LRU entry directly. A FULL but STALE cached object — the cache kept
+            # the one message it held while a reply that arrived afterwards went
+            # to disk — used to be saved straight back over its sidecar, so the
+            # delete silently dropped the newer messages: data loss in an
+            # ordinary flow (maintainer re-gate 2026-10-10T23:49:54Z, reproduced
+            # over real HTTP with 1 cached vs 2 persisted messages). get_session
+            # reloads a lagging entry from disk; a cache miss is resolved from
+            # the sidecar the exists() guard above just confirmed.
+            try:
+                cached = get_session(sid)
+            except KeyError:
+                # Sidecar vanished between the guard and the load: nothing to
+                # write through.
+                continue
+            if cached is None:
+                continue
+            # A metadata-only stub refuses save() by design (#1558); upgrade it
+            # the way every other metadata mutation does.
+            cached = _ensure_full_session_before_mutation(sid, cached)
             with LOCK:
-                cached = SESSIONS.get(sid)
-                if cached is None:
-                    continue
+                # Ownership and streaming are re-checked on the REFRESHED object
+                # (the two answers the caller's clear acted on), because the
+                # resolution above may have replaced the object cached under this
+                # id.
                 if str(getattr(cached, "active_stream_id", "") or "") in active_ids:
                     continue
                 if getattr(cached, "project_id", None) not in (None, project_id):
                     # Re-filed under another project while we waited: leave it.
                     continue
-            # A metadata-only stub refuses save() by design (#1558); upgrade it
-            # the way every other metadata mutation does.
-            cached = _ensure_full_session_before_mutation(sid, cached)
-            cached.project_id = None
-            with LOCK:
+                cached.project_id = None
                 SESSIONS[sid] = cached
                 SESSIONS.move_to_end(sid)
             # Not touch_updated_at: a delete must not re-date the chat it was
@@ -1250,6 +1272,20 @@ def _auto_assign_sweep_body(proj) -> int:
                 if getattr(s, "project_id", None):  # noqa: B009
                     # Another writer filed it while we were upgrading: never
                     # steal an id (same rule as the already-filed guard above).
+                    continue
+                # The upgrade can REPLACE the object: `s_ws`, the profile and the
+                # view-only verdict above were read from the resident stub, and a
+                # stub's metadata can disagree with the full sidecar (workspace A
+                # on the stub, unbound workspace B in the file). Claiming with the
+                # stale `s_ws` filed B's chat into A's project (maintainer
+                # re-gate 2026-10-10T23:49:54Z), so re-derive all three from the
+                # refreshed session before the claim.
+                if _auto_assign_target_is_view_only(s, sid):
+                    continue
+                if not _profiles_match(getattr(s, "profile", None) or "default", profile):  # noqa: B009
+                    continue
+                s_ws = getattr(s, "workspace", None)  # noqa: B009
+                if not s_ws or str(s_ws) not in bound:
                     continue
                 # Same stale-answer hole as the cached path above: the live
                 # binding was read before this session lock was acquired, so

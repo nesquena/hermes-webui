@@ -183,6 +183,16 @@ def _install_delete_stubs(monkeypatch, tmp_path, pid, sid, session_dir, catalog)
     )
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
     monkeypatch.setattr(routes, "_PROJECTS_CATALOG_LOCK", catalog)
+    # The write-through resolves each id through the canonical freshness path
+    # (`get_session`) so a stale full cache entry cannot be saved over a newer
+    # sidecar (maintainer re-gate 2026-10-10T23:49:54Z). This fixture keeps its
+    # fake rows in `sessions`, so the resolver must answer from there: a real
+    # load would go to disk and bypass the row's recorded save() calls.
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid, metadata_only=False: sessions.get(sid),
+    )
     return routes, sessions, locks
 
 
