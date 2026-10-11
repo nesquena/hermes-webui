@@ -122,6 +122,14 @@ contributor guidance; it does not change runtime behavior or CI gates.
   retarget or transient resolve fallback is always observed on the next call.
   Start here before widening this cache's scope or adding a similar
   call-scoped cache elsewhere (#7636).
+- [`docs/architecture/session-channel-lifecycle.md`](architecture/session-channel-lifecycle.md):
+  current contract for the per-session SSE channel and the per-turn stream lifecycle: the state
+  layers and their authoritative writers, the writer-side subscriber-liveness signal plus the
+  channel collection rules (`GRACE`, `IDLE_TTL`, queue-stall and writer-staleness), the single
+  orphan predicate shared by `chat/start` admission, busy reporting and the reaper, the
+  launch-phase claim that covers registration-to-admission, and the lock discipline
+  (`STREAMS_LOCK → ACTIVE_RUNS_LOCK`). Start here before changing subscriber liveness, channel
+  collection, stream registration, or orphan reclaim (#7302).
 
 When a change touches streaming, recovery, replay, compression, context
 reconstruction, cancellation, approval/clarify, session metadata, or run state,

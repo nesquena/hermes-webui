@@ -9,6 +9,11 @@
 
 ## Problem
 
+Session ownership preflight is read-only. Before a request is authorized for
+the owning profile, it must not repair a legacy sidecar, write a shrink backup,
+publish a repaired session to the cache, or promote its cache recency. The
+normal authorized load/mutation path remains responsible for repairs.
+
 A single WebUI agent turn is represented by several overlapping state layers:
 
 - the visible transcript the user can read,

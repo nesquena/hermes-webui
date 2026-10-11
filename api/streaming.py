@@ -34,6 +34,8 @@ from api.config import (
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
     STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
+    stream_owned_registries,
+    release_stream_owned_registries,
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
     _set_thread_env, _clear_thread_env,
@@ -1328,9 +1330,13 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         "- Write to external notes or durable memory only for explicit captures, durable user preferences, decisions, blockers/open issues, runbook-worthy workflows, or other clearly reusable signals; otherwise leave notes unchanged.",
         "- When you do write or update a durable note, briefly tell the user what note/section changed so the write is reviewable.",
     ]
+    # #8148: no per-session value here. This block sits above the progress and
+    # delivery prompts, and the agent appends the whole ephemeral prompt to the
+    # end of the system text, so a session id on this list made every new chat's
+    # system text differ from that line on and no provider prefix cache could
+    # be reused across chats. See _webui_session_id_prompt().
     fields = (
         ("source", "Source"),
-        ("session_id", "Session ID"),
         ("profile", "Profile"),
         ("workspace", "Workspace"),
     )
@@ -1340,6 +1346,31 @@ def _webui_surface_context_prompt(surface_context: Optional[dict]) -> str:
         if value:
             lines.append(f"- {label}: {value}")
     return "\n".join(lines)
+
+
+def _webui_session_id_prompt(
+    surface_context: Optional[dict], config_data: Optional[dict] = None
+) -> str:
+    """Return the session id line, only when ``webui.pass_session_id`` asks for it.
+
+    Off by default, like hermes-agent's own ``pass_session_id``: the id is
+    different for every chat, so it is the one line that two new chats cannot
+    share (#8148). When it is asked for, the caller emits it last, so everything
+    before it stays a shared prefix.
+    """
+    if not isinstance(surface_context, dict):
+        return ""
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    webui_cfg = cfg.get("webui") if isinstance(cfg, dict) else None
+    if not isinstance(webui_cfg, dict):
+        return ""
+    if str(webui_cfg.get("pass_session_id") or "").strip().lower() not in {"1", "true", "yes", "on"}:
+        return ""
+    raw = surface_context.get("session_id")
+    value = str(raw).strip() if raw is not None else ""
+    if not value:
+        return ""
+    return f"WebUI session:\n- Session ID: {value}"
 
 
 def _webui_ephemeral_system_prompt(
@@ -1358,6 +1389,10 @@ def _webui_ephemeral_system_prompt(
     delivery_prompt = _webui_delivery_context_prompt(config_data)
     if delivery_prompt:
         parts.append(delivery_prompt)
+    # Last on purpose (#8148): the only per-session text in this prompt.
+    session_id_prompt = _webui_session_id_prompt(surface_context, config_data)
+    if session_id_prompt:
+        parts.append(session_id_prompt)
     return "\n\n".join(part for part in parts if part)
 
 
@@ -1611,7 +1646,7 @@ def _webui_delivery_context_prompt(config_data: Optional[dict] = None) -> str:
     Gemma) reject.
 
     NOTE: This function only covers platform/delivery info.  The session
-    framing (\"Source: WebUI\", \"Session ID\", \"Profile\", \"Workspace\") is
+    framing (\"Source: WebUI\", \"Profile\", \"Workspace\") is
     emitted by ``_webui_surface_context_prompt()``, which is called from
     ``_webui_ephemeral_system_prompt()`` before this helper.  If you
     refactor this area, keep that surface call in place — the two helpers
@@ -8076,6 +8111,30 @@ def _message_identity(msg):
     )
 
 
+def _durable_tool_row_identity(msg):
+    """Return (tool_call_id, row_id) for a tool row with a valid durable row.
+
+    Agent-side compression rewrites old tool results in model context to a
+    one-line summary while keeping the state.db row, so content-based identity
+    differs from the visible full-output row. A durable row ID proves row
+    identity (run-state contract), so backfill can match on it instead.
+    """
+    if not isinstance(msg, dict) or msg.get('role') != 'tool':
+        return None
+    # Read the row through the canonical provenance helper: messages loaded
+    # from state.db (and IDs preserved from older Agents) carry
+    # ``_state_db_row_id`` rather than ``_row_id``, and both sides of the
+    # backfill must normalize to the same identity. Contradictory aliases are
+    # invalid and fall back to content-based matching.
+    row_id, valid = _state_db_row_identity_details(msg)
+    if not valid or row_id is None or int(row_id) <= 0:
+        return None
+    tool_call_id = msg.get('tool_call_id')
+    if not isinstance(tool_call_id, str) or not tool_call_id:
+        return None
+    return (tool_call_id, row_id)
+
+
 def _messages_have_prefix(messages, prefix, *, key_fn=None):
     key_fn = key_fn or _message_identity
     if len(messages or []) < len(prefix or []):
@@ -9046,27 +9105,48 @@ def _merge_display_messages_after_agent_result(
             )
         )
         _display_id_set = {_message_identity(m) for m in previous_display}
-        _context_id_set = {
-            _message_identity(m)
-            for m in previous_context
-            if not (
+        # A context tool row whose durable row is already displayed is the same
+        # row (e.g. an Agent-pruned summary of the visible full output), never
+        # a context-only turn, regardless of how its content was rewritten.
+        # Map it to its display twin's identity so it is never inserted but
+        # still anchors the backfill cursor at the visible tool result.
+        _display_identity_by_durable_tool_row = {}
+        for m in previous_display:
+            _durable = _durable_tool_row_identity(m)
+            if _durable is not None:
+                _display_identity_by_durable_tool_row.setdefault(_durable, _message_identity(m))
+
+        def _is_displayed_native_image_context_row(m):
+            return (
                 isinstance(m, dict)
                 and m.get('_active_turn_token') in _displayed_native_image_context_tokens
             )
+
+        def _displayed_durable_tool_twin_identity(m):
+            _durable = _durable_tool_row_identity(m)
+            if _durable is None:
+                return None
+            return _display_identity_by_durable_tool_row.get(_durable)
+
+        _context_id_set = {
+            _message_identity(m)
+            for m in previous_context
+            if not _is_displayed_native_image_context_row(m)
+            if _displayed_durable_tool_twin_identity(m) is None
             if not _is_context_compression_marker(m)
             and not _is_compressed_context_tool_result_summary_message(m)
         }
         _has_context_only_turns = bool(_context_id_set - _display_id_set)
         if _has_context_only_turns:
-            context_keys = [
-                None
-                if (
-                    isinstance(m, dict)
-                    and m.get('_active_turn_token') in _displayed_native_image_context_tokens
+            context_keys = []
+            for m in previous_context:
+                if _is_displayed_native_image_context_row(m):
+                    context_keys.append(None)
+                    continue
+                _twin_identity = _displayed_durable_tool_twin_identity(m)
+                context_keys.append(
+                    _twin_identity if _twin_identity is not None else _message_identity(m)
                 )
-                else _message_identity(m)
-                for m in previous_context
-            ]
             # Precompute display keys once; avoids repeated json.dumps calls inside
             # the inner any() loop (was O(D²·C) — see perf fix below).
             _display_keys = [_message_identity(m) for m in previous_display]
@@ -11196,18 +11276,20 @@ def _run_agent_streaming(
                     ephemeral=bool(ephemeral),
                     backend=WEBUI_LOCAL_CHAT_BACKEND,
                 )
+                # Worker admission ends the launch phase (#7302 finding 5): retire
+                # the claim published at registration. Ownership lives in
+                # ACTIVE_RUNS from here on.
+                from api.config import retire_pre_admission_claim_if_owned
+
+                retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
     if q is None:
-        # The stream was cancelled before the worker started; the route layer
-        # already registered the stream owner, so release it here to avoid
-        # leaking a STREAM_SESSION_OWNERS entry that the teardown finally never sees.
-        unregister_stream_owner(stream_id)
-        try:
-            clear_session_writeback_owner_if_owned(session_id, stream_id)
-        except Exception:
-            logger.debug(
-                "Failed to clear session writeback owner for stream %s", stream_id,
-                exc_info=True,
-            )
+        # The stream was cancelled (or cleared as an orphan) before this worker
+        # was admitted, so no teardown finally will ever run for it: release
+        # EVERY registry the route layer registered for the stream, not just the
+        # owner and writeback rows. STREAM_GOAL_RELATED is written before worker
+        # admission (api/routes.py `_start_chat_stream_for_session`), so a
+        # pre-start cancellation otherwise strands it for the process lifetime.
+        release_stream_owned_registries(stream_id, session_id=session_id)
         return
     try:
         run_journal = RunJournalWriter(session_id, stream_id)
@@ -15811,14 +15893,14 @@ def _run_agent_streaming(
         # restore above.
         _reset_turn_session_identity(_turn_session_identity_tokens)
         with STREAMS_LOCK:
-            STREAMS.pop(stream_id, None)
-            CANCEL_FLAGS.pop(stream_id, None)
-            AGENT_INSTANCES.pop(stream_id, None)  # Clean up agent instance reference
-            STREAM_PARTIAL_TEXT.pop(stream_id, None)  # Clean up partial text buffer (#893)
-            STREAM_REASONING_TEXT.pop(stream_id, None)  # Clean up reasoning trace (#1361 §A)
-            STREAM_LIVE_TOOL_CALLS.pop(stream_id, None)  # Clean up tool calls (#1361 §B)
-            STREAM_GOAL_RELATED.pop(stream_id, None)  # Clean up goal-related flag (#1932)
-            STREAM_LAST_EVENT_ID.pop(stream_id, None)  # Clean up event_id pointer (stage-364)
+            # ONE list for every per-stream registry (#7302 re-gate): this is the
+            # same tuple the chat/start orphan recovery releases, so a registry
+            # added later cannot be popped here and forgotten there (or the
+            # reverse). Per-registry cleanup notes (partial text #893, reasoning
+            # #1361 §A, tool calls #1361 §B, goal flag #1932, event id stage-364)
+            # live with the registries in api/config.py.
+            for _stream_registry in stream_owned_registries():
+                _stream_registry.pop(stream_id, None)
             unregister_active_run(stream_id)
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
@@ -16192,6 +16274,13 @@ def cancel_stream(stream_id: str) -> bool:
         # _clear_stale_stream_state() can eventually reclaim the session if the
         # worker is stuck in C-level I/O and never reaches its finally (#6623).
         update_active_run(stream_id, phase="cancelling", cancelled_at=time.time())
+
+        # Stop also ends the launch phase when the worker was never admitted: retire
+        # the claim on this same edge, AFTER the cancellation is published and BEFORE
+        # ownership is detached (#7302 finding 5). Retiring earlier would let a second
+        # chat/start slip in over a turn Stop already cancelled; retiring later leaves
+        # the claim behind, which would block a reuse of this stream id.
+        _live_config.retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
 
         # Stop and Steer share STREAMS_LOCK -> ACTIVE_RUNS_LOCK ordering.
         # Publish cancellation and detach ownership before releasing the edge;

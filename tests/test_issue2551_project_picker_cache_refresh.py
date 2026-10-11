@@ -140,7 +140,9 @@ def test_new_project_branch_still_uses_authoritative_refetch():
     create-branch block (up to the next picker item) rather than a fixed byte
     window so the assertion tracks intent, not exact offsets.
     """
-    create_idx = PICKER_BODY.find("'+ New project'")
+    # Located by the create row's own handler: its label is translated (#8044),
+    # so the English text is no longer in the source to search for.
+    create_idx = PICKER_BODY.find("createItem.onclick=")
     assert create_idx != -1, "'+ New project' branch not located"
     # Bound the window at the end of the create handler (the picker.appendChild
     # that follows the createItem.onclick), falling back to a generous slice.
