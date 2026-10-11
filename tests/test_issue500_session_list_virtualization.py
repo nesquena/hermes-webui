@@ -129,64 +129,68 @@ def test_session_list_only_moves_to_active_when_active_row_is_not_visible():
     render_end = js.index("async function _handleActiveSessionStorageEvent", render_start)
     render_body = js[render_start:render_end]
 
-    before_idx = render_body.index("const virtualWindowBeforeActiveAnchor=_sessionVirtualWindow({")
-    visible_idx = render_body.index("const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end")
-    move_idx = render_body.index("const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisible")
-    final_idx = render_body.index("activeIndex:shouldMoveSidebarToActive?activeIndex:-1")
-    anchor_idx = render_body.index("if(shouldMoveSidebarToActive&&virtualWindow.virtualized){")
+    # Overscan membership is not visibility. Inspect the rendered rectangle only
+    # on activation/filter transitions, after measuring and restoring scrollTop.
+    measure_idx = render_body.index("_measureSessionVirtualRows(list,virtualLayout,renderedVirtualRows,virtualSpacers);")
+    restore_idx = render_body.index("list.scrollTop=listScrollTopBeforeRender;", measure_idx)
+    target_idx = render_body.index("activeRow.el.querySelectorAll('.session-child-session[data-sid],.session-lineage-segment[data-sid]')")
+    visible_idx = render_body.index("const alreadyVisible=rect.top>=top&&rect.bottom<=top+list.clientHeight;")
+    move_idx = render_body.index("if(!alreadyVisible) list.scrollTop=")
+    assert measure_idx < restore_idx < target_idx < visible_idx < move_idx
+    assert "||activeRow.el.querySelector('.session-title-row')||activeRow.el" in render_body
+    assert "const shouldMoveSidebarToActive=shouldAnchorActive;" in render_body
+    assert "activeIndex:shouldMoveSidebarToActive?activeIndex:resizedAnchorIndex" in render_body
+    assert "activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start" not in render_body
 
-    assert before_idx < visible_idx < move_idx < final_idx < anchor_idx
-    assert "activeIndex:-1" in render_body[before_idx:visible_idx]
-    assert "activeIndex:shouldAnchorActive?activeIndex:-1" not in render_body
 
-
-def test_session_list_resyncs_when_browser_clamps_virtual_scroll_restore():
-    """If a hidden/reflowed sidebar rejects restored scrollTop, re-render the visible window."""
+def test_session_list_settles_measured_coverage_and_rejects_stale_generations():
+    """Clamped restores and unchanged-scroll reflows get one guarded correction."""
     js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
-    render_start = js.index("function renderSessionListFromCache()")
-    render_end = js.index("async function _handleActiveSessionStorageEvent", render_start)
-    render_body = js[render_start:render_end]
-
-    assert "_resyncSessionVirtualWindowAfterRender(list, listScrollTopBeforeRender, virtualWindow);" in render_body
-
     source = _extract_func_script(js) + """
-let renderCount = 0;
-let rafCount = 0;
-let _renamingSid = null;
-const SESSION_VIRTUAL_ROW_HEIGHT = 52;
-function requestAnimationFrame(cb){ rafCount += 1; cb(); return rafCount; }
-function cancelAnimationFrame(_id){}
-function renderSessionListFromCache(){ renderCount += 1; }
-const makeHelper = new Function(
-  'requestAnimationFrame',
-  'cancelAnimationFrame',
-  'renderSessionListFromCache',
-  `let _sessionVirtualResyncRaf = 0;
-   let _renamingSid = null;
-   const SESSION_VIRTUAL_ROW_HEIGHT = 52;
-   ${extractFunc('_resyncSessionVirtualWindowAfterRender')}
-   return _resyncSessionVirtualWindowAfterRender;`
-);
-const _resyncSessionVirtualWindowAfterRender = makeHelper(
-  requestAnimationFrame,
-  cancelAnimationFrame,
-  renderSessionListFromCache
-);
-
-_resyncSessionVirtualWindowAfterRender(
-  {scrollTop: 0},
-  52 * 10,
-  {virtualized: true, itemHeight: 52}
-);
-const afterClamp = renderCount;
-_resyncSessionVirtualWindowAfterRender(
-  {scrollTop: 52 * 10},
-  52 * 10,
-  {virtualized: true, itemHeight: 52}
-);
-console.log(JSON.stringify({afterClamp, final: renderCount, rafCount}));
+const SESSION_VIRTUAL_ROW_HEIGHT=52,SESSION_VIRTUAL_BUFFER_ROWS=8,SESSION_VIRTUAL_THRESHOLD_ROWS=80;
+let _sessionVirtualResyncRaf=0,_renamingSid=null,_sessionListSkeletonActive=false;
+let renderCount=0,rafCount=0;
+const queue=new Map();
+function requestAnimationFrame(cb){queue.set(++rafCount,cb);return rafCount;}
+function cancelAnimationFrame(id){queue.delete(id);}
+function flush(){const callbacks=[...queue.values()];queue.clear();callbacks.forEach(cb=>cb());}
+eval(extractFunc('_sessionVirtualWindow'));
+eval(extractFunc('_resyncSessionVirtualWindowAfterRender'));
+const makeLayout=()=>({rows:Array(200),contentOffsets:Array.from({length:201},(_,i)=>i*34),measurementGeneration:1});
+const list={scrollTop:3000,clientHeight:520,isConnected:true,_sessionVirtualLayout:makeLayout()};
+const oldWindow={virtualized:true,start:50,end:65};
+function renderSessionListFromCache(){
+  renderCount++;
+  list._sessionVirtualLayout.measurementGeneration++;
+  // Even a nonconvergent measurement may not schedule a recursive correction.
+  _resyncSessionVirtualWindowAfterRender(list,oldWindow);
+}
+_resyncSessionVirtualWindowAfterRender(list,oldWindow);flush();
+const stationary=renderCount;
+_resyncSessionVirtualWindowAfterRender(list,{virtualized:true,start:80,end:115});flush();
+const covered=renderCount;
+list.scrollTop=0;
+_resyncSessionVirtualWindowAfterRender(list,{virtualized:true,start:80,end:115});flush();
+const clamped=renderCount;
+list.scrollTop=3000;
+_resyncSessionVirtualWindowAfterRender(list,oldWindow);
+list._sessionVirtualLayout=makeLayout();flush();
+const replaced=renderCount;
+_resyncSessionVirtualWindowAfterRender(list,oldWindow);
+list._sessionVirtualLayout.measurementGeneration++;flush();
+const superseded=renderCount;
+_resyncSessionVirtualWindowAfterRender(list,oldWindow);
+_sessionListSkeletonActive=true;flush();
+const skeleton=renderCount;
+_sessionListSkeletonActive=false;
+_resyncSessionVirtualWindowAfterRender(list,oldWindow);
+// A subsequent fully covered render must cancel a queued stale correction.
+_resyncSessionVirtualWindowAfterRender(list,{virtualized:true,start:80,end:115});flush();
+_resyncSessionVirtualWindowAfterRender(list,{virtualized:true,start:80,end:115});
+// A browser can clamp the restored scroll position only on the next frame.
+list.scrollTop=0;flush();
+console.log(JSON.stringify({stationary,covered,clamped,replaced,superseded,skeleton,final:renderCount,pending:queue.size}));
 """
     metrics = json.loads(_run_node(source))
-    assert metrics["afterClamp"] == 1
-    assert metrics["final"] == 1
-    assert metrics["rafCount"] == 2
+    assert metrics == dict(stationary=1, covered=1, clamped=2, replaced=2,
+                           superseded=2, skeleton=2, final=3, pending=0)

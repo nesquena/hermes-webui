@@ -556,6 +556,93 @@ and 5; it does not mark every run-state boundary implemented.
    timestamp (falling back to run start), so a long-running turn cancelled
    moments ago is never mistaken for an orphan.
 
+## Sidebar notification ownership
+
+A conversation row's notification indicator reflects only that conversation's
+own running, unread-completion, or approval/clarification state. Nested child
+sessions (including attached forks) must not light the parent's notification dot,
+hide its timestamp, or add unread/attention styling to it. Activity is distinct
+from notification: when children are collapsed and an attention mark occupies
+the child chip's slot, a second spinner inside that chip exposes concurrent
+child work without implying parent activity or replacing the parent's own unread
+or attention cue. Running-only children use the chip's single spinner. Expanded
+children show activity on their own rows; reference-only running work retains
+the in-chip spinner even when other, navigable children are expanded. The parent's
+own running spinner remains regardless of expansion. A
+reference-only archived child with no expandable rows is treated as collapsed.
+The activity projection clears when child work settles and does not acknowledge
+anything. A separate status mark on the
+child-count chip exposes aggregated child state even while collapsed, including
+reference-only archived children. Approval takes precedence over clarification,
+then other attention, running, and unread completion. Expanded fork and delegated
+child rows expose their own running, unread, and attention states. Rendering or
+expanding the parent does not acknowledge its children; visiting a child retains
+its per-session acknowledgement semantics. Reference-only state does not make
+hidden archived children navigable. Child activity may still affect sidebar
+ordering. Compression-lineage segments remain one logical conversation and are
+not delegated child sessions.
+
+Child-chip tooltips and accessible toggle labels lead with the aggregated state,
+qualified with a localized child-session subject, followed by one separator and
+the localized child count/toggle hint. Approval
+and clarification tint the chip with semantic error/warning colors, including
+when its parent is active. Expanded attention rows pair their inset accent with
+the same error/warning background tint as parent attention rows when idle.
+Hover and selection backgrounds take precedence while the attention accent and
+status mark remain visible. Running and unread retain a plain status mark; concurrent unread
+completion remains in the chip tooltip and accessible name when running or
+attention takes visual precedence. A reference-only chip uses a localized
+short child-qualified archived label, keeps the full archived explanation in its tooltip and
+accessible name, and is not an expander. Clickable child counts reserve the initial
+numeral plus an ellipsis independently of the status and concurrent-activity
+marks. Secondary wording yields space before the primary title; both marks stay
+inside the chip, including selected skins and Detailed density. At the narrowest
+width, fork/worktree/project badges can still reduce the title to its existing
+24px floor; reference-only archived labels keep their separate width budget.
+Fork and delegated row indicators are both 14px; delegated navigation targets
+are at least 44px tall on narrow layouts or coarse pointers, while fine-pointer
+desktop rows remain compact.
+
+Large sidebars remain windowed in both densities, including compressed parents
+with child summaries. The rendered list owns transient row-height measurements
+and prefix-sum spacers; unseen rows use plain/summary height estimates until they
+enter the window. Measurements include wrapped localized summaries and expanded
+descendants, are pruned with the current rows, and are invalidated by layout,
+typography, theme or locale changes. Search query/title and content-preview text
+or visibility changes also invalidate a row's measurement, including offscreen
+rows. Selection changes, including selection through a lineage member, invalidate
+that row's retained height; selected heights do not seed unselected-row estimates.
+Batch-select entry and exit also invalidate retained heights because checkboxes
+reduce the text width. Expanded earlier-turn shapes include the identities from
+the renderer's local/report merge (not just the advertised segment count), so
+asynchronous report completion invalidates an offscreen parent's measurement
+before that parent reenters the window. Unseen expanded rows still use estimates;
+invalidation does not claim their exact height is known without rendering.
+Window selection and scroll callbacks, including pending animation frames,
+use content-coordinate offsets that include measured project/profile/archive
+controls and date headers. Group spacers use row-only prefix sums, so controls
+and headers are never counted twice. Both consume the same current
+layout. With unchanged row order and date-group placement, repainting preserves
+the visible conversation and its offset through row-height or expansion changes.
+Background activity reordering preserves the user's numeric scroll position instead
+of following a moved conversation into its new group, including non-virtual lists;
+reload and leaving search can bring an off-window active conversation into view
+using the rendered row's position, including preceding controls and date headers.
+Overscan membership is not viewport visibility: activation/filter transitions
+check the actual nested child/lineage row matching the active session, falling
+back to the parent's title row. A target is already visible only when its whole
+rectangle is inside the viewport; the height of an expanded parent block is not
+an active-child anchor. Own running/unread/attention gutter changes invalidate
+retained offscreen heights because they can wrap the prior-turns summary.
+Ordinary scroll refreshes do not recenter an unchanged active conversation.
+After measurement and anchor restoration, the measured content-coordinate
+window must cover the viewport without requiring another scroll event. An
+uncovered viewport queues one generation-guarded animation-frame correction;
+superseded measurements cannot repaint, and the correction cannot recursively
+enqueue itself. Settled layout, theme, locale and density transitions retain
+bounded row DOM and preserve the conversation anchor's offset.
+This presentation cache does not acknowledge notifications or mutate session metadata.
+
 ## Client-side unread persistence (sidebar layer)
 
 The sidebar unread dot is backed by two client-side stores in `static/sessions.js`.

@@ -69,13 +69,15 @@ def _extract_collapse_state_block() -> str:
 def _extract_group_loop() -> str:
     """The real group-render loop from sessions.js, verbatim: builds the
     session-date-group DOM including the real hdr.onclick handler. Sliced
-    from its start marker to the virtualization anchor restore that follows
+    from its start marker to the height-measurement phase that follows
     it in production."""
+    header_start = SESSIONS_JS.index('  const virtualGroups=[];')
+    header_end = SESSIONS_JS.index('  const previousVirtualLayout=', header_start)
     start_marker = "let globalSessionRowIndex=0;"
-    end_marker = "if(virtualAnchorScrollTop!==null){"
+    end_marker = "_measureSessionVirtualRows(list,virtualLayout,renderedVirtualRows,virtualSpacers);"
     start = SESSIONS_JS.index(start_marker)
     end = SESSIONS_JS.index(end_marker, start)
-    return SESSIONS_JS[start:end]
+    return SESSIONS_JS[header_start:header_end] + SESSIONS_JS[start:end]
 
 
 HARNESS_HTML = """<!DOCTYPE html>
@@ -140,6 +142,7 @@ window.__buildGroups = () => {
   list.innerHTML = '';
   const groups = window.__groups || [];
   const virtualWindow = {virtualized:false, start:0, end:1000000, itemHeight:24};
+  const renderedVirtualRows=[],virtualSpacers=[];
   const _renderOneSession = (s, isPinned) => {
     const row = document.createElement('div');
     row.className = 'session-row' + (isPinned ? ' pinned' : '');

@@ -7993,6 +7993,16 @@ function _sessionStateTooltip({isStreaming=false,hasUnread=false}={}){
   return '';
 }
 
+function _createChildSessionStateIndicator({isStreaming=false,hasUnread=false,attention=null}, className){
+  const state=document.createElement('span');
+  const attentionClass=attention?(attention.kind==='approval'?' is-attention-approval':(attention.kind==='clarify'?' is-attention-clarify':' is-attention-generic')):'';
+  state.className='session-state-indicator '+className
+    +(attention?attentionClass:(isStreaming?' is-streaming':(hasUnread?' is-unread':'')));
+  state.setAttribute('aria-hidden','true');
+  state.title=attention?t('session_child_attention',attention.title):(isStreaming?t('session_child_running'):(hasUnread?t('session_child_unread'):''));
+  return state;
+}
+
 function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawReferenceSessions){
   const referenceSessions=Array.isArray(rawReferenceSessions)?rawReferenceSessions:(rawSessions||[]);
   const sessionIdsInList=new Set(referenceSessions.map(s=>s&&s.session_id).filter(Boolean));
@@ -8005,6 +8015,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     delete row._child_sessions;
     delete row._child_session_count;
     delete row._child_session_streaming;
+    delete row._child_session_hidden_streaming;
     delete row._child_session_has_unread;
     delete row._child_session_attention;
     delete row._child_session_latest_at;
@@ -8160,6 +8171,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
         parentRow._child_session_count=parentRow._child_sessions.length;
       }
       bubbleSidebarState(parentRow, childCopy);
+      if((!childRenderable||isHiddenLineageReferenceChild)&&isChildStreaming(childCopy)) parentRow._child_session_hidden_streaming=true;
       visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
     } else if(childRenderable) {
       // #5305: a delegated subagent child whose WebUI parent is NOT a visible
@@ -8365,15 +8377,38 @@ function clearOptimisticSessionStreaming(sid){
 }
 
 
+function _sessionRowHasLineageSummary(s){
+  if(window._sidebarDensity!=='detailed'||_sessionSegmentCount(s)<=0) return false;
+  const childCount=typeof s._child_session_count==='number'?s._child_session_count:(Array.isArray(s._child_sessions)?s._child_sessions.length:0);
+  return childCount>0||!!s._child_session_streaming||!!s._child_session_has_unread||!!_sessionAttentionState({attention:s._child_session_attention});
+}
+
 function _sessionVirtualWindow(opts){
   const total=Math.max(0, Number(opts&&opts.total)||0);
   const threshold=Math.max(1, Number(opts&&opts.threshold)||SESSION_VIRTUAL_THRESHOLD_ROWS);
   const itemHeight=Math.max(1, Number(opts&&opts.itemHeight)||SESSION_VIRTUAL_ROW_HEIGHT);
-  const buffer=Math.max(0, Number(opts&&opts.buffer)||SESSION_VIRTUAL_BUFFER_ROWS);
+  const buffer=opts&&opts.buffer===0?0:Math.max(0, Number(opts&&opts.buffer)||SESSION_VIRTUAL_BUFFER_ROWS);
   const viewportHeight=Math.max(itemHeight, Number(opts&&opts.viewportHeight)||itemHeight*10);
   const visibleRows=Math.max(1, Math.ceil(viewportHeight/itemHeight));
   if(total<=threshold){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,itemHeight,total};
+  }
+  const offsets=opts&&opts.offsets;
+  if(offsets&&offsets.length===total+1){
+    const rowAt=(y)=>{
+      let lo=0,hi=total;
+      while(lo<hi){const mid=(lo+hi+1)>>1;if(offsets[mid]<=y)lo=mid;else hi=mid-1;}
+      return Math.min(lo,total-1);
+    };
+    const scrollTop=Math.max(0,Number(opts.scrollTop)||0);
+    let start=Math.max(0,rowAt(scrollTop)-buffer);
+    let end=Math.min(total,rowAt(scrollTop+viewportHeight)+1+buffer);
+    const activeIndex=Number.isFinite(Number(opts.activeIndex))?Number(opts.activeIndex):-1;
+    if(activeIndex>=0&&activeIndex<total&&(activeIndex<start||activeIndex>=end)){
+      start=Math.max(0,activeIndex-buffer);
+      end=Math.min(total,rowAt(offsets[start]+viewportHeight)+1+buffer*2);
+    }
+    return {virtualized:true,start,end,topPad:offsets[start],bottomPad:offsets[total]-offsets[end],itemHeight,total};
   }
   let start=Math.floor((Number(opts&&opts.scrollTop)||0)/itemHeight)-buffer;
   start=Math.max(0, Math.min(start, Math.max(0,total-visibleRows)));
@@ -8392,6 +8427,82 @@ function _sessionVirtualWindow(opts){
     itemHeight,
     total,
   };
+}
+
+// Measurements belong to the rendered list, not the session cache. Unseen rows
+// use measured plain/summary estimates; each real row replaces its estimate on
+// entry. Width, typography, theme and locale changes invalidate those measurements.
+function _sessionVirtualLayoutKey(list){
+  const root=document.documentElement;
+  return [list.clientWidth,window._sidebarDensity,root.className,
+    ...Array.from(root.attributes,a=>a.name+'='+a.value),t('session_child_archived_short')].join('|');
+}
+
+function _sessionVirtualLayout(list, rows, query, activeSid){
+  const key=_sessionVirtualLayoutKey(list);
+  let layout=list._sessionVirtualLayout;
+  if(!layout||layout.key!==key) layout={key,measured:new Map(),estimates:[52,72]};
+  const previous=layout.measured;
+  layout.measured=new Map();
+  layout.rows=rows.map(row=>{
+    const s=row.session,summary=Number(_sessionRowHasLineageSummary(s));
+    const active=_sessionLineageContainsSession(s,activeSid);
+    const lineageKey=_sidebarLineageKeyForRow(s);
+    // Search can add/remove a preview without changing lineage. Include its
+    // text and title/query inputs so offscreen measurements cannot survive it.
+    const lineageExpanded=_expandedLineageKeys.has(lineageKey);
+    // Batch checkboxes reduce the text width. Expanded earlier-turn rows also
+    // change after a report resolves, including while this parent is offscreen.
+    // Use the same report/local merge as the renderer, not the advertised count.
+    const segments=lineageExpanded&&window._sidebarDensity==='detailed'
+      ? _lineageSegmentsForRender(s,lineageKey,_lineageReportNeedsFetch(s,lineageKey,_sessionSegmentCount(s))) : [];
+    const shape=JSON.stringify([summary,_sessionSegmentCount(s),s._child_session_count,
+      lineageExpanded,_expandedChildSessionKeys.has(lineageKey),_sessionSelectMode,
+      segments.map(seg=>seg.session_id),
+      query||'',query?_sessionDisplayTitle(s):'',_sessionSearchContentPreview(s,query),
+      active?activeSid:'',_isSessionEffectivelyStreaming(s),_hasUnreadForSession(s)&&!active,!!_sessionAttentionState(s)]);
+    const id=s.session_id,old=previous.get(id);
+    if(old&&old.shape===shape) layout.measured.set(id,old);
+    return {id,shape,summary,active,group:row.group.label};
+  });
+  _sessionVirtualOffsets(layout);
+  list._sessionVirtualLayout=layout;
+  return layout;
+}
+
+function _sessionVirtualOffsets(layout){
+  layout.offsets=[0];
+  for(const row of layout.rows){
+    const measured=layout.measured.get(row.id);
+    layout.offsets.push(layout.offsets.at(-1)+(measured?measured.height:layout.estimates[row.summary]));
+  }
+  layout.contentOffsets=layout.offsets.map((offset,i)=>offset+(layout.chromeOffsets?.[i]||0));
+}
+
+function _sessionVirtualViewportAnchor(list){
+  const top=list.getBoundingClientRect().top;
+  for(const el of list.querySelectorAll('.session-date-body>.session-item')){
+    const rect=el.getBoundingClientRect();
+    if(rect.bottom>top&&rect.top<top+list.clientHeight) return {id:el.dataset.sid,y:rect.top-top};
+  }
+  return null;
+}
+
+function _measureSessionVirtualRows(list, layout, rendered, spacers){
+  layout.measurementGeneration=(layout.measurementGeneration||0)+1;
+  // Read all geometry before writing spacers, avoiding a layout per row.
+  const heights=rendered.map(({el,index})=>({el,index,height:el.getBoundingClientRect().height+
+    (parseFloat(getComputedStyle(el).marginBottom)||0)}));
+  for(const {el,index,height} of heights){
+    if(height<=0) continue;
+    const row=layout.rows[index];
+    layout.measured.set(row.id,{shape:row.shape,height});
+    // Expanded descendants are part of this row's measured height, but must
+    // not inflate the estimate for unrelated collapsed conversations.
+    if(!row.active&&!el.querySelector('.session-child-session,.session-lineage-segment')) layout.estimates[row.summary]=height;
+  }
+  _sessionVirtualOffsets(layout);
+  for(const {el,start,end} of spacers) el.style.height=(layout.offsets[end]-layout.offsets[start])+'px';
 }
 
 function _sessionVirtualSpacer(height, where){
@@ -8413,6 +8524,7 @@ function _scheduleSessionVirtualizedRender(){
   if(_sessionListSkeletonActive) return;
   if(_renamingSid||_sessionVirtualScrollRaf) return;
   const list=_sessionVirtualScrollList;
+  if(list&&list.dataset.sessionVirtualEnabled==='false') return;
   const total=Number(list&&list.dataset&&list.dataset.sessionVirtualTotal||0);
   // Skip the re-render if the list is below the virtualization threshold —
   // there's no virtual window to recompute, and re-rendering would just
@@ -8423,9 +8535,11 @@ function _scheduleSessionVirtualizedRender(){
   _sessionVirtualScrollRaf=requestAnimationFrame(()=>{
     _sessionVirtualScrollRaf=0;
     const liveList=_sessionVirtualScrollList;
+    if(liveList&&liveList.dataset.sessionVirtualEnabled==='false') return;
     const liveTotal=Number(liveList&&liveList.dataset&&liveList.dataset.sessionVirtualTotal||0);
     if(liveList&&liveTotal>SESSION_VIRTUAL_THRESHOLD_ROWS){
       const nextWindow=_sessionVirtualWindow({
+        offsets:liveList._sessionVirtualLayout&&liveList._sessionVirtualLayout.contentOffsets,
         total:liveTotal,
         scrollTop:liveList.scrollTop||0,
         viewportHeight:liveList.clientHeight||520,
@@ -8436,7 +8550,9 @@ function _scheduleSessionVirtualizedRender(){
       });
       const currentStart=Number(liveList.dataset.sessionVirtualStart||0);
       const currentEnd=Number(liveList.dataset.sessionVirtualEnd||0);
-      if(nextWindow.virtualized&&nextWindow.start===currentStart&&nextWindow.end===currentEnd) return;
+      const layout=liveList._sessionVirtualLayout;
+      const layoutChanged=layout&&layout.key!==_sessionVirtualLayoutKey(liveList);
+      if(!layoutChanged&&nextWindow.virtualized&&nextWindow.start===currentStart&&nextWindow.end===currentEnd) return;
     }
     renderSessionListFromCache();
   });
@@ -8472,18 +8588,30 @@ function _markSessionListPointerUp(){
 }
 
 let _sessionVirtualResyncRaf = 0;
-function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtualWindow){
-  if(!list||!virtualWindow||!virtualWindow.virtualized) return;
-  expectedScrollTop=Number(expectedScrollTop)||0;
-  if(expectedScrollTop<=0) return;
+function _resyncSessionVirtualWindowAfterRender(list, virtualWindow){
   if(_sessionVirtualResyncRaf) cancelAnimationFrame(_sessionVirtualResyncRaf);
+  _sessionVirtualResyncRaf=0;
+  if(!list||!virtualWindow||!virtualWindow.virtualized||list._sessionVirtualSettleCorrecting) return;
+  const layout=list._sessionVirtualLayout,generation=layout.measurementGeneration;
+  // Measurement can replace the initial estimates even at unchanged scrollTop.
+  // Check viewport coverage, not overscan equality, after restoring the anchor.
+  const viewportCovered=()=>{
+    const viewport=_sessionVirtualWindow({total:layout.rows.length,offsets:layout.contentOffsets,
+      scrollTop:list.scrollTop,viewportHeight:list.clientHeight||520,buffer:0});
+    return viewport.start>=virtualWindow.start&&viewport.end<=virtualWindow.end;
+  };
+  // Keep the next-frame clamp check for nonzero restores: browsers can defer
+  // clamping until layout settles. A covered viewport still needs no repaint.
+  if(list.scrollTop<=0&&viewportCovered()) return;
   _sessionVirtualResyncRaf=requestAnimationFrame(()=>{
     _sessionVirtualResyncRaf=0;
-    if(_renamingSid) return;
-    const actualScrollTop=Number(list.scrollTop)||0;
-    const tolerance=Math.max(2, Number(virtualWindow.itemHeight||SESSION_VIRTUAL_ROW_HEIGHT)/2);
-    if(Math.abs(actualScrollTop-expectedScrollTop)<=tolerance) return;
-    renderSessionListFromCache();
+    if(_renamingSid||_sessionListSkeletonActive||!list.isConnected||
+      list._sessionVirtualLayout!==layout||layout.measurementGeneration!==generation||viewportCovered()) return;
+    // One correction per measurement generation; its own measurement must not
+    // enqueue another correction and form a stationary render loop.
+    list._sessionVirtualSettleCorrecting=true;
+    try{renderSessionListFromCache();}
+    finally{list._sessionVirtualSettleCorrecting=false;}
   });
 }
 
@@ -8783,6 +8911,7 @@ function renderSessionListFromCache(){
   const committedSwipeDuration=_sessionPrefersReducedMotion()?0:SESSION_SWIPE_DURATION_MS;
   const committedSwipeReflowDelay=Math.max(0,committedSwipeDuration-SESSION_SWIPE_REFLOW_LEAD_MS);
   const listScrollTopBeforeRender=list.scrollTop||0;
+  const viewportAnchorBeforeRender=_sessionVirtualViewportAnchor(list);
   list.innerHTML='';
   // #4671: belt-and-suspenders. The authoritative skeleton-clear happens in
   // _applySessionListPayload (once fresh data is in hand) BEFORE this function is
@@ -9046,7 +9175,9 @@ function renderSessionListFromCache(){
   const flatSessionRows=[];
   for(const g of groups){
     if(_groupCollapsed[g.label]) continue;
-    for(const s of g.items){ flatSessionRows.push({group:g,session:s}); }
+    for(const s of g.items){
+      flatSessionRows.push({group:g,session:s});
+    }
   }
   _sessionVisibleSidebarIds=flatSessionRows.map(row=>row.session&&row.session.session_id).filter(Boolean);
   for(const row of flatSessionRows){
@@ -9061,48 +9192,10 @@ function renderSessionListFromCache(){
     }
   }
   _ensureSessionVirtualScrollHandler(list);
-  const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
-  const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
-    list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
-    list.dataset.sessionVirtualFilter!==q
-  );
-  const virtualWindowBeforeActiveAnchor=_sessionVirtualWindow({
-    total:flatSessionRows.length,
-    scrollTop:listScrollTopBeforeRender,
-    viewportHeight:list.clientHeight||520,
-    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
-    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
-    activeIndex:-1,
-  });
-  const activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start&&activeIndex<virtualWindowBeforeActiveAnchor.end;
-  const shouldMoveSidebarToActive=shouldAnchorActive&&!activeWasAlreadyVisible;
-  let virtualWindow=_sessionVirtualWindow({
-    total:flatSessionRows.length,
-    scrollTop:listScrollTopBeforeRender,
-    viewportHeight:list.clientHeight||520,
-    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
-    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
-    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
-    activeIndex:shouldMoveSidebarToActive?activeIndex:-1,
-  });
-  let virtualAnchorScrollTop=null;
-  if(shouldMoveSidebarToActive&&virtualWindow.virtualized){
-    list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
-    virtualAnchorScrollTop=virtualWindow.topPad;
-  }else if(activeSidForSidebar){
-    list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
-  }else{
-    delete list.dataset.sessionVirtualActiveAnchor;
-  }
-  list.dataset.sessionVirtualTotal=String(flatSessionRows.length);
-  list.dataset.sessionVirtualFilter=q;
-  list.dataset.sessionVirtualStart=String(virtualWindow.start);
-  list.dataset.sessionVirtualEnd=String(virtualWindow.end);
   // Render groups with collapsible headers. Large sidebars render only the
   // current session-row window plus top/bottom spacers inside each group body;
   // headers remain real DOM so pin/archive/date grouping and clicks survive.
-  let globalSessionRowIndex=0;
+  const virtualGroups=[];
   for(const g of groups){
     const wrapper=document.createElement('div');
     wrapper.className='session-date-group';
@@ -9128,23 +9221,106 @@ function renderSessionListFromCache(){
       renderSessionListFromCache();
     };
     wrapper.appendChild(hdr);
+    wrapper.appendChild(body);
+    list.appendChild(wrapper);
+    virtualGroups.push({g,body,isGroupCollapsed});
+  }
+  const previousVirtualLayout=list._sessionVirtualLayout;
+  // Geometric anchors correct height changes, not background reordering. A
+  // moved conversation must not drag the viewport to its new activity bucket.
+  // Compare before _sessionVirtualLayout replaces the retained row projection.
+  const stableRowOrder=previousVirtualLayout&&previousVirtualLayout.rows.length===flatSessionRows.length&&
+    previousVirtualLayout.rows.every((row,i)=>{
+      if(row.id!==flatSessionRows[i].session.session_id) return false;
+      const wasGroupStart=i===0||row.group!==previousVirtualLayout.rows[i-1].group;
+      const isGroupStart=i===0||flatSessionRows[i].group!==flatSessionRows[i-1].group;
+      return wasGroupStart===isGroupStart;
+    });
+  const virtualLayout=_sessionVirtualLayout(list,flatSessionRows,searchQueryRaw,activeSidForSidebar);
+  // Empty group bodies expose cumulative controls/header geometry independently
+  // of row estimates. Spacers remain row-only; windows use content coordinates.
+  const contentTop=list.getBoundingClientRect().top+list.clientTop-list.scrollTop;
+  virtualLayout.chromeOffsets=[];
+  for(const {g,body,isGroupCollapsed} of virtualGroups){
+    if(isGroupCollapsed) continue;
+    const chrome=body.getBoundingClientRect().top-contentTop;
+    for(const s of g.items) virtualLayout.chromeOffsets.push(chrome);
+  }
+  virtualLayout.chromeOffsets.push(virtualLayout.chromeOffsets.at(-1)||0);
+  _sessionVirtualOffsets(virtualLayout);
+  const resizedAnchorIndex=stableRowOrder&&previousVirtualLayout!==virtualLayout&&viewportAnchorBeforeRender
+    ?flatSessionRows.findIndex(row=>row.session.session_id===viewportAnchorBeforeRender.id):-1;
+  const renderedVirtualRows=[],virtualSpacers=[];
+  const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));
+  const shouldAnchorActive=activeSidForSidebar&&activeIndex>=0&&(
+    list.dataset.sessionVirtualActiveAnchor!==activeSidForSidebar||
+    list.dataset.sessionVirtualFilter!==q
+  );
+  // Render-window membership includes overscan, not viewport visibility. On an
+  // activation/filter transition render the target, then inspect its real rect.
+  const shouldMoveSidebarToActive=shouldAnchorActive;
+  let virtualWindow=_sessionVirtualWindow({
+    offsets:virtualLayout.contentOffsets,
+    total:flatSessionRows.length,
+    scrollTop:listScrollTopBeforeRender,
+    viewportHeight:list.clientHeight||520,
+    itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
+    buffer:SESSION_VIRTUAL_BUFFER_ROWS,
+    threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
+    activeIndex:shouldMoveSidebarToActive?activeIndex:resizedAnchorIndex,
+  });
+  let virtualAnchorScrollTop=null;
+  if(shouldMoveSidebarToActive&&virtualWindow.virtualized){
+    list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
+    virtualAnchorScrollTop=virtualWindow.topPad;
+  }else if(activeSidForSidebar){
+    list.dataset.sessionVirtualActiveAnchor=activeSidForSidebar;
+  }else{
+    delete list.dataset.sessionVirtualActiveAnchor;
+  }
+  list.dataset.sessionVirtualTotal=String(flatSessionRows.length);
+  // Scroll callbacks consume content offsets derived from these row measurements.
+  list.dataset.sessionVirtualEnabled=String(virtualWindow.virtualized);
+  list.dataset.sessionVirtualFilter=q;
+  list.dataset.sessionVirtualStart=String(virtualWindow.start);
+  list.dataset.sessionVirtualEnd=String(virtualWindow.end);
+  let globalSessionRowIndex=0;
+  for(const {g,body,isGroupCollapsed} of virtualGroups){
+    const groupStart=globalSessionRowIndex;
     let groupTopPad=0;
     let groupBottomPad=0;
     for(const s of g.items){
       if(isGroupCollapsed) continue;
       const rowIndex=globalSessionRowIndex++;
       const inWindow=!virtualWindow.virtualized||(rowIndex>=virtualWindow.start&&rowIndex<virtualWindow.end);
-      if(inWindow){ body.appendChild(_renderOneSession(s, Boolean(g.isPinned))); }
-      else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualWindow.itemHeight; }
-      else { groupBottomPad+=virtualWindow.itemHeight; }
+      if(inWindow){
+        const el=body.appendChild(_renderOneSession(s, Boolean(g.isPinned)));
+        renderedVirtualRows.push({el,index:rowIndex});
+      }else if(rowIndex<virtualWindow.start){ groupTopPad+=virtualLayout.offsets[rowIndex+1]-virtualLayout.offsets[rowIndex]; }
+      else { groupBottomPad+=virtualLayout.offsets[rowIndex+1]-virtualLayout.offsets[rowIndex]; }
     }
-    if(groupTopPad>0){ body.insertBefore(_sessionVirtualSpacer(groupTopPad,'before'), body.firstChild); }
-    if(groupBottomPad>0){ body.appendChild(_sessionVirtualSpacer(groupBottomPad,'after')); }
-    wrapper.appendChild(body);
-    list.appendChild(wrapper);
+    if(groupTopPad>0){
+      const el=_sessionVirtualSpacer(groupTopPad,'before');body.insertBefore(el,body.firstChild);
+      virtualSpacers.push({el,start:groupStart,end:Math.min(globalSessionRowIndex,virtualWindow.start)});
+    }
+    if(groupBottomPad>0){
+      const el=_sessionVirtualSpacer(groupBottomPad,'after');body.appendChild(el);
+      virtualSpacers.push({el,start:Math.max(groupStart,virtualWindow.end),end:globalSessionRowIndex});
+    }
   }
+  _measureSessionVirtualRows(list,virtualLayout,renderedVirtualRows,virtualSpacers);
   if(virtualAnchorScrollTop!==null){
-    list.scrollTop=virtualAnchorScrollTop;
+    // The real row position includes controls and every preceding group header,
+    // which are not part of the session-height prefix sums.
+    const activeRow=renderedVirtualRows.find(row=>row.index===activeIndex);
+    list.scrollTop=listScrollTopBeforeRender;
+    if(activeRow){
+      const target=Array.from(activeRow.el.querySelectorAll('.session-child-session[data-sid],.session-lineage-segment[data-sid]')).find(el=>el.dataset.sid===activeSidForSidebar)
+        ||activeRow.el.querySelector('.session-title-row')||activeRow.el;
+      const rect=target.getBoundingClientRect(),top=list.getBoundingClientRect().top;
+      const alreadyVisible=rect.top>=top&&rect.bottom<=top+list.clientHeight;
+      if(!alreadyVisible) list.scrollTop=Math.max(0,list.scrollTop+rect.top-top-(list.clientHeight-rect.height)/2);
+    }
   }else if(listScrollTopBeforeRender>0){
     // Always restore the user's scroll position after re-render, regardless
     // of whether the virtualization window applies. Lists below the
@@ -9153,8 +9329,12 @@ function renderSessionListFromCache(){
     // scrollTop drops to 0 — producing a "scroll keeps jumping back" feel
     // when the list scrolls naturally. Fixed for #1669 follow-up.
     list.scrollTop=listScrollTopBeforeRender;
-    _resyncSessionVirtualWindowAfterRender(list, listScrollTopBeforeRender, virtualWindow);
+    if(stableRowOrder&&viewportAnchorBeforeRender){
+      const anchor=renderedVirtualRows.find(r=>r.el.dataset.sid===viewportAnchorBeforeRender.id);
+      if(anchor) list.scrollTop+=anchor.el.getBoundingClientRect().top-list.getBoundingClientRect().top-viewportAnchorBeforeRender.y;
+    }
   }
+  _resyncSessionVirtualWindowAfterRender(list, virtualWindow);
   const archivePagingFilterActive=_sessionArchivePagingFilterActive();
   if(_showArchived&&!archivePagingFilterActive){
     const activeArchivedTotal=_sessionSourceFilter==='cli'?_archivedCliCount:_archivedWebuiCount;
@@ -9194,11 +9374,12 @@ function renderSessionListFromCache(){
     const el=document.createElement('div');
     const isActive=_sessionLineageContainsSession(s,activeSidForSidebar);
     const ownStreaming=_isSessionEffectivelyStreaming(s);
-    const isStreaming=ownStreaming||!!s._child_session_streaming;
+    // The row's indicator belongs to this conversation, not its nested children.
+    const isStreaming=ownStreaming;
     _rememberRenderedStreamingState(s, ownStreaming);
     _rememberRenderedSessionSnapshot(s);
-    const hasUnread=(_hasUnreadForSession(s)||!!s._child_session_has_unread)&&!isActive;
-    const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
+    const hasUnread=_hasUnreadForSession(s)&&!isActive;
+    const attention=_sessionAttentionState(s);
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
     el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
@@ -9310,8 +9491,13 @@ function renderSessionListFromCache(){
     if(lineageSegmentsExpanded&&needsLineageReport){
       _fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());
     }
+    const childCount=typeof s._child_session_count==='number'?s._child_session_count:(Array.isArray(s._child_sessions)?s._child_sessions.length:0);
+    const childAttention=_sessionAttentionState({attention:s._child_session_attention});
+    const childState={isStreaming:!!s._child_session_streaming,hasUnread:!!s._child_session_has_unread,attention:childAttention};
+    const hasChildState=childState.isStreaming||childState.hasUnread||!!childAttention;
+    let segmentCountEl=null;
     if(segmentCount>0){
-      const segmentCountEl=document.createElement('span');
+      segmentCountEl=document.createElement('span');
       segmentCountEl.className='session-lineage-count'+(canExpandLineageSegments?' expandable':'');
       const segmentLabel=t('session_meta_segments', segmentCount);
       segmentCountEl.textContent=segmentLabel;
@@ -9336,23 +9522,57 @@ function renderSessionListFromCache(){
           if(e.key==='Enter'||e.key===' '){toggleLineageSegments(e);}
         };
       }
-      titleRow.appendChild(segmentCountEl);
+      if(!childCount&&!hasChildState) titleRow.appendChild(segmentCountEl);
     }
-    const childCount=typeof s._child_session_count==='number'?s._child_session_count:(Array.isArray(s._child_sessions)?s._child_sessions.length:0);
-    if(childCount>0){
+    const childrenExpanded=childCount>0&&Array.isArray(s._child_sessions)&&(_expandedChildSessionKeys.has(lineageKey)||!!searchQueryRaw);
+    // Reference-only archived children contribute state without becoming navigable rows.
+    if(childCount>0||hasChildState){
       const childCountEl=document.createElement('span');
-      childCountEl.className='session-child-count';
-      const childLabel=t('session_meta_children', childCount);
-      childCountEl.textContent=childLabel;
-      childCountEl.title=_sessionChildBadgeTooltip(childLabel);
+      childCountEl.className='session-child-count'
+        +(childAttention&&childAttention.kind==='approval'?' is-attention-approval':(childAttention&&childAttention.kind==='clarify'?' is-attention-clarify':''));
+      const childLabel=childCount>0?t('session_meta_children', childCount):t('session_child_archived_short');
+      const label=document.createElement('span');
+      label.className='session-child-count-label';
+      label.textContent=childLabel;
+      childCountEl.appendChild(label);
+      const childBadgeTip=childCount>0?_sessionChildBadgeTooltip(childLabel):t('session_child_archived');
+      childCountEl.title=childBadgeTip;
+      if(hasChildState){
+        const state=_createChildSessionStateIndicator(childState,'session-child-count-state');
+        childCountEl.appendChild(state);
+        const concurrentRunning=childAttention&&childState.isStreaming?` · ${t('session_child_running')}`:'';
+        const concurrentUnread=childState.hasUnread&&(childAttention||childState.isStreaming)?` · ${t('session_child_unread')}`:'';
+        childCountEl.title=`${state.title}${concurrentRunning}${concurrentUnread} · ${childBadgeTip}`;
+        // Both marks belong to the child aggregate, never to the parent's dot.
+        if(childAttention&&childState.isStreaming&&(!childrenExpanded||s._child_session_hidden_streaming)){
+          childCountEl.appendChild(_createChildSessionStateIndicator(
+            {isStreaming:true},'session-child-activity-indicator'));
+        }
+      }
       ['pointerdown','pointerup','click'].forEach(ev=>childCountEl.addEventListener(ev,e=>e.stopPropagation()));
-      childCountEl.onclick=(e)=>{
-        e.stopPropagation();
-        const key=_sidebarLineageKeyForRow(s);
-        if(_expandedChildSessionKeys.has(key)) _expandedChildSessionKeys.delete(key);
-        else _expandedChildSessionKeys.add(key);
-        renderSessionListFromCache();
-      };
+      if(childCount>0){
+        // Touch focus can resize the row's action gutter before the synthetic
+        // click, moving this chip away from the finger. Keyboard focus is unchanged.
+        childCountEl.addEventListener('pointerdown',e=>{if(e.pointerType==='touch') e.preventDefault();});
+        childCountEl.setAttribute('role','button');
+        childCountEl.setAttribute('tabindex','0');
+        childCountEl.setAttribute('aria-expanded',childrenExpanded?'true':'false');
+        childCountEl.setAttribute('aria-label',childCountEl.title);
+        const toggleChildren=(e)=>{
+          e.preventDefault();
+          e.stopPropagation();
+          if(_expandedChildSessionKeys.has(lineageKey)) _expandedChildSessionKeys.delete(lineageKey);
+          else _expandedChildSessionKeys.add(lineageKey);
+          renderSessionListFromCache();
+        };
+        childCountEl.onclick=toggleChildren;
+        childCountEl.onkeydown=(e)=>{
+          if(e.key==='Enter'||e.key===' ') toggleChildren(e);
+        };
+      }else{
+        childCountEl.setAttribute('role','img');
+        childCountEl.setAttribute('aria-label',childCountEl.title);
+      }
       titleRow.appendChild(childCountEl);
     }
     if(s.is_cli_session||_isMessagingSession(s)){
@@ -9384,6 +9604,13 @@ function renderSessionListFromCache(){
       meta.textContent=metaBits.join(' · ');
       sessionText.appendChild(meta);
     }
+    if(segmentCountEl&&_sessionRowHasLineageSummary(s)){
+      // Keep earlier-turn navigation readable without crowding child status.
+      const lineageSummary=document.createElement('div');
+      lineageSummary.className='session-lineage-summary';
+      lineageSummary.appendChild(segmentCountEl);
+      sessionText.appendChild(lineageSummary);
+    }
     const contentPreview=titleMatched?'':_sessionSearchContentPreview(s,searchQueryRaw);
     if(contentPreview){
       const preview=document.createElement('div');
@@ -9401,6 +9628,7 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-lineage-segment'+(activeSidForSidebar&&seg.session_id===activeSidForSidebar?' active':'');
+        row.dataset.sid=seg.session_id;
         const segTitle=_sessionDisplayTitle(seg)||t('session_lineage_segment_untitled');
         const segTime=_formatRelativeSessionTime(_sessionTimestampMs(seg));
         row.textContent=`-> ${segTitle} - ${segTime}`;
@@ -9415,7 +9643,7 @@ function renderSessionListFromCache(){
       }
       sessionText.appendChild(lineageList);
     }
-    if(childCount>0&&Array.isArray(s._child_sessions)&&(_expandedChildSessionKeys.has(lineageKey)||!!searchQueryRaw)){
+    if(childrenExpanded){
       const childList=document.createElement('div');
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
@@ -9617,19 +9845,16 @@ function renderSessionListFromCache(){
         };
       };
       for(const child of sortedChildren){
+        const childIsActive=!!(activeSidForSidebar&&child.session_id===activeSidForSidebar);
+        const childStreaming=_isSessionEffectivelyStreaming(child);
+        const childHasUnread=_hasUnreadForSession(child)&&!childIsActive;
+        const childAttention=_sessionAttentionState(child);
+        const childAttentionClass=childAttention?(childAttention.kind==='approval'?' attention-approval':(childAttention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
+        const childStateClasses=(childIsActive?' active':'')+(childStreaming?' streaming':'')+(childHasUnread?' unread':'')+(childAttention?' needs-attention':'')+childAttentionClass;
+        const makeChildState=()=>_createChildSessionStateIndicator({isStreaming:childStreaming,hasUnread:childHasUnread,attention:childAttention},'session-child-session-state');
         if(child.session_source==='fork'){
-          const childIsActive=!!(activeSidForSidebar&&child.session_id===activeSidForSidebar);
-          const childStreaming=_isSessionEffectivelyStreaming(child);
-          const childHasUnread=_hasUnreadForSession(child)&&!childIsActive;
-          const childAttention=_sessionAttentionState(child);
-          const childAttentionClass=childAttention?(childAttention.kind==='approval'?' attention-approval':(childAttention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
           const row=document.createElement('div');
-          row.className='session-child-session session-child-session-fork'
-            +(childIsActive?' active':'')
-            +(childStreaming?' streaming':'')
-            +(childHasUnread?' unread':'')
-            +(childAttention?' needs-attention':'')
-            +childAttentionClass;
+          row.className='session-child-session session-child-session-fork'+childStateClasses;
           row.dataset.sid=child.session_id;
           if(_sessionSelectMode&&!_isReadOnlySession(child)){
             const cbW=document.createElement('label');cbW.className='session-select-cb-wrapper';
@@ -9665,16 +9890,7 @@ function renderSessionListFromCache(){
             mainBtn.textContent=childLabelFor(child);
           });
           row.appendChild(mainBtn);
-          const state=document.createElement('span');
-          state.className='session-state-indicator session-child-session-state'
-            +(childStreaming?' is-streaming':'')
-            +(childHasUnread?' is-unread':'')
-            +(childAttention?(childAttention.kind==='approval'?' is-attention-approval':(childAttention.kind==='clarify'?' is-attention-clarify':' is-attention-generic')):'');
-          state.setAttribute('aria-hidden','true');
-          const childStateTip=_sessionStateTooltip({isStreaming:childStreaming,hasUnread:childHasUnread});
-          if(childAttention&&childAttention.title) state.title=childAttention.title;
-          else if(childStateTip) state.title=childStateTip;
-          row.appendChild(state);
+          row.appendChild(makeChildState());
           const readOnlyChild=_isReadOnlySession(child);
           let actions=null;
           if(!readOnlyChild){
@@ -9717,9 +9933,15 @@ function renderSessionListFromCache(){
         }
         const row=document.createElement('button');
         row.type='button';
-        row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        row.textContent=childLabelFor(child);
-        row.title='Open child session';
+        row.className='session-child-session session-child-session-delegated'+childStateClasses;
+        row.dataset.sid=child.session_id;
+        const label=document.createElement('span');
+        label.className='session-child-session-label';
+        label.textContent=childLabelFor(child);
+        row.appendChild(label);
+        const state=makeChildState();
+        row.appendChild(state);
+        row.title=state.title?`${t('session_child_open')} · ${state.title}`:t('session_child_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
           if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
