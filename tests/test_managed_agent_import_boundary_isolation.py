@@ -14,9 +14,10 @@ from __future__ import annotations
 
 import importlib
 import os
+from pathlib import Path
 import sys
 
-from managed_agent_startup import agent_import_boundary
+from managed_agent_startup import LAZY_INSTALL_GUARD, agent_import_boundary
 
 _STUB = """\
 import os
@@ -93,3 +94,73 @@ def test_in_process_agent_venv_stays_importable(tmp_path, monkeypatch):
     assert sys.path == [str(venv)] + host_sys_path
     assert os.environ["PYTHONPATH"] == "/host/site-packages"
     assert os.environ["VIRTUAL_ENV"] == "/host/venv"
+
+
+def _snapshot():
+    """This process's interpreter state, as the boundary must hand it back."""
+    return (
+        sys.path[:],
+        os.environ.get("PATH"),
+        os.environ.get("PYTHONPATH"),
+        os.environ.get("VIRTUAL_ENV"),
+        os.putenv,
+        os.unsetenv,
+        os.environ.get(LAZY_INSTALL_GUARD),
+    )
+
+
+def _assert_restored(snapshot):
+    path, host_path, pythonpath, virtual_env, putenv, unsetenv, guard = snapshot
+    assert sys.path == path
+    assert os.environ.get("PATH") == host_path
+    assert os.environ.get("PYTHONPATH") == pythonpath
+    assert os.environ.get("VIRTUAL_ENV") == virtual_env
+    assert (os.putenv, os.unsetenv) == (putenv, unsetenv)
+    # The guard is the whole point: left set, on-demand installs stay disabled
+    # for the rest of the process even though the operator allowed them.
+    assert os.environ.get(LAZY_INSTALL_GUARD) == guard
+
+
+def test_malformed_pyvenv_cfg_is_tolerated(tmp_path, monkeypatch):
+    """A ``version`` without a minor part must not escape as IndexError.
+
+    The release parser runs while the boundary rewrites the environment back,
+    so an exception there would skip the restores and keep the guard set.
+    """
+    release = f"{sys.version_info[0]}.{sys.version_info[1] + 1}"
+    _agent_with_venv(tmp_path, monkeypatch, release)
+    (tmp_path / "agent-venv" / "pyvenv.cfg").write_text(
+        "version = 3\n", encoding="utf-8"
+    )
+    snapshot = _snapshot()
+
+    try:
+        with agent_import_boundary():
+            importlib.import_module("hermes_bootstrap")
+    finally:
+        sys.modules.pop("hermes_bootstrap", None)
+
+    _assert_restored(snapshot)
+
+
+def test_unreadable_pyvenv_cfg_is_tolerated(tmp_path, monkeypatch):
+    """An unreadable path must not escape as OSError either."""
+    release = f"{sys.version_info[0]}.{sys.version_info[1] + 1}"
+    _agent_with_venv(tmp_path, monkeypatch, release)
+    real_is_file = Path.is_file
+
+    def unreadable(self):
+        if self.name == "pyvenv.cfg":
+            raise PermissionError(13, "Permission denied")
+        return real_is_file(self)
+
+    snapshot = _snapshot()
+
+    try:
+        monkeypatch.setattr(Path, "is_file", unreadable)
+        with agent_import_boundary():
+            importlib.import_module("hermes_bootstrap")
+    finally:
+        sys.modules.pop("hermes_bootstrap", None)
+
+    _assert_restored(snapshot)

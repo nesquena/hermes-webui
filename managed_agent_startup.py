@@ -54,18 +54,26 @@ def _release_from_dir_name(part: str) -> tuple[int, int] | None:
 
 
 def _venv_release(entry: str) -> tuple[int, int] | None:
-    """The Python release the ``pyvenv.cfg`` above ``entry`` names, if any."""
+    """The Python release the ``pyvenv.cfg`` above ``entry`` names, if any.
+
+    A config that cannot be read, or that does not spell a ``major.minor``
+    release, is reported as "no release" instead of raising: this runs while
+    the import boundary puts the process back together, and an exception there
+    would strand the environment rewrites the boundary exists to undo.
+    """
     for candidate in (Path(entry), *Path(entry).parents)[:_VENV_CFG_DEPTH]:
         config = candidate / "pyvenv.cfg"
-        if not config.is_file():
-            continue
         try:
+            if not config.is_file():
+                continue
             for line in config.read_text(
                 encoding="utf-8", errors="replace"
             ).splitlines():
                 name, _, value = line.partition("=")
                 if name.strip() == "version":
                     parts = value.strip().split(".")
+                    if len(parts) < 2:
+                        return None
                     return int(parts[0]), int(parts[1])
         except (OSError, ValueError):
             return None
@@ -154,26 +162,35 @@ def agent_import_boundary():
             # shared dependency. Entries the activation dropped (the interpreter's
             # own site-packages, which the server booted with) come back after
             # them, so nothing the server needs is lost.
-            kept = [
-                entry for entry in sys.path if entry and not _abi_incompatible(entry)
-            ]
-            dropped = [
-                entry
-                for entry in saved_path
-                if entry not in kept and not _abi_incompatible(entry)
-            ]
-            sys.path[:] = kept + dropped
-            os.putenv = saved_putenv
-            os.unsetenv = saved_unsetenv
-            for key, value in saved_env.items():
-                if value is None:
-                    os.environ.pop(key, None)
+            try:
+                kept = [
+                    entry
+                    for entry in sys.path
+                    if entry and not _abi_incompatible(entry)
+                ]
+                dropped = [
+                    entry
+                    for entry in saved_path
+                    if entry not in kept and not _abi_incompatible(entry)
+                ]
+                sys.path[:] = kept + dropped
+            finally:
+                # Unconditional, so the rewrites above are undone even if the
+                # sys.path rebuild raises: this boundary exists to hand the
+                # guard back, and a cleanup error must not keep it set to "1"
+                # (or leave the Agent's PYTHONPATH/PATH/venv in place) for the
+                # rest of the process.
+                os.putenv = saved_putenv
+                os.unsetenv = saved_unsetenv
+                for key, value in saved_env.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+                if previous is None:
+                    os.environ.pop(LAZY_INSTALL_GUARD, None)
                 else:
-                    os.environ[key] = value
-            if previous is None:
-                os.environ.pop(LAZY_INSTALL_GUARD, None)
-            else:
-                os.environ[LAZY_INSTALL_GUARD] = previous
+                    os.environ[LAZY_INSTALL_GUARD] = previous
 
 
 def activate_managed_agent() -> None:
