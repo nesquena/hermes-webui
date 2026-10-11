@@ -91,10 +91,22 @@ def test_matching_bundle_passes(routes, monkeypatch):
 
 
 def test_missing_header_passes(routes, monkeypatch):
-    """curl, pytest handlers and pre-header clients must not be locked out."""
+    """curl, pytest handlers and scripts (no Origin/Referer) must not be locked out."""
     monkeypatch.setattr(routes, "WEBUI_VERSION", "exp-v9.9.9", raising=False)
     h = _Handler({})
     assert routes._stale_client_bundle_response(h) is None
+
+
+def test_missing_header_from_a_browser_page_is_stale(routes, monkeypatch):
+    """The client #8155 was filed about: a page running a bundle that predates
+    the header. Browser fetch() always sends Origin (or Referer) to a same-origin
+    API, so a page with no bundle header is a pre-header bundle, i.e. stale."""
+    monkeypatch.setattr(routes, "WEBUI_VERSION", "exp-v9.9.9", raising=False)
+    for hdrs in ({"Origin": "https://host.example"}, {"Referer": "https://host.example/session/abc"}):
+        payload = routes._stale_client_bundle_response(_Handler(hdrs))
+        assert payload is not None, hdrs
+        assert payload["type"] == "stale_client_bundle"
+        assert payload["server_version"] == "exp-v9.9.9"
 
 
 def test_chat_start_returns_409_before_touching_session(routes, monkeypatch):

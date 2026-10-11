@@ -25076,10 +25076,24 @@ def _stale_client_bundle_response(handler) -> dict | None:
         client_version = (handler.headers.get(STALE_CLIENT_BUNDLE_HEADER) or "").strip()
     except Exception:
         return None
-    if not client_version:
-        return None
     server_version = str(globals().get("WEBUI_VERSION") or _current_webui_version() or "").strip()
-    if not server_version or client_version == server_version:
+    if not server_version:
+        return None
+    if not client_version:
+        # No header. Two very different callers look like this: a non-browser
+        # client (curl, pytest, scripts) which must keep working, and a browser
+        # page running a bundle that predates the header — exactly the client
+        # #8155 was filed about, which otherwise never learns it is stale. A
+        # browser fetch() to a same-origin API always carries Origin or Referer;
+        # curl and tests do not. Use that to tell them apart.
+        try:
+            from_page = bool((handler.headers.get("Origin") or handler.headers.get("Referer") or "").strip())
+        except Exception:
+            from_page = False
+        if not from_page:
+            return None
+        client_version = "unknown (pre-header bundle)"
+    elif client_version == server_version:
         return None
     return {
         "error": (
