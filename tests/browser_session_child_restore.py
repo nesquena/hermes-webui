@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import time
 import urllib.request
 
@@ -36,7 +37,7 @@ def main():
                HERMES_WEBUI_HOST='127.0.0.1', HERMES_WEBUI_PORT=str(port),
                HERMES_WEBUI_AGENT_DIR=str(state / 'no-agent'), HERMES_WEBUI_SKIP_ONBOARDING='1',
                HERMES_DISABLE_LAZY_INSTALLS='1', PYTHONPATH='', SSH_ASKPASS='', GIT_ASKPASS='', GIT_TERMINAL_PROMPT='0')
-    server_python = os.environ.get('HERMES_WEBUI_SERVER_PYTHON', str(ROOT / '.venv/bin/python'))
+    server_python = os.environ.get('HERMES_WEBUI_SERVER_PYTHON', sys.executable)
     results, errors = [], []
     with (args.output / 'server.log').open('w') as log:
         proc = subprocess.Popen([server_python, 'server.py'], cwd=args.repo, env=env, stdout=log, stderr=subprocess.STDOUT)
