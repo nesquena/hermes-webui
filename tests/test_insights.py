@@ -338,32 +338,34 @@ def test_insights_mobile_models_table_has_contained_overflow():
 
 
 def test_insights_usage_grid_desktop_split_favors_models():
-    # Usage row (Token Breakdown + Models): on desktop the Models card gets 3x
-    # the width of Token Breakdown so long model IDs (e.g. "vendor/org/model:quant")
-    # render in full instead of ellipsizing in the .insights-model-name cell.
-    usage_rules = [line for line in STYLE_CSS.splitlines()
-                   if line.startswith('.insights-usage-grid{')]
-    assert usage_rules, 'a desktop .insights-usage-grid rule must exist'
-    rule = usage_rules[0]
-    assert 'minmax(160px,1fr) minmax(0,3fr)' in rule, f'usage row must split 25/75 with a 160px floor, got: {rule}'
-    # Cascade: equal specificity to .insights-row, so the 25/75 rule must come
-    # AFTER it in the file to win for the row that carries both classes.
-    assert STYLE_CSS.index('.insights-usage-grid{') > STYLE_CSS.index('.insights-row{'), \
-        'the 25/75 rule must follow .insights-row so it wins the cascade'
-    # The #2104 mobile collapse must still win below 640px: the single-column
-    # declaration must live INSIDE the scoped mobile block, and that block must
-    # start after the desktop rule so it wins the cascade at narrow widths.
+    # Usage row (Token Breakdown + Models): on wide content columns the Models
+    # card gets 3x the width of Token Breakdown so long model IDs
+    # (e.g. "vendor/org/model:quant") render in full instead of ellipsizing.
+    # The split is gated on the CONTENT column (container query), not the
+    # viewport, so a narrow column (small window or sidebar open) stacks the
+    # row instead of squeezing either card past its minimum.
+    assert '#insightsContent{container-type:inline-size' in STYLE_CSS, \
+        'insights content column must declare a size container'
+    cq_start = STYLE_CSS.find('@container insights (min-width: 620px)')
+    assert cq_start != -1, 'the 25/75 split must be gated on the insights container width'
+    cq_end = STYLE_CSS.find('}', STYLE_CSS.find('}', cq_start) + 1)
+    cq_block = STYLE_CSS[cq_start:cq_end + 1]
+    assert 'minmax(160px,1fr) minmax(0,3fr)' in cq_block, \
+        f'container-gated rule must split 25/75 with a 160px floor, got: {cq_block}'
+    # Default (outside the query): stacked single column, so narrow columns
+    # never split the row below the Models table's minimum width.
+    default_rules = [line for line in STYLE_CSS.splitlines()
+                     if line.startswith('.insights-usage-grid{')]
+    assert default_rules and all('grid-template-columns:1fr;' in r for r in default_rules), \
+        f'default usage-grid rule must stack, got: {default_rules}'
+    # The #2104 mobile block must still force single-column inside its scoped
+    # @media block (belt-and-braces below 640px viewport).
     mobile_start = STYLE_CSS.find('/* ── Mobile layout for Token Breakdown + Models')
     mobile_end = STYLE_CSS.find('/* ── Checkpoints', mobile_start)
     mobile_block = STYLE_CSS[mobile_start:mobile_end]
     assert '@media (max-width: 640px)' in mobile_block, 'mobile block must be scoped to <=640px'
-    mobile_rule = [line for line in mobile_block.splitlines()
-                   if '.insights-usage-grid' in line and '{' in line]
-    assert mobile_rule, 'mobile block must contain a .insights-usage-grid rule'
     assert 'grid-template-columns: 1fr' in mobile_block, \
         'mobile block must force single-column for the usage grid'
-    assert mobile_start > STYLE_CSS.index('.insights-usage-grid{'), \
-        'the mobile single-column block must follow the desktop 25/75 rule'
 
 
 # ── #3189: CLI/gateway sessions in Insights + webui double-count guard ──────
