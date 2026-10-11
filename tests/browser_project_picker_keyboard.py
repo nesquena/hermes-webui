@@ -50,7 +50,12 @@ WHAT IT CHECKS
     side: the row that has focus is brought back into the menu's box;
   - opened by a real touch held on the row and lifted beside the menu (CDP
     touch events, not a helper): focus stays in the menu, and End goes to its
-    last row and not to the conversation list.
+    last row and not to the conversation list;
+  - opened by a real touch held on a row in the middle of the screen, where
+    the menu opens over the finger (390x844 and 844x390), and lifted: no click
+    reaches a menu row, no request is sent, the menu stays open with focus in
+    it, and a tap on a row afterwards works; the same on a fork's row, whose
+    next tap must open the fork.
   the focus cue, on the dark and on the light theme
   - on the light theme the focused row's ring is the skin's --accent-text,
     solid, at least 3:1 against the picker (the translucent --focus-ring was
@@ -847,6 +852,191 @@ def _check_touch_release_keeps_menu_focus(browser, seed):
             failures.append(
                 f"  [{label}] End scrolled the conversation list from {held['listScroll']} to {scrolled}"
             )
+        failures.extend(f"  [{label}] pageerror: {err}" for err in errors)
+    finally:
+        ctx.close()
+    return failures
+
+
+# The centre of the title of the conversation row nearest the middle of the
+# screen: where a menu too tall to fit above or below its row ends up over the
+# finger that opened it.
+MIDDLE_ROW_JS = """() => {
+  const rows = Array.from(document.querySelectorAll('.session-item')).filter(row => {
+    const box = row.getBoundingClientRect();
+    return box.top > 60 && box.bottom < innerHeight - 20 && row.querySelector('.session-title');
+  });
+  if (!rows.length) return null;
+  const middle = innerHeight / 2;
+  rows.sort((a, b) => Math.abs(a.getBoundingClientRect().top - middle) - Math.abs(b.getBoundingClientRect().top - middle));
+  const title = rows[0].querySelector('.session-title').getBoundingClientRect();
+  return {x: title.left + title.width / 2, y: title.top + title.height / 2};
+}"""
+
+# Every click from here on, by what it landed on.
+RECORD_CLICKS_JS = """() => {
+  window.__clicks = [];
+  document.addEventListener('click', e => {
+    const row = e.target.closest('.session-action-opt');
+    const fork = e.target.closest('.session-child-session-main');
+    window.__clicks.push(row ? 'menu row: ' + row.textContent.trim() : fork ? 'fork: ' + fork.textContent.trim()
+      : e.target.tagName.toLowerCase() + '.' + String(e.target.className).split(' ')[0]);
+  }, true);
+}"""
+
+# A fork's row inside its expanded parent, and whether the one-shot guard that
+# swallows the click after a long press is still armed on it.
+FORK_ROW_JS = """(sid) => {
+  const parent = document.querySelector('.session-item[data-sid="' + sid + '"]');
+  const row = parent && parent.querySelector('.session-child-session');
+  const main = row && row.querySelector('.session-child-session-main');
+  if (!main) return null;
+  const box = main.getBoundingClientRect();
+  return {x: box.left + box.width / 2, y: box.top + box.height / 2, armed: !!row._skipNextChildOpen,
+          sid: row.dataset.sid || null, active: main.classList.contains('active')};
+}"""
+
+
+def _touch(session, kind, point=None):
+    points = [{"x": point["x"], "y": point["y"], "id": 1}] if point else []
+    session.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": points})
+
+
+def _over(box, point):
+    return bool(box) and box["left"] <= point["x"] <= box["right"] and box["top"] <= point["y"] <= box["bottom"]
+
+
+def _check_long_press_runs_nothing(browser, seed, size):
+    """A real touch held on a conversation until the ⋮ menu opens over the
+    finger, then lifted. The browser's own click for that touch would land on
+    the menu row under it and run it (copy the link, pin, duplicate). Nothing
+    may run, the menu must stay open with focus in it, and a deliberate tap on
+    a menu row afterwards must still work. Returns failure lines."""
+    width, height = size
+    label = f"⋮ menu, long press and release over the menu at {width}x{height}"
+    ctx, page, errors = _new_page(
+        browser, viewport={"width": width, "height": height}, has_touch=True, is_mobile=True
+    )
+    if page is None:
+        return [f"  [{label}] {errors}"]
+    failures = []
+    writes = []
+    page.on(
+        "request",
+        lambda request: writes.append(f"{request.method} {request.url.split('/api/')[-1]}")
+        if "/api/" in request.url and request.method != "GET"
+        else None,
+    )
+    try:
+        _open_mobile_drawer(page)
+        page.evaluate("renderSessionList()")
+        page.wait_for_timeout(SETTLE_MS)
+        point = page.evaluate(MIDDLE_ROW_JS)
+        if not point:
+            return [f"  [{label}] no conversation row in the middle of the screen"]
+        page.evaluate(RECORD_CLICKS_JS)
+        touch = ctx.new_cdp_session(page)
+        _touch(touch, "touchStart", point)
+        page.wait_for_timeout(LONG_PRESS_MS)
+        held = page.evaluate(LIST_AND_MENU_JS)
+        _touch(touch, "touchEnd")
+        page.wait_for_timeout(SETTLE_MS)
+        if not held["menu"]:
+            return [f"  [{label}] the long press did not open the ⋮ menu"]
+        if not _over(held["menu"], point):
+            # Guard: beside the menu the click lands on the row, which is the
+            # other check's case.
+            return [f"  [{label}] the menu did not open over the finger, so nothing was tested"]
+        clicks = page.evaluate("() => window.__clicks")
+        if clicks:
+            failures.append(f"  [{label}] lifting the finger clicked {clicks}")
+        if writes:
+            failures.append(f"  [{label}] lifting the finger sent {writes}")
+        released = page.evaluate(MENU_FOCUS_JS)
+        if released.get("problem"):
+            failures.append(f"  [{label}] after the finger lifts: {released['problem']}")
+            return failures
+        # A tap on purpose still reaches the row it lands on.
+        first = page.evaluate(
+            "() => { const row = document.querySelector('.session-action-menu .session-action-opt:not([disabled])');"
+            " const box = row.getBoundingClientRect();"
+            " return {x: box.left + box.width / 2, y: box.top + box.height / 2, text: row.textContent.trim()}; }"
+        )
+        _touch(touch, "touchStart", first)
+        page.wait_for_timeout(60)
+        _touch(touch, "touchEnd")
+        page.wait_for_timeout(SETTLE_MS)
+        clicks = page.evaluate("() => window.__clicks")
+        if clicks != [f"menu row: {first['text']}"]:
+            failures.append(f"  [{label}] a tap on '{first['text']}' afterwards clicked {clicks}")
+        failures.extend(f"  [{label}] pageerror: {err}" for err in errors)
+    finally:
+        ctx.close()
+    return failures
+
+
+def _check_fork_long_press_runs_nothing(browser, seed):
+    """The same on a fork's row inside its expanded parent, which has gesture
+    handlers of its own: lifting the finger opens nothing, and the guard that
+    used to swallow that click is not left armed, so the next tap on the fork
+    opens it. Returns failure lines."""
+    label = "⋮ menu, long press and release on a fork at 844x390"
+    # On its side, where the menu has no room but over the row.
+    ctx, page, errors = _new_page(
+        browser, viewport={"width": 844, "height": 390}, has_touch=True, is_mobile=True
+    )
+    if page is None:
+        return [f"  [{label}] {errors}"]
+    failures = []
+    try:
+        _open_mobile_drawer(page)
+        page.evaluate("renderSessionList()")
+        page.wait_for_timeout(SETTLE_MS)
+        placed = page.evaluate(TALL_ANCHOR_AT_JS, {"sid": seed["beta"], "offset": 60})
+        if placed.get("problem"):
+            return [f"  [{label}] {placed['problem']}"]
+        page.wait_for_timeout(SETTLE_MS)
+        fork = page.evaluate(FORK_ROW_JS, seed["beta"])
+        if not fork:
+            return [f"  [{label}] the parent has no fork row"]
+        page.evaluate(RECORD_CLICKS_JS)
+        touch = ctx.new_cdp_session(page)
+        _touch(touch, "touchStart", fork)
+        page.wait_for_timeout(LONG_PRESS_MS)
+        held = page.evaluate(LIST_AND_MENU_JS)
+        _touch(touch, "touchEnd")
+        page.wait_for_timeout(SETTLE_MS)
+        if not held["menu"]:
+            return [f"  [{label}] the long press did not open the ⋮ menu"]
+        if not _over(held["menu"], fork):
+            return [f"  [{label}] the menu did not open over the finger, so nothing was tested"]
+        clicks = page.evaluate("() => window.__clicks")
+        if clicks:
+            failures.append(f"  [{label}] lifting the finger clicked {clicks}")
+        if not page.evaluate("() => !!document.querySelector('.session-action-menu')"):
+            failures.append(f"  [{label}] the menu closed when the finger lifted")
+        after = page.evaluate(FORK_ROW_JS, seed["beta"])
+        if after and after["armed"]:
+            failures.append(f"  [{label}] the fork row still swallows its next click")
+        # Close the menu, then tap the fork on purpose: it must open.
+        page.evaluate("() => closeSessionActionMenu()")
+        page.wait_for_timeout(200)
+        fork = page.evaluate(FORK_ROW_JS, seed["beta"])
+        if not fork:
+            return failures + [f"  [{label}] the fork row is gone after the menu closed"]
+        if fork["active"]:
+            return failures + [f"  [{label}] the fork is already the open conversation, so the tap proves nothing"]
+        _touch(touch, "touchStart", fork)
+        page.wait_for_timeout(60)
+        _touch(touch, "touchEnd")
+        _wait_until(
+            page,
+            "() => { const main = document.querySelector('.session-item[data-sid=\"%s\"] .session-child-session-main');"
+            " return !main || main.classList.contains('active'); }" % seed["beta"],
+        )
+        opened = page.evaluate(FORK_ROW_JS, seed["beta"])
+        if opened and not opened["active"]:
+            failures.append(f"  [{label}] a tap on the fork afterwards did not open it")
         failures.extend(f"  [{label}] pageerror: {err}" for err in errors)
     finally:
         ctx.close()
@@ -1992,6 +2182,18 @@ def main():
                 failures.extend(found)
                 if not found:
                     print(f"OK  {done}")
+
+            # With the long list: a row in the middle of the screen, whose menu
+            # has no room above or below it and opens over the finger.
+            for size in ((390, 844), (844, 390)):
+                found = _check_long_press_runs_nothing(browser, seed, size)
+                failures.extend(found)
+                if not found:
+                    print(f"OK  ⋮ menu, real long press and release over the menu at {size[0]}x{size[1]} — nothing runs, the menu stays open, a tap on a row afterwards works")
+            found = _check_fork_long_press_runs_nothing(browser, seed)
+            failures.extend(found)
+            if not found:
+                print("OK  ⋮ menu, real long press and release on a fork at 844x390 — nothing opens, and the next tap on the fork opens it")
 
             # Still three projects, and the long list of conversations.
             found = _check_resize(browser) + _check_resize_hides_the_sidebar(browser)

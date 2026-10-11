@@ -648,3 +648,27 @@ def test_focus_that_falls_out_of_the_open_menu_onto_nothing_comes_back():
     assert "if(active&&active!==document.body&&active!==document.documentElement) return;" in handler
     assert "row.focus({preventScroll:true})" in handler
 
+
+def test_the_touch_that_opened_the_menu_does_not_click_what_is_under_it():
+    """With 44px rows the menu can open over the finger. A cancelled touchend
+    sends no compatibility click; the listener has to be non-passive to cancel.
+    What a real touch does is in the browser gate."""
+    end = SESSIONS_JS.index("    el.addEventListener('touchend',(e)=>{")
+    handler = SESSIONS_JS[end : SESSIONS_JS.index("    return el;", end)]
+    cancel = "if(_longPressMenuOpened&&e.cancelable) e.preventDefault();"
+
+    assert handler.count(cancel) == 1
+    assert handler.index(cancel) < handler.index("_finishSessionGesture(")
+    assert handler.rstrip().endswith("},{passive:false});")
+
+
+def test_a_fork_row_cancels_the_same_click_and_disarms_its_one_shot_guard():
+    """No click follows a cancelled touchend, so the guard that would have
+    swallowed it is cleared, or the next tap on the fork would be lost."""
+    start = SESSIONS_JS.index("        rowEl.addEventListener('touchend',(e)=>{")
+    handler = SESSIONS_JS[start : SESSIONS_JS.index("        rowEl.onpointercancel=", start)]
+
+    assert "if(!_longPressMenuOpened||!e.cancelable) return;" in handler
+    assert handler.index("e.preventDefault();") < handler.index("rowEl._skipNextChildOpen=false;")
+    assert handler.rstrip().endswith("},{passive:false});")
+

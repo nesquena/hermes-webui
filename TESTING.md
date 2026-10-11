@@ -181,8 +181,12 @@ input: a right click on the row followed by End and the screen turned from
 row that has focus must still be inside the menu's box; and a touch (browser
 touch events) held on the row until the menu opens and lifted beside it, after
 which focus must still be in the menu and End must reach its last row without
-scrolling the conversation list. A touch lifted over the open menu, a hardware
-keyboard on a phone and a real rotation are not checked. In a long list the
+scrolling the conversation list; and a touch held on a row in the middle of the
+screen, where the menu opens over the finger (390x844 and 844x390, and a fork's
+row at 844x390), and lifted there, after which no menu row may have been
+clicked, no request sent, the menu must still be open with focus in it, and a
+tap on a menu row or on the fork must then work. A hardware keyboard on a
+phone, a real rotation and a real finger are not checked. In a long list the
 focused row must be inside
 the picker's box, or, in the batch picker, scrolled onto the screen by the
 conversation list. With a mouse on the light theme, a keyboard-focused row's
