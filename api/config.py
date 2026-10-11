@@ -1502,6 +1502,12 @@ def _custom_provider_identity_owners(
     ``_custom_provider_slug_key`` for the WebUI's own mint, applied to the record
     key AND its ``name``, so ``providers: {custom:晨光: ...}`` and
     ``providers: {晨光: {name: custom:晨光}}`` both count as owners.
+
+    A generic record that belongs to no slug by its own key — ``providers['custom']``,
+    or a bare-``custom`` ``model:`` block — owns one only by NAMING it, through its
+    display ``name`` or its ``provider_key``. ``name`` is read only for a
+    ``providers:`` record: a ``model:`` block's ``name`` is the MODEL's name and names
+    no provider (#8026 r14).
     """
     owners: set[str] = set()
     if isinstance(custom_providers, list):
@@ -1518,7 +1524,15 @@ def _custom_provider_identity_owners(
         for record_key, record in providers_cfg.items():
             values = [record_key]
             if isinstance(record, dict):
+                # A generic ``providers['custom']`` record belongs to no slug by its own
+                # key, so it owns one only by NAMING it: by display ``name`` (the Hermes
+                # v12 alias shape) or by ``provider_key``, the identity field the
+                # installed Agent's own alias matcher reads. Omitting ``provider_key``
+                # left such a record invisible here, so a new same-slug fallback entry
+                # minted the identity and the alias-owned route switched endpoints and
+                # failed ``auth_mismatch`` where master completed (#8026 r14).
                 values.append(record.get("name"))
+                values.append(record.get("provider_key"))
             for value in values:
                 if not str(value or "").strip():
                     continue
@@ -1527,13 +1541,29 @@ def _custom_provider_identity_owners(
                     owners.add(key)
     if isinstance(model_cfg, dict) and model_cfg:
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
+        # Which slug does this block claim? A ``custom:<slug>`` provider names it
+        # directly. A bare ``custom`` block belongs to no slug by itself, so it claims
+        # one only through an identity field of its own (``provider_key`` /
+        # ``custom_provider``): ``name`` is excluded because a ``model:`` block's
+        # ``name`` is the MODEL's name and names no provider (#8026 r14).
+        model_slug = (
+            _custom_provider_slug_key(model_provider) if model_provider.startswith("custom:") else ""
+        )
+        if not model_slug and model_provider == "custom":
+            for _identity_field in _CUSTOM_RECORD_IDENTITY_FIELDS:
+                if _identity_field == "name":
+                    continue
+                claimed = _custom_provider_slug_key(model_cfg.get(_identity_field))
+                if claimed and claimed != "custom":
+                    model_slug = claimed
+                    break
         # ``enabled`` is checked HERE as well as at selection time. A disabled
         # record is invisible to the Agent's resolver, so it must not own a route
         # either: without this, a switched-off ``model:`` block still claimed its
         # slug and hid a valid same-slug ``custom_providers[]`` entry, leaving the
         # named route with no connection at all.
         if (
-            model_provider.startswith("custom:")
+            model_slug
             and _raw_provider_record_enabled(model_cfg)
             and _custom_record_owns_connection(model_cfg, model_provider)
             # A ``model:`` block that the default-model picker wrote carries the
@@ -1544,11 +1574,9 @@ def _custom_provider_identity_owners(
             # and routes the next send by the keyless placeholder (401). A model
             # block at a DIFFERENT endpoint, or with none, is a real authority and
             # still counts.
-            and not _model_block_mirrors_fallback_entry(model_cfg, model_provider, custom_providers)
+            and not _model_block_mirrors_fallback_entry(model_cfg, model_slug, custom_providers)
         ):
-            key = _custom_provider_slug_key(model_provider)
-            if key:
-                owners.add(key)
+            owners.add(model_slug)
     return owners
 
 
@@ -7030,12 +7058,6 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             _model_block_serves_selected_custom_provider(persisted_provider, previous_config_data)
         )
 
-        # The endpoint the block carried BEFORE this click. The picker rewrites
-        # ``base_url`` to the selected entry's own endpoint, so only this snapshot
-        # can tell a route that already served that host from one that just left a
-        # different one (#8026 r12).
-        previous_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
-
         model_cfg["default"] = persisted_model
         if persisted_provider:
             model_cfg["provider"] = persisted_provider
@@ -7057,44 +7079,30 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
                 # endpoint at all.
                 model_cfg.pop("base_url", None)
 
-        persisted_base_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
         selected_fallback_entry = (
             _selected_fallback_entry(persisted_provider, config_data)
             if persisted_provider != previous_provider
             else None
         )
-        # A block whose endpoint this click REPLACED cannot hold a credential for the
-        # host it now names: whatever source it still carries was minted for the
-        # endpoint it just left. That holds whatever the selected entry declares — the
-        # picker copies the entry's URL into the block and leaves the block's own key in
-        # place, so a credentialed entry at the new host did not stop the previous
-        # route's key travelling there (#8026 r12, the shape Greptile reproduced). An
-        # independent model route at the entry's own endpoint keeps its key: its URL did
-        # not change.
-        endpoint_replaced = bool(
-            selected_fallback_entry
-            and persisted_base_url
-            and previous_base_url
-            and persisted_base_url != previous_base_url
-        )
+        # The block now serves a fallback entry it did not serve before the click, so
+        # whatever credential source it still carries was minted for the route it just
+        # left. The picker rewrites ``model.provider`` and copies the entry's URL into
+        # the block, but leaves the block's own key in place: the old route's credential
+        # travelled to the new host whether or not the endpoint happened to change
+        # (#8026 r12), and a URL-equality test skipped exactly the case where it did not
+        # — a keyed entry at the host the block already served kept the block's key,
+        # which then shadowed the entry in the owner scan and disappeared it from the
+        # picker (#8026 r14 MUST-FIX). Drop every source here instead: the block then
+        # serves with the entry's OWN credential, and a keyless entry fails closed
+        # exactly as its ASCII counterpart does (an explicit key in ``advanced`` below
+        # still wins).
         if (
             persisted_provider != previous_provider
             and not block_served_selected
             and selected_fallback_entry is not None
-            and (
-                not _custom_record_declares_credential_source(selected_fallback_entry)
-                or endpoint_replaced
-            )
         ):
-            # The block now serves a fallback entry it did not serve before the click,
-            # so any credential still on it belongs to the PREVIOUS route. The resolver
-            # treats the block as that entry's connection; keeping ANY credential source
-            # here would send it to the new endpoint. Drop them all: a ``key_cmd`` mints
-            # a live bearer and a pool rotates one, so dropping only
-            # ``api_key``/``key_env`` left the old route's token reachable on the new
-            # host. A keyless entry then fails closed exactly as its ASCII counterpart
-            # does, and a credentialed one serves with its OWN credential (an explicit
-            # key in ``advanced`` below still wins).
+            # A ``key_cmd`` mints a live bearer and a pool rotates one, so dropping only
+            # ``api_key``/``key_env`` left the old route's token reachable on the new host.
             for _cred_field in CUSTOM_CREDENTIAL_SOURCE_FIELDS:
                 model_cfg.pop(_cred_field, None)
 

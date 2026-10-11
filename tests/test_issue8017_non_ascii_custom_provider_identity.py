@@ -1497,3 +1497,140 @@ def test_a_key_cmd_entry_is_not_judged_keyless(monkeypatch):
         "a genuinely keyless entry still takes the keyless path"
     )
 
+
+def test_picking_a_keyed_entry_at_the_blocks_own_host_keeps_the_entry(monkeypatch, tmp_path):
+    """r14 MUST-FIX: the r11 rule hid a keyed entry picked at the block's own endpoint.
+
+    Block ``{provider: custom, base_url: U, api_key: sk-A}`` plus a keyed entry 晨光 at
+    the same ``U``. The click rewrites the block to 晨光 but leaves ``sk-A`` on it; the
+    ``endpoint_replaced`` qualifier saw no URL change, so the block kept its key and the
+    r11 clause ("two credentialed authorities at one URL is not a mirror") then read the
+    picker-written block as an independent authority. The entry was shadowed and left the
+    picker, and the next send went out with the block's ``sk-A`` rather than the entry's
+    own ``sk-B``. The block did not serve this entry before the click, so no source of it
+    can belong to the route the entry now names.
+    """
+    U = "http://127.0.0.1:8317/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        f"  base_url: {U}\n"
+        "  api_key: sk-A\n"
+        "custom_providers:\n"
+        "  - name: 晨光\n"
+        f"    base_url: {U}\n"
+        "    api_key: sk-B\n"
+        "    model: chat-model\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    result = config.set_hermes_default_model("chat-model", provider="custom:晨光")
+    assert result["ok"] is True
+
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert not on_disk["model"].get("api_key"), (
+        "the block did not serve this entry before the click, so its key must not stay"
+    )
+    assert config._custom_provider_entry_identity(
+        on_disk["custom_providers"][0],
+        on_disk.get("custom_providers"),
+        on_disk.get("providers"),
+        on_disk.get("model"),
+    ) == "custom:晨光", "the picked entry must not be shadowed by its own copy"
+    config.cfg.clear()
+    config.cfg.update(on_disk)
+    assert config.resolve_custom_provider_connection("custom:晨光") == ("sk-B", U), (
+        "the entry's own key must serve the entry's own endpoint"
+    )
+
+
+def test_a_providers_record_naming_the_slug_by_provider_key_owns_it(monkeypatch):
+    """r14 CORE: an alias-owned ``providers['custom']`` record keeps the route.
+
+    The generic record names ``custom:晨光`` through ``provider_key``, the identity field
+    the installed Agent's own alias matcher reads. The owner scan ignored that field, so a
+    new fallback entry named 晨光 minted the identity, took the route, and the send went to
+    the entry's endpoint where master had completed at the record's.
+    """
+    u_record = "http://127.0.0.1:9000/v1"
+    u_entry = "http://127.0.0.1:9500/v1"
+    cfg_shape = {
+        "model": {"provider": "custom", "default": "old-model"},
+        "providers": {
+            "custom": {"provider_key": "custom:晨光", "base_url": u_record, "api_key": "sk-X"}
+        },
+        "custom_providers": [{"name": "晨光", "base_url": u_entry, "api_key": "sk-E"}],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    assert config._custom_provider_entry_identity(
+        cfg_shape["custom_providers"][0],
+        cfg_shape["custom_providers"],
+        cfg_shape["providers"],
+        cfg_shape["model"],
+    ) == "", "the alias-owned record already owns custom:晨光, so the entry mints nothing"
+    assert config.resolve_custom_provider_connection("custom:晨光") == ("sk-X", u_record), (
+        "the alias-owned record's endpoint and key must keep serving custom:晨光"
+    )
+
+
+def test_a_bare_custom_model_block_naming_the_slug_by_provider_key_owns_it(monkeypatch):
+    """r14 CORE, the ``model:`` half: a bare-``custom`` block that names the slug owns it."""
+    u_block = "http://127.0.0.1:9000/v1"
+    u_entry = "http://127.0.0.1:9500/v1"
+    cfg_shape = {
+        "model": {
+            "provider": "custom",
+            "provider_key": "custom:晨光",
+            "default": "old-model",
+            "base_url": u_block,
+            "api_key": "sk-X",
+        },
+        "custom_providers": [{"name": "晨光", "base_url": u_entry, "api_key": "sk-E"}],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    assert config._custom_provider_entry_identity(
+        cfg_shape["custom_providers"][0],
+        cfg_shape["custom_providers"],
+        cfg_shape.get("providers"),
+        cfg_shape["model"],
+    ) == "", "the block names custom:晨光 itself, so the entry mints nothing"
+    assert config.resolve_custom_provider_connection("custom:晨光") == ("sk-X", u_block), (
+        "the block's endpoint and key must keep serving custom:晨光"
+    )
+
+
+def test_a_model_blocks_name_never_names_a_provider(monkeypatch):
+    """r14 control: ``allow_name=False`` for the model block, and a free entry still mints.
+
+    The two halves of the identity field set are exercised together: a ``model:`` block
+    whose ``name`` is the MODEL's name claims nothing (before this, ``name`` was read for
+    every record), while a fallback entry no record claims is still admitted, so the guard
+    cannot pass by shadowing everything.
+    """
+    u = "http://127.0.0.1:9000/v1"
+    cfg_shape = {
+        "model": {"provider": "custom", "name": "chat-model", "default": "old-model", "base_url": u},
+        "custom_providers": [{"name": "晨光", "base_url": "http://127.0.0.1:9500/v1", "api_key": "sk-E"}],
+    }
+    monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+    monkeypatch.setattr(config, "get_config", lambda: dict(cfg_shape))
+
+    assert config._custom_provider_identity_owners(
+        cfg_shape["custom_providers"], cfg_shape.get("providers"), cfg_shape["model"]
+    ) == set(), "a model block names no provider through its model ``name``"
+    assert config._custom_provider_entry_identity(
+        cfg_shape["custom_providers"][0],
+        cfg_shape["custom_providers"],
+        cfg_shape.get("providers"),
+        cfg_shape["model"],
+    ) == "custom:晨光", "an unclaimed fallback entry is still admitted"
+
