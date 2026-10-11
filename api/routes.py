@@ -437,7 +437,7 @@ def _session_row_lineage_root_id(session, sessions_by_id) -> str:
     return current or sid
 
 
-def _visible_pinned_lineage_ids(session_rows) -> set[str]:
+def _visible_pinned_lineage_ids(session_rows, excluding=None, profiles=None) -> set[str]:
     sessions_by_id = {}
     for row in session_rows:
         sid = str(_session_field(row, "session_id", "") or "")
@@ -447,9 +447,13 @@ def _visible_pinned_lineage_ids(session_rows) -> set[str]:
     for row in session_rows:
         if not _session_counts_toward_pin_quota(row):
             continue
+        if profiles is not None and str(_session_field(row, "profile", None) or "default") not in profiles:
+            continue
         root = _session_row_lineage_root_id(row, sessions_by_id)
         if root:
             roots.add(root)
+    if excluding is not None:
+        roots.discard(_session_row_lineage_root_id(excluding, sessions_by_id))
     return roots
 
 
@@ -474,6 +478,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     _profiles_match,
     _is_isolated_profile_mode,
     _is_root_profile,
+    _root_profile_names_snapshot,
     _SKILLS_STATS_CACHE,
     get_active_profile_name,
     get_active_profile_name as _get_active_profile_name,
@@ -535,6 +540,45 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     if not isinstance(session_profile, str):
         session_profile = None
     return _profiles_match(session_profile, active_profile)
+
+
+def _retag_empty_session_profile(session, requested_profile):
+    """Atomically retag an empty, unpinned placeholder with pin admission."""
+    # Warm the canonical root-alias cache before LOCK, then use its snapshot
+    # below so a concurrent cache invalidation cannot trigger listing in-LOCK.
+    _profiles_match(getattr(session, "profile", None), requested_profile)
+    root_profile_names = set(_root_profile_names_snapshot() or ()) | {"default"}
+    with LOCK:
+        session_profile = getattr(session, "profile", None)
+        row_profile = session_profile or "default"
+        requested_owner = requested_profile or "default"
+        if row_profile == requested_owner or (
+            row_profile in root_profile_names and requested_owner in root_profile_names
+        ):
+            return session_profile, "same_owner"
+        has_persisted_turns = bool(
+            getattr(session, "messages", None)
+            or getattr(session, "context_messages", None)
+            or getattr(session, "pending_user_message", None)
+        )
+        is_pinned = bool(getattr(session, "pinned", False))
+        if has_persisted_turns:
+            return session_profile, "nonempty"
+        if is_pinned:
+            return session_profile, "pinned_empty"
+        session.profile = requested_profile
+        return requested_profile, "retagged"
+
+
+def _session_profile_mismatch_response(handler, session_id, session_profile):
+    if session_profile:
+        return j(handler, {
+            "error": "Session belongs to a different profile",
+            "code": "session_profile_mismatch",
+            "session_id": session_id,
+            "profile": session_profile,
+        }, status=409)
+    return bad(handler, "Session not found", 404)
 
 
 def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
@@ -608,10 +652,13 @@ def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = T
     if not is_safe_session_id(sid):
         return True
     try:
-        session = get_session(sid, metadata_only=True)
+        session_profile = get_session_profile_readonly(sid) or None
     except KeyError:
         return True
-    session_profile = getattr(session, "profile", None) or None
+    except (OSError, ValueError, TypeError):
+        if emit_error:
+            bad(handler, "Session not found", 404)
+        return False
     if not _session_visible_to_active_profile(session_profile, handler):
         if emit_error:
             if session_profile:
@@ -1526,11 +1573,13 @@ def _cron_job_for_api(job: dict) -> dict:
 
     ``toast_notifications`` is a WebUI preference for completion toasts. Legacy
     jobs default to enabled so existing behavior is preserved unless a job is
-    explicitly muted.
+    explicitly muted. ``badge_notifications`` mirrors it for the Tasks badge /
+    new-run marker.
     """
     payload = dict(job or {})
     payload.setdefault("profile", None)
     payload["toast_notifications"] = payload.get("toast_notifications") is not False
+    payload["badge_notifications"] = payload.get("badge_notifications") is not False
     return payload
 
 
@@ -2977,6 +3026,9 @@ from api.config import (
     set_reasoning_display,
     set_reasoning_effort,
     create_stream_channel,
+    publish_pre_admission_claim,
+    retire_pre_admission_claim_if_owned,
+    is_orphaned_stream,
     get_config,
     get_webui_session_save_mode,
     get_config_snapshot,
@@ -2998,6 +3050,7 @@ from api.helpers import (
     safe_resolve,
     arm_connection_close_if_body_pending,
     j,
+    _json_response_body,
     t,
     read_body,
     MAX_BODY_BYTES,
@@ -3008,6 +3061,7 @@ from api.helpers import (
     strip_public_internal_fields,
     _redact_text,
     _CLIENT_DISCONNECT_ERRORS,
+    split_media_token_ref,
 )
 from api.agent_health import build_agent_health_payload
 from api.gateway_chat import gateway_chat_config_status
@@ -3180,7 +3234,7 @@ def _cancelled_run_is_stale(run_entry) -> bool:
         return False
 
 
-def _clear_stale_stream_state(session) -> bool:
+def _clear_stale_stream_state(session, *, wait_for_writer: bool = False) -> bool:
     """Clear persisted streaming flags when the in-memory stream no longer exists.
 
     A server restart or worker crash can leave active_stream_id/pending_* in the
@@ -3257,6 +3311,13 @@ def _clear_stale_stream_state(session) -> bool:
         )
         return False
 
+    # Observation must not queue behind a worker committing a large transcript.
+    # The locked() probe avoids a needless full reload; acquire below is the
+    # actual synchronization check and also covers a writer starting afterward.
+    session_lock = _get_session_agent_lock(session.session_id)
+    if not wait_for_writer and session_lock.locked():
+        return False
+
     # ── #1558 P0 safety: if we were handed a metadata-only stub, reload the
     # full session before touching persisted state. The original
     # metadata-only object is left untouched so the caller's read path is
@@ -3307,7 +3368,9 @@ def _clear_stale_stream_state(session) -> bool:
     # active_stream_id under it. A concurrent chat_start may have already
     # registered a new stream after our STREAMS_LOCK check above; in that
     # case we must NOT clobber its session.active_stream_id.
-    with _get_session_agent_lock(session.session_id):
+    if not session_lock.acquire(blocking=wait_for_writer):
+        return False
+    try:
         if getattr(session, "active_stream_id", None) != stream_id:
             return False
         if getattr(session, "pending_user_message", None):
@@ -3365,6 +3428,8 @@ def _clear_stale_stream_state(session) -> bool:
                 "_clear_stale_stream_state: save() failed for session %s",
                 getattr(session, "session_id", "?"),
             )
+    finally:
+        session_lock.release()
     # Patch the caller's stub (if different from the full-load object) so
     # its in-memory active_stream_id matches what just got persisted.
     if original_stub is not session:
@@ -5006,6 +5071,26 @@ def _anchor_scene_content_rows(message, order_index, message_index, stream_id=""
     return rows
 
 
+def _anchor_scene_row_durable_identity(row) -> str:
+    if not isinstance(row, dict):
+        return ""
+    identity = row.get("identity") if isinstance(row.get("identity"), dict) else {}
+    payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
+    sources = (row, identity, payload)
+    for field in ("event_id", "row_id", "local_id"):
+        for source in sources:
+            value = source.get(field)
+            if not isinstance(value, str):
+                continue
+            normalized = value.strip()
+            if not normalized:
+                continue
+            if field == "row_id" and normalized.lower().startswith(("settled:", "hydrated:", "activity:")):
+                continue
+            return f"{field}:{normalized}"
+    return ""
+
+
 def _anchor_scene_row_key(row) -> str:
     if not isinstance(row, dict):
         return ""
@@ -5022,12 +5107,35 @@ def _anchor_scene_row_key(row) -> str:
             or ""
         )
     if row.get("role") in ("prose", "thinking"):
+        durable_identity = _anchor_scene_row_durable_identity(row)
+        if durable_identity:
+            return f"{row.get('role')}:identity:{durable_identity}"
         return f"{row.get('role')}:{_anchor_scene_text_key(row.get('text'))}"
     if row.get("role") == "lifecycle":
         source_type = str(row.get("source_event_type") or row.get("source") or "")
         if source_type in ("compressing", "compressed"):
             return "lifecycle:compression"
     return f"{row.get('role') or row.get('kind')}:{row.get('source_event_type') or ''}:{row.get('status') or ''}:{row.get('row_id') or ''}"
+
+
+def _anchor_scene_row_text_overlaps_existing(row_text_key: str, seen_text_keys, *, role=None) -> bool:
+    if not row_text_key or not isinstance(seen_text_keys, list):
+        return False
+    for existing in seen_text_keys:
+        existing_role = None
+        existing_text_key = existing
+        if isinstance(existing, dict):
+            existing_role = existing.get("role")
+            existing_text_key = existing.get("text_key")
+        elif isinstance(existing, (tuple, list)) and len(existing) == 2:
+            existing_role, existing_text_key = existing
+        if role is not None and existing_role != role:
+            continue
+        if not existing_text_key:
+            continue
+        if row_text_key == existing_text_key:
+            return True
+    return False
 
 
 def _anchor_scene_row_has_live_identity(row) -> bool:
@@ -5049,18 +5157,20 @@ def _anchor_scene_row_has_live_identity(row) -> bool:
     return has_stream_owner and not has_assistant_message_index
 
 
-def _anchor_scene_settle_live_running_row(row, *, has_settled_thinking: bool):
+def _anchor_scene_settle_live_running_row(row, *, drop_live_thinking: bool = False):
     if not isinstance(row, dict):
         return row
     role = row.get("role")
     if role not in ("thinking", "prose", "tool"):
         return row
-    if str(row.get("status") or "").lower() != "running":
-        return row
-    if not _anchor_scene_row_has_live_identity(row):
-        return row
-    if role == "thinking" and has_settled_thinking:
+    has_live_identity = _anchor_scene_row_has_live_identity(row)
+    is_running = str(row.get("status") or "").lower() == "running"
+    if role == "thinking" and drop_live_thinking and has_live_identity and is_running:
         return None
+    if not is_running:
+        return row
+    if not has_live_identity:
+        return row
     next_row = copy.deepcopy(row)
     next_row["status"] = "completed"
     payload = next_row.get("payload")
@@ -5095,6 +5205,98 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
     final_key = _anchor_scene_text_key(final_answer)
     rows = []
     seen = {}
+    identityless_text_rows = []
+    # Normalize the saved reasoning exactly as row reconciliation does: distinct
+    # IDs survive equal text, but a legacy projection must not count a second
+    # time merely because it lacks the ID carried by the same visible row.
+    scene_thinking_rows = []
+    scene_reasoning_ids = set()
+    scene_reasoning_texts = set()
+    legacy_reasoning_indexes = {}
+    for row in scene.get("activity_rows") or []:
+        if not isinstance(row, dict) or row.get("role") != "thinking":
+            continue
+        text_key = _anchor_scene_text_key(row.get("text"))
+        if not text_key:
+            continue
+        durable_identity = _anchor_scene_row_durable_identity(row)
+        if durable_identity:
+            if durable_identity in scene_reasoning_ids:
+                continue
+            scene_reasoning_ids.add(durable_identity)
+            legacy_index = legacy_reasoning_indexes.pop(text_key, None)
+            if legacy_index is not None:
+                scene_thinking_rows[legacy_index] = row
+            else:
+                scene_thinking_rows.append(row)
+        elif text_key not in scene_reasoning_texts:
+            legacy_reasoning_indexes[text_key] = len(scene_thinking_rows)
+            scene_thinking_rows.append(row)
+        scene_reasoning_texts.add(text_key)
+
+    # Only substitute a saved segment at a matching transcript reasoning slot.
+    # A global text match is insufficient: putting the whole saved scene first
+    # also changes tool-body priority and moves later activity ahead of earlier
+    # transcript rows. No tool or prose row participates in this substitution.
+    transcript_reasoning_slots = {}
+    for local_idx in range(turn_start + 1, local_final_idx + 1):
+        message = messages[local_idx]
+        if not isinstance(message, dict) or message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        parts = [
+            _anchor_scene_content_text(part)
+            for part in (content if isinstance(content, list) else [])
+            if isinstance(part, dict) and part.get("type") in ("thinking", "reasoning")
+        ]
+        parts = [part for part in parts if _anchor_scene_clean_text(part)]
+        metadata_slots = not _anchor_scene_message_has_content_tool_use(message) or not parts
+        if not _anchor_scene_message_has_content_tool_use(message):
+            metadata_reasoning = _anchor_scene_message_reasoning_text(message)
+            # No-tool content parts do not emit Thinking rows; only metadata owns a slot.
+            parts = [metadata_reasoning]
+        elif not parts:
+            parts = [_anchor_scene_message_reasoning_text(message)]
+        visible_text_key = _anchor_scene_text_key(_anchor_scene_message_text(message))
+        for ordinal, text in enumerate(parts):
+            text_key = _anchor_scene_text_key(text)
+            # A reasoning row filtered during emission must not consume a saved
+            # event's reconciliation slot or cause distinct live rows to drop.
+            if (
+                _anchor_scene_clean_text(text)
+                and (not metadata_slots or text_key != visible_text_key)
+                and not _anchor_scene_row_looks_like_final_answer(text_key, final_key)
+            ):
+                transcript_reasoning_slots[(local_idx, ordinal)] = text
+
+    reasoning_replacements = {}
+    reasoning_cursor = 0
+    for slot, text in transcript_reasoning_slots.items():
+        target_key = _anchor_scene_text_key(text)
+        group = []
+        matched = False
+        while reasoning_cursor < len(scene_thinking_rows):
+            group.append(scene_thinking_rows[reasoning_cursor])
+            reasoning_cursor += 1
+            group_text = [str(row.get("text") or "") for row in group]
+            group_key = _anchor_scene_text_key("\n".join(group_text))
+            compact_group_key = _anchor_scene_text_key("".join(group_text))
+            group_keys = {key for key in (group_key, compact_group_key) if key}
+            if target_key in group_keys:
+                reasoning_replacements[slot] = group
+                matched = True
+                break
+            if not any(target_key.startswith(key) for key in group_keys):
+                break
+        if not matched:
+            reasoning_replacements.clear()
+            break
+    if reasoning_cursor != len(scene_thinking_rows):
+        reasoning_replacements.clear()
+    preserve_scene_thinking = bool(scene_thinking_rows) and (
+        not transcript_reasoning_slots or bool(reasoning_replacements)
+    )
+    drop_live_thinking = bool(transcript_reasoning_slots) and not preserve_scene_thinking
 
     def merge_duplicate_tool_row(existing, incoming, *, prefer_incoming_body=False):
         if not isinstance(existing, dict) or not isinstance(incoming, dict):
@@ -5158,12 +5360,14 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         merged["payload"] = merged_payload
         return merged
 
+    seen_text_keys = []
+
     def push(row, *, prefer_incoming_tool_body=False):
         if not isinstance(row, dict):
             return
         row = _anchor_scene_settle_live_running_row(
             row,
-            has_settled_thinking=any(existing.get("role") == "thinking" for existing in rows),
+            drop_live_thinking=drop_live_thinking,
         )
         if row is None or not isinstance(row, dict):
             return
@@ -5171,6 +5375,17 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         if row.get("role") in ("prose", "thinking") and _anchor_scene_row_looks_like_final_answer(text_key, final_key):
             return
         if _anchor_scene_row_is_stale_token_answer(row, text_key, final_key):
+            return
+        durable_identity = _anchor_scene_row_durable_identity(row)
+        if (
+            row.get("role") in ("prose", "thinking")
+            and not durable_identity
+            and _anchor_scene_row_text_overlaps_existing(
+                text_key,
+                seen_text_keys,
+                role=row.get("role"),
+            )
+        ):
             return
         key = _anchor_scene_row_key(row)
         if key and key in seen:
@@ -5189,12 +5404,59 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
                 next_row["seq"] = index
                 rows[index] = next_row
             return
+        replace_text_index = None
+        if row.get("role") in ("prose", "thinking") and durable_identity and text_key:
+            for entry in identityless_text_rows:
+                if (
+                    entry.get("role") != row.get("role")
+                    or
+                    entry.get("durable_identity")
+                    or not _anchor_scene_row_text_overlaps_existing(
+                        text_key,
+                        [entry],
+                        role=row.get("role"),
+                    )
+                ):
+                    continue
+                replace_text_index = entry.get("index")
+                break
+        target_index = replace_text_index if replace_text_index is not None else len(rows)
         if key:
-            seen[key] = len(rows)
+            seen[key] = target_index
+        if row.get("role") in ("prose", "thinking") and text_key:
+            seen_text_keys.append({"role": row.get("role"), "text_key": text_key})
         next_row = copy.deepcopy(row)
-        next_row["order_index"] = len(rows)
-        next_row["seq"] = len(rows)
-        rows.append(next_row)
+        if row.get("role") == "prose" and replace_text_index is not None:
+            # The transcript owns Markdown and row metadata; saved prose supplies identity only.
+            next_row = copy.deepcopy(rows[replace_text_index])
+            for location in (None, "identity", "payload"):
+                source = row if location is None else row.get(location)
+                if not isinstance(source, dict):
+                    continue
+                for field in ("event_id", "row_id", "local_id"):
+                    value = source.get(field)
+                    if not isinstance(value, str) or not value.strip():
+                        continue
+                    if field == "row_id" and value.strip().lower().startswith(("settled:", "hydrated:", "activity:")):
+                        continue
+                    if location is not None and not isinstance(next_row.get(location), dict):
+                        next_row[location] = {}
+                    target = next_row if location is None else next_row[location]
+                    target[field] = value
+        next_row["order_index"] = target_index
+        next_row["seq"] = target_index
+        if replace_text_index is not None and 0 <= replace_text_index < len(rows):
+            rows[replace_text_index] = next_row
+            for entry in identityless_text_rows:
+                if entry.get("index") == replace_text_index:
+                    entry["durable_identity"] = durable_identity
+        else:
+            index = len(rows)
+            rows.append(next_row)
+            if row.get("role") in ("prose", "thinking") and not durable_identity and text_key:
+                identityless_text_rows.append(
+                    {"role": row.get("role"), "text_key": text_key, "index": index}
+                )
 
     order = 0
     content_tool_indexes_by_idx = {}
@@ -5217,7 +5479,16 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         used_content_tool_indexes = set()
         id_flexible_content_tool_indexes = set()
         if content_rows:
+            reasoning_ordinal = 0
             for row in content_rows:
+                if row.get("role") == "thinking":
+                    replacements = reasoning_replacements.get((local_idx, reasoning_ordinal))
+                    reasoning_ordinal += 1
+                    if replacements:
+                        for replacement in replacements:
+                            push(replacement)
+                        order += 1
+                        continue
                 previous_len = len(rows)
                 push(row)
                 if row.get("role") == "tool" and len(rows) > previous_len:
@@ -5231,8 +5502,18 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
             push(_anchor_scene_prose_row(text, order, absolute_idx, stream_id))
             order += 1
         reasoning = _anchor_scene_message_reasoning_text(message)
-        if _anchor_scene_clean_text(reasoning) and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text):
-            push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
+        if not content_rows:
+            reasoning = transcript_reasoning_slots.get((local_idx, 0), reasoning)
+        if (
+            _anchor_scene_clean_text(reasoning)
+            and _anchor_scene_text_key(reasoning) != _anchor_scene_text_key(text)
+        ):
+            replacements = reasoning_replacements.get((local_idx, 0))
+            if replacements:
+                for replacement in replacements:
+                    push(replacement)
+            else:
+                push(_anchor_scene_thinking_row(reasoning, order, absolute_idx, stream_id))
             order += 1
         for key in ("tool_calls", "_partial_tool_calls"):
             calls = message.get(key)
@@ -5598,6 +5879,58 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     return s
 
 
+def _apply_cli_source_meta_to_session(session, cli_meta):
+    """Apply CLI source identity from ``cli_meta`` onto an in-memory session.
+
+    Mirrors the ``_apply_source_meta`` closure inside ``_get_or_materialize_session``
+    (api/routes.py:~5535) so the rename/move/archive handlers can re-stamp the
+    full source-identity field set on a session that was reloaded via
+    ``Session.load(sid)`` inside their per-session lock.
+
+    #7776 Finding 2: the pre-lock materialization path
+    (``_get_or_materialize_session``) writes a sidecar for the regular
+    CLI/agent branch through ``import_cli_session`` (which saves with default
+    source identity) and then applies source meta to the in-memory object
+    WITHOUT a follow-up ``save()``. The lock-held ``Session.load(sid)`` reload
+    then reads that source-stripped sidecar, and the handler's ``s.save()``
+    persists a WebUI-native copy with ``is_cli_session=False`` + null source
+    identity. Persisting the source meta from the captured ``cli_meta`` BEFORE
+    the lock-held reload — or re-applying it to the freshly loaded session
+    after the reload — closes that gap. This helper does the latter.
+
+    #7776 Finding 3 (SILENT regression on forks): ``cli_meta`` comes from
+    ``_lookup_cli_session_metadata`` → ``get_cli_sessions()``, which projects
+    state.db rows for EVERY source — including WebUI-origin rows
+    (``session_source="webui"``). A WebUI fork is one of those rows, so a
+    blanket re-stamp turns the fork into a WebUI-native session on the
+    rename/move/archive save. Two guards:
+      1. Early-return when the row is WebUI-origin. It is not a CLI row
+         (``is_cli_session_row`` returns False for it), so there is nothing
+         to re-stamp; the reloaded sidecar already has the right identity.
+      2. Never overwrite an existing ``session_source == "fork"`` — a
+         WebUI-created fork (/api/session/branch, compression recovery)
+         owns its own provenance and must stay a fork even if a same-id
+         state.db row claims some other source.
+    """
+    if not cli_meta:
+        return
+    if _session_source_is_webui(cli_meta):
+        return
+    if str(getattr(session, "session_source", None) or "").strip().lower() == "fork":
+        return
+    session.is_cli_session = is_cli_session_row(cli_meta)
+    session.source_tag = cli_meta.get("source_tag")
+    session.raw_source = cli_meta.get("raw_source") or cli_meta.get("source_tag")
+    session.session_source = cli_meta.get("session_source")
+    session.source_label = cli_meta.get("source_label")
+    session.user_id = cli_meta.get("user_id")
+    session.chat_id = cli_meta.get("chat_id")
+    session.chat_type = cli_meta.get("chat_type")
+    session.thread_id = cli_meta.get("thread_id")
+    session.session_key = cli_meta.get("session_key")
+    session.platform = cli_meta.get("platform")
+
+
 def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = None) -> list:
     """Return the visible transcript that a public share should snapshot.
 
@@ -5610,6 +5943,8 @@ def _share_snapshot_messages_for_session(session, *, cli_meta: dict | None = Non
     current_messages = list(getattr(session, "messages", None) or [])
     if not sid:
         return current_messages
+    if _cancelled_journal_turn_owner(current_messages):
+        return reconciled_state_db_messages_for_session(session)
     profile = getattr(session, "profile", None)
     is_messaging = (
         _is_messaging_session_record(session)
@@ -9224,6 +9559,7 @@ def _state_db_backstop_limit_for_display(session, msg_before) -> int | None:
         msg_before is not None
         or getattr(session, "truncation_watermark", None) not in (None, "")
         or getattr(session, "truncation_boundary", None) not in (None, "")
+        or _cancelled_journal_turn_owner(getattr(session, "messages", None) or []) is not None
     )
     return None if has_boundary_prefix else _STATE_DB_DISPLAY_ROW_BACKSTOP
 
@@ -9308,7 +9644,43 @@ def _display_merge_session_is_active(session) -> bool:
     )
 
 
-def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None):
+def _display_exact_owner_positions(session, messages):
+    """Map saved row positions before display/cache copies lose object identity."""
+    projected = {id(row): index for index, row in enumerate(messages)}
+    return {
+        index: projected[id(row)]
+        for index, row in enumerate(getattr(session, "messages", None) or [])
+        if id(row) in projected
+    }
+
+
+def _display_projected_owner_positions(source_messages, messages, source_owners):
+    """Compose saved-to-source positions with an exact-object display projection."""
+    projected = {id(row): index for index, row in enumerate(messages)}
+    return {
+        owner: projected[id(source_messages[index])]
+        for owner, index in source_owners.items()
+        if 0 <= index < len(source_messages) and id(source_messages[index]) in projected
+    }
+
+
+def _display_rebased_tool_calls(tool_calls, owner_positions):
+    """Project cards onto proven owners without changing persisted metadata."""
+    projected = []
+    for card in tool_calls or []:
+        if not isinstance(card, dict):
+            projected.append(card)
+            continue
+        owner = card.get("assistant_msg_idx")
+        if type(owner) is int:
+            if owner not in owner_positions:
+                continue
+            card = dict(card, assistant_msg_idx=owner_positions[owner])
+        projected.append(card)
+    return projected
+
+
+def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None, owner_positions=None):
     """Return the memoized merged transcript, or None when it can't be reused.
 
     Lets GET /api/session skip loading the state.db rows entirely on a hit. That
@@ -9348,6 +9720,11 @@ def _display_merge_cached_messages(session, sidecar_messages, *, msg_before=None
         entry = _display_merge_cache.get(sid)
         if not _display_merge_cache_entry_usable(entry, cache_key):
             return None
+        if owner_positions is not None:
+            if "owner_positions" not in entry:
+                return None
+            owner_positions.clear()
+            owner_positions.update(entry["owner_positions"])
         _display_merge_cache.move_to_end(sid, last=True)
         return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
 
@@ -9362,19 +9739,32 @@ def _limited_webui_messages_for_display_with_sidecar(
     *,
     state_db_signature=_DISPLAY_STATE_SIGNATURE_UNSET,
     msg_before=None,
+    owner_positions=None,
 ) -> list:
+    sidecar_owners = dict(owner_positions or {})
     if sidecar_messages is None:
-        sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+        sidecar_owners = {}
+        sidecar_messages = _webui_sidecar_lineage_messages_for_display(
+            session, owner_positions=sidecar_owners,
+        )
     else:
         sidecar_messages = list(sidecar_messages or [])
+        if not sidecar_owners:
+            sidecar_owners = _display_exact_owner_positions(session, sidecar_messages)
     state_db_messages = list(state_db_messages or [])
     if not state_db_messages:
+        if owner_positions is not None:
+            owner_positions.clear()
+            owner_positions.update(sidecar_owners)
         return sidecar_messages
     state_db_messages = _suppress_native_image_display_mirrors(
         session,
         state_db_messages,
     )
     if not state_db_messages:
+        if owner_positions is not None:
+            owner_positions.clear()
+            owner_positions.update(sidecar_owners)
         return sidecar_messages
 
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
@@ -9427,7 +9817,11 @@ def _limited_webui_messages_for_display_with_sidecar(
         sid = str(getattr(session, "session_id", "") or "")
         with _display_merge_cache_lock:
             entry = _display_merge_cache.get(sid)
-            if _display_merge_cache_entry_usable(entry, cache_key):
+            if (_display_merge_cache_entry_usable(entry, cache_key)
+                    and (owner_positions is None or "owner_positions" in entry)):
+                if owner_positions is not None:
+                    owner_positions.clear()
+                    owner_positions.update(entry["owner_positions"])
                 _display_merge_cache.move_to_end(sid, last=True)
                 return [dict(m) if isinstance(m, dict) else m for m in entry["messages"]]
     merged = merge_session_messages_append_only(
@@ -9436,12 +9830,17 @@ def _limited_webui_messages_for_display_with_sidecar(
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
+        cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
     )
     merged = _project_native_image_payload_conflicts_for_display(
         sidecar_messages,
         state_db_messages,
         merged,
     )
+    projected_owners = _display_projected_owner_positions(sidecar_messages, merged, sidecar_owners)
+    if owner_positions is not None:
+        owner_positions.clear()
+        owner_positions.update(projected_owners)
     if cache_key is not None:
         _state_key = cache_key[4]
         _streaming_key = (
@@ -9465,6 +9864,7 @@ def _limited_webui_messages_for_display_with_sidecar(
             _display_merge_cache[sid] = {
                 "key": cache_key,
                 "messages": merged,
+                "owner_positions": projected_owners,
                 "stored_at": time.monotonic(),
             }
             _display_merge_cache.move_to_end(sid, last=True)
@@ -9868,7 +10268,7 @@ def _sidecar_file_exceeds_threshold(session_id, threshold_bytes) -> bool:
         return False
 
 
-def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None):
+def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before=None, *, owner_positions=None):
     """Return (timestamp floor, sidecar messages) for bounded state.db tail reads.
 
     The display window limit counts visible transcript rows after WebUI sidecar
@@ -9884,8 +10284,10 @@ def _state_db_since_timestamp_for_limited_display(session, msg_limit, msg_before
         return None, None
     if getattr(session, "truncation_boundary", None) not in (None, ""):
         return None, None
+    if _cancelled_journal_turn_owner(getattr(session, "messages", None) or []):
+        return None, None  # The exact cancelled owner is needed before slicing.
 
-    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    sidecar_messages = _webui_sidecar_lineage_messages_for_display(session, owner_positions=owner_positions)
     if not sidecar_messages:
         return None, sidecar_messages
     sidecar_timestamps = [_message_timestamp_as_float(msg) for msg in sidecar_messages]
@@ -9963,7 +10365,7 @@ _lineage_display_cache: "OrderedDict[str, dict]" = OrderedDict()
 _lineage_display_cache_lock = threading.Lock()
 
 
-def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) -> list:
+def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20, owner_positions=None) -> list:
     """Return WebUI sidecar messages stitched across compression snapshots.
 
     WebUI compression continuations persist the archived transcript in a parent
@@ -9995,6 +10397,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             entry is not None
             and entry.get("provenance_complete") is True
             and entry.get("self_sig") == self_sig
+            and (owner_positions is None or "owner_positions" in entry)
         ):
             stale = False
             for parent_path, parent_sig in entry.get("parent_sigs") or []:
@@ -10006,6 +10409,9 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
                     current_entry = _lineage_display_cache.get(sid)
                     if current_entry is entry:
                         _lineage_display_cache.move_to_end(sid, last=True)
+                        if owner_positions is not None:
+                            owner_positions.clear()
+                            owner_positions.update(entry["owner_positions"])
                         return [
                             dict(m) if isinstance(m, dict) else m
                             for m in entry["messages"]
@@ -10052,6 +10458,9 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
             session_messages,
             getattr(parent, "messages", []) or [],
         ):
+            if owner_positions is not None:
+                owner_positions.clear()
+                owner_positions.update(_display_exact_owner_positions(session, session_messages))
             return session_messages
         segments.append(parent)
         seen.add(parent_id)
@@ -10062,7 +10471,10 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         parent_signatures_complete = False
 
     if not segments:
-        return list(getattr(session, "messages", []) or [])
+        if owner_positions is not None:
+            owner_positions.clear()
+            owner_positions.update(_display_exact_owner_positions(session, session_messages))
+        return session_messages
 
     merged = []
     for segment in reversed(segments):
@@ -10077,6 +10489,10 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
         getattr(session, "messages", []) or [],
         truncation_watermark=None,
     )
+    projected_owners = _display_exact_owner_positions(session, merged)
+    if owner_positions is not None:
+        owner_positions.clear()
+        owner_positions.update(projected_owners)
     if (
         cache_allowed
         and self_sig is not None
@@ -10089,6 +10505,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20) 
                 "parent_sigs": parent_sigs,
                 "provenance_complete": True,
                 "messages": merged,
+                "owner_positions": projected_owners,
             }
             _lineage_display_cache.move_to_end(sid, last=True)
             while len(_lineage_display_cache) > _LINEAGE_DISPLAY_CACHE_MAX:
@@ -10795,6 +11212,7 @@ def _keep_latest_messaging_session_per_source(
 from api.models import (
     Session,
     get_session,
+    get_session_profile_readonly,
     get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
@@ -10816,6 +11234,9 @@ from api.models import (
     get_state_db_session_message_keys_before_timestamp,
     get_state_db_session_summary,
     merge_session_messages_append_only,
+    reconciled_state_db_messages_for_session,
+    _cancelled_journal_turn_owner,
+    _reindex_tool_owners_after_message_reorder,
     _project_native_image_payload_conflicts_for_display,
     _suppress_native_image_display_mirrors,
     _reconcile_api_content_sidecars,
@@ -13455,6 +13876,9 @@ def _handle_session_get(handler, parsed) -> bool:
         # branch below, including the ones that never probe the cache.
         _display_cache_hit = None
         _display_state_db_signature = None
+        _display_owner_positions = ({} if load_messages and _cancelled_journal_turn_owner(
+            getattr(s, "messages", None) or [], include_live_partial=True
+        ) else None)
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
@@ -13466,8 +13890,11 @@ def _handle_session_get(handler, parsed) -> bool:
                     s,
                     msg_limit,
                     msg_before=msg_before,
+                    owner_positions=_display_owner_positions,
                 )
             _state_db_reader_kwargs = {"profile": _session_profile}
+            if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
+                _state_db_reader_kwargs["include_row_identity"] = True
             if state_db_since_timestamp is not None:
                 _state_db_reader_kwargs["since_timestamp"] = state_db_since_timestamp
             # Apply the display-path row backstop ONLY on provably-safe
@@ -13501,6 +13928,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     s,
                     limited_sidecar_messages,
                     msg_before=msg_before,
+                    owner_positions=_display_owner_positions,
                 )
             if _display_cache_hit is not None:
                 state_db_messages = []
@@ -13564,13 +13992,17 @@ def _handle_session_get(handler, parsed) -> bool:
                         state_db_messages,
                         state_db_signature=_display_state_db_signature,
                         msg_before=msg_before,
+                        owner_positions=_display_owner_positions,
                     )
             else:
                 state_db_messages = _suppress_native_image_display_mirrors(
                     s,
                     state_db_messages,
                 )
-                sidecar_messages = _webui_sidecar_lineage_messages_for_display(s)
+                lineage_owners = {}
+                sidecar_messages = _webui_sidecar_lineage_messages_for_display(
+                    s, owner_positions=lineage_owners,
+                )
                 lineage_parent = _webui_lineage_parent_session_for_display(s)
                 projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
                     s,
@@ -13582,6 +14014,8 @@ def _handle_session_get(handler, parsed) -> bool:
                     state_db_messages,
                     truncation_watermark=getattr(s, "truncation_watermark", None),
                     truncation_boundary=getattr(s, "truncation_boundary", None),
+                    incoming_provenance="state_db",
+                    cancelled_journal_owner_messages=getattr(s, "messages", None) or [],
                 )
                 _all_msgs = _merged_webui_lineage_messages_for_display(
                     s,
@@ -13593,6 +14027,11 @@ def _handle_session_get(handler, parsed) -> bool:
                     state_db_messages,
                     _all_msgs,
                 )
+                if _display_owner_positions is not None:
+                    _display_owner_positions.clear()
+                    _display_owner_positions.update(_display_projected_owner_positions(
+                        sidecar_messages, _all_msgs, lineage_owners,
+                    ))
         else:
             if is_messaging_session and cli_messages:
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
@@ -13622,6 +14061,13 @@ def _handle_session_get(handler, parsed) -> bool:
         else:
             _summary_message_count = None
             _summary_last_message_at = None
+        _display_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+        if _display_owner_positions is not None:
+            if msg_limit is None:
+                _display_owner_positions.update(_display_exact_owner_positions(s, _all_msgs))
+            _display_tool_calls = _display_rebased_tool_calls(
+                _display_tool_calls, _display_owner_positions
+            )
         if load_messages:
             _truncated_msgs, _messages_offset = _message_window_for_display(
                 _all_msgs,
@@ -13635,7 +14081,7 @@ def _handle_session_get(handler, parsed) -> bool:
                 _truncated_msgs,
                 getattr(s, "anchor_activity_scenes", None),
                 message_offset=_messages_offset,
-                tool_calls=getattr(s, "tool_calls", None),
+                tool_calls=_display_tool_calls,
             )
         else:
             _truncated_msgs = []
@@ -13707,7 +14153,7 @@ def _handle_session_get(handler, parsed) -> bool:
                         _fb_cl,
                     )
                 _persisted_cl = _fb_cl
-        _session_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
+        _session_tool_calls = _display_tool_calls
         # Always include session-level tool_calls so the browser can merge
         # them with per-message tool_calls for messages that lack the
         # per-message variant (older messages whose tool_calls live only
@@ -14018,9 +14464,21 @@ def handle_get(handler, parsed) -> bool:
 
             # The disk read + process-constant token substitutions are cached;
             # only the per-session CSRF token and per-request extension tags are
-            # applied here (see _render_index_shell_base).
-            html = _render_index_shell_base().replace(
-                "__CSRF_TOKEN_JSON__", json.dumps(csrf_token)
+            # applied here (see _render_index_shell_base). The CSP image
+            # allowlist is computed once and shared with the header via
+            # _csp_extra_img_src_preset, so the renderer's inert-placeholder
+            # decision always matches what the browser will enforce (#7941).
+            from api.helpers import _csp_extra_img_src, csp_img_extra_sources
+
+            extra_img_src = _csp_extra_img_src()
+            handler._csp_extra_img_src_preset = extra_img_src
+            html = (
+                _render_index_shell_base()
+                .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
+                .replace(
+                    "__CSP_IMG_EXTRA_JSON__",
+                    json.dumps(csp_img_extra_sources(extra_img_src)).replace("<", "\\u003c"),
+                )
             )
             return t(
                 handler,
@@ -14032,9 +14490,20 @@ def handle_get(handler, parsed) -> bool:
 
     if parsed.path == "/share" or parsed.path.startswith("/share/"):
         share_path = (Path(__file__).parent.parent / "static" / "share.html").resolve()
+        # Same contract as the app shell: the share page renders with renderMd(),
+        # so it needs the validated CSP image allowlist, computed once and shared
+        # with this response's header (#7941).
+        from api.helpers import _csp_extra_img_src, csp_img_extra_sources
+
+        share_img_src = _csp_extra_img_src()
+        handler._csp_extra_img_src_preset = share_img_src
+        share_html = share_path.read_text(encoding="utf-8").replace(
+            "__CSP_IMG_EXTRA_JSON__",
+            json.dumps(csp_img_extra_sources(share_img_src)).replace("<", "\\u003c"),
+        )
         return t(
             handler,
-            share_path.read_text(encoding="utf-8"),
+            share_html,
             content_type="text/html; charset=utf-8",
             extra_headers={
                 "X-Robots-Tag": "noindex, nofollow",
@@ -16093,6 +16562,19 @@ def handle_post(handler, parsed) -> bool:
                 # 404, not 400 — missing resource, not a malformed request.
                 return bad(handler, "Session not found", status=404)
 
+            copy_messages = session.messages
+            copy_context = getattr(session, "context_messages", None) or []
+            if _cancelled_journal_turn_owner(session.messages, include_live_partial=True):
+                # Read one complete private snapshot for both persisted layers.
+                # A recovered sidecar can predate later Gateway exchanges.
+                copy_state = get_state_db_session_messages(
+                    sid, profile=getattr(session, "profile", None), include_row_identity=True,
+                )
+                copy_messages = reconciled_state_db_messages_for_session(session, state_messages=copy_state)
+                copy_context = reconciled_state_db_messages_for_session(
+                    session, prefer_context=True, state_messages=copy_state,
+                )
+
             # Deep-copy mutable lists so the duplicate is *actually* independent.
             # `Session.__init__` does `self.messages = messages or []` — plain
             # assignment, no copy. Without deepcopy, both sessions share the same
@@ -16107,7 +16589,7 @@ def handle_post(handler, parsed) -> bool:
                 workspace=session.workspace,
                 model=session.model,
                 model_provider=session.model_provider,
-                messages=copy.deepcopy(session.messages),
+                messages=copy.deepcopy(copy_messages),
                 tool_calls=copy.deepcopy(session.tool_calls),
                 # Reset ephemeral / per-session-instance flags. Duplicating an
                 # archived conversation should produce a visible (un-archived)
@@ -16134,7 +16616,7 @@ def handle_post(handler, parsed) -> bool:
                 # context_messages is the authoritative model-facing prefix — must be
                 # deepcopied so the duplicate has its own independent context that won't
                 # be mutated when the original session's context changes (#2914).
-                context_messages=copy.deepcopy(getattr(session, "context_messages", None) or []),
+                context_messages=copy.deepcopy(copy_context),
                 # Gateway routing — if the user customized routing for this session,
                 # the duplicate should behave identically.
                 gateway_routing=copy.deepcopy(getattr(session, "gateway_routing", None)),
@@ -16150,6 +16632,13 @@ def handle_post(handler, parsed) -> bool:
                 context_engine_state=copy.deepcopy(getattr(session, "context_engine_state", None) or {}),
                 created_at=time.time(),
                 updated_at=time.time(),
+            )
+
+            # Reconciliation can insert SQLite rows before a saved tool owner.
+            # Map the original row objects before deepcopy, but update only the
+            # copy's tool dictionaries. Equal assistant prose is not ownership.
+            _reindex_tool_owners_after_message_reorder(
+                copied_session, session.messages, after_messages=copy_messages,
             )
 
             with LOCK:
@@ -16311,21 +16800,56 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id", "title")
         except ValueError as e:
             return bad(handler, str(e))
+        sid = body["session_id"]
+        # #7738: pre-validate OUTSIDE the lock (404 / 403 contracts), then
+        # re-resolve the canonical session INSIDE the lock. Between an outside
+        # resolve and the lock acquire, _evict_sessions_over_cap can drop the
+        # resolved object from SESSIONS, so the stale, evicted object's save()
+        # would otherwise clobber a newer save on disk. Mirrors the
+        # SESSIONS.get -> Session.load -> _ensure_full_session_before_mutation
+        # pattern in _persist_generated_session_title.
         try:
-            s = _get_or_materialize_session(body["session_id"])
+            _get_or_materialize_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be renamed from WebUI", 403)
-        with _get_session_agent_lock(body["session_id"]):
+        # #7776 Finding 2: capture the CLI source identity BEFORE acquiring
+        # the lock so the lock-held Session.load(sid) reload (which materializes
+        # a brand-new WebUI session without the pre-lock CLI metadata) cannot
+        # drop it on the way back to disk.
+        _rename_cli_meta = _lookup_cli_session_metadata(sid) or {}
+        with _get_session_agent_lock(sid):
+            with LOCK:
+                latest = SESSIONS.get(sid)
+                if latest is not None and str(getattr(latest, "session_id", "") or "") != sid:
+                    SESSIONS.pop(sid, None)
+                    latest = None
+                elif latest is not None:
+                    SESSIONS.move_to_end(sid)
+            if latest is None:
+                latest = Session.load(sid)
+                if latest is None:
+                    return bad(handler, "Session not found", 404)
+            s = _ensure_full_session_before_mutation(sid, latest)
+            if getattr(s, "read_only", False):
+                return bad(handler, "Read-only imported sessions cannot be renamed from WebUI", 403)
+            # #7776 Finding 2: re-stamp CLI source identity on the freshly
+            # loaded session before mutating it.
+            if _rename_cli_meta:
+                _apply_cli_source_meta_to_session(s, _rename_cli_meta)
             from api.session_ops import apply_session_title_rename
             apply_session_title_rename(s, body["title"])
             s.save()
+            with LOCK:
+                SESSIONS[sid] = s
+                SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
         _sync_session_title_to_insights(s)
         publish_session_list_changed(
             "session_rename",
             profile=getattr(s, "profile", None),
-            session_id=getattr(s, "session_id", body["session_id"]),
+            session_id=getattr(s, "session_id", sid),
         )
         return j(handler, {"session": s.compact()})
 
@@ -16572,6 +17096,18 @@ def handle_post(handler, parsed) -> bool:
                 close_terminal(body["session_id"])
             except Exception:
                 logger.debug("Failed to close workspace terminal after workspace update")
+            # Keep state.db's cwd in step with the new workspace so clients that
+            # group by cwd (Hermes Desktop) move the session with it. No-op when
+            # the session has no state.db row yet (never sent a message).
+            # Background: SessionDB retries for ~20 s on a busy state.db and the
+            # response must not wait for optional metadata.
+            try:
+                from api.state_sync import sync_session_cwd_background
+                sync_session_cwd_background(
+                    lambda _sid=s.session_id: _current_cwd_sync_target(_sid)
+                )
+            except Exception:
+                logger.debug("Failed to schedule session cwd sync after workspace update")
         set_last_workspace(new_ws, profile=getattr(s, "profile", None))
         return j(
             handler,
@@ -16907,6 +17443,7 @@ def handle_post(handler, parsed) -> bool:
         cli_meta = _lookup_cli_session_metadata(source.session_id) if _session_requires_cli_metadata_lookup(source) else {}
         is_messaging_session = _is_messaging_session_record(source) or _is_messaging_session_record(cli_meta)
         cli_messages = get_cli_session_messages(source.session_id) if is_messaging_session else []
+        source_context = getattr(source, "context_messages", None)
         if is_messaging_session:
             if cli_messages:
                 source_messages = _merged_session_messages_for_display(source, cli_messages)
@@ -16932,19 +17469,26 @@ def handle_post(handler, parsed) -> bool:
             _state_db_reader_kwargs = {
                 "profile": getattr(source, "profile", None) or None,
             }
+            cancelled_owner = _cancelled_journal_turn_owner(source.messages, include_live_partial=True)
+            if cancelled_owner:
+                _state_db_reader_kwargs["include_row_identity"] = True
             _backstop = _state_db_backstop_limit_for_display(source, None)
             if _backstop is not None:
                 _state_db_reader_kwargs["limit"] = _backstop
+            source_state = get_state_db_session_messages(source.session_id, **_state_db_reader_kwargs)
             source_messages = merge_session_messages_append_only(
                 _webui_sidecar_lineage_messages_for_display(source),
-                get_state_db_session_messages(
-                    source.session_id,
-                    **_state_db_reader_kwargs,
-                ),
+                source_state,
                 truncation_watermark=getattr(source, "truncation_watermark", None),
                 truncation_boundary=getattr(source, "truncation_boundary", None),
+                **({"incoming_provenance": "state_db", "cancelled_journal_owner_messages": source.messages}
+                   if cancelled_owner else {}),
             )
             source_messages = _merged_webui_lineage_messages_for_display(source, source_messages)
+            if cancelled_owner:
+                source_context = reconciled_state_db_messages_for_session(
+                    source, prefer_context=True, state_messages=source_state,
+                )
         if keep_count is not None:
             forked_messages = source_messages[:keep_count]
         else:
@@ -16963,7 +17507,7 @@ def handle_post(handler, parsed) -> bool:
         fork_keep = keep_count if keep_count is not None else len(source_messages)
         forked_context = copy.deepcopy(
             truncate_context_for_display_keep(
-                getattr(source, "context_messages", None),
+                source_context,
                 source_messages,
                 fork_keep,
             )
@@ -17678,25 +18222,41 @@ def handle_post(handler, parsed) -> bool:
         # persisted index outside the lock, then re-check the in-memory
         # mutation set inside the lock and commit the pin atomically.
         if pin_requested and not getattr(s, "pinned", False):
+            try:
+                profiles = list_profiles_api()
+            except Exception:
+                profiles = []
+            root_profile_names = set(_root_profile_names_snapshot() or ()) | {"default"}
+            listed_root_names = {str(p["name"]) for p in profiles or [] if p.get("name") and p.get("is_default") is True}
+            nonroot_names = {str(p["name"]) for p in profiles or [] if p.get("name") and p.get("is_default") is False}
+            root_profile_names.update(listed_root_names)
+            conflicts = (root_profile_names - {"default"}) & nonroot_names
+            known_nonroots = nonroot_names - conflicts - {"default"}
+            pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
             # Pre-snapshot from persisted index (acquires LOCK internally,
             # so must run outside our own LOCK acquire below).
             persisted_rows = [
                 existing for existing in all_sessions()
                 if _session_counts_toward_pin_quota(existing)
             ]
+            admission_error = None
             with LOCK:
+                owner_profile = str(_session_field(s, "profile", None) or "default")
+                uncertain_owner = owner_profile in conflicts or owner_profile not in root_profile_names | nonroot_names
+                root_owner = owner_profile not in known_nonroots
+                quota_profile_names = root_profile_names - conflicts if root_owner else {owner_profile}
+                candidate_rows = list(persisted_rows)
                 # Final authoritative count: merge persisted pinned rows with the
                 # in-memory SESSIONS snapshot. Count logical sidebar-visible pin
                 # lineages rather than raw session rows so continuation siblings
                 # in the same visible lineage do not consume extra pin quota.
-                candidate_rows = list(persisted_rows)
                 candidate_rows.extend(
                     existing.compact() for existing in SESSIONS.values()
                     if _session_counts_toward_pin_quota(existing)
                 )
                 target_row = s.compact()
                 candidate_rows.append(target_row)
-                pinned_lineage_ids = _visible_pinned_lineage_ids(candidate_rows)
+                pinned_lineage_ids = _visible_pinned_lineage_ids(candidate_rows, profiles=quota_profile_names)
                 target_lineage = _session_row_lineage_root_id(
                     target_row,
                     {
@@ -17706,13 +18266,26 @@ def handle_post(handler, parsed) -> bool:
                     },
                 )
                 pinned_lineage_ids.discard(target_lineage)
-                pinned_sessions_limit = int(load_settings().get("pinned_sessions_limit", 3) or 3)
-                if len(pinned_lineage_ids) >= pinned_sessions_limit:
-                    return bad(handler, f"Up to {pinned_sessions_limit} sessions can be pinned. Unpin one before pinning another.", 400)
-                # Mark in-memory pin state under LOCK so concurrent pin
-                # requests see the increment immediately, even before
-                # save() finishes flushing to disk.
-                s.pinned = True
+                pinned_count = len(pinned_lineage_ids)
+                if root_owner:
+                    upper_profiles = {str(_session_field(row, "profile", None) or "default") for row in candidate_rows} - known_nonroots
+                    upper_count = len(_visible_pinned_lineage_ids(candidate_rows, target_row, upper_profiles))
+                if uncertain_owner:
+                    own_count = len(_visible_pinned_lineage_ids(candidate_rows, target_row, {owner_profile}))
+                if (own_count if uncertain_owner else pinned_count) >= pinned_sessions_limit:
+                    admission_error = (
+                        f"Up to {pinned_sessions_limit} sessions can be pinned. Unpin one before pinning another.",
+                        400,
+                    )
+                elif root_owner and upper_count >= pinned_sessions_limit:
+                    admission_error = ("Session profile information is incomplete; please retry.", 503)
+                else:
+                    # Mark in-memory pin state under LOCK so concurrent pin
+                    # requests see the increment immediately, even before
+                    # save() finishes flushing to disk.
+                    s.pinned = True
+            if admission_error:
+                return bad(handler, *admission_error)
             with _get_session_agent_lock(body["session_id"]):
                 s.save()
         else:
@@ -17735,6 +18308,11 @@ def handle_post(handler, parsed) -> bool:
         sid = body["session_id"]
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
+        # #7776 Finding 2: capture the CLI source identity BEFORE the lock so
+        # the lock-held Session.load(sid) reload (which materializes a brand
+        # new WebUI session without the pre-lock CLI metadata) cannot drop it
+        # on the way back to disk. The materialize path below also uses it.
+        _archive_cli_meta = _lookup_cli_session_metadata(sid) or {}
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -17748,7 +18326,7 @@ def handle_post(handler, parsed) -> bool:
                 with LOCK:
                     SESSIONS[sid] = s
         except KeyError:
-            cli_meta = _lookup_cli_session_metadata(sid)
+            cli_meta = _archive_cli_meta
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
             if cli_meta.get("read_only"):
@@ -17809,8 +18387,40 @@ def handle_post(handler, parsed) -> bool:
                 s.session_key = cli_meta.get("session_key")
                 s.platform = cli_meta.get("platform")
         with _get_session_agent_lock(sid):
+            # #7738: re-resolve the canonical session under the lock so the
+            # object we mutate is the resident one (not a stale, evicted one).
+            # For the in-cache path the outer get_session(sid) above can drop
+            # out of SESSIONS via _evict_sessions_over_cap before this lock is
+            # acquired; for the materialize path the just-saved object could
+            # likewise be evicted by a concurrent cap-1 request. Either way,
+            # the session we archive must be the freshest one.
+            with LOCK:
+                latest = SESSIONS.get(sid)
+                if latest is not None and str(getattr(latest, "session_id", "") or "") != sid:
+                    SESSIONS.pop(sid, None)
+                    latest = None
+                elif latest is not None:
+                    SESSIONS.move_to_end(sid)
+            if latest is None:
+                latest = Session.load(sid)
+                if latest is None:
+                    return bad(handler, "Session not found", 404)
+            s = _ensure_full_session_before_mutation(sid, latest)
+            # #7776 Finding 2: re-stamp CLI source identity on the freshly
+            # loaded session before mutating it. ``_archive_cli_meta`` was
+            # captured above (before the lock); for the regular CLI/agent
+            # materialize path the on-disk sidecar that Session.load(sid)
+            # just read is the import_cli_session save WITHOUT source meta,
+            # so without this re-stamp the save() below would persist a
+            # WebUI-native copy with is_cli_session=False + null source.
+            if _archive_cli_meta:
+                _apply_cli_source_meta_to_session(s, _archive_cli_meta)
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
+            with LOCK:
+                SESSIONS[sid] = s
+                SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
         publish_session_list_changed(
             "session_archive",
             profile=getattr(s, "profile", None),
@@ -17824,30 +18434,40 @@ def handle_post(handler, parsed) -> bool:
             require(body, "session_id")
         except ValueError as e:
             return bad(handler, str(e))
+        sid = body["session_id"]
+        # #7738: pre-validate OUTSIDE the lock (404 / 403 contracts) so we can
+        # still answer with a 404 before the lock is acquired. The actual
+        # mutation re-resolves INSIDE the lock (see #7738 same-shape fix as
+        # /api/session/rename) to avoid saving a stale, evicted object over a
+        # newer save.
         try:
-            s = _get_or_materialize_session(body["session_id"])
+            s = _get_or_materialize_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be moved from WebUI", 403)
-        # #1614: refuse moves into a project owned by another profile.
+        # #7776 Finding 1: the pre-lock ``s`` may be stale (issue #7738's
+        # exact race). The 1614 cross-profile authorization MUST be
+        # re-evaluated against the canonical session resolved INSIDE the
+        # lock — using the stale pre-lock ``s.profile`` would let a
+        # profile-beta session be assigned to a profile-alpha project.
+        # We still need ``target_pid`` and the project-not-found 404
+        # outside the lock (so the early-exit is honored), but the
+        # authoritative profile match waits for the canonical session.
         target_pid = body.get("project_id") or None
+        target = None
         if target_pid:
-            # Use the session's own profile for authorization, not the global
-            # active profile. A session belongs to a specific profile set at
-            # creation; projects from that profile should always be assignable,
-            # regardless of which profile is "active" at the process level.
-            # Matches the same principle as the profile chip fix — prefer
-            # session-scoped state over global active profile. (#3325 follow-up)
-            _session_profile = getattr(s, 'profile', None) or get_active_profile_name()
             target = next(
                 (p for p in load_projects() if p["project_id"] == target_pid),
                 None,
             )
             if not target:
                 return bad(handler, "Project not found", 404)
-            if not _profiles_match(target.get("profile"), _session_profile):
-                return bad(handler, "Project not found", 404)
+        # #7776 Finding 2: capture the CLI source identity BEFORE acquiring
+        # the lock so the lock-held reload (which materializes a new WebUI
+        # session via Session.load(sid)) cannot drop it on the way back to
+        # disk. Applied after the reload below.
+        _move_cli_meta = _lookup_cli_session_metadata(sid) or {}
         # #3746: acquire the per-session agent lock with a bounded timeout
         # instead of blocking indefinitely. The streaming thread holds this same
         # lock during checkpoint saves; on slow file I/O (e.g. WSL/DrvFs) a bare
@@ -17856,7 +18476,7 @@ def handle_post(handler, parsed) -> bool:
         # the wait converts that into an actionable HTTP 503 the client can retry.
         # We keep the lock (rather than dropping it for this metadata-only write)
         # because s.save() still races the streaming thread's atomic writer.
-        _move_lock = _get_session_agent_lock(body["session_id"])
+        _move_lock = _get_session_agent_lock(sid)
         if not _move_lock.acquire(timeout=5):
             return j(
                 handler,
@@ -17864,14 +18484,53 @@ def handle_post(handler, parsed) -> bool:
                 status=503,
             )
         try:
+            # #7738: re-resolve the canonical session under the lock so the
+            # object we mutate is the resident one (not a stale, evicted one).
+            with LOCK:
+                latest = SESSIONS.get(sid)
+                if latest is not None and str(getattr(latest, "session_id", "") or "") != sid:
+                    SESSIONS.pop(sid, None)
+                    latest = None
+                elif latest is not None:
+                    SESSIONS.move_to_end(sid)
+            if latest is None:
+                latest = Session.load(sid)
+                if latest is None:
+                    return bad(handler, "Session not found", 404)
+            s = _ensure_full_session_before_mutation(sid, latest)
+            # #7776 Finding 2: re-stamp CLI source identity on the freshly
+            # loaded session (the lock-held Session.load(sid) read the
+            # source-stripped sidecar that _get_or_materialize_session's
+            # import_cli_session path produced).
+            if _move_cli_meta:
+                _apply_cli_source_meta_to_session(s, _move_cli_meta)
+            # #7776 Finding 1: re-run the #1614 profile authorization with
+            # the canonical session's profile. The pre-lock check above was
+            # only a 404/404 contract gate; the authoritative cross-profile
+            # move guard runs here, with ``s`` guaranteed to be the resident
+            # object (issue #7738's stale hazard closed).
+            if target_pid:
+                # Use the session's own profile for authorization, not the global
+                # active profile. A session belongs to a specific profile set at
+                # creation; projects from that profile should always be assignable,
+                # regardless of which profile is "active" at the process level.
+                # Matches the same principle as the profile chip fix — prefer
+                # session-scoped state over global active profile. (#3325 follow-up)
+                _session_profile = getattr(s, 'profile', None) or get_active_profile_name()
+                if not _profiles_match(target.get("profile"), _session_profile):
+                    return bad(handler, "Project not found", 404)
             s.project_id = target_pid
             s.save()
+            with LOCK:
+                SESSIONS[sid] = s
+                SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
         finally:
             _move_lock.release()
         publish_session_list_changed(
             "session_move",
             profile=getattr(s, "profile", None),
-            session_id=getattr(s, "session_id", body["session_id"]),
+            session_id=getattr(s, "session_id", sid),
         )
         return j(handler, {"ok": True, "session": s.compact()})
 
@@ -18471,7 +19130,16 @@ def _handle_session_export(handler, parsed):
     # ``public_session_projection`` supersedes the narrower
     # ``redact_session_data`` path so export context_messages uses the same
     # alias-stripping boundary as the visible transcript.
-    safe = public_session_projection(s.__dict__)
+    snapshot = dict(s.__dict__)
+    if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
+        state_messages = get_state_db_session_messages(
+            sid, profile=getattr(s, "profile", None), include_row_identity=True,
+        )
+        snapshot["messages"] = reconciled_state_db_messages_for_session(s, state_messages=state_messages)
+        snapshot["context_messages"] = reconciled_state_db_messages_for_session(
+            s, prefer_context=True, state_messages=state_messages
+        )
+    safe = public_session_projection(snapshot)
     qs = parse_qs(parsed.query)
     fmt = qs.get("format", ["json"])[0].lower()
     if fmt == "html":
@@ -18490,11 +19158,19 @@ def _handle_session_export(handler, parsed):
                         palette = parsed_palette
             except Exception:
                 palette = None
-        payload = render_session_html(safe, theme=theme, palette=palette)
+        html = render_session_html(safe, theme=theme, palette=palette)
+        # Join provider UTF-16 halves for presentation, while leaving durable
+        # session/journal text unchanged. Lone halves retain replacement output.
+        html = html.encode('utf-16-le', errors='surrogatepass').decode(
+            'utf-16-le', errors='replace'
+        )
+        payload = html.encode(
+            "utf-8", errors="replace"
+        )
         content_type = "text/html; charset=utf-8"
         ext = "html"
     else:
-        payload = json.dumps(safe, ensure_ascii=False, indent=2)
+        payload = _json_response_body(safe, pretty=True)
         content_type = "application/json; charset=utf-8"
         ext = "json"
     handler.send_response(200)
@@ -18502,10 +19178,10 @@ def _handle_session_export(handler, parsed):
     handler.send_header(
         "Content-Disposition", f'attachment; filename="hermes-{sid}.{ext}"'
     )
-    handler.send_header("Content-Length", str(len(payload.encode("utf-8"))))
+    handler.send_header("Content-Length", str(len(payload)))
     handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
-    handler.wfile.write(payload.encode("utf-8"))
+    handler.wfile.write(payload)
     return True
 
 
@@ -20599,6 +21275,28 @@ def _handle_tts(handler, parsed):
             from api.helpers import bad as _bad
             return _bad(handler, "unauthorized", 401)
 
+    # A chunked playback captures the profile that owns it, so a mid-playback
+    # profile switch cannot stream the previous profile's text under the new
+    # profile's provider/credentials. Requests that omit the field stay accepted
+    # (legacy direct callers); only an explicit MISMATCH is rejected, and it is
+    # rejected here — before the limiter, credential lookup or config access —
+    # so a mismatched chunk costs no quota and reads no other profile's config.
+    try:
+        claimed_profile = data.get("profile")
+    except Exception:
+        claimed_profile = None
+    if isinstance(claimed_profile, str) and claimed_profile.strip():
+        from api.helpers import bad as _bad
+        from api.profiles import _profiles_match, get_active_profile_name
+
+        claimed = claimed_profile.strip()
+        if not _profiles_match(claimed, get_active_profile_name()):
+            return _bad(
+                handler,
+                "playback profile no longer active",
+                409,
+            )
+
     # High-quality per-client rate limiting for TTS.
     if not hasattr(_handle_tts, "_tts_limiter"):
         import time as _time, threading as _threading
@@ -20812,6 +21510,7 @@ def _handle_tts(handler, parsed):
         "fr-CA-AntoineNeural", "fr-CA-JeanNeural",
         "fr-CA-SylvieNeural", "fr-CA-ThierryNeural",
         "fr-FR-DeniseNeural", "fr-FR-EloiseNeural", "fr-FR-HenriNeural",
+        "fr-FR-RemyMultilingualNeural", "fr-FR-VivienneMultilingualNeural",
         "id-ID-GadisNeural",
     }
     if voice not in allowed:
@@ -20931,7 +21630,6 @@ _MEDIA_TOKEN_RE = re.compile(r"MEDIA:([^\s\)\]]+)")
 #      class) so a filename that legally contains a backtick
 #      (``report`final.png``) is captured in full instead of being
 #      truncated at the first backtick.
-_BACKTICK_MEDIA_RE = re.compile(r"`MEDIA:([^`\s]+)`")
 
 
 def _message_content_text(content) -> str:
@@ -20966,12 +21664,10 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
     for message in getattr(session, "messages", []) or []:
         if not isinstance(message, dict):
             continue
-        # Only honor MEDIA: tokens that the assistant/tool emitted. User-authored
-        # content cannot mint allow-list entries even if it contains a MEDIA:
-        # token — keeps the implicit threat model (assistant-emitted artifacts
-        # only) explicit.
+        # Only assistant/tool messages can grant artifact access. Other or
+        # missing roles cannot mint grants, even with an exact MEDIA: token.
         role = str(message.get("role") or "").strip().lower()
-        if role == "user":
+        if role not in {"assistant", "tool"}:
             continue
         # #7565: also inspect typed public assistant commentary carried in
         # ``codex_message_items`` (Agent phase: "commentary"). The
@@ -20991,11 +21687,11 @@ def _session_media_token_allows_path(sid: str, target: Path, allowed_mimes: set[
         )
         if "MEDIA:" not in text:
             continue
-        # #7680 re-gate: strip backtick wrappers first so the bare
-        # class below captures the full path even when the filename
-        # itself contains a backtick.
-        text = _BACKTICK_MEDIA_RE.sub(lambda m: f"MEDIA:{m.group(1)}", text)
-        for ref in _MEDIA_TOKEN_RE.findall(text):
+        for match in _MEDIA_TOKEN_RE.finditer(text):
+            parts = split_media_token_ref(text, match)
+            if not parts:
+                continue
+            ref = parts[0]
             if "://" in ref:
                 continue
             try:
@@ -21303,8 +21999,17 @@ def _handle_media(handler, parsed):
     # Archives are download-only: never added to the inline-preview sets below,
     # so they always get Content-Disposition: attachment.
     _ARCHIVE_TYPES = {"application/zip"}
+    _SESSION_TEXT_ARTIFACT_TYPES = {
+        "text/csv",
+        "text/x-diff",
+        "application/vnd.excalidraw+json",
+    }
     _SESSION_MEDIA_TOKEN_TYPES = (
-        _INLINE_IMAGE_TYPES | _AUDIO_VIDEO_PDF_TYPES | _ARCHIVE_TYPES | {"text/html"}
+        _INLINE_IMAGE_TYPES
+        | _AUDIO_VIDEO_PDF_TYPES
+        | _ARCHIVE_TYPES
+        | _SESSION_TEXT_ARTIFACT_TYPES
+        | {"text/html"}
     )
     session_media_allowed = _session_media_token_allows_path(
         qs.get("session_id", [""])[0],
@@ -22031,11 +22736,39 @@ def _handle_session_sse_stream(handler, parsed):
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
                 _sse_keepalive(handler)
+                # A completed keepalive is proof of life for an idle subscriber
+                # (re-gate finding 1): without this mark the reaper cannot tell a
+                # quiet-but-healthy tab from a half-open socket on an idle session,
+                # because an idle session never fills a subscriber's queue.
+                ch.note_subscriber_write_ok(q)
                 continue
             if payload is None:
+                # End-of-stream sentinel: the channel was deliberately closed
+                # (SessionChannel.close(), reaper or owner). Simply returning here
+                # does NOT end the response: under HTTP/1.1 keep-alive, with no
+                # Content-Length and no chunked framing, the server keeps the
+                # socket open, the browser's EventSource never sees EOF and stays
+                # attached to a channel the reaper already removed -- silently
+                # missing every later event (the "tab stops receiving updates"
+                # defect this change fixes). Flag the socket so the server closes
+                # it after this handler returns and the client reconnects onto the
+                # replacement channel. The #3103 note still holds: never advertise
+                # `Connection: close` up front (reconnect storms); this applies
+                # only to a deliberate end-of-channel.
+                try:
+                    handler.close_connection = True
+                except Exception:
+                    logger.debug(
+                        "session-stream: could not flag socket close for %s", sid,
+                        exc_info=True,
+                    )
                 break
             event_name, data = payload
             _sse(handler, event_name, data)
+            # Delivered: that write completed, so this subscriber is alive right
+            # now (re-gate finding 1). A write that raises instead never reaches
+            # this line, and its handler path unsubscribes in the finally below.
+            ch.note_subscriber_write_ok(q)
     except _CLIENT_DISCONNECT_ERRORS:
         pass  # client went away — normal for long-lived connections
     finally:
@@ -22765,6 +23498,7 @@ def _handle_cron_recent(handler, parsed):
                         "status": job.get("last_status", "unknown"),
                         "completed_at": ts,
                         "toast_notifications": job.get("toast_notifications") is not False,
+                        "badge_notifications": job.get("badge_notifications") is not False,
                     }
                 )
         latest_session_info = _latest_cron_session_info_for_jobs(
@@ -23180,23 +23914,42 @@ def _handle_btw(handler, body):
     ephemeral.messages = list(s.messages or [])
     ephemeral.title = f"btw: {question[:60]}"
     ephemeral.save()
+    from api.session_ops import snapshot_session_state
+
+    # Snapshot BEFORE the launch mutations so the abort cleanup can restore the
+    # session to its pre-launch shape (no active_stream_id / pending fields).
+    snapshot = snapshot_session_state(ephemeral)
     stream_id = uuid.uuid4().hex
     ephemeral.active_stream_id = stream_id
     register_session_writeback_owner(ephemeral.session_id, stream_id)
-    ephemeral.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, ephemeral.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    from api.background import track_btw
-    track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
-    thr = threading.Thread(
-        target=_run_agent_streaming,
-        args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
-        kwargs={"ephemeral": True, "model_provider": model_provider},
-        daemon=True,
-    )
-    thr.start()
+    # #6869 re-gate: every step after the writeback-owner registration — the
+    # second save, the channel registration, task tracking, thread construction
+    # and thread start — is now guarded. A throw in any of them used to orphan
+    # the registries and leave the ephemeral session pointing at a dead stream.
+    try:
+        ephemeral.save()
+        stream = create_stream_channel()
+        register_stream_owner(stream_id, ephemeral.session_id)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+            # Launch-phase ownership claim (re-gate finding B): the reaper's sweep
+            # makes this load-bearing on EVERY registration edge, not just the two
+            # chat/start paths -- an unclaimed stream whose worker has not been
+            # admitted yet is indistinguishable from a dead one, and the sweep would
+            # harvest it before the worker runs the task.
+            publish_pre_admission_claim(stream_id, streams_lock_held=True)
+        from api.background import track_btw
+        track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
+        thr = threading.Thread(
+            target=_run_agent_streaming,
+            args=(ephemeral.session_id, question, s.model, s.workspace, stream_id, None),
+            kwargs={"ephemeral": True, "model_provider": model_provider},
+            daemon=True,
+        )
+        thr.start()
+    except Exception:
+        _cleanup_chat_start_launch_failure(ephemeral, stream_id, snapshot)
+        raise
     return j(handler, {"stream_id": stream_id, "session_id": ephemeral.session_id, "parent_session_id": body["session_id"]})
 
 
@@ -23231,19 +23984,17 @@ def _handle_background(handler, body):
     )
     bg.title = f"bg: {prompt[:60]}"
     bg.save()
+    from api.session_ops import snapshot_session_state
+
+    # Snapshot BEFORE the launch mutations (see _handle_btw).
+    snapshot = snapshot_session_state(bg)
     stream_id = uuid.uuid4().hex
     bg.active_stream_id = stream_id
     register_session_writeback_owner(bg.session_id, stream_id)
-    bg.save()
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, bg.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
     task_id = uuid.uuid4().hex[:8]
     from api.background import track_background, complete_background
     parent_sid = body["session_id"]
     bg_sid = bg.session_id
-    track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
 
     def _run_bg_and_notify():
         """Run the background agent, then mark the tracked task `done` with the
@@ -23291,8 +24042,32 @@ def _handle_background(handler, body):
             except Exception:
                 pass
 
-    thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
-    thr.start()
+    # #6869 re-gate: the second save, the channel registration, task tracking
+    # and the thread construction/start all run after the writeback owner was
+    # registered. A throw in any of them used to orphan the registries, leave
+    # the hidden bg session pointing at a dead stream, and strand the tracked
+    # task in status="running" forever — the frontend poll never saw a result.
+    try:
+        bg.save()
+        stream = create_stream_channel()
+        register_stream_owner(stream_id, bg.session_id)
+        with STREAMS_LOCK:
+            STREAMS[stream_id] = stream
+            # Same launch-phase claim as every other registration edge (re-gate
+            # finding B): its worker is scheduled below, and until it admits itself
+            # the claim is the only thing that tells the reaper's sweep this stream
+            # is launching rather than dead.
+            publish_pre_admission_claim(stream_id, streams_lock_held=True)
+        track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
+        thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
+        thr.start()
+    except Exception:
+        _cleanup_chat_start_launch_failure(bg, stream_id, snapshot)
+        try:
+            complete_background(parent_sid, task_id, "(background task failed)")
+        except Exception:
+            pass
+        raise
     return j(handler, {"task_id": task_id, "stream_id": stream_id, "session_id": bg.session_id})
 
 
@@ -23338,7 +24113,25 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     # allows state.db rows newer than the watermark, so post-edit turns
     # are not dropped. Never 0.0 (the truncate-to-empty sentinel, #2914).
     if getattr(s, "truncation_watermark", None):
-        s.truncation_watermark = user_msg.get("timestamp") or time.time()
+        # Same invariant as streaming._advance_truncation_watermark_after_commit:
+        # only ever advance to a REAL message timestamp. Falling back to
+        # time.time() here stamped the watermark newer than every sidecar row
+        # and permanently self-locked the append-only state.db merge. When
+        # started_at is absent, clamp to the newest real message instead.
+        checkpoint_ts = user_msg.get("timestamp") or user_msg.get("_ts")
+        if not (isinstance(checkpoint_ts, (int, float)) and checkpoint_ts > 0):
+            newest_real_ts = None
+            for _m in (getattr(s, "messages", None) or []):
+                if not isinstance(_m, dict):
+                    continue
+                _ts = _m.get("timestamp") or _m.get("_ts")
+                if isinstance(_ts, (int, float)) and _ts > 0:
+                    newest_real_ts = (
+                        _ts if newest_real_ts is None else max(newest_real_ts, _ts)
+                    )
+            checkpoint_ts = newest_real_ts
+        if isinstance(checkpoint_ts, (int, float)) and checkpoint_ts > 0:
+            s.truncation_watermark = float(checkpoint_ts)
 
 
 def _is_default_or_empty_session_title(title) -> bool:
@@ -23353,6 +24146,194 @@ def _provisional_title_from_prompt(prompt: str, fallback: str = "Untitled") -> s
 
 
 _RETAINED_CONTEXT_USER_UNSET = object()
+
+
+# One-shot bounded retry for a deferred process-wakeup whose worker never
+# started (#7680 finding 3). Maps sid → the live threading.Timer so repeated
+# aborts for one session coalesce into a single pending retry.
+_DEFERRED_WAKEUP_RETRY_TIMERS: dict = {}
+_DEFERRED_WAKEUP_RETRY_TIMERS_LOCK = threading.Lock()
+_DEFERRED_WAKEUP_RETRY_DELAY_SECS = 2.0
+
+
+def _schedule_deferred_wakeup_retry(sid: str, *, retry_attempt: int = 0) -> None:
+    """Schedule ONE bounded drain retry for a launch-aborted wakeup (#7680).
+
+    The recording call site (``_rearm_process_wakeup_after_launch_failure``)
+    runs on a request thread; the retry must not block it. A short-delay
+    daemon ``threading.Timer`` fires ``drain_deferred_wakeups_for_session``
+    once — the drain itself is the bounded operation: it no-ops while the
+    session has an active turn, claims atomically (so a racing real next
+    turn cannot double-deliver), and on its own launch failure re-defers the
+    prompt without rescheduling. One-shot, no loop.
+
+    ``retry_attempt`` is the per-delivery attempt marker that makes the
+    "one-shot" claim real. The first abort (attempt 0) schedules the retry;
+    the retry's own launch runs with attempt 1, and a failure there goes
+    through ``_rearm_process_wakeup_after_launch_failure(retry_attempt=1)``
+    which keeps the prompt queued but never schedules again. Without the
+    marker the timer popped its own handle *before* draining, so the
+    "already scheduled" coalesce guard could not fire on the retry's own
+    failure and the drain rescheduled every 2s forever under a persistent
+    launch failure (#7680 CORE, maintainer 2026-10-01).
+
+    Coalescing: if a retry is already pending for this session, keep it —
+    one drain delivers one wakeup, and the prompt is queued either way.
+    """
+    if not sid:
+        return
+    try:
+        with _DEFERRED_WAKEUP_RETRY_TIMERS_LOCK:
+            existing = _DEFERRED_WAKEUP_RETRY_TIMERS.get(sid)
+            if existing is not None and existing.is_alive():
+                return  # one pending retry is enough — the prompt is queued
+            timer = threading.Timer(
+                _DEFERRED_WAKEUP_RETRY_DELAY_SECS,
+                _run_deferred_wakeup_retry,
+                args=(sid, retry_attempt + 1),
+            )
+            timer.daemon = True
+            _DEFERRED_WAKEUP_RETRY_TIMERS[sid] = timer
+        # ``start()`` is deliberately OUTSIDE the registry lock (a Timer that
+        # blocks in start() must not hold the lock other sessions need), but
+        # that means a start() failure leaves a dead entry in
+        # ``_DEFERRED_WAKEUP_RETRY_TIMERS``: the callback that would pop it
+        # never runs. Thread exhaustion on the launch-failure path is exactly
+        # when this fires, and every leaked entry is a session that can never
+        # schedule a retry again. Remove the entry on failure, but ONLY if it
+        # still refers to this timer — a racing session may have installed a
+        # newer one (P2 finding, api/routes.py ~23401).
+        try:
+            timer.start()
+        except Exception:
+            with _DEFERRED_WAKEUP_RETRY_TIMERS_LOCK:
+                if _DEFERRED_WAKEUP_RETRY_TIMERS.get(sid) is timer:
+                    _DEFERRED_WAKEUP_RETRY_TIMERS.pop(sid, None)
+            raise
+    except Exception:
+        logger.debug(
+            "Failed to schedule deferred-wakeup retry for session %s", sid,
+            exc_info=True,
+        )
+
+
+def _run_deferred_wakeup_retry(sid: str, retry_attempt: int = 0) -> None:
+    """Timer body: drain once, then drop the timer handle (#7680).
+
+    ``retry_attempt`` is threaded into the drain's launch so a launch failure
+    during this attempt reaches the abort cleanup as an already-retried
+    delivery: the prompt is preserved, no new timer is scheduled.
+    """
+    # Pop our own handle BEFORE draining. The coalesce guard above cannot be
+    # relied on for this (the entry is already gone), which is exactly why
+    # the attempt marker — not the registry state — is what bounds the
+    # retry.
+    try:
+        with _DEFERRED_WAKEUP_RETRY_TIMERS_LOCK:
+            _DEFERRED_WAKEUP_RETRY_TIMERS.pop(sid, None)
+        from api.background_process import drain_deferred_wakeups_for_session
+
+        drain_deferred_wakeups_for_session(
+            sid, retry_attempt=retry_attempt
+        )
+    except Exception:
+        logger.debug(
+            "Deferred-wakeup retry drain failed for session %s", sid, exc_info=True,
+        )
+
+
+def _rearm_process_wakeup_after_launch_failure(
+    sid: str,
+    stream_id: str,
+    *,
+    wakeup_prompt,
+    process_id: str = "",
+    retry_attempt: int = 0,
+) -> None:
+    """Re-arm the process-wakeup drain after a launch-failure abort (#7680).
+
+    Opt-in from the process-completion path ONLY. The caller sets
+    ``rearm_deferred_wakeup=True`` on ``_start_chat_stream_for_session``, which
+    today only ``api.background_process._start_server_side_wakeup_turn`` does.
+    Async-delegation completions start their turn with the same
+    ``source="process_wakeup"`` but already own a durable claim/retry
+    (``release_async_delegation_delivery(..., retryable=True)`` →
+    ``_retry_unclaimed_async_delegation_event``), so re-arming here as well
+    delivered one completion through two independent retry paths: the durable
+    retry AND a deferred prompt AND a retry timer. Gating on ``source`` alone
+    could not tell the two callers apart (maintainer 2026-10-01 CORE).
+
+    The process-wakeup path consumes ``PENDING_BG_TASK_COMPLETIONS[sid]`` and
+    the deferred entry BEFORE the worker actually starts. If preparation,
+    thread construction or ``start()`` then fails, the abort otherwise leaves
+    the marker consumed and the prompt gone with no retry. Re-arm = persist the
+    prompt via ``record_deferred_wakeup`` (the bare PENDING marker is a
+    telemetry flag with no payload, so re-marking alone is a no-op), then
+    schedule ONE bounded retry off the request thread.
+
+    ``retry_attempt`` is the per-delivery attempt marker. >= 1 means this
+    delivery was already retried once: the prompt is preserved but no further
+    timer is scheduled. The retry timer pops its own handle *before* draining,
+    so by the time a failure inside that drain reaches here the registry is
+    already empty and the coalesce guard cannot fire — without this marker a
+    persistent launch failure spun a new timer every 2s forever.
+    """
+    wakeup_prompt = str(wakeup_prompt or "").strip()
+    if not wakeup_prompt:
+        # Nothing to retry — leave the marker state alone.
+        return
+    try:
+        from api.background_process import record_deferred_wakeup
+    except Exception:
+        record_deferred_wakeup = None
+    if record_deferred_wakeup is not None:
+        # Prefer the authoritative process_id threaded down from the dispatch
+        # boundary (``_process_one`` has the real registry id in scope when it
+        # fires the wakeup). Parsing the display text back into an identity is
+        # the fragile fallback: a multi-line heredoc command fails the pinned
+        # single-line grammar, so parsing yields "" even though a real id
+        # exists. When the threaded id IS provided, both this rearm and the
+        # real handler's re-defer append with the SAME id, so
+        # ``record_deferred_wakeup``'s dedup collapses them into one entry.
+        _process_id = str(process_id or "").strip()
+        if not _process_id:
+            try:
+                from api.process_event_utils import wakeup_display_meta
+
+                _meta = wakeup_display_meta(wakeup_prompt) or {}
+                _process_id = str(_meta.get("task_id") or "").strip()
+            except Exception:
+                _process_id = ""
+        try:
+            record_deferred_wakeup(sid, _process_id, wakeup_prompt)
+        except Exception:
+            logger.debug(
+                "Failed to record deferred wakeup for session %s", sid, exc_info=True,
+            )
+        # Schedule the delivery half. Recording the prompt only fixes the LOSS
+        # half: nothing delivers it, because ``drain_deferred_wakeups_for_session``
+        # has exactly one caller — the turn-teardown hook — and a worker that
+        # never started has no teardown. With an autonomous agent there is no
+        # next user turn either, so the wakeup would sit in the in-memory queue
+        # until the user types something (or be lost on restart).
+        if retry_attempt <= 0:
+            _schedule_deferred_wakeup_retry(sid)
+        else:
+            logger.debug(
+                "deferred-wakeup retry attempt %d failed for session %s; "
+                "prompt kept queued, no further retry scheduled",
+                retry_attempt,
+                sid,
+            )
+    # Re-arm the bare PENDING_BG_TASK_COMPLETIONS marker too (preserved
+    # behaviour for any drain path that does not consult
+    # DEFERRED_PROCESS_WAKEUPS).
+    try:
+        PENDING_BG_TASK_COMPLETIONS.add(sid)
+    except Exception:
+        logger.debug(
+            "Failed to re-arm process-wakeup marker for session %s", sid, exc_info=True,
+        )
 
 
 def _prepare_chat_start_session_for_stream(
@@ -23452,52 +24433,151 @@ def _prepare_chat_start_session_for_stream(
         s.save()
 
 
-def _cleanup_chat_start_launch_failure(session, stream_id: str) -> None:
-    """Release state registered before a worker thread successfully starts."""
-    clear_session_writeback_owner_if_owned(session.session_id, stream_id)
-    unregister_stream_owner(stream_id)
-    with STREAMS_LOCK:
-        STREAMS.pop(stream_id, None)
-    STREAM_GOAL_RELATED.pop(stream_id, None)
-    # The session-field reset needs the same concurrency discipline as the
-    # registry half: hold the per-session lock and re-resolve the canonical
-    # session before clearing anything. Mutating the passed-in stale object
-    # could wipe a concurrent successor turn's pending fields, and saving it
-    # could resurrect a session deleted while the launch was failing. Same
-    # pattern as the #1533 race fix (routes.py:3077) and the anchor-scene
-    # write guard (routes.py:5140).
-    #
-    # This runs while the original launch failure is being handled, so it must
-    # never raise. Lock acquisition and session resolution can fail on their own
-    # (I/O, deserialization), and an escaping error here would mask the launch
-    # failure the caller is about to report while leaving the reset half done.
+def _atomic_write_chat_start_bytes(path: Path, payload: bytes) -> None:
+    """Replace one chat-start recovery file without exposing a partial write."""
+    tmp = path.with_suffix(
+        f"{path.suffix}.restore.tmp.{os.getpid()}.{threading.current_thread().ident}"
+    )
     try:
-        with _get_session_agent_lock(session.session_id):
+        with open(tmp, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        from api.models import _safe_replace
+
+        _safe_replace(tmp, path)
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _restore_chat_start_backup_provenance(provenance, *, compensation_succeeded: bool) -> None:
+    """Restore the backup state that existed before rejected admission."""
+    if provenance is None:
+        return
+    _sidecar_path, sidecar_bytes, backup_path, had_backup, backup_bytes, _sidecar_unknown = provenance
+    try:
+        if had_backup:
+            if backup_bytes is not None:
+                _atomic_write_chat_start_bytes(backup_path, backup_bytes)
+            return
+        elif compensation_succeeded:
+            backup_path.unlink(missing_ok=True)
+        elif sidecar_bytes is not None:
+            _atomic_write_chat_start_bytes(backup_path, sidecar_bytes)
+    except Exception:
+        logger.debug(
+            "Failed to restore chat-start recovery backup %s",
+            backup_path,
+            exc_info=True,
+        )
+
+
+def _restore_chat_start_entry_sidecar(provenance) -> None:
+    """Restore the entry sidecar before saving when backup bytes are unknown."""
+    sidecar_path, sidecar_bytes, _backup_path, _had_backup, _backup_bytes, sidecar_unknown = provenance
+    if sidecar_unknown:
+        raise OSError("chat-start entry sidecar bytes are unavailable")
+    if sidecar_bytes is None:
+        sidecar_path.unlink(missing_ok=True)
+    else:
+        _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
+
+
+def _cleanup_chat_start_launch_failure(
+    session,
+    stream_id: str,
+    snapshot,
+    *,
+    backup_provenance=None,
+    lock_held: bool = False,
+) -> None:
+    """Release state registered before a worker thread successfully starts."""
+    cleanup_result = {
+        "backup_provenance": backup_provenance,
+        "backup_unknown": (
+            backup_provenance is not None
+            and backup_provenance[3]
+            and backup_provenance[4] is None
+        ),
+        "sidecar_restored": False,
+    }
+    try:
+        clear_session_writeback_owner_if_owned(session.session_id, stream_id)
+        unregister_stream_owner(stream_id)
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+            # A launch whose worker never started must not strand its launch-phase
+            # claim: this path clears the registries directly and never reaches the
+            # canonical release funnel, and the orphan check keeps a claimed stream
+            # alive whatever the pending age -- so a stale claim would block every
+            # later chat/start for this stream id (re-gate finding 3).
+            retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
+        STREAM_GOAL_RELATED.pop(stream_id, None)
+    except Exception:
+        logger.debug(
+            "Failed to clear chat-start registries after chat-start failure for %s",
+            stream_id,
+            exc_info=True,
+        )
+    def restore_locked() -> None:
+        # Re-resolve the canonical session before clearing anything. Mutating
+        # the passed-in object could wipe a successor turn or resurrect a
+        # session deleted while the launch was failing.
+        try:
+            canonical = get_session(session.session_id)
+        except KeyError:
+            return
+        if getattr(canonical, "active_stream_id", None) != stream_id:
+            return
+        from api.session_ops import restore_session_state
+
+        restore_session_state(canonical, snapshot)
+        compensation_succeeded = False
+        if cleanup_result["backup_unknown"]:
             try:
-                canonical = get_session(session.session_id)
-            except KeyError:
-                return  # session deleted while the thread launch was failing
-            if getattr(canonical, "active_stream_id", None) != stream_id:
-                return  # a successor turn already owns the session
-            canonical.active_stream_id = None
-            canonical.pending_user_message = None
-            canonical.pending_attachments = []
-            canonical.pending_started_at = None
-            canonical.pending_user_source = None
-            try:
-                canonical.save()
+                _restore_chat_start_entry_sidecar(backup_provenance)
+                cleanup_result["sidecar_restored"] = True
             except Exception:
                 logger.debug(
-                    "Failed to persist chat-start cleanup after worker launch failure for %s",
+                    "Failed to restore chat-start entry sidecar for %s",
                     stream_id,
                     exc_info=True,
                 )
+                return
+        try:
+            canonical.save(touch_updated_at=False)
+            compensation_succeeded = True
+            cleanup_result["sidecar_restored"] = True
+        except Exception:
+            logger.debug(
+                "Failed to persist chat-start cleanup after chat-start failure for %s",
+                stream_id,
+                exc_info=True,
+            )
+        _restore_chat_start_backup_provenance(
+            backup_provenance,
+            compensation_succeeded=compensation_succeeded,
+        )
+
+    # This runs while the original launch failure is being handled, so it must
+    # never raise. Lock acquisition and session resolution can fail on their own,
+    # and an escaping error here would mask the launch failure.
+    try:
+        if lock_held:
+            restore_locked()
+        else:
+            with _get_session_agent_lock(session.session_id):
+                restore_locked()
     except Exception:
         logger.debug(
             "Failed to reset session state after worker launch failure for %s",
             stream_id,
             exc_info=True,
         )
+    return cleanup_result
 
 
 def _is_hidden_empty_session(s) -> bool:
@@ -23510,6 +24590,29 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+def _pending_turn_in_registration_window(session) -> bool:
+    """Return whether a pending turn is still inside its registration grace window.
+
+    ``active_stream_id`` is published before the SSE channel is registered and
+    before the worker lands in ``ACTIVE_RUNS``, so a very fresh pending turn must
+    keep blocking duplicate chat/start requests even though neither registry
+    shows anything yet. Past the grace window a pending turn is no evidence of a
+    live worker: it is what a crashed turn leaves behind.
+    """
+    if not getattr(session, "pending_user_message", None):
+        return False
+    try:
+        from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
+        grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
+    except Exception:
+        grace_seconds = 30.0
+    try:
+        pending_started_at = float(getattr(session, "pending_started_at", None) or 0)
+    except Exception:
+        pending_started_at = 0.0
+    return bool(pending_started_at and time.time() - pending_started_at < grace_seconds)
+
+
 def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     """Return whether an active_stream_id still owns this session's next turn.
 
@@ -23517,32 +24620,108 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     very fresh pending turn must also block duplicate chat_start requests. If we
     only check STREAMS here, a second request can race through the registration
     gap and overwrite the sidecar owner.
+
+    STREAMS membership alone is not evidence of a live turn: the entry is only
+    removed by the worker's own finalization, so a hard-killed or wedged worker
+    leaves it behind and every later chat/start for that session is refused with
+    ``409 session already has an active stream`` — for hours, since the SSE
+    channel reaper never touches this registry. The authoritative liveness check
+    is ``ACTIVE_RUNS`` (keyed by ``stream_id``, unregistered in the worker's
+    outer ``finally``); the fresh-pending guard covers the window between stream
+    registration and worker registration. When a stream is registered, no worker
+    is live and no pending turn is inside that window, it is an orphan: drop it
+    from both registries and let the caller admit a fresh turn.
     """
     if not stream_id:
         return False
+    orphan_released = False
     with STREAMS_LOCK:
         if stream_id in STREAMS:
-            return True
+            # ONE definition of "orphan", shared with every other reader
+            # (re-gate finding 2): registered, no live worker, no launch-phase
+            # claim, and no pending turn inside its registration window. The claim
+            # check is what keeps a stream that is still launching alive whatever
+            # the pending age (finding 5).
+            # The predicate fails CLOSED on its own when the worker registry cannot
+            # be read (api.config._is_orphaned_stream_locked returns False for an
+            # unreadable ACTIVE_RUNS), so no second guard belongs here: one
+            # definition, one owner. A local try/except would be unreachable.
+            if not is_orphaned_stream(
+                stream_id,
+                pending_turn_in_window=_pending_turn_in_registration_window(session),
+                streams_lock_held=True,
+            ):
+                return True
+            # Confirmed orphan. Clear the WHOLE stream-owned state, not just the
+            # registry entry: a crashed or wedged worker never reaches its own
+            # teardown, so this stream's agent instance / cancel flag / partial
+            # and reasoning text / live tool calls / goal marker / last event id
+            # would otherwise stay allocated for the life of the process -- one
+            # stale set per recovered orphan. The set and the lock mirror the
+            # canonical teardown (api/streaming.py, api/gateway_chat.py).
+            # STREAMS_LOCK is already held and threading.Lock is not reentrant,
+            # so the entries are removed directly instead of by re-entering a
+            # helper. Lock order stays STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK,
+            # the order the rest of the lifecycle uses (never the reverse).
+            from api import config as _live_config
+            _orphan_session_id = getattr(session, "session_id", None)
+            # ONE call releases every registry the stream owns
+            # (the shared stream_owned_registries() list + both owner registries) -- the single
+            # teardown entry point, so this path can never clear a hand-picked
+            # subset again. The session writeback entry is compare-and-clear: a
+            # successor admitted after this orphan keeps its registry claim.
+            # STREAMS_LOCK is already held and threading.Lock is not reentrant.
+            try:
+                _live_config.release_stream_owned_registries(
+                    stream_id,
+                    session_id=_orphan_session_id,
+                    streams_lock_held=True,
+                )
+            except Exception:
+                logger.debug(
+                    "chat/start: could not release the stream-owned registries "
+                    "for orphan %s",
+                    stream_id,
+                    exc_info=True,
+                )
+            logger.info(
+                "chat/start: cleared orphaned stream %s for session %s "
+                "(no live worker, no pending turn in the registration window)",
+                stream_id,
+                _orphan_session_id or "?",
+            )
+            orphan_released = True
+    if orphan_released:
+        # Gateway-owned rows (run lifecycle / run id / endpoint) live in
+        # api/gateway_chat.py and are released through their no-op-safe
+        # lifecycle/waiter path, which must NOT run nested under STREAMS_LOCK:
+        # the canonical Gateway teardown releases that lock before the same step.
+        try:
+            from api.gateway_chat import release_gateway_stream_state
+
+            release_gateway_stream_state(stream_id)
+        except Exception:
+            logger.debug(
+                "chat/start: could not release the Gateway state for orphan %s",
+                stream_id,
+                exc_info=True,
+            )
+        return False
     try:
-        from api import config as _live_config
-        with _live_config.ACTIVE_RUNS_LOCK:
-            if stream_id in (_live_config.ACTIVE_RUNS or {}):
+        with ACTIVE_RUNS_LOCK:
+            if stream_id in (ACTIVE_RUNS or {}):
                 return True
     except Exception:
         pass
-    if getattr(session, "pending_user_message", None):
-        try:
-            from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
-            grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
-        except Exception:
-            grace_seconds = 30.0
-        try:
-            pending_started_at = float(getattr(session, "pending_started_at", None) or 0)
-        except Exception:
-            pending_started_at = 0.0
-        if pending_started_at and time.time() - pending_started_at < grace_seconds:
-            return True
-    return False
+    return _pending_turn_in_registration_window(session)
+
+
+def _local_agent_worker_kwargs(*, model_provider, goal_related: bool, moa_config) -> dict:
+    """Build kwargs shared by both launch sites for the in-process worker."""
+    kwargs = {"model_provider": model_provider, "goal_related": goal_related}
+    if moa_config:
+        kwargs["moa_config"] = moa_config
+    return kwargs
 
 
 def _start_regeneration_stream_locked(
@@ -23558,6 +24737,8 @@ def _start_regeneration_stream_locked(
     source: str,
     moa_config,
     backend_is_gateway: bool,
+    persisted_model=None,
+    persisted_model_provider=None,
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -23567,6 +24748,11 @@ def _start_regeneration_stream_locked(
         restore_regeneration_state,
         snapshot_regeneration_state,
     )
+
+    if persisted_model is None:
+        persisted_model = model
+    if persisted_model_provider is None:
+        persisted_model_provider = model_provider
 
     try:
         plan = plan_regeneration(
@@ -23596,14 +24782,20 @@ def _start_regeneration_stream_locked(
     worker_target = (
         _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
     )
-    worker_kwargs = {
-        "model_provider": model_provider,
-        "goal_related": goal_related,
-    }
     if backend_is_gateway:
+        worker_kwargs = {
+            "model_provider": model_provider,
+            "persisted_model": persisted_model,
+            "persisted_model_provider": persisted_model_provider,
+            "goal_related": goal_related,
+        }
         worker_kwargs["regeneration"] = True
-    if moa_config and not backend_is_gateway:
-        worker_kwargs["moa_config"] = moa_config
+    else:
+        worker_kwargs = _local_agent_worker_kwargs(
+            model_provider=model_provider,
+            goal_related=goal_related,
+            moa_config=moa_config,
+        )
 
     def _gated_worker():
         release_worker.wait()
@@ -23624,6 +24816,9 @@ def _start_regeneration_stream_locked(
             STREAM_GOAL_RELATED.pop(stream_id, None)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+            # Launch failure ends the launch phase: the claim must not outlive the
+            # registration it was published for (#7302 finding 5).
+            retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
         unregister_stream_owner(stream_id)
         clear_session_writeback_owner_if_owned(s.session_id, stream_id)
         if gateway_starting:
@@ -23664,8 +24859,8 @@ def _start_regeneration_stream_locked(
             msg=msg,
             attachments=attachments,
             workspace=workspace,
-            model=model,
-            model_provider=model_provider,
+            model=persisted_model,
+            model_provider=persisted_model_provider,
             stream_id=stream_id,
             source=turn.source,
             retained_user=retained_user,
@@ -23685,8 +24880,8 @@ def _start_regeneration_stream_locked(
                 "content": msg,
                 "attachments": attachments,
                 "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
+                "model": persisted_model,
+                "model_provider": persisted_model_provider,
                 "created_at": s.pending_started_at,
             },
         )
@@ -23695,6 +24890,11 @@ def _start_regeneration_stream_locked(
         register_stream_owner(stream_id, s.session_id)
         with STREAMS_LOCK:
             STREAMS[stream_id] = stream
+            # Launch-phase ownership claim (#7302 finding 5): published atomically
+            # with the registration so the orphan check keeps this stream while its
+            # worker is still being admitted -- this path holds that worker at
+            # release_worker.wait() while s.save() runs below.
+            publish_pre_admission_claim(stream_id, streams_lock_held=True)
         if goal_related:
             STREAM_GOAL_RELATED[stream_id] = True
         if backend_is_gateway:
@@ -23909,6 +25109,8 @@ def _start_chat_stream_for_session(
     workspace: str,
     model: str,
     model_provider=None,
+    persisted_model=None,
+    persisted_model_provider=None,
     normalized_model: bool = False,
     diag=None,
     goal_related: bool = False,
@@ -23916,11 +25118,27 @@ def _start_chat_stream_for_session(
     moa_config=None,
     external_runtime_owned: bool | None = None,
     regeneration=None,
+    process_id: str = "",
+    retry_attempt: int = 0,
+    rearm_deferred_wakeup: bool = False,
 ):
-    """Persist pending state, register an SSE channel, and start an agent turn."""
+    """Persist pending state, register an SSE channel, and start an agent turn.
+
+    ``process_id``/``retry_attempt``/``rearm_deferred_wakeup`` are the
+    process-wakeup delivery identity threaded down from
+    ``start_session_turn``. ``rearm_deferred_wakeup`` is opt-in from the
+    process-completion path ONLY (``_start_server_side_wakeup_turn``):
+    async-delegation completions share ``source="process_wakeup"`` but own a
+    durable retry, so re-arming for them double-delivered one completion
+    (#7680 CORE, maintainer 2026-10-01).
+    """
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
     backend_is_gateway = bool(external_runtime_owned)
+    if persisted_model is None:
+        persisted_model = model
+    if persisted_model_provider is None:
+        persisted_model_provider = model_provider
     stale_response = _agent_runtime_barrier_response(
         external_runtime_owned=backend_is_gateway,
     )
@@ -23945,23 +25163,32 @@ def _start_chat_stream_for_session(
         diag.stage("stale_stream_cleanup") if diag else None
         _clear_stale_stream_state(s)
 
-    # #1932: check if this session has a pending goal continuation flag.
-    # The streaming hook sets PENDING_GOAL_CONTINUATION when goal_continue fires,
-    # so the next chat/start for this session is automatically treated as goal-related.
-    if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-        goal_related = True
-        PENDING_GOAL_CONTINUATION.discard(s.session_id)
+    consumed_goal_continuation = False
+    consumed_bg_task_completion = False
 
-    # process_complete wakeup (ours-original, Option B): if this session has a
-    # pending process_complete marker (set by api/background_process.py drain),
-    # discard it atomically here. Mirrors the goal_continue pattern (#1932).
-    # The marker is server-internal telemetry; the actual wakeup is delivered
-    # either server-side (Option Z) or via the PR #2279 next-turn drain.
-    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
-        PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+    def consume_continuation_markers() -> None:
+        nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
+        if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+            goal_related = True
+            PENDING_GOAL_CONTINUATION.discard(s.session_id)
+            consumed_goal_continuation = True
+        if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+            PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
+            consumed_bg_task_completion = True
+
+    def restore_consumed_continuation_markers() -> None:
+        if consumed_goal_continuation:
+            PENDING_GOAL_CONTINUATION.add(s.session_id)
+        if consumed_bg_task_completion:
+            PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
 
     session_lock = _get_session_agent_lock(s.session_id)
     diag.stage("session_lock_wait") if diag else None
+    snapshot = None
+    stream_id = None
+    backup_provenance = None
+    was_hidden_empty_session = False
+    journal_event = {}
     while True:
         with session_lock:
             locked_stream_id = getattr(s, "active_stream_id", None)
@@ -23985,36 +25212,212 @@ def _start_chat_stream_for_session(
                     }
                 needs_stale_cleanup = False
                 if regeneration is not None:
-                    return _start_regeneration_stream_locked(
-                        s,
-                        turn=regeneration,
-                        workspace=workspace,
-                        model=model,
-                        model_provider=model_provider,
-                        normalized_model=normalized_model,
-                        diag=diag,
-                        goal_related=goal_related,
-                        source=source,
-                        moa_config=moa_config,
-                        backend_is_gateway=backend_is_gateway,
-                    )
+                    consume_continuation_markers()
+                    try:
+                        regeneration_response = _start_regeneration_stream_locked(
+                            s,
+                            turn=regeneration,
+                            workspace=workspace,
+                            model=model,
+                            model_provider=model_provider,
+                            persisted_model=persisted_model,
+                            persisted_model_provider=persisted_model_provider,
+                            normalized_model=normalized_model,
+                            diag=diag,
+                            goal_related=goal_related,
+                            source=source,
+                            moa_config=moa_config,
+                            backend_is_gateway=backend_is_gateway,
+                        )
+                    except Exception:
+                        restore_consumed_continuation_markers()
+                        raise
+                    if (
+                        isinstance(regeneration_response, dict)
+                        and int(regeneration_response.get("_status", 200) or 200) >= 400
+                    ):
+                        restore_consumed_continuation_markers()
+                    return regeneration_response
                 stream_id = uuid.uuid4().hex
+                from api.session_ops import snapshot_session_state
+
+                snapshot = snapshot_session_state(s)
+                sidecar_path = getattr(s, "path", None)
+                if sidecar_path is not None:
+                    sidecar_path = Path(sidecar_path)
+                    backup_path = sidecar_path.with_suffix(".json.bak")
+                    sidecar_bytes = None
+                    sidecar_unknown = False
+                    if sidecar_path.exists():
+                        try:
+                            sidecar_bytes = sidecar_path.read_bytes()
+                        except OSError:
+                            sidecar_unknown = True
+                            logger.debug(
+                                "Failed to capture chat-start entry sidecar %s",
+                                sidecar_path,
+                                exc_info=True,
+                            )
+                    backup_exists = backup_path.exists()
+                    backup_bytes = None
+                    if backup_exists:
+                        try:
+                            backup_bytes = backup_path.read_bytes()
+                        except OSError:
+                            logger.debug(
+                                "Failed to capture chat-start recovery backup %s",
+                                backup_path,
+                                exc_info=True,
+                            )
+                    backup_provenance = (
+                        sidecar_path,
+                        sidecar_bytes,
+                        backup_path,
+                        backup_exists,
+                        backup_bytes,
+                        sidecar_unknown,
+                    )
+                consume_continuation_markers()
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
-                _prepare_chat_start_session_for_stream(
-                    s,
-                    msg=msg,
-                    attachments=attachments,
-                    workspace=workspace,
-                    model=model,
-                    model_provider=model_provider,
-                    stream_id=stream_id,
-                    source=source,
-                )
+                try:
+                    _prepare_chat_start_session_for_stream(
+                        s,
+                        msg=msg,
+                        attachments=attachments,
+                        workspace=workspace,
+                        model=persisted_model,
+                        model_provider=persisted_model_provider,
+                        stream_id=stream_id,
+                        source=source,
+                    )
+                    diag.stage("turn_journal_submitted") if diag else None
+                    try:
+                        from api.turn_journal import append_turn_journal_event
+
+                        journal_event = append_turn_journal_event(
+                            s.session_id,
+                            {
+                                "event": "submitted",
+                                "stream_id": stream_id,
+                                "role": "user",
+                                "content": msg,
+                                "attachments": attachments,
+                                "workspace": workspace,
+                                "model": persisted_model,
+                                "model_provider": persisted_model_provider,
+                                "created_at": s.pending_started_at,
+                            },
+                        )
+                    except Exception:
+                        logger.warning("Failed to append submitted turn journal event", exc_info=True)
+                    diag.stage("stream_registration") if diag else None
+                    stream = create_stream_channel()
+                    register_stream_owner(stream_id, s.session_id)
+                    with STREAMS_LOCK:
+                        STREAMS[stream_id] = stream
+                        # Same launch-phase claim as the regeneration path
+                        # (#7302 finding 5): the ordinary start has the same
+                        # registration-then-worker-admission window.
+                        publish_pre_admission_claim(stream_id, streams_lock_held=True)
+                    # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
+                    if goal_related:
+                        STREAM_GOAL_RELATED[stream_id] = True
+                    diag.stage("worker_thread_start") if diag else None
+                    worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
+                    if backend_is_gateway:
+                        worker_kwargs = {
+                            "model_provider": model_provider,
+                            "persisted_model": persisted_model,
+                            "persisted_model_provider": persisted_model_provider,
+                            "goal_related": goal_related,
+                        }
+                    else:
+                        worker_kwargs = _local_agent_worker_kwargs(
+                            model_provider=model_provider,
+                            goal_related=goal_related,
+                            moa_config=moa_config,
+                        )
+                    if backend_is_gateway:
+                        from api.gateway_chat import _mark_gateway_run_starting
+
+                        _mark_gateway_run_starting(stream_id)
+                    thr = threading.Thread(
+                        target=worker_target,
+                        args=(s.session_id, msg, model, workspace, stream_id, attachments),
+                        kwargs=worker_kwargs,
+                        daemon=True,
+                    )
+                    thr.start()
+                except Exception as exc:
+                    if backend_is_gateway and stream_id:
+                        try:
+                            from api.gateway_chat import _finish_gateway_run_starting
+                            from api.gateway_chat import _clear_gateway_run_starting
+
+                            _finish_gateway_run_starting(stream_id)
+                            _clear_gateway_run_starting(stream_id)
+                        except Exception:
+                            logger.debug(
+                                "Failed to record gateway run-start failure for stream %s",
+                                stream_id,
+                                exc_info=True,
+                            )
+                    cleanup_result = None
+                    if snapshot is not None and stream_id:
+                        cleanup_result = _cleanup_chat_start_launch_failure(
+                            s,
+                            stream_id,
+                            snapshot,
+                            backup_provenance=backup_provenance,
+                            lock_held=True,
+                        )
+                    if cleanup_result is not None:
+                        try:
+                            exc._chat_start_cleanup_result = cleanup_result
+                        except Exception:
+                            pass
+                    restore_consumed_continuation_markers()
+                    if journal_event:
+                        try:
+                            from api.turn_journal import append_turn_journal_event
+
+                            append_turn_journal_event(
+                                s.session_id,
+                                {
+                                    "event": "interrupted",
+                                    "stream_id": stream_id,
+                                    "turn_id": journal_event.get("turn_id"),
+                                    "reason": "start_compensated",
+                                },
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to close compensated turn journal event",
+                                exc_info=True,
+                            )
+                    if rearm_deferred_wakeup:
+                        # Opt-in process-completion re-arm (#7680 CORE). Runs
+                        # AFTER the launch-abort cleanup so the registries are
+                        # unwound, and after the journal close so the turn is
+                        # not left in-flight. The prompt is passed explicitly:
+                        # the cleanup restored the session from its pre-launch
+                        # snapshot, so ``s.pending_user_message`` no longer
+                        # holds it.
+                        _rearm_process_wakeup_after_launch_failure(
+                            s.session_id,
+                            stream_id,
+                            wakeup_prompt=msg,
+                            process_id=process_id,
+                            retry_attempt=retry_attempt,
+                        )
+                    raise
                 break
         if needs_stale_cleanup:
             diag.stage("stale_stream_cleanup") if diag else None
-            cleared = _clear_stale_stream_state(s)
+            # chat_start is itself a writer that just released this lock: wait for a
+            # transient holder instead of answering 409 for a dead stream (#8072 review).
+            cleared = _clear_stale_stream_state(s, wait_for_writer=True)
             if not cleared and getattr(s, "active_stream_id", None):
                 diag.stage("response_write") if diag else None
                 return {
@@ -24023,68 +25426,19 @@ def _start_chat_stream_for_session(
                     "_status": 409,
                 }
     if was_hidden_empty_session:
-        publish_session_list_changed(
-            "session_new",
-            profile=getattr(s, "profile", None),
-            session_id=getattr(s, "session_id", None),
-        )
-    diag.stage("turn_journal_submitted") if diag else None
-    journal_event = {}
-    try:
-        from api.turn_journal import append_turn_journal_event
-        journal_event = append_turn_journal_event(
-            s.session_id,
-            {
-                "event": "submitted",
-                "stream_id": stream_id,
-                "role": "user",
-                "content": msg,
-                "attachments": attachments,
-                "workspace": workspace,
-                "model": model,
-                "model_provider": model_provider,
-                "created_at": s.pending_started_at,
-            },
-        )
-    except Exception:
-        logger.warning("Failed to append submitted turn journal event", exc_info=True)
+        try:
+            publish_session_list_changed(
+                "session_new",
+                profile=getattr(s, "profile", None),
+                session_id=getattr(s, "session_id", None),
+            )
+        except Exception:
+            logger.debug("Failed to publish session_new after chat start", exc_info=True)
     diag.stage("set_last_workspace") if diag else None
-    set_last_workspace(workspace, profile=getattr(s, "profile", None))
-    diag.stage("stream_registration") if diag else None
-    stream = create_stream_channel()
-    register_stream_owner(stream_id, s.session_id)
-    with STREAMS_LOCK:
-        STREAMS[stream_id] = stream
-    # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
-    if goal_related:
-        STREAM_GOAL_RELATED[stream_id] = True
-    diag.stage("worker_thread_start") if diag else None
-    worker_target = _run_gateway_chat_streaming if backend_is_gateway else _run_agent_streaming
-    worker_kwargs = {"model_provider": model_provider, "goal_related": goal_related}
-    if moa_config and not backend_is_gateway:
-        worker_kwargs["moa_config"] = moa_config
-    if backend_is_gateway:
-        from api.gateway_chat import _mark_gateway_run_starting
-        _mark_gateway_run_starting(stream_id)
-    thr = threading.Thread(
-        target=worker_target,
-        args=(s.session_id, msg, model, workspace, stream_id, attachments),
-        kwargs=worker_kwargs,
-        daemon=True,
-    )
     try:
-        thr.start()
+        set_last_workspace(workspace, profile=getattr(s, "profile", None))
     except Exception:
-        if backend_is_gateway:
-            try:
-                from api.gateway_chat import _finish_gateway_run_starting
-                _finish_gateway_run_starting(stream_id)
-                from api.gateway_chat import _clear_gateway_run_starting
-                _clear_gateway_run_starting(stream_id)
-            except Exception:
-                logger.debug("Failed to record gateway run-start failure for stream %s", stream_id, exc_info=True)
-        _cleanup_chat_start_launch_failure(s, stream_id)
-        raise
+        logger.debug("Failed to persist last workspace after chat start", exc_info=True)
     response = {
         "stream_id": stream_id,
         "session_id": s.session_id,
@@ -24152,6 +25506,65 @@ def _runtime_adapter_goal_action(goal_args: str) -> str:
     return "set"
 
 
+def _server_initiated_turn_routing(session, *, model, model_provider):
+    """Resolve gateway ownership and the alias route for a server-initiated turn.
+
+    ``/api/chat/start`` computes gateway ownership from its request-scoped
+    config snapshot and passes it to ``_start_run`` explicitly; its request
+    thread also carries the profile TLS that makes the alias-lane resolution
+    profile-correct. ``start_session_turn`` (process wakeup) passes neither and
+    runs on a drain thread with no profile TLS, so resolve BOTH here under the
+    owning session's profile scope — otherwise gateway ownership is discovered
+    only later, inside ``_start_chat_stream_for_session``, after the alias-lane
+    conversion that depends on it, and a named profile's ``webui_chat_backend``
+    setting / alias table would be read from the default profile.
+    """
+    profile_name = str(getattr(session, "profile", "") or "").strip()
+    if profile_name and not _is_root_profile(profile_name):
+        with profile_scope_for_detached_worker(
+            profile_name,
+            "server-initiated turn routing",
+            logger_override=logger,
+        ):
+            return (
+                webui_gateway_chat_enabled(get_config_snapshot()),
+                api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+            )
+    return (
+        webui_gateway_chat_enabled(get_config_snapshot()),
+        api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+    )
+
+
+def _unresolved_model_alias_lane_response(alias_route, model_provider) -> dict | None:
+    """Refuse an opaque alias lane that resolved to nothing, before dispatch."""
+    if alias_route is not None or not api_config.is_model_alias_route_provider(model_provider):
+        return None
+    verdict = api_config.unresolved_model_alias_route_error()
+    return {
+        "error": verdict["message"],
+        "type": "provider_unroutable",
+        "reason": verdict["reason"],
+        "hint": verdict["hint"],
+        "_status": 400,
+    }
+
+
+def _external_model_alias_lane_response(alias_route, *, external_owned: bool) -> dict | None:
+    """Reject alias overrides that the external run protocol cannot express."""
+    if not external_owned or alias_route is None:
+        return None
+    if not (alias_route.get("base_url_explicit") or alias_route.get("credential_explicit")):
+        return None
+    return {
+        "error": "This model alias needs the in-process backend because it overrides an endpoint or credential.",
+        "type": "provider_unroutable",
+        "reason": "model_alias_requires_in_process_backend",
+        "hint": "Use the in-process chat backend or select a provider-only model alias.",
+        "_status": 400,
+    }
+
+
 def _start_run(
     s,
     *,
@@ -24167,6 +25580,10 @@ def _start_run(
     moa_config=None,
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
+    goal_related: bool = False,
+    process_id: str = "",
+    retry_attempt: int = 0,
+    rearm_deferred_wakeup: bool = False,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -24186,6 +25603,21 @@ def _start_run(
     returns no adapter is surfaced as ``{"error": str(exc), "_status": 501}``
     so both call sites can map it onto their own HTTP shape.
     """
+    # Transport routing and durable identity are separate: the session retains
+    # its target model plus profile-bound opaque lane on every backend.
+    persisted_model = model
+    persisted_model_provider = model_provider
+    if gateway_chat_enabled is None:
+        # Server-initiated turn (start_session_turn): gateway ownership was not
+        # computed by the caller, so resolve it — together with the alias lane —
+        # under the owning session's profile scope BEFORE the alias conversion
+        # below. Explicit True/False from /api/chat/start is preserved unchanged.
+        gateway_chat_enabled, alias_route = _server_initiated_turn_routing(
+            s, model=model, model_provider=model_provider
+        )
+    else:
+        alias_route = api_config.resolve_model_alias_runtime(model_provider, expected_model=model)
+
     from api.runtime_adapter import (
         LegacyJournalRuntimeAdapter,
         StartRunRequest,
@@ -24194,8 +25626,30 @@ def _start_run(
         runtime_adapter_runner_enabled,
     )
 
+    # Determine external ownership before translating the alias. The adapter
+    # gate below keeps its original shape as the seam tests pin it.
+    runner_enabled = runtime_adapter_runner_enabled()
+    alias_refusal = _unresolved_model_alias_lane_response(alias_route, model_provider)
+    if alias_refusal is not None:
+        logger.warning(
+            "Turn blocked by an unresolved model alias lane for session %s",
+            getattr(s, "session_id", None),
+        )
+        return alias_refusal
+    alias_refusal = _external_model_alias_lane_response(
+        alias_route, external_owned=gateway_chat_enabled or runner_enabled,
+    )
+    if alias_refusal is not None:
+        return alias_refusal
+    if alias_route is not None and (gateway_chat_enabled or runner_enabled):
+        # External runtimes do not own WebUI's alias registry. Their protocol
+        # carries provider/model, but cannot express alias endpoint/key overrides.
+        model = alias_route["model"]
+        model_provider = str(alias_route["provider"])
+    # The in-process worker keeps the opaque lane and resolves it at the send seam.
+
     if runtime_adapter_enabled() or runtime_adapter_runner_enabled():
-        if regeneration is not None and runtime_adapter_runner_enabled():
+        if regeneration is not None and runner_enabled:
             return {"error": "Regeneration is not supported by the runner backend.", "code": "unsupported_regeneration_backend", "_status": 409}
         def _legacy_start_run(request: StartRunRequest) -> dict:
             return _start_chat_stream_for_session(
@@ -24205,12 +25659,18 @@ def _start_run(
                 workspace=request.workspace or workspace,
                 model=request.model or model,
                 model_provider=request.provider or model_provider,
+                persisted_model=persisted_model,
+                persisted_model_provider=persisted_model_provider,
                 normalized_model=normalized_model,
                 diag=diag,
                 source=request.source or source,
                 moa_config=moa_config,
+                goal_related=goal_related,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                process_id=process_id,
+                retry_attempt=retry_attempt,
+                rearm_deferred_wakeup=rearm_deferred_wakeup,
             )
 
         def _legacy_adapter_factory():
@@ -24233,7 +25693,10 @@ def _start_run(
                     provider=model_provider,
                     model=model,
                     source=source,
-                    metadata={"route": route},
+                    metadata={
+                        "route": route,
+                        **({"goal_related": True} if goal_related else {}),
+                    },
                 )
             )
         except NotImplementedError as exc:
@@ -24247,12 +25710,18 @@ def _start_run(
         workspace=workspace,
         model=model,
         model_provider=model_provider,
+        persisted_model=persisted_model,
+        persisted_model_provider=persisted_model_provider,
         normalized_model=normalized_model,
         diag=diag,
         source=source,
         moa_config=moa_config,
+        goal_related=goal_related,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        process_id=process_id,
+        retry_attempt=retry_attempt,
+        rearm_deferred_wakeup=rearm_deferred_wakeup,
     )
 
 
@@ -24286,7 +25755,7 @@ def _process_wakeup_provider_has_recovery_credential(
     if not provider_id:
         return False
     profile_name = str(getattr(session, "profile", "") or "").strip()
-    if profile_name and not _is_root_profile(profile_name):
+    if profile_name:
         with profile_scope_for_detached_worker(
             profile_name,
             "process_wakeup credential revalidation",
@@ -24312,6 +25781,9 @@ def start_session_turn(
     message: str,
     *,
     source: str = "process_wakeup",
+    process_id: str = "",
+    retry_attempt: int = 0,
+    rearm_deferred_wakeup: bool = False,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
@@ -24509,6 +25981,9 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        process_id=process_id,
+        retry_attempt=retry_attempt,
+        rearm_deferred_wakeup=rearm_deferred_wakeup,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -24737,13 +26212,13 @@ def _handle_goal_command(handler, body):
         except ImportError:
             requested_profile = ""
     if requested_profile and not _profiles_match(getattr(s, "profile", None), requested_profile):
-        has_persisted_turns = bool(
-            getattr(s, "messages", None)
-            or getattr(s, "context_messages", None)
-            or getattr(s, "pending_user_message", None)
+        session_profile, retag_result = _retag_empty_session_profile(
+            s, requested_profile
         )
-        if not has_persisted_turns:
-            s.profile = requested_profile
+        if retag_result == "pinned_empty":
+            return _session_profile_mismatch_response(
+                handler, body.get("session_id", ""), session_profile
+            )
 
     current_stream_id = getattr(s, "active_stream_id", None)
     stream_running = False
@@ -24763,6 +26238,26 @@ def _handle_goal_command(handler, body):
     from api.goals import goal_command_payload, goal_state_snapshot, restore_goal_state
 
     goal_args = str(body.get("args", "") or body.get("text", "") or "")
+    from api.runtime_adapter import (
+        LegacyJournalRuntimeAdapter,
+        build_runtime_adapter,
+        runtime_adapter_enabled,
+        runtime_adapter_runner_enabled,
+    )
+
+    goal_adapter_action = _runtime_adapter_goal_action(goal_args)
+    runner_goal_owned = runtime_adapter_runner_enabled()
+    if runner_goal_owned and goal_adapter_action == "set":
+        # Separate set and kickoff calls cannot restore the runner's prior goal
+        # on failure. Refuse until the runner supports an atomic operation.
+        return j(handler, {
+            "ok": False,
+            "status": "unsupported",
+            "error": (
+                "Goal set requires an atomic set-goal-and-kickoff control, which "
+                "the runner backend does not support. Existing goal state is unchanged."
+            ),
+        }, status=501)
     goal_action = goal_args.strip().lower()
     will_kickoff = bool(
         goal_args.strip()
@@ -24797,6 +26292,13 @@ def _handle_goal_command(handler, body):
             profile_config=_pp_cfg,
             explicit_model_pick=explicit_model_pick,
         )
+        alias_refusal = _external_model_alias_lane_response(
+            api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+            external_owned=webui_gateway_chat_enabled(get_config()),
+        )
+        if alias_refusal is not None:
+            status = alias_refusal.pop("_status")
+            return j(handler, {"ok": False, **alias_refusal}, status=status)
         # #5979/#6703 parity with chat-start: record a SIGNATURE of the
         # deliberately-picked model+provider so the streaming resolver can
         # preserve a custom-proxy vendor namespace on a cold catalog. A first
@@ -24811,8 +26313,6 @@ def _handle_goal_command(handler, body):
             pass
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
-    from api.runtime_adapter import LegacyJournalRuntimeAdapter, runtime_adapter_enabled
-
     def _legacy_goal_update(session_id: str, _action: str, text: str) -> dict:
         return goal_command_payload(
             session_id,
@@ -24821,8 +26321,40 @@ def _handle_goal_command(handler, body):
             profile_home=profile_home,
         )
 
-    goal_adapter_action = _runtime_adapter_goal_action(goal_args)
-    if runtime_adapter_enabled():
+    goal_adapter = None
+    if runner_goal_owned:
+        try:
+            goal_adapter = build_runtime_adapter(
+                legacy_adapter_factory=lambda: LegacyJournalRuntimeAdapter(
+                    goal_delegate=_legacy_goal_update
+                ),
+                runner_client_factory=_runtime_runner_client_factory,
+            )
+        except NotImplementedError as exc:
+            return j(
+                handler,
+                {"ok": False, "error": str(exc)},
+                status=501,
+            )
+        if goal_adapter is None:
+            return j(
+                handler,
+                {"ok": False, "error": "runner-local goal adapter is unavailable"},
+                status=501,
+            )
+        control_result = goal_adapter.update_goal(
+            s.session_id,
+            goal_adapter_action,
+            goal_args,
+        )
+        payload = dict(control_result.payload)
+        if not control_result.accepted and not payload:
+            payload = {
+                "ok": False,
+                "error": control_result.safe_message or "Runner rejected the goal update.",
+                "status": control_result.status,
+            }
+    elif runtime_adapter_enabled():
         adapter = LegacyJournalRuntimeAdapter(goal_delegate=_legacy_goal_update)
         control_result = adapter.update_goal(
             s.session_id,
@@ -24836,8 +26368,17 @@ def _handle_goal_command(handler, body):
     else:
         payload = _legacy_goal_update(s.session_id, goal_adapter_action, goal_args)
     if not payload.get("ok", True):
-        status = 409 if payload.get("error") == "agent_running" else 400
+        if runner_goal_owned and payload.get("status") == "unsupported":
+            status = 501
+        else:
+            status = 409 if payload.get("error") == "agent_running" else 400
         return j(handler, payload, status=status)
+
+    def _rollback_goal_after_failed_kickoff() -> None:
+        restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
+
+    if runner_goal_owned:
+        return j(handler, payload)
 
     kickoff_prompt = str(payload.get("kickoff_prompt") or "").strip()
     if kickoff_prompt:
@@ -24870,21 +26411,28 @@ def _handle_goal_command(handler, body):
                     s.model_explicit_pick_signature = _mk_sig(model, model_provider)
             except Exception:
                 pass
-        stream_response = _start_chat_stream_for_session(
-            s,
-            msg=kickoff_prompt,
-            attachments=[],
-            workspace=workspace,
-            model=model,
-            model_provider=model_provider,
-            normalized_model=normalized_model,
-            goal_related=True,
-            external_runtime_owned=webui_gateway_chat_enabled(get_config()),
-        )
+        gateway_owned = webui_gateway_chat_enabled(get_config())
+        try:
+            stream_response = _start_run(
+                s,
+                msg=kickoff_prompt,
+                attachments=[],
+                workspace=workspace,
+                model=model,
+                model_provider=model_provider,
+                normalized_model=normalized_model,
+                source="webui",
+                route="/api/goal",
+                gateway_chat_enabled=gateway_owned,
+                goal_related=True,
+            )
+        except Exception:
+            _rollback_goal_after_failed_kickoff()
+            raise
         status = int(stream_response.pop("_status", 200) or 200)
         payload.update(stream_response)
         if status >= 400:
-            restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
+            _rollback_goal_after_failed_kickoff()
             payload["ok"] = False
             return j(handler, payload, status=status)
 
@@ -24901,6 +26449,50 @@ def _is_silent_control_message(message) -> bool:
     case-sensitive so ordinary user text is unaffected.
     """
     return str(message or "").strip() == "[SILENT]"
+
+
+def _restore_chat_start_compression_recovery(session, recovery, cleanup_result=None):
+    """Restore recovery metadata without replacing an unreadable backup."""
+    session.compression_recovery = recovery
+    session.recommended_recovery_action = recovery.get("recommended_action")
+    if cleanup_result and cleanup_result.get("backup_provenance") is not None:
+        if not cleanup_result.get("sidecar_restored"):
+            try:
+                _restore_chat_start_entry_sidecar(cleanup_result["backup_provenance"])
+                cleanup_result["sidecar_restored"] = True
+            except Exception:
+                logger.debug(
+                    "Skipped compression recovery save because sidecar restore failed for %s",
+                    getattr(session, "session_id", None),
+                    exc_info=True,
+                )
+                return None
+        return _save_chat_start_compression_recovery(session)
+    backup_path = Path(session.path).with_suffix(".json.bak")
+    try:
+        backup_path.read_bytes()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        logger.debug(
+            "Skipped compression recovery save because backup is unreadable for %s",
+            getattr(session, "session_id", None),
+            exc_info=True,
+        )
+        return None
+    return _save_chat_start_compression_recovery(session)
+
+
+def _save_chat_start_compression_recovery(session):
+    try:
+        session.save()
+    except Exception as restore_err:
+        logger.exception(
+            "failed to restore compression recovery after chat start rejection for %s",
+            getattr(session, "session_id", None),
+        )
+        return restore_err
+    return None
 
 
 def _handle_chat_start(handler, body, diag=None):
@@ -25011,33 +26603,22 @@ def _handle_chat_start(handler, body, diag=None):
             except ImportError:
                 requested_profile = ""
         session_profile = getattr(s, "profile", None)
-        has_persisted_turns = bool(
-            getattr(s, "messages", None)
-            or getattr(s, "context_messages", None)
-            or getattr(s, "pending_user_message", None)
-        )
         if not _session_visible_to_active_profile(session_profile, handler):
             if (
                 requested_profile
                 and _profiles_match(requested_profile, active_profile)
-                and not has_persisted_turns
             ):
-                # Empty placeholders can still be retagged when the
-                # requested profile matches the active request profile.
-                s.profile = requested_profile
-            elif session_profile:
-                # #7710: known other profile → 409 ``session_profile_mismatch``
-                # so the client can offer to switch to it (#5419).
-                # 404 is preserved only for the None-profile
-                # (unknown/legacy) self-heal case.
-                return j(handler, {
-                    "error": "Session belongs to a different profile",
-                    "code": "session_profile_mismatch",
-                    "session_id": body.get("session_id", ""),
-                    "profile": session_profile,
-                }, status=409)
+                session_profile, retag_result = (
+                    _retag_empty_session_profile(s, requested_profile)
+                )
+                if retag_result not in ("same_owner", "retagged"):
+                    return _session_profile_mismatch_response(
+                        handler, body.get("session_id", ""), session_profile
+                    )
             else:
-                return bad(handler, "Session not found", 404)
+                return _session_profile_mismatch_response(
+                    handler, body.get("session_id", ""), session_profile
+                )
         # Resolve durable rotations before any workspace/model/pending mutation.
         # GET navigation adopts the tip; POST never silently replays a user turn.
         from api.compression_continuation import durable_compression_continuation
@@ -25125,6 +26706,15 @@ def _handle_chat_start(handler, body, diag=None):
             profile_config=_pp_cfg,
             explicit_model_pick=explicit_model_pick,
         )
+        from api.runtime_adapter import runtime_adapter_runner_enabled
+
+        alias_refusal = _external_model_alias_lane_response(
+            api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+            external_owned=gateway_chat_enabled or runtime_adapter_runner_enabled(),
+        )
+        if alias_refusal is not None:
+            status = alias_refusal.pop("_status")
+            return j(handler, alias_refusal, status=status)
         # #5979: record a SIGNATURE of the deliberately-picked model+provider so
         # the streaming resolver can preserve a custom-proxy vendor namespace on a
         # cold catalog — but ONLY while the routing context still matches. On a
@@ -25171,13 +26761,25 @@ def _handle_chat_start(handler, body, diag=None):
                 or explicit_model_pick
             ):
                 return bad(handler, "MoA override is unavailable on gateway-backed sessions", 409)
-        elif model_provider == "moa" and moa_config is None:
-            from api.commands import resolve_moa_config
+        elif model_provider == "moa":
+            from api.commands import agent_has_moa_virtual_provider, resolve_moa_config
 
-            try:
-                moa_config = resolve_moa_config(model)
-            except RuntimeError as e:
-                return bad(handler, str(e), 503)
+            if agent_has_moa_virtual_provider():
+                # hermes-agent serves the virtual ``moa`` provider itself and runs
+                # the selected preset through its MoA facade (profile-scoped
+                # config, fan-out cadence, degraded-reference policy). Also
+                # passing a per-turn ``moa_config`` makes run_conversation() run
+                # a SECOND, legacy fan-out + synthesis on every tool iteration,
+                # and the rewritten user message defeats the facade's per-turn
+                # reference cache. Never stack the two paths.
+                moa_config = None
+            elif moa_config is None:
+                # Older hermes-agent without the virtual provider: keep the
+                # legacy per-turn MoA path so a ``moa`` session still runs MoA.
+                try:
+                    moa_config = resolve_moa_config(model)
+                except RuntimeError as e:
+                    return bad(handler, str(e), 503)
         # NOTE: runtime-adapter selection is delegated to _start_run (shared
         # with start_session_turn so both entry points behave identically
         # under runtime_adapter_enabled() / runtime_adapter_runner_enabled()
@@ -25198,17 +26800,15 @@ def _handle_chat_start(handler, body, diag=None):
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
         recovery_cleared_for_start = None
+        recovery_restore_error = None
         def _restore_cleared_recovery():
             if recovery_cleared_for_start is None:
                 return None
-            s.compression_recovery = recovery_cleared_for_start
-            s.recommended_recovery_action = recovery_cleared_for_start.get("recommended_action")
-            try:
-                s.save()
-            except Exception as restore_err:
-                logger.exception("failed to restore compression recovery after chat start rejection for %s", getattr(s, "session_id", None))
-                return restore_err
-            return None
+            return _restore_chat_start_compression_recovery(
+                s,
+                recovery_cleared_for_start,
+                getattr(recovery_restore_error, "_chat_start_cleanup_result", None),
+            )
 
         if recovery and regeneration is None:
             recovery_cleared_for_start = copy.deepcopy(recovery)
@@ -25219,6 +26819,7 @@ def _handle_chat_start(handler, body, diag=None):
                 **start_run_kwargs,
             )
         except Exception as exc:
+            recovery_restore_error = exc
             if not getattr(exc, "_regeneration_accepted", False):
                 _restore_cleared_recovery()
             raise
@@ -25324,6 +26925,24 @@ def _normalize_chat_attachments(raw_attachments):
             if value:
                 normalized.append({"name": value, "path": "", "mime": ""})
     return normalized
+
+
+def _current_cwd_sync_target(sid):
+    """Resolve ``(session_id, workspace, profile)`` for a delayed cwd sync.
+
+    Runs when the background write executes, not when it is scheduled. A
+    ``Session`` captured at schedule time can be replaced in ``SESSIONS`` (LRU
+    eviction, disk-ahead reload, metadata-stub upgrade), so the current object
+    is looked up by id under the per-session agent lock, the same way the
+    streaming teardown does. Returns ``None`` (skip the write) when the session
+    no longer resolves.
+    """
+    with _get_session_agent_lock(sid):
+        try:
+            cur = get_session(sid)
+        except KeyError:
+            return None
+        return (cur.session_id, cur.workspace, getattr(cur, "profile", None))
 
 
 def _handle_chat_sync(handler, body):
@@ -25494,6 +27113,16 @@ def _handle_chat_sync(handler, body):
                 persist_user_message=msg,
             )
     finally:
+        # Same as the streaming worker's teardown: mirror the workspace into the
+        # Agent-created state.db row on every exit, including a raised turn.
+        try:
+            from api.state_sync import sync_session_cwd_background
+
+            sync_session_cwd_background(
+                lambda _sid=s.session_id: _current_cwd_sync_target(_sid)
+            )
+        except Exception:
+            logger.debug("Failed to schedule session cwd sync", exc_info=True)
         with _ENV_LOCK:
             if old_cwd is None:
                 os.environ.pop("TERMINAL_CWD", None)
@@ -25681,6 +27310,7 @@ def _handle_cron_create(handler, body):
 
         profile = _normalize_cron_profile_value(body.get("profile"))
         toast_notifications = body.get("toast_notifications") is not False
+        badge_notifications = body.get("badge_notifications") is not False
         requested_model = body.get("model") or None
         requested_provider = body.get("provider") or None
         job = create_job(
@@ -25704,6 +27334,8 @@ def _handle_cron_create(handler, body):
             )
         if not toast_notifications:
             post_create_updates["toast_notifications"] = False
+        if not badge_notifications:
+            post_create_updates["badge_notifications"] = False
         if post_create_updates:
             job = update_job(job["id"], post_create_updates) or job
         return j(handler, {"ok": True, "job": _cron_job_for_api(job)})

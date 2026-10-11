@@ -9,6 +9,11 @@
 
 ## Problem
 
+Session ownership preflight is read-only. Before a request is authorized for
+the owning profile, it must not repair a legacy sidecar, write a shrink backup,
+publish a repaired session to the cache, or promote its cache recency. The
+normal authorized load/mutation path remains responsible for repairs.
+
 A single WebUI agent turn is represented by several overlapping state layers:
 
 - the visible transcript the user can read,
@@ -66,13 +71,296 @@ reacquire this non-reentrant lock from a branch that already owns it.
 
 ## Run-journal sequence publication
 
-Within one WebUI process, auto-numbered appends to the same journal allocate
-sequence numbers and write their rows under the same per-path lock.
+Auto-numbered appends to the same journal allocate sequence numbers and write
+rows under the same per-path thread lock and a cooperating-process file lock.
+POSIX locks the held journal inode; native Windows uses a companion byte lock,
+retained while the journal exists. Unsupported lock backends fail closed.
+The process lock covers seed/tail repair, write, configured fsync and rollback;
+recovery reads wait for the same settlement. Inode/size/mtime/ctime signatures
+invalidate cached next sequences after a peer changes the held file, while
+unchanged hot appends still avoid a scan. Concurrent deletion or arbitrary
+external inode replacement is not covered by this append protocol.
 `RunJournalWriter` delegates both operations to `append_run_event`; it must not
 reserve a sequence and release the lock before the physical append. Otherwise
 individually valid rows can reach disk out of order and the session replay
-reader must reject them as noncontiguous. This does not change caller-supplied
-sequence semantics, cross-process ownership, or failed-write recovery.
+reader must reject them as noncontiguous.
+
+The durable run-journal file and its next-sequence cache are one append
+transaction under that lock. Encode the full JSON row before file mutation,
+using lossless JSON escapes for lone provider surrogates. Publish the next
+sequence only after all bytes and the configured fsync succeed. Positive short
+writes are completed; zero-progress writes and exceptions roll the same open
+file descriptor back to its pre-append length and evict the sequence and summary
+caches. If rollback itself fails, report failure and leave the sequence cache
+evicted: the next attempt must inspect the actual file rather than assume success.
+The existing terminal-only/eager fsync policy is unchanged; these exception
+checks do not certify physical power-loss behavior or recovery from a filesystem
+that cannot truncate a failed write.
+Authoritative recovery reads share the thread and process locks, so cancel
+admission cannot observe a cooperating writer's speculative terminal row before
+failed fsync and rollback settle. Generic inspection and client replay keep their existing read
+policy. Opening before lock allocation keeps missing-journal reads from retaining
+registry entries; existing-file reads still wait before scanning any bytes.
+
+On the first append to a path in a new process (or after cache eviction), inspect
+the held file descriptor, validate the existing rows, and plan tail repair before
+encoding the new event. Discard only the same unparseable, unterminated EOF
+fragment that recovery can ignore; retain every validated prefix row. A valid
+unterminated final row gets a newline rather than being discarded. Complete
+malformed rows, foreign identities and conflicting terminal metadata prohibit
+an append without rewriting the evidence. Hot appends do not reparse the file.
+Newly written rows declare version 2, whose recovery contract is contiguous
+positive sequences, starting at 1 for a new run. Legacy version 1 (or absent
+version) consumed numbers on failed writes: identity-valid, strictly increasing
+positive legacy sequences remain recoverable without changing event IDs. A new
+writer may extend that legacy prefix with version 2 at the next sequence; every
+subsequent row must stay version 2 and gapless. Unknown/boolean versions,
+downgrades, duplicate/decreasing sequences and foreign identities are rejected.
+Explicit caller sequences retain their writer-seeding compatibility, but a
+gapped version-2 run receives no recovery or terminal authority. No rows are
+renumbered or historical files rewritten merely to migrate protocol versions.
+
+Session-sidecar atomic saves also use lossless JSON escapes when recovered
+provider surrogates cannot be encoded as UTF-8, so journal recovery survives
+subsequent cold loads rather than only appearing in the in-memory session.
+The same encoding check applies before creating a shrink-backup temp file when
+exact replay cleanup reserializes that backup. Retain distinct recovered rows,
+metadata and the cleaned message count; ordinary raw-copy backups remain byte
+preserving. This does not expand which message identities authorize deletion.
+Guarded backup restoration uses the same lossless encoding before opening its
+temp file, including raw-copy and orphan backups. Restore the exact snapshot
+that authorized recovery; clear and intentional-shrink checks, effective row
+counts, atomic replacement and error cleanup keep their existing authority.
+
+
+JSON responses and SSE frames apply the same UnicodeEncodeError-only lossless
+escape fallback before sending UTF-8 bytes. Ordinary Unicode, event IDs, payload
+shape and compact/pretty JSON formatting retain their existing behavior, so a
+persisted recovered answer is both reloadable and observable over HTTP. JSON
+exports and atomic share snapshots use the same lossless byte encoder. HTML
+exports join paired UTF-16 surrogate halves and replace lone code units at
+their UTF-8 presentation boundary. Exports prepare the complete body before sending headers, and use
+those same bytes for Content-Length and the response body; journal and JSON
+transcript text remain lossless.
+Ordinary journal-recovered rows do not by themselves suppress newer state.db
+turns. The interrupted partial display guard retains live partials and explicit
+cancel-journal recovery ownership. A unique compatible cancelled user in the
+ordered SQLite transcript proves the next user boundary: suppress only that
+cancelled run's assistant/tool replay and merge the successor suffix in durable
+order, even when it predates recovery-time sidecar timestamps. Stop synthesis
+preserves the finite positive pending owner's fractional timestamp; a recovery
+clock cannot replace its execution identity. Completed SQLite-only turns before
+that owner are restored after a unique retained, ordered compatible identity or
+exact-clock/content anchor, including gaps between retained pairs. Agent flush
+and WebUI settlement may stamp assistant rows independently: a mutually unique
+content match within the same proved user execution is a mirror. A compatible
+row identity can anchor despite that clock skew; ambiguous clock/content
+occurrences and conflicting private identities still deny restoration. Preserve saved row objects and
+native tool-call/result blocks. When both stores have unmatched turns inside
+one proved gap, merge complete user-led turns by their valid, strictly ordered
+user timestamps; equal or invalid clocks grant no relative-order authority.
+Matched assistant/tool anchors must not have contradictory preceding user
+owners; matching reply bytes alone cannot reassign a reply to a different turn.
+Keep leading assistant/tool fragments with the preceding anchor, even when
+their recovery clocks are newer than subsequent users. Competing unanchored
+leading fragments are ambiguous and cannot authorize restoration. Reject
+conflicting or duplicated private identities, and exclude every proved earlier
+cancelled execution block as well, including
+older live-partial Stops before a journal-recovered Stop. A uniquely compatible
+legacy integer/fractional owner identifies only its execution block; projecting
+its saved owner must not rewrite either durable source.
+An explicit verified compression anchor admits only its already sliced tail;
+without one, the leading discarded prefix stays excluded. Persisted truncation
+continues to veto restoration. A later-only
+store needs a user strictly newer than the terminal carrier. Missing, conflicting
+or ambiguous ownership grants no replay authority. Keep this cutoff after later
+rows persist, before display pagination or model-context delta selection; live
+partial, exact identity/deduplication, compression and truncation guards remain.
+The live-partial veto belongs to the selected history: a displayed Stop cannot
+suppress SQLite completion of an older deferred model-context snapshot. A terminal
+live Stop excludes its proved raw execution rather than vetoing all SQLite
+history, so its proved successor Gateway suffix remains visible and reaches
+next-send provider history. A typed crash/provider interruption is not a user
+Stop: its selected live-partial veto remains in force, including when an older
+cancelled segment also exists in the saved history. Rebase tool-card owners through the same display
+projection before hydration/pagination, including cached limited reads; do not
+rewrite saved owner metadata. Snapshot-lineage caches retain an independent
+saved-row-to-display map computed before row copies; later reconciliation composes
+that provenance through surviving exact objects, never matching assistant prose.
+Selected context may omit the display-only terminal carrier. Its user and each
+ordered saved partial still require compatible content plus shared identity or
+an exact valid clock. Clock-only user proof must have exactly one compatible
+claimant in the complete owner history; duplicate earlier users need a trusted
+ID or turn token for a shorter selected view. Exact saved row references or a
+complete ordered copy of the saved history also prove which occurrence owns the
+partial, allowing display-only error carriers to be omitted. Copied rows retain
+compatible identities, exact valid clocks, and the saved partial flag; an older,
+incomplete or reordered clock-only view grants no ownership. Clock-only partial proof must retain the partial state, so an
+ordinary settled answer cannot supply that ownership. Trusted current user
+identity still anchors its selected segment when earlier rows share its clocks.
+Known owner IDs with changed content/time cannot enter the later-only fallback.
+A content/time tuple shared by an earlier saved user cannot identify a missing
+or restamped cancelled owner without a shared durable identity or turn token.
+After proving the cancelled boundary, reconcile saved successors only against
+an ordered prefix after the terminal carrier. Require at least two legacy
+mirrored rows, tolerate restamped timestamps, retain occurrence counts, and
+reject conflicting private identities; additional repeated turns remain new.
+Only deduplicate a saved prefix also represented in the selected display/context
+view. Newer visible history does not authorize dropping rows from older
+model-facing context. Content-only similarity at different timestamps cannot
+prove a mirror: a legitimate new identical turn has the same legacy shape.
+Consume each saved successor only with shared valid message/positive row identity
+or an exact non-null timestamp, plus compatible provider content. Cancelled
+consumers opt into private SQLite row IDs so newly accepted successors retain
+that proof through sidecar persistence; ordinary reader projection is unchanged.
+Both streaming snapshot reads and session-ops preserve those IDs. Cancelled
+session-ops reads require the complete owner snapshot rather than a bounded tail.
+Historical IDs survive Agent sanitization through the proved pre-turn prefix.
+For Agents that discard returned row IDs (including some versions accepting
+`persist_user_timestamp`), cancelled-session invocations
+observe the actual same-thread SQLite append return IDs during their indexed
+flush. A complete compatible batch binds those IDs to the exact written dicts;
+the old Agent's indexed current user retains the captured WebUI run token and
+valid owner timestamp when its clock is absent. Existing clocks are preserved.
+Fully native matching row identities retain their original metadata unchanged;
+the run signature alone does not prove native row identity support.
+Foreign-session/thread writes, incomplete/failed batches, invalid or conflicting
+IDs grant no mapping. The append method is restored on every exit. This creates
+new write provenance; it does not infer identity from legacy transcript text.
+Historical rows without that mapping remain distinct rather than losing a new
+turn. This can retain an ambiguous historical duplicate; do not claim universal
+deduplication of unidentifiable legacy/restamped histories.
+Context compression intersects its accepted tail with the proved successor
+suffix of the full SQLite read, retaining both owner proof and anchor authority.
+Session reads, exports, shares and next-send context use the same proved suffix.
+Branch/fork and duplicate reconcile display and provider context from one full
+private SQLite snapshot before slicing or copying. Branch keep-count remains in
+the GET display coordinate space; cancelled raw replay stays excluded, successor
+IDs remain private in saved copies, and public projections strip those IDs.
+Duplicate rebases saved tool-card owner indexes against that reconciled display
+using exact source-row identity before deepcopy. Inserting a SQLite-only row
+must not move a card to another assistant, including equal-prose assistants;
+the source tool metadata and journal remain unchanged.
+
+
+## Cancelled journal-only restart recovery
+
+When Stop has no in-memory assistant partial to persist, the cancellation marker
+may carry a bounded exact-stream run-journal recovery hook. The hook does not
+continue or replay provider execution; it only makes already-emitted durable
+prose, display reasoning, and tool activity recoverable after process loss.
+
+The worker registry remains authoritative while the cancelling worker is known
+live. Registry absence in the same process is not sufficient because stale-run
+reclamation can remove bookkeeping before a wedged worker physically exits.
+The marker therefore records its creating process instance: the same process may
+consume a nonempty hook only after that journal is explicitly terminal, while a
+new process instance may recover a nonterminal durable tail because the old
+writer cannot survive the interpreter restart.
+
+Recovery is owned by the marker's exact stream and exact active-turn token.
+Stop stamps that token onto the owning display user row and the exact matching
+provider-context user row before the hook becomes durable. Journal-only cancelled
+owners are provisional (`_recovered: true`), so Stop without an answer does not
+send that prompt to the provider on the next turn. Stop computes the saved
+in-memory partial first: when one exists, it does not create a provisional owner
+or mutate provider context for journal recovery. The existing saved-partial
+history projection retains the saved user turn and assistant output rather than
+replacing them with an unanswered recovery boundary. Exact-owner context recovery
+clears the provisional flag only after model-visible assistant output is
+recovered; display-only thinking and errors do not promote the owner. The
+visible cancelled prompt remains in the transcript. Rows reconstructed
+after a restart are placed before that cancellation marker and before any
+persisted successor turn. Provider-context projection is inserted only after a
+unique matching token; compression that removed the owner fails closed for
+provider context while visible transcript recovery may still succeed. Display
+ordinals, content, timestamps, or tool equality are not cross-layer ownership
+evidence. The hook is retired only in the same successful session save that
+commits the recovered projection; a failed save restores the in-memory hook for
+a later retry.
+
+Cancelled journal rows are created display-only (`_recovered_display_only:
+true`). Only a unique exact-token provider-context owner and successful answer
+insertion authorize removing that flag. Missing or duplicate context owners
+retain visible output but cannot feed empty-context next-send replay or manual
+compression. Display-only reasoning and tool anchors retain that flag.
+
+Session-sidecar run-journal recovery consumers, including same-process terminal admission,
+validate the complete durable run before materializing any row: exact session,
+run and event identity, strictly integer sequences starting at 1 without gaps or
+duplicates, and terminal metadata matching the actual event. A foreign,
+noncontiguous, semantically invalid or newline-terminated malformed row anywhere
+in the run yields no recovered rows and no terminal authority. Only an
+unterminated, unparseable JSON fragment at EOF (including an incomplete trailing
+UTF-8 codepoint) may be discarded while retaining the validated contiguous
+prefix. A valid final JSON row without a newline still requires all identity and
+terminal checks; arbitrary invalid UTF-8 is not a torn-tail exemption. A torn
+terminal fragment grants no terminal authority: same-process Stop admission
+still requires a real validated terminal row in the prefix.
+
+Authoritative restart and Stop recovery read the durable journal incrementally
+without the client replay endpoint's 4 MiB / 4,096-row limits. Long answers and
+large terminal session snapshots must remain recoverable. Client
+`read_session_run_events` retains those limits and its existing rejection
+behavior. Ordinary journal inspection reads remain unchanged; recovery opts into
+identity validation without making client replay capacity a durability limit.
+
+Journal-recovered segments retain `_recovered_from_run_journal` provenance,
+without the live `_partial` snapshot marker: distinct equal-text segments and
+their tool owner indexes must survive cold loading unchanged. Cancelled-sidecar
+display ownership recognizes that provenance before an error carrier. Tool
+completion searches all unfinished exact IDs before falling back to the latest
+same-name start that originally had no ID; an ID-bearing start is never a
+name-only fallback for another completion ID.
+
+A full session read may try multiple eligible cancellation hooks, newest first,
+when earlier selections yield no output. Each hook keeps its own attempt and age
+budget and is visited at most once per read; live, same-process nonterminal,
+and still-arriving hooks do not consume that budget. One successful recovery
+ends the pass. A failed cancellation save restores the projection and ends the
+pass before any stale marker reference can be reused.
+
+Interrupted-hook scans bypass only assistant rows carrying the explicit
+`_recovered_from_cancel_journal: true` provenance stamped by successful exact-stream
+cancellation recovery. Other recovered and ordinary assistant turns retain the
+existing stopping boundary; a stream ID alone does not authorize bypass.
+Interrupted output recovered behind a later display user enters provider history
+only when its display owner uniquely matches a context user through a shared
+stable identity (turn token, message ID, state.db row ID, or message UID, kept in
+separate namespaces), or through a unique exact timestamp, normalized source,
+and display-equivalent text. Legacy integer-truncated times may match a finite
+fractional time only when one side is integer-typed; two distinct fractional
+times remain distinct. Both endpoints must be unique across both projections,
+so an integer matching two same-second candidates does not establish ownership.
+A missing context token may use only that unique fallback pair; context-only or
+conflicting tokens still fail closed. New stale repairs retain the exact pending
+time and stamp its active-turn token before projecting the recovered user row.
+Text comparison removes only a leading workspace
+tag and a terminal attachment suffix and extracts known native text parts; it
+never rewrites provider payloads or image bytes. Contradictory/malformed identities,
+reused shared identities, and conflicting API content or attachments carried by
+both projections fail closed. Missing, null, or empty-string source metadata has
+the legacy WebUI default; non-string source values, including falsy values, never
+authorize provider-context insertion. Context-only API content and display-only attachment
+descriptors do not defeat ownership. The next context user must likewise uniquely
+match an authoritative later display turn token. A surviving owner without a context successor must be the context tail and
+still requires a token-bearing later display turn; compression summaries or
+unowned context suffixes do not prove an insertion boundary. Recovery inserts exact-stream output before that next user,
+retaining existing native tool call/result blocks together; truncated display tool
+metadata never becomes a provider call. Only inserted model-visible assistant
+output promotes the proven recovered question out of its provisional state;
+reasoning-only/tool-display/error recovery does not. This placement and hook retirement commit
+in one save, with in-memory rollback on failure. Empty, compressed, duplicate or
+ambiguous/tokenless ownership stays display-only (`_recovered_display_only: true`),
+including during empty-context seeding and Agent/API replay sanitization. It must
+not be appended as the newer turn's answer.
+Latest-turn interrupted output retains its existing provider-context projection.
+Display deduplication stays within the selected interrupted user/marker window;
+that window is not provider-context ownership evidence. Reordering moves only
+the selected stream's rows, and tools retain their exact display owner after
+both movement and terminal-marker removal. Cancelled provider context remains
+exact-token owned; no cross-turn context ownership is inferred from text,
+timestamps, or display ordinals.
 
 ## Inactive compression continuation recovery
 

@@ -72,14 +72,26 @@ def test_advance_helper_noop_when_unset():
     assert s.truncation_watermark is None
 
 
-def test_advance_helper_uses_current_time_when_no_timestamp():
-    """When the newest user message has no timestamp, the helper falls back to
-    time.time()."""
+def test_advance_helper_never_stamps_wall_clock_when_no_timestamp():
+    """When NO row in messages carries a timestamp, the helper must NOT invent a
+    wall-clock boundary (it used to fall back to time.time()).
+
+    A wall-clock watermark is newer than every sidecar row, which starves the
+    merge's sidecar_advanced_past_watermark guard and permanently self-locks the
+    append-only state.db merge (real session 20260929_085828_15c6e6 lost 3412
+    messages this way). The existing value is kept instead: a too-old watermark
+    merely over-filters the replaced tail and cannot self-lock. See
+    tests/test_stale_watermark_self_heal.py.
+    """
     s = _FakeSession(100.0)
     s.messages = _rows(("user", "new turn", None))
     streaming._advance_truncation_watermark_after_commit(s)
-    assert s.truncation_watermark is not None
-    assert s.truncation_watermark > 100.0  # advanced past the old watermark
+    assert s.truncation_watermark == 100.0
+    # The core invariant: the watermark is always a real message timestamp.
+    real_ts = [m["timestamp"] for m in s.messages
+               if isinstance(m.get("timestamp"), (int, float)) and m["timestamp"] > 0]
+    if real_ts:
+        assert s.truncation_watermark <= max(real_ts)
 
 
 def test_advance_helper_picks_newest_user_timestamp():

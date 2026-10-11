@@ -30,12 +30,12 @@ management requests, not every scheduled execution.
 
 **Symptom.** WebUI starts, shows the chat interface, but every chat request fails immediately with this error in the response or the server log. As of v0.51.6 the error includes a diagnostic block with the running Python interpreter, the relevant `sys.path` entries, and the most-common fix; on older versions the message is bare.
 
-**Why it happens.** The WebUI imports the agent class at chat time via `from run_agent import AIAgent`. That import only succeeds if the running Python's `sys.path` contains either the hermes-agent checkout or a pip-installed copy of the agent. Three common failure modes:
+**Why it happens.** The WebUI imports the agent class at chat time via `from run_agent import AIAgent`. That import only succeeds if the running Python's `sys.path` contains either the hermes-agent checkout or a pip-installed copy of the agent. Four common failure modes:
 
 1. **Agent installed but not on `sys.path`.** Most common. The agent is checked out somewhere (e.g. `~/Programmes/hermes-agent`), the WebUI was launched with a Python that doesn't know about it, and there's no `pip install -e .` linking the two.
 2. **Symlink with a typo or wrong target.** A symlink to the agent looks correct on `ls`, but `readlink` resolves to a path that doesn't exist or doesn't contain `agent/__init__.py`.
 3. **`HERMES_WEBUI_AGENT_DIR` set to the wrong directory.** Override env var beats auto-discovery and points at a directory that has no agent code.
-4. **Agent installed as root, under the FHS layout.** When the Hermes Agent installer runs as root on Linux it places the agent at `/usr/local/lib/hermes-agent` (CLI linked into `/usr/local/bin`), not `~/.hermes/hermes-agent`. Older `bootstrap.py` didn't probe that path, so it built a WebUI-only `.venv` and failed at launch with **"Python environment cannot import both WebUI dependencies and Hermes Agent."** `git pull` to update the WebUI (current `bootstrap.py` auto-discovers the FHS layout and follows the `hermes` launcher to the agent), or set `HERMES_WEBUI_PYTHON=/usr/local/lib/hermes-agent/venv/bin/python` and relaunch.
+4. **Agent installed as root, under the FHS layout.** When the Hermes Agent installer runs as root on Linux it places the agent at `/usr/local/lib/hermes-agent` (CLI linked into `/usr/local/bin`), not `~/.hermes/hermes-agent`. Older `bootstrap.py` didn't probe that path, so it built a WebUI-only `.venv` and failed at launch with **"Python environment cannot import both WebUI dependencies and Hermes Agent."** `git pull` to update the WebUI (current `bootstrap.py` auto-discovers the FHS layout and follows the `hermes` launcher to the agent), and let the launcher pick the interpreter: when relaunch is enabled (the default: `HERMES_DISABLE_LAZY_INSTALLS` unset, `updateMechanism=self`, checkout with `.git`/`pyproject.toml`), launch preparation re-exec's a non-store interpreter into the store python before activation, so leaving `HERMES_WEBUI_PYTHON` unset lands on the managed interpreter. When the service suppresses relaunch instead, no re-exec corrects the seed interpreter, and an unset override falls through `discover_launcher_python()` to whatever non-managed python it finds (`agent_dir/venv/bin/python` if it exists, else the WebUI `.venv`, else system `python3`) — every turn then fails while the pre-flight check still passes. Those services must resolve the store python fresh at every start and export it as `HERMES_WEBUI_PYTHON` (see step 2) — never the in-tree venv, and never a saved path of any kind — see [Hermes package-managed runtime bootstrap order](#hermes-package-managed-runtime-bootstrap-order).
 
 ### Step 1 — confirm the agent location
 
@@ -54,13 +54,28 @@ The third command must succeed (the file must exist). If it fails, your symlink 
 cd ~/hermes-webui && ./start.sh 2>&1 | grep -iE 'agent|python|hermes_webui_python' | head -20
 ```
 
-The startup banner prints which Python and agent dir it resolved. If the agent dir is empty or the Python is the wrong one, set the override:
+The startup log shows how the launch resolved. If the agent dir is empty or the Python is the wrong one, set the override:
 
 ```bash
 export HERMES_WEBUI_AGENT_DIR=/absolute/path/to/hermes-agent
-export HERMES_WEBUI_PYTHON=/absolute/path/to/agent/venv/bin/python
+export HERMES_WEBUI_PYTHON=/absolute/path/to/working/python
 ./start.sh
 ```
+
+For a source checkout that path is the agent venv python (`.../hermes-agent/venv/bin/python`). For a package-managed install with relaunch enabled (the default: `HERMES_DISABLE_LAZY_INSTALLS` unset, `updateMechanism=self`, checkout with `.git`/`pyproject.toml`), leave `HERMES_WEBUI_PYTHON` unset whenever the launcher discovers the agent on its own — managed activation selects and leases the committed generation on every launch. Never persist a resolved path — neither a generation path (`installs/<key>/environments/<hash>/venv/bin/python`, garbage-collected once unselected) nor a store path (`tools/python-*`, superseded on managed-python updates): both stop being the interpreter the Agent runs on. If the service suppresses relaunch (e.g. it sets `HERMES_DISABLE_LAZY_INSTALLS=1`), leaving the override unset re-selects a non-managed python — `discover_launcher_python()` prefers `agent_dir/venv/bin/python` when it exists (else the WebUI `.venv`, else system `python3`) and the pre-flight's pure-Python check passes on it while every turn fails. Those services must resolve the store python fresh at every start instead: `hermes --print-runtime-command` prints a JSON array whose element zero is the store python, so decode it in the service's own launch step (a systemd `ExecStart` wrapper or `EnvironmentFile` generator) and export it as `HERMES_WEBUI_PYTHON` (Python 3 is already required, so its standard library does the decoding):
+
+```bash
+HERMES_WEBUI_PYTHON="$(hermes --print-runtime-command \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)[0])')" || exit 1
+[ -x "$HERMES_WEBUI_PYTHON" ] || exit 1
+export HERMES_WEBUI_PYTHON
+```
+
+Assign, check, then export: `export VAR="$(…)"` succeeds even when the command
+substitution fails, so a launcher that can't find `hermes` would otherwise start
+with an empty `HERMES_WEBUI_PYTHON` instead of stopping.
+
+A wrong extraction (e.g. `cut -d, -f1`) yields a JSON-quoted fragment instead of a path that fails loudly when the launcher execs it — never a saved path, never the pre-PM in-tree venv — see [Hermes package-managed runtime bootstrap order](#hermes-package-managed-runtime-bootstrap-order).
 
 ### Step 3 — install the agent in editable mode
 
@@ -86,7 +101,19 @@ If steps 1-3 still don't work, check whether the WebUI's Python can import the a
 $HERMES_WEBUI_PYTHON -c "from run_agent import AIAgent; print('ok')" 2>&1
 ```
 
-(Replace `$HERMES_WEBUI_PYTHON` with the actual Python path from step 2 if the env var isn't set.) If this prints `ok`, the agent IS on `sys.path` for that Python — and the WebUI should work.
+(Replace `$HERMES_WEBUI_PYTHON` with the actual Python path from step 2 if the env var isn't set.) If this prints `ok`, the agent IS on `sys.path` for that Python. It does **not** prove the WebUI will serve a turn: a bare `run_agent` import pulls in no compiled extensions, so this probe passes on an interpreter the server cannot run on — see [Hermes package-managed runtime bootstrap order](#hermes-package-managed-runtime-bootstrap-order). On installs whose agent ships `hermes_bootstrap.py`, check the activated layer too by importing a compiled extension after the bootstrap import:
+
+```bash
+PYTHONPATH=/path/to/hermes-agent $HERMES_WEBUI_PYTHON -c "
+import sys
+import hermes_bootstrap                                        # activates the committed dependency environment
+print(sys.executable)
+from run_agent import AIAgent
+from pydantic_core._pydantic_core import SchemaValidator        # compiled: fails on an ABI mismatch
+print('ok')"
+```
+
+(On agents without `hermes_bootstrap.py` the bare probe above is the whole check — server startup supports those legacy checkouts, so don't gate them on the compiled import.) The agent's launch preparation re-exec's a non-store interpreter into the store python before activation, so run this probe the way the service runs: with the service's `HERMES_HOME`, and with `HERMES_DISABLE_LAZY_INSTALLS=1` only if the service itself sets it. That variable (plus a non-`self` update mechanism, a checkout without `.git`/`pyproject.toml`, or a failed launch preparation) suppresses the re-exec — under those conditions the probe tests the launcher's interpreter directly, which is exactly the mismatch detector. If the bare probe printed `ok` but this one fails with `No module named 'pydantic_core._pydantic_core'`, the interpreter is on the wrong side of an ABI mismatch: fix the launcher's interpreter — `HERMES_WEBUI_PYTHON` unset when relaunch is enabled, otherwise the store python resolved fresh at every start (see step 2). Reinstalling or repairing `pydantic` changes nothing, because both environments are complete in isolation.
 
 If this fails, `import run_agent` itself is broken — check that the agent's pyproject.toml lists `run_agent` as a top-level module or that the agent dir is on PYTHONPATH:
 
@@ -103,6 +130,7 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 - The output of every command in steps 1-4
 - The full diagnostic block printed by the WebUI's `ImportError` (v0.51.6+)
 - Your OS, Python version, and how the agent was installed
+- The interpreter your launcher resolved (or `readlink /proc/<pid>/exe` for a systemd unit)
 
 ---
 
@@ -127,6 +155,85 @@ still stops the process. The interpreter compatibility probe may still import
 startup. If a restart fails, inspect the current service journal and selected
 interpreter. This ordering repair does not remove the static fallback lock or
 change cross-profile credential handling.
+
+The launcher must still hand `bootstrap.py` an interpreter on the same side of the
+Python ABI as the committed dependency generation — for example, the pre-PM
+in-tree `venv` (3.11) beside a 3.14 generation. WebUI does not choose the
+generation, but the interpreter it starts with decides whether that generation can
+load: `activate_dependencies()` replaces `sys.path` with the generation's
+`site-packages`, so a process built for another minor version starts, serves `/health`,
+and then fails on **every** turn, with every MCP server reporting a connect failure
+in the same breath:
+
+```
+Failed to initialize OpenAI client: No module named 'pydantic_core._pydantic_core'
+module 'tools.mcp_tool' has no attribute 'StdioServerParameters'
+MCP server '<name>' requires HTTP transport but mcp.client.streamable_http is not available
+```
+
+Those are the same ABI failure re-wrapped several modules deep, not a broken `mcp`
+package and not broken MCP servers — do not upgrade or disable MCP servers over
+them. This is also the false-negative in step 4's probe above: the bare probe's
+`run_agent` import pulls in no compiled extensions, so it passes on an interpreter
+the server cannot run on.
+
+For a package-managed install the fix is to stop pinning an interpreter, not to
+pin a better one — provided relaunch is enabled (the default:
+`HERMES_DISABLE_LAZY_INSTALLS` unset, `updateMechanism=self`, checkout with
+`.git`/`pyproject.toml`). Leave `HERMES_WEBUI_PYTHON` unset whenever the launcher
+discovers the agent on its own: the agent's launch preparation re-exec's a
+non-store interpreter into the store python (`~/.hermes/tools/python-*`) before
+activation, and activation then selects and leases the committed generation —
+the generation python itself is re-exec'd into the store python, so a saved
+generation path is neither the interpreter the Agent runs on nor stable across
+updates. Never persist a resolved path: saved generation paths
+(`installs/<key>/environments/<hash>/venv/bin/python`) are garbage-collected
+once unselected, and a saved store path (`tools/python-*`) is superseded on the
+next managed-python update — in both cases the next `start.sh` launches an
+interpreter the Agent no longer runs on. If an override is unavoidable — or the
+service suppresses relaunch (e.g. it sets `HERMES_DISABLE_LAZY_INSTALLS=1`, in
+which case an unset override falls through `discover_launcher_python()` to a
+non-managed python) — resolve the store python fresh at every start and export
+it as `HERMES_WEBUI_PYTHON`. `hermes --print-runtime-command` prints a JSON
+array whose element zero is the store python; decode it in the service's own
+launch step (a systemd `ExecStart` wrapper or `EnvironmentFile` generator):
+
+```bash
+HERMES_WEBUI_PYTHON="$(hermes --print-runtime-command \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)[0])')" || exit 1
+[ -x "$HERMES_WEBUI_PYTHON" ] || exit 1
+export HERMES_WEBUI_PYTHON
+```
+
+Assign, check, then export: `export VAR="$(…)"` succeeds even when the command
+substitution fails, so a launcher that can't find `hermes` would otherwise start
+with an empty `HERMES_WEBUI_PYTHON` instead of stopping.
+
+That resolves per-launch instead of persisting a versioned path. Run it with
+the service's `HERMES_HOME` when the install uses a non-default home (per-user
+installs live at `~/.hermes/hermes-agent`; the FHS path above is the
+root-on-Linux layout only), and with the service's `HERMES_RUNTIME_DIR` when it
+sets one — the runtime override also steers `store_root()`, so a resolver run
+without it can point at a different store than the service uses.
+
+The bare store python needs no workaround either: run through `bootstrap.py`'s
+pre-flight `_python_can_run_webui_and_agent()` probe it behaves like any managed
+interpreter, because that probe itself triggers the same launch preparation and
+activation. From the outside, `/health` and `/api/health/agent` both return `200`
+while this is broken; only a real turn (`POST /api/chat`, or
+`POST /api/chat/start` + `GET /api/chat/stream`) constructs the OpenAI client
+and surfaces the mismatch.
+
+The native Windows launcher also decides *which* Agent root that bootstrap runs
+from, so the two have to agree. `start.ps1` normally keeps the source-first
+order from `api.config._discover_agent_dir`, but it repairs a few displaced
+layouts: a bare source checkout, the repo sibling, an Agent root (source or
+pip-style) at the repo parent, or `%USERPROFILE%\hermes-agent`, when that selection has no in-root
+venv and a later master-order install exists. For the layout-fallback cases the
+install may win even without its own venv (deps already importable); otherwise
+the install needs a `venv\Scripts\python.exe`. A source checkout that has its
+own venv keeps priority, since it is launchable on its own.
+`HERMES_WEBUI_AGENT_DIR` remains authoritative over both.
 
 Current Hermes managed environments ship `ruamel.yaml` and may not include
 PyYAML. WebUI reads and writes YAML through `api/yaml_compat.py`, which uses
@@ -232,6 +339,14 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 **Why.** WebUI imports `run_agent.AIAgent` into its long-lived Python process. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision. Local Agent-backed actions return a retryable `409 agent_runtime_stale` with `restart_scheduled: false` before accepting a new turn. Gateway- and runner-owned chat keep their existing runtime ownership. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare; losing a previously known revision remains fail-closed.
 
+Revision checks allow up to 10 seconds total across the three local Git reads
+(worktree root, tracked module, and HEAD). Each read receives only the time
+remaining before one monotonic deadline, so slow reads that finish within the
+total budget do not falsely look like a changed runtime. An exhausted budget or
+failed read still blocks a previously identified Git runtime; this does not
+bypass the revision guard or schedule an automatic restart. This is a per-check
+budget, not an end-to-end chat-request timeout; chat admission can check twice.
+
 **Diagnostic.** The stale-runtime response includes `agent_update_state`, also preserved in asynchronous compression error status:
 
 | Value | Observation |
@@ -264,7 +379,11 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 **Symptom.** The sidebar's imported/CLI session list takes seconds per refresh on a large Hermes profile, or a log line says a `state.db` read failed. Sessions still appear; nothing is lost.
 
-**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary (the listing returns empty for that profile) instead of silently reopening the file writable.
+**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary instead of silently reopening the file writable.
+
+A primary `state.db` read failure keeps the existing availability behavior: a complete same-generation stale snapshot wins when available, then the independently bounded eight-entry last-known-good cache keyed without the volatile database fingerprint preserves rows across idle and streaming-frozen refreshes. In the all-profiles view, a profile whose primary read fails makes the aggregate non-authoritative, so it is never published to either cache.
+
+The additive cron, webhook, and kanban passes, and the project-assigned recovery and unassigned refill passes, have a different failure boundary. If one of those later reads is temporarily unavailable, WebUI serves the primary rows it already loaded as an explicitly incomplete, fresh projection for that request and does not cache it; the next poll retries the optional pass. Errors while creating project metadata or building an optional row are debug-logged and skipped without misclassifying `projects.json` as an unavailable `state.db`. In all-profiles mode, an optional-pass failure therefore keeps both the affected profile's primary rows and healthy profiles' rows instead of replacing them with a stale aggregate. Claude Code discovery remains one global scan, independent of profile database availability, and runs only for unfiltered or explicit `claude-code` requests.
 
 **Diagnostic.**
 
@@ -297,6 +416,67 @@ python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confir
 **Why.** The server-side redirect after login targets `/sessions` (plural), but that path was missing from the explicit SPA-shell allowlist in `handle_get()`. Without auth the bug is invisible because the SPA handles `/sessions` client-side and the server route is never hit — only the server-side post-login redirect exposes it.
 
 **Fix.** `/sessions` is now included alongside `/` and `/index.html` in the set of paths that serve the SPA shell. No configuration change is needed.
+
+---
+
+## Update check reports a Git authentication or fetch failure
+
+**Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or
+`could not read Username`, or `unable to get password from user` (Git 2.47+).
+Git's own prompts are disabled; credential-helper UI depends on the helper.
+
+**Why.** Update checks are unattended. WebUI removes inherited askpass, SSH-command, proxy, and Git
+config injection settings; disables checkout-controlled askpass and credential helpers; and forces
+SSH batch mode. Generic and URL-scoped credential helpers from trusted user and system Git config
+remain available when declared directly in the primary system/global files.
+Git Credential Manager also receives `GCM_INTERACTIVE=never` and
+`credential.interactive=false`: cached credentials may authenticate a check, but a GCM cache miss
+must fail without opening its GUI or browser login. Git itself honors
+`credential.interactive` starting in 2.47; other credential helpers may ignore
+these controls and still open a browser or GUI. These controls follow
+[GCM's environment contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/environment.md#gcm_interactive)
+and [configuration contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/configuration.md#credentialinteractive). `include` and
+`includeIf` are not followed for credential helpers, `core.sshCommand`, or `ssh.variant`:
+included files may be checkout-controlled even when Git labels their scope global. Move these
+settings into the main user/system config if needed. The explicit scope reads also work on
+Git versions before 2.26. A trusted user/system `core.sshCommand` is retained with the batch option for
+its trusted or detected SSH variant (`-oBatchMode=yes` for OpenSSH, `-batch` for PuTTY/Plink),
+as is an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
+to the active `git://` remote's host; ordinary `git://` remotes without an applicable override remain
+supported. Push checks follow `branch.<name>.pushRemote`, `remote.pushDefault`,
+`branch.<name>.remote`, then `origin`. Checks cover every selected remote `pushurl`,
+or every `url` when no `pushurl` exists; fetch/pull use only the first fetch URL.
+Any applicable checkout-controlled proxy blocks the entire push before it starts.
+A trusted SSH command is preserved/probed when any actual push destination uses SSH.
+Remote-helper forms such as `ext::`, `ssh::`, and `https::` are rejected because the
+transport prefix names a helper command.
+
+**Diagnostic.** Run the project diagnostic for each checkout named by the update status:
+
+```bash
+python3 scripts/diagnose_update_git.py /path/to/checkout
+```
+
+The diagnostic reads the origin, accepts built-in HTTP(S), SSH, and `git://` remote forms,
+applies the update runner's proxy guard in the original checkout, then probes the captured
+URL outside the checkout so repository-controlled remote helpers and URL rewrites cannot run. It
+reports fixed failure categories instead of relaying Git or credential-helper output, and redacts
+checkout paths, origin paths, URL credentials, tokens, and secret query values.
+
+**Fix.** Configure a non-interactive user/system credential helper for a private HTTPS origin, or use
+an SSH origin with a key already loaded in the SSH agent seen by WebUI. Restart WebUI if necessary so
+it inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic and update check. Custom SSH
+commands must declare or auto-detect as OpenSSH, Plink, PuTTY, or TortoisePlink; Git's `simple` variant
+fails closed. Only SSH destinations trigger the five-second, stdin-disabled `-G`
+configuration probe for custom-named commands; local paths and HTTP(S) never invoke
+the SSH wrapper. The probe uses Git's resolved shell rather than requiring `sh` on PATH;
+only a successful probe enables OpenSSH batch mode. Explicit interactive `BatchMode` options
+(including whitespace forms such as `-o 'BatchMode no'`) fail closed rather than relying on
+a later option to override OpenSSH's first-value semantics. Failed/unknown probes fail closed.
+
+**When to file a bug.** File a WebUI bug if the diagnostic succeeds under the same user and
+environment but the update check still fails, or if either path opens a credential prompt. Include
+only sanitized hosts and errors; do not include credential-bearing URLs, tokens, or private paths.
 
 ---
 
@@ -363,7 +543,7 @@ python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_proces
 
 **Symptom.** With several profiles, the Skills panel of profile A lists skills from profile B's `skills.external_dirs`, or the external roots configured for profile A do not appear at all. `/api/skills` reports `runtime_scope: "unavailable"`.
 
-**Why.** The WebUI binds external-root discovery to the request profile (`ARCHITECTURE.md` §4.11), reads that profile's `skills.external_dirs` directly, and expands variables from its runtime environment with `HERMES_HOME` fixed to the profile home. Relative paths start at that home; `~` and `$HOME` use the stable shell home. The root profile also accepts variables captured at server launch, with its `.env` taking precedence. Named profiles use only their own runtime environment, including when the server is pinned to a named profile. Variables missing from those sources withhold external roots instead of using another streaming profile's process environment. If the Agent's routed-profile decision cannot be matched to the profile WebUI resolved, external roots are also withheld. Local skills remain usable in panels, cron, and slash suggestions; incomplete lists are retried on the next lookup. An accepted profile switch clears the previous profile's skill selection and edit form immediately. Delayed list, detail, linked-file, toggle, save, and delete responses cannot repaint the new profile or reopen an old form; select a skill again in the new profile.
+**Why.** The WebUI binds external-root discovery to the request profile (`ARCHITECTURE.md` §4.12), reads that profile's `skills.external_dirs` directly, and expands variables from its runtime environment with `HERMES_HOME` fixed to the profile home. Relative paths start at that home; `~` and `$HOME` use the stable shell home. The root profile also accepts variables captured at server launch, with its `.env` taking precedence. Named profiles use only their own runtime environment, including when the server is pinned to a named profile. Variables missing from those sources withhold external roots instead of using another streaming profile's process environment. If the Agent's routed-profile decision cannot be matched to the profile WebUI resolved, external roots are also withheld. Local skills remain usable in panels, cron, and slash suggestions; incomplete lists are retried on the next lookup. An accepted profile switch clears the previous profile's skill selection and edit form immediately. Delayed list, detail, linked-file, toggle, save, and delete responses cannot repaint the new profile or reopen an old form; select a skill again in the new profile.
 
 **Diagnostic commands.**
 

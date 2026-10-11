@@ -759,13 +759,15 @@ function $(id) {
 }
 const window = { _configuredModelBadges: payload.configuredBadges || {} };
 const document = { createElement(tag) { return makeNode(tag); } };
-function esc(v) { return String(v || ''); }
+const escSource = ui.match(/^const esc=(.*);$/m);
+if (!escSource) throw new Error('production esc helper not found');
+const esc = eval(escSource[1]);
 function t(key, ...args) {
   if (key === 'model_show_all_models') return `Show all ${args[0]} models`;
   return key;
 }
 function li() { return 'x'; }
-function getModelLabel(v) { return String(v || ''); }
+function getModelLabel(v) { return (payload.labels || {})[v] || String(v || ''); }
 function _providerFromModelValue(v) {
   const value = String(v || '');
   if (value.startsWith('@') && value.includes(':')) return value.slice(1, value.lastIndexOf(':'));
@@ -796,23 +798,37 @@ for (const name of [
   eval(extractFunc(name));
 }
 
+const initialSelection=_modelStateForSelect(modelSelect,modelSelect.value);
 renderModelDropdown();
-const backupRow=findInTree(dropdown,node=>String(node._innerHTML||'').includes('@custom:backup:model-a'));
+const backupRow=findInTree(dropdown,node=>String(node._innerHTML||'').includes('<span class="model-opt-id">@custom:backup:model-a</span>'));
 if(!backupRow||typeof backupRow.onclick!=='function') throw new Error('backup row not rendered');
 backupRow.onclick();
+const backupPicked=window.__picked;
+const catalogRow=findInTree(dropdown,node=>String(node._innerHTML||'').includes('<span class="model-opt-id">gpt-6-sol</span>'));
+if(!catalogRow||typeof catalogRow.onclick!=='function') throw new Error('catalog row not rendered');
+catalogRow.onclick();
+const catalogPicked=window.__picked;
 process.stdout.write(JSON.stringify({
-  picked:window.__picked,
+  initialSelection,
+  backupPicked,
+  catalogPicked,
+  rows:snapshot(dropdown).filter(row=>String(row.className||'').split(/\s+/).includes('model-opt')).map(row=>row.html),
   options:modelSelect.options.map(o=>({value:o.value,provider:_getOptionProviderId(o)})),
 }));
 """
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
-def test_rendered_missing_fallback_row_click_persists_its_own_provider(tmp_path):
+def test_configured_picker_keeps_friendly_title_and_exact_selection_routing(tmp_path):
     driver = tmp_path / "rendered_click_driver.js"
     driver.write_text(_RENDERED_CLICK_DRIVER, encoding="utf-8")
     payload = {
         "groups": [
+            {
+                "provider": "OpenAI",
+                "provider_id": "openai",
+                "models": [{"id": "gpt-6-sol", "label": "R&D <safe>"}],
+            },
             {
                 "provider": "Primary",
                 "provider_id": "custom:primary",
@@ -820,12 +836,14 @@ def test_rendered_missing_fallback_row_click_persists_its_own_provider(tmp_path)
             }
         ],
         "configuredBadges": {
+            "gpt-6-sol": {"role": "primary", "label": "Primary", "provider": "openai"},
             "@custom:backup:model-a": {
                 "role": "fallback",
                 "label": "Fallback 1",
                 "provider": "custom:backup",
             }
         },
+        "labels": {"@custom:backup:model-a": "model-a"},
         "selectedValue": "model-a",
     }
     assert NODE is not None
@@ -838,7 +856,33 @@ def test_rendered_missing_fallback_row_click_persists_its_own_provider(tmp_path)
     assert result.returncode == 0, result.stderr
     actual = json.loads(result.stdout)
 
-    assert actual["picked"] == {
+    assert actual["initialSelection"] == {
+        "model": "model-a",
+        "model_provider": "custom:primary",
+    }
+    catalog_row = next(
+        row for row in actual["rows"]
+        if '<span class="model-opt-id">gpt-6-sol</span>' in row
+    )
+    assert '<span class="model-opt-name">R&amp;D &lt;safe&gt;</span>' in catalog_row, (
+        "configured catalog title was not escaped exactly once"
+    )
+    assert '&amp;amp;' not in catalog_row
+    assert '<span class="model-opt-badge model-opt-badge--primary">gpt-6-sol (openai)</span>' in catalog_row
+    assert actual["catalogPicked"] == {
+        "model": "gpt-6-sol",
+        "model_provider": "openai",
+    }
+    fallback_row = next(
+        row for row in actual["rows"]
+        if '<span class="model-opt-id">@custom:backup:model-a</span>' in row
+    )
+    assert '<span class="model-opt-name">model-a</span>' in fallback_row
+    assert (
+        '<span class="model-opt-badge model-opt-badge--fallback">'
+        '@custom:backup:model-a (backup)</span>' in fallback_row
+    )
+    assert actual["backupPicked"] == {
         "model": "model-a",
         "model_provider": "custom:backup",
     }
@@ -846,3 +890,304 @@ def test_rendered_missing_fallback_row_click_persists_its_own_provider(tmp_path)
         "value": "@custom:backup:model-a",
         "provider": "custom:backup",
     }
+
+
+# ── same-normalized matrix ────────────────────────────────────────────────────
+# A badge-owned @commandcode:model-a row must be equivalent only to
+# same-provider candidates; bare, slash-prefixed, and at-prefixed aliases from
+# otherprovider must not be collapsed into it (#7290 CR re-gate).
+
+_SAME_NORM_MATRIX_DRIVER = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[1], 'utf8');
+
+function extractFunction(source, name) {
+  const marker = 'function ' + name + '(';
+  const start = source.indexOf(marker);
+  if (start < 0) throw new Error('not found: ' + name);
+  const brace = source.indexOf('{', source.indexOf(')', start));
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth += 1;
+    else if (source[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error('unterminated: ' + name);
+}
+
+eval([
+  '_normalizeConfiguredModelKey',
+  '_getOptionProviderId',
+  '_isEquivalentConfiguredModelEntry',
+].map(name => extractFunction(ui, name)).join('\n'));
+
+// One existing row: badge-owned @commandcode:model-a
+const entries = [{
+  value: '@commandcode:model-a',
+  providerId: '',
+  badge: { provider: 'commandcode', label: 'CommandCode A' },
+}];
+
+function check(modelId, badgeProvider) {
+  const badge = { provider: badgeProvider, label: 'X' };
+  return _isEquivalentConfiguredModelEntry(modelId, badge, entries);
+}
+
+const results = {
+  // same provider — must be equivalent
+  same_at:        check('@commandcode:model-a', 'commandcode'),
+  same_slash:     check('commandcode/model-a', 'commandcode'),
+  same_bare:      check('model-a', 'commandcode'),
+  // otherprovider — must NOT be equivalent
+  other_bare:     check('model-a', 'otherprovider'),
+  other_slash:    check('otherprovider/model-a', 'otherprovider'),
+  other_at:       check('@otherprovider:model-a', 'otherprovider'),
+};
+process.stdout.write(JSON.stringify(results));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_same_normalized_badge_row_is_equivalent_only_to_same_provider():
+    """@commandcode:model-a row must not suppress otherprovider/model-a aliases."""
+    result = subprocess.run(
+        [NODE, "-e", _SAME_NORM_MATRIX_DRIVER, str(UI_JS)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    r = result.stdout.strip()
+    payload = __import__("json").loads(r)
+
+    # same-provider candidates are equivalent (correct suppression)
+    assert payload["same_at"], "same-provider @commandcode:model-a must be equivalent"
+    assert payload["same_slash"], "commandcode/model-a must be equivalent"
+    assert payload["same_bare"], "bare model-a under commandcode must be equivalent"
+
+    # otherprovider aliases must NOT be collapsed
+    assert not payload["other_bare"], (
+        "bare model-a under otherprovider must not be equivalent to @commandcode:model-a"
+    )
+    assert not payload["other_slash"], (
+        "otherprovider/model-a must not be equivalent to @commandcode:model-a"
+    )
+    assert not payload["other_at"], (
+        "@otherprovider:model-a must not be equivalent to @commandcode:model-a"
+    )
+
+
+# ── composed two-provider renderModelDropdown dedup control ───────────────────
+# After _ensureModelOptionInDropdown adds a missing-catalog fallback for
+# @custom:backup:model-a alongside an existing @custom:primary:model-a,
+# renderModelDropdown must produce exactly one configured row per provider.
+
+_TWO_PROVIDER_DEDUP_DRIVER = r"""
+const fs = require('fs');
+const ui = fs.readFileSync(process.argv[2], 'utf8');
+const payload = JSON.parse(process.argv[3]);
+
+function extractFunc(name) {
+  const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+  const start = ui.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let openParen = ui.indexOf('(', start);
+  let i = openParen + 1;
+  let parenDepth = 1;
+  while (parenDepth > 0 && i < ui.length) {
+    if (ui[i] === '(') parenDepth++;
+    else if (ui[i] === ')') parenDepth--;
+    i++;
+  }
+  i = ui.indexOf('{', i);
+  let depth = 1;
+  i++;
+  while (depth > 0 && i < ui.length) {
+    if (ui[i] === '{') depth++;
+    else if (ui[i] === '}') depth--;
+    i++;
+  }
+  return ui.slice(start, i);
+}
+
+function makeNode(tag) {
+  const node = {
+    tagName: String(tag || '').toUpperCase(),
+    children: [], dataset: {}, style: {}, parentElement: null,
+    textContent: '', value: '', tabIndex: 0, onclick: null,
+    _listeners: {}, _innerHTML: '',
+    appendChild(child) {
+      child.parentElement = this;
+      this.children.push(child);
+      if (this.tagName === 'OPTGROUP' && this._ownerSelect && child.tagName === 'OPTION') {
+        this._ownerSelect.options.push(child);
+      }
+      return child;
+    },
+    addEventListener(type, handler) { this._listeners[type] = handler; },
+    querySelector(sel) { return this._qs ? this._qs[sel] || null : null; },
+    setAttribute(name, value) { this[name] = value; },
+    focus() {},
+  };
+  const set = new Set();
+  node.classList = {
+    _set: set,
+    add(c) { set.add(c); },
+    remove(c) { set.delete(c); },
+    contains(c) { return set.has(c); },
+    toggle(c, f) {
+      if (f === true) { set.add(c); return true; }
+      if (f === false) { set.delete(c); return false; }
+      if (set.has(c)) { set.delete(c); return false; }
+      set.add(c); return true;
+    },
+  };
+  Object.defineProperty(node, 'className', {
+    get() { return [...node.classList._set].join(' '); },
+    set(v) { node.classList._set.clear(); String(v||'').split(/\s+/).filter(Boolean).forEach(c=>node.classList._set.add(c)); },
+  });
+  Object.defineProperty(node, 'innerHTML', {
+    get() { return this._innerHTML; },
+    set(v) {
+      this._innerHTML = String(v || ''); this.children = []; this._qs = {};
+      if (this.tagName === 'DIV' && this._innerHTML.includes('model-search-input')) {
+        const inp = makeNode('input'); inp.className = 'model-search-input';
+        const clr = makeNode('button'); clr.className = 'model-search-clear';
+        this._qs['.model-search-input'] = inp; this._qs['.model-search-clear'] = clr;
+      } else if (this.tagName === 'DIV' && this._innerHTML.includes('model-custom-input')) {
+        const inp = makeNode('input'); inp.className = 'model-custom-input';
+        const btn = makeNode('button'); btn.className = 'model-custom-btn';
+        this._qs['.model-custom-input'] = inp; this._qs['.model-custom-btn'] = btn;
+      }
+    },
+  });
+  return node;
+}
+
+function makeSelect(groups, selectedValue) {
+  const sel = { id: 'modelSelect', children: [], options: [], _value: selectedValue || '' };
+  Object.defineProperty(sel, 'value', {get(){return sel._value;},set(v){sel._value=String(v||'');}});
+  Object.defineProperty(sel, 'selectedOptions', {get(){const o=sel.options.find(x=>x.value===sel._value);return o?[o]:[];}});
+  sel.appendChild=function(opt){opt.parentElement=null;sel.options.push(opt);};
+  sel.querySelectorAll=function(){return [];};
+  for (const group of groups || []) {
+    const og = makeNode('optgroup');
+    og.label = group.provider || '';
+    og.dataset.provider = group.provider_id || '';
+    og._ownerSelect = sel;
+    for (const model of group.models || []) {
+      const opt = makeNode('option');
+      opt.value = model.id; opt.textContent = model.label || model.id; opt.parentElement = og;
+      og.appendChild(opt);  // _ownerSelect.options.push already called inside appendChild
+    }
+    sel.children.push(og);
+    // Do NOT push og.children again: appendChild already pushed each option via _ownerSelect hook
+  }
+  return sel;
+}
+
+const dropdown = makeNode('div');
+dropdown.classList.add('open');
+const modelSelect = makeSelect(payload.groups, payload.selectedValue);
+
+function $(id) {
+  if (id === 'composerModelDropdown') return dropdown;
+  if (id === 'modelSelect') return modelSelect;
+  return null;
+}
+const window = { _configuredModelBadges: payload.configuredBadges || {} };
+const document = { createElement(tag) { return makeNode(tag); } };
+function esc(v) { return String(v || ''); }
+function t(key,...args) { if(key==='model_show_all_models') return `Show all ${args[0]} models`; return key; }
+function li() { return 'x'; }
+function getModelLabel(v) { return String(v || ''); }
+function _normalizeConfiguredModelKey(v) { return String(v||'').toLowerCase(); }
+function _getConfiguredModelBadge(value, badgeMap) { return (badgeMap||{})[value] || null; }
+function closeModelDropdown() {}
+function syncModelChip() {}
+function _refreshOpenModelDropdown() {}
+function _deduplicateModelPickerOptions() { return 0; }
+async function selectModelFromDropdown(value, provider) {
+  _ensureModelOptionInDropdown(value, modelSelect, provider);
+  window.__picked = _modelStateForSelect(modelSelect, modelSelect.value);
+}
+
+for (const name of [
+  '_readModelOverflowData',
+  '_appendOverflowOptionsToGroup',
+  '_providerFromModelValue',
+  '_modelPickerOptionIdentity',
+  '_isEquivalentConfiguredModelEntry',
+  '_getOptionProviderId',
+  '_modelStateForSelect',
+  '_findModelInDropdown',
+  '_applyModelToDropdown',
+  '_ensureModelOptionInDropdown',
+  'renderModelDropdown',
+]) {
+  eval(extractFunc(name));
+}
+
+// Ensure the backup fallback is present before rendering
+_ensureModelOptionInDropdown('@custom:backup:model-a', modelSelect, 'custom:backup');
+renderModelDropdown();
+
+// The canonical state is modelSelect.options — renderModelDropdown reads from it
+// and _isEquivalentConfiguredModelEntry decides which configured rows to add.
+// Both providers must survive: model-a (custom:primary) and
+// @custom:backup:model-a (custom:backup).
+const opts = modelSelect.options.map(o => ({
+  value: o.value,
+  provider: _getOptionProviderId(o),
+}));
+process.stdout.write(JSON.stringify({ opts }));
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_two_provider_composed_dedup_renders_exactly_one_row_per_provider(tmp_path):
+    """_ensureModelOptionInDropdown + renderModelDropdown = exactly 1 row per provider."""
+    driver = tmp_path / "two_provider_dedup_driver.js"
+    driver.write_text(_TWO_PROVIDER_DEDUP_DRIVER, encoding="utf-8")
+    payload = {
+        "groups": [
+            {
+                "provider": "Primary",
+                "provider_id": "custom:primary",
+                "models": [{"id": "model-a", "label": "Model A"}],
+            }
+        ],
+        "configuredBadges": {
+            "@custom:backup:model-a": {
+                "role": "fallback",
+                "label": "Fallback A",
+                "provider": "custom:backup",
+            }
+        },
+        "selectedValue": "model-a",
+    }
+    result = subprocess.run(
+        [NODE, str(driver), str(UI_JS), __import__("json").dumps(payload)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    actual = __import__("json").loads(result.stdout)
+
+    opts = actual.get("opts", [])
+    # model-a (primary) and @custom:backup:model-a (backup) must each appear once
+    primary_opts = [o for o in opts if o["value"] == "model-a"]
+    backup_opts  = [o for o in opts if o["value"] == "@custom:backup:model-a"]
+    assert len(primary_opts) == 1, (
+        f"expected exactly 1 primary option, got {len(primary_opts)}: {primary_opts}"
+    )
+    assert len(backup_opts) == 1, (
+        f"expected exactly 1 backup option, got {len(backup_opts)}: {backup_opts}"
+    )
+    if backup_opts:
+        assert backup_opts[0]["provider"] == "custom:backup", (
+            "backup option must carry custom:backup provider identity"
+        )

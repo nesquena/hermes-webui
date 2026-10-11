@@ -4,6 +4,13 @@ from unittest.mock import MagicMock, patch
 import api.updates as updates
 
 
+def _git_command_args(args):
+    args = list(args)
+    while len(args) >= 2 and args[0] == '-c':
+        del args[:2]
+    return args
+
+
 def test_run_git_uses_which_result_when_available(tmp_path):
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
          patch.object(updates.subprocess, 'run') as mock_run:
@@ -93,7 +100,9 @@ def test_check_repo_does_not_report_git_not_found_via_launchd_fallback(tmp_path)
 
     def fake_run(cmd, **kwargs):
         assert cmd[0] == '/usr/bin/git'
-        git_args = cmd[1:]
+        git_args = _git_command_args(cmd[1:])
+        if git_args[0] == 'config' and git_args[1] in {'--includes', '--system', '--global'}:
+            return MagicMock(returncode=1, stdout=b'', stderr=b'')
         if git_args == ['fetch', 'origin', '--tags', '--force']:
             return MagicMock(returncode=0, stdout='', stderr='')
         if git_args == ['tag', '--list', 'v*', '--sort=-v:refname']:
@@ -108,7 +117,10 @@ def test_check_repo_does_not_report_git_not_found_via_launchd_fallback(tmp_path)
             return MagicMock(returncode=0, stdout='abcdef1\n', stderr='')
         if git_args == ['rev-parse', '--short', 'origin/master']:
             return MagicMock(returncode=0, stdout='fedcba9\n', stderr='')
-        if git_args == ['remote', 'get-url', 'origin']:
+        if git_args in (
+            ['remote', 'get-url', 'origin'],
+            ['ls-remote', '--get-url', 'origin'],
+        ):
             return MagicMock(
                 returncode=0,
                 stdout='https://github.com/nesquena/hermes-webui.git\n',

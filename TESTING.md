@@ -15,6 +15,50 @@
 
 ---
 
+## Cancelled-journal recovery combinations
+
+Run `./scripts/test.sh tests/test_cancel_recovery_properties.py tests/test_cancel_restart_journal_recovery.py`.
+Use isolated `HERMES_HOME`, `HERMES_BASE_HOME`, `HERMES_CONFIG_PATH`, and
+`HERMES_WEBUI_STATE_DIR` directories. Seed `782920261003` selects 128 of 768
+lifecycle combinations and covers all 156 pairwise axis combinations. The tests
+exercise the real eager/deferred checkpoint, Stop, journal, restart, cold/cached
+load, and next-send history builders. They preserve native image and tool payloads,
+reject ambiguous or malformed ownership, and check rollback and repeated-load
+idempotence, with capacity cases up to 17 hooks and 64 tool cards. This coverage
+does not certify external provider execution or filesystem crash durability.
+
+Run `./scripts/test.sh tests/test_cancelled_history_real_producers.py` for independent Agent-flush versus WebUI-settlement clocks, later Gateway turns after a live Stop, legacy integer/fractional Stop owners, and tool-card owners on cold/cached paginated HTTP reads. A terminal Stop excludes only its proved raw execution block, including when it retained live partial output; proved later Gateway exchanges remain in display and next-send history. Ambiguous clock/content occurrences still prevent prefix restoration. Sidecar-only Stop tool-card regressions repeat full, tail, and earlier-page reads through the production handler and real HTTP for missing SQLite, empty SQLite, and native-image mirror rows fully filtered from display. Owners use exact saved message objects, including distinct assistants with identical prose; invisible and missing owners remain excluded, and saved card metadata stays unchanged. Snapshot-parent/non-cumulative child Stop coverage runs in a separate HTTP server process to exercise lineage cache store/hit paths and repeated full, tail, earlier and owner-absent pages, with missing, empty and nonempty SQLite. Cache row copies retain independently stored exact-owner provenance; reconciliation composes that map before pagination without mutating saved indices. The worker stubs write real SQLite rows and exercise production worker/HTTP paths; they do not certify a real provider call.
+
+## Context replay matching
+
+Run `./scripts/test.sh -q tests/test_context_replay_scaling.py tests/test_large_replay_settlement.py tests/test_issue1217_transcript_compaction.py tests/test_stale_user_context_contamination.py tests/test_context_message_stable_ids.py tests/test_issue6751_api_content_agent_replay.py`.
+The context suite compares serialized output against the former greedy algorithm
+over seeded adversarial sequences, checks summary identity boundaries and all
+three reconciliation branches, and counts normalization/key comparisons for
+disjoint, periodic and near-miss sequences. Operation budgets, not wall-clock
+thresholds, are the regression gate. Benchmark no-overlap histories separately
+from correctness checks; include the shared helper and its reconciliation caller,
+and report row count, interpreter and base revision with timings. Use synthetic
+rows or isolated copies, never production session state.
+
+## Session-scoped media authorization
+
+Run `./scripts/test.sh tests/test_media_inline.py tests/test_media_session_preview_auth.py`.
+For files outside global media roots, only exact `MEDIA:` paths emitted by
+`assistant` or `tool` messages can grant access through the owning session.
+User, system, developer, unknown, blank, null, and missing roles must not grant
+access. The route-level role matrix covers CSV, diff, patch, Excalidraw, and
+HTML; no-session requests stay denied. The new text-artifact types remain
+download-only with `nosniff`, even when `inline=1` is requested. Hard-denied
+state and secret paths stay denied regardless of message role or session token.
+
+Run `./scripts/test.sh tests/test_media_preview_session_lifetime.py` for lazy
+preview identity across a session switch. CSV, Excalidraw, PDF, and HTML action
+and fallback URLs retain the session and snapshot captured for their fetch,
+including requests started without a session. The Node harness executes the
+real loaders with deferred responses and PDF-ready/timeout callbacks; it does
+not certify browser rendering or real CDN availability.
+
 ## Static JS runtime lint (brick-class regression guard)
 
 Some JS bugs throw a `TypeError`/`ReferenceError` only when a specific function
@@ -148,6 +192,43 @@ environment before launching the server, needs no secrets, and does not drive a
 real model (it verifies the app *loads and initializes* cleanly — the brick class
 that breaks the page for everyone).
 
+The same job then runs `tests/browser_new_chat_focus.py`, on the same agent-free
+setup: with every `/api/sessions` response held, New Chat, Cmd/Ctrl+K and the
+typed `/new` command must focus the composer (and `/new` show its toast), and
+the first message typed with no conversation open must be sent; each reads the
+session list once before that, and shows the new row once the list is released
+(#7936, #7996, #8004). Run it locally with `python tests/browser_new_chat_focus.py`.
+
+It also runs `tests/browser_project_picker_keyboard.py`, which imports two
+conversations and creates three projects through the API and then drives both
+"Move to project" pickers. The single-conversation picker is opened from the ⋮
+menu with the keyboard: its rows must be buttons in a named menu, focus must
+open on the conversation's current project, ArrowDown/ArrowUp must wrap and
+Home/End jump, Tab must close it, Escape must close it and return focus to the
+conversation's ⋮ trigger (also after a sidebar repaint replaced that trigger,
+after a right-click open, and for a parent row whose expanded fork has a
+trigger of its own), and Enter, Space and a click must each send the move. The
+batch picker must open on its first row and return focus to the selection
+bar's Move button. "No project" and "+ New project" must follow the interface
+language; in a touch context, with the drawer open, every row must be at least
+44px tall; and in a long list the focused row must be inside the picker's box,
+or, in the batch picker, scrolled onto the screen by the conversation list.
+With forty more conversations and fifteen projects, a mouse wheel over the open
+batch picker must still scroll the conversation list, and on four phone sizes
+every row of the single picker must be tappable wherever in the list it was
+opened, with the batch picker scrolling inside its cap; on the two landscape
+sizes the same must hold from a parent conversation whose open forks make its
+row taller than the room beside it. A list the screen has room for must show
+whole without scrolling: below its anchor, else above it, else slid up over it
+from the bottom of the screen; and an open picker must follow a shorter window
+or a turned tablet, also after a sidebar repaint, keep the row the keyboard is
+on inside its box when the resize caps its height, and close, without handing
+focus back, when the resize hides the sidebar it was opened from: a phone
+turned either way, or a window narrowed until the sidebar collapses or becomes
+a closed drawer (#8044). Run it locally with
+`python tests/browser_project_picker_keyboard.py`; add `--screenshots DIR` to
+write the open picker at 390x844, 820x1180, 844x390 and 1440x900.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
@@ -230,6 +311,23 @@ read earlier content, including a small scroll gesture immediately after a live
 render. Subsequent streamed content must not pull the reader back to the bottom.
 Use the jump-to-latest control to resume following the live tail; after that,
 new streamed content should remain visible at the bottom.
+
+The authoritative behavior contract — including the input-tail re-pinning rules
+(scrolling back down to the tail you were aiming at re-pins immediately, even
+while the stream keeps growing) and the transcript's overscroll suppression —
+lives in
+[`docs/architecture/transcript-auto-follow-scroll.md`](docs/architecture/transcript-auto-follow-scroll.md).
+Verify it per that document's manual checklist across wide desktop, ordinary
+laptop width, and narrow/mobile viewport widths (touch: swipe up releases
+follow, swipe back down to the tail re-pins, and no bottom-edge vibration is
+visible while pinned during streaming), matching the responsive-state
+expectations in [`docs/UIUX-GUIDE.md`](docs/UIUX-GUIDE.md).
+
+Automated regression coverage for this section:
+`tests/test_fast_stream_shrink_clamp_unpin.py`,
+`tests/test_issue5637_stale_anchor_guard.py` (the `test_live_render_queue_*`
+ownership tests), `tests/test_2111_ios_pwa_bottom_scroll_stutter.py`, and
+`tests/test_mobile_layout.py` (the `.messages` overscroll suppression).
 
 
 `tests/test_static_js_runtime_lint.py` runs this automatically when eslint is present
@@ -2089,3 +2187,16 @@ Bridged CLI sessions:
 *Regression gate: tests/test_regressions.py*
 *Run: ./scripts/test.sh*
 *Source: <repo>/*
+
+
+### MEDIA boundary regression checks (#6923)
+
+- Bare local paths and remote path-only URLs preserve every trailing byte,
+  including `.`, `,`, `;`, `:`, `!`, and `?`; those bytes are ambiguous and
+  may be part of the actual filename or URL. Punctuation detaches only when a
+  matching Markdown or quote wrapper proves that it is outside the token.
+- Query and fragment values retain all punctuation, including punctuation-only values.
+- Render `MEDIA:_`, `MEDIA:__`, and `MEDIA:*`: these are local filenames.
+  Matching empty wrappers such as `**MEDIA:**` must remain prose.
+- Recheck settled and safe/fade streaming output across callback boundaries.
+  Automated coverage: renderer behavior, MEDIA consumer parity, and SMD stream tests.

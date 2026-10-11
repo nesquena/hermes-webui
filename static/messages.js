@@ -1440,7 +1440,7 @@ async function send(){
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
     if(text||S.pendingFiles.length){
-      if(!S.session){await newSession();await renderSessionList();}
+      if(!S.session){await newSession();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
       // /queue, /terminal, /goal, /yolo, or /stop while the agent is running and have
@@ -1518,7 +1518,7 @@ async function send(){
     if(_cmd){
       let _pushedUser=false;
       if(!_cmd.noEcho){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         _pushedUser=true;
         renderMessages();
@@ -1536,7 +1536,7 @@ async function send(){
     }
     if(_parsedCmd&&!_cmd){
       if(_parsedCmd.name==='pet'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _petOutput=null;
         try{
@@ -1565,7 +1565,7 @@ async function send(){
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
@@ -1573,7 +1573,7 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
@@ -1588,7 +1588,7 @@ async function send(){
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
@@ -1604,7 +1604,7 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();await renderSessionList();}
+        if(!S.session){await newSession();}
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
@@ -1636,7 +1636,7 @@ async function send(){
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session){await newSession();await renderSessionList();}
+          if(!S.session){await newSession();}
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
@@ -1645,7 +1645,7 @@ async function send(){
       }
     }
   }
-  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session){await newSession();}
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
@@ -3620,7 +3620,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
       return `tool:${row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||row.row_id||''}`;
     }
-    if(row.role==='prose'||row.role==='thinking') return `${row.role}:${_anchorSceneTextKey(row.text)}`;
+    if(row.role==='prose'||row.role==='thinking'){
+      const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
+      const durableId=row.local_id||row.row_id||row.event_id||identity.local_id||identity.row_id||identity.event_id;
+      if(durableId) return `${row.role}:id:${durableId}`;
+      return `${row.role}:${_anchorSceneTextKey(row.text)}`;
+    }
     return `${row.role||row.kind}:${row.source_event_type||''}:${row.status||''}:${row.row_id||''}`;
   }
   function _anchorSceneRowHasLiveIdentity(row){
@@ -3733,18 +3738,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seen=new Set();
     const seenTextKeys=[];
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
-    const orderedRows=[];
-    for(const row of projectedRows){
-      if(row&&row.role==='terminal') continue;
-      orderedRows.push(row);
-    }
-    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
-      const bucket=messageRows.get(idx)||[];
-      for(const row of bucket) orderedRows.push(row);
-    }
-    for(const row of projectedRows){
-      if(row&&row.role==='terminal') orderedRows.push(row);
-    }
+    // ── provenance-aware projection mirror tracking ────────────
+    // (allocated below, after the final-answer guards are defined, so slots
+    // are reserved only by projected rows that survive running-row
+    // settlement, final-answer filtering, and same-ID coalescing)
     // #5758 gap: final-segment eligibility must be judged against the LIVE
     // projection's own chronology. The settled per-message tool rows appended
     // into orderedRows above re-list tools that ran EARLIER in the turn, so an
@@ -3760,7 +3757,86 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
     });
     const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
-    const pushRow=(row)=>{
+    // ── provenance-aware projection mirror tracking ────────────
+    // Mirror slots are allocated ONLY from projected rows that survive
+    // running-row settlement (_anchorSceneSettleLiveRunningRow), the
+    // final-answer guards, and same-ID coalescing. A projected running
+    // thinking row that is discarded because settled thinking replaced it
+    // must not reserve a mirror slot, or its settled replacement would be
+    // consumed as a mirror and the thinking would disappear entirely.
+    // Mirror capacity is keyed by ROLE + normalized text, never by text alone:
+    // a projected PROSE row and a settled THINKING row can carry the same
+    // normalized text (the content-parts path emits prose and thinking
+    // independently and does not reject cross-role text equality). Keyed by
+    // text alone, a surviving projected prose row reserved a slot that an
+    // EARLIER settled thinking row of the same text then consumed, so the
+    // settled thinking disappeared and the real settled prose survived as a
+    // duplicate.
+    const _mirrorSlotKey=(role,textKey)=>`${String(role||'').toLowerCase()}\u0000${textKey}`;
+    const projectedMirrorSlots={};
+    const _idToLatestSlot={};
+    for(const row of projectedRows){
+      if(!row||row.role==='terminal'||(row.role!=='prose'&&row.role!=='thinking')) continue;
+      // Running rows discarded by settlement (e.g. projected running thinking
+      // with a settled-thinking replacement) allocate no slot.
+      const settledRow=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
+      if(!settledRow||typeof settledRow!=='object') continue;
+      const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
+      const textKey=_anchorSceneTextKey(settledRow.text);
+      if(!textKey) continue;
+      // Rows dropped by the final-answer guards allocate no slot either.
+      if(rowIsLiveTokenFinalPrefix(settledRow,textKey,finalSegmentEligible)) continue;
+      if(_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) continue;
+      const key=_anchorSceneExistingRowKey(settledRow)||'__no_key__';
+      const slotKey=_mirrorSlotKey(settledRow.role,textKey);
+      const prevSlot=_idToLatestSlot[key];
+      if(prevSlot){
+        if(prevSlot!==slotKey){
+          // Same identity re-appeared under a different role/text key: move its
+          // single slot to the latest key instead of allocating a second one.
+          projectedMirrorSlots[prevSlot]=(projectedMirrorSlots[prevSlot]||1)-1;
+          if(projectedMirrorSlots[prevSlot]<=0) delete projectedMirrorSlots[prevSlot];
+          _idToLatestSlot[key]=slotKey;
+          projectedMirrorSlots[slotKey]=(projectedMirrorSlots[slotKey]||0)+1;
+        }
+        // Same key + same role/text: the identity already holds one slot; do not
+        // double-count repeated snapshots of the same identity.
+      }else{
+        _idToLatestSlot[key]=slotKey;
+        projectedMirrorSlots[slotKey]=(projectedMirrorSlots[slotKey]||0)+1;
+      }
+    }
+    const _projectedSlotKeys=Object.keys(projectedMirrorSlots);
+    // ── end provenance tracking ────────────────────────────────
+    const _consumeMirror=(role,textKey)=>{
+      if(!role||!textKey) return false;
+      const slotKey=_mirrorSlotKey(role,textKey);
+      if(!projectedMirrorSlots[slotKey]) return false;
+      if(projectedMirrorSlots[slotKey]<=0) return false;
+      projectedMirrorSlots[slotKey]-=1;
+      return true;
+    };
+    const _tryNearOverlapMirror=(role,textKey)=>{
+      if(!role||!textKey||textKey.length<80) return false;
+      const selfKey=_mirrorSlotKey(role,textKey);
+      const rolePrefix=`${String(role||'').toLowerCase()}\u0000`;
+      for(const slotKey of _projectedSlotKeys){
+        // Near-overlap capacity is role-scoped too: a thinking write-up that
+        // happens to contain a projected prose prefix is a different identity
+        // class and must not be consumed by the prose mirror.
+        if(slotKey===selfKey||slotKey.indexOf(rolePrefix)!==0) continue;
+        const pk=slotKey.slice(rolePrefix.length);
+        if(!pk||pk.length<80) continue;
+        if(pk.includes(textKey)||textKey.includes(pk)){
+          if(projectedMirrorSlots[slotKey]>0){
+            projectedMirrorSlots[slotKey]-=1;
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    const pushRow=(row,origin)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
@@ -3769,11 +3845,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)) return;
       const isTextual=row.role==='prose'||row.role==='thinking';
       if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
-      if(isTextual&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
       const key=_anchorSceneExistingRowKey(row);
-      if(key&&seen.has(key)) return;
+      // ── same-identity enrichment: keep latest/richest value ──
+      if(key&&seen.has(key)){
+        const existingIdx=rows.findIndex(r=>_anchorSceneExistingRowKey(r)===key);
+        if(isTextual&&existingIdx>=0){
+          rows[existingIdx]={...rows[existingIdx],...row,display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode)};
+        }
+        return;
+      }
       if(key) seen.add(key);
-      if(isTextual&&textKey) seenTextKeys.push(textKey);
+      // ── provenance-aware mirror consumption (settled rows) ───
+      if(origin==='settled'&&isTextual&&textKey){
+        if(_consumeMirror(row.role,textKey)) return;
+        // Fallback: near-overlap mirror matching for >=80 char texts
+        if(_tryNearOverlapMirror(row.role,textKey)) return;
+      }
+      // ── legacy text-only dedup ────────────────────────────────────
+      // Exact-text dedup applies only to rows without a durable ID
+      // (rows with IDs are already deduped by _anchorSceneExistingRowKey).
+      // Long-text ≥80 near-overlap protection applies unconditionally.
+      if(isTextual&&textKey){
+        const hasDurableId=!!(row.local_id||row.row_id||row.event_id||(row.identity&&(row.identity.local_id||row.identity.row_id||row.identity.event_id)));
+        if(!hasDurableId){
+          if(_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+          seenTextKeys.push(textKey);
+        }else if(textKey.length>=80){
+          // For rows that carry a durable ID, only the >=80 char near-overlap leg applies
+          if(_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+        }
+      }
       rows.push({
         ...row,
         display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode),
@@ -3781,7 +3882,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         seq:rows.length,
       });
     };
-    orderedRows.forEach((row)=>pushRow(row));
+    // Phase 1: projected non-terminal rows
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') continue;
+      pushRow(row,'projected');
+    }
+    // Phase 2: settled/backfill rows (from per-message buckets)
+    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
+      const bucket=messageRows.get(idx)||[];
+      for(const row of bucket) pushRow(row,'settled');
+    }
+    // Phase 3: projected terminal rows
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') pushRow(row,'projected');
+    }
     const scene={
       ...base,
       version:'activity_scene_v1',
@@ -4576,7 +4690,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdImgSrcAllowed(v){
     const s=String(v||'');
     if(/^data:/i.test(s)) return typeof _isSafeDataImageUri==='function'&&_isSafeDataImageUri(s);
-    return _SMD_SAFE_IMG_URL_RE.test(s);
+    if(!_SMD_SAFE_IMG_URL_RE.test(s)) return false;
+    // #7941: a remote image outside the CSP img-src allowlist gets no src while
+    // streaming (nothing is fetched); the settled renderMd() pass then shows the
+    // inert click-to-open link.
+    return typeof _remoteImageAllowed!=='function'||_remoteImageAllowed(s);
   }
   function _smdLinkHref(raw){
     const href=String(raw||'');
@@ -4844,23 +4962,39 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _smdMediaTailSameOwner(entry, parent, baseAddText, writeText){
     return !!entry && entry.parent===parent && entry.baseAddText===baseAddText && entry.writeText===writeText;
   }
-  function _smdMediaRefHasReliableBoundary(rawRef){
-    const raw=String(rawRef||'');
-    if(/[?#]$/.test(raw)) return false;
-    const ref=raw.split(/[?#]/,1)[0];
-    return /\.(?:png|jpe?g|gif|webp|bmp|ico|svg|avif|mp4|webm|mov|m4v|mkv|avi|ogv|mp3|wav|ogg|m4a|aac|wma|opus|flac|oga|pdf|html?|csv|diff|patch|excalidraw)$/i.test(ref);
+  function _smdMediaTokenParts(source, matchOffset, rawRef, parent){
+    const value=String(source||'');
+    const offset=Number(matchOffset)||0;
+    const before=value.slice(0,offset);
+    const quotedSource=(candidate)=>{
+      const normalized=String(candidate||'').replace(/&amp;(quot;|#39;)$/,'&$1');
+      return normalized.endsWith('"')||normalized.endsWith("'")||/(?:&quot;|&#39;)$/.test(normalized)
+        ? normalized
+        : '';
+    };
+    const quotedRef=(candidate)=>String(candidate||'').replace(/&(?:amp;)?(quot|#39);?(?=[.,;:!?]*$)/,'&$1;');
+    const localQuotedSource=quotedSource(before);
+    if(localQuotedSource){
+      return _mediaTokenParts(localQuotedSource,localQuotedSource.length,quotedRef(rawRef));
+    }
+    // Keep enough same-owner context to reconstruct a split parser-escaped
+    // HTML-entity quote opener. &amp;quot; is the longest accepted form
+    // (10 chars); literal and singly encoded quotes are shorter.
+    const prior=parent&&typeof parent.textContent==='string'?parent.textContent.slice(-10):'';
+    const contextQuotedSource=quotedSource(prior);
+    if(contextQuotedSource){
+      return _mediaTokenParts(contextQuotedSource,contextQuotedSource.length,quotedRef(rawRef));
+    }
+    return _mediaTokenParts(prior+value,prior.length+offset,rawRef);
   }
   function _smdMediaTailFlushEntry(entry){
     const chunk=_smdMediaTailEntryChunk(entry);
     if(!chunk) return;
-    // #7680 re-gate (9/22): strip backtick wrappers so the bare-token
-    // match below sees a plain ``MEDIA:path`` and the bare class
-    // (no backtick in the exclusion set) captures the full filename
-    // even when the path itself contains a backtick.
-    const normalized = String(chunk).replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1');
-    const m=/^MEDIA:([^\s\)\]]+)$/.exec(normalized);
-    const emitted=!!(m && entry && entry.parent && _smdAppendMediaNode(entry.parent, m[1]));
-    if(!emitted && entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
+    const m=/^MEDIA:([^\s\)\]]+)$/.exec(String(chunk));
+    const parts=m&&typeof _mediaTokenParts==='function'?_smdMediaTokenParts(String(chunk),0,m[1],entry&&entry.parent):null;
+    const emitted=!!(parts && entry && entry.parent && _smdAppendMediaNode(entry.parent, parts[0]));
+    if(emitted&&parts[1]) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, parts[1]);
+    else if(!emitted&&entry) _smdMediaWriteText(entry.parent, entry.data, entry.baseAddText, entry.writeText, chunk);
   }
   function _smdMediaTailFlush(parser){
     if(!_SMD_MEDIA_TAIL||!parser||!_SMD_MEDIA_TAIL.get) return;
@@ -4904,39 +5038,43 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     // Walk the combined string, slicing into prose + MEDIA token runs.
     // Prose runs go through the owning text writer. MEDIA tokens go through
-    // the single-token DOMParser helper only after a delimiter or
-    // reliable filename suffix proves the ref is complete.
-    // #7680 re-gate (9/22): strip backtick wrappers first so the bare
-    // class (no backtick in the exclusion set) captures the full
-    // filename even when the path itself contains a backtick.
-    // The pre-pass replaces `` `MEDIA:path` `` with ``MEDIA:path``
-    // so the wrapped form is consumed before the bare scan.
-    const normalized = combined.replace(/`MEDIA:([^`\s]+)`/g, 'MEDIA:$1');
+    // the single-token DOMParser helper only after a grammar delimiter or
+    // authoritative parser finalization proves the ref is complete.
     const re=/MEDIA:([^\s\)\]]+)/g;
     let last=0, m;
     let unmatchedTail=null;
-    while((m=re.exec(normalized))){
+    while((m=re.exec(combined))){
       const matchEnd = m.index + m[0].length;
       if(m.index>last){
-        const slice = normalized.slice(last, m.index);
+        const slice = combined.slice(last, m.index);
         writeCurrent(slice);
       }
-      if(matchEnd===normalized.length && !_smdMediaRefHasReliableBoundary(m[1])){
-        const candidate = normalized.slice(m.index);
+      const parts=typeof _mediaTokenParts==='function'?_smdMediaTokenParts(combined,m.index,m[1],parent):null;
+      // An add_text callback boundary is never proof that the logical ref is
+      // complete: later callbacks can append a filename suffix, query, or
+      // fragment even when this callback ends at a familiar extension. Keep
+      // the trailing candidate buffered until grammar or parser finalization
+      // supplies an authoritative boundary.
+      if(matchEnd===combined.length){
+        const candidate = combined.slice(m.index);
         if(candidate.length < _MEDIA_TAIL_MAX){
           unmatchedTail = candidate;
         } else {
           writeCurrent(candidate);
         }
-        last = normalized.length;
+        last = combined.length;
         break;
       }
-      if(!_smdAppendMediaNode(parent, m[1])) writeCurrent(m[0]);
+      if(parts&&_smdAppendMediaNode(parent,parts[0])){
+        if(parts[1]) writeCurrent(parts[1]);
+      }else{
+        writeCurrent(m[0]);
+      }
       last = matchEnd;
     }
     // Tail buffer — hold trailing bytes that look like an unterminated
     // MEDIA prefix; flush any prose before the partial MEDIA suffix.
-    const rest = normalized.slice(last);
+    const rest = combined.slice(last);
     if(rest){
       const tailMatch = /MEDIA:[^\s\)\]]*$/.exec(rest);
       const prefixTail = tailMatch ? '' : _smdMediaPrefixTail(rest);
@@ -6128,11 +6266,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
+    // Stream-local titles survive the delayed done/fade rebind after compression.
+    const _pendingTitleUpdates=new Map();
+    const _pendingTitleExpectedCurrent=new Map();
     source.addEventListener('title',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
-      if((d.session_id||activeSid)!==activeSid) return;
-      applySessionTitleUpdate(activeSid, d.title);
+      // Accept either the title TARGET session or the stream OWNER session:
+      // after an A→B compression rotation a reattached listener runs with
+      // activeSid=B, and the server keys this event on the title target (B)
+      // while a mid-stream listener that captured the pre-rotation activeSid=A
+      // must still receive it. Matching either id rejects only genuinely
+      // foreign streams (#7318 re-gate).
+      if((d.session_id||activeSid)!==activeSid && d.stream_owner_session_id!==activeSid) return;
+      const targetSid=d.target_session_id||d.session_id||activeSid;
+      _pendingTitleUpdates.set(targetSid, d.title);
+      _pendingTitleExpectedCurrent.set(targetSid, d.expectedCurrent);
+      // Pass the server-declared previous title as expectedCurrent: after a
+      // compression rotation or SSE reattach, the open session's title is the
+      // malformed persisted value and nothing is remembered provisionally, so
+      // a bare listener-style call would be refused and the recovered title
+      // would only appear after a full reload (#7318 re-gate).
+      applySessionTitleUpdate(targetSid, d.title, {expectedCurrent:d.expectedCurrent});
     });
 
     source.addEventListener('title_status',e=>{
@@ -6328,6 +6483,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          if(_pendingTitleUpdates.has(completedSid)){
+            applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
+            _pendingTitleUpdates.delete(completedSid);
+            _pendingTitleExpectedCurrent.delete(completedSid);
+          }
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);
@@ -9543,9 +9703,24 @@ function playAttentionSound(key){
 }
 
 function _notificationOptions(body,options={}){
-  const sid=(options&&options.sid)||(S&&S.session&&S.session.session_id);
-  const url=sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href;
-  return {body:body||'',tag:sid?`hermes-${sid}`:'hermes-webui',renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
+  // #7652 review: a falsy sid used to fall through to the CURRENT session, so
+  // a notification for a sessionless surface (e.g. a cron completion with no
+  // session_id) opened whatever chat the user happened to be in and reused its
+  // notification tag. An explicit {sessionless:true} marker routes away from
+  // the current session, with its own tag, instead.
+  const sessionless=!!(options&&options.sessionless);
+  const sid=sessionless?null:((options&&options.sid)||(S&&S.session&&S.session.session_id));
+  // A sessionless surface still needs a DESTINATION to land on: the root URL
+  // alone restores whatever chat was last open (boot's saved-session restore),
+  // so the alert about a cron run opened the chat instead of the panel the run
+  // belongs to (#7652 review round 4). An explicit panel intent is carried in
+  // the URL; boot honors it ahead of the saved-chat restore.
+  const panel=(options&&options.panel)?String(options.panel).slice(0,64):'';
+  const rootWithPanelIntent=panel
+    ? `${location.origin}${_appRootPath()}${_appRootPath().includes('?')?'&':'?'}panel=${encodeURIComponent(panel)}`
+    : `${location.origin}${_appRootPath()}`;
+  const url=sessionless?rootWithPanelIntent:(sid?`${location.origin}${_sessionUrlForSid(sid)}`:location.href);
+  return {body:body||'',tag:sessionless?'hermes-webui-sessionless':(sid?`hermes-${sid}`:'hermes-webui'),renotify:true,icon:'static/favicon-192.png',badge:'static/favicon-32.png',data:{url}};
 }
 function _showPwaNotification(title,body,options={}){
   const botName=assistantDisplayName();
