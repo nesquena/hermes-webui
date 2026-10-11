@@ -11181,6 +11181,11 @@ function restoreLiveTurnHtmlForSession(sid){
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+  try{
+  if(typeof highlightCode==='function') highlightCode(restored);
+  if(typeof addCopyButtons==='function') addCopyButtons(restored);
+  if(typeof initTreeViews==='function') initTreeViews(restored);
+  }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(restored));
   return true;
 }
@@ -18399,6 +18404,11 @@ function renderMessages(options){
       if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      try{
+      if(typeof highlightCode==='function') highlightCode(inner);
+      if(typeof addCopyButtons==='function') addCopyButtons(inner);
+      if(typeof initTreeViews==='function') initTreeViews(inner);
+      }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
@@ -20054,6 +20064,21 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
+  // Reconcile extension message-action slots BEFORE the cache snapshot so the cached
+  // HTML carries the reconciled attribute-bound buttons (same contract as before #7752).
+  if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
+  // Snapshot only when this render can be cached (same gate as the .set below): mid-stream
+  // and transient-card renders must not pay a whole-transcript serialization they discard.
+  let cacheHtml='';
+  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){ cacheHtml=inner.innerHTML; }
+  // Synchronously highlight code blocks, initialize structured tree views, and attach
+  // copy buttons BEFORE the frame is painted so virtualized transcripts do not paint
+  // unhighlighted raw text for one frame when scrolled into view (#7752).
+  try{
+  if(typeof highlightCode==='function') highlightCode(inner);
+  if(typeof addCopyButtons==='function') addCopyButtons(inner);
+  if(typeof initTreeViews==='function') initTreeViews(inner);
+  }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
@@ -20064,7 +20089,6 @@ function renderMessages(options){
   }
   // Apply persisted playback speed after media nodes are rendered.
   if(typeof _applyMediaPlaybackPreferences==='function') _applyMediaPlaybackPreferences(inner);
-  if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
   // Populate session cache so switching back here skips a full rebuild.
   _sessionHtmlCacheSid=sid;
   // Skip caching while the just-settled keep-open token is armed: that render
@@ -20076,9 +20100,9 @@ function renderMessages(options){
   // the helper) working — absent helper == not armed == cache normally.
   const _keepOpenArmed=(typeof _isKeepSettledWorklogOpenArmed==='function')&&_isKeepSettledWorklogOpenArmed();
   if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi&&!_keepOpenArmed){
-    const _html=inner.innerHTML;
+    const _html=cacheHtml;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
-    if(_html.length<300_000){
+    if(_html&&_html.length<300_000){
       const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
       _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}

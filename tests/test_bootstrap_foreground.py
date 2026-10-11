@@ -238,6 +238,8 @@ class TestMainForegroundRouting:
         import bootstrap as bs
         python_exe = sys.executable
         monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
+        monkeypatch.setattr(bs, "_check_port_available", lambda *a, **kw: None)
+        monkeypatch.setattr(bs, "_already_serving_scheme", lambda *a, **kw: "")
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: tmp_path / "agent")
         monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)
         monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: python_exe)
@@ -381,6 +383,8 @@ class TestForegroundEnvAndCwd:
         import bootstrap as bs
         python_exe = sys.executable
         monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
+        monkeypatch.setattr(bs, "_check_port_available", lambda *a, **kw: None)
+        monkeypatch.setattr(bs, "_already_serving_scheme", lambda *a, **kw: "")
         agent_dir = tmp_path / "agent"
         agent_dir.mkdir()
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: agent_dir)
@@ -512,6 +516,8 @@ class TestForegroundExecutabilityGuard:
         bad_python.write_text("#!/bin/bash\necho hi", encoding="utf-8")
         bad_python.chmod(0o644)  # NOT executable
         monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
+        monkeypatch.setattr(bs, "_check_port_available", lambda *a, **kw: None)
+        monkeypatch.setattr(bs, "_already_serving_scheme", lambda *a, **kw: "")
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: agent_dir)
         monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)
         monkeypatch.setattr(bs, "discover_launcher_python", lambda *a: str(bad_python))
@@ -553,6 +559,8 @@ def test_package_python_discovers_agent_before_skip_install_gate(import_bootstra
     monkeypatch.setattr(bs, "REPO_ROOT", tmp_path / "webui")
     monkeypatch.setattr(bs.Path, "home", classmethod(lambda cls: tmp_path / "home"))
     monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
+    monkeypatch.setattr(bs, "_check_port_available", lambda *a, **kw: None)
+    monkeypatch.setattr(bs, "_already_serving_scheme", lambda *a, **kw: "")
     monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground", "--skip-agent-install"])
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(os, "access", lambda path, mode: True)
@@ -584,6 +592,8 @@ def test_package_python_without_agent_stays_fail_closed(import_bootstrap, clean_
     monkeypatch.setattr(bs, "REPO_ROOT", tmp_path / "webui")
     monkeypatch.setattr(bs.Path, "home", classmethod(lambda cls: tmp_path / "home"))
     monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
+    monkeypatch.setattr(bs, "_check_port_available", lambda *a, **kw: None)
+    monkeypatch.setattr(bs, "_already_serving_scheme", lambda *a, **kw: "")
     monkeypatch.setattr(sys, "argv", ["bootstrap.py", "--foreground", "--skip-agent-install"])
 
     with patch.object(bs, "_agent_dir_from_python", return_value=None) as mock_probe, patch.object(bs, "install_hermes_agent") as mock_install, patch.object(bs.venv, "EnvBuilder") as mock_builder, patch.object(os, "execv") as mock_execv, pytest.raises(RuntimeError, match="Hermes Agent was not found"):

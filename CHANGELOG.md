@@ -135,6 +135,34 @@
 
 ### Fixed
 
+- **New chats answer faster: the session ID no longer breaks the model's prompt cache.** Every new chat put its own
+  session ID near the end of the system prompt, so no two chats ever shared a cacheable prompt and the model had to
+  re-read it from that line on each time (on a local backend the reporter saw 15-18 s first responses drop to 2-3 s).
+  The ID is now left out by default, matching hermes-agent's own `pass_session_id`. Set `webui.pass_session_id: true`
+  in config.yaml to include it again; it is then added last, so everything before it stays shareable. Thanks @ybai08,
+  and @apakuts for the report. (#8150, fixes #8148)
+
+- **Asking another profile's conversation to change no longer rewrites it before the refusal.** When a request
+  targeted a conversation owned by another profile (such as archive or pin), the ownership check loaded the
+  conversation through the full repair path first, so a refused request could still collapse duplicate partial files
+  and write a shrink backup of the other profile's transcript. The check now reads only who owns the conversation,
+  without repairing, saving or touching the session cache, and refusals answer exactly as before. Thanks @Tivonsico.
+  (#8142, fixes #8094)
+
+- **Long conversations no longer show tool results twice after compression.** When the agent compressed old tool
+  output into a one-line summary, the WebUI kept the full result and also spliced the summary in next to it, so repeated
+  tool cards built up over many compressions. A tool row already on screen is now recognised by its durable row identity
+  and not added again. Thanks @psanger. (#7990)
+
+- **Code blocks no longer flash unhighlighted while you scroll a long conversation.** In virtualized transcripts a
+  newly mounted code block was painted plain for a frame before syntax highlighting and tree views applied; they now
+  render highlighted on first paint, including after switching back to a cached conversation. Thanks @webtecnica.
+  (#7912, #7752)
+- **Starting the WebUI on a port that is already taken explains what to do.** `bootstrap.py` / `start.sh` now check the
+  port before launching: if your own WebUI is already running there it says so (and opens it), otherwise it names the
+  port as busy and suggests a free one instead of failing later with a bind error. Works for IPv4, IPv6 and HTTPS.
+  Thanks @mercael91. (#8112, #8111)
+
 - **A Git "terminal prompts disabled" answer from Git Credential Manager is reported as an authentication failure.**
   Workspace Git status and fetch now show the sign-in message instead of a generic Git error when GCM refuses to prompt
   because interactivity is disabled. Thanks @PeterPunk1320. (#8127)

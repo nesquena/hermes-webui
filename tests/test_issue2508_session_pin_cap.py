@@ -80,6 +80,7 @@ def _configure_pin_route(monkeypatch, sessions, persisted, source, active_profil
     monkeypatch.setattr(routes, "SESSIONS", OrderedDict(by_id if source == "memory" else {}))
     monkeypatch.setattr(routes, "all_sessions", lambda: list(persisted) if source == "persisted" else [])
     monkeypatch.setattr(routes, "get_session", lambda sid, **_: by_id[sid])
+    monkeypatch.setattr(routes, "get_session_profile_readonly", lambda sid: by_id[sid].profile)
     monkeypatch.setattr(routes, "list_profiles_api", lambda **_: [
         {"name": name, "is_default": name == "default"} for name in names])
     monkeypatch.setattr(profiles, "_root_profile_name_cache", set(root_names or {"default"}))

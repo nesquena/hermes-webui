@@ -403,6 +403,8 @@ before the session's named-profile Gateway ownership is known.
 | Default workspace | `HERMES_WEBUI_DEFAULT_WORKSPACE` env, then `~/workspace`, then state dir |
 | Port | `HERMES_WEBUI_PORT` env or first argument, default `8787` |
 
+Before it installs the agent or writes any state, the bootstrap binds the resolved host and port as a preflight. If another service already holds the port, it stops right there, names the address it could not bind, and prints a free alternative to pass to `./start.sh <port>` or set as `HERMES_WEBUI_PORT` in `.env`. The running service and your existing configuration are left untouched. When the listener on that port is a healthy WebUI -- the instance you already started -- bootstrap reports it ready and leaves it alone, browser included; only a foreign service gets the conflict message.
+
 If discovery finds everything, nothing else is required.
 
 ---

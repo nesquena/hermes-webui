@@ -236,6 +236,29 @@ rename is kept. A title model that keeps returning unusable output is capped
 at 3 recovery exchanges per session before it stops retrying. `stream_end`
 still closes the original stream.
 
+## Session ID in the system prompt
+
+WebUI tells the agent which surface it is running on (source, profile and
+workspace) in the system text of each turn. The session ID is **not** part of
+that text by default. It is different for every chat, so with it two new chats
+never send the same system text, and a provider or local backend that caches
+the prompt prefix has to read the rest of the request again for every new
+chat.
+
+If a skill, plugin or prompt of yours needs the model to know its own session
+ID, turn it back on in `config.yaml`:
+
+```yaml
+webui:
+  pass_session_id: true
+```
+
+`true`, `yes`, `on` and `1` are accepted; anything else, or no key, leaves it
+off. This mirrors Hermes Agent's own `pass_session_id` option, which is also
+off by default. When it is on, the ID is the last line of the system text
+(`- Session ID: <id>`), so everything before it is still the same across
+chats.
+
 ## Gateway-backed browser chat
 
 By default, browser chat runs through WebUI's in-process legacy runtime. Advanced
