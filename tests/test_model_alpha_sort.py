@@ -577,11 +577,10 @@ eval([
   '_compareModelPickerEntries',
 ].map(extractFunction).join('\n'));
 
-const BARE = process.argv[3];
-const ROUTED = process.argv[4];
-// Negative => `first` sorts before `second`. The tie pair is
-// '@custom:abc:a-model' (routed) vs 'a-model' (bare).
-console.log(JSON.stringify({ cmp: _compareModelPickerEntries(ROUTED, BARE) }));
+// Tie pair: '@custom:abc:a-model' (routed) vs 'a-model' (bare).
+// Pass argv[3]/argv[4] straight through with the provider hint so the probe
+// exercises the same raw-id tie-break path as production.
+console.log(JSON.stringify({ cmp: _compareModelPickerEntries(process.argv[3], process.argv[4], 'custom:abc') }));
 '''
 
 
