@@ -1567,13 +1567,14 @@ def _custom_provider_identity_owners(
             and _raw_provider_record_enabled(model_cfg)
             and _custom_record_owns_connection(model_cfg, model_provider)
             # A ``model:`` block that the default-model picker wrote carries the
-            # entry's OWN endpoint (see ``set_hermes_default_model``). It names the
-            # slug, but it is a copy of the entry's connection rather than a
-            # separate authority, so it must not shadow the entry it was written
-            # from — otherwise the first click removes the entry from the picker
-            # and routes the next send by the keyless placeholder (401). A model
-            # block at a DIFFERENT endpoint, or with none, is a real authority and
-            # still counts.
+            # entry's OWN endpoint (see ``set_hermes_default_model``) and the mark
+            # that records that write. It names the slug, but it is a copy of the
+            # entry's connection rather than a separate authority, so it must not
+            # shadow the entry it was written from — otherwise the first click
+            # removes the entry from the picker and routes the next send by the
+            # keyless placeholder (401). A block the user wrote never carries the
+            # mark and still counts, and so does one whose connection a later save
+            # rewrote: that block is the user's own route again.
             and not _model_block_mirrors_fallback_entry(model_cfg, model_slug, custom_providers)
         ):
             owners.add(model_slug)
@@ -1649,6 +1650,23 @@ def _model_block_mirrors_fallback_entry(
         if not str(name or "").strip() or not _custom_provider_slug_is_fallback(name):
             continue
         if _custom_provider_slug_key(name) == key:
+            return True
+    return False
+
+
+def _model_block_connection_changed(before: object, after: object) -> bool:
+    """True when two ``model:`` blocks declare different connections.
+
+    Compares the endpoint and every credential source, because those are what the
+    route resolver and the ownership scan read. An absent field and an explicit
+    ``None`` are one state: a block that never carried a key has not changed one
+    away. Used to tell the picker's own write (a copy of a fallback entry) from a
+    later edit of the same block, which is the user's own route again (#8026 r16).
+    """
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    for field in ("base_url", *CUSTOM_CREDENTIAL_SOURCE_FIELDS):
+        if before.get(field) != after.get(field):
             return True
     return False
 
@@ -7111,6 +7129,17 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
                 model_cfg.pop(_cred_field, None)
 
         _apply_advanced_model_options(model_cfg, advanced)
+        # The mark records a COPY: the block the picker wrote to serve a fallback entry.
+        # A save that keeps the provider but rewrites the block's own connection is not
+        # that write — it is the user editing the route through "Main model options" —
+        # so the copy is no longer faithful and the mark goes with it. Keeping it made
+        # ``_model_block_mirrors_fallback_entry`` read the edited block as the entry's,
+        # so the saved ``base_url`` lost to the list entry's old endpoint and its key,
+        # and chat kept sending to the connection the user had just replaced (#8026 r16).
+        if persisted_provider == previous_provider and _model_block_connection_changed(
+            previous_config_data.get("model"), model_cfg
+        ):
+            model_cfg.pop(PICKER_WRITTEN_FOR_FIELD, None)
         if not _main_model_supports_service_tier(persisted_model, persisted_provider):
             model_cfg.pop("service_tier", None)
 

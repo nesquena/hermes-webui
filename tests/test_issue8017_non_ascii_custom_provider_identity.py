@@ -1697,6 +1697,82 @@ def test_a_user_written_block_keeps_its_convention_key_beside_a_keyless_entry(mo
         ), "the picker's own write is a copy of the entry's route, and is refused"
 
 
+def test_a_main_model_options_save_that_changes_the_endpoint_clears_the_mark(monkeypatch, tmp_path):
+    """An edit of the block's own connection is not the picker's write (r16).
+
+    The mark records a COPY: the block the Save path wrote to serve the selected
+    fallback entry. "Main model options" saves the same provider with a new ``base_url``,
+    which is no selection at all, so the block is the user's own route from then on.
+    Trusting the mark there read the edited block as the entry's connection, so the saved
+    endpoint lost to the list entry's old endpoint and its key and chat kept using the
+    connection the user had just replaced (greptile P1, #8026 r16). Master serves the
+    saved endpoint here; this pins that pair.
+
+    The first save in this test is a deliberate CONTROL, and it passes with and without
+    the fix: an advanced save that rewrites nothing keeps the mark, because nothing was
+    rewritten.
+    """
+    U = "http://127.0.0.1:8317/v1"
+    U2 = "http://replacement.example/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: chat-model\n"
+        f"  base_url: {U}\n"
+        "custom_providers:\n"
+        "  - name: 晨光\n"
+        f"    base_url: {U}\n"
+        "    api_key: sk-entry\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    assert config.set_hermes_default_model("chat-model", provider="custom:晨光")["ok"] is True
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert on_disk["model"].get(config.PICKER_WRITTEN_FOR_FIELD) == "custom:晨光", (
+        "the pick is the picker's write and carries the mark"
+    )
+
+    # CONTROL: the Main model options form sends the fields it holds. Here it holds the
+    # endpoint the picker just wrote, so nothing is rewritten.
+    assert config.set_hermes_default_model(
+        "chat-model",
+        provider="custom:晨光",
+        advanced={"base_url": U, "api_key": "", "api_key_clear": False},
+    )["ok"] is True
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert on_disk["model"].get(config.PICKER_WRITTEN_FOR_FIELD) == "custom:晨光", (
+        "a save that rewrites nothing leaves the picker's provenance alone"
+    )
+    config.cfg.clear()
+    config.cfg.update(on_disk)
+    assert config.resolve_custom_provider_connection("custom:晨光") == ("sk-entry", U), (
+        "and the entry the block was written from still owns the connection"
+    )
+
+    # The user now redirects the endpoint. No selection happened, so the block is an
+    # authority again and its saved endpoint is the one the route uses, as on master.
+    assert config.set_hermes_default_model(
+        "chat-model",
+        provider="custom:晨光",
+        advanced={"base_url": U2, "api_key": "", "api_key_clear": False},
+    )["ok"] is True
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert on_disk["model"].get("base_url") == U2
+    assert config.PICKER_WRITTEN_FOR_FIELD not in on_disk["model"], (
+        "a save that rewrote the block's connection is not the picker's copy any more"
+    )
+    config.cfg.clear()
+    config.cfg.update(on_disk)
+    assert config.resolve_custom_provider_connection("custom:晨光") == (None, U2), (
+        "the route serves the endpoint the user just saved, not the entry's old one"
+    )
+    assert config.resolve_model_provider("chat-model") == ("chat-model", "custom:晨光", U2)
+
+
 def test_the_save_marks_the_block_it_wrote_and_clears_it_on_the_next_pick(monkeypatch, tmp_path):
     """The Save path is the only writer of the provenance mark (r15).
 
