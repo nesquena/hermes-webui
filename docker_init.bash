@@ -239,9 +239,9 @@ chown_home_hermeswebui() {
   #
   # Two-container compose shares ~/.hermes with a running agent that replaces
   # files atomically (write temp + rename), so an entry listed by find can be
-  # gone before find stats it or chown reaches it (#8106). Only that vanished
-  # entry is tolerated: any other chown failure (EACCES, EROFS outside the
-  # pruned path) still fails startup.
+  # gone before find stats it or chown reaches it (#8106). Only chown's ENOENT
+  # for that vanished entry is tolerated: any other chown failure (EACCES,
+  # EROFS outside the pruned path, EIO) still fails startup.
   find /home/hermeswebui -ignore_readdir_race \
     -path "/home/hermeswebui/.hermes/hermes-agent" -prune \
     -o -name ".git" -prune \
@@ -249,8 +249,8 @@ chown_home_hermeswebui() {
       owner=$1; shift
       chown -h "$owner" "$@" 2>/dev/null && exit 0
       for f in "$@"; do
-        err=$(chown -h "$owner" "$f" 2>&1) && continue
-        [ -e "$f" ] || [ -L "$f" ] || continue
+        err=$(LC_ALL=C chown -h "$owner" "$f" 2>&1) && continue
+        case "$err" in *": No such file or directory") continue ;; esac
         printf "%s\n" "$err" >&2
         exit 1
       done

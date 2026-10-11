@@ -71,6 +71,17 @@ def test_chown_helper_tolerates_only_vanished_entries(tmp_path):
     assert denied.returncode != 0
     assert str(present) in denied.stderr
 
+    # A path that cannot be examined for a reason other than ENOENT (here
+    # ENOTDIR) is not a vanished file either, even though `[ -e ]` is false.
+    not_a_dir = present / "child"
+    unreadable = subprocess.run(
+        ["sh", "-c", helper, "chown_home_hermeswebui", own, str(not_a_dir)],
+        capture_output=True,
+        text=True,
+    )
+    assert unreadable.returncode != 0
+    assert "Not a directory" in unreadable.stderr
+
 
 def test_docker_smoke_runs_first_start_race_proof():
     workflow = (REPO / ".github" / "workflows" / "docker-smoke.yml").read_text(encoding="utf-8")
