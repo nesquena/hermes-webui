@@ -1247,11 +1247,15 @@ function _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt) {
 // aggregated unread state (own + children) authoritatively, so a lineage
 // PARENT keeps its own / other children's unread dot instead of being stripped
 // by ad-hoc DOM surgery (Greptile concern (b) on #4946).
-function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0) {
+function _acknowledgeSessionVisit(sid, messageCount = 0, lastMessageAt = 0, backgroundRepaint = false) {
   if (!sid) return;
   _setSessionViewedCount(sid, messageCount);
   _syncSessionListSnapshotOnVisit(sid, messageCount, lastMessageAt);
-  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+  if(backgroundRepaint&&typeof _repaintSidebarForBackgroundChurn==='function'){
+    _repaintSidebarForBackgroundChurn();
+  }else if(typeof renderSessionListFromCache==='function'){
+    renderSessionListFromCache();
+  }
 }
 
 // Does the session currently carry any unread state that a visit should clear?
@@ -2693,7 +2697,8 @@ async function loadSession(sid){
   _acknowledgeSessionVisit(
     S.session.session_id,
     Number(data.session.message_count || 0),
-    Number(data.session.last_message_at || data.session.updated_at || 0)
+    Number(data.session.last_message_at || data.session.updated_at || 0),
+    Boolean(opts.externalRefreshReason)
   );
   try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
   _setActiveSessionUrl(S.session.session_id);
@@ -3044,7 +3049,8 @@ async function loadSession(sid){
     _acknowledgeSessionVisit(
       sid,
       Number(S.session.message_count || 0),
-      Number(S.session.last_message_at || S.session.updated_at || 0)
+      Number(S.session.last_message_at || S.session.updated_at || 0),
+      Boolean(opts.externalRefreshReason)
     );
   }
 
@@ -5349,11 +5355,14 @@ function closeSessionActionMenu({restoreFocus=false}={}){
       if(active&&active!==document.body&&active.isConnected) return;
       const row=typeof _findSessionRenameRow==='function'?_findSessionRenameRow(restoreSessionId):null;
       if(!row) return;
-      const candidates=[
-        row.querySelector(':scope > .session-actions-trigger, :scope > .session-actions > .session-actions-trigger'),
-        row.querySelector('.session-child-session-main'),
-        row,
-      ];
+      const ownAction=row.querySelector(':scope > .session-actions-trigger, :scope > .session-actions > .session-actions-trigger');
+      const ownMain=row.querySelector(':scope > .session-child-session-main');
+      // A top-level row can contain expanded fork buttons. Never hand focus to
+      // one of those descendants when restoring the owning conversation. If
+      // this read-only/hidden-action row has no direct control, make the owner
+      // itself programmatically focusable for this restoration.
+      if(!ownAction&&!ownMain) row.tabIndex=-1;
+      const candidates=[ownAction,ownMain,row];
       for(const candidate of candidates){
         if(candidate&&_focusSessionActionMenuRestoreTarget(candidate)) break;
       }
@@ -5562,7 +5571,11 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
       const releaseRename=()=>{
         _renamingSid=null;
         if(inp.isConnected) inp.replaceWith(displayEl);
-        setTimeout(()=>{ if(_renamingSid===null) renderSessionListFromCache(); },50);
+        setTimeout(()=>{
+          if(_renamingSid!==null) return;
+          if(typeof _repaintSidebarForBackgroundChurn==='function') _repaintSidebarForBackgroundChurn();
+          else if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+        },50);
       };
       if(!save){
         applyTitle(oldTitle,false);

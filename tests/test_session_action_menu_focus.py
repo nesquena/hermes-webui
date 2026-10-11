@@ -29,6 +29,66 @@ def _function_source(name: str) -> str:
     return SESSIONS_JS[start:index]
 
 
+def _deferred_parent_focus_script() -> str:
+    return "\n".join(
+        [
+            "let _sessionActionMenu = document.createElement('div'); document.body.appendChild(_sessionActionMenu);",
+            "let _sessionActionAnchor = null;",
+            "let _sessionActionSessionId = 'owner';",
+            "let _sessionActionPreviousFocus = null;",
+            "let _sessionListRepaintDeferredByPicker = true;",
+            "let _projectPickerTeardown = null;",
+            "const opened = [];",
+            "function paint(){",
+            "  const host = document.getElementById('sessionList');",
+            "  const owner = document.createElement('div'); owner.className = 'session-item'; owner.dataset.sid = 'owner';",
+            "  const nested = document.createElement('div'); nested.className = 'session-child-session session-child-session-fork'; nested.dataset.sid = 'fork';",
+            "  const nestedMain = document.createElement('button'); nestedMain.className = 'session-child-session-main'; nestedMain.dataset.sid = 'fork'; nestedMain.textContent = 'Fork'; nestedMain.onclick = () => opened.push('fork');",
+            "  nested.appendChild(nestedMain); owner.appendChild(nested); host.replaceChildren(owner);",
+            "  return owner;",
+            "}",
+            "function renderSessionListFromCache(){ paint(); }",
+            _function_source("_focusSessionActionMenuRestoreTarget"),
+            _function_source("_findSessionRenameRow"),
+            _function_source("closeSessionActionMenu"),
+            "window.__prepareDeferredParentFocus = async () => {",
+            "  const stale = paint(); _sessionActionAnchor = stale;",
+            "  closeSessionActionMenu({restoreFocus:true});",
+            "  await new Promise(resolve => setTimeout(resolve, 20));",
+            "  const focused = document.activeElement;",
+            "  return {focusedSid: focused && focused.dataset.sid, focusedClass: focused && focused.className};",
+            "};",
+            "window.__deferredParentOpened = () => opened;",
+        ]
+    )
+
+
+def test_deferred_parent_focus_never_rehomes_to_nested_fork_in_browser():
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover
+        pytest.skip("playwright is unavailable")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
+        page.add_script_tag(content=_deferred_parent_focus_script())
+        result = page.evaluate("window.__prepareDeferredParentFocus()")
+        page.keyboard.press("Enter")
+        result["opened"] = page.evaluate("window.__deferredParentOpened()")
+        browser.close()
+
+    assert result == {"focusedSid": "owner", "focusedClass": "session-item", "opened": []}
+
+
+def test_deferred_focus_restore_targets_only_owner_controls():
+    close = _function_source("closeSessionActionMenu")
+    assert "row.querySelector(':scope > .session-child-session-main')" in close
+    assert "row.querySelector('.session-child-session-main')" not in close
+    assert "if(!ownAction&&!ownMain) row.tabIndex=-1;" in close
+
+
 def _fixture_script() -> str:
     """Run the production menu lifecycle in a small real-DOM fixture.
 

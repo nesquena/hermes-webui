@@ -55,6 +55,18 @@ def test_session_rename_guard_releases_after_save_path_completes():
     )
 
 
+def test_session_rename_completion_is_background_sidebar_churn():
+    block = _session_rename_block()
+    release_pos = block.index("const releaseRename=()=>{")
+    timer_pos = block.index("setTimeout", release_pos)
+    timer_end = block.index("};", timer_pos)
+    timer = block[timer_pos:timer_end]
+    assert "_repaintSidebarForBackgroundChurn()" in timer, (
+        "a held rename response can finish after another row opens its picker; "
+        "the delayed completion must preserve that picker"
+    )
+
+
 def test_session_rename_success_updates_cache_and_active_session_title():
     block = _session_rename_block()
     assert "_allSessions.find(item=>item&&item.session_id===session.session_id)" in block
