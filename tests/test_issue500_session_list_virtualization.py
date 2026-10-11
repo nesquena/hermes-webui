@@ -133,9 +133,11 @@ def test_session_list_only_moves_to_active_when_active_row_is_not_visible():
     # on activation/filter transitions, after measuring and restoring scrollTop.
     measure_idx = render_body.index("_measureSessionVirtualRows(list,virtualLayout,renderedVirtualRows,virtualSpacers);")
     restore_idx = render_body.index("list.scrollTop=listScrollTopBeforeRender;", measure_idx)
-    visible_idx = render_body.index("const alreadyVisible=rect.bottom>top&&rect.top<top+list.clientHeight;")
+    target_idx = render_body.index("activeRow.el.querySelectorAll('.session-child-session[data-sid],.session-lineage-segment[data-sid]')")
+    visible_idx = render_body.index("const alreadyVisible=rect.top>=top&&rect.bottom<=top+list.clientHeight;")
     move_idx = render_body.index("if(!alreadyVisible) list.scrollTop=")
-    assert measure_idx < restore_idx < visible_idx < move_idx
+    assert measure_idx < restore_idx < target_idx < visible_idx < move_idx
+    assert "||activeRow.el.querySelector('.session-title-row')||activeRow.el" in render_body
     assert "const shouldMoveSidebarToActive=shouldAnchorActive;" in render_body
     assert "activeIndex:shouldMoveSidebarToActive?activeIndex:resizedAnchorIndex" in render_body
     assert "activeWasAlreadyVisible=activeIndex>=virtualWindowBeforeActiveAnchor.start" not in render_body
