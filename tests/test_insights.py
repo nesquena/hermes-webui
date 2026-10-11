@@ -337,6 +337,26 @@ def test_insights_mobile_models_table_has_contained_overflow():
     assert 'insights-model-table' in section_block or 'insights-card' in section_block
 
 
+def test_insights_usage_grid_desktop_split_favors_models():
+    # Usage row (Token Breakdown + Models): on desktop the Models card gets 3x
+    # the width of Token Breakdown so long model IDs (e.g. "vendor/org/model:quant")
+    # render in full instead of ellipsizing in the .insights-model-name cell.
+    usage_rules = [line for line in STYLE_CSS.splitlines()
+                   if line.startswith('.insights-usage-grid{')]
+    assert usage_rules, 'a desktop .insights-usage-grid rule must exist'
+    rule = usage_rules[0]
+    assert 'minmax(0,1fr) minmax(0,3fr)' in rule, f'usage row must split 25/75, got: {rule}'
+    # Cascade: equal specificity to .insights-row, so the 25/75 rule must come
+    # AFTER it in the file to win for the row that carries both classes.
+    assert STYLE_CSS.index('.insights-usage-grid{') > STYLE_CSS.index('.insights-row{'), \
+        'the 25/75 rule must follow .insights-row so it wins the cascade'
+    # The #2104 mobile collapse must still win below 640px: its block must come
+    # after the desktop rule in the file.
+    mobile_block = STYLE_CSS.find('/* ── Mobile layout for Token Breakdown + Models')
+    assert mobile_block > STYLE_CSS.index('.insights-usage-grid{'), \
+        'the mobile single-column block must follow the desktop 25/75 rule'
+
+
 # ── #3189: CLI/gateway sessions in Insights + webui double-count guard ──────
 
 
