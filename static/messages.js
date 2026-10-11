@@ -1381,6 +1381,17 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+// #8155: the server refused /api/chat/start because this page's bundle
+// (window.__HERMES_WEBUI_BUNDLE_VERSION__) differs from the build it serves.
+// api() attaches the raw body on the Error; parse the typed marker from it.
+function _isStaleClientBundleError(e){
+  if(!e) return false;
+  try{
+    const body=typeof e.body==='string'?JSON.parse(e.body):(e.body||null);
+    return !!(body&&body.type==='stale_client_bundle');
+  }catch(_){ return false; }
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1846,8 +1857,40 @@ async function send(){
     })});
     _pendingMoaConfig=null;
     postStartData = startData;
+    // #8155: a successful start proves this bundle matches the server; allow a
+    // future stale-bundle 409 (after the next upgrade) to reload once again.
+    try{ sessionStorage.removeItem('hermes-webui-stale-bundle-reload'); }catch(_){ }
   }catch(e){
     const errMsg=String((e&&e.message)||'');
+    // #8155: this page runs a bundle from an older WebUI build than the server
+    // (a native shell or long-lived tab that never re-navigated after an
+    // upgrade). The server refused the turn with a typed 409 before touching
+    // session state. Keep the typed message as the draft and reload ONCE so the
+    // fresh bundle loads; a sessionStorage marker stops a persistent mismatch
+    // (e.g. a proxy serving a cached index.html) from reloading forever.
+    if(e&&e.status===409&&_isStaleClientBundleError(e)){
+      const _marker='hermes-webui-stale-bundle-reload';
+      let _already=false;
+      try{ _already=sessionStorage.getItem(_marker)==='1'; }catch(_){ }
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      if(Array.isArray(optimisticMessages)) S.messages=S.messages.filter(m=>!optimisticMessages.includes(m));
+      if(typeof renderMessages==='function') renderMessages();
+      setBusy(false);
+      // Put the typed message back and persist it server-side so the reloaded
+      // page restores it (the normal draft-clear already ran at send time).
+      const _box=$('msg'); if(_box&&!_box.value){ _box.value=_submittedDraftTextForClear||displayText; if(typeof autoResize==='function') autoResize(); }
+      if(typeof _saveComposerDraftNow==='function') _saveComposerDraftNow(activeSid,_box?_box.value:'',null);
+      if(!_already){
+        try{ sessionStorage.setItem(_marker,'1'); }catch(_){ }
+        showToast(t('stale_bundle_reloading'),2000);
+        setTimeout(()=>{ try{ window.location.reload(); }catch(_){ } },300);
+      }else{
+        showToast(t('stale_bundle_reload_failed'),8000);
+      }
+      return;
+    }
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
     // the stale /session/<id> URL and clear localStorage so a reload does not
