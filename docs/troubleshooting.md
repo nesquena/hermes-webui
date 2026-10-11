@@ -6,16 +6,36 @@ If your symptom isn't listed and the diagnostics don't narrow it down, file a bu
 
 ---
 
+## Requests succeed but access records disappear during agent work
+
+The server emits `[webui]` JSON access records to its original process stdout,
+using a private duplicate captured before agent imports. This keeps request and
+HTTP error logs visible when an in-process tool redirects or closes `sys.stdout`.
+Logging failures still must not interrupt HTTP responses.
+
+Check the service's captured stdout (for example, `docker logs <container>` or
+the journal for your WebUI unit). Verify successful `POST /api/chat/start` and
+`GET /api/chat/stream` records, not only health probes or rejected requests.
+Records include `method`, `path`, `status`, and `ms`: elapsed time until response
+headers, **not** the lifetime of an SSE stream or the agent turn. A missing record
+before response headers does not distinguish a pending request from a logging
+failure. Keep the launcher's output destination open for the process lifetime.
+
+Scheduled cron execution belongs to the Hermes Agent gateway scheduler, not the
+WebUI HTTP server. Investigate cron outcomes in the gateway's logs and the
+active Hermes home's `cron/executions.db`; WebUI access records show HTTP cron
+management requests, not every scheduled execution.
+
 ## "AIAgent not available -- check that hermes-agent is on sys.path"
 
 **Symptom.** WebUI starts, shows the chat interface, but every chat request fails immediately with this error in the response or the server log. As of v0.51.6 the error includes a diagnostic block with the running Python interpreter, the relevant `sys.path` entries, and the most-common fix; on older versions the message is bare.
 
-**Why it happens.** The WebUI imports the agent class at chat time via `from run_agent import AIAgent`. That import only succeeds if the running Python's `sys.path` contains either the hermes-agent checkout or a pip-installed copy of the agent. Three common failure modes:
+**Why it happens.** The WebUI imports the agent class at chat time via `from run_agent import AIAgent`. That import only succeeds if the running Python's `sys.path` contains either the hermes-agent checkout or a pip-installed copy of the agent. Four common failure modes:
 
 1. **Agent installed but not on `sys.path`.** Most common. The agent is checked out somewhere (e.g. `~/Programmes/hermes-agent`), the WebUI was launched with a Python that doesn't know about it, and there's no `pip install -e .` linking the two.
 2. **Symlink with a typo or wrong target.** A symlink to the agent looks correct on `ls`, but `readlink` resolves to a path that doesn't exist or doesn't contain `agent/__init__.py`.
 3. **`HERMES_WEBUI_AGENT_DIR` set to the wrong directory.** Override env var beats auto-discovery and points at a directory that has no agent code.
-4. **Agent installed as root, under the FHS layout.** When the Hermes Agent installer runs as root on Linux it places the agent at `/usr/local/lib/hermes-agent` (CLI linked into `/usr/local/bin`), not `~/.hermes/hermes-agent`. Older `bootstrap.py` didn't probe that path, so it built a WebUI-only `.venv` and failed at launch with **"Python environment cannot import both WebUI dependencies and Hermes Agent."** `git pull` to update the WebUI (current `bootstrap.py` auto-discovers the FHS layout and follows the `hermes` launcher to the agent), or set `HERMES_WEBUI_PYTHON=/usr/local/lib/hermes-agent/venv/bin/python` and relaunch.
+4. **Agent installed as root, under the FHS layout.** When the Hermes Agent installer runs as root on Linux it places the agent at `/usr/local/lib/hermes-agent` (CLI linked into `/usr/local/bin`), not `~/.hermes/hermes-agent`. Older `bootstrap.py` didn't probe that path, so it built a WebUI-only `.venv` and failed at launch with **"Python environment cannot import both WebUI dependencies and Hermes Agent."** `git pull` to update the WebUI (current `bootstrap.py` auto-discovers the FHS layout and follows the `hermes` launcher to the agent), and let the launcher pick the interpreter: when relaunch is enabled (the default: `HERMES_DISABLE_LAZY_INSTALLS` unset, `updateMechanism=self`, checkout with `.git`/`pyproject.toml`), launch preparation re-exec's a non-store interpreter into the store python before activation, so leaving `HERMES_WEBUI_PYTHON` unset lands on the managed interpreter. When the service suppresses relaunch instead, no re-exec corrects the seed interpreter, and an unset override falls through `discover_launcher_python()` to whatever non-managed python it finds (`agent_dir/venv/bin/python` if it exists, else the WebUI `.venv`, else system `python3`) — every turn then fails while the pre-flight check still passes. Those services must resolve the store python fresh at every start and export it as `HERMES_WEBUI_PYTHON` (see step 2) — never the in-tree venv, and never a saved path of any kind — see [Hermes package-managed runtime bootstrap order](#hermes-package-managed-runtime-bootstrap-order).
 
 ### Step 1 — confirm the agent location
 
@@ -34,13 +54,28 @@ The third command must succeed (the file must exist). If it fails, your symlink 
 cd ~/hermes-webui && ./start.sh 2>&1 | grep -iE 'agent|python|hermes_webui_python' | head -20
 ```
 
-The startup banner prints which Python and agent dir it resolved. If the agent dir is empty or the Python is the wrong one, set the override:
+The startup log shows how the launch resolved. If the agent dir is empty or the Python is the wrong one, set the override:
 
 ```bash
 export HERMES_WEBUI_AGENT_DIR=/absolute/path/to/hermes-agent
-export HERMES_WEBUI_PYTHON=/absolute/path/to/agent/venv/bin/python
+export HERMES_WEBUI_PYTHON=/absolute/path/to/working/python
 ./start.sh
 ```
+
+For a source checkout that path is the agent venv python (`.../hermes-agent/venv/bin/python`). For a package-managed install with relaunch enabled (the default: `HERMES_DISABLE_LAZY_INSTALLS` unset, `updateMechanism=self`, checkout with `.git`/`pyproject.toml`), leave `HERMES_WEBUI_PYTHON` unset whenever the launcher discovers the agent on its own — managed activation selects and leases the committed generation on every launch. Never persist a resolved path — neither a generation path (`installs/<key>/environments/<hash>/venv/bin/python`, garbage-collected once unselected) nor a store path (`tools/python-*`, superseded on managed-python updates): both stop being the interpreter the Agent runs on. If the service suppresses relaunch (e.g. it sets `HERMES_DISABLE_LAZY_INSTALLS=1`), leaving the override unset re-selects a non-managed python — `discover_launcher_python()` prefers `agent_dir/venv/bin/python` when it exists (else the WebUI `.venv`, else system `python3`) and the pre-flight's pure-Python check passes on it while every turn fails. Those services must resolve the store python fresh at every start instead: `hermes --print-runtime-command` prints a JSON array whose element zero is the store python, so decode it in the service's own launch step (a systemd `ExecStart` wrapper or `EnvironmentFile` generator) and export it as `HERMES_WEBUI_PYTHON` (Python 3 is already required, so its standard library does the decoding):
+
+```bash
+HERMES_WEBUI_PYTHON="$(hermes --print-runtime-command \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)[0])')" || exit 1
+[ -x "$HERMES_WEBUI_PYTHON" ] || exit 1
+export HERMES_WEBUI_PYTHON
+```
+
+Assign, check, then export: `export VAR="$(…)"` succeeds even when the command
+substitution fails, so a launcher that can't find `hermes` would otherwise start
+with an empty `HERMES_WEBUI_PYTHON` instead of stopping.
+
+A wrong extraction (e.g. `cut -d, -f1`) yields a JSON-quoted fragment instead of a path that fails loudly when the launcher execs it — never a saved path, never the pre-PM in-tree venv — see [Hermes package-managed runtime bootstrap order](#hermes-package-managed-runtime-bootstrap-order).
 
 ### Step 3 — install the agent in editable mode
 
@@ -66,7 +101,19 @@ If steps 1-3 still don't work, check whether the WebUI's Python can import the a
 $HERMES_WEBUI_PYTHON -c "from run_agent import AIAgent; print('ok')" 2>&1
 ```
 
-(Replace `$HERMES_WEBUI_PYTHON` with the actual Python path from step 2 if the env var isn't set.) If this prints `ok`, the agent IS on `sys.path` for that Python — and the WebUI should work.
+(Replace `$HERMES_WEBUI_PYTHON` with the actual Python path from step 2 if the env var isn't set.) If this prints `ok`, the agent IS on `sys.path` for that Python. It does **not** prove the WebUI will serve a turn: a bare `run_agent` import pulls in no compiled extensions, so this probe passes on an interpreter the server cannot run on — see [Hermes package-managed runtime bootstrap order](#hermes-package-managed-runtime-bootstrap-order). On installs whose agent ships `hermes_bootstrap.py`, check the activated layer too by importing a compiled extension after the bootstrap import:
+
+```bash
+PYTHONPATH=/path/to/hermes-agent $HERMES_WEBUI_PYTHON -c "
+import sys
+import hermes_bootstrap                                        # activates the committed dependency environment
+print(sys.executable)
+from run_agent import AIAgent
+from pydantic_core._pydantic_core import SchemaValidator        # compiled: fails on an ABI mismatch
+print('ok')"
+```
+
+(On agents without `hermes_bootstrap.py` the bare probe above is the whole check — server startup supports those legacy checkouts, so don't gate them on the compiled import.) The agent's launch preparation re-exec's a non-store interpreter into the store python before activation, so run this probe the way the service runs: with the service's `HERMES_HOME`, and with `HERMES_DISABLE_LAZY_INSTALLS=1` only if the service itself sets it. That variable (plus a non-`self` update mechanism, a checkout without `.git`/`pyproject.toml`, or a failed launch preparation) suppresses the re-exec — under those conditions the probe tests the launcher's interpreter directly, which is exactly the mismatch detector. If the bare probe printed `ok` but this one fails with `No module named 'pydantic_core._pydantic_core'`, the interpreter is on the wrong side of an ABI mismatch: fix the launcher's interpreter — `HERMES_WEBUI_PYTHON` unset when relaunch is enabled, otherwise the store python resolved fresh at every start (see step 2). Reinstalling or repairing `pydantic` changes nothing, because both environments are complete in isolation.
 
 If this fails, `import run_agent` itself is broken — check that the agent's pyproject.toml lists `run_agent` as a top-level module or that the agent dir is on PYTHONPATH:
 
@@ -83,6 +130,115 @@ If after running steps 1-4 the import still fails *and* `pip install -e .` succe
 - The output of every command in steps 1-4
 - The full diagnostic block printed by the WebUI's `ImportError` (v0.51.6+)
 - Your OS, Python version, and how the agent was installed
+- The interpreter your launcher resolved (or `readlink /proc/<pid>/exe` for a systemd unit)
+
+---
+
+### Hermes package-managed runtime bootstrap order
+
+For package-managed Hermes installs, the server activates the discovered Agent's
+`hermes_bootstrap` dependency layer before importing WebUI modules that need
+third-party packages. It must **not** import `run_agent` at that point:
+`api.config` first selects the active profile, then profile-sensitive Agent
+application modules can be imported. Importing skills under the launch/base home
+before selecting a named profile can disable their context-local home resolution
+and force turns and model-catalog scopes into the legacy whole-turn lock.
+
+The dependency layer retains Agent-owned activation and re-exec behavior; WebUI
+does not choose generation directories or install into an obsolete Agent venv.
+Legacy Agents and browser-only fixtures without `hermes_bootstrap.py` skip this
+early activation. A failure inside a present bootstrap is logged as a warning
+and startup continues, as it did when the Agent import was lazy, so the UI,
+diagnostics and updater stay reachable; the Agent's own relaunch or repair exit
+still stops the process. The interpreter compatibility probe may still import
+`run_agent` in its disposable subprocess; that import must not leak into server
+startup. If a restart fails, inspect the current service journal and selected
+interpreter. This ordering repair does not remove the static fallback lock or
+change cross-profile credential handling.
+
+The launcher must still hand `bootstrap.py` an interpreter on the same side of the
+Python ABI as the committed dependency generation — for example, the pre-PM
+in-tree `venv` (3.11) beside a 3.14 generation. WebUI does not choose the
+generation, but the interpreter it starts with decides whether that generation can
+load: `activate_dependencies()` replaces `sys.path` with the generation's
+`site-packages`, so a process built for another minor version starts, serves `/health`,
+and then fails on **every** turn, with every MCP server reporting a connect failure
+in the same breath:
+
+```
+Failed to initialize OpenAI client: No module named 'pydantic_core._pydantic_core'
+module 'tools.mcp_tool' has no attribute 'StdioServerParameters'
+MCP server '<name>' requires HTTP transport but mcp.client.streamable_http is not available
+```
+
+Those are the same ABI failure re-wrapped several modules deep, not a broken `mcp`
+package and not broken MCP servers — do not upgrade or disable MCP servers over
+them. This is also the false-negative in step 4's probe above: the bare probe's
+`run_agent` import pulls in no compiled extensions, so it passes on an interpreter
+the server cannot run on.
+
+For a package-managed install the fix is to stop pinning an interpreter, not to
+pin a better one — provided relaunch is enabled (the default:
+`HERMES_DISABLE_LAZY_INSTALLS` unset, `updateMechanism=self`, checkout with
+`.git`/`pyproject.toml`). Leave `HERMES_WEBUI_PYTHON` unset whenever the launcher
+discovers the agent on its own: the agent's launch preparation re-exec's a
+non-store interpreter into the store python (`~/.hermes/tools/python-*`) before
+activation, and activation then selects and leases the committed generation —
+the generation python itself is re-exec'd into the store python, so a saved
+generation path is neither the interpreter the Agent runs on nor stable across
+updates. Never persist a resolved path: saved generation paths
+(`installs/<key>/environments/<hash>/venv/bin/python`) are garbage-collected
+once unselected, and a saved store path (`tools/python-*`) is superseded on the
+next managed-python update — in both cases the next `start.sh` launches an
+interpreter the Agent no longer runs on. If an override is unavoidable — or the
+service suppresses relaunch (e.g. it sets `HERMES_DISABLE_LAZY_INSTALLS=1`, in
+which case an unset override falls through `discover_launcher_python()` to a
+non-managed python) — resolve the store python fresh at every start and export
+it as `HERMES_WEBUI_PYTHON`. `hermes --print-runtime-command` prints a JSON
+array whose element zero is the store python; decode it in the service's own
+launch step (a systemd `ExecStart` wrapper or `EnvironmentFile` generator):
+
+```bash
+HERMES_WEBUI_PYTHON="$(hermes --print-runtime-command \
+  | python3 -c 'import json, sys; print(json.load(sys.stdin)[0])')" || exit 1
+[ -x "$HERMES_WEBUI_PYTHON" ] || exit 1
+export HERMES_WEBUI_PYTHON
+```
+
+Assign, check, then export: `export VAR="$(…)"` succeeds even when the command
+substitution fails, so a launcher that can't find `hermes` would otherwise start
+with an empty `HERMES_WEBUI_PYTHON` instead of stopping.
+
+That resolves per-launch instead of persisting a versioned path. Run it with
+the service's `HERMES_HOME` when the install uses a non-default home (per-user
+installs live at `~/.hermes/hermes-agent`; the FHS path above is the
+root-on-Linux layout only), and with the service's `HERMES_RUNTIME_DIR` when it
+sets one — the runtime override also steers `store_root()`, so a resolver run
+without it can point at a different store than the service uses.
+
+The bare store python needs no workaround either: run through `bootstrap.py`'s
+pre-flight `_python_can_run_webui_and_agent()` probe it behaves like any managed
+interpreter, because that probe itself triggers the same launch preparation and
+activation. From the outside, `/health` and `/api/health/agent` both return `200`
+while this is broken; only a real turn (`POST /api/chat`, or
+`POST /api/chat/start` + `GET /api/chat/stream`) constructs the OpenAI client
+and surfaces the mismatch.
+
+The native Windows launcher also decides *which* Agent root that bootstrap runs
+from, so the two have to agree. `start.ps1` normally keeps the source-first
+order from `api.config._discover_agent_dir`, but it repairs a few displaced
+layouts: a bare source checkout, the repo sibling, an Agent root (source or
+pip-style) at the repo parent, or `%USERPROFILE%\hermes-agent`, when that selection has no in-root
+venv and a later master-order install exists. For the layout-fallback cases the
+install may win even without its own venv (deps already importable); otherwise
+the install needs a `venv\Scripts\python.exe`. A source checkout that has its
+own venv keeps priority, since it is launchable on its own.
+`HERMES_WEBUI_AGENT_DIR` remains authoritative over both.
+
+Current Hermes managed environments ship `ruamel.yaml` and may not include
+PyYAML. WebUI reads and writes YAML through `api/yaml_compat.py`, which uses
+PyYAML when it is importable and falls back to `ruamel.yaml` otherwise, and the
+bootstrap probe accepts either backend.
 
 ---
 
@@ -179,13 +335,31 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 
 ## "Hermes Agent was updated while Hermes WebUI was running"
 
-**Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.
+**Symptom.** An action that uses the in-process Agent runtime stops with a message telling you to restart Hermes WebUI manually. This can happen after `hermes update`, a Git checkout/pull in the Agent source tree, or another tool updates Hermes Agent without restarting the already-running WebUI backend.
 
-**Why.** WebUI currently imports `run_agent.AIAgent` into its long-lived Python process. Python keeps imported modules in memory. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision, producing misleading `ImportError`s or inconsistent runtime state. For local Agent-backed chat, WebUI therefore returns a retryable `409 agent_runtime_stale` before claiming or mutating session state instead of attempting a partial in-process reload. Gateway-backed chat runs in the gateway process and is not blocked by this WebUI-local check. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare.
+**Why.** WebUI imports `run_agent.AIAgent` into its long-lived Python process. Continuing after a known Agent Git revision changes could combine cached modules from the old revision with source read from the new revision. Local Agent-backed actions return a retryable `409 agent_runtime_stale` with `restart_scheduled: false` before accepting a new turn. Gateway- and runner-owned chat keep their existing runtime ownership. Non-Git Agent installs preserve their existing behavior because there is no revision identity to compare; losing a previously known revision remains fail-closed.
 
-**Diagnostic.** Compare the running WebUI process start time with the Agent checkout revision and recent update history. If the Agent was updated after WebUI started, restart WebUI before investigating individual missing-symbol errors.
+Revision checks allow up to 10 seconds total across the three local Git reads
+(worktree root, tracked module, and HEAD). Each read receives only the time
+remaining before one monotonic deadline, so slow reads that finish within the
+total budget do not falsely look like a changed runtime. An exhausted budget or
+failed read still blocks a previously identified Git runtime; this does not
+bypass the revision guard or schedule an automatic restart. This is a per-check
+budget, not an end-to-end chat-request timeout; chat admission can check twice.
 
-**Fix.** Restart using the same launch method that started WebUI:
+**Diagnostic.** The stale-runtime response includes `agent_update_state`, also preserved in asynchronous compression error status:
+
+| Value | Observation |
+| --- | --- |
+| `active` | A recent Agent update marker names a live PID. |
+| `incomplete` | An Agent recovery marker exists in the loaded checkout or configured venv installation. |
+| `stale` | The update marker names a dead PID or is older than the diagnostic age limit. |
+| `unknown` | Marker contents, PID liveness, or recovery-marker presence cannot be read or classified. |
+| `unverified` | No active or recovery marker was found. Update completion and environment health remain unverified. |
+
+These are observations, not success receipts. Hermes Agent removes `.hermes-update-in-progress` on failed and interrupted exits too. A missing or stale marker, or a readable Git revision, does not prove a completed update or a healthy environment. WebUI only reads these markers; it does not remove or repair them.
+
+**Fix.** Check the Agent updater's outcome and resolve any failed or incomplete Agent update first. Once the Agent checkout and environment are healthy and no updater is running, restart WebUI using the same launch method that started it:
 
 ```bash
 ./ctl.sh restart
@@ -193,9 +367,175 @@ turn in the exhausted session instead of being blocked with recovery guidance.
 systemctl --user restart hermes-webui.service
 ```
 
-If you launched `python3 bootstrap.py` in the foreground, stop it with Ctrl-C and start it again. Restarting the whole computer or WSL is not required when restarting the WebUI backend succeeds.
+For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again. Restarting the whole computer or WSL is not required when restarting the WebUI backend succeeds. Retry the action after restarting the backend; refreshing the browser alone does not replace its imported Agent modules.
 
-**When to file a bug.** File a WebUI bug if the restart-required message appears even though the Agent revision did not change, or if a clean WebUI restart still produces the same import error. Include the WebUI launch method, WebUI revision, Agent revision, and the sanitized error text.
+**Automatic restart prerequisite.** Revision mismatch does not schedule a WebUI restart. Safe automation requires an Agent-owned terminal success receipt bound to the exact update transaction, final revision, and healthy environment, plus an Agent-owned atomic handoff or lease that excludes new mutations across process replacement (or an Agent updater that performs the restart itself). No such public contract is verified for this integration. Repeated readiness checks followed by `os.execv()` leave a race; WebUI's own update lock does not exclude an external Agent updater. Explicit updates initiated through WebUI retain their existing behavior and are outside this revision-mismatch guard.
+
+**When to file a bug.** File a WebUI bug if the restart-required message appears even though the Agent revision did not change or become unreadable, or if a clean WebUI restart still produces the same import error. Include the launch method, WebUI and Agent revisions, the marker diagnostic, and sanitized error text.
+
+---
+
+## Agent sessions list slowly (or the `state.db` read index is missing)
+
+**Symptom.** The sidebar's imported/CLI session list takes seconds per refresh on a large Hermes profile, or a log line says a `state.db` read failed. Sessions still appear; nothing is lost.
+
+**Why.** Every WebUI reader of the agent's `state.db` (session listing, transcript reads, lineage, gateway watcher, cron sidebar, insights, health) opens it strictly read-only (`file:...?mode=ro`). A reader never upgrades to a write-capable handle and never creates an index: on a multi-GiB `messages` table `CREATE INDEX` holds the SQLite writer lock for minutes and stalls the agent streaming into the same WAL database. When the agent's standard `idx_messages_session` index is missing (older agent, hand-rebuilt or re-imported DB), listings degrade to a bounded one-pass pre-aggregation — slower than the indexed seek, but read-only. A read-only open failure propagates to the caller's existing error boundary instead of silently reopening the file writable.
+
+A primary `state.db` read failure keeps the existing availability behavior: a complete same-generation stale snapshot wins when available, then the independently bounded eight-entry last-known-good cache keyed without the volatile database fingerprint preserves rows across idle and streaming-frozen refreshes. In the all-profiles view, a profile whose primary read fails makes the aggregate non-authoritative, so it is never published to either cache.
+
+The additive cron, webhook, and kanban passes, and the project-assigned recovery and unassigned refill passes, have a different failure boundary. If one of those later reads is temporarily unavailable, WebUI serves the primary rows it already loaded as an explicitly incomplete, fresh projection for that request and does not cache it; the next poll retries the optional pass. Errors while creating project metadata or building an optional row are debug-logged and skipped without misclassifying `projects.json` as an unavailable `state.db`. In all-profiles mode, an optional-pass failure therefore keeps both the affected profile's primary rows and healthy profiles' rows instead of replacing them with a stale aggregate. Claude Code discovery remains one global scan, independent of profile database availability, and runs only for unfiltered or explicit `claude-code` requests.
+
+**Diagnostic.**
+
+```bash
+sqlite3 "file:$HOME/.hermes/state.db?mode=ro" "PRAGMA index_list(messages)"
+```
+
+`idx_messages_session` should be listed. If it is not, the agent has not created it and WebUI will not create it for you.
+
+**Fix.** Create the covering read indexes in an explicit drained maintenance window: stop the agent (and any gateway/cron runner) writing to that `state.db`, then run:
+
+```bash
+python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confirm-drained
+```
+
+- `--confirm-drained` is mandatory: it is your assertion that no agent turn is running against the database. The tool does not verify it.
+- `--lock-file PATH` (optional) additionally holds an exclusive non-blocking lock on `PATH` (`flock` on POSIX, `msvcrt.locking` on Windows) for deployments that serialise agent turns on a lock file; a held lock makes the tool exit without touching the database. Without `--lock-file` no lock primitive is required, so the script runs on native Windows as well. On Windows the lock covers byte 0 of `PATH`; a new or empty lock file is initialised with one byte first (an existing lock file is never rewritten).
+- The tool opens the database `mode=rw` (never `rwc`): a mistyped path raises instead of creating an empty database. Indexes are created inside one `BEGIN IMMEDIATE` transaction and rolled back on any error.
+- It is idempotent and prints a JSON status per index (`created` / `existing` / `skipped`). `skipped` means this database's schema lacks a column that index keys on (an older agent); the indexes the schema does support are still created. An existing index with a different table, key shape or collation is reported as `Incompatible index` and never replaced; an index that is not covering (`EXPLAIN QUERY PLAN`) is reported as `Index is not covering`.
+- Windows UNC profiles (`HERMES_HOME=\\server\share\...`) are supported: readers and this tool build the empty-authority URI `file:////server/share/state.db` that the bundled SQLite accepts.
+
+**When to file a bug.** File a WebUI bug if the listing stays slow after the tool reports `existing` for `idx_messages_session`, if the tool reports `Incompatible index` on an untouched agent-created database, or if a read-only open fails on a local path. Include the tool's JSON output, the `PRAGMA index_list(messages)` result, and the sanitized error text.
+
+---
+
+## 404 after login when password auth is enabled
+
+**Symptom.** After enabling password authentication (`HERMES_WEBUI_PASSWORD`), logging in redirects to `/sessions` and the browser shows a `404 not found` error instead of the chat interface.
+
+**Why.** The server-side redirect after login targets `/sessions` (plural), but that path was missing from the explicit SPA-shell allowlist in `handle_get()`. Without auth the bug is invisible because the SPA handles `/sessions` client-side and the server route is never hit — only the server-side post-login redirect exposes it.
+
+**Fix.** `/sessions` is now included alongside `/` and `/index.html` in the set of paths that serve the SPA shell. No configuration change is needed.
+
+---
+
+## Update check reports a Git authentication or fetch failure
+
+**Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or
+`could not read Username`, or `unable to get password from user` (Git 2.47+).
+Git's own prompts are disabled; credential-helper UI depends on the helper.
+
+**Why.** Update checks are unattended. WebUI removes inherited askpass, SSH-command, proxy, and Git
+config injection settings; disables checkout-controlled askpass and credential helpers; and forces
+SSH batch mode. Generic and URL-scoped credential helpers from trusted user and system Git config
+remain available when declared directly in the primary system/global files.
+Git Credential Manager also receives `GCM_INTERACTIVE=never` and
+`credential.interactive=false`: cached credentials may authenticate a check, but a GCM cache miss
+must fail without opening its GUI or browser login. Git itself honors
+`credential.interactive` starting in 2.47; other credential helpers may ignore
+these controls and still open a browser or GUI. These controls follow
+[GCM's environment contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/environment.md#gcm_interactive)
+and [configuration contract](https://github.com/git-ecosystem/git-credential-manager/blob/main/docs/configuration.md#credentialinteractive). `include` and
+`includeIf` are not followed for credential helpers, `core.sshCommand`, or `ssh.variant`:
+included files may be checkout-controlled even when Git labels their scope global. Move these
+settings into the main user/system config if needed. The explicit scope reads also work on
+Git versions before 2.26. A trusted user/system `core.sshCommand` is retained with the batch option for
+its trusted or detected SSH variant (`-oBatchMode=yes` for OpenSSH, `-batch` for PuTTY/Plink),
+as is an inherited `SSH_AUTH_SOCK`. A checkout-controlled `core.gitProxy` is rejected only when it applies
+to the active `git://` remote's host; ordinary `git://` remotes without an applicable override remain
+supported. Push checks follow `branch.<name>.pushRemote`, `remote.pushDefault`,
+`branch.<name>.remote`, then `origin`. Checks cover every selected remote `pushurl`,
+or every `url` when no `pushurl` exists; fetch/pull use only the first fetch URL.
+Any applicable checkout-controlled proxy blocks the entire push before it starts.
+A trusted SSH command is preserved/probed when any actual push destination uses SSH.
+Remote-helper forms such as `ext::`, `ssh::`, and `https::` are rejected because the
+transport prefix names a helper command.
+
+**Diagnostic.** Run the project diagnostic for each checkout named by the update status:
+
+```bash
+python3 scripts/diagnose_update_git.py /path/to/checkout
+```
+
+The diagnostic reads the origin, accepts built-in HTTP(S), SSH, and `git://` remote forms,
+applies the update runner's proxy guard in the original checkout, then probes the captured
+URL outside the checkout so repository-controlled remote helpers and URL rewrites cannot run. It
+reports fixed failure categories instead of relaying Git or credential-helper output, and redacts
+checkout paths, origin paths, URL credentials, tokens, and secret query values.
+
+**Fix.** Configure a non-interactive user/system credential helper for a private HTTPS origin, or use
+an SSH origin with a key already loaded in the SSH agent seen by WebUI. Restart WebUI if necessary so
+it inherits the correct `SSH_AUTH_SOCK`, then rerun the diagnostic and update check. Custom SSH
+commands must declare or auto-detect as OpenSSH, Plink, PuTTY, or TortoisePlink; Git's `simple` variant
+fails closed. Only SSH destinations trigger the five-second, stdin-disabled `-G`
+configuration probe for custom-named commands; local paths and HTTP(S) never invoke
+the SSH wrapper. The probe uses Git's resolved shell rather than requiring `sh` on PATH;
+only a successful probe enables OpenSSH batch mode. Explicit interactive `BatchMode` options
+(including whitespace forms such as `-o 'BatchMode no'`) fail closed rather than relying on
+a later option to override OpenSSH's first-value semantics. Failed/unknown probes fail closed.
+
+**When to file a bug.** File a WebUI bug if the diagnostic succeeds under the same user and
+environment but the update check still fails, or if either path opens a credential prompt. Include
+only sanitized hosts and errors; do not include credential-bearing URLs, tokens, or private paths.
+
+---
+
+## "OpenCode Go model picker shows a model that errors when you send" (or is missing newly released models)
+
+**Symptom.** One of two directions:
+
+1. A model selected from the OpenCode Go group fails on the first message (`model not found`, `Model is unavailable`, or a region error), even though the picker offered it.
+2. A newly released OpenCode Go model does not appear in the picker at all, and must be typed into the Custom Model ID box.
+
+**Why.** The Go picker follows the **live** Go-tier catalog (`https://opencode.ai/zen/go/v1/models`) whenever the installed Hermes Agent is v0.20.5 or newer. That endpoint advertises a superset of what a given tier, key, or region can actually serve — an id can be listed and still fail on send. Conversely, an id the endpoint serves but the WebUI's static fallback list predates is missing when the live path is unavailable (Agent older than v0.20.5, probe failure, or offline); the static list mirrors Hermes core's curated Go catalog and can lag new releases by design.
+
+**Diagnostic.** Check which path is feeding your picker:
+
+```bash
+hermes --version          # live path requires >= 0.20.5
+curl -sS https://opencode.ai/zen/go/v1/models \
+  -H "Authorization: Bearer $OPENCODE_GO_API_KEY" | head -50
+```
+
+Interpret the two together:
+
+- **Failing model absent from the `curl` output** → it was delisted upstream (for example `ox-alpha-free`, removed from the relay on 2026-09-09). A picker can still offer it from a **stale catalog merge**: Hermes core merges its own curated Go list into the live result, and every Agent release *through v0.21.1 (tag `v2026.9.7`)* still carries the delisted id in that list — verified at runtime against v0.21.0, where the live path serves 37 ids including `ox-alpha-free`. The removal is committed on core `main` (2026-09-09 sync) but **no released Agent version includes it yet** — and `main` reports the same `0.21.1` version string as the stale tag, so a version number alone cannot tell you whether the fix is in. Until a release notes the 2026-09-09 catalog sync, the **verified workaround is the config allowlist** (below); selecting the dead entry is harmless to other models (it errors on send, nothing else).
+- **Failing model present in the `curl` output** → the relay lists it but your tier/region cannot serve it; the picker is behaving correctly. Pin the models you actually use with an explicit allowlist in `config.yaml`, which takes precedence over both the live catalog and the fallback:
+
+  ```yaml
+  providers:
+    opencode-go:
+      models:
+        - kimi-k3
+        - glm-5.3
+  ```
+
+  A lighter per-provider exclude capability is tracked in #7507.
+- **Missing new model, Agent ≥ v0.20.5** → the live catalog is the source; refresh or check the endpoint with the `curl` above (cold rebuilds are also bounded by a 4-second foreground budget — the first picker open after a restart can serve the last-known list while the live rebuild finishes in the background, so re-open the picker once before concluding it's stale).
+- **Missing new model, Agent older than v0.20.5** → the static fallback is serving by design; upgrade the Agent to ≥ v0.20.5 so the picker reads the live catalog.
+
+**When to file a bug.** File a WebUI bug if a model fails on send *and* appears in the `curl` output for your key (a routing problem), or if a model is missing with Agent ≥ v0.20.5 and the live catalog reachable (fallback used when it should not be).
+
+---
+
+## MCP panel shows another profile's servers, or "Live status for this profile is unavailable"
+
+**Symptom.** With several profiles, the MCP settings panel of profile A shows a server as *Active* with a tool count while the tool inventory is empty (or lists profile B's tools); `/reload-mcp` on one profile stops the other profile's servers; or the MCP panel and the external Notes drawer show the notice *"Live status for this profile is unavailable right now"* and `/reload-mcp` answers *"MCP runtime scope could not be confirmed"*.
+
+**Why.** Hermes Agent keeps one in-process MCP ledger per WebUI process and keys a connection by profile only when it can tell the request serves a profile other than the process's own. The WebUI binds every MCP status read and `/reload-mcp` to the request profile (`ARCHITECTURE.md` §4.10). While a chat turn is streaming, the WebUI mirrors that turn's profile into `HERMES_HOME`; Agents that predate `hermes_constants.pin_process_hermes_home` cannot distinguish that mirror from the process profile, so the WebUI withholds runtime data and refuses the reload instead of showing or resetting another profile's connection.
+
+**Diagnostic commands.**
+
+```bash
+# runtime_scope: "profile" (bound), "legacy_process" (Agent without profile-scoped MCP),
+# "unavailable" (scope could not be confirmed right now)
+curl -s -b "hermes_profile=<profile>" http://127.0.0.1:8787/api/mcp/servers | python3 -m json.tool | grep -E '"(name|status|tool_count|runtime_scope)"'
+python3 -c "import hermes_constants; print(hasattr(hermes_constants, 'pin_process_hermes_home'))"
+```
+
+**Fix.** `unavailable` while a turn is running is expected: refresh once the turn finishes. If it persists with no turn running, the Agent predates the process-home pin; upgrade Hermes Agent. `legacy_process` means the Agent has no profile-scoped MCP ledger at all; its `/reload-mcp` stays process-wide by design. After changing a profile's `mcp_servers`, run `/reload-mcp` **from that profile**: it only resets that profile's own connections and retries its failed servers.
+
+**When to file a bug.** File a WebUI bug if `runtime_scope` is `"profile"` and a server is still reported *Active* with tools you cannot see in the inventory, or if `/reload-mcp` from one profile changes another profile's `tool_count`.
 
 ---
 

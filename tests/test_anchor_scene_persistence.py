@@ -241,8 +241,18 @@ def test_anchor_scene_persistence_rejects_cross_profile_write(tmp_path, monkeypa
         SimpleNamespace(command="POST"),
         SimpleNamespace(path="/api/session/anchor-scene"),
     ) is True
-    assert captured.get("status") == 404
-    assert "payload" not in captured  # success j() never called
+    # #7710: the generic request-guard now mirrors the detail-load
+    # endpoint's contract — a session owned by a KNOWN other profile
+    # yields 409 ``session_profile_mismatch`` so the client can offer
+    # to switch to it (#5419). The 404 self-heal path is preserved for
+    # the None-profile (unknown/legacy) case.
+    assert captured.get("status") == 409, captured
+    assert captured.get("payload") == {
+        "error": "Session belongs to a different profile",
+        "code": "session_profile_mismatch",
+        "session_id": "foreignprofile1",
+        "profile": "profile-b",
+    }
     raw = json.loads((session_dir / "foreignprofile1.json").read_text(encoding="utf-8"))
     assert not raw.get("anchor_activity_scenes"), (
         "cross-profile request must NOT persist anchor_activity_scenes"
@@ -2118,7 +2128,7 @@ def test_anchor_scene_settlement_does_not_reclassify_transcript_owned_tool_row()
         "payload": {"tid": "call-1", "status": "running", "done": False},
     }
 
-    assert routes._anchor_scene_settle_live_running_row(row, has_settled_thinking=False) is row
+    assert routes._anchor_scene_settle_live_running_row(row, drop_live_thinking=False) is row
     assert row["tool"]["done"] is False
     assert row["payload"]["done"] is False
 

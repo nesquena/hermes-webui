@@ -18,6 +18,8 @@ import time
 import urllib.error
 import urllib.request
 
+import pytest
+
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 from tests._pytest_port import BASE
 
@@ -498,6 +500,178 @@ def test_compression_chain_collapses_to_latest_tip_in_sidebar():
         except Exception:
             pass
         post('/api/settings', {'show_cli_sessions': False})
+
+
+@pytest.mark.parametrize('reset_marker_origin', ('creation', 'reopen'))
+def test_reopen_then_recompress_reset_child_stays_independent_across_readers(
+    tmp_path, monkeypatch, reset_marker_origin
+):
+    """Real Agent lifecycle: reset child, ``reopen_session()``, later compression.
+
+    Driven through the installed ``SessionDB`` so the rows carry exactly the
+    production shape. ``creation`` mirrors the gateway creating the reset child
+    with ``_reset_from`` in its INSERT; ``reopen`` mirrors a marker-less legacy
+    reset child that ``reopen_session()`` durably stamps. Either way the parent
+    ends up ``end_reason='compression'`` with a live reset child, and every
+    WebUI reader must agree: the reset conversation stays visible and its
+    transcript is never prefixed with the parent's.
+
+    The WebUI readers are the contract under test. The Agent's own
+    ``find_live_compression_child`` / ``get_compression_tip`` verdict is only
+    cross-checked when the installed Agent already binds ``_reset_from`` in
+    its non-continuation child predicate; an older Agent whose predicate
+    predates that marker still has to drive the same fixture without turning
+    this WebUI test red.
+    """
+    hermes_state = pytest.importorskip('hermes_state')
+    # SessionDB lazily imports sibling Agent modules (e.g. hermes_logging);
+    # keep the Agent checkout importable even after the suite's sys.path
+    # isolation guard restored an earlier snapshot.
+    monkeypatch.syspath_prepend(str(pathlib.Path(hermes_state.__file__).resolve().parent))
+    import api.models as models
+    from api.agent_sessions import (
+        read_importable_agent_session_rows,
+        read_session_lineage_metadata,
+        read_session_lineage_report,
+    )
+    from api.gateway_watcher import GatewayWatcher
+    from api.models import get_state_db_session_messages
+
+    parent_id = 'recompressed_reset_parent'
+    child_id = 'reset_child_conversation'
+    routing = {'session_key': 'telegram:reset-peer', 'user_id': 'peer', 'chat_id': 'chat-1'}
+    db_path = tmp_path / 'state.db'
+    db = hermes_state.SessionDB(db_path=db_path)
+    try:
+        db.create_session(parent_id, source='telegram', model='test-model', **routing)
+        db.append_messages_batch(
+            parent_id,
+            [
+                {'role': 'user', 'content': 'before reset', 'timestamp': 100.0},
+                {'role': 'assistant', 'content': 'answer before reset', 'timestamp': 101.0},
+            ],
+        )
+        assert db.promote_to_session_reset(parent_id) is True
+        child_model_config = (
+            {'_reset_from': parent_id} if reset_marker_origin == 'creation' else None
+        )
+        db.create_session(
+            child_id,
+            source='telegram',
+            model='test-model',
+            parent_session_id=parent_id,
+            model_config=child_model_config,
+            **routing,
+        )
+        db.append_messages_batch(
+            child_id,
+            [
+                {'role': 'user', 'content': 'after reset', 'timestamp': 200.0},
+                {'role': 'assistant', 'content': 'answer after reset', 'timestamp': 201.0},
+            ],
+        )
+        if reset_marker_origin == 'reopen':
+            assert db.get_session(child_id)['model_config'] is None
+        # The user resumes the old conversation: reopen_session() durably
+        # stamps _reset_from on the legacy reset child before clearing the
+        # parent's reset boundary. Should an installed Agent predate that
+        # stamping, apply the same schema the upstream Agent writes
+        # (``model_config._reset_from = parent_session_id``) so the rows still
+        # carry the production shape the WebUI readers are contracted against.
+        db.reopen_session(parent_id)
+        expected_child_config = {'_reset_from': parent_id}
+        if json.loads(db.get_session(child_id)['model_config'] or '{}') != expected_child_config:
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.execute(
+                    "UPDATE sessions SET model_config = ? WHERE id = ?",
+                    (json.dumps(expected_child_config), child_id),
+                )
+        assert json.loads(db.get_session(child_id)['model_config']) == expected_child_config
+        reopened = db.get_session(parent_id)
+        assert reopened['ended_at'] is None and reopened['end_reason'] is None
+        db.append_messages_batch(
+            parent_id,
+            [{'role': 'user', 'content': 'resumed parent', 'timestamp': 300.0}],
+        )
+        # ...and that resumed parent is later closed by compression.
+        db.end_session(parent_id, 'compression')
+        assert db.get_session(parent_id)['end_reason'] == 'compression'
+        # Agent cross-check, only when the installed Agent's child predicate
+        # already binds _reset_from: the reset child is not a compression
+        # continuation there either. Older Agents are not this test's subject.
+        agent_filter_sql = str(
+            getattr(hermes_state.SessionDB, '_NON_CONTINUATION_CHILD_FILTER_SQL', '')
+        )
+        if '_reset_from' in agent_filter_sql:
+            assert db.find_live_compression_child(parent_id) is None
+            assert db.get_compression_tip(parent_id) == parent_id
+    finally:
+        db.close()
+
+    with sqlite3.connect(str(db_path)) as conn:
+        conn.execute(
+            "UPDATE sessions SET title = ? WHERE id = ?",
+            ('Reset parent conversation', parent_id),
+        )
+        conn.execute(
+            "UPDATE sessions SET title = ? WHERE id = ?",
+            ('Reset child conversation', child_id),
+        )
+
+    # (a) Sidebar projection: both rows visible; the child keeps its own
+    # title and is a plain child_session, never a hidden continuation.
+    projected = read_importable_agent_session_rows(db_path, limit=None, exclude_sources=None)
+    projected_by_id = {row['id']: row for row in projected}
+    assert set(projected_by_id) == {parent_id, child_id}
+    child_row = projected_by_id[child_id]
+    assert child_row['title'] == 'Reset child conversation'
+    assert child_row['relationship_type'] == 'child_session'
+    assert child_row['parent_session_id'] == parent_id
+    assert '_lineage_root_id' not in child_row
+    parent_row = projected_by_id[parent_id]
+    assert parent_row['title'] == 'Reset parent conversation'
+    assert '_lineage_tip_id' not in parent_row
+    assert '_compression_segment_count' not in parent_row
+
+    # (b) Lineage metadata and report.
+    metadata = read_session_lineage_metadata(db_path, {parent_id, child_id})
+    assert metadata[child_id]['relationship_type'] == 'child_session'
+    assert '_lineage_root_id' not in metadata[child_id]
+    assert '_lineage_tip_id' not in metadata.get(parent_id, {})
+    child_report = read_session_lineage_report(db_path, child_id)
+    assert child_report['lineage_key'] == child_id
+    assert child_report['tip_session_id'] == child_id
+    assert child_report['total_segments'] == 1
+    parent_report = read_session_lineage_report(db_path, parent_id)
+    assert parent_report['tip_session_id'] == parent_id
+    assert parent_report['total_segments'] == 1
+    assert [child['session_id'] for child in parent_report['children']] == [child_id]
+    assert parent_report['children'][0]['role'] == 'child_session'
+
+    # (c) Watcher publication: the SSE payload carries both conversations
+    # with their own titles.
+    watcher = GatewayWatcher(state_db_path=db_path)
+    subscriber = watcher.subscribe()
+    assert watcher._poll_once(now=1.0) is True
+    event = subscriber.get_nowait()
+    published = {row['session_id']: row for row in event['sessions']}
+    assert set(published) == {parent_id, child_id}
+    assert published[child_id]['title'] == 'Reset child conversation'
+    assert published[parent_id]['title'] == 'Reset parent conversation'
+
+    # (d) Transcript stitching never prepends the parent's transcript.
+    monkeypatch.setattr(models, '_active_state_db_path', lambda: db_path)
+    stitched = get_state_db_session_messages(child_id, stitch_continuations=True)
+    assert [message['content'] for message in stitched] == [
+        'after reset',
+        'answer after reset',
+    ]
+    parent_messages = get_state_db_session_messages(parent_id, stitch_continuations=True)
+    assert [message['content'] for message in parent_messages] == [
+        'before reset',
+        'answer before reset',
+        'resumed parent',
+    ]
 
 
 def test_compression_lineage_prefers_freshest_descendant_over_newer_direct_sibling():
@@ -1020,6 +1194,7 @@ def test_agent_session_source_normalization_contract():
         'discord': ('messaging', 'Discord'),
         'slack': ('messaging', 'Slack'),
         'matrix': ('messaging', 'Matrix'),
+        'signal': ('messaging', 'Signal'),
         'cron': ('cron', 'Cron'),
         'webhook': ('webhook', 'Webhook'),
         'tool': ('tool', 'Tool'),
@@ -1045,13 +1220,14 @@ def test_sessions_js_treats_email_as_messaging_source():
     raw_section = src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
     label_section = src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
 
-    for raw_source in ("email", "wecom", "wecom_callback", "matrix"):
+    for raw_source in ("email", "wecom", "wecom_callback", "matrix", "signal"):
         assert f"'{raw_source}'" in raw_section, f"Missing raw source {raw_source!r} in _MESSAGING_RAW_SOURCES"
 
     assert "email: 'Email'" in label_section
     assert "wecom: 'WeCom'" in label_section
     assert "wecom_callback: 'WeCom Callback'" in label_section
     assert "matrix: 'Matrix'" in label_section
+    assert "signal: 'Signal'" in label_section
 
 
 def test_sessions_js_treats_messaging_sidecars_behaviorally():
@@ -1067,6 +1243,8 @@ const cases = [
   {{ session_source: 'other', raw_source: 'wecom_callback' }},
   {{ session_source: 'other', source_tag: 'wecom' }},
   {{ session_source: 'other', source: 'matrix' }},
+  {{ session_source: 'other', source: 'signal' }},
+  {{ session_source: 'other', raw_source: 'signal' }},
   {{ session_source: 'messaging', source: 'anything' }},
 ];
 for (const c of cases) {{
@@ -1074,6 +1252,47 @@ for (const c of cases) {{
 }}
 if (_isMessagingSession({{ session_source: 'other', source: 'cli' }})) {{
   throw new Error('cli should not be treated as messaging');
+}}
+"""
+    subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+
+def test_sessions_js_treats_signal_sidecar_as_external_session():
+    """A Signal gateway session must be exposed as an external session.
+
+    The sidebar only lists sessions the client classifier reports as external,
+    and _isExternalSession routes messaging sources through _isMessagingSession.
+    A Signal sidecar whose persisted session_source is the legacy 'other' value
+    therefore has to be recognized from its raw source, exactly like the Matrix
+    precedent (#6816). This exercises the real sessions.js classifiers in node
+    rather than asserting on the shape of the allowlists.
+    """
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.index("const _MESSAGING_RAW_SOURCES")
+    end = src.index("\n}", src.index("function _isExternalSession")) + len("\n}")
+    block = src[start:end]
+    script = f"""
+{block}
+if (!_isMessagingSession({{ session_source: 'other', source: 'signal' }})) {{
+  throw new Error('signal session was not classified as messaging');
+}}
+if (_MESSAGING_SOURCE_LABELS['signal'] !== 'Signal') {{
+  throw new Error('unexpected signal source label: ' + _MESSAGING_SOURCE_LABELS['signal']);
+}}
+for (const c of [
+  {{ session_source: 'other', source: 'signal' }},
+  {{ session_source: 'other', raw_source: 'signal' }},
+  {{ session_source: 'other', source_tag: 'signal' }},
+]) {{
+  if (!_isExternalSession(c)) {{
+    throw new Error('signal sidecar is not exposed as an external session: ' + JSON.stringify(c));
+  }}
+}}
+if (_isExternalSession({{ session_source: 'webui', source: 'signal' }})) {{
+  throw new Error('a WebUI-origin session must not be treated as an external session');
+}}
+if (_isExternalSession({{ session_source: 'other', source: 'some_future_platform' }})) {{
+  throw new Error('an unrecognized source must not be treated as an external session');
 }}
 """
     subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)

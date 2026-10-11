@@ -151,9 +151,9 @@ def test_chat_start_no_longer_bare_404_on_keyerror():
 def test_get_session_route_uses_shared_synthesiser():
     """The GET KeyError path must also delegate to the same helper."""
     src = ROUTES_PY.read_text(encoding="utf-8")
-    # Find the /api/session GET block (not /api/sessions).
+    # Find the /api/session GET handler (extracted to _handle_session_get).
     block = re.search(
-        r'if parsed\.path == "/api/session":.*?return j\(handler, \{"session": public_session_projection\(sess\)\}\)',
+        r'def _handle_session_get\(.*?return j\(handler, \{"session": public_session_projection\(sess\)\}\)',
         src,
         re.DOTALL,
     )
@@ -185,7 +185,7 @@ def test_get_session_preserves_cli_read_only_flag():
     sets to True for BOTH the explicit AND the source-refused
     refusal paths."""
     block = re.search(
-        r'if parsed\.path == "/api/session":.*?return j\(handler, \{"session": public_session_projection\(sess\)\}\)\)?',
+        r'def _handle_session_get\(.*?return j\(handler, \{"session": public_session_projection\(sess\)\}\)\)?',
         ROUTES_PY.read_text(encoding="utf-8"),
         re.DOTALL,
     )

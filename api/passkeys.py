@@ -182,6 +182,41 @@ def _host_without_port(host: str) -> str:
 
 
 def rp_context(handler) -> tuple[str, str]:
+    # A reverse proxy that rewrites Host to its own upstream address (common
+    # when a separate SPA front-end proxies /api to this backend) leaves Host
+    # useless for deriving the RPID, while Origin still carries the origin the
+    # browser is actually on. Prefer Origin's hostname: WebAuthn's RPID-origin
+    # check compares against the page's origin, not the backend's.
+    #
+    # Origin is client-supplied, so this is deliberately NOT a trust decision:
+    # it only selects which name the ceremony is scoped to. The actual security
+    # gates are unchanged and live elsewhere — the authenticator will only
+    # release a credential whose RPID is a registrable suffix of the real page
+    # origin, `_client_data()` requires clientDataJSON.origin to equal the
+    # origin stored with the challenge, `_parse_auth_data()` compares the
+    # authenticator's rpIdHash against that same stored RPID, and the assertion
+    # signature is verified against the stored credential public key. A forged
+    # Origin therefore yields a self-consistent ceremony that still cannot
+    # produce a valid signature.
+    #
+    # Accept it only as a syntactically valid http(s) origin with a hostname,
+    # and rebuild the origin string from the parsed parts rather than echoing
+    # the raw header, so a malformed or non-http Origin falls through to Host.
+    browser_origin = handler.headers.get("Origin", "")
+    if browser_origin:
+        try:
+            from urllib.parse import urlparse
+            parsed = urlparse(browser_origin.strip())
+            if parsed.scheme in ("http", "https") and parsed.hostname:
+                # Re-bracket IPv6 literals: parsed.hostname strips the [] that the
+                # browser's clientDataJSON.origin carries, so an unbracketed
+                # "http://::1:8787" would never match the stored origin.
+                host_part = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+                netloc = host_part if parsed.port is None else f"{host_part}:{parsed.port}"
+                return parsed.hostname, f"{parsed.scheme}://{netloc}"
+        except Exception:
+            pass
+    # Fallback: derive from Host header (direct/internal access)
     host = _host_without_port(handler.headers.get("Host", "localhost"))
     proto = handler.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
     if proto not in {"http", "https"}:
@@ -342,9 +377,23 @@ def finish_registration(payload: dict[str, Any], handler) -> dict[str, Any]:
     if len(rest) < 18:
         raise PasskeyError("Malformed credential data")
     cred_len = int.from_bytes(rest[16:18], "big")
+    if cred_len == 0 or len(rest) < 18 + cred_len:
+        raise PasskeyError("Malformed credential data")
     credential_id = rest[18:18 + cred_len]
-    cose_bytes = rest[18 + cred_len:]
-    cose_key = _cbor_loads(cose_bytes)
+    # The COSE key is followed by a separate CBOR extension map when ED is set.
+    parser = _Cbor(rest[18 + cred_len:])
+    cose_key = parser.item()
+    if not isinstance(cose_key, dict):
+        raise PasskeyError("Malformed credential public key")
+    if parsed["flags"] & 0x80:
+        try:
+            extensions = parser.item()
+        except (TypeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+            raise PasskeyError("Malformed authenticator extensions") from exc
+        if not isinstance(extensions, dict):
+            raise PasskeyError("Malformed authenticator extensions")
+    if parser.pos != len(parser.data):
+        raise PasskeyError("Trailing CBOR data")
     public_key = _public_key_from_cose(cose_key)
     pem = public_key.public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")
     cred_id = _b64u(credential_id)

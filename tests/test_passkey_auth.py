@@ -395,3 +395,73 @@ def test_passwordless_settings_and_last_passkey_guard_are_wired():
     assert "id=\"btnGoPasswordless\"" in index
     assert "async function goPasswordless" in panels
     assert "prompt(" not in panels
+
+
+# ── rp_context: RPID/origin derivation (Origin-first, IPv6-safe) — #6772 ──────
+
+class _HeaderHandler:
+    """Minimal stand-in for the HTTP handler rp_context() reads headers from."""
+
+    def __init__(self, headers):
+        # case-insensitive get, like http.client.HTTPMessage
+        self._h = {k.lower(): v for k, v in headers.items()}
+
+    class _H:
+        def __init__(self, h):
+            self._h = h
+
+        def get(self, name, default=""):
+            return self._h.get(name.lower(), default)
+
+    @property
+    def headers(self):
+        return _HeaderHandler._H(self._h)
+
+
+def test_rp_context_prefers_wellformed_origin_over_host():
+    from api import passkeys
+
+    h = _HeaderHandler({"Origin": "https://app.example.com", "Host": "backend.internal:9000"})
+    rp_id, origin = passkeys.rp_context(h)
+    assert rp_id == "app.example.com"
+    assert origin == "https://app.example.com"
+
+
+def test_rp_context_preserves_origin_port():
+    from api import passkeys
+
+    h = _HeaderHandler({"Origin": "http://localhost:8787", "Host": "localhost:8787"})
+    rp_id, origin = passkeys.rp_context(h)
+    assert rp_id == "localhost"
+    assert origin == "http://localhost:8787"
+
+
+def test_rp_context_ipv6_origin_is_bracketed_to_match_clientdata():
+    """A browser's clientDataJSON.origin brackets an IPv6 host ('http://[::1]:8787').
+    rp_context must store the same bracketed form, or _client_data()'s origin
+    comparison (and thus passkey login over IPv6) would always fail."""
+    from api import passkeys
+
+    h = _HeaderHandler({"Origin": "http://[::1]:8787", "Host": "[::1]:8787"})
+    rp_id, origin = passkeys.rp_context(h)
+    assert rp_id == "::1"
+    assert origin == "http://[::1]:8787"
+
+
+def test_rp_context_falls_back_to_host_on_malformed_origin():
+    from api import passkeys
+
+    for bad in ("javascript:alert(1)", "file:///etc/passwd", "not-a-url", ""):
+        h = _HeaderHandler({"Origin": bad, "Host": "real.example.com"})
+        rp_id, _origin = passkeys.rp_context(h)
+        assert rp_id == "real.example.com", f"expected Host fallback for Origin={bad!r}"
+
+
+def test_rp_context_strips_origin_userinfo():
+    """A userinfo-bearing Origin must not be stored verbatim; the hostname wins."""
+    from api import passkeys
+
+    h = _HeaderHandler({"Origin": "https://user:pw@evil.example.com", "Host": "real.example.com"})
+    rp_id, origin = passkeys.rp_context(h)
+    assert rp_id == "evil.example.com"
+    assert "@" not in origin and origin == "https://evil.example.com"

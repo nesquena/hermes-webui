@@ -68,6 +68,21 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
         return default
     return value if value >= minimum else default
 
+
+def _env_int_clamped(name: str, default: int, *, minimum: int = 1, maximum: int) -> int:
+    """Like ``_env_int``, then clamp a valid override to ``maximum``."""
+    value = _env_int(name, default, minimum=minimum)
+    if not str(os.getenv(name) or "").strip():
+        return value
+    return min(value, maximum)
+
+
+# Sidebar recency window. Resolved here, before profile init, so a profile
+# .env cannot override a server-wide resource bound. Clamped at 200.
+CLI_VISIBLE_SESSION_LIMIT = _env_int_clamped(
+    "HERMES_WEBUI_VISIBLE_SESSION_LIMIT", 20, maximum=200,
+)
+
 # ── TLS/HTTPS config (optional, env-overridable) ────────────────────────────
 TLS_CERT = os.getenv("HERMES_WEBUI_TLS_CERT", "").strip() or None
 TLS_KEY = os.getenv("HERMES_WEBUI_TLS_KEY", "").strip() or None
@@ -83,10 +98,19 @@ STATE_DIR = (
     .resolve()
 )
 
+
+def _resolve_settings_file(state_dir: Path) -> Path:
+    """Resolve an optional per-instance settings file without splitting session state."""
+    configured = os.getenv("HERMES_WEBUI_SETTINGS_FILE", "").strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return state_dir / "settings.json"
+
+
 SESSION_DIR = STATE_DIR / "sessions"
 WORKSPACES_FILE = STATE_DIR / "workspaces.json"
 SESSION_INDEX_FILE = SESSION_DIR / "_index.json"
-SETTINGS_FILE = STATE_DIR / "settings.json"
+SETTINGS_FILE = _resolve_settings_file(STATE_DIR)
 LAST_WORKSPACE_FILE = STATE_DIR / "last_workspace.txt"
 PROJECTS_FILE = STATE_DIR / "projects.json"
 
@@ -97,6 +121,17 @@ logger = logging.getLogger(__name__)
 # path probes configured custom endpoints serially, so each provider needs a
 # short hard cap and graceful degradation.
 CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS = 5.0
+
+# Attempt-only timeout for a probe that ``_CustomProbeSchedule`` reaches *after*
+# the shared rebuild window is already spent while the foreground caller is still
+# waiting — the narrow hand-off race described on ``next_timeout``. It is NOT a
+# per-probe minimum and NOT a share of the window: by the time it applies the
+# window is already gone, so nothing is being divided out of it, and it can never
+# be handed out on the fair-share path. Not zero, because urllib reads a zero
+# timeout as "non-blocking" and would report a probe that is genuinely still in
+# flight as an instant connection failure. The full per-endpoint cap is reserved
+# for the deliberately out-of-band continuation, never for this state.
+CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS = 0.01
 
 
 def _env_mb_bytes(name: str, default_mb: int) -> int:
@@ -552,6 +587,7 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     # Remember the old mtime so we can tell whether config actually changed
     # vs. first-ever load (mtime == 0.0, e.g. server start or profile switch).
     _old_cfg_mtime = _cfg_mtime
+    _old_cfg_path = _cfg_path
     _cfg_path = config_path
     _cfg_mtime = 0.0
     try:
@@ -608,10 +644,11 @@ def _refresh_config_cache(config_path: Path | None = None) -> None:
     _cfg_fingerprint = _fingerprint_config(_cfg_cache)
     # Bust the models cache so the next request sees fresh config values.
     # Only delete the disk cache when config has actually changed -- not on
-    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start or
-    # profile switch) -- preserving the disk cache so the next restart
+    # first-ever load (when _old_cfg_mtime == 0.0, i.e. server start) and not
+    # on a path change (per-client profile switch leaves the old profile's
+    # mtime) -- preserving the disk cache so the next restart
     # still hits the fast path without a cold run.
-    if _old_cfg_mtime != 0.0:
+    if _old_cfg_mtime != 0.0 and _old_cfg_path == config_path:
         _delete_models_cache_on_disk()
 
 
@@ -652,7 +689,7 @@ def _load_yaml_config_file_raw(config_path: Path, *, _copy: bool = True) -> dict
     mutates its input) pass _copy=False to skip the redundant copy on the hot path.
     """
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError:
         return {}
 
@@ -713,10 +750,14 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     bypassing the thread-local resolver entirely. When ``profile_home`` matches
     the path the ambient resolver would pick (the common single-profile case),
     we return the cached ``get_config()`` to preserve in-memory overrides used
-    by tests and runtime callers. Only when the session's profile home diverges
-    from the ambient path do we read the session profile's file directly — a
-    pure read with no global cache mutation, so it is race-free across
-    concurrent sessions on different profiles.
+    by tests and runtime callers, and to honour an authoritative
+    ``HERMES_CONFIG_PATH`` override. Only when the session's profile home
+    diverges from the ambient path do we read the session profile's file
+    directly — a pure read with no global cache mutation, so it is race-free
+    across concurrent sessions on different profiles. Divergent profiles stay
+    isolated: a nonexistent home returns ``{}`` and an existing home without a
+    ``config.yaml`` yields defaults — neither ever falls back to the ambient
+    config (profiles-are-islands).
     """
     if not profile_home:
         return get_config()
@@ -724,10 +765,18 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
         target = Path(profile_home).expanduser()
     except Exception:
         return get_config()
+
+    from api.workspace import _safe_resolve as _cfg_safe_resolve
+
+    # Canonicalize BOTH sides before every identity comparison (#7168 re-gate
+    # round 5): when HERMES_HOME (or the config parent) is a symlink alias,
+    # lexical equality fails and an authoritative HERMES_CONFIG_PATH inside
+    # the aliased home would be bypassed in favor of a direct — wrong — read.
+    target = _cfg_safe_resolve(target)
     try:
         from api.profiles import get_active_hermes_home
 
-        if Path(get_active_hermes_home()).expanduser() == target:
+        if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
             return get_config()
     except Exception:
         pass
@@ -737,7 +786,7 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     # whose directory doesn't physically exist yet (fresh install, monkeypatched
     # cfg) must still resolve through get_config(), not return {} (#4516 gate).
     try:
-        if _get_config_path().parent == target:
+        if _cfg_safe_resolve(_get_config_path().parent) == target:
             return get_config()
     except Exception:
         pass
@@ -776,7 +825,7 @@ def _config_for_yaml_save(config_data: dict) -> dict:
 
 def _save_yaml_config_file(config_path: Path, config_data: dict) -> None:
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
     except ImportError as exc:
         raise RuntimeError("PyYAML is required to write Hermes config.yaml") from exc
 
@@ -1034,7 +1083,12 @@ MIME_MAP = {
     ".ico": "image/x-icon",
     ".bmp": "image/bmp",
     ".pdf": "application/pdf",
+    ".zip": "application/zip",
     ".json": "application/json",
+    ".csv": "text/csv",
+    ".diff": "text/x-diff",
+    ".patch": "text/x-diff",
+    ".excalidraw": "application/vnd.excalidraw+json",
     ".html": "text/html",
     ".htm": "text/html",
     ".xls": "application/vnd.ms-excel",
@@ -1151,6 +1205,7 @@ _FALLBACK_MODELS = [
     {"provider": "MiniMax",   "id": "minimax/MiniMax-M2.7-highspeed",   "label": "MiniMax M2.7 Highspeed"},
     # Z.AI / GLM
     {"provider": "Z.AI",      "id": "zai/glm-5.3",                      "label": "GLM-5.3"},
+    {"provider": "Z.AI",      "id": "zai/glm-5.3-flash",                "label": "GLM-5.3 Flash"},
     {"provider": "Z.AI",      "id": "zai/glm-5.2",                      "label": "GLM-5.2"},
     {"provider": "Z.AI",      "id": "zai/glm-5.1",                      "label": "GLM-5.1"},
     {"provider": "Z.AI",      "id": "zai/glm-5",                        "label": "GLM-5"},
@@ -1398,6 +1453,37 @@ def _configured_model_ids(raw_models: object) -> list[str]:
     return model_ids
 
 
+def _provider_discover_allowed(provider_cfg: object) -> bool:
+    """Mirror the Hermes Agent ``discover_models`` opt-out (``model_switch_providers._discover_flag``).
+
+    ``discover_models`` defaults to True; the string forms ``"false"``/``"no"``/``"0"``
+    (case-insensitive) mean False. A provider that pins its catalog with
+    ``discover_models: false`` keeps its configured ``models:`` even when the entry is
+    also marked ``models_discovered: true`` — the explicit opt-out wins.
+    """
+    if not isinstance(provider_cfg, dict):
+        return True
+    discover = provider_cfg.get("discover_models", True)
+    if isinstance(discover, str):
+        return discover.strip().lower() not in {"false", "no", "0"}
+    return bool(discover)
+
+
+def _provider_models_are_discovered_catalog(provider_cfg: object) -> bool:
+    """True when ``models:`` is an auto-discovered catalog that should defer to the live probe.
+
+    A provider entry marked ``models_discovered: true`` carries a per-model *metadata*
+    mapping written by Hermes discovery, not a hand-curated allowlist — so the live
+    ``/v1/models`` catalog is authoritative. But an explicit ``discover_models: false``
+    re-pins the configured mapping as the source of truth, so honor that opt-out.
+    """
+    return (
+        isinstance(provider_cfg, dict)
+        and provider_cfg.get("models_discovered") is True
+        and _provider_discover_allowed(provider_cfg)
+    )
+
+
 def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
     """Return picker option rows from supported config allowlist shapes."""
     labels: dict[str, str] = {}
@@ -1415,6 +1501,29 @@ def _configured_model_options(raw_models: object) -> list[dict[str, str]]:
         {"id": model_id, "label": labels.get(model_id, model_id)}
         for model_id in _configured_model_ids(raw_models)
     ]
+
+
+def _merge_model_option_rows(*row_lists: object) -> list[dict[str, str]]:
+    """Merge picker option rows from multiple sources, first-seen order, deduped by id.
+
+    Used to preserve a discovered provider's configured model IDs (ordered first) as a
+    fallback when a live ``/v1/models`` probe transiently returns nothing, merged with
+    any static built-in catalog without producing duplicate ids.
+    """
+    merged: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for rows in row_lists:
+        if not isinstance(rows, (list, tuple)):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            model_id = str(row.get("id") or "").strip()
+            if not model_id or model_id in seen:
+                continue
+            seen.add(model_id)
+            merged.append(row)
+    return merged
 
 
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
@@ -1695,26 +1804,21 @@ _PROVIDER_MODELS = {
     ],
     "openai": [
         {"id": "gpt-5.5",      "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-api": [
         {"id": "gpt-5.5",      "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
         {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
         {"id": "gpt-5.4",      "label": "GPT-5.4"},
     ],
     "openai-codex": [
-        {"id": "gpt-5.5", "label": "GPT-5.5"},
-        {"id": "gpt-5.5-mini", "label": "GPT-5.5 Mini"},
-        {"id": "gpt-5.4", "label": "GPT-5.4"},
-        {"id": "gpt-5.4-mini", "label": "GPT-5.4 Mini"},
-        {"id": "gpt-5.3-codex", "label": "GPT-5.3 Codex"},
-        {"id": "gpt-5.2-codex", "label": "GPT-5.2 Codex"},
-        {"id": "gpt-5.1-codex-max", "label": "GPT-5.1 Codex Max"},
-        {"id": "gpt-5.1-codex-mini", "label": "GPT-5.1 Codex Mini"},
-        {"id": "codex-mini-latest", "label": "Codex Mini (latest)"},
+        {"id": "gpt-6-sol",      "label": "GPT-6 Sol"},
+        {"id": "gpt-6-luna",     "label": "GPT-6 Luna"},
+        {"id": "gpt-5.6-sol",    "label": "GPT-5.6 Sol"},
+        {"id": "gpt-5.6-terra",  "label": "GPT-5.6 Terra"},
+        {"id": "gpt-5.6-luna",   "label": "GPT-5.6 Luna"},
+        {"id": "gpt-5.5",        "label": "GPT-5.5"},
     ],
     "google": [
         {"id": "gemini-3.1-pro-preview",            "label": "Gemini 3.1 Pro Preview"},
@@ -1737,6 +1841,7 @@ _PROVIDER_MODELS = {
     ],
     "zai": [
         {"id": "glm-5.3", "label": "GLM-5.3"},
+        {"id": "glm-5.3-flash", "label": "GLM-5.3 Flash"},
         {"id": "glm-5.2", "label": "GLM-5.2"},
         {"id": "glm-5.1", "label": "GLM-5.1"},
         {"id": "glm-5", "label": "GLM-5"},
@@ -1835,28 +1940,44 @@ _PROVIDER_MODELS = {
         {"id": "big-pickle", "label": "Big Pickle"},
     ],
     # OpenCode Go — flat-rate models via opencode.ai/go ($10/month).
-    # Synced 2026-07-08 from the public Go docs and documented models endpoint.
-    # Keep preview/free-only Zen models out of this Go picker snapshot.
+    # Fallback only: the live Hermes CLI catalog (Go-specific
+    # /zen/go/v1/models probe, core v0.20.5+) leads (#1240, #5311).
+    # Mirrors Hermes core's curated opencode-go list
+    # (hermes_cli/models_catalog_static.py, core main as of 2026-09-10).
+    # Core's 2026-09-09 sync dropped `ox-alpha-free` (Go relay delisted it:
+    # GET /zen/go/v1/models omits it, POST → 401) and added `glm-5.3-flash`
+    # and `muse-spark-1.3-contributor`. Core owns the sync duty against the
+    # live endpoint; WebUI mirrors.
     "opencode-go": [
-        {"id": "minimax-m3",       "label": "MiniMax M3"},
-        {"id": "minimax-m2.7",     "label": "MiniMax M2.7"},
-        {"id": "minimax-m2.5",     "label": "MiniMax M2.5"},
-        {"id": "kimi-k2.7-code",   "label": "Kimi K2.7 Code"},
-        {"id": "kimi-k2.6",        "label": "Kimi K2.6"},
-        {"id": "kimi-k2.5",        "label": "Kimi K2.5"},
-        {"id": "glm-5.2",          "label": "GLM-5.2"},
-        {"id": "glm-5.1",          "label": "GLM-5.1"},
-        {"id": "glm-5",            "label": "GLM-5"},
-        {"id": "deepseek-v4-pro",  "label": "DeepSeek V4 Pro"},
-        {"id": "deepseek-v4-flash","label": "DeepSeek V4 Flash"},
-        {"id": "qwen3.7-max",      "label": "Qwen3.7 Max"},
-        {"id": "qwen3.7-plus",     "label": "Qwen3.7 Plus"},
-        {"id": "qwen3.6-plus",     "label": "Qwen3.6 Plus"},
-        {"id": "qwen3.5-plus",     "label": "Qwen3.5 Plus"},
-        {"id": "mimo-v2-pro",      "label": "MiMo V2 Pro"},
-        {"id": "mimo-v2-omni",     "label": "MiMo V2 Omni"},
-        {"id": "mimo-v2.5-pro",    "label": "MiMo V2.5 Pro"},
-        {"id": "mimo-v2.5",        "label": "MiMo V2.5"},
+        {"id": "kimi-k3",                  "label": "Kimi K3"},
+        {"id": "kimi-k2.7-code",           "label": "Kimi K2.7 Code"},
+        {"id": "kimi-k2.6",                "label": "Kimi K2.6"},
+        {"id": "kimi-k2.5",                "label": "Kimi K2.5"},
+        {"id": "gpt-5.6-luna",             "label": "GPT 5.6 Luna"},
+        {"id": "grok-4.5",                 "label": "Grok 4.5"},
+        {"id": "glm-5.3",                  "label": "GLM-5.3"},
+        {"id": "glm-5.3-flash",            "label": "GLM-5.3 Flash"},
+        {"id": "glm-5.2",                  "label": "GLM-5.2"},
+        {"id": "glm-5.1",                  "label": "GLM-5.1"},
+        {"id": "glm-5",                    "label": "GLM-5"},
+        {"id": "mimo-v2.5-pro",            "label": "MiMo V2.5 Pro"},
+        {"id": "mimo-v2.5",                "label": "MiMo V2.5"},
+        {"id": "mimo-v2-pro",              "label": "MiMo V2 Pro"},
+        {"id": "mimo-v2-omni",             "label": "MiMo V2 Omni"},
+        {"id": "minimax-m3",               "label": "MiniMax M3"},
+        {"id": "minimax-m2.7",             "label": "MiniMax M2.7"},
+        {"id": "minimax-m2.5",             "label": "MiniMax M2.5"},
+        {"id": "deepseek-v4-pro",          "label": "DeepSeek V4 Pro"},
+        {"id": "deepseek-v4-flash",        "label": "DeepSeek V4 Flash"},
+        {"id": "qwen3.8-max",              "label": "Qwen3.8 Max"},
+        {"id": "qwen3.7-max",              "label": "Qwen3.7 Max"},
+        {"id": "qwen3.7-plus",             "label": "Qwen3.7 Plus"},
+        {"id": "qwen3.6-plus",             "label": "Qwen3.6 Plus"},
+        {"id": "qwen3.5-plus",             "label": "Qwen3.5 Plus"},
+        {"id": "hy3",                      "label": "HY3"},
+        {"id": "hy3-preview",              "label": "HY3 Preview"},
+        {"id": "muse-spark-1.2-contributor", "label": "Muse Spark 1.2 Contributor"},
+        {"id": "muse-spark-1.3-contributor", "label": "Muse Spark 1.3 Contributor"},
     ],
     # 'gemini' is the hermes_cli provider ID for Google AI Studio
     # Model IDs are bare — sent directly to:
@@ -1917,11 +2038,12 @@ def _seed_provider_models_from_core() -> None:
     """Enrich existing provider model lists with missing IDs from hermes_cli.
 
     The core's _PROVIDER_MODELS is the authoritative curated list of agent-capable
-    models per provider.  The WebUI's static dict above is a display-oriented copy
-    (with {id, label} entries) that can go stale when new models are added to the
-    core without a matching WebUI update.  This function bridges the gap by
-    injecting any missing model IDs from the core into **existing** WebUI provider
-    entries.
+    models for ordinary providers.  The WebUI's static dict above is a
+    display-oriented copy (with {id, label} entries) that can go stale when new
+    models are added to the core without a matching WebUI update.  This function
+    bridges the gap by injecting any missing model IDs from the core into
+    **existing** WebUI provider entries.  OpenAI Codex is excluded because its
+    account-entitlement-aware live/cache path owns catalog freshness.
 
     Constrains seeding to providers already in the WebUI catalog — does NOT add
     brand-new providers.  Adding new vendors is a maintainer curation decision.
@@ -1952,6 +2074,8 @@ def _seed_provider_models_from_core() -> None:
             _webui_key_by_canonical[_canon] = _wk
 
     for provider_id, core_models in _core_pm.items():
+        if provider_id == "openai-codex":
+            continue
         if not isinstance(core_models, list):
             continue
 
@@ -2245,6 +2369,29 @@ def _model_matches_picker_selection(
         candidate_provider = candidate[1 : candidate.index(":")].lower()
 
     return not selected_provider or not candidate_provider or selected_provider == candidate_provider
+
+
+def _openrouter_model_display_name(model_id: str) -> str:
+    """Return the OpenRouter display name (e.g. ``Ox Alpha``) for *model_id*.
+
+    Reads only the local shared metadata disk cache written by hermes-agent
+    (``cache/openrouter_model_metadata.json``) — never touches the network.
+    Falls back to the raw id when the model is unknown or the cache is
+    unavailable, so picker rows are always populated (#7228).
+    """
+    if not model_id:
+        return model_id
+    try:
+        from agent.model_metadata import _load_model_metadata_disk_cache
+
+        cache = _load_model_metadata_disk_cache() or {}
+    except Exception:
+        return model_id
+    entry = cache.get(model_id)
+    if not isinstance(entry, dict):
+        return model_id
+    name = str(entry.get("name") or "").strip()
+    return name or model_id
 
 
 def _split_picker_overflow_models(
@@ -2554,6 +2701,20 @@ def _custom_slug_rest_looks_like_host_port(rest: str) -> bool:
     return False
 
 
+class _ConfiguredCustomLaneModel(str):
+    """A model id bound to the Custom lane of the configured endpoint (#7955).
+
+    model_with_provider_context() returns it for a ``custom`` session under a
+    configured provider that aliases to ``custom`` (``ollama``, legacy
+    ``local``), and resolve_model_provider() routes it to ``model.base_url``.
+    The lane travels as this type, not as text: every caller passes the value
+    straight from one to the other, and no ``@<provider>:<model>`` string a
+    ``providers.<name>`` entry can produce is an instance of it.
+    """
+
+    __slots__ = ()
+
+
 def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     """Parse WebUI's ``@provider:model`` route hint into ``(model, provider)``.
 
@@ -2616,6 +2777,85 @@ def _get_provider_cfg(provider_id) -> dict:
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
+class AmbiguousCustomProviderError(ValueError):
+    """Raised when two+ custom_providers[] entries normalize to the same slug.
+
+    A custom provider is identified downstream by a SLUG (``custom:<slug>``):
+    ``resolve_model_provider()`` returns it, and the credential lookup
+    (``resolve_custom_provider_connection``) resolves the API key + base_url by
+    scanning ``custom_providers[]`` for the FIRST entry whose name normalizes to
+    that slug — independent of model ownership or the endpoint chosen earlier. So
+    when two distinct provider names normalize to the same slug (e.g. ``Foo Bar``
+    and ``foo-bar`` both -> ``custom:foo-bar``), consuming the slug on ANY path
+    could pair one entry's endpoint with another entry's credential — including
+    the asymmetric case where only one of the colliding entries lists the
+    requested model. Rather than guess, every slug-only boundary fails closed and
+    surfaces the collision so the user can rename one provider. Subclasses
+    ``ValueError`` so existing ``except ValueError`` / broad-``except`` fallbacks
+    continue to catch it.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        # Expose the actionable rename text as ``.message`` so HTTP handlers can
+        # forward it verbatim (as the JSON ``error``) without ``str(e)`` casts,
+        # and it reaches the user on the handoff + save paths instead of being
+        # swallowed into a generic fallback.
+        self.message = message
+
+
+def _custom_provider_slug_key(value: object) -> str:
+    """Canonical bare slug for custom-provider identity + collision detection.
+
+    Derived from the SINGLE authoritative slug PRODUCER
+    ``_custom_provider_slug_from_name()`` — the same function that mints the
+    ``custom:<slug>`` ids resolve_model_provider() actually returns, persists,
+    and routes on. Using the producer's normalization (not a private variant)
+    everywhere means every slug-only boundary — bare + qualified resolution,
+    credential lookup, auxiliary persistence — compares against ONE identity, so
+    names that genuinely collide at the producer level (e.g. ``Foo (Bar)`` and
+    ``foo-bar`` both -> ``custom:foo-bar``) are detected as collisions instead of
+    slipping through a looser key. Returns the bare slug (no ``custom:`` prefix).
+    Accepts a bare provider name or a ``custom:<slug>`` id.
+    """
+    produced = _custom_provider_slug_from_name(value)
+    return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
+
+
+def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:
+    """Return the single named ``custom_providers`` entry matching ``slug_key``.
+
+    Pure and lock-safe: operates only on the passed-in list, so it can be called
+    while holding ``_cfg_lock`` (unlike ``get_config()``-based resolvers).
+
+    Membership is built from ALL named entries, INDEPENDENT of model ownership,
+    because slug-only credential resolution scans every same-slug entry and
+    returns the first match. Raises ``AmbiguousCustomProviderError`` when 2+
+    entries share the key so an endpoint and an API key can never be resolved
+    from different entries on any path. Returns the matching entry, or ``None``
+    when no entry matches.
+    """
+    if not slug_key or not isinstance(custom_providers, list):
+        return None
+    matches: list[dict] = []
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        if _custom_provider_slug_key(name) == slug_key:
+            matches.append(entry)
+    if len(matches) >= 2:
+        names = [str(e.get("name") or "").strip() for e in matches]
+        raise AmbiguousCustomProviderError(
+            f"Custom providers {names!r} all normalize to the same provider slug "
+            f"{slug_key!r}; an endpoint and API key could be resolved from "
+            f"different entries. Rename one so each custom provider has a unique slug."
+        )
+    return matches[0] if matches else None
+
+
 def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
@@ -2669,9 +2909,40 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     if isinstance(config_provider, str) and config_provider.strip().lower() == "local":
         config_provider = "custom"
 
+    def _finalize(model: object, provider: object, base_url: object) -> tuple:
+        """Point-of-return collision guard.
+
+        Fail closed HERE — immediately before handing a ``custom:<slug>`` back —
+        never up front. A slug collision on one custom pair must not block a
+        request that resolves to a DIFFERENT provider (an unrelated
+        ``@openrouter:...`` / ``@custom:safe-provider:...`` lane, or the bare
+        ``custom`` proxy), so the ambiguity check runs only on the slug actually
+        being returned. ``_unique_custom_provider_entry`` raises
+        AmbiguousCustomProviderError when >=2 config entries share the slug, so a
+        downstream credential lookup can never first-match a different entry than
+        the one whose endpoint we resolved. No-op for bare ``custom`` and every
+        non-custom provider.
+        """
+        if isinstance(provider, str) and provider.startswith("custom:"):
+            _unique_custom_provider_entry(
+                cfg.get('custom_providers', []),
+                _custom_provider_slug_key(provider),
+            )
+        return model, provider, base_url
+
+    # Read before the strip below, which returns a plain str.
+    configured_custom_lane = isinstance(model_id, _ConfiguredCustomLaneModel)
     model_id = (model_id or "").strip()
     if not model_id:
-        return model_id, config_provider, config_base_url
+        return _finalize(model_id, config_provider, config_base_url)
+
+    # The Custom lane of the configured endpoint (#7955). It is bound to
+    # ``model.base_url`` and answered before anything is looked up by name: a
+    # ``providers.<name>`` or ``custom_providers[]`` record that carries the
+    # configured provider's name, or lists the same model id, has its own
+    # endpoint and credential and is not this lane.
+    if configured_custom_lane:
+        return _finalize(model_id, "custom", config_base_url)
 
     # Custom providers declared in config.yaml should win over slash-based
     # OpenRouter heuristics. Their model IDs commonly contain '/' too.
@@ -2732,6 +3003,57 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     )
     custom_providers = cfg.get('custom_providers', [])
     if isinstance(custom_providers, list) and not _skip_custom_providers:
+        # Disambiguation guard: when two custom_providers[] entries both list the
+        # same bare model id (e.g. dogapi and packyapi both advertise
+        # 'claude-sonnet-5'), a plain first-match scan routes on config WRITE
+        # ORDER — silently hijacking the model to whichever entry appears first,
+        # regardless of the active provider the user actually configured. If the
+        # ACTIVE provider is itself a named custom provider (config_provider
+        # resolved to 'custom:<slug>', including via model.base_url → named-slug
+        # matching), prefer THAT entry when it also owns the model, so an explicit
+        # active endpoint wins over an overlapping earlier entry. Falls through to
+        # the ordered scan below when the active provider is bare 'custom' / not a
+        # named custom entry, or when it doesn't list this model.
+        _active_custom_slug = ''
+        if isinstance(config_provider, str) and config_provider.startswith('custom:'):
+            _active_custom_slug = config_provider
+
+        def _entry_owns_model(entry: dict) -> bool:
+            entry_model = (entry.get('model') or '').strip()
+            ids = set()
+            if entry_model:
+                ids.add(entry_model)
+            ids.update(_configured_model_ids(entry.get('models')))
+            return model_id in ids
+
+        # Explicit active named provider wins over config order when it owns the
+        # model. Only CONSUME the active slug (and thus let _finalize fail closed
+        # on a collision) when the active provider actually lists this model: if
+        # it doesn't, fall through so an unrelated collision on the active slug
+        # never blocks a request that resolves to a different provider.
+        if _active_custom_slug:
+            _active_key = _custom_provider_slug_key(_active_custom_slug)
+            _active_owner = next(
+                (
+                    e for e in custom_providers
+                    if isinstance(e, dict)
+                    and _entry_owns_model(e)
+                    and _custom_provider_slug_key(e.get('name')) == _active_key
+                ),
+                None,
+            )
+            # Exactly one entry carries the active slug AND owns the model ->
+            # authoritative, even when model.base_url is stale/absent or points at
+            # a different endpoint. An explicit, unambiguous named provider must
+            # never lose to config order: a stale URL is not evidence to discard
+            # it. _finalize() fails closed if the active slug is shared by >=2
+            # entries (endpoint + credential could then split).
+            if _active_owner is not None:
+                return _finalize(
+                    model_id,
+                    _active_custom_slug,
+                    (_active_owner.get('base_url') or '').strip() or None,
+                )
         for entry in custom_providers:
             if not isinstance(entry, dict):
                 continue
@@ -2744,7 +3066,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
                 provider_hint = _custom_provider_slug_from_name(entry_name)
-                return model_id, provider_hint, entry_base_url or None
+                # _finalize() applies the all-entry collision guard on this
+                # bare-'custom' / fall-through path before returning the slug.
+                return _finalize(model_id, provider_hint, entry_base_url or None)
 
     # Check user-defined providers (config.yaml → providers:).
     # Mirrors the custom_providers scan above — exact match against each
@@ -2803,14 +3127,53 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     parsed_provider_hint = _parse_provider_qualified_model_id(model_id)
     if parsed_provider_hint is not None:
         bare_model, provider_hint = parsed_provider_hint
+        # Session/send/handoff shapes encode the provider as @custom:<slug>:model
+        # and reach here after the ownership scan only saw the ENCODED string.
+        # _finalize() applies the all-entry uniqueness check before returning the
+        # slug so the downstream credential lookup can't first-match a different
+        # colliding entry — but ONLY on the custom:<slug> actually returned, so an
+        # unrelated collision never blocks this explicit hint (@openrouter, a
+        # non-colliding @custom:other, ...).
         if (
             provider_hint.startswith("custom:")
             and config_base_url
             and _is_local_server_provider(config_provider)
             and provider_hint.lower() in _custom_endpoint_slugs_for_base_url(config_base_url)
         ):
-            return bare_model, config_provider, config_base_url
-        return bare_model, provider_hint, _get_provider_base_url(provider_hint)
+            return _finalize(bare_model, config_provider, config_base_url)
+        # _get_provider_base_url() only reads `providers:` and the ACTIVE
+        # `model.base_url`, so a named custom provider registered solely in
+        # `custom_providers:` resolved to None there. Prefer that entry's own
+        # endpoint so a non-active @custom:<slug> hint routes to its own URL
+        # instead of falling back to the default endpoint (HTTP 400 "Invalid
+        # model format or no credentials for provider: <bare-model>").
+        #
+        # Match via _unique_custom_provider_entry on the module-level `cfg` list:
+        # it is pure and lock-safe, so it stays callable when resolve_model_provider()
+        # is invoked while the caller already holds the non-reentrant _cfg_lock —
+        # a get_config()-based resolver would self-deadlock there. It also does NOT
+        # guess: an unmatched slug (e.g. a host:port-derived one absent from
+        # custom_providers) keeps the prior None so no stale endpoint is persisted
+        # for it (#4728). A colliding slug still fails closed via the raise.
+        #
+        # When an exact custom_providers[] entry exists, that row is authoritative
+        # for its slug: use its stripped base_url directly (including None when
+        # blank). It must NOT fall through to _get_provider_base_url(), which
+        # could pair a same-slug keyed `providers:` endpoint with this entry's
+        # credentials (violating same-entry endpoint/key parity). Only fall back
+        # to _get_provider_base_url() when no exact custom_providers[] row exists.
+        if provider_hint.startswith("custom:"):
+            entry = _unique_custom_provider_entry(
+                cfg.get('custom_providers', []),
+                _custom_provider_slug_key(provider_hint),
+            )
+            if entry is not None:
+                base_url = str(entry.get('base_url') or '').strip() or None
+            else:
+                base_url = _get_provider_base_url(provider_hint)
+        else:
+            base_url = _get_provider_base_url(provider_hint)
+        return _finalize(bare_model, provider_hint, base_url)
 
     if "/" in model_id:
         prefix, bare = model_id.split("/", 1)
@@ -2828,11 +3191,11 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # #854 / #894 for Nous, where this guard was originally added).
         _PORTAL_PROVIDERS = {"nous", "opencode-zen", "opencode-go", "nvidia"}
         if config_provider in _PORTAL_PROVIDERS:
-            return model_id, config_provider, config_base_url
+            return _finalize(model_id, config_provider, config_base_url)
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
         if config_provider and prefix == config_provider:
-            return bare, config_provider, config_base_url
+            return _finalize(bare, config_provider, config_base_url)
         # The OpenAI Codex provider uses a real base_url, but its default
         # ChatGPT endpoint cannot serve OpenRouter-style provider/model IDs.
         # Keep that narrow exception before the custom endpoint protection so
@@ -2858,7 +3221,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
                         _slug = _custom_provider_slug_from_name(prefix)
                         _base = (_entry.get("base_url") or "").strip()
-                        return model_id, _slug, _base or None
+                        return _finalize(model_id, _slug, _base or None)
 
         # If a custom endpoint base_url is configured, don't reroute through OpenRouter
         # just because the model name contains a slash (e.g. google/gemma-4-26b-a4b).
@@ -2872,7 +3235,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             # pointing at a loopback/private host.
             if (_is_local_server_provider(config_provider)
                     or _base_url_points_at_local_server(config_base_url)):
-                return model_id, config_provider, config_base_url
+                return _finalize(model_id, config_provider, config_base_url)
             # Strip the provider prefix only when it's a known provider namespace
             # AND stripping is the right call for this configured provider:
             #
@@ -2920,22 +3283,22 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 #     model.models / custom_providers[].models). Authoritative and
                 #     network-free, so #5979 survives a cold restart — preserve.
                 if _model_id_declared_in_config(model_id, config_provider):
-                    return model_id, config_provider, config_base_url
+                    return _finalize(model_id, config_provider, config_base_url)
                 # (2) The endpoint's live/cached catalog advertised it.
                 _advertised = _endpoint_advertised_model_ids(config_provider)
                 if _advertised:
                     # Full id advertised → route on it verbatim (#5979/#3872/#548).
                     if model_id in _advertised:
-                        return model_id, config_provider, config_base_url
+                        return _finalize(model_id, config_provider, config_base_url)
                     # ONLY the bare id advertised → the prefix is a redundant
                     # leftover the relay rejects; strip it (#433). Keep the
                     # ``prefix in _PROVIDER_MODELS`` belt so an adversarial catalog
                     # advertising a bare id can't strip an unknown-vendor prefix.
                     if bare in _advertised and prefix in _PROVIDER_MODELS:
-                        return bare, config_provider, config_base_url
+                        return _finalize(bare, config_provider, config_base_url)
                     # Advertised but neither exact shape matched → intrinsic /
                     # unknown prefix the proxy routes on; preserve it whole.
-                    return model_id, config_provider, config_base_url
+                    return _finalize(model_id, config_provider, config_base_url)
                 # (3) Provenance genuinely unavailable (cold/unbuilt or
                 #     fingerprint-mismatched catalog AND not config-declared).
                 #     Distinguish a DELIBERATE selection from a stale leftover:
@@ -2961,17 +3324,17 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 #     the static first-party catalog silently flipped routing
                 #     (exactly how #5979 regressed).
                 if explicitly_picked:
-                    return model_id, config_provider, config_base_url
+                    return _finalize(model_id, config_provider, config_base_url)
                 if prefix in _PROVIDER_MODELS and _is_first_party_model(prefix, bare):
-                    return bare, config_provider, config_base_url
-                return model_id, config_provider, config_base_url
+                    return _finalize(bare, config_provider, config_base_url)
+                return _finalize(model_id, config_provider, config_base_url)
             # Non-custom first-party provider pointed at an OpenAI-compatible
             # proxy (e.g. provider=openai + base_url=litellm): the bare id is
             # what it expects — "openai/gpt-5.4" → "gpt-5.4" (#433).
             if prefix in _PROVIDER_MODELS:
-                return bare, config_provider, config_base_url
+                return _finalize(bare, config_provider, config_base_url)
             # Intrinsic / unknown prefix — pass the full model_id through unchanged.
-            return model_id, config_provider, config_base_url
+            return _finalize(model_id, config_provider, config_base_url)
 
         # If prefix does NOT match config provider, the user picked a cross-provider model
         # from the OpenRouter dropdown (e.g. config=anthropic but picked openai/gpt-5.4-mini).
@@ -2993,105 +3356,1507 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         ):
             return model_id, "openrouter", None
 
-    return model_id, config_provider, config_base_url
+    # Final active-provider fallback: when nothing more specific matched, route
+    # on the configured provider. _finalize() fails closed here too if that
+    # provider is a collision-shared custom:<slug> (per finding #2 — the check
+    # must reach this last fallback, not just the earlier explicit paths).
+    return _finalize(model_id, config_provider, config_base_url)
 
 
-def resolve_custom_provider_connection(provider_id: str) -> tuple[str | None, str | None]:
+def _custom_record_base_url(record: object) -> str | None:
+    """Return a custom record's OWN endpoint, or None when it declares none."""
+    if not isinstance(record, dict):
+        return None
+    return str(record.get("base_url") or "").strip() or None
+
+
+def _resolve_custom_record_key(
+    raw_api_key: object,
+    raw_key_env: object,
+    provider_hint: object = None,
+) -> str | None:
+    """Static credential declared by ONE custom record.
+
+    Accepts a literal key, a ``${ENV_VAR}`` reference or a ``key_env`` env-var
+    hint, then falls back to the ``CUSTOM_<SLUG>_API_KEY`` convention. Reading
+    every form from the SAME record is what keeps an endpoint and a credential
+    from being resolved out of two different authorities.
+    """
+    api_key = None
+    if raw_api_key is not None:
+        key_text = str(raw_api_key).strip()
+        if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
+            api_key = _thread_local_env_value(key_text[2:-1]).strip() or None
+        elif key_text:
+            api_key = key_text
+    if not api_key:
+        key_env = str(raw_key_env or "").strip()
+        if key_env:
+            api_key = _thread_local_env_value(key_env).strip() or None
+    if not api_key and provider_hint:
+        api_key = _lookup_custom_api_key_env(provider_hint)
+    return api_key
+
+
+# Explicit outcomes of a named ``custom:<slug>`` selection.
+#
+# The status travels with the resolved bundle so a caller can tell "a record
+# OWNS this route" from "nothing owns this route" instead of inferring it from
+# an empty URL/key pair. That difference is load-bearing: an unowned named route
+# must fail closed — no ambient endpoint, no ambient credential, no ambient
+# pool/transport, no rewrite to the generic ``custom`` provider and no keyless
+# placeholder — rather than borrow whatever the ambient runtime resolved.
+CUSTOM_SELECTION_EXACT = "exact"           # exact custom_providers[] row
+CUSTOM_SELECTION_KEYED = "keyed"           # identity-owned providers:/model: record
+CUSTOM_SELECTION_RESOLVER = "resolver"     # injected connection_resolver reported a pair
+CUSTOM_SELECTION_MISSING = "missing"       # no authority owns this slug
+CUSTOM_SELECTION_MALFORMED = "malformed"   # ``custom:`` with no slug behind it
+# ``ambiguous`` is never RETURNED: a slug collision raises
+# AmbiguousCustomProviderError out of _unique_custom_provider_entry, so the
+# actionable rename message reaches the user (routes turn it into a 400) instead
+# of being silently degraded into a keyless or ambient-authority send.
+CUSTOM_SELECTION_AMBIGUOUS = "ambiguous"
+# Statuses for which NO authority owns the route.
+CUSTOM_SELECTION_UNOWNED = (CUSTOM_SELECTION_MISSING, CUSTOM_SELECTION_MALFORMED)
+
+
+# ── Terminal routing verdicts ────────────────────────────────────────────────
+#
+# Hermes Agent does NOT read an incomplete connection pair as a refusal. Its
+# ``agent/agent_init.py:_init_openai_client()`` honours the explicit endpoint and
+# credential the constructor was handed only when BOTH are truthy:
+#
+#     if api_key and base_url:
+#         client_kwargs = _explicit_client_kwargs(...)
+#     else:
+#         client_kwargs = _routed_client_kwargs(...)
+#
+# and ``_routed_client_kwargs()`` resolves a provider AGAIN — through the
+# centralized router, then the init-time fallback chain. So a bundle that "fails
+# closed" by clearing its endpoint and/or its credential is not terminal at the
+# constructor boundary; clearing those fields is precisely the signal to route
+# somewhere else, which is how an unroutable custom slug ends up talking to the
+# ambient or fallback provider after all.
+#
+# A route that cannot be resolved therefore has to be represented as an explicit
+# verdict rather than as an ordinary constructor-ready dict with a hole in it.
+# :data:`CUSTOM_ROUTE_ERROR_FIELD` carries that verdict on every merged bundle
+# (``None`` when the route is fine), and every consumer that builds an AIAgent —
+# or writes the agent cache, or hands the bundle to an auxiliary client — must
+# stop on it and emit a controlled failure instead.
+CUSTOM_ROUTE_UNOWNED = "unowned_custom_provider"
+CUSTOM_ROUTE_NO_CREDENTIAL = "custom_provider_credential_unresolved"
+CUSTOM_ROUTE_NO_ENDPOINT = "custom_provider_endpoint_unresolved"
+# An opaque model-alias lane that no longer resolves to any configured alias
+# (deleted, renamed, owned by another profile, or targeting a different model).
+# Kept beside the custom-provider reasons because it travels the same terminal
+# verdict path: an unresolvable route must stop before any provider routing.
+MODEL_ALIAS_ROUTE_UNRESOLVED = "model_alias_route_unresolved"
+
+# Key the verdict travels under on a merged bundle. ``None`` == routable.
+CUSTOM_ROUTE_ERROR_FIELD = "route_error"
+
+
+class CustomProviderRouteError(ValueError):
+    """Raised when a named ``custom:<slug>`` route must not reach a provider client.
+
+    The route resolved to no usable ``(api_key, base_url)`` pair, and passing
+    that pair to AIAgent would re-enter provider routing rather than fail (see
+    the :data:`CUSTOM_ROUTE_ERROR_FIELD` note above). Raising is how the refusal
+    stays terminal across the constructor boundary.
+
+    Subclasses ``ValueError`` for the same reason
+    :class:`AmbiguousCustomProviderError` does: existing ``except ValueError`` /
+    broad-``except`` handlers in the non-streaming routes already turn it into a
+    controlled 400 / deterministic fallback instead of a traceback.
+    """
+
+    def __init__(self, message: str, *, reason: str, provider: str | None = None, hint: str = ""):
+        super().__init__(message)
+        # Forwarded verbatim by HTTP handlers, exactly like the ambiguous-slug
+        # error's ``.message``.
+        self.message = message
+        self.reason = reason
+        self.provider = provider
+        self.hint = hint
+
+
+def _custom_route_verdict(reason: str, provider: str | None) -> dict:
+    """Build the terminal verdict recorded on an unroutable bundle."""
+    name = str(provider or "").strip() or "custom"
+    if reason == CUSTOM_ROUTE_UNOWNED:
+        message = (
+            f"Custom provider '{name}' is not configured: no custom_providers[] row, "
+            "keyed providers[] record or model: authority owns that name."
+        )
+        hint = (
+            "Add the provider under Settings -> Providers (or config.yaml "
+            "custom_providers[]), or pick a configured provider, then send again."
+        )
+    elif reason == CUSTOM_ROUTE_NO_CREDENTIAL:
+        message = (
+            f"Custom provider '{name}' declares a credential source that produced no "
+            "API key, so the route has no usable connection."
+        )
+        hint = (
+            "Check the provider's api_key / key_env / key_cmd / credential_pool "
+            "setting and the environment variable it names, then send again."
+        )
+    else:
+        message = (
+            f"Custom provider '{name}' resolved no endpoint, so the route has no "
+            "usable connection."
+        )
+        hint = (
+            "Set a base_url for the provider under Settings -> Providers (or "
+            "config.yaml custom_providers[]), then send again."
+        )
+    return {"reason": reason, "provider": name, "message": message, "hint": hint}
+
+
+def custom_provider_route_error(bundle: object) -> dict | None:
+    """Return ``bundle``'s terminal verdict, or ``None`` when it is routable.
+
+    The verdict dict carries ``reason`` (one of :data:`CUSTOM_ROUTE_UNOWNED`,
+    :data:`CUSTOM_ROUTE_NO_CREDENTIAL`, :data:`CUSTOM_ROUTE_NO_ENDPOINT`),
+    ``provider``, a user-facing ``message`` and a ``hint``.
+    """
+    if not isinstance(bundle, dict):
+        return None
+    verdict = bundle.get(CUSTOM_ROUTE_ERROR_FIELD)
+    return verdict if isinstance(verdict, dict) else None
+
+
+def raise_for_custom_provider_route(bundle: dict) -> dict:
+    """Return ``bundle`` when routable; raise :class:`CustomProviderRouteError` otherwise.
+
+    The single chokepoint every AIAgent-constructing consumer goes through, so
+    "this route is unresolvable" cannot degrade into "resolve it some other way"
+    at the constructor.
+    """
+    verdict = custom_provider_route_error(bundle)
+    if verdict is None:
+        return bundle
+    raise CustomProviderRouteError(
+        verdict["message"],
+        reason=verdict["reason"],
+        provider=verdict["provider"],
+        hint=verdict["hint"],
+    )
+
+
+# Identity fields a record can use to NAME the custom provider it belongs to.
+# ``name`` is the friendly name a ``custom_providers[]`` entry carries, so a
+# ``providers:`` record spelled the same way is claiming the same identity. A
+# ``model:`` block's ``name`` is the MODEL's name and never claims a provider,
+# which is why that call site passes ``allow_name=False``.
+_CUSTOM_RECORD_IDENTITY_FIELDS = ("provider_key", "provider", "custom_provider", "name")
+
+
+def _custom_record_claims_slug(record: object, slug: str, *, allow_name: bool = True) -> bool:
+    """True when ``record`` names ``slug`` as its OWN identity.
+
+    A generic record — ``providers['custom']`` or a ``model:`` block whose
+    provider is the bare string ``custom`` — belongs to no slug by itself, so it
+    is an authority for ``custom:<slug>`` only when it names that slug. Without
+    this test any unknown route adopts whichever generic record happens to be
+    configured, which is a credential handed to an endpoint the user never named.
+    """
+    if not isinstance(record, dict) or not slug:
+        return False
+    for field in _CUSTOM_RECORD_IDENTITY_FIELDS:
+        if field == "name" and not allow_name:
+            continue
+        value = record.get(field)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        if _custom_provider_slug_key(value) == slug:
+            return True
+    return False
+
+
+def _custom_record_owns_connection(record: dict, pid: str) -> bool:
+    """True when ``record`` declares ANY field the connection bundle carries.
+
+    The bundle is more than a URL/key pair: ``key_cmd`` mints a per-request
+    bearer, ``credential_pool`` supplies a rotating one, and ``api_mode`` and the
+    ACP command/args decide the wire protocol and the transport process. A record
+    keyed to this slug that declares ONLY those still owns the route — reporting
+    it ``missing`` would fail the route closed and then clear the very fields it
+    declares (see :func:`merge_custom_provider_runtime_bundle`).
+    """
+    base_url = _custom_record_base_url(record)
+    if base_url:
+        return True
+    # DECLARATION, not resolution: a ``key_env`` naming an unset variable or a
+    # pool that is momentarily empty still names this slug's credential source.
+    # Judging by "did a static key resolve?" hands the route to the ambient
+    # authority instead of surfacing the misconfiguration.
+    if _custom_record_declares_credential(record, base_url, None):
+        return True
+    if _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid):
+        return True
+    if _custom_record_api_mode(record):
+        return True
+    if _custom_record_acp_transport(record):
+        return True
+    return False
+
+
+# ── raw ``providers:<key>`` records (the standard Hermes v12 config shape) ────
+#
+# The installed Agent's authoritative matcher for a named custom route is
+# ``hermes_cli.runtime_provider_custom._match_new_style_provider()``. It scans
+# the ENABLED entries of the RAW ``providers:`` mapping and takes the first
+# whose alias set contains the requested name, where the alias set is minted by
+# ``hermes_cli.providers.custom_provider_aliases()`` from BOTH the entry's
+# display ``name`` and its config KEY. So the standard v12 shape
+#
+#     model:
+#       provider: custom:omni
+#     providers:
+#       omni:
+#         base_url: https://omni.example/v1
+#         key_env: OMNI_GATE_KEY
+#
+# routes through ``providers['omni']``: that record names the identity by its
+# own config key, exactly the way ``providers['custom:<slug>']`` does. Looking
+# only at the ``custom:``-prefixed spellings made every send on that config fail
+# closed as ``unowned_custom_provider`` while the Agent resolved it fine.
+#
+# The alias/enabled rules are MIRRORED here rather than imported for the same
+# reason :data:`_API_MODE_ALIASES` is: selection has to keep working when the
+# installed runtime module is unavailable or replaced by a test double.
+
+
+def _agent_custom_provider_slug(value: object) -> str:
+    """``custom:<name>`` identity the Agent mints for ``value``.
+
+    Mirror of ``hermes_cli.providers.custom_provider_slug()``: lowercase, spaces
+    to dashes, prefixed unless it already carries one. Deliberately NOT
+    :func:`_custom_provider_slug_key`'s normalization — this one reproduces the
+    Agent's alias vocabulary, and both are consulted by
+    :func:`_custom_record_names_identity`.
+    """
+    identity = str(value or "").strip().lower().replace(" ", "-")
+    if not identity:
+        return ""
+    return identity if identity.startswith("custom:") else f"custom:{identity}"
+
+
+def _custom_provider_alias_set(display_name: object, provider_key: object) -> frozenset[str]:
+    """Every identity the Agent accepts for ONE custom-provider record.
+
+    Mirror of ``hermes_cli.providers.custom_provider_aliases()``, including its
+    legacy ``custom:custom:<name>`` spelling, so a record the Agent would route
+    to is not reported unowned here.
+    """
+    aliases: set[str] = set()
+    for value in (display_name, provider_key):
+        raw = str(value or "").strip().lower()
+        if not raw:
+            continue
+        normalized = raw.replace(" ", "-")
+        aliases.update({raw, normalized, _agent_custom_provider_slug(normalized)})
+        if normalized.startswith("custom:"):
+            suffix = normalized.split(":", 1)[1]
+            if suffix:
+                aliases.update({suffix, f"custom:{normalized}"})
+    aliases.discard("")
+    return frozenset(aliases)
+
+
+def _custom_record_names_identity(display_name: object, provider_key: object, pid: str, slug: str) -> bool:
+    """True when a record keyed ``provider_key`` / named ``display_name`` IS ``pid``.
+
+    Two vocabularies, because two producers mint these ids. The Agent's alias set
+    is what decides a CLI send, so honouring it is what keeps the two in
+    agreement. :func:`_custom_provider_slug_key` is what the WebUI itself mints
+    from a friendly name (``Local (127.0.0.1:11434)`` -> ``local-127.0.0.1-11434``),
+    so a record the WebUI wrote is recognised by its own rules too. Both are
+    identity tests on the record's OWN name/key — neither widens selection to a
+    record that names some other provider.
+    """
+    if pid in _custom_provider_alias_set(display_name, provider_key):
+        return True
+    return any(
+        _custom_provider_slug_key(value) == slug
+        for value in (display_name, provider_key)
+        if str(value or "").strip()
+    )
+
+
+# ``enabled:`` words YAML may hand us as strings, matching
+# hermes_cli.config_providers._FALSE_WORDS.
+_PROVIDER_DISABLED_WORDS = frozenset({"false", "0", "no", "off"})
+
+
+def _raw_provider_record_enabled(record: object) -> bool:
+    """Mirror of ``hermes_cli.config_providers.is_provider_enabled()``.
+
+    Default True; only an explicit falsey ``enabled`` hides the entry. A disabled
+    entry is invisible to the Agent's resolver, so it must not own a WebUI route
+    either — the route fails closed instead of quietly using a row the user
+    switched off.
+    """
+    if not isinstance(record, dict):
+        return False
+    flag = record.get("enabled", True)
+    if isinstance(flag, bool):
+        return flag
+    if isinstance(flag, str):
+        return flag.strip().lower() not in _PROVIDER_DISABLED_WORDS
+    return bool(flag)
+
+
+# ``_entry_url``'s precedence in hermes_cli.runtime_provider_custom.
+_RAW_PROVIDER_URL_FIELDS = ("api", "url", "base_url")
+
+
+def _normalized_raw_provider_record(record: dict, ep_name: str) -> dict:
+    """Return ``record`` respelled in the field names this module's readers use.
+
+    ONE record in, ONE record out: every value is copied from ``record`` and
+    nothing is sourced from anywhere else, so the endpoint, the credential, the
+    wire protocol, the pool, the ACP transport, the capabilities and the request
+    fields the caller then lifts all still belong to that single authority. Only
+    the SPELLINGS differ between the raw ``providers:<key>`` shape and the
+    ``custom_providers[]`` shape the field readers were written against:
+
+    ``api`` / ``url`` -> ``base_url`` (the Agent's ``_entry_url`` precedence)
+    ``api_key_env``   -> ``key_env``
+    ``<key>``         -> ``provider_key``, when the record names none itself
+
+    ``transport`` -> ``api_mode`` and ``command`` / ``args`` -> ``acp_*`` need no
+    rewrite: :func:`_custom_record_api_mode` and
+    :func:`_custom_record_acp_transport` already accept both spellings in place.
+
+    Respelling a COPY rather than the live record keeps the config snapshot
+    unmutated, so a second resolution of the same slug sees the same input.
+    """
+    normalized = dict(record)
+    for field in _RAW_PROVIDER_URL_FIELDS:
+        value = record.get(field)
+        if isinstance(value, str) and value.strip():
+            normalized["base_url"] = value.strip()
+            break
+    if not str(normalized.get("key_env") or "").strip():
+        api_key_env = record.get("api_key_env")
+        if isinstance(api_key_env, str) and api_key_env.strip():
+            normalized["key_env"] = api_key_env.strip()
+    if not str(normalized.get("provider_key") or "").strip() and str(ep_name or "").strip():
+        # The record's OWN config key is its identity. Stamping it keeps the
+        # credential-pool lookup and the ``key_cmd`` token process labelled with
+        # this provider instead of the generic ``custom``.
+        normalized["provider_key"] = str(ep_name).strip()
+    return normalized
+
+
+def _unique_raw_provider_record(providers_cfg: object, pid: str, slug: str) -> dict | None:
+    """The ONE enabled raw ``providers:<key>`` record that owns ``pid``, else None.
+
+    Skips the two keys that already have dedicated, higher-precedence candidates
+    in :func:`_select_custom_provider_record` — ``providers['custom:<slug>']``
+    and the generic ``providers['custom']`` — so one record can never be counted
+    as two authorities, nor collide with itself.
+
+    Fails closed on a genuine collision: when two DISTINCT raw records both name
+    this identity and both declare connection fields, an endpoint and a
+    credential could be lifted from different rows, which is the same
+    split-authority pairing :func:`_unique_custom_provider_entry` raises on. A
+    record that names the identity but declares nothing is not a competing
+    authority, so it neither wins nor blocks — selection simply falls through to
+    the next candidate, and to the terminal verdict when there is none.
+    """
+    if not isinstance(providers_cfg, dict):
+        return None
+    owning: list[tuple[str, dict]] = []
+    for ep_name, record in providers_cfg.items():
+        key = str(ep_name or "").strip()
+        if not key or key.lower() in {pid, "custom"}:
+            continue
+        if not isinstance(record, dict) or not record:
+            continue
+        if not _raw_provider_record_enabled(record):
+            continue
+        if not _custom_record_names_identity(record.get("name") or key, key, pid, slug):
+            continue
+        normalized = _normalized_raw_provider_record(record, key)
+        if _custom_record_owns_connection(normalized, pid):
+            owning.append((key, normalized))
+    if len(owning) >= 2:
+        keys = [key for key, _record in owning]
+        raise AmbiguousCustomProviderError(
+            f"Custom provider records {keys!r} under providers: all name the provider "
+            f"slug {slug!r}; an endpoint and API key could be resolved from different "
+            f"records. Rename one so each custom provider has a unique slug."
+        )
+    return owning[0][1] if owning else None
+
+
+def _select_custom_provider_record(
+    pid: str,
+    slug: str,
+    cfg_data: dict,
+) -> tuple[dict | None, str, bool, str]:
+    """Return ``(record, source, is_exact, status)`` — the ONE authority for ``pid``.
+
+    Selection is IDENTITY-OWNED: a candidate qualifies only by naming this slug
+    (or by being the bare-``custom`` / explicitly-matching ``model:`` authority),
+    never by being the only row around. Selection order is the WebUI routing
+    contract:
+
+    1. the exact ``custom_providers[]`` row whose name normalizes to ``slug``
+       (authoritative for its slug even against a same-slug keyed record, and
+       even when its ``base_url`` is blank — see #1806);
+    2. otherwise the keyed ``providers['custom:<slug>']`` record, then the raw
+       ``providers:<key>`` record that names this identity by its own config key
+       or display name (``providers: {omni: ...}`` for ``custom:omni`` — the
+       standard Hermes v12 shape, matched with the installed Agent's own alias
+       rules; see :func:`_unique_raw_provider_record`), then a record that NAMES
+       this slug (the generic ``providers['custom']`` entry whose own
+       name/provider_key normalizes to it, or a ``model:`` block whose provider
+       is ``custom:<slug>``), and last the generic ``providers['custom']`` entry
+       when ``model.provider`` names this slug — the active-provider shape the
+       WebUI itself writes. Each is taken as a COMPLETE record rather than
+       field-by-field, and each is eligible as soon as it declares ANY field the
+       connection bundle carries, not just a static key or a base_url (see
+       :func:`_custom_record_owns_connection`).
+
+    What is deliberately NOT eligible is the generic ``providers['custom']``
+    record or a bare-``custom`` ``model:`` block that names no slug at all. Those
+    are catch-alls, and while they matched every lookup, ``custom:ghost`` took
+    whichever one was configured and inherited its endpoint, credential, pool,
+    ``api_mode`` and ACP transport — the same wrong-authority pairing as the
+    sole-row fallback below, sourced from ``providers:``/``model:`` instead.
+
+    There is deliberately NO "the list holds exactly one row, so use it"
+    fallback. That rule resolved ``custom:ghost`` to the endpoint AND credential
+    of a sole unrelated row named ``omni`` — the same wrong-authority pairing the
+    exact-row rule exists to prevent, and a credential leak to an endpoint the
+    user never named. An unknown slug owns nothing, so it reports ``missing``
+    and the caller fails closed. This matches the point-of-return rule
+    ``resolve_model_provider`` already applies (#4728: no unique entry -> no
+    base_url, never a guess).
+
+    ``source`` is ``custom_providers`` / ``providers`` / ``model`` (or ``""``
+    when nothing matched) and names the authority that owns every field the
+    caller then lifts off ``record``. ``status`` is one of the
+    ``CUSTOM_SELECTION_*`` values (``ambiguous`` raises instead of returning).
+    """
+    custom_providers = cfg_data.get("custom_providers", [])
+    if not isinstance(custom_providers, list):
+        custom_providers = []
+
+    # Fail closed when the slug maps to multiple entries (raises); otherwise use
+    # the single matching entry. Shared with resolve_model_provider so endpoint
+    # and credential are always resolved from the SAME entry.
+    matched_entry = _unique_custom_provider_entry(custom_providers, slug)
+    if matched_entry is not None:
+        return matched_entry, "custom_providers", True, CUSTOM_SELECTION_EXACT
+
+    # Fallbacks for setups that don't use custom_providers names directly. Every
+    # one of them is keyed on this provider's OWN identity.
+    providers_cfg = cfg_data.get("providers", {})
+    provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
+    provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
+
+    if (
+        isinstance(provider_specific, dict)
+        and provider_specific
+        and not _raw_provider_record_enabled(provider_specific)
+    ):
+        # ``providers['custom:<slug>']`` names THIS slug by its own exact key, so
+        # switching it off is a statement about this route and not merely about
+        # one candidate among several. Falling through to the generic ``custom``
+        # record or the ``model:`` block would honour the disable by routing the
+        # turn somewhere ELSE — the ambient provider's endpoint and credential
+        # under the name the user just took offline. The slug's own authority
+        # said no, so the route is terminal here.
+        return None, "", False, CUSTOM_SELECTION_MISSING
+
+    model_cfg = cfg_data.get("model", {})
+    model_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
+
+    # The generic ``providers['custom']`` record and a ``model:`` block whose
+    # provider is the bare string ``custom`` are catch-alls: they name no slug of
+    # their own. While they were eligible for EVERY ``custom:<slug>`` lookup,
+    # ``custom:ghost`` selected whichever one happened to be configured and
+    # inherited its endpoint, credential, pool, api_mode and ACP transport — the
+    # user's prompt and a credential sent to a provider they never named.
+    # Candidates are ordered by how specifically they name THIS identity.
+    named_by_model = model_provider in {pid, slug}
+    # A disabled record is invisible to the Agent's resolver, so it is not an
+    # authority here either — at EVERY rung, not just the raw-``providers:`` scan
+    # that already filtered for it.
+    has_generic_custom = (
+        isinstance(provider_custom, dict)
+        and bool(provider_custom)
+        and _raw_provider_record_enabled(provider_custom)
+    )
+    # The generic record is keyed ``custom`` in ``providers:``, so it names the
+    # literal ``custom:custom`` route by its own key; for any other slug it has
+    # to say so itself.
+    generic_claims_slug = has_generic_custom and (
+        slug == "custom" or _custom_record_claims_slug(provider_custom, slug)
+    )
+
+    def _candidates():
+        """Identity-owned candidates, most specific first — evaluated LAZILY.
+
+        Laziness is load-bearing for the raw-``providers:`` scan alone: that one
+        RAISES on an alias collision, and a config whose route is already decided
+        by the exact ``providers['custom:<slug>']`` key must not be failed closed
+        by a collision further down a list it never reaches.
+        """
+        if isinstance(provider_specific, dict) and provider_specific:
+            # Keyed by this provider's own id: ``providers['custom:<slug>']``.
+            yield provider_specific, "providers"
+        # The standard v12 shape: a raw ``providers:<key>`` record that names
+        # this identity by its own config key or display name (``providers:
+        # {omni: ...}`` for ``custom:omni``), matched with the installed Agent's
+        # alias rules. This is identity ownership, not an ambient-field escape —
+        # a record that names some OTHER provider never appears here, and an
+        # unknown slug still matches nothing and falls through to the terminal
+        # verdict below.
+        raw_record = _unique_raw_provider_record(providers_cfg, pid, slug)
+        if raw_record is not None:
+            yield raw_record, "providers"
+        if generic_claims_slug:
+            yield provider_custom, "providers"
+        if isinstance(model_cfg, dict) and model_cfg and _raw_provider_record_enabled(model_cfg) and (
+            named_by_model
+            or (model_provider == "custom" and _custom_record_claims_slug(model_cfg, slug, allow_name=False))
+        ):
+            yield model_cfg, "model"
+        if has_generic_custom and named_by_model and not generic_claims_slug:
+            # Last: the active-provider shape the WebUI itself writes, where the
+            # generic record holds the configuration of whichever custom provider
+            # ``model.provider`` names — here, THIS slug. That is a provenance
+            # tie rather than a declaration, so anything naming the slug outright
+            # (above) outranks it.
+            yield provider_custom, "providers"
+
+    for cand, source in _candidates():
+        # A record that names this slug is its authority as soon as it declares
+        # ANY connection field — a static key and a base_url are not the only
+        # things a record can own. One that declares only ``key_cmd``, a
+        # credential pool, an ``api_mode`` or an ACP transport is still THIS
+        # slug's record; reporting it missing would clear those very fields as
+        # foreign in merge_custom_provider_runtime_bundle.
+        #
+        # The ``enabled`` re-check is the single chokepoint every candidate has
+        # to pass: each branch above gates on it too, and one selection path
+        # added later without that gate is exactly how a switched-off row's
+        # endpoint and secret got back onto a live route.
+        if _raw_provider_record_enabled(cand) and _custom_record_owns_connection(cand, pid):
+            return cand, source, False, CUSTOM_SELECTION_KEYED
+
+    return None, "", False, CUSTOM_SELECTION_MISSING
+
+
+def resolve_custom_provider_connection(
+    provider_id: str,
+    *,
+    return_provenance: bool = False,
+) -> tuple[str | None, str | None] | tuple[str | None, str | None, bool]:
     """Return (api_key, base_url) for a named ``custom:*`` provider.
 
     Supports ``custom_providers[].api_key`` as either a literal key or
     ``${ENV_VAR}``, and ``custom_providers[].key_env`` as an env-var hint.
     Returns ``(None, None)`` when no named custom provider matches.
+    If ``return_provenance=True``, returns ``(api_key, base_url, is_exact)``
+    indicating whether the connection was resolved from an exact matching
+    ``custom_providers[]`` entry.
+
+    This is the URL/key VIEW of the authoritative record. Agent-construction
+    paths want :func:`resolve_custom_provider_bundle` instead: the record also
+    owns ``api_mode``, ``key_cmd``, pool credentials and ACP transport fields,
+    and a caller that takes only two of them still builds a mixed-authority
+    agent.
     """
     pid = str(provider_id or "").strip().lower()
     if not pid.startswith("custom:"):
+        if return_provenance:
+            return None, None, False
         return None, None
 
-    def _slugify(value: str) -> str:
-        s = str(value or "").strip().lower().replace("_", "-").replace(" ", "-")
-        while "--" in s:
-            s = s.replace("--", "-")
-        return s.strip("-")
-
-    slug = _slugify(pid.split(":", 1)[1].strip())
+    slug = _custom_provider_slug_key(pid)
     if not slug:
+        if return_provenance:
+            return None, None, False
         return None, None
 
     # Read the live config snapshot to avoid stale module-level cache edge
     # cases after profile switches or runtime config edits.
-    cfg_data = get_config()
+    record, _source, is_exact, _status = _select_custom_provider_record(pid, slug, get_config())
+    if record is None:
+        # Nothing owns this slug. Returning ``(None, None)`` is the whole point:
+        # an unknown named route must not inherit an unrelated row's endpoint or
+        # credential (see _select_custom_provider_record).
+        if return_provenance:
+            return None, None, False
+        return None, None
 
-    def _resolve_key(raw_api_key, raw_key_env, provider_hint=None) -> str | None:
-        api_key = None
-        if raw_api_key is not None:
-            key_text = str(raw_api_key).strip()
-            if key_text.startswith("${") and key_text.endswith("}") and len(key_text) > 3:
-                api_key = _thread_local_env_value(key_text[2:-1]).strip() or None
-            elif key_text:
-                api_key = key_text
-        if not api_key:
-            key_env = str(raw_key_env or "").strip()
-            if key_env:
-                api_key = _thread_local_env_value(key_env).strip() or None
-        if not api_key and provider_hint:
-            api_key = _lookup_custom_api_key_env(provider_hint)
-        return api_key
+    base_url = _custom_record_base_url(record)
+    api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+    if return_provenance:
+        return api_key, base_url, is_exact
+    return api_key, base_url
 
-    custom_providers = cfg_data.get("custom_providers", [])
-    if not isinstance(custom_providers, list):
-        custom_providers = []
 
-    for entry in custom_providers:
-        if not isinstance(entry, dict):
+# Local OpenAI-compatible servers frequently run without authentication, so a
+# missing key must not fail before the first request: hand the SDK a harmless
+# placeholder and let the endpoint accept it or return its own auth error. It is
+# applied ONLY after the authoritative record has been resolved in full and
+# reported itself genuinely keyless (no api_key, no key_env, no key_cmd, no
+# host-gated env key, no credential pool) — substituting it while any of those
+# could still mint a credential is what turned a working ``key_cmd`` endpoint
+# into a 401.
+KEYLESS_CUSTOM_API_KEY = "dummy-key"
+
+# The constructor-routing fields AIAgent takes beside provider/base_url/api_key.
+# They travel with the connection: a bundle that replaces the endpoint and the
+# credential but leaves these behind builds an agent whose wire protocol
+# (api_mode), transport (ACP subprocess) or credential source (pool) still
+# points at the previous authority.
+CUSTOM_CONNECTION_SIDE_FIELDS = ("api_mode", "acp_command", "acp_args", "credential_pool")
+
+# Alias spellings accepted for a record's ``api_mode`` / ``transport``, mirroring
+# hermes_cli.config_providers._canonical_api_mode. Resolved locally rather than
+# imported so a record's own transport survives even when the installed runtime
+# module is unavailable (or replaced by a test double).
+_API_MODE_ALIASES = {
+    "chat-completions": "chat_completions",
+    "chatcompletions": "chat_completions",
+    "openai": "chat_completions",
+    "responses": "codex_responses",
+    "openai_responses": "codex_responses",
+    "openai-responses": "codex_responses",
+    "anthropic": "anthropic_messages",
+    "anthropic-messages": "anthropic_messages",
+    "messages": "anthropic_messages",
+    "bedrock": "bedrock_converse",
+    "bedrock-converse": "bedrock_converse",
+}
+_VALID_API_MODES = {
+    "chat_completions",
+    "codex_responses",
+    "anthropic_messages",
+    "bedrock_converse",
+    "codex_app_server",
+}
+
+
+def _custom_record_api_mode(record: dict) -> str | None:
+    """Return the wire protocol a custom record declares for ITSELF, else None.
+
+    ``transport:`` is the v12-migration spelling of ``api_mode:``; hand-edited
+    configs still use either. An unrecognized value returns None so the runtime
+    keeps its own host/provider detection instead of being handed nonsense.
+    """
+    for field in ("api_mode", "transport"):
+        raw = record.get(field)
+        if not isinstance(raw, str):
             continue
-        name = str(entry.get("name") or "").strip()
-        if not name:
+        cleaned = raw.strip()
+        if not cleaned:
             continue
-        entry_slug = _slugify(name)
-        if entry_slug != slug:
-            continue
+        canonical = _API_MODE_ALIASES.get(cleaned.lower(), cleaned).lower()
+        if canonical in _VALID_API_MODES:
+            return canonical
+    return None
 
-        base_url = str(entry.get("base_url") or "").strip() or None
-        api_key = _resolve_key(entry.get("api_key"), entry.get("key_env"), pid)
-        return api_key, base_url
 
-    # If exactly one custom provider is configured, use it as a pragmatic
-    # fallback for mismatched slugs (e.g. punctuation differences).
-    if len(custom_providers) == 1 and isinstance(custom_providers[0], dict):
-        entry = custom_providers[0]
-        return (
-            _resolve_key(entry.get("api_key"), entry.get("key_env"), pid),
-            str(entry.get("base_url") or "").strip() or None,
+def _custom_record_acp_transport(record: dict) -> dict:
+    """Return the ACP subprocess transport a custom record declares for ITSELF."""
+    owned: dict = {}
+    command = record.get("acp_command") or record.get("command")
+    if isinstance(command, str) and command.strip():
+        owned["acp_command"] = command.strip()
+    args = record.get("acp_args")
+    if args is None:
+        args = record.get("args")
+    if isinstance(args, (list, tuple)) and len(args) > 0:
+        owned["acp_args"] = list(args)
+    return owned
+
+
+def _custom_record_pool_runtime(base_url: str | None, record: dict) -> dict | None:
+    """Runtime dict from the credential pool that owns ``base_url``, else None.
+
+    Delegates to the installed runtime's own pool lookup so pool ownership,
+    ordering and the loopback placeholder behave exactly as they do for a CLI
+    send. Best-effort: builds that do not expose the helper (or a stubbed
+    runtime module) simply report no pool.
+    """
+    if not base_url:
+        return None
+    try:
+        import hermes_cli.runtime_provider as _runtime_provider
+
+        resolve_pool = getattr(_runtime_provider, "_try_resolve_from_custom_pool", None)
+        if resolve_pool is None:
+            return None
+        return resolve_pool(
+            base_url,
+            "custom",
+            _custom_record_api_mode(record),
+            provider_name=str(record.get("provider_key") or record.get("name") or "") or None,
+        )
+    except Exception:
+        return None
+
+
+def _host_gated_env_key(base_url: str | None) -> str | None:
+    """Env credential the installed runtime would accept for ``base_url``, else None.
+
+    Host-GATED on purpose (GHSA-76xc-57q6-vm5m): the helper only yields
+    OPENAI/OPENROUTER/``<VENDOR>``_API_KEY when the endpoint's host is the
+    authoritative one, so this cannot leak a cloud key to an unrelated custom
+    endpoint. Consulted here only so "is this endpoint genuinely keyless?" has
+    the same answer in WebUI as it does at runtime.
+    """
+    if not base_url:
+        return None
+    try:
+        import hermes_cli.runtime_provider as _runtime_provider
+
+        candidates = getattr(_runtime_provider, "_host_gated_env_key_candidates", None)
+        if candidates is None:
+            return None
+        for candidate in candidates(base_url, ollama=False):
+            cleaned = str(candidate or "").strip()
+            if cleaned:
+                return cleaned
+    except Exception:
+        return None
+    return None
+
+
+def _custom_record_key_cmd_provider(base_url: str | None, record: dict, pid: str):
+    """Per-request token provider for a record's ``key_cmd``, else None.
+
+    ``key_cmd`` names a command that PRINTS a short-lived bearer; both wire
+    clients accept a callable api_key and mint per request. It is a real
+    credential source, so a record that declares one is NOT keyless and must
+    never be handed :data:`KEYLESS_CUSTOM_API_KEY`.
+    """
+    key_cmd = str(record.get("key_cmd") or "").strip()
+    if not key_cmd:
+        return None
+    try:
+        from agent.command_token_source import build_command_token_provider
+
+        return build_command_token_provider(
+            key_cmd, str(record.get("name") or record.get("provider_key") or pid or "custom")
+        )
+    except Exception:
+        logger.debug("key_cmd token provider unavailable for %s", pid, exc_info=True)
+        return None
+
+
+def _custom_record_declares_credential(
+    record: dict,
+    base_url: str | None,
+    pool_runtime: dict | None,
+) -> bool:
+    """True when the record DECLARES any credential source, resolved or not.
+
+    "Keyless" is a positive claim that an endpoint wants no authentication, and
+    it is the only gate on :data:`KEYLESS_CUSTOM_API_KEY`. Deriving it from
+    "``api_key`` came back empty" conflates two opposite situations: an
+    unauthenticated local server, and an authenticated endpoint whose declared
+    credential did not resolve (an ``${ENV}`` that is unset, a ``key_env``
+    naming a missing variable, a configured pool that yielded nothing, an
+    unbuildable ``key_cmd``). The second must NOT be handed the placeholder —
+    that turns a missing-credential misconfiguration into an opaque 401 from the
+    endpoint and hides the real cause.
+
+    So the question asked here is declaration, not resolution: the RAW
+    ``api_key`` (literal or ``${ENV}``), ``key_env``, ``key_cmd``, a configured
+    ``credential_pool``, a pool that actually resolved for this endpoint, and a
+    host-gated env credential the runtime would accept for it.
+    """
+    for field in ("api_key", "key_env", "key_cmd"):
+        if str(record.get(field) or "").strip():
+            return True
+    # A configured pool is a declaration even when empty or exhausted: the user
+    # pointed this endpoint at a credential source.
+    if record.get("credential_pool") is not None:
+        return True
+    if pool_runtime:
+        return True
+    if _host_gated_env_key(base_url):
+        return True
+    return False
+
+
+def _unowned_custom_provider_bundle(pid: str, slug: str, status: str) -> dict:
+    """Bundle for a named ``custom:*`` route that NO authority owns.
+
+    Every connection field is empty and ``keyless`` is False, so the merge below
+    cannot substitute :data:`KEYLESS_CUSTOM_API_KEY`: "nobody owns this route" is
+    not a claim that the route is unauthenticated.
+    """
+    return {
+        "provider_id": pid,
+        "slug": slug,
+        "source": "",
+        "status": status,
+        "is_exact": False,
+        "record": None,
+        "base_url": None,
+        "api_key": None,
+        # Nothing owns the route, so nothing positively owns an endpoint for it
+        # either. Stated rather than inferred: the merge must never read an
+        # endpoint that reached it from somewhere else as this route's own.
+        "endpoint_owned": False,
+        "keyless": False,
+        "owned": {},
+    }
+
+
+def resolve_custom_provider_bundle(
+    provider_id: str,
+    *,
+    connection_resolver=None,
+) -> dict | None:
+    """Return the COMPLETE connection bundle a named ``custom:*`` record owns.
+
+    ``None`` only when ``provider_id`` is not a named custom provider at all.
+    When it IS one but nothing owns it, the result is an explicit unowned bundle
+    (``status`` ``missing``/``malformed``, every connection field empty and
+    ``keyless`` False) rather than ``None``, so the merge below can fail the
+    route closed instead of silently leaving the ambient runtime's endpoint,
+    credential and pool in place. Otherwise a dict with:
+
+    ``base_url``
+        the record's own endpoint (``None`` when it declares none).
+    ``endpoint_owned``
+        True only when the SELECTED record supplied that endpoint itself. It is
+        the positive half of the provenance the merge needs: an endpoint already
+        sitting in a caller's bundle, an endpoint that merely compares equal, and
+        an absent runtime dict are all silence, and silence must never be read as
+        "this endpoint belongs to the selected record". False here means the
+        route has no endpoint of its own, whatever else is in flight.
+    ``api_key``
+        the record's own credential, resolved through the SAME ladder the
+        runtime uses for a named custom provider: pool credential, then literal
+        / ``${ENV}`` / ``key_env`` / ``CUSTOM_<SLUG>_API_KEY``, then a host-gated
+        env key — with ``key_cmd`` overriding the static forms because it mints a
+        fresh bearer per request. May be a callable (``key_cmd`` token provider).
+    ``keyless``
+        True only when the record DECLARES no credential source at all, i.e. the
+        endpoint is genuinely unauthenticated. A declared-but-unresolved
+        credential (unset ``${ENV}``, missing ``key_env`` variable, empty pool,
+        unbuildable ``key_cmd``) leaves this False — see
+        :func:`_custom_record_declares_credential`. This is the ONLY gate on
+        :data:`KEYLESS_CUSTOM_API_KEY`.
+    ``owned``
+        the subset of :data:`CUSTOM_CONNECTION_SIDE_FIELDS` this record supplies
+        itself. Callers keep these and must not overwrite them with the ambient
+        runtime's values; fields ABSENT here are simply unowned, not proven
+        foreign (see :func:`merge_custom_provider_runtime_bundle`).
+    ``source`` / ``is_exact`` / ``record`` / ``status``
+        the provenance of the selection, so a caller can tell an exact
+        ``custom_providers[]`` row from a keyed fallback — and either of them
+        from a route nothing owns (``status`` in
+        :data:`CUSTOM_SELECTION_UNOWNED`).
+
+    ``connection_resolver`` lets a caller inject its own module-bound reference
+    to :func:`resolve_custom_provider_connection`, so monkeypatching that name in
+    the caller's namespace still takes effect. An injected resolver can only
+    report a URL/key pair — there is no record behind it — so the bundle it
+    yields owns no side fields and the caller keeps the runtime's.
+    """
+    pid = str(provider_id or "").strip().lower()
+    if not pid.startswith("custom:"):
+        return None
+    slug = _custom_provider_slug_key(pid)
+    if not slug:
+        # ``custom:`` with nothing behind it names no provider, so no record can
+        # own it. Report it explicitly rather than as "not a custom route": the
+        # caller asked to route somewhere and must fail closed, not inherit the
+        # ambient connection.
+        return _unowned_custom_provider_bundle(pid, slug, CUSTOM_SELECTION_MALFORMED)
+
+    if connection_resolver is not None and connection_resolver is not resolve_custom_provider_connection:
+        # Tolerate resolvers that predate/omit the provenance kwarg (older builds
+        # and test doubles that patch in a plain two-value resolver).
+        try:
+            conn = connection_resolver(pid, return_provenance=True)
+        except TypeError:
+            conn = connection_resolver(pid)
+        if len(conn) == 3:
+            api_key, base_url, is_exact = conn
+        else:
+            api_key, base_url = conn
+            is_exact = False
+        if not (is_exact or api_key or base_url):
+            # The injected resolver is the whole authority on this path, and it
+            # reported nothing for the slug — so nothing owns the route.
+            return _unowned_custom_provider_bundle(pid, slug, CUSTOM_SELECTION_MISSING)
+        return {
+            "provider_id": pid,
+            "slug": slug,
+            "source": "resolver",
+            "status": CUSTOM_SELECTION_RESOLVER,
+            "is_exact": bool(is_exact),
+            "record": None,
+            "base_url": base_url,
+            "api_key": api_key,
+            "endpoint_owned": bool(base_url),
+            # A resolver reports a URL/key pair and nothing else; with no record
+            # behind it there is no declaration to inspect, so an absent key is
+            # the only keyless signal available here.
+            "keyless": not api_key,
+            "owned": {},
+        }
+
+    record, source, is_exact, status = _select_custom_provider_record(pid, slug, get_config())
+    if record is None:
+        return _unowned_custom_provider_bundle(pid, slug, status)
+
+    base_url = _custom_record_base_url(record)
+    owned: dict = {}
+
+    api_mode = _custom_record_api_mode(record)
+    if api_mode:
+        owned["api_mode"] = api_mode
+    owned.update(_custom_record_acp_transport(record))
+
+    # Pool first, exactly like the runtime's named-custom path: a pooled
+    # endpoint's credential AND its pool object come from the same lookup.
+    api_key = None
+    pool_runtime = _custom_record_pool_runtime(base_url, record)
+    if pool_runtime:
+        api_key = pool_runtime.get("api_key") or None
+        if pool_runtime.get("credential_pool") is not None:
+            owned["credential_pool"] = pool_runtime.get("credential_pool")
+
+    if not api_key:
+        api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+    if not api_key:
+        api_key = _host_gated_env_key(base_url)
+
+    # ``key_cmd`` beats a static api_key / key_env (short-lived bearers go stale
+    # mid-session), but never displaces a pooled credential, which the pool
+    # itself already rotates.
+    if not pool_runtime:
+        token_provider = _custom_record_key_cmd_provider(base_url, record, pid)
+        if token_provider is not None:
+            api_key = token_provider
+
+    if "credential_pool" not in owned and record.get("credential_pool") is not None:
+        owned["credential_pool"] = record.get("credential_pool")
+
+    return {
+        "provider_id": pid,
+        "slug": slug,
+        "source": source,
+        "status": status,
+        "is_exact": is_exact,
+        "record": record,
+        "base_url": base_url,
+        "api_key": api_key,
+        # POSITIVE endpoint provenance, resolved from the selected record and
+        # from nothing else. The merge below pairs this record's credential with
+        # an endpoint only while this is True.
+        "endpoint_owned": bool(base_url),
+        "keyless": not api_key
+        and not _custom_record_declares_credential(record, base_url, pool_runtime),
+        "owned": owned,
+    }
+
+
+def _connection_identity(runtime_provider: dict, resolved_provider: str | None) -> str | None:
+    """Name the provider the already-resolved connection fields belong to.
+
+    The runtime provider dict names itself, so it wins when present. With no
+    runtime dict the caller resolved the connection for ``resolved_provider``
+    (every such call site passes ``requested=resolved_provider``), so that is
+    the identity behind the fields.
+    """
+    rt_provider = str((runtime_provider or {}).get("provider") or "").strip()
+    if rt_provider:
+        return rt_provider.lower()
+    return str(resolved_provider or "").strip().lower() or None
+
+
+def _custom_bundle_endpoint_matches(bundle: dict, runtime_provider: dict) -> bool:
+    """True when the runtime resolved the SAME endpoint the record owns.
+
+    This is the provenance test that decides whether the ambient runtime's side
+    fields are same-authority (keep) or foreign (clear). A record that declares
+    no endpoint of its own cannot prove the runtime is foreign, so its runtime
+    fields stand.
+
+    Endpoint equality alone is NOT provenance. Two providers are free to share a
+    base_url — a gateway fronting several accounts, a local proxy, the same host
+    reached with different keys — so a URL match between a record and the ambient
+    runtime says only that both point at one host, never that one authority
+    resolved both. When the runtime dict NAMES itself and that name is some other
+    provider, the identities settle it directly and the shared URL proves
+    nothing.
+    """
+    if not isinstance(runtime_provider, dict) or not runtime_provider:
+        return False
+    rt_provider = str(runtime_provider.get("provider") or "").strip().lower()
+    if rt_provider:
+        slug = str(bundle.get("slug") or "").strip().lower()
+        owned_names = {
+            str(bundle.get("provider_id") or "").strip().lower(),
+            slug,
+            f"custom:{slug}" if slug else "",
+            # The generic ``custom`` runtime is the shape the WebUI writes for
+            # whichever custom provider is active, so it is not a competing name.
+            "custom",
+        }
+        owned_names.discard("")
+        if rt_provider not in owned_names:
+            return False
+    record_base_url = bundle.get("base_url")
+    rt_base_url = runtime_provider.get("base_url")
+    if not record_base_url and not rt_base_url:
+        return True
+    if not record_base_url or not rt_base_url:
+        return False
+    return _normalize_base_url_for_match(record_base_url) == _normalize_base_url_for_match(
+        rt_base_url
+    )
+
+
+def _custom_runtime_endpoint_is_record_owned(bundle: dict, runtime_provider: dict) -> bool:
+    """True when the runtime dict positively originated from the selected RECORD.
+
+    Endpoint equality alone is NOT selected-record provenance: two distinct
+    records (e.g. an exact list row and a same-slug keyed record) can share a
+    normalized URL while carrying different credentials. A tie requires either
+    an explicit source-record identity or matching record credentials;
+    silence, missing runtime dicts, and distinct records sharing an endpoint
+    never establish that the runtime spelling belongs to the selected record.
+    """
+    if not bundle.get("base_url"):
+        return False
+    if not isinstance(runtime_provider, dict) or not runtime_provider.get("base_url"):
+        return False
+    # Credential conflict strictly rejects a tie before checking identity metadata
+    bundle_key = bundle.get("api_key")
+    rt_key = runtime_provider.get("api_key")
+    if bundle_key and rt_key and bundle_key != rt_key:
+        return False
+    rec = bundle.get("record")
+    rt_rec = runtime_provider.get("record") or runtime_provider.get("source_record")
+    if rt_rec is not None:
+        return rt_rec == rec and _custom_bundle_endpoint_matches(bundle, runtime_provider)
+    rec_id = bundle.get("record_id") or (rec.get("id") if isinstance(rec, dict) else None)
+    rt_id = runtime_provider.get("record_id")
+    if rt_id is not None:
+        return rt_id == rec_id and _custom_bundle_endpoint_matches(bundle, runtime_provider)
+    if bundle_key and rt_key and bundle_key == rt_key:
+        return _custom_bundle_endpoint_matches(bundle, runtime_provider)
+    return False
+
+
+def merge_custom_provider_runtime_bundle(
+    resolved_provider: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    runtime_provider: dict | None = None,
+    *,
+    lookup_provider: str | None = None,
+    connection_resolver=None,
+) -> dict:
+    """Return the COMPLETE constructor-routing bundle for one send attempt.
+
+    Keys: ``provider``, ``base_url``, ``api_key``, every field in
+    :data:`CUSTOM_CONNECTION_SIDE_FIELDS`, and
+    :data:`CUSTOM_ROUTE_ERROR_FIELD`. Callers must apply the WHOLE dict — that is
+    the point: the connection and the transport/protocol/pool fields are one
+    authority, and the agent-cache signature must be derived from the same dict
+    so a bundle change always mints a new agent.
+
+    :data:`CUSTOM_ROUTE_ERROR_FIELD` is the bundle's TERMINAL verdict, and it is
+    not optional to check. A named ``custom:`` route that resolves no complete
+    ``(api_key, base_url)`` pair is not constructor-ready: Hermes Agent reads the
+    missing field as permission to resolve another provider, so every consumer
+    that builds an AIAgent (or writes the agent cache, or feeds an auxiliary
+    client) must run the bundle through :func:`raise_for_custom_provider_route`
+    first and fail the turn with a controlled provider / missing-credential
+    error. See the :data:`CUSTOM_ROUTE_ERROR_FIELD` commentary for the exact
+    constructor branch this defends.
+
+    Every consumer that builds an AIAgent for a ``custom:<slug>`` route goes
+    through here so the endpoint, the credential and the routing fields all come
+    from ONE record. The fill-only pattern this replaces
+    (``if not api_key: api_key = ...``) mixed authorities whenever the runtime
+    provider had already supplied a truthy value from a same-slug keyed
+    ``providers:`` record: resolution deterministically produced the
+    ``custom_providers[]`` row's URL while keeping the keyed row's API key.
+
+    Ownership rules, per side field:
+
+    * the selected record declares it -> the record's value wins (an exact list
+      row's ``api_mode: anthropic_messages`` is not "ambient noise" to be
+      cleared, and a keyed record keeps the pool/transport it owns);
+    * the record declares no endpoint of its own, or the runtime resolved the
+      SAME endpoint -> the runtime's value is same-authority and is kept;
+    * otherwise the runtime resolved a DIFFERENT authority -> the field is
+      cleared, because passing it through is what let a custom HTTP endpoint
+      inherit Anthropic credential pooling and a Claude ACP subprocess.
+
+    The ENDPOINT itself is decided by positive provenance only. A selected
+    config record supplies the endpoint its credential is sent to, and the one
+    exception is a runtime dict positively tied to that same record (same
+    identity, same normalized URL), whose spelling is the one it can reach.
+    Everything else is silence: the ``resolved_base_url`` the caller arrived
+    with, a URL that merely compares equal, and a missing runtime dict say
+    nothing about the record selected for this slug. So a record that declares
+    no usable ``base_url`` does not borrow one — the route is terminal with
+    :data:`CUSTOM_ROUTE_NO_ENDPOINT` and the bundle keeps neither the incoming
+    endpoint nor this record's credential, because pairing them is precisely how
+    a non-active provider's secret reached the ACTIVE provider's URL.
+
+    The CREDENTIAL of an exact ``custom_providers[]`` row is exempt from the
+    same-endpoint rule above: it is resolved from that row's own ladder and is
+    never inherited from the runtime, because a same-slug keyed record may
+    declare the identical ``base_url`` and endpoint equality would then be
+    enough to hand the row somebody else's key.
+
+    :data:`KEYLESS_CUSTOM_API_KEY` is substituted only once the selected record
+    reports that it DECLARES no credential source at all. A record that declares
+    one which produced nothing here (an unset ``${ENV}``, a ``key_env`` naming a
+    missing variable, an empty pool, an unbuildable ``key_cmd``) is sent without
+    a key rather than with a placeholder that guarantees a 401 and hides the
+    real cause.
+
+    A named ``custom:<slug>`` route that NO authority owns fails closed: the
+    returned bundle keeps the named provider but carries no endpoint, no
+    credential, no pool/transport and no placeholder key, so an unknown slug can
+    never be routed through the ambient provider's connection. This holds even
+    when the ambient runtime LABELS itself with that same slug — a provider
+    string is self-assigned, not proof that the connection belongs to the slug.
+    """
+    return _custom_provider_runtime_bundle_with_provenance(
+        resolved_provider,
+        resolved_api_key,
+        resolved_base_url,
+        runtime_provider,
+        lookup_provider=lookup_provider,
+        connection_resolver=connection_resolver,
+    )[0]
+
+
+def _custom_provider_runtime_bundle_with_provenance(
+    resolved_provider: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    runtime_provider: dict | None = None,
+    *,
+    lookup_provider: str | None = None,
+    connection_resolver=None,
+) -> tuple[dict, dict | None]:
+    """:func:`merge_custom_provider_runtime_bundle` plus the record it selected.
+
+    Returns ``(bundle, custom)`` where ``custom`` is the
+    :func:`resolve_custom_provider_bundle` result the merge applied (``None``
+    when the route is not a named custom provider, or no record matched).
+    Callers that also need the provenance take it from here rather than
+    re-resolving: a second resolution re-reads the config and can mint a second
+    ``key_cmd`` token provider or select a different pool entry.
+    """
+    _rt = runtime_provider if isinstance(runtime_provider, dict) else {}
+    bundle = {
+        "provider": resolved_provider,
+        "base_url": resolved_base_url,
+        "api_key": resolved_api_key,
+        "api_mode": _rt.get("api_mode"),
+        "acp_command": _rt.get("acp_command", _rt.get("command")),
+        "acp_args": _rt.get("acp_args", _rt.get("args")),
+        "credential_pool": _rt.get("credential_pool"),
+        # Routable until a named custom route proves otherwise. Non-custom
+        # routes legitimately leave the endpoint and/or credential to the
+        # runtime provider, so only the named-``custom:`` branches below can
+        # record a verdict here.
+        CUSTOM_ROUTE_ERROR_FIELD: None,
+    }
+
+    lookup = lookup_provider or resolved_provider
+    if not (isinstance(lookup, str) and lookup.startswith("custom:")):
+        return bundle, None
+
+    custom = resolve_custom_provider_bundle(lookup, connection_resolver=connection_resolver)
+    if custom is None:
+        return bundle, None
+
+    if custom["status"] in CUSTOM_SELECTION_UNOWNED:
+        # NO authority owns this slug: not an exact ``custom_providers[]`` row,
+        # not a keyed ``providers:`` record, not a ``model:`` authority. Whatever
+        # is already in ``bundle`` was resolved by someone else and reached us as
+        # ambient state, so the whole bundle fails closed.
+        #
+        # A provider LABEL is not proof of ownership. The runtime dict's
+        # ``provider: "custom:ghost"`` is a self-assigned string on a connection
+        # this process authenticated for some other reason, and
+        # :func:`_connection_identity` falls back to ``resolved_provider`` — the
+        # very slug being looked up — so a caller that passes no runtime dict at
+        # all would match itself. Trusting either would let any unknown slug
+        # claim the ambient endpoint, credential, pool and transport simply by
+        # naming itself. Ownership is decided by config records, and there are
+        # none here.
+        #
+        # So: no endpoint and no credential; no ambient pool/transport/
+        # wire-protocol carried alongside them; the provider stays the NAMED
+        # slug, because rewriting it to the generic ``custom`` would present an
+        # unresolvable route as a resolved one; and no KEYLESS_CUSTOM_API_KEY —
+        # ``keyless`` is False on an unowned bundle precisely so the placeholder
+        # cannot claim that an endpoint we never found is unauthenticated.
+        logger.warning(
+            "custom provider %s matches no custom_providers[] row, keyed "
+            "providers[] record or model: authority, and the resolved connection "
+            "belongs to %s; refusing to route it through that provider's "
+            "endpoint and credential",
+            lookup,
+            _connection_identity(_rt, resolved_provider) or "an unnamed provider",
+        )
+        bundle["base_url"] = None
+        bundle["api_key"] = None
+        for field in CUSTOM_CONNECTION_SIDE_FIELDS:
+            bundle[field] = None
+        # Clearing the fields is NOT what makes this terminal — the constructor
+        # reads an empty pair as "route me somewhere else". Record the verdict so
+        # consumers stop before AIAgent instead.
+        bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
+            CUSTOM_ROUTE_UNOWNED, lookup
+        )
+        return bundle, custom
+
+    same_authority = _custom_bundle_endpoint_matches(custom, _rt)
+    # The positive tie: the runtime dict resolved the very endpoint the selected
+    # record declares. Never True on absence of evidence, so it is the only
+    # signal allowed to keep an endpoint this record did not supply itself.
+    endpoint_tied = _custom_runtime_endpoint_is_record_owned(custom, _rt)
+
+    if custom["record"] is not None and not custom["endpoint_owned"]:
+        # A CONFIG RECORD owns this slug — an exact ``custom_providers[]`` row, a
+        # keyed ``providers['custom:<slug>']``, a raw ``providers:<key>`` row (the
+        # standard v12 shape) or a ``model:`` authority — and it declares no
+        # usable endpoint. So this route HAS no endpoint: the one sitting in
+        # ``bundle`` was resolved for whoever the process was already talking to
+        # (the ACTIVE provider) and reached us as ambient state.
+        #
+        # Keeping it would pair THIS record's credential with THAT provider's
+        # URL — the user's prompt and a non-active provider's secret delivered to
+        # an endpoint neither the record nor the user named. The installed
+        # Agent's ``_match_new_style_provider()`` skips an endpoint-less raw
+        # record for exactly this reason.
+        #
+        # Nothing here may stand in for the missing endpoint: not the caller's
+        # ``resolved_base_url``, not a URL that merely compares equal (a gateway
+        # fronting two accounts is one host and two authorities), and not an
+        # absent runtime dict. Absence of contrary evidence is not provenance.
+        # So the route fails closed on its OWN name — the terminal
+        # ``custom_provider_endpoint_unresolved``, naming the setting to fix —
+        # rather than degrading into a send through the active provider.
+        bundle["base_url"] = None
+        bundle["api_key"] = None
+        for field in CUSTOM_CONNECTION_SIDE_FIELDS:
+            # The record keeps what it declares for ITSELF; every other side
+            # field belongs to the ambient authority whose endpoint was just
+            # refused, so it goes with it. Leaving those behind would hand the
+            # refused provider's credential pool and ACP transport to a route
+            # that is about to be reported unresolvable.
+            bundle[field] = custom["owned"].get(field)
+        bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
+            CUSTOM_ROUTE_NO_ENDPOINT, custom["provider_id"]
+        )
+        logger.warning(
+            "custom provider %s resolved no endpoint of its own; refusing to pair "
+            "its credential with the connection resolved for %s",
+            custom["provider_id"],
+            _connection_identity(_rt, resolved_provider) or "another provider",
+        )
+        return bundle, custom
+
+    if custom["is_exact"]:
+        # An exact ``custom_providers[]`` row is authoritative for its slug: BOTH
+        # the endpoint (including None when the row's base_url is blank) and the
+        # credential are replaced, never merged — the sole exception being the
+        # runtime's spelling of the row's OWN endpoint, handled below. The
+        # credential comes from the
+        # ROW's own ladder (pool, api_key/``${ENV}``/``key_env``/
+        # ``CUSTOM_<SLUG>_API_KEY``, ``key_cmd``, host-gated env) and from
+        # nowhere else — including when ``same_authority`` holds.
+        #
+        # Endpoint equality is NOT record provenance. A same-slug keyed
+        # ``providers["custom:<slug>"]`` record is free to declare the very same
+        # ``base_url``, and the ambient runtime dict carrying that URL is then
+        # indistinguishable by URL from one the row itself resolved. Accepting
+        # ``_rt["api_key"]`` on that evidence hands the keyed row's credential to
+        # the exact row, which is precisely the split-authority merge this
+        # function exists to stop: the row's URL with the keyed row's key.
+        #
+        # So a row whose declared credential produced nothing here keeps
+        # ``api_key`` None and falls through to the terminal-route verdict below,
+        # naming the setting to fix, rather than silently borrowing a credential
+        # the row never declared. A row that declares NO credential at all is
+        # reported ``keyless`` by the resolution above and gets
+        # :data:`KEYLESS_CUSTOM_API_KEY` there — that is the row's own statement
+        # that the endpoint is unauthenticated, not an inherited key either.
+        bundle["api_key"] = custom["api_key"] or None
+        # Same endpoint rule as the keyed branch below: the row's endpoint wins
+        # unless the runtime dict is POSITIVELY tied to it — same identity, same
+        # normalized URL — in which case the runtime's spelling of the ROW's own
+        # endpoint is kept, because that is the form it can actually reach. This
+        # is not a merge: an endpoint the row did not declare can never survive
+        # here, since ``endpoint_tied`` is False whenever the row supplied none.
+        bundle["base_url"] = _rt.get("base_url") if endpoint_tied else custom["base_url"]
+    elif custom["record"] is not None:
+        # No exact row, but a CONFIG RECORD was selected: a keyed
+        # ``providers['custom:<slug>']``, a raw ``providers:<key>`` row (the
+        # standard v12 shape) or a ``model:`` authority, picked as ONE complete
+        # record. The endpoint and the credential must therefore come from it
+        # together, decided by that record's OWN endpoint provenance and by
+        # nothing that happened to be in flight when it was selected. A record
+        # that declares NO endpoint never reaches here — the terminal branch
+        # above already refused it rather than let it borrow one.
+        #
+        # The record DECLARES an endpoint, so that endpoint and the credential
+        # sent to it are one authority's pair and the record's credential is the
+        # only one that may accompany it — including when the ambient runtime
+        # reports the SAME URL. A shared base_url is not shared provenance: a
+        # gateway fronting two accounts hands both providers one host and two
+        # different keys, and taking ``_rt["api_key"]`` there sends the ACTIVE
+        # provider's secret to the non-active record's endpoint. A record whose
+        # declared credential source resolved nothing keeps ``api_key`` None and
+        # falls through to the terminal verdict naming the setting to fix, rather
+        # than borrowing the ambient key across that host.
+        bundle["api_key"] = custom["api_key"] or None
+        # The record's endpoint wins unless the runtime dict is POSITIVELY tied
+        # to it — same identity, same normalized URL — in which case the
+        # runtime's spelling is kept, because a normalized form of the same
+        # endpoint is the one it can actually reach. Any other endpoint already
+        # in the bundle was resolved before this record was selected: absent
+        # provenance is not a tie, so it is displaced rather than left beside the
+        # credential this record just supplied.
+        bundle["base_url"] = _rt.get("base_url") if endpoint_tied else custom["base_url"]
+    else:
+        # No record behind the selection: an injected ``connection_resolver``
+        # reported a bare URL/key pair and IS the whole authority on this path.
+        # There is no record to take endpoint provenance from, so this keeps the
+        # historical fill-only shape — the caller's already-resolved endpoint
+        # stands and the resolver fills only what it left empty (#2271).
+        if custom["base_url"]:
+            bundle["api_key"] = custom["api_key"] or None
+        elif same_authority and _rt.get("api_key"):
+            # The resolver reported NO endpoint, so the runtime's URL is filling
+            # a hole rather than being displaced — and the ambient endpoint's own
+            # credential is the coherent partner for it.
+            bundle["api_key"] = _rt.get("api_key")
+        elif custom["api_key"]:
+            bundle["api_key"] = custom["api_key"]
+        if custom["base_url"] and _rt.get("base_url") and not same_authority:
+            bundle["base_url"] = custom["base_url"]
+        elif not bundle["base_url"] and custom["base_url"]:
+            bundle["base_url"] = custom["base_url"]
+
+    for field in CUSTOM_CONNECTION_SIDE_FIELDS:
+        if field in custom["owned"]:
+            # The selected record declares this field for ITSELF, so it wins over
+            # the ambient runtime even when the two disagree: an exact list row's
+            # ``api_mode: anthropic_messages`` is the row's wire protocol, not
+            # ambient noise, and a keyed record keeps the pool/ACP transport it
+            # declares.
+            bundle[field] = custom["owned"][field]
+        elif not same_authority:
+            # The record owns an endpoint the runtime did NOT resolve, so this
+            # value provably came from a different authority. Clearing it is what
+            # stops a custom HTTP endpoint inheriting Anthropic credential pooling
+            # and a Claude ACP subprocess.
+            bundle[field] = None
+        # else: the runtime resolved the SAME endpoint the record owns, so its
+        # value is same-authority and the seed above already kept it.
+
+    if bundle["base_url"]:
+        # Route through the generic custom OpenAI-compatible client once the
+        # named provider has supplied the concrete endpoint. Keeping the provider
+        # as custom:<slug> would make Agent init synthesize invalid env-var hints
+        # like CUSTOM:SOMETHING-8000_API_KEY on keyless setups.
+        bundle["provider"] = "custom"
+        if not bundle["api_key"]:
+            if custom["keyless"]:
+                # Only now, with the record's full credential ladder exhausted
+                # (pool, api_key, key_env, CUSTOM_<SLUG>_API_KEY, key_cmd,
+                # host-gated env) and the runtime offering nothing either, is the
+                # endpoint provably keyless.
+                bundle["api_key"] = KEYLESS_CUSTOM_API_KEY
+            else:
+                # The record DECLARES a credential source that did not yield one
+                # here (e.g. a ``key_cmd`` whose token provider could not be
+                # built). Substituting the placeholder would turn that into a
+                # silent 401 against an endpoint that does require auth; leave the
+                # credential unset so the failure names its real cause.
+                logger.warning(
+                    "custom provider %s declares a credential source that produced "
+                    "no key; sending without one rather than the keyless placeholder",
+                    custom["provider_id"],
+                )
+
+    if not (bundle["api_key"] and bundle["base_url"]):
+        # A record OWNS this route, but the merge could not produce the complete
+        # explicit pair AIAgent needs to honour it. Leaving the hole would hand
+        # the send straight back to ``_routed_client_kwargs()``, which re-resolves
+        # the provider and can reach the ambient endpoint, a keyed row this record
+        # deliberately displaced, or the init-time fallback chain. Name the real
+        # cause instead and let the caller fail the turn.
+        bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
+            CUSTOM_ROUTE_NO_CREDENTIAL if bundle["base_url"] else CUSTOM_ROUTE_NO_ENDPOINT,
+            custom["provider_id"],
+        )
+        logger.warning(
+            "custom provider %s resolved no routable connection (%s); refusing to "
+            "build an agent that would re-enter provider routing",
+            custom["provider_id"],
+            bundle[CUSTOM_ROUTE_ERROR_FIELD]["reason"],
         )
 
-    # Fallbacks for setups that don't use custom_providers names directly.
-    providers_cfg = cfg_data.get("providers", {})
-    provider_specific = providers_cfg.get(pid, {}) if isinstance(providers_cfg, dict) else {}
-    provider_custom = providers_cfg.get("custom", {}) if isinstance(providers_cfg, dict) else {}
+    return bundle, custom
 
-    model_cfg = cfg_data.get("model", {})
-    model_provider = str(model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
 
-    fallback_base = None
-    for candidate in (provider_specific, provider_custom, model_cfg):
-        if isinstance(candidate, dict):
-            _base = str(candidate.get("base_url") or "").strip()
-            if _base:
-                fallback_base = _base
-                break
+def apply_custom_provider_connection_authority(
+    resolved_provider: str | None,
+    resolved_api_key: str | None,
+    resolved_base_url: str | None,
+    *,
+    lookup_provider: str | None = None,
+    connection_resolver=None,
+    runtime_provider: dict | None = None,
+) -> tuple[str | None, str | None, str | None, bool]:
+    """Connection-only VIEW of :func:`merge_custom_provider_runtime_bundle`.
 
-    fallback_key = None
-    if isinstance(provider_specific, dict):
-        fallback_key = _resolve_key(provider_specific.get("api_key"), provider_specific.get("key_env"), pid)
-    if not fallback_key and isinstance(provider_custom, dict):
-        fallback_key = _resolve_key(provider_custom.get("api_key"), provider_custom.get("key_env"), pid)
-    if not fallback_key and isinstance(model_cfg, dict) and model_provider in {"custom", pid, slug}:
-        fallback_key = _resolve_key(model_cfg.get("api_key"), model_cfg.get("key_env"), pid)
-
-    if fallback_key or fallback_base:
-        return fallback_key, fallback_base or None
-
-    return None, None
+    Returns ``(provider, api_key, base_url, custom_owned)``, where
+    ``custom_owned`` reports whether a config-owned custom record supplied the
+    connection — False for a named route nothing owns, whose key and base_url
+    come back ``None`` rather than as the ambient runtime's. Kept for callers
+    that genuinely construct nothing else (capability/vision lookups); anything
+    that builds an AIAgent must take the whole bundle instead and honour its
+    :data:`CUSTOM_ROUTE_ERROR_FIELD` verdict, because the three connection fields
+    alone are neither a complete constructor contract nor a terminal refusal.
+    This view deliberately does NOT raise: a capability lookup asking "can this
+    route do vision" is not a constructor boundary and must not turn into a
+    failed turn.
+    """
+    bundle, custom = _custom_provider_runtime_bundle_with_provenance(
+        resolved_provider,
+        resolved_api_key,
+        resolved_base_url,
+        runtime_provider,
+        lookup_provider=lookup_provider,
+        connection_resolver=connection_resolver,
+    )
+    custom_owned = custom is not None and custom["status"] not in CUSTOM_SELECTION_UNOWNED
+    return bundle["provider"], bundle["api_key"], bundle["base_url"], custom_owned
 
 
 # Subprocess ACP transports (Cursor/Copilot CLI). Model IDs often contain '/'
@@ -3134,10 +4899,32 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if _is_plugin_model_provider(provider):
         return f"@{provider}:{model}"
 
+    # Codex live/cache models are intentionally absent from the static catalog,
+    # so bare same-provider IDs can be claimed by overlapping providers.* entries.
+    if provider == "openai-codex":
+        return f"@{provider}:{model}"
+
     # If the selected provider is already the configured provider, leaving the
     # model bare preserves provider-specific base_url/proxy settings.
     if provider == config_provider:
         return model
+
+    # The picker reports a configured provider that aliases to the generic
+    # ``custom`` lane (``local``, or ``ollama`` through the agent's alias table)
+    # as ``custom``, so the session's ``custom`` IS the configured provider even
+    # though the raw strings differ. Qualifying it as ``custom`` would mint
+    # ``@custom:qwen3.8:27b``, whose tag prefix resolve_model_provider() reads
+    # as a named-provider slug (``custom:qwen3.8``). A bare id is not safe
+    # either: it goes through the custom_providers[] / providers: ownership
+    # scans, so another endpoint listing the same id would take the request.
+    # Nor is the configured provider's own hint (``@ollama:``), which picks up
+    # a same-named providers: / custom_providers[] record, nor any other
+    # ``@<name>:`` text, which a providers.<name> entry of that name produces.
+    # The lane is carried as a type, resolved to ``model.base_url`` before any
+    # lookup. (#7955)
+    if provider == "custom" and config_provider:
+        if str(_resolve_provider_alias(config_provider) or "").strip().lower() == "custom":
+            return _ConfiguredCustomLaneModel(model)
 
     # OpenRouter selections with slash IDs are explicit provider/model paths.
     if provider == "openrouter":
@@ -3158,8 +4945,35 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
 
     # For non-OpenRouter slash IDs without an explicit configured provider,
     # keep the ID intact so existing custom/proxy base_url routing and
-    # portal-provider handling remain in charge.
+    # portal-provider handling remain in charge — UNLESS the session provider
+    # is a known routable provider that differs from the profile default.
+    # Dropping the hint there lets the default provider's base_url win and
+    # 404s (e.g. a Nous portal row `upstage/solar-pro4:free` under an
+    # xai-oauth default gets sent to api.x.ai — #7333). Emit the explicit
+    # hint for known static/portal providers and named custom providers
+    # (including `custom:<slug>` stored as the session provider), and keep
+    # the bare ID only for unknown/ambiguous provider slugs (negative
+    # control) so custom/proxy base_url routing stays in charge.
     if "/" in model:
+        if provider in _PROVIDER_MODELS or provider in _PROVIDER_DISPLAY:
+            return f"@{provider}:{model}"
+        # A named custom provider is only routable when the slug resolves to a
+        # real, unique custom_providers[] entry. `custom:missing` (stale
+        # session provider, no config entry) must NOT be minted into an
+        # @custom:missing:... route — resolve_model_provider() would take the
+        # named-provider lane and find no matching endpoint. `_unique_custom_provider_entry`
+        # returns None for unknown slugs and raises AmbiguousCustomProviderError
+        # for collisions, matching the point-of-return guard used by
+        # resolve_model_provider. (#7356 maintainer review)
+        if provider.startswith("custom:"):
+            custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else []
+            if (
+                _unique_custom_provider_entry(
+                    custom_providers, _custom_provider_slug_key(provider)
+                )
+                is not None
+            ):
+                return f"@{provider}:{model}"
         return model
 
     return f"@{provider}:{model}"
@@ -3855,8 +5669,10 @@ def _lmstudio_model_reasoning_options(
         )
 
     try:
-        from hermes_cli.models import (
-            lmstudio_model_reasoning_options as _cli_lmstudio_model_reasoning_options,
+        from api.agent_compat import agent_attr
+
+        _cli_lmstudio_model_reasoning_options = agent_attr(
+            "hermes_cli.models", "lmstudio_model_reasoning_options", "hermes_cli.models_local"
         )
     except Exception:
         return _lmstudio_reasoning_probe_options_fallback(
@@ -4498,9 +6314,14 @@ def _model_supports_fast_tier_for_provider(model_id: str | None, provider: str |
 
 
 def _annotate_fast_tier_model_groups(payload: dict | None) -> dict | None:
-    """Add service-tier capability metadata to OpenAI-family model groups."""
+    """Add computed, browser-safe metadata to a model-catalog payload."""
     if not isinstance(payload, dict):
         return payload
+    routes = _public_model_alias_routes()
+    if routes:
+        payload["model_alias_routes"] = routes
+    else:
+        payload.pop("model_alias_routes", None)
     groups = payload.get("groups")
     if not isinstance(groups, list):
         return payload
@@ -4810,6 +6631,31 @@ def _coerce_optional_positive_int(value, field: str):
     return number
 
 
+def _provider_native_auxiliary_model(provider: str, model: str) -> str:
+    """Return the provider-native model stored by an auxiliary slot.
+
+    ``@provider:model`` is a WebUI picker routing token. Auxiliary slots already
+    store the selected provider separately, so only an exact matching prefix is
+    safe to remove. Reject other qualified forms instead of persisting an
+    ambiguous upstream model name.
+    """
+    provider_id = str(provider or "").strip() or "auto"
+    model_id = str(model or "").strip()
+    if not model_id.startswith("@") or ":" not in model_id:
+        return model_id
+
+    matching_prefix = f"@{provider_id}:"
+    if provider_id != "auto" and model_id.startswith(matching_prefix):
+        native_model = model_id[len(matching_prefix) :]
+        if native_model:
+            return native_model
+
+    raise ValueError(
+        "provider-qualified auxiliary model must match the selected provider "
+        "and include a model name"
+    )
+
+
 def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | None = None) -> dict:
     """Persist an auxiliary model assignment in config.yaml.
 
@@ -4818,6 +6664,8 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     Sensitive api_key values are write-only: get_auxiliary_models() only reports
     whether one is set.
     """
+    provider = str(provider or "").strip() or "auto"
+    model = str(model or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
@@ -4843,18 +6691,65 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
             aux_cfg = config_data.get("auxiliary", {})
             if not isinstance(aux_cfg, dict):
                 aux_cfg = {}
+            model = _provider_native_auxiliary_model(provider, model)
             slot_cfg = aux_cfg.get(task, {})
             if not isinstance(slot_cfg, dict):
                 slot_cfg = {}
-            slot_cfg["provider"] = provider or "auto"
-            slot_cfg["model"] = model or ""
+            slot_cfg["provider"] = provider
+            slot_cfg["model"] = model
             if provider and (provider.startswith("custom:") or provider == "custom"):
-                try:
-                    _, _, resolved_base_url = resolve_model_provider(model)
-                    if resolved_base_url:
-                        slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
-                except Exception:
-                    pass
+                # Resolve the auxiliary slot's base_url against the SELECTED
+                # provider, not the active main provider. A bare
+                # resolve_model_provider(model) ignores `provider` and routes the
+                # model through whatever main provider is active — so when the
+                # selected auxiliary provider (custom:A) and the active main
+                # provider (custom:B) both list the same model id, the slot was
+                # persisted with provider=custom:A but base_url=B's endpoint
+                # (overlapping-id misroute, sibling of the resolve_model_provider
+                # fix). For a named custom:<slug> selection, look up that
+                # provider's OWN custom_providers[] entry directly. Note we do
+                # NOT route through model_with_provider_context here: its
+                # @custom:<slug>:model form re-resolves against the AMBIENT
+                # module-level `cfg`, while this path must read the in-lock
+                # `config_data` snapshot it is about to write. Those two can
+                # disagree whenever the cache is stale or the profile path
+                # changed, and ambient/global resolution while holding the
+                # non-reentrant _cfg_lock is exactly what the direct lookup below
+                # exists to avoid. (That qualified form DOES resolve a custom
+                # entry's own base_url as of the non-active #1806 fix -- the
+                # reason to stay direct here is the lock/snapshot, not a URL the
+                # qualified path cannot produce.) Fall back to the bare resolve
+                # only for the unnamed `custom` case, which has no own entry.
+                resolved_base_url = None
+                if provider.startswith("custom:"):
+                    # Resolve the selected provider's base_url from the
+                    # config_data already loaded under _cfg_lock above. Do NOT
+                    # call resolve_custom_provider_connection() / get_config()
+                    # here: they re-acquire the non-reentrant _cfg_lock we
+                    # already hold, self-deadlocking whenever the cache is stale
+                    # or the profile path changed. Use the shared uniqueness
+                    # helper on the in-scope dict so this slug-only save fails
+                    # closed on a collision (raises AmbiguousCustomProviderError)
+                    # exactly like every other path — otherwise the ambiguity
+                    # would be swallowed and the wrong endpoint persisted.
+                    _cp_match = _unique_custom_provider_entry(
+                        config_data.get("custom_providers", []),
+                        _custom_provider_slug_key(provider),
+                    )
+                    if _cp_match is not None:
+                        resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
+                if not resolved_base_url:
+                    # Best-effort fallback for the unnamed `custom` case (no own
+                    # entry). Keep it non-fatal for unexpected errors, but let a
+                    # genuine ambiguity propagate so the save fails closed.
+                    try:
+                        _, _, resolved_base_url = resolve_model_provider(model)
+                    except AmbiguousCustomProviderError:
+                        raise
+                    except Exception:
+                        resolved_base_url = None
+                if resolved_base_url:
+                    slot_cfg["base_url"] = str(resolved_base_url).strip().rstrip("/")
             if advanced is not None:
                 try:
                     _apply_advanced_model_options(slot_cfg, advanced)
@@ -4880,6 +6775,137 @@ _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
+
+# ── Catalog publication ordering ─────────────────────────────────────────────
+# Every cold rebuild takes the next sequence number, and the published catalog
+# remembers the sequence it came from. A build may publish only if it is newer
+# than whatever is already published. That is what stops an over-budget worker
+# finishing late — the out-of-band publisher, which outlives the foreground
+# caller that gave up on it — from resurrecting a superseded catalog over a
+# newer one. Wall-clock stamps cannot express this ordering: an OLDER build can
+# publish *after* a newer build has already started, and a time comparison would
+# read that publication as "newer" and wrongly discard the newer build's result
+# (#7481 review).
+_models_rebuild_seq: int = 0
+
+
+def _allocate_models_rebuild_seq() -> int:
+    """Take the next catalog-rebuild sequence number.
+
+    The caller must hold ``_available_models_cache_lock`` (the cold path does),
+    so the counter is never advanced by two builds at once.
+    """
+    global _models_rebuild_seq
+    _models_rebuild_seq += 1
+    return _models_rebuild_seq
+
+
+def _models_rebuild_superseded(rebuild_seq: int) -> bool:
+    """True when a newer rebuild has been allocated since ``rebuild_seq``.
+
+    The caller must hold ``_cache_build_cv`` (which shares its RLock with
+    ``_available_models_cache_lock``) so this reads ``_models_rebuild_seq``
+    atomically with respect to ``_allocate_models_rebuild_seq``.
+
+    A build is superseded by the newest *allocated* generation, not merely by the
+    newest *published* one. ``invalidate_models_cache()`` clears
+    ``_cache_build_in_progress`` without cancelling an in-flight worker (#7481
+    review), so a newer rebuild can be allocated while an older one is still
+    running. Comparing against the last published sequence would let that older
+    worker publish an invalidated catalog before the newer build publishes, and
+    then release the build flag that already belongs to the newer rebuild — the
+    invalidation has to fence against the latest allocated generation to be a
+    real freshness boundary.
+
+    Invalidation advances the allocated generation itself, so a build that was
+    already running when the cache was invalidated is superseded even when no
+    successor rebuild is ever allocated. Without that, the delayed worker stayed
+    eligible and repopulated the catalog that had just been cleared.
+    """
+    return rebuild_seq < _models_rebuild_seq
+
+
+def _clear_build_in_progress(rebuild_seq: int) -> None:
+    """Release the single-flight slot only if this build still owns it.
+
+    ``_cache_build_in_progress`` is one shared flag, so a build that has been
+    superseded — a newer rebuild was allocated, or an invalidation advanced the
+    generation — must leave it alone: clearing it here would wake waiters to an
+    empty cache and let another cold rebuild start beside the newer one (#7481
+    review). Used by the error paths inside the catalog critical section and by
+    the post-lock durable commit, so it lives at module scope rather than being
+    redefined inside ``get_available_models``.
+    """
+    global _cache_build_in_progress
+    with _cache_build_cv:
+        if _models_rebuild_superseded(rebuild_seq):
+            # A newer rebuild owns the flag now; releasing it here would wake
+            # waiters to an empty cache and let another cold rebuild start
+            # concurrently with the newer one.
+            return
+        _cache_build_in_progress = False
+        _cache_build_cv.notify_all()
+
+
+def _models_build_identity_current(
+    build_fingerprint, build_profile
+) -> bool:
+    """True when a build's source/profile identity is still the current one.
+
+    A catalog is only an answer for the config, auth state and provider catalog
+    it was *read from*. A build that started before a config edit and publishes
+    afterwards would otherwise stamp its stale catalog with the fingerprint of
+    the sources it never saw — a fresh-looking provenance on stale data — and on
+    the disk path that is exactly what makes the stale file look loadable
+    (#7481 review). So the identity captured when the build started is compared
+    again at publication and at the durable commit; a mismatch means the result
+    is dropped and the next caller rebuilds.
+
+    ``build_fingerprint`` / ``build_profile`` are ``None`` for the legacy caller
+    that has no rebuild to fence (nothing is validated then). A ``None``
+    profile — single-profile installs, or a runtime where ``api.profiles`` could
+    not be imported — skips the profile axis; the fingerprint's
+    ``config_yaml`` axis is the profile-specific config path, so a foreign
+    profile's catalog still fails that comparison.
+
+    Fails CLOSED: an identity that cannot be read is not treated as a match.
+    """
+    if build_fingerprint is None:
+        return True
+    try:
+        if _models_cache_source_fingerprint() != build_fingerprint:
+            return False
+    except Exception:
+        return False
+    if build_profile is not None:
+        try:
+            from api.profiles import get_active_profile_name
+
+            if (get_active_profile_name() or "").strip() != build_profile:
+                return False
+        except Exception:
+            return False
+    return True
+
+
+# Serializes the durable (on-disk) catalog commit. The in-memory generation
+# fence alone cannot order two *file* writers: a publisher decides under
+# ``_cache_build_cv`` and then writes the file with that lock released (a disk
+# write must not run inside the catalog lock), so an older publisher can reach
+# the filesystem after a newer one has already committed and revert the durable
+# catalog — valid-looking JSON from a superseded build (#7481 review). The
+# commit is therefore taken under this lock and re-validated against the
+# generation and the sources it was built from, immediately before the rename.
+_models_cache_disk_commit_lock = threading.Lock()
+# Generation of the newest rebuild whose payload actually reached the durable
+# file, guarded by ``_models_cache_disk_commit_lock``. The generation fence alone
+# leaves one check-then-use window on the disk path: a publisher can pass its
+# check, be descheduled, let a newer build commit, and only then take the commit
+# lock — reverting the file it just lost to. Remembering the last committed
+# generation inside the lock closes that window without holding the catalog lock
+# across a file write.
+_models_disk_committed_seq: int = 0
+
 
 # Memoized (snapshot_ref, {provider_slug: frozenset(model_ids)}) derived from
 # the published models-catalog snapshot. Used by _endpoint_advertised_model_ids
@@ -5015,6 +7041,108 @@ except (TypeError, ValueError):
     _LIVE_REBUILD_BUDGET_SECONDS = 4.0
 
 
+class _CustomProbeSchedule:
+    """Fair-share timing for the serial custom-endpoint probe chain (#7481).
+
+    The cold model-catalog rebuild probes the active endpoint first and each
+    named ``custom_providers`` entry after it, serially, and every probe in the
+    chain shares the one ``_LIVE_REBUILD_BUDGET_SECONDS`` wall-clock budget
+    while individually being capped at ``CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS``.
+    One unreachable endpoint — a LAN LM Studio/Ollama host the webui container
+    cannot route to is the common case, since the probe runs server-side —
+    therefore used to spend the entire budget on its connect timeout, and every
+    reachable provider scheduled behind it never got an in-band ``/v1/models``
+    probe at all: its group rendered from a stale disk cache or stayed empty and
+    the whole rebuild was pushed out-of-band.
+
+    This schedule hands each probe a fair slice of the *remaining* budget rather
+    than letting it consume the whole cap, so an endpoint that times out cannot
+    starve the endpoints after it. Two cases intentionally keep the historical
+    unthrottled cap, and both are stated rather than inferred:
+
+    * the legacy unbounded path (``_LIVE_REBUILD_BUDGET_SECONDS <= 0``), where
+      there is no window to share;
+    * the out-of-band continuation, i.e. the rebuild worker still running after
+      the foreground caller already gave up — reported by the ``out_of_band``
+      predicate — whose probes are no longer holding anyone up and must keep
+      their full attempt so the refresh can complete.
+
+    A slice is ``left / (remaining + 0.1)`` with no lower bound: a fractional
+    slot reserves publication headroom without halving a lone endpoint's window.
+    A slice bounds the serial wait, not the HTTP attempt: attempts may overlap
+    against the same deadline. After later probes, unused time is lent back to
+    still-running attempts before rebuilding from their outcomes in-band. The
+    active/LM Studio duplicate does not reserve a second slot when its URL and
+    configured credential match.
+
+    Even the shared window can truncate a healthy endpoint. A timeout below the
+    full cap is therefore not evidence of unreachability: return a partial,
+    uncached catalog, then retry truncated targets at the full cap on the worker.
+    Successful probes are retained and the final catalog uses the existing
+    generation, identity, ownership and durable-publication fences.
+
+    The window is the CALLER's window, not this chain's: ``deadline`` is an
+    absolute instant captured once before the worker and the foreground wait
+    start (see ``__init__``), so work that happens earlier in the rebuild is paid
+    out of the same window instead of being re-granted to the chain.
+    """
+
+    def __init__(self, endpoint_count: int, *, out_of_band=None, deadline=None) -> None:
+        """``deadline`` is the ABSOLUTE ``time.monotonic()`` instant the shared
+        window ends — the same instant the foreground caller stops waiting on
+        (#7481 review). The caller that owns the rebuild captures it once, before
+        the worker and the foreground wait start, because a deadline minted here
+        would be minted at construction time: any discovery work that ran before
+        the custom-probe phase (provider detection, the live id lookups, the
+        profile rebind) would be spent twice — once against the caller's wait and
+        again against a fresh window handed to this chain — so the chain could
+        still be probing for seconds after the caller had been served a fallback.
+        ``None`` falls back to "one window from now" for standalone callers.
+        """
+        self._remaining = max(1, int(endpoint_count))
+        self._cap = float(CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS)
+        self._attempt_only = float(CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS)
+        self._out_of_band = out_of_band
+        if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
+            # Legacy unbounded path: there is no window to share, so an absolute
+            # deadline is meaningless and the explicit one (if any) is ignored.
+            self._deadline = None
+        elif deadline is not None:
+            self._deadline = float(deadline)
+        else:
+            self._deadline = time.monotonic() + float(_LIVE_REBUILD_BUDGET_SECONDS)
+
+    def next_timeout(self) -> float:
+        """Timeout for the next probe in the chain, then advance the schedule."""
+        remaining = self._remaining
+        self._remaining = max(1, remaining - 1)
+        # Legacy unbounded path: no window exists, so there is nothing to share.
+        if self._deadline is None:
+            return self._cap
+        # Deliberately out-of-band continuation: the foreground caller has already
+        # stopped waiting and served its fallback, so this chain is no longer
+        # holding anyone up and keeps the full attempt for the refresh to be able
+        # to complete. This is an explicit signal rather than an inference from
+        # the deadline, because the deadline being spent does NOT imply the
+        # foreground has given up — a probe can find the window spent while the
+        # caller is still waiting (the hand-off race handled below), and that
+        # state has to stay bounded.
+        if self._out_of_band is not None and self._out_of_band():
+            return self._cap
+        left = self._deadline - time.monotonic()
+        if left <= 0:
+            # In-band, window already spent: attempt the probe with the smallest
+            # workable timeout instead of the full cap. Handing out the cap here
+            # is what let a long chain outspend the window once its early slices
+            # were floored up — the later probes paid a full per-endpoint cap each
+            # after the window was gone, so a reachable provider behind them still
+            # landed out-of-band (or not at all), which is the reported defect.
+            return min(self._cap, self._attempt_only)
+        # Fractional headroom, not a whole extra endpoint. No fixed floor:
+        # arbitrary-length chains must not over-allocate the shared window.
+        return min(self._cap, left / (remaining + 0.1))
+
+
 # ── Budget-exceeded warning rate-limit ───────────────────────────────────────
 # Q-2979-A3 / Copilot discussion_r3305864400: the live-rebuild-budget-exceeded
 # warning at _invoke_models_rebuild's slow-path is potentially high-volume —
@@ -5143,8 +7271,8 @@ def _configured_model_badges_from_static_catalog(
     for entry in configured_entries:
         provider = entry["provider"]
         model = entry["model"]
-        raw_candidates = []
-        for candidate in (model, f"{provider}/{model}", f"@{provider}:{model}"):
+        raw_candidates: list[str] = []
+        for candidate in (model, f"@{provider}:{model}"):
             if candidate and candidate not in raw_candidates:
                 raw_candidates.append(candidate)
 
@@ -5238,13 +7366,13 @@ def _minimal_static_models_catalog() -> dict:
         })
     except Exception:
         logger.debug("minimal static models catalog build failed", exc_info=True)
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": None,
             "default_model": "",
             "configured_model_badges": {},
             "groups": [],
             "aliases": {},
-        }
+        })
 
 
 def _static_models_catalog_without_live_probes() -> dict:
@@ -5469,8 +7597,12 @@ def _static_models_catalog_without_live_probes() -> dict:
             raw_key = canonical_to_raw_provider_key.get(pid, pid)
             provider_cfg = _get_provider_cfg(raw_key)
             raw_models = []
-            if isinstance(provider_cfg, dict) and "models" in provider_cfg:
-                raw_models = _configured_model_options(provider_cfg["models"])
+            if (
+                isinstance(provider_cfg, dict)
+                and "models" in provider_cfg
+                and not _provider_models_are_discovered_catalog(provider_cfg)
+            ):
+                raw_models = _configured_model_options(provider_cfg.get("models"))
             if not raw_models:
                 raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
             # Plugin-only providers (e.g. 9router) are not in _PROVIDER_MODELS
@@ -5579,17 +7711,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         groups.sort(key=_group_sort_key)
 
-        model_aliases: dict[str, str] = {}
-        try:
-            raw_aliases = cfg.get("model", {}).get("aliases", {})
-            if isinstance(raw_aliases, dict):
-                model_aliases = {
-                    str(k).strip(): str(v).strip()
-                    for k, v in raw_aliases.items()
-                    if k and v
-                }
-        except Exception:
-            pass
+        model_aliases = _model_aliases_from_config()
 
         if not groups and default_model:
             return copy.deepcopy(_minimal_static_models_catalog())
@@ -5726,7 +7848,6 @@ def _has_explicit_pool_credentials(provider_id: str) -> bool:
     cost more than once per TTL window.
     """
     return bool(_pool_entry_payloads(provider_id))
-_provider_models_invalidated_ts: dict[str, float] = {}  # provider_id -> timestamp of last invalidation
 
 # Disk-backed in-memory cache for get_available_models().
 # Written to disk on every cache population so the cache survives server restarts.
@@ -5778,7 +7899,7 @@ _MODELS_CACHE_SCHEMA_VERSION = 3
 _models_cache_path = STATE_DIR / "models_cache.json"
 
 
-def _get_models_cache_path() -> Path:
+def _get_models_cache_path(profile: str | None = None) -> Path:
     """Return the /api/models disk-cache path for the *active* profile (#3957).
 
     WebUI profile switching is per-client/cookie scoped (issue #798), but the
@@ -5802,12 +7923,13 @@ def _get_models_cache_path() -> Path:
     The named-profile path is derived from ``_models_cache_path`` (the
     module-level default), not from ``STATE_DIR`` directly, so the path stays
     correct if the default is repointed (e.g. tests monkeypatch
-    ``_models_cache_path`` to an isolated tmp file).
+    ``_models_cache_path`` to an isolated tmp file). Pass *profile* to get
+    another profile's path (profile delete/create).
     """
     try:
         from api.profiles import get_active_profile_name, _is_root_profile
 
-        name = (get_active_profile_name() or "").strip()
+        name = (profile or get_active_profile_name() or "").strip()
         if not name or _is_root_profile(name):
             return _models_cache_path
         # Defensive filename sanitization: the cookie-derived profile name is
@@ -5852,6 +7974,97 @@ def _models_cache_file_fingerprint(path: Path) -> dict:
     return fingerprint
 
 
+# Codex's ~/.codex/models_cache.json is rewritten on Codex's own refresh timer.
+# Each rewrite bumps mtime_ns + size, but the payload usually only refreshes
+# the volatile timestamp fields (`fetched_at`, plus `updated_at` when present)
+# while the model catalog (client_version, etag, models[]) stays identical.
+# Fingerprinting that file by stat (#2443's _models_cache_file_fingerprint)
+# therefore invalidated the 24h /api/models cache on every Codex refresh, and
+# the next session visit paid a full live rebuild whose serial provider probes
+# starved the session-open path (#7540).
+#
+# This is a DENY-list, not an allow-list, on purpose — same safety direction as
+# _AUTH_FINGERPRINT_VOLATILE_KEYS: every other field (client_version, etag,
+# models, and any future model-affecting key) stays IN the fingerprint, so a
+# genuine catalog change still invalidates the cache.
+_CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS = frozenset({
+    # Whole-file refresh timestamp, rewritten by every Codex models refresh.
+    "fetched_at",
+    # Same-family save timestamp (mirrors the auth.json deny-list).
+    "updated_at",
+})
+
+
+def _strip_volatile_codex_cache_fields(obj):
+    """Recursively drop refresh-timestamp-only keys from a Codex cache tree.
+
+    Pure structural transform; never mutates the input. Any key NOT in the
+    deny-list is preserved verbatim so real catalog changes still show through
+    in the fingerprint.
+    """
+    if isinstance(obj, dict):
+        return {
+            k: _strip_volatile_codex_cache_fields(v)
+            for k, v in obj.items()
+            if k not in _CODEX_CACHE_FINGERPRINT_VOLATILE_KEYS
+        }
+    if isinstance(obj, list):
+        return [_strip_volatile_codex_cache_fields(v) for v in obj]
+    return obj
+
+
+def _codex_models_cache_fingerprint(path: Path) -> dict:
+    """Return a content fingerprint of Codex's models_cache.json.
+
+    Unlike _models_cache_file_fingerprint() (mtime_ns + size), this hashes the
+    JSON content with the refresh-timestamp fields stripped, so a Codex
+    refresh that only bumps `fetched_at` does NOT invalidate the 24h
+    /api/models cache and therefore does not force the live rebuild that
+    stalled session opens (#7540). A change to anything that actually feeds the
+    Codex models we surface (client_version, etag, models[], an unknown future
+    field) still changes the hash and correctly busts the cache.
+
+    Failure modes are deliberately conservative — a missing file is recorded,
+    and an unreadable/undecodable file falls back to the stat-based fingerprint
+    so behaviour is never *less* safe than the stat-only version.
+    """
+    p = Path(path).expanduser()
+    fp: dict = {"path": str(p)}
+    try:
+        st = p.stat()
+    except OSError:
+        fp["missing"] = True
+        return fp
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        # Unreadable / corrupt / mid-write: keep the stat-based fingerprint.
+        # Strictly no less safe than the pre-fix behaviour (every write still
+        # invalidates) for this rare path only.
+        fp["mtime_ns"] = st.st_mtime_ns
+        fp["size"] = st.st_size
+        fp["semantic"] = "unparsed-fallback"
+        return fp
+    try:
+        # The recursive strip can raise (e.g. RecursionError on a pathologically
+        # deep JSON tree) — keep it inside the fallback try so any transform
+        # failure degrades to the stat fingerprint rather than 500ing /api/models.
+        stripped = _strip_volatile_codex_cache_fields(raw)
+        encoded = json.dumps(
+            stripped,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            default=str,
+        ).encode("utf-8")
+        fp["semantic_sha256"] = hashlib.sha256(encoded).hexdigest()
+    except Exception:
+        fp["mtime_ns"] = st.st_mtime_ns
+        fp["size"] = st.st_size
+        fp["semantic"] = "encode-fallback"
+    return fp
+
+
 def _models_cache_catalog_fingerprint() -> dict:
     """Return non-secret model-catalog identity metadata for cache invalidation.
 
@@ -5861,6 +8074,13 @@ def _models_cache_catalog_fingerprint() -> dict:
     deterministic so a server restart after catalog changes does not keep
     serving an otherwise-valid persisted models_cache.json until the 24h TTL
     expires (#2443).
+
+    The Codex axis uses a *content* fingerprint that excludes the refresh
+    timestamp fields (see _codex_models_cache_fingerprint): Codex rewrites
+    ~/.codex/models_cache.json on its own timer, bumping mtime_ns + size while
+    the model payload stays identical, so a stat-based fingerprint invalidated
+    the 24h cache on every Codex refresh and the next session visit paid a live
+    rebuild (#7540).
     """
     catalog_payload = {
         "provider_models": _PROVIDER_MODELS,
@@ -5881,7 +8101,7 @@ def _models_cache_catalog_fingerprint() -> dict:
     codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
     return {
         "provider_catalog_sha256": provider_catalog_sha,
-        "codex_models_cache": _models_cache_file_fingerprint(codex_home / "models_cache.json"),
+        "codex_models_cache": _codex_models_cache_fingerprint(codex_home / "models_cache.json"),
     }
 
 
@@ -5996,6 +8216,96 @@ def _auth_store_semantic_fingerprint(path: Path) -> dict:
     return fp
 
 
+def _active_profile_home() -> Path:
+    try:
+        from api.profiles import get_active_hermes_home as _gah
+
+        return _gah()
+    except ImportError:
+        return _DEFAULT_HERMES_HOME
+
+
+def _models_cache_env_fingerprint(path: Path) -> list:
+    """``[key, HMAC(value)]`` per non-empty ``.env`` entry, parsed like provider detection.
+
+    Values are keyed-hashed with the WebUI signing key so the cache file never holds a secret.
+    """
+    import hmac
+    from api.auth import _signing_key
+    from api.providers import _load_env_file
+
+    key = _signing_key()
+    return [
+        [k, hmac.new(key, v.encode("utf-8"), hashlib.sha256).hexdigest()]
+        for k, v in sorted(_load_env_file(Path(path).expanduser()).items())
+        if v
+    ]
+
+
+def _declares_model_provider_kind(plugin_dir: Path) -> bool:
+    # Same parse as the agent's providers._declares_model_provider_kind: PyYAML, then a line scan.
+    for filename in ("plugin.yaml", "plugin.yml"):
+        manifest = plugin_dir / filename
+        if not manifest.is_file():
+            continue
+        try:
+            text = manifest.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return False
+        try:
+            from api import yaml_compat as _yaml
+
+            data = _yaml.safe_load(text)
+            if isinstance(data, dict):
+                return str(data.get("kind", "")).strip() == "model-provider"
+        except Exception:
+            pass
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("#") or ":" not in stripped:
+                continue
+            key, _, value = stripped.partition(":")
+            if key.strip() == "kind":
+                return value.strip().strip("\"'") == "model-provider"
+        return False
+    return False
+
+
+def _models_cache_plugin_fingerprint(home: Path) -> list:
+    """``[dir, file stamps]`` per model-provider plugin, discovered like providers._scan_home_layer."""
+    found = []
+    plugins_root = Path(home).expanduser() / "plugins"
+    for base, flat in ((plugins_root / "model-providers", False), (plugins_root, True)):
+        try:
+            children = sorted(base.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if not child.is_dir() or child.name.startswith(("_", ".")):
+                continue
+            if flat and (child.name == "model-providers" or not _declares_model_provider_kind(child)):
+                continue
+            found.append([str(child.relative_to(plugins_root)), _plugin_tree_stamps(child)])
+    return found
+
+
+def _plugin_tree_stamps(plugin_dir: Path) -> list:
+    # The loader execs __init__.py, which may import siblings or read data files; skip bytecode.
+    stamps = []
+    for root, dirs, files in os.walk(plugin_dir):
+        dirs[:] = sorted(d for d in dirs if d != "__pycache__" and not d.startswith("."))
+        for name in sorted(files):
+            if name.endswith((".pyc", ".pyo")):
+                continue
+            path = os.path.join(root, name)
+            try:
+                st = os.stat(path)
+            except OSError:
+                continue
+            stamps.append([os.path.relpath(path, plugin_dir), st.st_mtime_ns, st.st_size])
+    return stamps
+
+
 def _models_cache_source_fingerprint() -> dict:
     """Return the current config/auth/catalog fingerprint for /api/models cache.
 
@@ -6007,9 +8317,12 @@ def _models_cache_source_fingerprint() -> dict:
     mtime/size fingerprint because it is only rewritten on deliberate user
     edits (which can change anything) and does not churn on a timer.
     """
+    home = _active_profile_home()
     return {
         "config_yaml": _models_cache_file_fingerprint(_get_config_path()),
         "auth_json": _auth_store_semantic_fingerprint(_get_auth_store_path()),
+        "env": _models_cache_env_fingerprint(home / ".env"),
+        "plugins": _models_cache_plugin_fingerprint(home),
         "catalog": _models_cache_catalog_fingerprint(),
     }
 
@@ -6137,24 +8450,363 @@ def _load_models_cache_from_disk() -> dict | None:
 
 
 def _model_aliases_from_config() -> dict[str, str]:
-    """Build the normalized model-alias map from current config.
-
-    Mirrors the alias construction used by the live and static catalog paths so
-    the `/api/models.aliases` contract is consistent across every catalog source
-    (live, static, and the stale-disk fallback, which can't read aliases from a
-    disk cache that never persisted them).
-    """
+    """Build the legacy string-alias map from current config."""
     try:
         raw_aliases = cfg.get("model", {}).get("aliases", {})
         if isinstance(raw_aliases, dict):
             return {
                 str(k).strip(): str(v).strip()
                 for k, v in raw_aliases.items()
-                if k and v
+                if k and v and isinstance(v, str)
             }
     except Exception:
         pass
     return {}
+
+
+_MODEL_ALIAS_ROUTE_PREFIX = "model-alias-"
+
+
+def _model_alias_route_provider(name: object) -> str:
+    """Return a stable opaque provider lane for one profile-local alias name."""
+    normalized = str(name or "").strip().lower()
+    try:
+        from api.profiles import get_active_hermes_home
+
+        profile_home = str(get_active_hermes_home().expanduser().resolve())
+    except Exception:
+        # The config path is the closest stable profile identity available during
+        # early imports and in reduced test environments.
+        profile_home = str(_get_config_path().expanduser().resolve().parent)
+    digest = hashlib.sha256(f"{profile_home}\0{normalized}".encode("utf-8")).hexdigest()
+    return f"{_MODEL_ALIAS_ROUTE_PREFIX}{digest}"
+
+
+def _configured_model_alias_entries(config_data: dict | None = None) -> dict[str, dict[str, str]]:
+    """Normalize canonical and legacy aliases with Hermes precedence."""
+    config_data = config_data if isinstance(config_data, dict) else cfg
+    entries: dict[str, dict[str, str]] = {}
+    canonical = config_data.get("model_aliases")
+    if isinstance(canonical, dict):
+        for raw_name, raw_entry in canonical.items():
+            name = str(raw_name or "").strip().lower()
+            if not name or not isinstance(raw_entry, dict):
+                continue
+            model = str(raw_entry.get("model") or "").strip()
+            if not model:
+                continue
+            entries[name] = {
+                "model": model,
+                "provider": str(raw_entry.get("provider") or "custom").strip() or "custom",
+                "base_url": str(raw_entry.get("base_url") or "").strip(),
+                "api_key": str(raw_entry.get("api_key") or "").strip(),
+                "key_env": str(raw_entry.get("key_env") or "").strip(),
+            }
+
+    model_section = config_data.get("model")
+    legacy = model_section.get("aliases") if isinstance(model_section, dict) else None
+    current_provider = str(model_section.get("provider") or "").strip() if isinstance(model_section, dict) else ""
+    if isinstance(legacy, dict):
+        for raw_name, raw_entry in legacy.items():
+            name = str(raw_name or "").strip().lower()
+            if not name or name in entries:
+                continue
+            if isinstance(raw_entry, dict):
+                model = str(raw_entry.get("model") or "").strip()
+                explicit_provider = str(raw_entry.get("provider") or "").strip()
+                base_url = str(raw_entry.get("base_url") or "").strip()
+                api_key = str(raw_entry.get("api_key") or "").strip()
+                key_env = str(raw_entry.get("key_env") or "").strip()
+                if not explicit_provider and not base_url:
+                    continue
+                provider = explicit_provider or current_provider or "custom"
+            elif isinstance(raw_entry, str) and raw_entry.strip():
+                value = raw_entry.strip()
+                if "/" not in value:
+                    continue
+                provider, model = value.split("/", 1)
+                provider, model, base_url = provider.strip(), model.strip(), ""
+                api_key, key_env = "", ""
+                if not provider:
+                    continue
+            else:
+                continue
+            if model:
+                entries[name] = {
+                    "model": model,
+                    "provider": provider or current_provider or "custom",
+                    "base_url": base_url,
+                    "api_key": api_key,
+                    "key_env": key_env,
+                }
+    return entries
+
+
+def _public_model_alias_routes() -> dict[str, dict[str, str]]:
+    """Return alias routes safe to expose through ``/api/models``.
+
+    Endpoint and credential fields remain server-side. The opaque provider lane
+    preserves exact alias/endpoint identity in session state without exposing a
+    credential-bearing URL or key material.
+    """
+    return {
+        name: {
+            "model": entry["model"],
+            "provider": entry["provider"],
+            "route_provider": _model_alias_route_provider(name),
+        }
+        for name, entry in _configured_model_alias_entries().items()
+    }
+
+
+def resolve_model_alias_runtime(
+    route_provider: str | None,
+    expected_model: str | None = None,
+) -> dict[str, object] | None:
+    """Resolve an opaque alias lane to server-side runtime routing material."""
+    route_provider = str(route_provider or "").strip().lower()
+    if not route_provider.startswith(_MODEL_ALIAS_ROUTE_PREFIX):
+        return None
+    aliases = _configured_model_alias_entries()
+    name = next(
+        (alias_name for alias_name in aliases if _model_alias_route_provider(alias_name) == route_provider),
+        None,
+    )
+    if name is None:
+        return None
+
+    configured = aliases[name]
+    resolved = dict(configured)
+    base_url_explicit = bool(configured.get("base_url"))
+    credential_explicit = bool(configured.get("api_key") or configured.get("key_env"))
+    # Hermes resolves a URL-bearing alias's credential for the alias HOST
+    # (requested="custom", which is host-gated), never for its provider label.
+    # That lookup provider is credential authority only; the alias's logical
+    # provider stays its routing/wire identity.
+    credential_lookup_provider = (
+        "custom" if base_url_explicit else str(configured.get("provider") or "custom").strip()
+    )
+    try:
+        from hermes_cli.model_switch import _load_direct_aliases, direct_alias_runtime_request
+
+        direct = _load_direct_aliases().get(name)
+        if direct is not None:
+            requested_provider, api_key = direct_alias_runtime_request(direct)
+            credential_lookup_provider = str(requested_provider or credential_lookup_provider).strip()
+            resolved = {
+                "model": str(direct.model or "").strip(),
+                "provider": str(direct.provider or requested_provider or "custom").strip(),
+                "base_url": str(direct.base_url or configured.get("base_url") or "").strip(),
+                "api_key": str(api_key or configured.get("api_key") or "").strip(),
+                "key_env": "" if api_key else str(configured.get("key_env") or "").strip(),
+            }
+    except Exception:
+        pass
+    resolved["credential_lookup_provider"] = credential_lookup_provider
+
+    resolved["alias"] = name
+    # Keep server-only provenance for composing aliases with named custom
+    # providers. An explicit alias endpoint is its own authority and must not be
+    # replaced by, or paired with credentials from, ``custom:<slug>`` config.
+    resolved["base_url_explicit"] = base_url_explicit
+    resolved["credential_explicit"] = credential_explicit
+    if expected_model and str(expected_model).strip() != resolved["model"]:
+        return None
+    raw_api_key = resolved.get("api_key", "")
+    if raw_api_key.startswith("${") and raw_api_key.endswith("}"):
+        resolved["api_key"] = _thread_local_env_value(raw_api_key[2:-1]).strip()
+    elif not raw_api_key and resolved.get("key_env"):
+        resolved["api_key"] = _thread_local_env_value(resolved["key_env"]).strip()
+    return resolved
+
+
+def is_model_alias_route_provider(route_provider: object) -> bool:
+    """True when ``route_provider`` is an opaque model-alias lane.
+
+    True whether or not the lane currently resolves: the lane is a WebUI-minted
+    identity for one alias name, so it identifies the alias route even when the
+    alias was deleted, belongs to another profile, or now targets a different
+    model. Callers use this to keep such a lane out of generic provider
+    resolution, which would read the opaque digest as a provider id.
+    """
+    return str(route_provider or "").strip().lower().startswith(_MODEL_ALIAS_ROUTE_PREFIX)
+
+
+def unresolved_model_alias_route_error() -> dict:
+    """Return the terminal verdict for an alias lane that resolved to nothing."""
+    return {
+        "reason": MODEL_ALIAS_ROUTE_UNRESOLVED,
+        "provider": None,
+        "message": (
+            "This session's model alias is not configured in the active profile: it "
+            "may have been deleted or renamed, or its target model may have changed."
+        ),
+        "hint": (
+            "Pick the model again (the /model command or the model selector), then "
+            "send again."
+        ),
+    }
+
+
+def raise_for_unresolved_model_alias_route(route_provider: object) -> None:
+    """Fail closed when an opaque alias lane no longer resolves.
+
+    No-op for a lane that is not a ``model-alias-*`` route. Otherwise raise the
+    terminal :class:`CustomProviderRouteError` so the caller stops before
+    generic provider resolution, before any AIAgent is constructed, and before
+    the agent cache is written — the opaque digest is not a provider id, and
+    resolving it as one can land on an ambient/fallback endpoint the user never
+    picked. The verdict carries no endpoint, credential, or alias-name detail.
+    """
+    if not is_model_alias_route_provider(route_provider):
+        return
+    verdict = unresolved_model_alias_route_error()
+    raise CustomProviderRouteError(
+        verdict["message"],
+        reason=verdict["reason"],
+        provider=verdict["provider"],
+        hint=verdict["hint"],
+    )
+
+
+def _same_endpoint_origin(url_a: object, url_b: object) -> bool:
+    """True only for an identical (scheme, host, port) origin; unknown is False."""
+    from urllib.parse import urlsplit
+
+    def _origin(url: object):
+        try:
+            parts = urlsplit(str(url or "").strip())
+            scheme = (parts.scheme or "").lower()
+            host = (parts.hostname or "").lower()
+            port = parts.port or {"https": 443, "http": 80}.get(scheme)
+        except ValueError:
+            return None
+        return (scheme, host, port) if scheme and host else None
+
+    origin_a = _origin(url_a)
+    return origin_a is not None and origin_a == _origin(url_b)
+
+
+def _model_alias_endpoint_api_mode(provider: str, base_url: str | None, model: object) -> str | None:
+    """Wire protocol for a URL-bearing alias, via Hermes' own detection.
+
+    Mirrors Hermes Agent, which clears the mode for a direct-alias endpoint and
+    re-detects it from the alias's logical provider plus its host. ``None``
+    (agent-side detection) when the installed Hermes cannot answer.
+    """
+    try:
+        from hermes_cli.providers import determine_api_mode
+
+        return determine_api_mode(provider, base_url or "", model=str(model or "")) or None
+    except Exception:
+        return None
+
+
+def merge_model_alias_runtime_bundle(
+    alias_route: dict,
+    runtime_provider: dict | None = None,
+    *,
+    connection_resolver=None,
+) -> dict:
+    """Compose one alias route with provider runtime state without mixing authorities.
+
+    An alias-declared ``base_url`` owns the endpoint boundary, matching Hermes
+    Agent's direct-alias contract (``_apply_direct_alias_endpoint``): the alias's
+    declared credential wins; otherwise the only credential that may accompany
+    it is one the caller resolved host-gated against the alias URL itself (see
+    ``direct_alias_runtime_request``), and only when that runtime reports the
+    alias's own origin. An unrelated provider credential never crosses to it.
+    The alias's logical provider remains its identity and selects the wire
+    protocol together with the alias host; the host-gated ``custom`` lookup is
+    credential authority only. When the alias names only a provider, normal
+    provider resolution remains authoritative. A credential-only alias may
+    override that provider's credential, but not its endpoint or wire protocol,
+    and it clears the provider credential pool it displaced.
+    """
+    route = alias_route if isinstance(alias_route, dict) else {}
+    runtime = runtime_provider if isinstance(runtime_provider, dict) else {}
+    provider = str(route.get("provider") or runtime.get("provider") or "").strip() or None
+    explicit_base_url = bool(route.get("base_url_explicit"))
+    explicit_credential = bool(route.get("credential_explicit"))
+    alias_api_key = route.get("api_key") or None
+
+    if explicit_base_url:
+        alias_base_url = route.get("base_url") or None
+        logical_provider = str(route.get("provider") or "").strip()
+        # WebUI canonicalizes named custom providers to "custom" everywhere.
+        bundle_provider = (
+            "custom"
+            if not logical_provider or logical_provider.lower().startswith("custom")
+            else logical_provider
+        )
+        if explicit_credential:
+            api_key = alias_api_key
+        else:
+            runtime_key = str(runtime.get("api_key") or "").strip()
+            if runtime_key == "no-key-required" or not _same_endpoint_origin(
+                runtime.get("base_url"), alias_base_url
+            ):
+                runtime_key = ""
+            api_key = runtime_key or KEYLESS_CUSTOM_API_KEY
+        bundle = {
+            "provider": bundle_provider,
+            "base_url": alias_base_url,
+            "api_key": api_key,
+            "api_mode": _model_alias_endpoint_api_mode(
+                logical_provider or bundle_provider, alias_base_url, route.get("model")
+            ),
+            "acp_command": None,
+            "acp_args": None,
+            "credential_pool": None,
+            CUSTOM_ROUTE_ERROR_FIELD: None,
+        }
+        if explicit_credential and not alias_api_key:
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
+                CUSTOM_ROUTE_NO_CREDENTIAL,
+                provider or f"model alias {route.get('alias') or '<unknown>'}",
+            )
+        return bundle
+
+    resolved_provider = provider
+    resolved_api_key = runtime.get("api_key")
+    resolved_base_url = runtime.get("base_url")
+    if isinstance(provider, str) and provider.lower().startswith("custom:"):
+        bundle = merge_custom_provider_runtime_bundle(
+            resolved_provider,
+            resolved_api_key,
+            resolved_base_url,
+            runtime,
+            lookup_provider=provider,
+            connection_resolver=connection_resolver,
+        )
+    else:
+        bundle = {
+            "provider": resolved_provider,
+            "base_url": resolved_base_url,
+            "api_key": resolved_api_key,
+            "api_mode": runtime.get("api_mode"),
+            "acp_command": runtime.get("acp_command", runtime.get("command")),
+            "acp_args": runtime.get("acp_args", runtime.get("args")),
+            "credential_pool": runtime.get("credential_pool"),
+            CUSTOM_ROUTE_ERROR_FIELD: None,
+        }
+
+    if explicit_credential:
+        bundle["api_key"] = alias_api_key
+        bundle["credential_pool"] = None
+        if alias_api_key and bundle.get("base_url"):
+            # The alias supplied the credential the provider bundle lacked; the
+            # pair is now complete, so a prior missing-credential verdict no
+            # longer applies. Endpoint/unowned verdicts remain terminal.
+            verdict = bundle.get(CUSTOM_ROUTE_ERROR_FIELD)
+            if not verdict or verdict.get("reason") == CUSTOM_ROUTE_NO_CREDENTIAL:
+                bundle[CUSTOM_ROUTE_ERROR_FIELD] = None
+        elif not alias_api_key:
+            bundle[CUSTOM_ROUTE_ERROR_FIELD] = _custom_route_verdict(
+                CUSTOM_ROUTE_NO_CREDENTIAL,
+                provider or f"model alias {route.get('alias') or '<unknown>'}",
+            )
+    return bundle
 
 
 def _load_stale_models_cache_from_disk() -> dict | None:
@@ -6163,10 +8815,10 @@ def _load_stale_models_cache_from_disk() -> dict | None:
     The main cache loader enforces metadata stamps for a full cold-path cache hit.
     This helper intentionally does not apply that stricter policy, so we can still
     recover a useful fallback payload when the strict loader rejected cache because
-    metadata or fingerprint fields are stale. It DOES still enforce the schema
-    version: a cross-schema cache can have an incompatible groups/badge shape, so
-    serving it to the picker could surface a broken catalog — schema mismatch is a
-    hard reject even on the fallback path.
+    the WebUI version stamp is stale. It DOES still enforce the schema version (a
+    cross-schema cache can have an incompatible groups/badge shape) and the source
+    fingerprint: a snapshot built from other config/auth/.env/plugin sources is a
+    wrong catalog, not merely an old one, so it is never served.
     """
     try:
         import json as _j
@@ -6179,6 +8831,8 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
+            return None
+        if cache.get("_source_fingerprint") != _models_cache_source_fingerprint():
             return None
         aliases = cache.get("aliases")
         if not isinstance(aliases, dict):
@@ -6200,7 +8854,9 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         return None
 
 
-def _save_models_cache_to_disk(cache: dict) -> None:
+def _save_models_cache_to_disk(
+    cache: dict, *, rebuild_seq=None, build_fingerprint=None, build_profile=None
+) -> None:
     """Save cache to disk so it survives server restarts.
 
     Stamps the payload with `_webui_version` and `_schema_version` (#1633) so
@@ -6215,13 +8871,31 @@ def _save_models_cache_to_disk(cache: dict) -> None:
     a mismatch (since runtime_version is non-None on every subsequent call),
     so this is safe — at worst we write one cache file that gets rejected
     once on the next boot.
+
+    The commit is fenced (#7481 review). Two overlapping publishers used to
+    pick the SAME ``.<pid>.tmp`` path, so the newer writer's rename could be
+    undone by the older writer's still-open descriptor, leaving stale-but-valid
+    JSON as the durable catalog; and there was no re-check between the in-memory
+    generation decision and the rename. So the temp file is unique per build, and
+    the rename is taken under ``_models_cache_disk_commit_lock`` after
+    re-validating that this build is still the newest allocated generation and is
+    still publishing for the sources it read. A superseded or re-sourced commit
+    discards its temp file and leaves the durable catalog to the build that won.
+    ``_source_fingerprint`` records the fingerprint the build READ, so the file
+    can never claim provenance it did not have.
     """
+    global _models_disk_committed_seq
+    tmp = None
     try:
         if not _is_valid_models_cache(cache):
             return
         payload = {
             "_schema_version": _MODELS_CACHE_SCHEMA_VERSION,
-            "_source_fingerprint": _models_cache_source_fingerprint(),
+            "_source_fingerprint": (
+                build_fingerprint
+                if build_fingerprint is not None
+                else _models_cache_source_fingerprint()
+            ),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -6231,12 +8905,145 @@ def _save_models_cache_to_disk(cache: dict) -> None:
         if runtime_version is not None:
             payload["_webui_version"] = runtime_version
         cache_path = _get_models_cache_path()
-        tmp = str(cache_path) + f".{os.getpid()}.tmp"
+        # Unique per build AND per thread: a shared per-pid name is what let two
+        # concurrent publishers collide on one temp path. Same directory, so the
+        # commit stays a same-filesystem (atomic) rename.
+        tmp = "{}.{}.{}.{}.tmp".format(
+            cache_path,
+            os.getpid(),
+            threading.get_ident(),
+            "unfenced" if rebuild_seq is None else int(rebuild_seq),
+        )
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
-        os.rename(tmp, str(cache_path))
+        with _models_cache_disk_commit_lock:
+            # Commit-time fence, not merely a pre-write check: the write above is
+            # slow enough for a newer build to publish in the meantime, and the
+            # durable file must never be reverted to an older catalog.
+            #
+            # Lock order is commit lock -> catalog lock; nothing takes them the
+            # other way round (the publishers call this with `_cache_build_cv`
+            # released, because a file write must not run inside the catalog
+            # lock).
+            # Hold the catalog lock through the rename: invalidation takes
+            # commit -> catalog in that same order and deletes under both.
+            # Otherwise it can revoke the build after this check, delete the
+            # file, and return before this stale rename restores it.
+            with _cache_build_cv:
+                superseded = rebuild_seq is not None and _models_rebuild_superseded(
+                    rebuild_seq
+                )
+                if superseded or (
+                    rebuild_seq is not None
+                    and (
+                        int(rebuild_seq) < _models_disk_committed_seq
+                        or not _models_build_identity_current(
+                            build_fingerprint, build_profile
+                        )
+                    )
+                ):
+                    logger.debug(
+                        "discarding models-cache disk commit from superseded rebuild "
+                        "#%s (latest allocated rebuild #%s, latest committed #%s)",
+                        rebuild_seq, _models_rebuild_seq, _models_disk_committed_seq,
+                    )
+                    return
+                os.replace(tmp, str(cache_path))
+                tmp = None
+                if rebuild_seq is not None:
+                    _models_disk_committed_seq = max(
+                        _models_disk_committed_seq, int(rebuild_seq)
+                    )
     except Exception:
         pass  # Non-fatal -- cache will rebuild on next call
+    finally:
+        if tmp is not None:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass  # already gone / never created
+
+
+def _commit_models_cache_to_disk_after_lock(
+    cache: dict, rebuild_seq, build_fingerprint, build_profile
+) -> None:
+    """Foreground durable publication, run with the catalog lock NOT held.
+
+    ``get_available_models`` holds ``_available_models_cache_lock`` across the
+    whole cold path, including the foreground wait. It publishes memory there
+    and queues the durable commit for this helper, which runs only after that
+    outer lock scope has fully ended (#7481 review). Calling
+    ``_save_models_cache_to_disk`` while the catalog lock was still held acquired
+    the two locks in the order catalog -> commit, while
+    ``_invalidate_models_catalog_epoch`` (and the writer itself) uses
+    commit -> catalog: a foreground publisher then blocked on a commit mutex an
+    invalidator already held, while that invalidator blocked on the catalog lock
+    the publisher owned. Both acquisitions are unbounded in production, so that
+    is a cycle with no escape — the foreground `/api/models` load and the
+    invalidation would each wait forever.
+
+    Running the commit here keeps the writer's own order (commit -> catalog)
+    intact with no outer catalog ownership held, so the two can never cycle.
+    The single-flight release rides with the commit, so ownership still spans
+    the durable write; ``_clear_build_in_progress`` refuses to release a slot a
+    newer rebuild owns, so a superseded foreground publisher cannot clear the
+    newer build's flag (#7481 review).
+    """
+    try:
+        _save_models_cache_to_disk(
+            cache,
+            rebuild_seq=rebuild_seq,
+            build_fingerprint=build_fingerprint,
+            build_profile=build_profile,
+        )
+    except Exception:
+        logger.debug("models cache disk save failed", exc_info=True)
+    finally:
+        _clear_build_in_progress(rebuild_seq)
+
+
+class _DeferredCatalogPublication:
+    """Hold the models-catalog lock for one cold path, then flush the commits.
+
+    ``get_available_models`` runs its whole cold path under
+    ``_available_models_cache_lock`` and, on the foreground paths, publishes the
+    catalog to memory *and* to disk. Committing to disk while that lock is held
+    acquires the two locks as catalog -> commit, while
+    ``_invalidate_models_catalog_epoch`` and ``_save_models_cache_to_disk``
+    itself take commit -> catalog (#7481 review): a foreground publisher then
+    waits forever on a commit mutex an invalidator already holds, and that
+    invalidator waits forever on the catalog lock the publisher owns. Both
+    acquisitions are unbounded in production, so this is a hard deadlock, not a
+    latency bug.
+
+    This scope owns the catalog lock for the critical section and, on exit,
+    releases it *before* running the queued durable commits. Ordering is the
+    whole point: the exit runs after the ``with`` body (including on the way out
+    of a ``return``), and the release happens first, so the commits below acquire
+    commit -> catalog with no outer catalog ownership — the writer's own order,
+    which cannot cycle with an invalidator.
+
+    The queue is handed to the body (``as deferred``) so the closures inside it
+    can enqueue instead of committing inline.
+    """
+
+    def __init__(self, lock) -> None:
+        self._lock = lock
+        self._commits: list = []
+
+    def __enter__(self) -> list:
+        self._lock.acquire()
+        return self._commits
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        # Release exactly the level acquired in __enter__ — the body's own
+        # re-entries (``_cache_build_cv`` shares this RLock) are balanced, so
+        # the lock is fully free from here on. Doing this before the flush is
+        # what removes the cycle; holding it would recreate the deadlock.
+        self._lock.release()
+        while self._commits:
+            _commit_models_cache_to_disk_after_lock(*self._commits.pop(0))
+        return False
 
 
 def _get_fresh_memory_models_cache(now: float) -> dict | None:
@@ -6270,7 +9077,39 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     return None
 
 
-def invalidate_models_cache():
+def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: str | None = None) -> None:
+    """Revoke readers and workers, then remove the durable snapshot atomically.
+
+    Lock order is always disk-commit -> catalog. Keeping both through unlink
+    prevents an already-admitted rename from restoring a deleted cache. Readers
+    that loaded disk outside the lock use the epoch to reject those bytes.
+    """
+    global _available_models_cache, _available_models_cache_ts
+    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
+    global _cache_build_in_progress
+    with _models_cache_disk_commit_lock:
+        with _cache_build_cv:
+            _allocate_models_rebuild_seq()
+            _available_models_cache = None
+            _available_models_cache_ts = 0.0
+            _available_models_live_rebuild_ts = 0.0
+            _available_models_cache_source_fingerprint = None
+            _sync_models_cache_provenance()
+            # Evict credentials before reopening rebuild admission. Otherwise a
+            # new generation can persist an old pool with the new fingerprint.
+            if provider_id is None:
+                _CREDENTIAL_POOL_CACHE.clear()
+            else:
+                tag = _credential_pool_profile_tag()
+                _CREDENTIAL_POOL_CACHE.pop((tag, provider_id), None)
+                _CREDENTIAL_POOL_CACHE.pop((tag, _resolve_provider_alias(provider_id)), None)
+            _cache_build_in_progress = False
+            _cache_build_cv.notify_all()
+            if delete_disk:
+                _delete_models_cache_on_disk()
+
+
+def invalidate_models_cache(*, delete_disk: bool = True):
     """Force the TTL cache for get_available_models() to be cleared.
 
     Call this after modifying config.cfg in-memory (e.g. in tests) so
@@ -6283,25 +9122,12 @@ def invalidate_models_cache():
     that call invalidate_models_cache() still get back the previous test's
     result from the disk cache because the disk hit is checked before the memory
     cache rebuild runs.
+
+    Invalidation revokes running rebuilds even without a successor. A profile
+    switch passes ``delete_disk=False`` to preserve its fingerprint-guarded disk
+    snapshot; the generation/owner epoch still advances.
     """
-    global _cache_build_in_progress, _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _cache_build_cv
-    with _available_models_cache_lock:
-        _available_models_cache = None
-        _available_models_cache_ts = 0.0
-        _available_models_live_rebuild_ts = 0.0
-        _available_models_cache_source_fingerprint = None
-        _sync_models_cache_provenance()
-        _cache_build_in_progress = False
-        _cache_build_cv.notify_all()
-        # Clear the credential pool cache too (all profiles). Without this,
-        # tests (and live provider key edits) see a stale CredentialPool from a
-        # prior auth_store payload — the test_credential_pool_providers suite was
-        # hitting this directly. A full reset is intentionally profile-wide.
-        _CREDENTIAL_POOL_CACHE.clear()
-    # Also delete the disk cache so the next cold build starts fresh.
-    # Disk delete is outside the lock — file I/O shouldn't block other readers.
-    _delete_models_cache_on_disk()
+    _invalidate_models_catalog_epoch(delete_disk=delete_disk)
     try:
         from api.plugin_providers import invalidate_plugin_model_provider_cache
 
@@ -6337,30 +9163,12 @@ def invalidate_provider_models_cache(provider_id: str):
 
     Also invalidates the full cache so that the next get_available_models()
     call rebuilds all groups cleanly (the rebuilt provider is merged with any
-    other cached groups from the 24h TTL window).  After the next
-    get_available_models() call, _provider_models_invalidated_ts[provider_id]
-    is cleared so the provider's fresh models are used.
+    other cached groups from the 24h TTL window).
 
     Args:
         provider_id: canonical provider id (e.g. 'openai', 'anthropic', 'custom:my-key')
     """
-    global _available_models_cache, _available_models_cache_ts
-    global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint, _CREDENTIAL_POOL_CACHE
-    with _available_models_cache_lock:
-        _available_models_cache = None
-        _available_models_cache_ts = 0.0
-        _available_models_live_rebuild_ts = 0.0
-        _available_models_cache_source_fingerprint = None
-        _sync_models_cache_provenance()
-        _provider_models_invalidated_ts[provider_id] = time.time()
-        # Also evict the credential pool so the next cold path re-loads it.
-        # Must evict both the original key and its canonical form (load_pool
-        # may be called with either, and both paths cache under their own key),
-        # scoped to the active profile's cache key.
-        _cp_tag = _credential_pool_profile_tag()
-        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, provider_id), None)
-        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, _resolve_provider_alias(provider_id)), None)
-    _delete_models_cache_on_disk()
+    _invalidate_models_catalog_epoch(provider_id=provider_id)
 
 
 def _get_label_for_model(model_id: str, existing_groups: list) -> str:
@@ -6488,6 +9296,26 @@ def _read_live_provider_model_ids(provider_id: str) -> list[str]:
     return []
 
 
+def _hermes_cli_supports_opencode_go_live_catalog() -> bool:
+    """Whether the installed Agent has Go-specific model discovery.
+
+    Hermes core versions before 0.20.5 route ``opencode-go`` through a
+    generic public catalog. That lookup can return a convincing non-empty
+    list containing models the Go relay rejects with 404, so absence or an
+    unparseable/prerelease version must fail closed to WebUI's static Go list.
+    """
+    try:
+        import hermes_cli
+
+        version = str(getattr(hermes_cli, "__version__", "")).strip()
+    except Exception:
+        return False
+    match = re.fullmatch(r"v?(\d+)\.(\d+)\.(\d+)", version)
+    if not match:
+        return False
+    return tuple(int(part) for part in match.groups()) >= (0, 20, 5)
+
+
 def _models_from_live_provider_ids(provider_id: str, live_ids: list[str]) -> list[dict]:
     """Convert Hermes CLI model ids into WebUI picker model entries."""
     formatter = _format_ollama_label if provider_id in ("ollama", "ollama-cloud") else None
@@ -6529,9 +9357,9 @@ def _read_visible_codex_cache_model_ids() -> list[str]:
     """Return visible model slugs from Codex's local models_cache.json.
 
     The agent's provider_model_ids('openai-codex') intentionally filters IDs
-    with ``supported_in_api: false``. Codex CLI still lists some of those models
-    in its picker (notably ``gpt-5.3-codex-spark`` from #1680), so the WebUI
-    merges this visible local catalog to stay in sync with Codex itself.
+    with ``supported_in_api: false``. Codex's visible catalog may still include
+    some of those models, so the WebUI merges this local catalog with live
+    discovery.
     """
     codex_home = Path(os.getenv("CODEX_HOME", "").strip() or (HOME / ".codex")).expanduser()
     cache_path = codex_home / "models_cache.json"
@@ -6612,6 +9440,99 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     # ── COLD PATH helper ─────────────────────────────────────────────────────
     # Extracted so it runs inside _available_models_cache_lock (RLock) to
     # prevent thundering-herd: only one thread rebuilds while others wait.
+    #
+    # #7481: explicit foreground-vs-out-of-band signal for the probe schedule.
+    # The bounded path below runs the rebuild on a daemon worker and lets the
+    # foreground caller stop waiting at the budget; from that moment the worker's
+    # remaining probes are out-of-band and keep the full per-endpoint cap so the
+    # refresh can complete. That is a *different* contract from the in-band chain,
+    # which must stay inside the shared window — and the two cannot be told apart
+    # by the deadline alone (a probe can find the window spent while the caller is
+    # still waiting). The foreground sets this event when it gives up; every
+    # rebuild invocation gets its own, so a still-running worker from an earlier
+    # rebuild cannot read a later caller's state. Defined before the builder
+    # closure so the closure can capture it as a free variable; on the legacy
+    # synchronous path it is simply never set and there is no window to share.
+    _models_rebuild_abandoned = threading.Event()
+
+    # ONE absolute deadline for this whole rebuild (#7481 review). Captured
+    # before the worker and the foreground wait start, then read by BOTH: by
+    # ``_CustomProbeSchedule`` (so the custom-probe chain spends what is LEFT of
+    # the caller's window rather than minting a fresh one after whatever
+    # discovery work already ran) and by the foreground ``build_done.wait``
+    # below. A schedule that minted its own deadline let earlier discovery work
+    # — provider detection, live id lookups, the profile rebind — be paid twice:
+    # once against the caller's wait, again against the chain's fresh window, so
+    # the chain could still be probing seconds after the caller had been served
+    # the over-budget fallback. ``None`` means the legacy unbounded path
+    # (budget <= 0), where there is no window to share. Defined before the
+    # builder closure so the closure can capture it as a free variable; assigned
+    # in the cold path below, before either caller runs.
+    _models_rebuild_deadline: float | None = None
+
+    # Retain successful probes across the full-cap continuation; only truncated
+    # attempts are removed before rebuilding the catalog on the same worker.
+    _custom_endpoint_probe_memo: dict[tuple[str, str], tuple[str, object]] = {}
+    _truncated_probes: set[tuple[str, str]] = set()
+    # A slice limits serial waiting, not the lifetime of the HTTP attempt.
+    # Later probes can run while earlier slow probes use the shared window.
+    # Only the catalog worker consumes outcomes/mutates the probe memo.
+    _pending_probes: dict[tuple[str, str], tuple[threading.Event, dict]] = {}
+
+    def _read_probe_payload(req, probe_key, timeout):
+        import urllib.request
+
+        pending = _pending_probes.get(probe_key)
+        if pending is None:
+            # Keep synchronous/full-cap continuation semantics. A bounded
+            # attempt gets the remaining caller window, not just its fair slice.
+            if _models_rebuild_deadline is None or _models_rebuild_abandoned.is_set():
+                with urllib.request.urlopen(req, timeout=timeout) as response:  # nosec B310
+                    return json.loads(response.read().decode("utf-8"))
+            remaining = max(timeout, _models_rebuild_deadline - time.monotonic() - 0.05)
+            request_timeout = min(CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS, remaining)
+            done, outcome = threading.Event(), {"timeout": request_timeout}
+
+            def read():
+                try:
+                    with urllib.request.urlopen(req, timeout=request_timeout) as response:  # nosec B310
+                        outcome["data"] = json.loads(response.read().decode("utf-8"))
+                except Exception as exc:
+                    outcome["error"] = exc
+                finally:
+                    done.set()
+
+            _pending_probes[probe_key] = (done, outcome)
+            threading.Thread(target=read, name="models-endpoint-probe", daemon=True).start()
+        else:
+            done, outcome = pending
+        if not done.wait(timeout):
+            raise TimeoutError("catalog probe slice exhausted")
+        _pending_probes.pop(probe_key, None)
+        if "error" in outcome:
+            exc = outcome["error"]
+            if outcome.get("timeout", 0.0) >= CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS:
+                # The HTTP attempt itself ran at the full endpoint cap, so its
+                # timeout IS evidence of unreachability even when a later pass
+                # consumes the outcome under a smaller fair-share slice.
+                exc.hermes_full_cap_attempt = True
+            raise exc
+        return outcome["data"]
+    # A full-cap custom retry must not repeat unrelated provider discovery.
+    # Empty/failure fallbacks are retained too, but only for this invocation.
+    _live_provider_memo: dict[str, tuple[bool, object]] = {}
+
+    def _memoized_live_lookup(key, lookup):
+        if key not in _live_provider_memo:
+            try:
+                _live_provider_memo[key] = (True, lookup())
+            except Exception as exc:
+                _live_provider_memo[key] = (False, exc)
+        succeeded, value = _live_provider_memo[key]
+        if not succeeded:
+            raise value
+        return copy.deepcopy(value)
+
     def _build_available_models_uncached() -> dict:
         active_provider = None
         default_model = get_effective_default_model(cfg)
@@ -6696,10 +9617,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             for entry in configured_entries:
                 provider = entry["provider"]
                 model = entry["model"]
-                raw_candidates = []
+                raw_candidates: list[str] = []
                 for candidate in (
                     model,
-                    f"{provider}/{model}",
                     f"@{provider}:{model}",
                 ):
                     if candidate and candidate not in raw_candidates:
@@ -7134,7 +10054,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         def _custom_endpoint_error(
             provider: str,
-            exc: Exception,
+            exc: Exception | None = None,
             *,
             code: int | None = None,
         ) -> dict:
@@ -7158,16 +10078,47 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 "message": f"Models endpoint unreachable for {provider_label}; verify base_url.",
             }
 
+        # ── In-rebuild probe de-duplication (#7481 follow-up) ────────────────
+        # One rebuild can consult the same endpoint more than once: step 4 probes
+        # the active ``model.base_url``, and the LM Studio provider-group fallback
+        # later reads ``providers.lmstudio.base_url`` (falling back to
+        # ``model.base_url`` when lmstudio is the active provider) — in the config
+        # shape the issue reports those are the SAME unreachable LAN host, so one
+        # dead endpoint cost the rebuild two full connect timeouts and two slots of
+        # the shared window. A named ``custom_providers`` entry can likewise repeat
+        # an endpoint an earlier entry already probed. Memoise by (endpoint URL,
+        # credential) and reuse the outcome, so an endpoint is probed at most once
+        # per initial pass (slice-truncated attempts get one full-cap retry).
+        #
+        # The credential is part of the identity: the same URL with a different key
+        # is a different probe and still runs. The raw payload is cached rather than
+        # the parsed entries, so each consumer still shapes the list for its own
+        # provider, and the memo is consulted only AFTER the per-endpoint
+        # SSRF/validation checks — a consumer that would have been blocked is still
+        # blocked rather than served another caller's result.
+
+        def _custom_endpoint_probe_key(endpoint_url: str, headers: dict) -> tuple[str, str]:
+            """Identity of one custom-endpoint probe: the URL it hits + the credential it sends."""
+            return (endpoint_url, str(headers.get("Authorization") or ""))
+
         def _read_custom_endpoint_models(
             base_url: object,
             provider: str,
             *,
             api_key: object = "",
             trusted_base_urls: tuple[object, ...] = (),
+            timeout_seconds: float | None = None,
         ) -> tuple[list[dict], dict | None]:
             base = str(base_url or "").strip()
             if not base:
                 return [], None
+            # Filled in once the endpoint has passed validation; the failure paths
+            # below memoize their outcome under it so a later consumer in the same
+            # rebuild does not pay the same timeout twice. It stays None when the
+            # validation refuses the URL, so a consumer that would have been blocked
+            # is never served another caller's memoized result.
+            probe_key: tuple[str, str] | None = None
+            probe_timeout = CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
             try:
                 import ipaddress
                 import urllib.error
@@ -7210,21 +10161,116 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     except socket.gaierror:
                         pass
 
+                probe_key = _custom_endpoint_probe_key(endpoint_url, headers)
+                memoized = _custom_endpoint_probe_memo.get(probe_key)
+                if memoized is not None:
+                    # This exact endpoint + credential was already probed earlier in
+                    # this rebuild, so reuse the outcome rather than paying the
+                    # connect timeout a second time (#7481 follow-up). A memoized
+                    # failure is re-reported for THIS provider (its own label).
+                    memo_kind, memo_value = memoized
+                    if memo_kind == "ok":
+                        logger.debug("Reusing in-rebuild /models probe for %s", endpoint_url)
+                        return _extract_model_entries_from_payload(memo_value, provider), None
+                    if memo_kind == "truncated":
+                        return [], None
+                    return [], _custom_endpoint_error(provider, code=memo_value)
+
                 req = urllib.request.Request(endpoint_url, method="GET")
                 req.add_header("User-Agent", "OpenAI/Python 1.0")
                 for k, v in headers.items():
                     req.add_header(k, v)
-                with urllib.request.urlopen(req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as response:  # nosec B310
-                    data = json.loads(response.read().decode("utf-8"))
+                # #7481: the caller may hand us a fair-share slice of the shared
+                # rebuild budget (see _CustomProbeSchedule) instead of the full
+                # per-endpoint cap, so one unreachable endpoint cannot starve the
+                # providers probed after it. Default stays the documented cap.
+                probe_timeout = (
+                    CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                    if timeout_seconds is None
+                    else float(timeout_seconds)
+                )
+                data = _read_probe_payload(req, probe_key, probe_timeout)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("ok", data)
                 return _extract_model_entries_from_payload(data, provider), None
             except urllib.error.HTTPError as exc:
-                error = _custom_endpoint_error(provider, exc, code=getattr(exc, "code", None))
+                response_code = getattr(exc, "code", None)
+                error = _custom_endpoint_error(provider, exc, code=response_code)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("error", response_code)
                 logger.debug("Custom endpoint models fetch failed for provider %s: %s", provider, error)
                 return [], error
             except Exception as exc:
+                reason = getattr(exc, "reason", exc)
+                if (probe_key is not None and probe_timeout < CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                        and not getattr(exc, "hermes_full_cap_attempt", False)
+                        and isinstance(reason, (TimeoutError, socket.timeout))):
+                    _truncated_probes.add(probe_key)
+                    _custom_endpoint_probe_memo[probe_key] = ("truncated", None)
+                    return [], None
                 error = _custom_endpoint_error(provider, exc)
+                if probe_key is not None:
+                    _custom_endpoint_probe_memo[probe_key] = ("error", None)
                 logger.debug("Custom endpoint unreachable or misconfigured for provider %s: %s", provider, error)
                 return [], error
+
+        # ── Fair-share schedule for the serial custom-endpoint probe chain ───
+        # #7481: step 4 probes the active endpoint and step 5 probes each named
+        # ``custom_providers`` entry after it, serially, off one shared rebuild
+        # budget. Without a schedule the first endpoint in the chain could spend
+        # that entire budget on its own connect timeout and leave every later —
+        # reachable — provider with no in-band probe at all. See
+        # _CustomProbeSchedule for the allocation rules.
+        def _pending_custom_probe_count() -> int:
+            """How many endpoints this rebuild is about to probe live, in order.
+
+            Counts the active endpoint (step 4) plus the named
+            ``custom_providers`` entries that will need a live ``/v1/models``
+            probe (step 5). Providers carrying a static ``models:`` allowlist
+            never probe live, so they must not dilute the schedule. Entries
+            whose base_url is only resolvable later from the credential pool are
+            counted anyway — over-counting merely makes the earlier slices a
+            little smaller, whereas under-counting would over-spend the budget.
+            """
+            count = 1 if cfg_base_url else 0
+            custom_providers_cfg = cfg.get("custom_providers", [])
+            if isinstance(custom_providers_cfg, list):
+                for entry in custom_providers_cfg:
+                    if not isinstance(entry, dict):
+                        continue
+                    if not (entry.get("name") or "").strip():
+                        continue
+                    configured_models = entry.get("models")
+                    if isinstance(configured_models, (dict, list)) and len(configured_models) > 0:
+                        continue
+                    count += 1
+            # The LM Studio provider-group branch re-probes the same
+            # /v1/models endpoint from ``providers.lmstudio.base_url`` in its own
+            # right — the second consumer of a single dead LAN endpoint in the
+            # common #7481 config — so it has to hold a slot in the schedule too.
+            # When the hermes_cli tier answers first no HTTP probe happens and
+            # the slot simply goes unused, which only makes the earlier slices a
+            # touch smaller.
+            if (
+                "lmstudio" in {str(pid).strip().lower() for pid in detected_providers}
+                and _get_provider_base_url("lmstudio")
+            ):
+                lm_base = _get_provider_base_url("lmstudio")
+                lm_key = str(_get_provider_cfg("lmstudio").get("api_key") or "").strip()
+                active_key = str(model_cfg.get("api_key") or lm_key).strip() if isinstance(model_cfg, dict) else ""
+                # The common active-LM-Studio shape has one distinct target,
+                # not two competing probes. Do not halve its healthy latency.
+                if (not cfg_base_url or active_provider != "lmstudio"
+                        or _models_endpoint_for_base_url(str(cfg_base_url)) != (str(lm_base) + "/models").rstrip("/")
+                        or active_key != lm_key):
+                    count += 1
+            return count
+
+        custom_probe_schedule = _CustomProbeSchedule(
+            _pending_custom_probe_count(),
+            out_of_band=_models_rebuild_abandoned.is_set,
+            deadline=_models_rebuild_deadline,
+        )
 
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
@@ -7300,6 +10346,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider,
                 api_key=api_key,
                 trusted_base_urls=tuple(_trusted_custom_bases),
+                timeout_seconds=custom_probe_schedule.next_timeout(),
             )
             for auto_model in _active_endpoint_models:
                 auto_detected_models.append(auto_model)
@@ -7373,6 +10420,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             _slug,
                             api_key=_cp_api_key,
                             trusted_base_urls=(_cp_base_url,),
+                            timeout_seconds=custom_probe_schedule.next_timeout(),
                         )
                     if _live_error:
                         _named_custom_errors[_slug] = _live_error
@@ -7594,11 +10642,17 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         from hermes_cli.models import (
                             fetch_openrouter_models as _fetch_or_models,
                         )
-                        live_curated = _fetch_or_models() or []
+                        live_curated = _memoized_live_lookup("openrouter-curated", _fetch_or_models) or []
                         for mid, _desc in live_curated:
                             if mid and mid not in seen_ids:
                                 seen_ids.add(mid)
-                                raw_models.append({"id": mid, "label": mid})
+                                # Ship the friendly display name (e.g. "Ox Alpha")
+                                # from the local OpenRouter metadata cache instead
+                                # of the raw id, so the picker search matches what
+                                # users see in Hermes Desktop (#7228).
+                                raw_models.append(
+                                    {"id": mid, "label": _openrouter_model_display_name(mid)}
+                                )
                     except Exception:
                         logger.warning("Failed to load OpenRouter curated catalog from hermes_cli")
 
@@ -7613,8 +10667,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         )
                         free_tier_models = []
                         selected_free_tier_model = None
-                        with _urlreq.urlopen(_req, timeout=8.0) as _resp:
-                            _payload = json.loads(_resp.read().decode())
+                        def _fetch_free_tier(req=_req):
+                            with _urlreq.urlopen(req, timeout=8.0) as _resp:
+                                return json.loads(_resp.read().decode())
+
+                        _payload = _memoized_live_lookup("openrouter-free", _fetch_free_tier)
                         for _item in _payload.get("data", []) or []:
                             if not isinstance(_item, dict):
                                 continue
@@ -7688,7 +10745,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                         raw_models = [
                             {"id": mid, "label": _format_ollama_label(mid)}
-                            for mid in (_provider_model_ids("ollama-cloud") or [])
+                            for mid in (_memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or [])
                         ]
                     except Exception:
                         logger.warning("Failed to load Ollama Cloud models from hermes_cli")
@@ -7696,18 +10753,16 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if raw_models:
                         _append_picker_group(provider_name, pid, raw_models)
                 elif pid == "openai-codex":
-                    # Codex account catalogs drift faster than WebUI releases
-                    # (for example gpt-5.3-codex-spark in #1680). Ask the
-                    # agent's Codex resolver first so /api/models inherits the
-                    # live Codex API / local ~/.codex cache / static fallback
-                    # chain instead of freezing the picker to WebUI's curated
-                    # _PROVIDER_MODELS snapshot.
+                    # Codex account catalogs drift independently from WebUI
+                    # releases, so ask the agent's resolver first and merge the
+                    # visible local cache below before falling back to WebUI's
+                    # static _PROVIDER_MODELS snapshot.
                     raw_models = []
                     codex_ids = []
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
 
-                        codex_ids = [mid for mid in (_provider_model_ids("openai-codex") or []) if mid]
+                        codex_ids = [mid for mid in (_memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or []) if mid]
                     except Exception:
                         logger.warning("Failed to load OpenAI Codex models from hermes_cli")
 
@@ -7745,7 +10800,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
 
-                        live_ids = _provider_model_ids("nous") or []
+                        live_ids = _memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or []
                     except Exception:
                         logger.warning("Failed to load Nous Portal models from hermes_cli")
                         live_ids = []
@@ -7805,7 +10860,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     lm_ids: list[str] = []
                     try:
                         from hermes_cli.models import provider_model_ids as _provider_model_ids
-                        lm_ids = _provider_model_ids("lmstudio") or []
+                        lm_ids = _memoized_live_lookup(pid, lambda pid=pid: _provider_model_ids(pid)) or []
                     except Exception:
                         logger.debug("hermes_cli LM Studio lookup unavailable; using urlopen fallback")
 
@@ -7826,17 +10881,61 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                                 headers["Authorization"] = f"Bearer {lm_api_key}"
                             endpoint = (lm_base_url + "/models").rstrip("/")
                             try:
-                                import urllib.request as _urlreq
-                                req = _urlreq.Request(endpoint, method="GET", headers=headers)
-                                with _urlreq.urlopen(req, timeout=5) as resp:
-                                    lm_data = json.loads(resp.read().decode())
-                                for m in (lm_data.get("data") or []):
+                                _lm_probe_key = _custom_endpoint_probe_key(endpoint, headers)
+                            except Exception:
+                                _lm_probe_key = None
+                            _lm_memo = (
+                                _custom_endpoint_probe_memo.get(_lm_probe_key)
+                                if _lm_probe_key is not None
+                                else None
+                            )
+                            lm_data = None
+                            if _lm_memo is not None:
+                                # #7481 follow-up: this endpoint was already probed
+                                # earlier in this rebuild — typically by the active
+                                # model.base_url probe, since
+                                # _get_provider_base_url("lmstudio") falls back to
+                                # model.base_url when lmstudio is the active
+                                # provider. Reuse that payload (or its failure)
+                                # instead of stalling on the same host a second
+                                # time, which is what made one dead LAN endpoint
+                                # cost the rebuild two connect timeouts.
+                                if _lm_memo[0] == "ok":
+                                    lm_data = _lm_memo[1]
+                                else:
+                                    logger.debug(
+                                        "LM Studio endpoint %s already failed in this rebuild; not re-probing",
+                                        endpoint,
+                                    )
+                            else:
+                                lm_timeout = CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                                try:
+                                    import urllib.request as _urlreq
+                                    req = _urlreq.Request(endpoint, method="GET", headers=headers)
+                                    # #7481: this probe is part of the same rebuild as
+                                    # the custom-endpoint chain, so it draws from the
+                                    # shared schedule instead of a hardcoded 5s that
+                                    # could push the rebuild past the budget on its own.
+                                    lm_timeout = custom_probe_schedule.next_timeout()
+                                    lm_data = _read_probe_payload(req, _lm_probe_key, lm_timeout)
+                                    if _lm_probe_key is not None:
+                                        _custom_endpoint_probe_memo[_lm_probe_key] = ("ok", lm_data)
+                                except Exception as exc:
+                                    if _lm_probe_key is not None:
+                                        if (lm_timeout < CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+                                                and not getattr(exc, "hermes_full_cap_attempt", False)
+                                                and isinstance(getattr(exc, "reason", exc), TimeoutError)):
+                                            _truncated_probes.add(_lm_probe_key)
+                                            _custom_endpoint_probe_memo[_lm_probe_key] = ("truncated", None)
+                                        else:
+                                            _custom_endpoint_probe_memo[_lm_probe_key] = ("error", None)
+                                    logger.debug("LM Studio /models fetch failed at %s", endpoint)
+                            if isinstance(lm_data, dict) and isinstance(lm_data.get("data"), list):
+                                for m in lm_data["data"]:
                                     if isinstance(m, dict):
                                         mid = str(m.get("id") or "").strip()
                                         if mid and {"id": mid, "label": mid} not in raw_models:
                                             raw_models.append({"id": mid, "label": mid})
-                            except Exception:
-                                logger.debug("LM Studio /models fetch failed at %s", endpoint)
 
                     if raw_models:
                         _append_picker_group(provider_name, pid, raw_models)
@@ -7865,28 +10964,46 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # whichever model had local settings. Only Copilot skips the
                     # config-models allowlist branch and asks Hermes CLI for the
                     # live catalog first (static _PROVIDER_MODELS is fallback only).
-                    _uses_models_as_settings_map = pid == "copilot"
+                    _uses_models_as_settings_map = (
+                        pid == "copilot"
+                        or _provider_models_are_discovered_catalog(provider_cfg)
+                    )
                     if (
                         not _uses_models_as_settings_map
                         and isinstance(provider_cfg, dict)
                         and "models" in provider_cfg
                     ):
-                        raw_models = _configured_model_options(provider_cfg["models"])
+                        raw_models = _configured_model_options(provider_cfg.get("models"))
 
                     if not raw_models:
                         if pid == "moa":
                             raw_models = _moa_preset_models_from_config(cfg)
-                        elif pid == "opencode-go":
-                            # Skip live /v1/models probe for OpenCode Go — it
-                            # returns models from the public catalog that are
-                            # not enabled on the Go tier, causing 404 when
-                            # selected. Use the curated static list only. (#5311)
-                            pass
+                        elif (
+                            pid == "opencode-go"
+                            and not _hermes_cli_supports_opencode_go_live_catalog()
+                        ):
+                            # Before core v0.20.5 this resolver returned the
+                            # generic public catalog, including models that
+                            # 404 on the Go tier. Use the curated Go fallback.
+                            raw_models = []
                         else:
                             raw_models = _models_from_live_provider_ids(
                                 pid,
-                                _read_live_provider_model_ids(pid),
+                                _memoized_live_lookup(pid, lambda pid=pid: _read_live_provider_model_ids(pid)),
                             )
+                            if (
+                                not raw_models
+                                and _provider_models_are_discovered_catalog(provider_cfg)
+                            ):
+                                # A transient live-catalog failure must not drop a
+                                # provider's persisted discovered models (the empty
+                                # result would then be cached for up to 24h). Fall
+                                # back to the configured discovered IDs, ordered
+                                # first, merged with any static fallback (deduped).
+                                raw_models = _merge_model_option_rows(
+                                    _configured_model_options(provider_cfg.get("models")),
+                                    copy.deepcopy(_PROVIDER_MODELS.get(pid, [])),
+                                )
 
                     if not raw_models:
                         raw_models = copy.deepcopy(_PROVIDER_MODELS.get(pid, []))
@@ -7982,13 +11099,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     default_model,
                 )
             else:
-                all_ids_norm = {
+                # Model IDs are provider-scoped: an OpenAI API entry cannot
+                # satisfy a configured Codex default with the same bare ID.
+                # Keep the global fallback only when no active group exists.
+                active_groups = [
+                    g for g in groups if g.get("provider_id") == active_provider
+                ] if active_provider else []
+                existing_ids_norm = {
                     _norm_model_id(m["id"])
-                    for g in groups
+                    for g in (active_groups or groups)
                     for bucket_name in ("models", "extra_models")
                     for m in g.get(bucket_name, [])
                 }
-                if _norm_model_id(default_model) not in all_ids_norm:
+                if _norm_model_id(default_model) not in existing_ids_norm:
                     label = _get_label_for_model(default_model, groups)
                     target_display = (
                         _PROVIDER_DISPLAY.get(active_provider, active_provider or "").lower()
@@ -8061,21 +11184,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         groups.sort(key=_group_sort_key)
 
         # 12. Include model aliases so the WebUI frontend can resolve them.
-        model_aliases: dict[str, str] = {}
-        try:
-            raw_aliases = cfg.get("model", {}).get("aliases", {})
-            if isinstance(raw_aliases, dict):
-                model_aliases = {str(k).strip(): str(v).strip() for k, v in raw_aliases.items() if k and v}
-        except Exception:
-            pass
+        model_aliases = _model_aliases_from_config()
 
-        return {
+        return _annotate_fast_tier_model_groups({
             "active_provider": active_provider,
             "default_model": default_model,
             "configured_model_badges": _build_configured_model_badges(),
             "groups": groups,
             "aliases": model_aliases,
-        }
+        })
 
     # ── FAST PATH ─────────────────────────────────────────────────────────────
     # Mark that a build may be in progress BEFORE acquiring the lock.
@@ -8093,10 +11210,12 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     _cfg_changed = _current_mtime != _cfg_mtime
 
     # Disk load BEFORE lock: ~0.1ms, lets concurrent requests skip entirely.
-    # Then acquire lock and check memory cache.  Cold path runs inside the lock
-    # so only one thread rebuilds while others wait.
+    # Capture the epoch before that load: the bytes must not be published to
+    # memory under a fresh fingerprint if invalidation advanced the epoch in
+    # between. Cold rebuilds still serialize on the lock.
     disk_groups = None
     stale_disk_groups = None
+    disk_epoch = _models_rebuild_seq
     if _available_models_cache is None and not force_refresh:
         disk_groups = _load_models_cache_from_disk()
         if disk_groups is None:
@@ -8104,7 +11223,27 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
     elif force_refresh:
         stale_disk_groups = _load_stale_models_cache_from_disk()
 
-    with _available_models_cache_lock:
+    # Durable commits queued while the catalog lock is held, run after it is
+    # released (#7481 review). A foreground publisher owns
+    # ``_available_models_cache_lock`` for this whole critical section, and the
+    # durable writer takes commit-lock -> catalog-lock — so committing inline
+    # here would acquire the two in the reverse order of
+    # ``_invalidate_models_catalog_epoch`` and deadlock against a concurrent
+    # invalidation. Memory publication stays inside the short critical sections
+    # below; the durable commit is queued and executed by the scope's exit
+    # (after the catalog lock is released) via
+    # ``_commit_models_cache_to_disk_after_lock``.
+    with _DeferredCatalogPublication(_available_models_cache_lock) as deferred_disk_commits:
+        if disk_epoch != _models_rebuild_seq:
+            # Invalidation advanced the epoch after the unlocked read, so these
+            # bytes may describe the catalog it just cleared: they must not be
+            # published to memory here, nor served as the fresh answer.
+            # ``stale_disk_groups`` is deliberately NOT fenced — it is the
+            # degraded fallback handed to a caller that already stopped waiting
+            # (and to the strict-metadata miss below), and it is never published
+            # to memory, so discarding it would only turn a stale-but-real answer
+            # into a static catalog without protecting anything.
+            disk_groups = None
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
         if should_wait:
@@ -8195,7 +11334,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
 
-        # Cold path: disk cache hit — use it (fast, no lock contention)
+        # Cold path: disk cache hit — use it only from the captured epoch.
         if disk_groups is not None and not force_refresh:
             _available_models_cache = disk_groups
             _available_models_cache_ts = now
@@ -8228,6 +11367,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:
             _cache_build_in_progress = True
+        # This build's position in the publication order. Taken while holding
+        # _available_models_cache_lock (above), so no two builds can share one,
+        # and used to keep a late out-of-band publisher from overwriting a newer
+        # catalog (#7481).
+        rebuild_seq = _allocate_models_rebuild_seq()
+        # The one absolute deadline this rebuild runs against: the custom-probe
+        # schedule and the foreground wait below both measure THIS instant, so
+        # discovery work done before the probe chain is spent out of the caller's
+        # window instead of being re-granted to the chain (#7481 review).
+        if _LIVE_REBUILD_BUDGET_SECONDS > 0:
+            _models_rebuild_deadline = (
+                time.monotonic() + float(_LIVE_REBUILD_BUDGET_SECONDS)
+            )
 
         # Capture the active per-request profile (#3957). The live provider
         # probe inside the rebuild resolves credentials from os.environ /
@@ -8240,6 +11392,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _active_profile_name = ""
         _prof_env_request = None
         _prof_scope_worker = None
+        _profile_resolver = None
         try:
             from api.profiles import (
                 get_active_profile_name as _gapn,
@@ -8247,9 +11400,28 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 profile_scope_for_detached_worker as _prof_scope_worker,
             )
             _active_profile_name = (_gapn() or "").strip()
+            _profile_resolver = _gapn
         except Exception:
             _prof_env_request = None
             _prof_scope_worker = None
+
+        # The sources and the profile this build is reading (#7481 review). The
+        # result is only an answer for THESE inputs, so both are captured here —
+        # on the request thread, where the profile TLS is valid, before the
+        # worker starts — and re-validated at publication and at the durable
+        # commit. Without that, a build that outlives a config edit publishes its
+        # stale catalog stamped with the *current* fingerprint, which is exactly
+        # how stale data acquires fresh-looking provenance. ``None`` profile
+        # means the resolver was unavailable; the fingerprint's config-path axis
+        # still fences a foreign profile.
+        rebuild_source_fingerprint = _models_cache_source_fingerprint()
+        rebuild_profile = (
+            _active_profile_name if _profile_resolver is not None else None
+        )
+
+        # ``_clear_build_in_progress`` is the module-level single-flight release
+        # used by every exit path here and by the post-lock durable commit.
+
 
         # Legacy synchronous (unbounded) rebuild — opt-in via budget<=0.
         if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
@@ -8266,24 +11438,55 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 with _sync_scope:
                     result = _invoke_models_rebuild(_build_available_models_uncached)
             except BaseException:
-                # Always reset the flag so waiting threads don't block for 60s
-                with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                # Always reset the flag so waiting threads don't block for 60s —
+                # unless a newer rebuild has been allocated in the meantime, in
+                # which case the flag now belongs to it (#7481 review). Same
+                # ownership rule as the success path, one implementation.
+                _clear_build_in_progress(rebuild_seq)
                 raise
             with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
-            try:
-                _save_models_cache_to_disk(result)
-            finally:
-                with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
+                _superseded = _models_rebuild_superseded(rebuild_seq)
+                _identity_current = _models_build_identity_current(
+                    rebuild_source_fingerprint, rebuild_profile
+                )
+                if not _superseded and _identity_current:
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = rebuild_source_fingerprint
+                    _sync_models_cache_provenance()
+            if _superseded:
+                # An invalidated/older generation must not overwrite the disk
+                # cache either, and must leave the build flag to the newer build.
+                logger.debug(
+                    "discarding superseded models-catalog rebuild result "
+                    "(rebuild #%d, latest allocated rebuild #%d)",
+                    rebuild_seq,
+                    _models_rebuild_seq,
+                )
+                return copy.deepcopy(result)
+            if not _identity_current:
+                # The config/auth/catalog this build read changed while it ran, so
+                # it describes sources that no longer exist. Publishing it would
+                # stamp stale data with the current fingerprint; drop it and let
+                # the next caller rebuild (#7481 review).
+                logger.debug(
+                    "discarding models-catalog rebuild result for changed sources "
+                    "(rebuild #%d)",
+                    rebuild_seq,
+                )
+                _clear_build_in_progress(rebuild_seq)
+                return copy.deepcopy(result)
+            # Foreground durable commit, queued rather than performed here: the
+            # caller still holds the catalog lock, and taking the commit mutex in
+            # that state is the lock-order cycle the #7481 review reproduced. The
+            # single-flight release rides with the queued commit (see
+            # _commit_models_cache_to_disk_after_lock), so ownership still spans
+            # it.
+            deferred_disk_commits.append(
+                (result, rebuild_seq, rebuild_source_fingerprint, rebuild_profile)
+            )
             return copy.deepcopy(result)
 
         # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
@@ -8315,33 +11518,94 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         publish_lock = threading.Lock()
         box: dict = {}
 
-        def _publish_models_result(result):
+        def _publish_models_result(
+            result,
+            *,
+            rebuild_seq: int,
+            build_fingerprint,
+            build_profile,
+            defer_durable: bool = False,
+        ):
             global _cache_build_in_progress, _available_models_cache
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
-            with _cache_build_cv:
-                published_at = time.monotonic()
-                _available_models_cache = result
-                _available_models_cache_ts = published_at
-                _available_models_live_rebuild_ts = published_at
-                _available_models_cache_source_fingerprint = (
-                    _models_cache_source_fingerprint()
-                )
-                _sync_models_cache_provenance()
+            deferred = False
             try:
-                _save_models_cache_to_disk(result)
-            except Exception:
-                logger.debug("models cache disk save failed", exc_info=True)
-            finally:
                 with _cache_build_cv:
-                    _cache_build_in_progress = False
-                    _cache_build_cv.notify_all()
-
-        def _clear_build_in_progress():
-            global _cache_build_in_progress
-            with _cache_build_cv:
-                _cache_build_in_progress = False
-                _cache_build_cv.notify_all()
+                    if _models_rebuild_superseded(rebuild_seq):
+                        # #7481 failure isolation: a newer rebuild has been
+                        # allocated since this one started, so this result is
+                        # superseded and must not overwrite the cache or the
+                        # disk. Invalidation revokes the running generation and
+                        # clears _cache_build_in_progress without cancelling this
+                        # worker, which is how a newer build can be allocated while
+                        # this one is still running; the flag now belongs to that
+                        # newer build, so the ``finally`` below deliberately leaves
+                        # it set rather than releasing it for a build that is not
+                        # ours. Ordered by allocated generation, not by wall clock:
+                        # an older build can publish *after* a newer one started,
+                        # and a timestamp comparison would misread that as newer
+                        # and drop the newer result instead.
+                        logger.debug(
+                            "discarding superseded models-catalog rebuild result "
+                            "(rebuild #%d, latest allocated rebuild #%d)",
+                            rebuild_seq,
+                            _models_rebuild_seq,
+                        )
+                        return
+                    if not _models_build_identity_current(
+                        build_fingerprint, build_profile
+                    ):
+                        # The sources this build read are gone (config/auth/catalog
+                        # edit) or the publishing thread is no longer in the
+                        # profile the build belonged to. Publishing would hand the
+                        # catalog the CURRENT fingerprint — fresh-looking
+                        # provenance on data that was never built from it — so it
+                        # is dropped instead. Fail closed (#7481 review).
+                        logger.debug(
+                            "discarding models-catalog rebuild result for changed "
+                            "sources (rebuild #%d)",
+                            rebuild_seq,
+                        )
+                        return
+                    published_at = time.monotonic()
+                    _available_models_cache = result
+                    _available_models_cache_ts = published_at
+                    _available_models_live_rebuild_ts = published_at
+                    _available_models_cache_source_fingerprint = build_fingerprint
+                    _sync_models_cache_provenance()
+                if defer_durable:
+                    # Foreground caller: it still owns the outer catalog lock,
+                    # so the durable commit is queued for the post-lock flush
+                    # instead of taking commit -> catalog underneath it (#7481
+                    # review). The single-flight release rides with the queued
+                    # commit, so ownership still spans the durable write.
+                    deferred_disk_commits.append(
+                        (result, rebuild_seq, build_fingerprint, build_profile)
+                    )
+                    deferred = True
+                    return
+                try:
+                    _save_models_cache_to_disk(
+                        result,
+                        rebuild_seq=rebuild_seq,
+                        build_fingerprint=build_fingerprint,
+                        build_profile=build_profile,
+                    )
+                except Exception:
+                    logger.debug("models cache disk save failed", exc_info=True)
+            finally:
+                # Release the single-flight slot only when this build still owns
+                # it. A newer rebuild may have been allocated while the disk write
+                # above ran with the catalog lock released; clearing the flag
+                # unconditionally there ended that rebuild's single-flight
+                # ownership and let a third rebuild in beside it (#7481 review).
+                # This also covers the error paths, including anything raised
+                # after the disk I/O. A deferred (foreground) publication skips
+                # the release here: it is queued, and the flush performs the
+                # commit and then the release, in that order.
+                if not deferred:
+                    _clear_build_in_progress(rebuild_seq)
 
         def _claim_publish() -> bool:
             """Return True iff the caller won the right to publish."""
@@ -8356,7 +11620,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # (#3957): the daemon inherits neither the request-profile TLS nor
             # os.environ, so without this it would probe the default profile's
             # credentials and, over budget, publish the rebuilt catalog to the
-            # DEFAULT profile's disk cache. No-op for the default profile.
+            # DEFAULT profile's disk cache. Default still binds request TLS but
+            # does not mirror a named-profile environment.
             _worker_scope = (
                 _prof_scope_worker(_active_profile_name, "models rebuild (worker)")
                 if _prof_scope_worker is not None
@@ -8365,6 +11630,36 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             with _worker_scope:
                 try:
                     box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+                    if _pending_probes:
+                        # Lend all time left by later fast probes back to the
+                        # still-running attempts before yielding a partial.
+                        for done, _outcome in list(_pending_probes.values()):
+                            left = max(0.0, (_models_rebuild_deadline or 0.0) - time.monotonic())
+                            done.wait(max(0.0, left - 0.05))
+                        completed = [key for key, (done, _) in _pending_probes.items() if done.is_set()]
+                        if completed:
+                            for key in completed:
+                                _custom_endpoint_probe_memo.pop(key, None)
+                                _truncated_probes.discard(key)
+                            box.pop("result", None)
+                            box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
+                    if _truncated_probes:
+                        # The foreground may use this partial catalog, but it is
+                        # not authoritative and must never enter either cache.
+                        box["partial"] = box.pop("result")
+                        build_done.set()
+                        _models_rebuild_abandoned.wait()
+                        with _cache_build_cv:
+                            if _models_rebuild_superseded(rebuild_seq):
+                                return
+                        for key in _truncated_probes:
+                            _custom_endpoint_probe_memo.pop(key, None)
+                            # A surviving HTTP attempt owns only its private box.
+                            # It cannot publish or write into this build's memo.
+                            _pending_probes.pop(key, None)
+                        _truncated_probes.clear()
+                        box.pop("result", None)
+                        box["result"] = _invoke_models_rebuild(_build_available_models_uncached)
                 except Exception as exc:  # noqa: BLE001 — propagated to caller
                     box["error"] = exc
                 finally:
@@ -8377,9 +11672,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     # the correct profile's cache file.
                     if budget_exceeded.is_set() and _claim_publish():
                         if "result" in box:
-                            _publish_models_result(box["result"])
+                            _publish_models_result(
+                                box["result"],
+                                rebuild_seq=rebuild_seq,
+                                build_fingerprint=rebuild_source_fingerprint,
+                                build_profile=rebuild_profile,
+                            )
                         else:
-                            _clear_build_in_progress()
+                            _clear_build_in_progress(rebuild_seq)
 
         _worker = threading.Thread(
             target=_rebuild_worker,
@@ -8388,25 +11688,62 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         )
         _worker.start()
 
-        if build_done.wait(timeout=_LIVE_REBUILD_BUDGET_SECONDS):
+        # Wait on the SAME absolute deadline the probe schedule draws its slices
+        # from (#7481 review), not on a fresh full window started here: with two
+        # windows, discovery work that ran before the custom-probe phase was paid
+        # by the caller but re-granted to the chain, so the chain could still be
+        # probing after this caller had already been served the over-budget
+        # fallback. Computed after start() so thread-launch time counts too.
+        timeout_remaining = (
+            max(0.0, _models_rebuild_deadline - time.monotonic())
+            if _models_rebuild_deadline is not None
+            else float(_LIVE_REBUILD_BUDGET_SECONDS)
+        )
+        finished_in_time = build_done.wait(timeout=timeout_remaining)
+        if finished_in_time and "partial" not in box:
             # Build finished within budget — foreground publishes
             # synchronously, exactly like the legacy path.
             if "error" in box:
-                _clear_build_in_progress()
+                _clear_build_in_progress(rebuild_seq)
                 raise box["error"]
             if _claim_publish():
-                _publish_models_result(box["result"])
+                _publish_models_result(
+                    box["result"],
+                    rebuild_seq=rebuild_seq,
+                    build_fingerprint=rebuild_source_fingerprint,
+                    build_profile=rebuild_profile,
+                    # Foreground publisher: queue the durable commit for the
+                    # post-catalog-lock flush (#7481 review).
+                    defer_durable=True,
+                )
             return copy.deepcopy(box["result"])
 
         # Budget elapsed. Mark it so the worker knows it owns out-of-band
-        # publication. Handle the tiny race where the build completed between
-        # wait() returning False and here: if so, still publish synchronously
-        # so this caller honours the cache contract.
+        # publication, and so the probe schedule hands its remaining probes the
+        # full per-endpoint cap instead of a share of a window nobody is waiting
+        # on any more (#7481). Handle the tiny race where the build completed
+        # between wait() returning False and here: if so, still publish
+        # synchronously so this caller honours the cache contract.
         budget_exceeded.set()
-        if build_done.is_set() and "error" not in box and "result" in box:
-            if _claim_publish():
-                _publish_models_result(box["result"])
-            return copy.deepcopy(box["result"])
+        _models_rebuild_abandoned.set()
+        if build_done.is_set() and "error" not in box:
+            if "partial" in box:
+                if box["partial"].get("groups"):
+                    return copy.deepcopy(box["partial"])
+                # An all-truncated pass has no picker options. Use the same
+                # stale/static fallback as a still-running first pass below.
+            elif "result" in box and _claim_publish():
+                _publish_models_result(
+                    box["result"],
+                    rebuild_seq=rebuild_seq,
+                    build_fingerprint=rebuild_source_fingerprint,
+                    build_profile=rebuild_profile,
+                    # Budget-boundary foreground winner: same deferred durable
+                    # commit as the within-budget path above (#7481 review).
+                    defer_durable=True,
+                )
+            if "partial" not in box:
+                return copy.deepcopy(box["result"])
 
         # Genuinely slow/hung probe: serve the best fallback now; the worker
         # keeps going and refreshes the cache for the next caller.
@@ -8417,10 +11754,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             "live provider-catalog rebuild exceeded %.1fs budget — serving "
             "fallback, refreshing catalog out-of-band"
         )
-        if _should_warn_budget("live_rebuild_budget_exceeded"):
-            logger.warning(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
-        else:
-            logger.info(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
+        if not finished_in_time:
+            if _should_warn_budget("live_rebuild_budget_exceeded"):
+                logger.warning(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
+            else:
+                logger.info(_budget_log_msg, _LIVE_REBUILD_BUDGET_SECONDS)
         # ``stale_disk_groups`` is shape-valid but failed the strict metadata
         # checks required for authoritative cold-path use. It was read before
         # acquiring _available_models_cache_lock so this over-budget fallback
@@ -8557,21 +11895,26 @@ def get_available_models_for_session_visit() -> dict:
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                 return cached
         _mark("memory_cache_miss_loading_disk")
+        disk_epoch = _models_rebuild_seq
         disk_cached = _load_models_cache_from_disk()
         if disk_cached is not None:
             with _available_models_cache_lock:
+                if disk_epoch != _models_rebuild_seq:
+                    disk_cached = None
                 cached = _get_fresh_memory_models_cache(time.monotonic())
                 if cached is not None:
                     _mark("disk_then_memory_cache_hit")
                     _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
                     return cached
-                _available_models_cache = copy.deepcopy(disk_cached)
-                _available_models_cache_ts = time.monotonic()
-                _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
-                _sync_models_cache_provenance()
-            _mark("disk_cache_returned")
-            _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
-            return copy.deepcopy(disk_cached)
+                if disk_cached is not None:
+                    _available_models_cache = copy.deepcopy(disk_cached)
+                    _available_models_cache_ts = time.monotonic()
+                    _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
+                    _sync_models_cache_provenance()
+            if disk_cached is not None:
+                _mark("disk_cache_returned")
+                _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                return copy.deepcopy(disk_cached)
 
     _mark("cache_age_stale_or_missing")
     stale_cached = disk_cached or _load_stale_models_cache_from_disk()
@@ -8961,6 +12304,28 @@ def create_stream_channel() -> StreamChannel:
 
 STREAMS: dict = {}
 STREAMS_LOCK = threading.Lock()
+# Launch-phase ownership claims, keyed by stream_id and guarded by STREAMS_LOCK
+# (no extra lock edge). A claim is published in the SAME critical section that
+# creates the STREAMS entry and retired by identity once the worker is admitted
+# or the stream is torn down. While it exists the stream is still launching, so
+# chat/start must keep it whatever the pending age -- a slow session save between
+# registration and worker admission is not evidence of an orphan.
+PRE_ADMISSION_CLAIMS: dict = {}
+
+
+def peek_stream(stream_id):
+    """Lock-disciplined stream queue lookup.
+
+    Writers mutate STREAMS under STREAMS_LOCK (teardown in api/streaming.py,
+    the route layer's start/cancel paths); reads must take the same lock so a
+    read racing a teardown pop can never observe-and-use a queue the registry
+    has already released. Returns the queue or None — callers keep their
+    existing None-guard fallbacks.
+    """
+    with STREAMS_LOCK:
+        return STREAMS.get(stream_id)
+
+
 # stream_id -> session_id owner, populated synchronously before worker startup so
 # stream-id authorization does not depend on worker lifecycle registration.
 STREAM_SESSION_OWNERS: dict = {}
@@ -8973,6 +12338,227 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+
+# ── THE list of per-stream registries (#7302 re-gate) ───────────────────────
+# Every registry a stream owns. Both the local worker teardown (api/streaming.py)
+# and the chat/start orphan recovery (api/routes.py) iterate THIS list instead of
+# hand-maintained pop lists, so a new per-stream registry cannot be added to one
+# teardown path and silently forgotten in the other.
+def stream_owned_registries() -> tuple:
+    """The per-stream registries, resolved on EVERY call.
+
+    Deliberately a function, not a module-level constant: a frozen tuple holds
+    the dict objects that existed at import time, so rebinding a registry
+    (``config.STREAMS = {...}``) would leave every teardown popping the stale
+    dict and leaking the live one. Module-level attribute lookup keeps the list
+    in step with whichever object is current.
+    """
+    return (
+        STREAMS,
+        AGENT_INSTANCES,
+        CANCEL_FLAGS,
+        STREAM_GOAL_RELATED,
+        STREAM_PARTIAL_TEXT,
+        STREAM_REASONING_TEXT,
+        STREAM_LIVE_TOOL_CALLS,
+        STREAM_LAST_EVENT_ID,
+    )
+
+
+def _release_stream_owned_rows(stream_id: str, session_id: str | None) -> None:
+    """Drop this stream's rows from every registry. Caller holds the locks."""
+    for _registry in stream_owned_registries():
+        _registry.pop(stream_id, None)
+    # The launch-phase claim dies with the stream it was published for. This is
+    # the single teardown entry point every release path goes through, so the
+    # claim can never outlive its stream and block a later chat/start.
+    PRE_ADMISSION_CLAIMS.pop(stream_id, None)
+    # Owner registries. The writeback entry is compare-and-clear: a successor
+    # admitted after cancel must keep its registry claim (#6623 re-gate).
+    unregister_stream_owner(stream_id)
+    if session_id:
+        try:
+            clear_session_writeback_owner_if_owned(session_id, stream_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear session writeback owner for stream %s", stream_id,
+                exc_info=True,
+            )
+
+
+def release_stream_owned_registries(
+    stream_id: str, *, session_id: str | None = None, streams_lock_held: bool = False
+) -> None:
+    """Release EVERY registry a stream can own -- the single teardown entry point.
+
+    ``streams_lock_held=True`` is for callers already inside ``STREAMS_LOCK``
+    (``threading.Lock`` is not reentrant). Lock order stays
+    ``STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK``, the order the rest of the
+    lifecycle uses; ``_release_stream_owned_rows`` never takes a lock itself, so
+    the nesting is the caller's.
+
+    The Gateway-owned rows (``_STREAM_RUN_LIFECYCLE`` / ``_STREAM_RUN_IDS`` /
+    ``_STREAM_ENDPOINTS``) are NOT touched here: they live in api/gateway_chat.py
+    and are released through ``release_gateway_stream_state()``, which uses the
+    lifecycle/waiter protocol and must run OUTSIDE ``STREAMS_LOCK``.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return
+    if streams_lock_held:
+        _release_stream_owned_rows(stream_id, session_id)
+        return
+    with STREAMS_LOCK:
+        _release_stream_owned_rows(stream_id, session_id)
+
+
+def publish_pre_admission_claim(stream_id: str, *, streams_lock_held: bool = False) -> str:
+    """Publish the launch-phase ownership claim for a stream being registered.
+
+    MUST run inside the same ``STREAMS_LOCK`` critical section that creates the
+    ``STREAMS`` entry (pass ``streams_lock_held=True``; ``threading.Lock`` is not
+    reentrant): the orphan check in ``_active_stream_blocks_chat_start`` reads this
+    registry under that lock, and a stream registered without its claim is
+    indistinguishable from a crashed turn once the pending window expires.
+
+    Returns the claim token; retire with ``retire_pre_admission_claim_if_owned``.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return ""
+    claim_token = uuid.uuid4().hex
+    if streams_lock_held:
+        PRE_ADMISSION_CLAIMS[stream_id] = claim_token
+        return claim_token
+    with STREAMS_LOCK:
+        PRE_ADMISSION_CLAIMS[stream_id] = claim_token
+    return claim_token
+
+
+def retire_pre_admission_claim_if_owned(
+    stream_id: str, *, claim_token: str | None = None, streams_lock_held: bool = False
+) -> bool:
+    """Retire a launch-phase claim by IDENTITY. Idempotent; returns whether it retired.
+
+    ``claim_token=None`` is the stream's own teardown speaking for the whole
+    stream (Stop, launch failure, worker admission): the claim goes with it. With
+    a token, only that exact claim is retired, so a successor that registered the
+    same stream id keeps its own claim.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+
+    def _retire() -> bool:
+        current = PRE_ADMISSION_CLAIMS.get(stream_id)
+        if current is None:
+            return False
+        if claim_token is not None and current != claim_token:
+            return False
+        PRE_ADMISSION_CLAIMS.pop(stream_id, None)
+        return True
+
+    if streams_lock_held:
+        return _retire()
+    with STREAMS_LOCK:
+        return _retire()
+
+
+def _is_orphaned_stream_locked(
+    stream_id: str, pending_turn_in_window: bool
+) -> bool:
+    """Orphan decision body. The caller holds ``STREAMS_LOCK``.
+
+    Split out so the decision and the release can share ONE lock acquisition
+    (``release_orphaned_stream_if_still_orphaned``); ``is_orphaned_stream`` is the
+    locking wrapper for readers that only need the answer.
+    """
+    if stream_id not in STREAMS:
+        return False
+    if stream_id in PRE_ADMISSION_CLAIMS:
+        return False
+    if pending_turn_in_window:
+        return False
+    try:
+        with ACTIVE_RUNS_LOCK:
+            if stream_id in (ACTIVE_RUNS or {}):
+                return False
+    except Exception:
+        # Fail closed: an unreadable liveness registry must never be taken as
+        # proof of an orphan.
+        return False
+    return True
+
+
+def is_orphaned_stream(
+    stream_id: str,
+    *,
+    pending_turn_in_window: bool = False,
+    streams_lock_held: bool = False,
+) -> bool:
+    """Single definition of an orphaned stream, shared by every reader.
+
+    A stream is an orphan only when ALL of these hold:
+
+      * it is still registered in ``STREAMS``;
+      * no worker owns it (``ACTIVE_RUNS`` has no row);
+      * it is not still launching (``PRE_ADMISSION_CLAIMS`` has no claim);
+      * its pending turn is outside the registration window
+        (``pending_turn_in_window`` -- the caller's call, since only callers with
+        the session at hand can evaluate it).
+
+    ``STREAMS`` membership alone is not liveness: the entry is removed by the
+    worker's own finalization, so a hard-killed or wedged worker leaves it behind.
+    ``ACTIVE_RUNS`` is the authoritative worker-liveness registry, the
+    launch-phase claim covers the window between registration and worker
+    admission, and the pending window covers the shortest gap for callers that
+    hold a session.
+
+    The claim check is mandatory. Without it a stream that is still launching is
+    classified as orphaned and reaped, which makes its first worker exit without
+    running the turn (finding 5). Callers that already hold ``STREAMS_LOCK`` must
+    pass ``streams_lock_held=True``: ``threading.Lock`` is not reentrant.
+
+    Reading this answer and acting on it later is NOT safe on its own -- see
+    ``release_orphaned_stream_if_still_orphaned`` for the decide-and-release
+    contract.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    if streams_lock_held:
+        return _is_orphaned_stream_locked(stream_id, pending_turn_in_window)
+    with STREAMS_LOCK:
+        return _is_orphaned_stream_locked(stream_id, pending_turn_in_window)
+
+
+def release_orphaned_stream_if_still_orphaned(
+    stream_id: str, *, pending_turn_in_window: bool = False
+) -> bool:
+    """Decide AND release on ONE ``STREAMS_LOCK`` edge. Returns whether it released.
+
+    Callers that decide and release under two separate acquisitions hand the worker
+    a race: it can publish its ``ACTIVE_RUNS`` row (or its launch claim) in the gap,
+    and the release then drops a stream that is live -- taking its ownership state
+    with it while the worker keeps running. Re-validating inside the same critical
+    section that drops the rows makes a stale decision impossible.
+
+    ``_release_stream_owned_rows`` takes no locks ("caller holds the locks"), and
+    ``stream_owner_session_id`` only takes ``STREAM_SESSION_OWNERS_LOCK``, which
+    respects the documented ``STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK`` order.
+
+    Gateway-owned rows are deliberately NOT touched here: they live in
+    api/gateway_chat.py and must be released OUTSIDE ``STREAMS_LOCK``, so the caller
+    runs ``release_gateway_stream_state()`` when this returns True.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    with STREAMS_LOCK:
+        if not _is_orphaned_stream_locked(stream_id, pending_turn_in_window):
+            return False
+        _release_stream_owned_rows(stream_id, stream_owner_session_id(stream_id))
+        return True
 
 
 def register_stream_owner(stream_id: str, session_id: str) -> None:
@@ -9200,6 +12786,13 @@ DEFERRED_PROCESS_WAKEUPS_LOCK = threading.Lock()
 # subscribers-empty grace path (60s) handles ordinary tab-close traffic.
 SESSION_CHANNEL_IDLE_TTL_SECS: int = 14400  # 4 hours
 SESSION_CHANNEL_SUBSCRIBER_GRACE_SECS: int = 60  # subscribers-empty grace
+# Positive dead-subscriber signal. How long a subscriber's queue
+# must reject broadcasts CONTINUOUSLY before the reaper may treat it as dead
+# (a ghost/half-open tab that never drains). A healthy tab drains on every
+# event, so it can never accumulate a run this long; 300s is well above the
+# SSE heartbeat interval and any plausible transient backpressure. Age alone
+# never collects a subscribed channel — only this signal or an explicit close.
+SESSION_CHANNEL_SUBSCRIBER_STALL_SECS: int = 300  # 5 minutes
 
 # Active agent-run registry. This intentionally tracks worker lifecycle rather
 # than SSE lifecycle: cancel/reconnect may remove STREAMS while the worker is
@@ -9292,6 +12885,37 @@ def unregister_active_run(stream_id: str) -> None:
         ACTIVE_RUNS.pop(stream_id, None)
         LAST_RUN_FINISHED_AT = time.time()
     unregister_stream_owner(stream_id)
+
+
+def unregister_active_run_if_owned(stream_id: str, *, claim_token: str | None = None) -> bool:
+    """Retire an active-run row only while it is still the caller's own claim.
+
+    ``Stop`` (``cancel_stream``) deliberately leaves the row behind in
+    ``phase="cancelling"`` so recovery/health polling sees the detached run while
+    the worker unwinds; the worker's normal ``finally`` retires it and stamps
+    ``LAST_RUN_FINISHED_AT``. A worker cancelled BEFORE it admits the stream takes
+    the early-return path, which never reaches that ``finally`` -- so the claim
+    published before the worker was scheduled has to be retired here, BY IDENTITY,
+    so a row that a successor legitimately registered for the same stream id is
+    never deleted. Returns True when this call retired the row.
+
+    ``unregister_stream_owner`` is deliberately NOT called: the owner registry is a
+    stream-owned registry (already released by ``release_stream_owned_registries``)
+    and a successor may own it.
+    """
+    if not stream_id:
+        return False
+    global LAST_RUN_FINISHED_AT
+    with ACTIVE_RUNS_LOCK:
+        entry = ACTIVE_RUNS.get(stream_id)
+        if entry is None:
+            return False
+        if claim_token is not None:
+            if not isinstance(entry, dict) or str(entry.get("claim_token") or "") != str(claim_token):
+                return False
+        ACTIVE_RUNS.pop(stream_id, None)
+        LAST_RUN_FINISHED_AT = time.time()
+    return True
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
 # _user_turn_count survives between turns.  This mirrors the gateway's
@@ -9508,7 +13132,13 @@ _SETTINGS_DEFAULTS = {
     "hidden_tabs": [],  # sidebar tab panel names hidden by user (e.g. ["tasks","kanban"]); chat and settings are always visible
     "tab_order": [],  # user-defined sidebar/rail tab order for reorderable tabs; chat/settings stay fixed
     "composer_control_order": [],  # user-defined composer footer control order; invalid/duplicate keys are ignored
-    "language": "en",  # UI locale code; must match a key in static/i18n.js LOCALES
+    # #7622 (round 3): language is intentionally absent from the defaults so
+    # `load_settings()` reports `None` for a fresh install.  This lets the
+    # client distinguish "no preference" from an explicit saved choice,
+    # so a user who genuinely picked English (and has `language: "en"`
+    # persisted on disk) is no longer overridden by the browser hint on
+    # their first hydration.  When a user picks a locale in the Settings
+    # modal the value is written here and the field is set explicitly.
     "bot_name": os.getenv(
         "HERMES_WEBUI_BOT_NAME", "Hermes"
     ),  # display name for the assistant
@@ -9748,6 +13378,16 @@ def load_settings() -> dict:
             settings["default_model_provider"] = str(model_cfg.get("provider"))
     except Exception:
         logger.debug("Failed to resolve default model provider for settings")
+    # #7622/#7730 (round 4): keep the tri-state signal explicit.  `language`
+    # is intentionally absent from `_SETTINGS_DEFAULTS` (see above), so
+    # without this line a fresh install's returned dict would OMIT the key
+    # entirely and the API payload would carry no `language` field.  Emit an
+    # explicit `None` (serialized as JSON `null`) so the client receives the
+    # three-way signal it trusts: `null` = no preference, "en" = explicitly
+    # saved English, any other code = explicitly chosen locale.  Stored
+    # values (including a legacy English pick written before this change)
+    # win via the merge above and are never touched here.
+    settings.setdefault("language", None)
     return settings
 
 
@@ -9755,6 +13395,15 @@ _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {
     "password_hash",
     "default_model",
     "simplified_tool_calling",
+} | {
+    # #7622 (round 3): `language` is intentionally absent from
+    # `_SETTINGS_DEFAULTS` so a fresh install returns `None` for
+    # `settings["language"]` and the client can distinguish "no
+    # preference" from an explicit saved choice.  But the user
+    # MUST still be able to pick a locale in the Settings modal,
+    # so we add it back to the explicit allow-list here.  The
+    # existing BCP-47 validation at save-time still applies.
+    "language",
 }
 _SETTINGS_ENUM_VALUES = {
     "send_key": {"enter", "ctrl+enter", "shift+enter"},

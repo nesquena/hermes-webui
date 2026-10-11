@@ -333,6 +333,178 @@ def test_gateway_runs_api_submission():
     assert captured["body_extras"]["reasoning_effort"] == "high"
 
 
+@pytest.mark.parametrize(
+    ("terminal_event", "terminal_reason"),
+    [
+        ("run.completed", "Gateway run completed before approval resolution"),
+        ("run.failed", "Gateway run failed before approval resolution"),
+        ("run.cancelled", "Gateway run was cancelled before approval resolution"),
+    ],
+)
+def test_gateway_terminal_event_fail_closes_parked_run_producer(
+    terminal_event,
+    terminal_reason,
+):
+    """Each terminal gateway event denies and wakes the run's parked producers."""
+    from api import gateway_chat
+    from api import route_approvals as approvals
+
+    sid = f"sess-terminal-event-{terminal_event}"
+    stream_id = f"stream-terminal-event-{terminal_event}"
+    run_id = f"run-terminal-event-{terminal_event}"
+    target = SimpleNamespace(
+        data={"run_id": run_id, "approval_id": "approval-target"},
+        event=threading.Event(),
+        result=None,
+        reason=None,
+    )
+    survivor = SimpleNamespace(
+        data={"run_id": "run-other", "approval_id": "approval-other"},
+        event=threading.Event(),
+        result=None,
+        reason=None,
+    )
+
+    class JsonResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _limit=None):
+            return json.dumps({"run_id": run_id}).encode()
+
+    class SseResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def __iter__(self):
+            payload = {"event": terminal_event}
+            if terminal_event == "run.failed":
+                payload["error"] = "terminal failure"
+            return iter([f"data: {json.dumps(payload)}".encode(), b""])
+
+    def fake_urlopen(req, *, timeout=None):
+        del timeout
+        return JsonResponse() if req.full_url.endswith("/v1/runs") else SseResponse()
+
+    try:
+        with approvals._lock:
+            approvals._pending.pop(sid, None)
+            approvals._gateway_queues[sid] = [target, survivor]
+        with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            if terminal_event == "run.failed":
+                with pytest.raises(RuntimeError, match="terminal failure"):
+                    gateway_chat._run_gateway_runs_api_streaming(
+                        sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
+                        put_gateway_event=lambda *_args: None,
+                        cancel_event=threading.Event(),
+                        session=SimpleNamespace(context_messages=[]),
+                    )
+            else:
+                gateway_chat._run_gateway_runs_api_streaming(
+                    sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
+                    put_gateway_event=lambda *_args: None,
+                    cancel_event=threading.Event(),
+                    session=SimpleNamespace(context_messages=[]),
+                )
+
+        assert target.result == "deny"
+        assert target.reason == terminal_reason
+        assert target.event.is_set()
+        assert survivor.result is None
+        assert not survivor.event.is_set()
+        with approvals._lock:
+            assert approvals._gateway_queues[sid] == [survivor]
+    finally:
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+        with approvals._lock:
+            approvals._pending.pop(sid, None)
+            approvals._gateway_queues.pop(sid, None)
+
+
+def test_gateway_stream_teardown_fail_closes_parked_run_producer():
+    """A disconnect before a terminal event still settles the mapped run."""
+    from api import gateway_chat
+    from api import route_approvals as approvals
+    from api.config import STREAMS, STREAMS_LOCK
+
+    sid = "sess-terminal-teardown"
+    stream_id = "stream-terminal-teardown"
+    run_id = "run-terminal-teardown"
+    target = SimpleNamespace(
+        data={"run_id": run_id, "approval_id": "approval-target"},
+        event=threading.Event(),
+        result=None,
+        reason=None,
+    )
+    survivor = SimpleNamespace(
+        data={"run_id": "run-other", "approval_id": "approval-other"},
+        event=threading.Event(),
+        result=None,
+        reason=None,
+    )
+    events = []
+    queue = MagicMock()
+    queue.put_nowait = lambda item: events.append(item)
+    with STREAMS_LOCK:
+        STREAMS[stream_id] = queue
+
+    session = MagicMock()
+    session.active_stream_id = stream_id
+    session.workspace = "/tmp"
+    session.model = "test"
+    session.model_provider = None
+    session.profile = None
+    session.context_messages = []
+    session.messages = []
+    session.pending_user_message = None
+    session.pending_attachments = None
+    session.pending_started_at = None
+
+    def disconnect_after_run_id(*_args, **_kwargs):
+        gateway_chat._publish_gateway_run_id(stream_id, run_id)
+        raise RuntimeError("gateway disconnected")
+
+    try:
+        with approvals._lock:
+            approvals._pending.pop(sid, None)
+            approvals._gateway_queues[sid] = [target, survivor]
+        with patch.dict(
+            "os.environ",
+            {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"},
+        ), patch("api.gateway_chat.gateway_supports_approval", return_value=True), patch(
+            "api.gateway_chat._run_gateway_runs_api_streaming",
+            side_effect=disconnect_after_run_id,
+        ), patch("api.gateway_chat.get_session", return_value=session):
+            gateway_chat._run_gateway_chat_streaming(
+                session_id=sid,
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
+
+        assert target.result == "deny"
+        assert target.reason == "Gateway run ended during teardown before approval resolution"
+        assert target.event.is_set()
+        assert survivor.result is None
+        assert not survivor.event.is_set()
+        with approvals._lock:
+            assert approvals._gateway_queues[sid] == [survivor]
+    finally:
+        gateway_chat._STREAM_RUN_IDS.pop(stream_id, None)
+        with STREAMS_LOCK:
+            STREAMS.pop(stream_id, None)
+        with approvals._lock:
+            approvals._pending.pop(sid, None)
+            approvals._gateway_queues.pop(sid, None)
+
+
 # ---------------------------------------------------------------------------
 # 3. Approval event translation
 # ---------------------------------------------------------------------------
@@ -531,9 +703,33 @@ def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
         def __exit__(self, *args):
             return None
 
+    class _ReattachedSseResponse:
+        # reconnect after [DONE]: the already-consumed event window replays empty
+        def __iter__(self):
+            return iter([])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    events_connects = 0
+
     def fake_urlopen(req, *, timeout=None):
+        nonlocal events_connects
         if req.full_url.endswith("/v1/runs"):
             return _JsonResponse()
+        # durable-status probe from the watchdog (run ended via [DONE] without a terminal frame):
+        # no durable record for this run, so the second consecutive 404 fails
+        # the turn closed while the approval mirror stays pending. A terminal
+        # status answer would settle the run and retire the mirror before the
+        # assertions below can read it.
+        if req.full_url.endswith("/v1/runs/run-empty-ingress"):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+        if req.full_url.endswith("/events"):
+            events_connects += 1
+            return _SseResponse() if events_connects == 1 else _ReattachedSseResponse()
         return _SseResponse()
 
     handler = MagicMock()
@@ -541,12 +737,13 @@ def test_live_empty_ingress_id_stays_fifo_under_capability_v1():
     try:
         with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
              patch("api.config.gateway_supports_approval_identity_v1", return_value=True):
-            _run_gateway_runs_api_streaming(
-                session_id=sid, msg_text="hi", model="test-model", workspace="/tmp",
-                stream_id=stream_id, base_url="http://gw:8642", api_key="secret",
-                prefill_messages=[], body_extras={}, put_gateway_event=lambda event, data: events.append((event, data)),
-                cancel_event=threading.Event(),
-            )
+            with pytest.raises(RuntimeError, match="no longer has the run"):
+                _run_gateway_runs_api_streaming(
+                    session_id=sid, msg_text="hi", model="test-model", workspace="/tmp",
+                    stream_id=stream_id, base_url="http://gw:8642", api_key="secret",
+                    prefill_messages=[], body_extras={}, put_gateway_event=lambda event, data: events.append((event, data)),
+                    cancel_event=threading.Event(),
+                )
             mirror = approvals.gateway_pending_mirror(sid, run_id="run-empty-ingress")
             browser_id = mirror["approval_id"]
             with patch("api.routes.get_session", return_value=SimpleNamespace(active_stream_id=stream_id)), \
@@ -610,9 +807,33 @@ def test_live_authoritative_ingress_id_relays_exactly_under_capability_v1():
         def __exit__(self, *args):
             return None
 
+    class _ReattachedSseResponse:
+        # reconnect after [DONE]: the already-consumed event window replays empty
+        def __iter__(self):
+            return iter([])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    events_connects = 0
+
     def fake_urlopen(req, *, timeout=None):
+        nonlocal events_connects
         if req.full_url.endswith("/v1/runs"):
             return _JsonResponse()
+        # durable-status probe from the watchdog (run ended via [DONE] without a terminal frame):
+        # no durable record for this run, so the second consecutive 404 fails
+        # the turn closed while the approval mirror stays pending. A terminal
+        # status answer would settle the run and retire the mirror before the
+        # assertions below can read it.
+        if req.full_url.endswith("/v1/runs/run-authoritative-ingress"):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+        if req.full_url.endswith("/events"):
+            events_connects += 1
+            return _SseResponse() if events_connects == 1 else _ReattachedSseResponse()
         return _SseResponse()
 
     handler = MagicMock()
@@ -620,12 +841,13 @@ def test_live_authoritative_ingress_id_relays_exactly_under_capability_v1():
     try:
         with patch("urllib.request.urlopen", side_effect=fake_urlopen), \
              patch("api.config.gateway_supports_approval_identity_v1", return_value=True):
-            _run_gateway_runs_api_streaming(
-                session_id=sid, msg_text="hi", model="test-model", workspace="/tmp",
-                stream_id=stream_id, base_url="http://gw:8642", api_key="secret",
-                prefill_messages=[], body_extras={}, put_gateway_event=lambda event, data: events.append((event, data)),
-                cancel_event=threading.Event(),
-            )
+            with pytest.raises(RuntimeError, match="no longer has the run"):
+                _run_gateway_runs_api_streaming(
+                    session_id=sid, msg_text="hi", model="test-model", workspace="/tmp",
+                    stream_id=stream_id, base_url="http://gw:8642", api_key="secret",
+                    prefill_messages=[], body_extras={}, put_gateway_event=lambda event, data: events.append((event, data)),
+                    cancel_event=threading.Event(),
+                )
             mirror = approvals.gateway_pending_mirror(
                 sid, approval_id="agent-approval-1", run_id="run-authoritative-ingress"
             )
@@ -690,16 +912,43 @@ def test_gateway_runs_api_streaming_same_run_fifo_emits_head_and_promotes_succes
         def __exit__(self, *args):
             return None
 
+    class _ReattachedSseResponse:
+        # reconnect after [DONE]: the already-consumed event window replays empty
+        def __iter__(self):
+            return iter([])
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+    events_connects = 0
+
     def fake_urlopen(req, *, timeout=None):
-        return _JsonResponse() if req.full_url.endswith("/v1/runs") else _SseResponse()
+        nonlocal events_connects
+        if req.full_url.endswith("/v1/runs"):
+            return _JsonResponse()
+        # durable-status probe from the watchdog (run ended via [DONE] without a terminal frame):
+        # no durable record for this run, so the second consecutive 404 fails
+        # the turn closed while the approval mirrors stay pending. A terminal
+        # status answer would settle the run and retire the mirrors before the
+        # assertions below can read them.
+        if req.full_url.endswith("/v1/runs/run-fifo"):
+            raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+        if req.full_url.endswith("/events"):
+            events_connects += 1
+            return _SseResponse() if events_connects == 1 else _ReattachedSseResponse()
+        return _SseResponse()
 
     try:
         with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            _run_gateway_runs_api_streaming(
-                sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
-                put_gateway_event=lambda event, data: events.append((event, data)),
-                cancel_event=threading.Event(),
-            )
+            with pytest.raises(RuntimeError, match="no longer has the run"):
+                _run_gateway_runs_api_streaming(
+                    sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
+                    put_gateway_event=lambda event, data: events.append((event, data)),
+                    cancel_event=threading.Event(),
+                )
 
         approval_events = [data for event, data in events if event == "approval"]
         assert [(data["approval_id"], data["pending_count"]) for data in approval_events] == [
@@ -764,8 +1013,32 @@ def test_empty_id_runs_approval_reaches_real_response_lifecycle():
             def __exit__(self, *args):
                 return None
 
-        def fake_urlopen(req, *, timeout=None):
-            return _JsonResponse() if req.full_url.endswith("/v1/runs") else _SseResponse()
+        class _ReattachedSseResponse:
+            # reconnect after [DONE]: the already-consumed event window replays empty
+            def __iter__(self):
+                return iter([])
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                return None
+
+        events_connects = 0
+
+        def fake_urlopen(req, *, timeout=None, choice=choice):
+            nonlocal events_connects
+            if req.full_url.endswith("/v1/runs"):
+                return _JsonResponse()
+            # durable-status probe from the watchdog (run ended via [DONE] without a terminal frame):
+            # no durable record for this run, so the second consecutive 404
+            # fails the turn closed while the approval mirror stays pending. A
+            # terminal status answer would settle the run and retire the
+            # mirror before the assertions below can read it.
+            if req.full_url.endswith(f"/v1/runs/run-real-{choice}"):
+                raise urllib.error.HTTPError(req.full_url, 404, "Not Found", None, None)
+            if req.full_url.endswith("/events"):
+                events_connects += 1
+                return _SseResponse() if events_connects == 1 else _ReattachedSseResponse()
+            return _SseResponse()
 
         handler = MagicMock()
         handler.wfile = io.BytesIO()
@@ -774,11 +1047,12 @@ def test_empty_id_runs_approval_reaches_real_response_lifecycle():
              patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
              patch("api.gateway_chat._gateway_api_key", return_value=""), \
              patch("api.runner_client.HttpRunnerClient._request_json", return_value={"ok": True}):
-            _run_gateway_runs_api_streaming(
-                sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
-                put_gateway_event=lambda event, data, _events=events: _events.append((event, data)),
-                cancel_event=threading.Event(),
-            )
+            with pytest.raises(RuntimeError, match="no longer has the run"):
+                _run_gateway_runs_api_streaming(
+                    sid, "hi", "test", "/tmp", stream_id, "http://gw:8642", "", [], {},
+                    put_gateway_event=lambda event, data, _events=events: _events.append((event, data)),
+                    cancel_event=threading.Event(),
+                )
             approval_id = events[0][1]["approval_id"]
             assert approval_id
             mirror = approvals.gateway_pending_mirror(sid, approval_id=approval_id)
@@ -1268,22 +1542,32 @@ def test_terminal_run_retirement_removes_all_same_run_mirrors():
         approvals._pending.pop(sid, None)
 
 
-def test_terminal_run_retirement_clears_same_run_gateway_queue_state():
+def test_terminal_run_settlement_clears_same_run_gateway_queue_state():
     import api.route_approvals as approvals
 
     sid = "sess-terminal-run-queue"
     approvals._pending.pop(sid, None)
     approvals._gateway_queues.pop(sid, None)
     try:
-        approvals._gateway_queues[sid] = [
-            SimpleNamespace(data={"run_id": "run-a", "approval_id": "appr-a", "command": "a"}),
-            SimpleNamespace(data={"command": "local-head"}),
-        ]
+        target = SimpleNamespace(
+            data={"run_id": "run-a", "approval_id": "appr-a", "command": "a"},
+            event=threading.Event(),
+            result=None,
+            reason=None,
+        )
+        local_head = SimpleNamespace(data={"command": "local-head"})
+        approvals._gateway_queues[sid] = [target, local_head]
         approvals.submit_gateway_pending_mirror(
             sid,
             {"run_id": "run-a", "approval_id": "appr-a", "command": "a"},
         )
-        assert approvals.retire_gateway_pending_mirror(sid, run_id="run-a")
+        settled, _head, _total = approvals.settle_gateway_pending_run(
+            sid, "run-a", reason="terminal"
+        )
+        assert settled == 1
+        assert target.result == "deny"
+        assert target.reason == "terminal"
+        assert target.event.is_set()
         assert approvals.gateway_pending_mirror(sid, run_id="run-a") is None
         assert not any(
             str((getattr(entry, "data", None) or {}).get("run_id") or "").strip() == "run-a"
@@ -1294,18 +1578,30 @@ def test_terminal_run_retirement_clears_same_run_gateway_queue_state():
         approvals._gateway_queues.pop(sid, None)
 
 
-def test_terminal_run_retirement_clears_non_head_same_run_gateway_queue_state():
+def test_terminal_run_settlement_clears_non_head_same_run_gateway_queue_state():
     import api.route_approvals as approvals
 
     sid = "sess-terminal-run-non-head-queue"
     approvals._pending.pop(sid, None)
     approvals._gateway_queues.pop(sid, None)
     try:
+        target = SimpleNamespace(
+            data={"run_id": "run-a", "approval_id": "appr-a", "command": "a"},
+            event=threading.Event(),
+            result=None,
+            reason=None,
+        )
         approvals._gateway_queues[sid] = [
             SimpleNamespace(data={"command": "local-head"}),
-            SimpleNamespace(data={"run_id": "run-a", "approval_id": "appr-a", "command": "a"}),
+            target,
         ]
-        assert approvals.retire_gateway_pending_mirror(sid, run_id="run-a")
+        settled, _head, _total = approvals.settle_gateway_pending_run(
+            sid, "run-a", reason="terminal"
+        )
+        assert settled == 1
+        assert target.result == "deny"
+        assert target.reason == "terminal"
+        assert target.event.is_set()
         assert approvals.gateway_pending_mirror(sid, run_id="run-a") is None
         assert not any(
             str((getattr(entry, "data", None) or {}).get("run_id") or "").strip() == "run-a"
@@ -1865,7 +2161,15 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
     STREAMS[stream_id] = SimpleNamespace(put_nowait=lambda *_args, **_kwargs: None)
     register_stream_owner(stream_id, sid)
     approvals._pending.pop(sid, None)
-    approvals.submit_gateway_pending_mirror(sid, {"run_id": "run-stop/1", "command": "first"})
+    approval_entry = SimpleNamespace(
+        data={"run_id": "run-stop/1", "approval_id": "approval-stop"},
+        event=threading.Event(),
+        result=None,
+        reason=None,
+    )
+    with approvals._lock:
+        approvals._gateway_queues[sid] = [approval_entry]
+    approvals.submit_gateway_pending_mirror(sid, approval_entry.data)
     session = SimpleNamespace(
         profile=None,
         workspace="/tmp",
@@ -1945,8 +2249,15 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
             assert called["stop"] == "run-stop/1"
             assert called["cancel"] is expect_cancel
             if stop_result:
+                assert approval_entry.result == "deny"
+                assert approval_entry.reason == (
+                    "Gateway run was cancelled before approval resolution"
+                )
+                assert approval_entry.event.is_set()
                 assert approvals.gateway_pending_mirror(sid, run_id="run-stop/1") is None
             else:
+                assert approval_entry.result is None
+                assert not approval_entry.event.is_set()
                 assert stream_id in STREAMS
                 assert stream_owner_session_id(stream_id) == sid
                 assert session.active_stream_id == stream_id
@@ -1957,7 +2268,9 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
         release_worker.set()
         request_thread.join(timeout=5)
         worker_thread.join(timeout=5)
-        approvals._pending.pop(sid, None)
+        with approvals._lock:
+            approvals._pending.pop(sid, None)
+            approvals._gateway_queues.pop(sid, None)
         STREAMS.pop(stream_id, None)
         ACTIVE_RUNS.pop(stream_id, None)
         unregister_stream_owner(stream_id)
