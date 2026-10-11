@@ -6726,6 +6726,19 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-stat-value{font-size:22px;font-weight:700;color:var(--text);}
 .insights-stat-label{font-size:11px;color:var(--muted);margin-top:4px;}
 .insights-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
+/* Usage row (Token Breakdown + Models): 25/75 split so long model IDs
+   (e.g. "vendor/org/model:quant") render in full instead of ellipsizing.
+   Gated on the CONTENT column via a container query (same mechanism as
+   .rightpanel below), not the viewport: a narrow column (small window or
+   sidebar open) stacks the row instead — 620px is where the 160px Token
+   Breakdown floor + 12px gap + the Models table's ~430px minimum
+   (80px name floor + fixed columns + gaps + card padding) all fit.
+   The #2104 mobile block further down still collapses under 640px viewport. */
+#insightsContent{container-type:inline-size;container-name:insights;}
+.insights-usage-grid{grid-template-columns:1fr;}
+@container insights (min-width: 620px){
+  .insights-usage-grid{grid-template-columns:minmax(160px,1fr) minmax(0,3fr);}
+}
 .insights-card{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px;}
 .wiki-status-card{margin-bottom:16px;}
 .wiki-status-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}
