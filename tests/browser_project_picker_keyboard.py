@@ -47,11 +47,13 @@ WHAT IT CHECKS
     they move focus to into the menu's box; the same in a 300px-tall desktop
     window, which the compact rows do not fit either.
   the focus cue, on the dark and on the light theme
-  - on the light theme the focused row's ring is the skin's accent, solid, at
-    least 3:1 against the picker (the translucent --focus-ring was 1.4:1), and
-    a row under the pointer has the theme's --hover-bg wash (the white one
-    cannot be seen there); on the dark theme the ring and the wash are what
-    they were; on both, "+ New project" keeps its accent tint under the pointer.
+  - on the light theme the focused row's ring is the skin's --accent-text,
+    solid, at least 3:1 against the picker (the translucent --focus-ring was
+    1.4:1), also on "+ New project", which is drawn at full opacity while it
+    has keyboard focus so that its ring is not dimmed with it; a row under the
+    pointer has the theme's --hover-bg wash (the white one cannot be seen
+    there); on the dark theme the ring and the wash are what they were; on
+    both, "+ New project" keeps its accent tint under the pointer.
   a long list of conversations (forty more), still three projects
   - on a phone upright (390x844, 375x667, touch) the five rows show whole, below
     their anchor, and above it from the last conversation on screen;
@@ -741,10 +743,15 @@ FOCUS_CUE_JS = """() => {
     const colour = parse(getComputedStyle(node).backgroundColor);
     if (colour.a > 0) picker = over(colour, picker);
   }
-  const ring = over(parse(style.outlineColor), picker);
+  // A row's opacity dims its outline with it ("+ New project" is drawn at 70%).
+  const opacity = parseFloat(style.opacity);
+  const drawn = parse(style.outlineColor);
+  drawn.a *= opacity;
+  const ring = over(drawn, picker);
   const light = luminance(ring), dark = luminance(picker);
   return {
     dark: document.documentElement.classList.contains('dark'),
+    create: row.classList.contains('project-picker-create'), opacity,
     ring: style.outlineColor, ringStyle: style.outlineStyle, ringWidth: style.outlineWidth,
     accent: resolved('--accent'), accentText: resolved('--accent-text'), focusRing: resolved('--focus-ring'),
     contrast: Math.round((Math.max(light, dark) + 0.05) / (Math.min(light, dark) + 0.05) * 100) / 100,
@@ -796,6 +803,28 @@ def _light_ring_problems(cue, label):
     return problems
 
 
+def _create_row_ring_problems(page, label):
+    """End puts focus on "+ New project". The row is drawn at 70% opacity,
+    which would dim its ring to under 3:1; with keyboard focus on a light theme
+    it is drawn in full."""
+    page.keyboard.press("End")
+    page.wait_for_timeout(SETTLE_MS)
+    cue = page.evaluate(FOCUS_CUE_JS)
+    if cue.get("problem"):
+        return [f"  [focus cue, {label}, + New project] {cue['problem']}"]
+    if not cue["create"]:
+        return [f"  [focus cue, {label}, + New project] End did not put focus on '+ New project'"]
+    problems = _light_ring_problems(cue, f"{label}, + New project")
+    if cue["opacity"] != 1:
+        problems.append(
+            f"  [focus cue, {label}, + New project] the focused row is drawn at opacity {cue['opacity']}"
+        )
+    # Back to a project row, so that what follows starts where it did before.
+    page.keyboard.press("Home")
+    page.wait_for_timeout(150)
+    return problems
+
+
 def _check_focus_cue(page, seed):
     """On a light theme the focused row's ring is the skin's --accent-text, not
     the translucent --focus-ring, and a hovered row shows a wash; a dark theme
@@ -825,8 +854,23 @@ def _check_focus_cue(page, seed):
                     failures.append(
                         f"  [focus cue, dark] the ring is {cue['ring']}, expected --focus-ring ({cue['focusRing']})"
                     )
+                if theme == "dark":
+                    # "+ New project" is left as it was on dark: still at 70%.
+                    page.keyboard.press("End")
+                    page.wait_for_timeout(SETTLE_MS)
+                    create = page.evaluate(FOCUS_CUE_JS)
+                    if not create.get("create") or create.get("opacity") != 0.7:
+                        failures.append(
+                            f"  [focus cue, dark, + New project] focused row: create={create.get('create')},"
+                            f" opacity {create.get('opacity')}, expected the 0.7 it had"
+                        )
+                    # Back to a project row: the pointer checks below are for
+                    # rows that do not also have keyboard focus.
+                    page.keyboard.press("Home")
+                    page.wait_for_timeout(150)
                 if theme == "light":
                     failures += _light_ring_problems(cue, "light")
+                    failures += _create_row_ring_problems(page, "light")
                     if cue["accentText"] == cue["accent"]:
                         failures.append(
                             "  [focus cue, light] --accent-text equals --accent on the default skin:"
@@ -890,6 +934,7 @@ def _check_focus_cue(page, seed):
             page.keyboard.press("ArrowDown")
             page.wait_for_timeout(150)
             failures += _light_ring_problems(page.evaluate(FOCUS_CUE_JS), f"{skin} light")
+            failures += _create_row_ring_problems(page, f"{skin} light")
             page.keyboard.press("Escape")
             page.wait_for_timeout(150)
         # The batch picker sits on the selection bar, a darker ground than the

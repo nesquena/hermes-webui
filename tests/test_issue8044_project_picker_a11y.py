@@ -500,6 +500,8 @@ def test_on_a_light_theme_the_ring_is_the_text_accent_and_the_pointer_has_a_wash
     assert "outline-color:var(--accent);}" not in _between(
         STYLE_CSS, ":root:not(.dark) .project-picker-item:hover{", "@media (pointer:coarse){.project-picker-item{"
     )
+    # "+ New project" is drawn at 70% opacity, which would dim its ring too.
+    assert ":root:not(.dark) .project-picker-create:focus-visible{opacity:1;}" in STYLE_CSS
     assert ":root:not(.dark) .project-picker-item:hover{background:var(--hover-bg);}" in STYLE_CSS
     # That rule outranks ".project-picker-create:hover", so the row's accent
     # tint is restated right after it.

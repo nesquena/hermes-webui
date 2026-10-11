@@ -5872,10 +5872,13 @@ main.main > #mainPlugin{display:none;}
    on the palest skins (Terracotta, Sienna, Neon Paint) and on the default
    skin's batch picker it is under 3:1 against the picker; --accent-text is
    the accent made dark enough to read as text, and is over 4:1 on every skin.
-   "+ New project" keeps its accent tint: the first rule outranks its own hover. */
+   "+ New project" keeps its accent tint: the first rule outranks its own hover.
+   It is drawn at 70% opacity, which dims an outline with it (to about 2.8:1),
+   so with keyboard focus it is drawn in full, as it is under the pointer. */
 :root:not(.dark) .project-picker-item:hover{background:var(--hover-bg);}
 :root:not(.dark) .project-picker-create:hover{background:var(--accent-bg);}
 :root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent-text);}
+:root:not(.dark) .project-picker-create:focus-visible{opacity:1;}
 @media (pointer:coarse){.project-picker-item{min-height:44px;padding-top:8px;padding-bottom:8px;font-size:13px;}}
 .project-picker:not(.batch-project-picker){max-height:calc(100dvh - 16px);overflow-y:auto;overscroll-behavior:contain;}
 /* The batch picker renders inline in the selection bar, so on touch its 44px rows would push the
