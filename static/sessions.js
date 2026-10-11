@@ -3960,15 +3960,31 @@ function _hasInflightTailUserDuplicate(messages,candidate){
       // shared ID, or a precision-matched timestamp + normalized prompt.
       const _aTs=(msg.timestamp||msg._ts||0), _bTs=(candidate.timestamp||candidate._ts||0);
       const _aId=msg.id||msg._id, _bId=candidate.id||candidate._id;
+      const _sameText=(x,y)=>_messageComparableText(x)===_messageComparableText(y)
+        ||_normalizeUserTranscriptText(_messageComparableText(x))===_normalizeUserTranscriptText(_messageComparableText(y));
       if(_aId&&_bId){
         if(String(_aId)===String(_bId)) return true;
         return false;
       }
+      // #6649 review 2026-10-10: authoritative active-turn signals decide first
+      // — a shared active_turn_token (stream_id + started_at, unique per turn)
+      // or the server's `_active_turn_user` marker on either row (token and
+      // marker are the SAME turn by construction, so text equality suffices).
+      // These precede the timestamp heuristics so a marker/token pair is never
+      // split by float drift, while a genuinely different token stays separate.
+      const _aTok=typeof msg._active_turn_token==='string'?msg._active_turn_token:'';
+      const _bTok=typeof candidate._active_turn_token==='string'?candidate._active_turn_token:'';
+      if(_aTok&&_bTok){ return _aTok===_bTok?_sameText(msg,candidate):false; }
+      if(msg._active_turn_user===true||candidate._active_turn_user===true){
+        return _sameText(msg,candidate);
+      }
       if(_aTs&&_bTs){
-        // Both stamped: _sameTranscriptMessage requires equal timestamp AND
-        // normalized user-text equality. A whole-second (or sub-second) drift
-        // is ambiguous and must NOT match (a rapid "继续" repeat lands ~1s later).
-        return !!_sameTranscriptMessage(msg,candidate);
+        // Both stamped: precision-only epsilon (state.db round-trips drop
+        // sub-µs precision) + normalized text. A whole-second drift stays a
+        // different turn (a rapid "继续" repeat lands ~1s later).
+        const _eps=(typeof _PENDING_ACTIVE_TURN_TS_EPSILON==='number')?_PENDING_ACTIVE_TURN_TS_EPSILON:1e-6;
+        if(Math.abs(_aTs-_bTs)<=_eps) return _sameText(msg,candidate);
+        return false;
       }
       if(_aTs||_bTs){
         // #6649 SHOULD-FIX (2026-10-06 re-gate): an asymmetric stamp alone is
@@ -4393,10 +4409,27 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
     // base rows. Recovering in that case re-injects a prompt the merged view
     // already holds — the reported duplicate.
     const _alreadyInBase=_pendingForGuard===null&&Array.isArray(baseMessages)&&baseMessages.length>0;
-    // The prompt is already in the merged view: skip the recovery so nothing is
-    // injected, but fall through to the settled-belongs-to-current-turn logic
-    // below — that is what reconciles the live tail correctly in this case.
-    if(!_alreadyInBase){
+    // 三分支：#6649 maintainer review 2026-10-10 —— null 本身不能区分
+    // 「无 pending prompt」「adopted 既有行」「新建 pending 行」三种状态。
+    // adopted 时 resolver 已把当前轮的 user 行就地采纳（可能补附件）并返回
+    // null；必须把该行留作当前轮的 ownership witness，但不插入第二份 prompt。
+    // 空 pending text → 无东西可恢复；否则走既有的 materialize 分支。
+    const _pendingText=String(session&&session.pending_user_message||'').trim();
+    if(_alreadyInBase&&_pendingText){
+      const _witness=(()=>{
+        const list=baseMessages;
+        const _matches=(row)=>(row&&String(row.role||'')==='user')
+          &&(typeof _sameTranscriptMessage==='function'
+            ? !!_sameTranscriptMessage(row,{role:'user',content:_pendingText})
+            : false);
+        const tail=typeof _pendingCurrentTailUserMessage==='function'?_pendingCurrentTailUserMessage(list):null;
+        if(_matches(tail)) return tail;
+        const active=typeof _pendingActiveTurnUserMessage==='function'?_pendingActiveTurnUserMessage(list,session):null;
+        if(_matches(active)) return active;
+        return null;
+      })();
+      if(_witness) turnUser=_witness;
+    }else if(!_alreadyInBase){
       const recovered=_assistantOnlySnapshotUserTurn(session, inflight);
       if(recovered){
         // Insert BEFORE the live assistant so the current user owns the tail.
