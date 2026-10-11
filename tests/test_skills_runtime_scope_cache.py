@@ -239,3 +239,54 @@ def test_skill_mutations_invalidate_pending_panel_and_cron_responses(action):
     """)
     assert result['skills'] == result['cron'] == [{'name': 'saved'}]
     assert all(row != [{'name': 'stale'}] for row in result['rendered'])
+
+
+_DEFERRED_WRITE = """
+  let finishWrite, slashInvalidations=0;
+  invalidateSlashSkillCaches = () => { slashInvalidations++; };
+  const baseApi = api;
+  api = (path,opts) => (path==='/api/skills/save'||path==='/api/skills/delete')
+    ? new Promise(resolve=>{ finishWrite=resolve; }) : baseApi(path,opts);
+"""
+
+
+@pytest.mark.parametrize('action', ['saveSkillForm()', 'deleteCurrentSkill()'])
+def test_superseded_skill_write_still_invalidates_and_reloads(action):
+    # Opening another skill while the write is in flight must not keep the old list.
+    result = _run_node(_DEFERRED_WRITE + f"""
+      _skillsData=[{{name:'before'}}];
+      _cronSkillsCache=[{{name:'before'}}];
+      _currentSkillDetail={{name:'local-one'}};
+      const action={action};
+      await flush();
+      _skillDetailRequest++;
+      finishWrite({{ok:true}});
+      await action;
+      await flush();
+      if(requests.length!==1) throw Error('superseded write did not reload the list');
+      requests[0].resolve({{runtime_scope:'profile',skills:[{{name:'after'}}]}});
+      await flush();
+      return {{skills:_skillsData,cron:_cronSkillsCache,slashInvalidations,detail:_currentSkillDetail}};
+    """)
+    assert result == {'skills': [{'name': 'after'}], 'cron': None,
+                      'slashInvalidations': 1, 'detail': {'name': 'local-one'}}
+
+
+@pytest.mark.parametrize('action', ['saveSkillForm()', 'deleteCurrentSkill()'])
+def test_skill_write_settling_in_other_profile_leaves_its_caches(action):
+    result = _run_node(_DEFERRED_WRITE + f"""
+      _currentSkillDetail={{name:'local-one'}};
+      const action={action};
+      await flush();
+      await switchToProfile('B');
+      _skillsData=[{{name:'b-skill'}}];
+      _cronSkillsCache=[{{name:'b-skill'}}];
+      const before=slashInvalidations;
+      finishWrite({{ok:true}});
+      await action;
+      await flush();
+      return {{skills:_skillsData,cron:_cronSkillsCache,requests:requests.length,
+               slash:slashInvalidations-before}};
+    """)
+    assert result == {'skills': [{'name': 'b-skill'}], 'cron': [{'name': 'b-skill'}],
+                      'requests': 0, 'slash': 0}

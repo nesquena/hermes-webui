@@ -5134,6 +5134,17 @@ function _ownsSkillDetail(owner) {
     owner.request === _skillDetailRequest;
 }
 
+// A write that reached the server changes this profile's skill set even after the
+// detail pane moved on, so cache invalidation follows the profile, not the pane.
+function _ownsSkillProfile(owner) {
+  return owner.profile === S.activeProfile;
+}
+
+function _invalidateSkillCachesAfterWrite() {
+  invalidateSkillListCaches();
+  if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
+}
+
 function _clearSkillDetail() {
   _currentSkillDetail = null;
   _skillPreFormDetail = null;
@@ -5422,10 +5433,10 @@ async function saveSkillForm() {
   const isEdit = !!_editingSkillName;
   try {
     await api('/api/skills/save', {method:'POST', timeoutToast: false, retries: 0, body: JSON.stringify({name, category: category||undefined, content})});
-    if (!_ownsSkillDetail(owner)) return;
+    if (!_ownsSkillProfile(owner)) return;
+    _invalidateSkillCachesAfterWrite();
+    if (!_ownsSkillDetail(owner)) { loadSkills(); return; }
     showToast(isEdit ? t('skill_updated') : t('skill_created'));
-    invalidateSkillListCaches();
-    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
     _editingSkillName = null;
     _skillPreFormDetail = null;
     await loadSkills();
@@ -5467,9 +5478,9 @@ async function deleteCurrentSkill() {
   if (!ok || !owns()) return;
   try {
     await api('/api/skills/delete', { method:'POST', timeoutToast: false, retries: 0, body: JSON.stringify({ name }) });
-    if (!owns()) return;
-    invalidateSkillListCaches();
-    if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
+    if (!_ownsSkillProfile(owner)) return;
+    _invalidateSkillCachesAfterWrite();
+    if (!owns()) { loadSkills(); return; }
     _skillDetailRequest++;
     _clearSkillDetail();
     const reloadOwner = _skillDetailOwner();
