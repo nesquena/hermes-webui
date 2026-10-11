@@ -113,10 +113,12 @@ class TestCronSkillCacheInvalidation:
         # Shared invalidation retires pending reads as well as cached values.
         # Executable coverage lives in test_skills_runtime_scope_cache.py.
         m = re.search(
-            r'async function saveSkillForm\(\).*?invalidateSkillListCaches\(\)',
+            r'async function saveSkillForm\(\).*?_invalidateSkillCachesAfterWrite\(\)',
             src, re.DOTALL
         )
         assert m, "saveSkillForm must retire both skill loaders via shared invalidation"
+        after_write = src.split('function _invalidateSkillCachesAfterWrite(', 1)[1].split('\n}', 1)[0]
+        assert 'invalidateSkillListCaches(keepSkills)' in after_write
         helper = src.split('function invalidateSkillListCaches(', 1)[1].split('\nlet ', 1)[0]
         assert '_skillsData = null;' in helper
         assert '_cronSkillsCache = null;' in helper

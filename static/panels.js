@@ -5094,7 +5094,7 @@ async function toggleSkill(name, currentlyEnabled) {
       method: 'POST', timeoutToast: false, retries: 0,
       body: JSON.stringify({ name, enabled: newEnabled })
     });
-    if (result && result.ok && profile === S.activeProfile && !owns()) {
+    if (result && result.ok && _ownsSkillProfile({profile}) && !owns()) {
       // Superseded but applied: the local working set can't be patched safely, so refetch.
       _invalidateSkillCachesAfterWrite();
       loadSkills();
