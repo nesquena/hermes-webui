@@ -1,12 +1,22 @@
+# ⚠️ DEPRECATED (issue #6876): the separate hermes-dashboard container below
+# runs `dashboard --host 0.0.0.0 --insecure`, which the current agent image
+# rejects when no dashboard auth provider is registered. Prefer
+# docker-compose.three-service.yml (v0.14+): the dashboard runs inside the
+# hermes-agent process via HERMES_DASHBOARD_HOST / HERMES_DASHBOARD_PORT.
+#
 # Three-container Docker Compose: Hermes Agent + Dashboard + WebUI
 #
-# QUICK START:
+# QUICK START (chat/gateway):
 #   docker compose -f docker-compose.three-container.yml up -d
-#   Open http://localhost:8787 (chat) and http://localhost:9119 (dashboard)
+#   Open http://localhost:8787 (chat)
 #   Remote access (issue #6876): echo "HERMES_DASHBOARD_BIND=0.0.0.0" >> .env
 #   and echo "API_SERVER_KEY=<16+ chars>" >> .env, then recreate the stack.
 #   The WebUI reports "Hermes agent is not responding" when the gateway
 #   listener is down — API_SERVER_KEY must be set for port 8642 to open.
+# For a working dashboard use docker-compose.three-service.yml, which sets
+# HERMES_DASHBOARD=1 (required for the dashboard to start) and registers a
+# dashboard auth provider for its non-loopback bind; the separate dashboard
+# container below starts only with a registered provider.
 #
 # This extends the two-container setup with the Hermes Dashboard for
 # monitoring agent activity, sessions, and resource usage.

@@ -609,11 +609,18 @@ docker run -d \
 If you want the agent and WebUI in separate containers (for isolation, or because you're already running an agent gateway elsewhere):
 
 ```bash
-# Agent + WebUI
+# Agent + WebUI — chat boots with no credentials in .env, but the gateway
+# health check and the Tasks panel need a matching API_SERVER_KEY (>=16 chars)
+# and the bind configuration described in docs/docker.md; without them the
+# WebUI reports the agent gateway as unreachable.
 docker compose -f docker-compose.two-container.yml up -d
 
-# Agent + Dashboard + WebUI
-docker compose -f docker-compose.three-container.yml up -d
+# Agent + Dashboard + WebUI — needs DASHBOARD_PASSWORD and a >=16-char
+# API_SERVER_KEY in .env first: docker-compose.three-service.yml interpolates
+# both as required variables, so compose aborts before starting any service.
+#   printf 'DASHBOARD_USER=admin\nDASHBOARD_PASSWORD=%s\nAPI_SERVER_KEY=%s\n' \
+#     "$(openssl rand -hex 8)" "$(openssl rand -hex 16)" > .env
+docker compose -f docker-compose.three-service.yml up -d
 ```
 
 Both compose files use **named Docker volumes** by default, which solves the UID/GID problem by construction. If you need bind mounts to share an existing host directory, see [`docs/docker.md`](docs/docker.md) for the full migration recipe.
