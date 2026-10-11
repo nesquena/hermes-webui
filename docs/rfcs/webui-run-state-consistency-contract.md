@@ -559,7 +559,10 @@ and 5; it does not mark every run-state boundary implemented.
 ## Sidebar notification ownership
 
 A conversation row's notification indicator reflects only that conversation's
-own running, unread-completion, or approval/clarification state. Nested child
+own running, unread-completion, or approval/clarification state. The existing
+active-lineage presentation still suppresses a parent's own unread marker while
+its child is active; this is not a promise that every own cue remains painted.
+Nested child
 sessions (including attached forks) must not light the parent's notification dot,
 hide its timestamp, or add unread/attention styling to it. Activity is distinct
 from notification: when children are collapsed and an attention mark occupies
@@ -593,22 +596,29 @@ status mark remain visible. Running and unread retain a plain status mark; concu
 completion remains in the chip tooltip and accessible name when running or
 attention takes visual precedence. A reference-only chip uses a localized
 short child-qualified archived label, keeps the full archived explanation in its tooltip and
-accessible name, and is not an expander. Clickable child counts reserve the initial
-numeral plus an ellipsis independently of the status and concurrent-activity
-marks. Secondary wording yields space before the primary title; both marks stay
+accessible name, and is not an expander. Clickable child counts show a complete
+compact numeral rather than clipped localized wording; their tooltip and
+accessible name retain the full localized count and toggle hint. The numeral
+and status/concurrent-activity marks have separate intrinsic budgets. Both marks stay
 inside the chip, including selected skins and Detailed density. At the narrowest
 width, fork/worktree/project badges can still reduce the title to its existing
 24px floor; reference-only archived labels keep their separate width budget.
 Fork and delegated row indicators are both 14px; delegated navigation targets
 are at least 44px tall on narrow layouts or coarse pointers, while fine-pointer
 desktop rows remain compact.
+Keyboard toggles retain focus on the replacement chip for the same conversation
+owner. Repaints do not take focus from another control or restore a missing owner.
 
 Large sidebars remain windowed in both densities, including compressed parents
 with child summaries. The rendered list owns transient row-height measurements
 and prefix-sum spacers; unseen rows use plain/summary height estimates until they
 enter the window. Measurements include wrapped localized summaries and expanded
 descendants, are pruned with the current rows, and are invalidated by layout,
-typography, theme or locale changes. Search query/title and content-preview text
+typography, theme or locale changes. Layout measurements use the occupied list
+width before replacing the DOM: clearing
+the list can temporarily remove a native scrollbar, but that transient width is
+not a layout change. Real content-width changes still invalidate measurements.
+Search query/title and content-preview text
 or visibility changes also invalidate a row's measurement, including offscreen
 rows. Selection changes, including selection through a lineage member, invalidate
 that row's retained height; selected heights do not seed unselected-row estimates.

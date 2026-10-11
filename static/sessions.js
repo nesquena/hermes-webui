@@ -8438,8 +8438,7 @@ function _sessionVirtualLayoutKey(list){
     ...Array.from(root.attributes,a=>a.name+'='+a.value),t('session_child_archived_short')].join('|');
 }
 
-function _sessionVirtualLayout(list, rows, query, activeSid){
-  const key=_sessionVirtualLayoutKey(list);
+function _sessionVirtualLayout(list, rows, query, activeSid, key=_sessionVirtualLayoutKey(list)){
   let layout=list._sessionVirtualLayout;
   if(!layout||layout.key!==key) layout={key,measured:new Map(),estimates:[52,72]};
   const previous=layout.measured;
@@ -8912,6 +8911,11 @@ function renderSessionListFromCache(){
   const committedSwipeReflowDelay=Math.max(0,committedSwipeDuration-SESSION_SWIPE_REFLOW_LEAD_MS);
   const listScrollTopBeforeRender=list.scrollTop||0;
   const viewportAnchorBeforeRender=_sessionVirtualViewportAnchor(list);
+  // Clearing the list temporarily removes a native scrollbar. Measure the
+  // occupied content width, not that transient wider empty-list layout.
+  const virtualLayoutKeyBeforeRender=_sessionVirtualLayoutKey(list);
+  const focusedChildOwner=document.activeElement?.classList.contains('session-child-count')
+    ? document.activeElement.dataset.childOwner : null;
   list.innerHTML='';
   // #4671: belt-and-suspenders. The authoritative skeleton-clear happens in
   // _applySessionListPayload (once fresh data is in hand) BEFORE this function is
@@ -9236,7 +9240,7 @@ function renderSessionListFromCache(){
       const isGroupStart=i===0||flatSessionRows[i].group!==flatSessionRows[i-1].group;
       return wasGroupStart===isGroupStart;
     });
-  const virtualLayout=_sessionVirtualLayout(list,flatSessionRows,searchQueryRaw,activeSidForSidebar);
+  const virtualLayout=_sessionVirtualLayout(list,flatSessionRows,searchQueryRaw,activeSidForSidebar,virtualLayoutKeyBeforeRender);
   // Empty group bodies expose cumulative controls/header geometry independently
   // of row estimates. Spacers remain row-only; windows use content coordinates.
   const contentTop=list.getBoundingClientRect().top+list.clientTop-list.scrollTop;
@@ -9307,6 +9311,13 @@ function renderSessionListFromCache(){
       const el=_sessionVirtualSpacer(groupBottomPad,'after');body.appendChild(el);
       virtualSpacers.push({el,start:Math.max(groupStart,virtualWindow.end),end:globalSessionRowIndex});
     }
+  }
+  // Restore only the control that owned focus before replacement. A removed
+  // or off-window owner has no replacement; another focused control wins.
+  if(focusedChildOwner&&document.activeElement===document.body){
+    const replacement=Array.from(list.querySelectorAll('.session-child-count[role="button"]'))
+      .find(el=>el.dataset.childOwner===focusedChildOwner);
+    if(replacement) replacement.focus({preventScroll:true});
   }
   _measureSessionVirtualRows(list,virtualLayout,renderedVirtualRows,virtualSpacers);
   if(virtualAnchorScrollTop!==null){
@@ -9533,7 +9544,9 @@ function renderSessionListFromCache(){
       const childLabel=childCount>0?t('session_meta_children', childCount):t('session_child_archived_short');
       const label=document.createElement('span');
       label.className='session-child-count-label';
-      label.textContent=childLabel;
+      // A count is intentional compact text, never a fragment of localized
+      // wording. The full meaning remains in the tooltip and accessible name.
+      label.textContent=childCount>0?String(childCount):childLabel;
       childCountEl.appendChild(label);
       const childBadgeTip=childCount>0?_sessionChildBadgeTooltip(childLabel):t('session_child_archived');
       childCountEl.title=childBadgeTip;
@@ -9549,12 +9562,13 @@ function renderSessionListFromCache(){
             {isStreaming:true},'session-child-activity-indicator'));
         }
       }
-      ['pointerdown','pointerup','click'].forEach(ev=>childCountEl.addEventListener(ev,e=>e.stopPropagation()));
+      ['pointerdown','pointerup','click','dblclick'].forEach(ev=>childCountEl.addEventListener(ev,e=>e.stopPropagation()));
       if(childCount>0){
         // Touch focus can resize the row's action gutter before the synthetic
         // click, moving this chip away from the finger. Keyboard focus is unchanged.
         childCountEl.addEventListener('pointerdown',e=>{if(e.pointerType==='touch') e.preventDefault();});
         childCountEl.setAttribute('role','button');
+        childCountEl.dataset.childOwner=s.session_id;
         childCountEl.setAttribute('tabindex','0');
         childCountEl.setAttribute('aria-expanded',childrenExpanded?'true':'false');
         childCountEl.setAttribute('aria-label',childCountEl.title);

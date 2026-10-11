@@ -25,6 +25,8 @@ def script(source):
     # as the full cache renderer, whose API/filtering seams are not at issue.
     start = source.index('  const flatSessionRows=[];')
     end = source.index('  const archivePagingFilterActive=', start)
+    capture_start = source.index('  const viewportAnchorBeforeRender=')
+    capture_end = source.index("  list.innerHTML='';", capture_start)
     names = ['_sessionVirtualWindow', '_sessionVirtualSpacer',
              '_scheduleSessionVirtualizedRender', '_ensureSessionVirtualScrollHandler',
              '_markSessionListPointerDown', '_markSessionListPointerUp',
@@ -56,7 +58,7 @@ function repaint(){
  renderCount++;
  const list=document.querySelector('#sessionList'),listScrollTopBeforeRender=list.scrollTop;
  const q=searchQueryRaw;
- const viewportAnchorBeforeRender=typeof _sessionVirtualViewportAnchor==='function'?_sessionVirtualViewportAnchor(list):null;
+""" + source[capture_start:capture_end] + r"""
  list.replaceChildren();
 """ + source[start:end] + r"""
 }
