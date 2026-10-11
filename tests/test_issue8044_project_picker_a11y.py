@@ -735,6 +735,19 @@ def test_a_pen_stays_on_the_row_it_pressed_once_its_long_press_opens_the_menu():
     assert timer.index("_longPressMenuOpened=true;") < timer.index(capture) < timer.index("_openSessionActionMenu(childSession, rowEl);")
 
 
+def test_a_pen_that_leaves_a_conversation_row_ends_its_press():
+    """Uncaptured, a pen that leaves the row sends it no release, and the
+    long-press timer would open the menu after the pen had lifted elsewhere.
+    The fork row already ended a pen's press when it left; a finger's press is
+    not ended, its events keep coming to the row."""
+    leave = _between(SESSIONS_JS, "    el.onpointerleave=()=>{", "    el.onpointerup=(e)=>{")
+    assert "if(_gesturePointerType==='pen'&&_gestureState!=='idle') _clearPointerDragState();" in leave
+    assert "touch" not in leave
+
+    fork = _between(SESSIONS_JS, "        rowEl.onpointerleave=()=>{", "\n        };")
+    assert "if(_gesturePointerType!=='mouse'&&_gestureState!=='idle') _clearForkPointerState();" in fork
+
+
 def test_opening_the_menu_closes_a_picker_left_open():
     """A long press sends no click any more and a right click never did, so
     the picker's own close-on-outside-click cannot be what closes it."""
