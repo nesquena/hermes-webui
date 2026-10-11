@@ -145,9 +145,9 @@ const compose = () => {
       else old.resolve(scenario==='detail'||scenario==='file'?content('A'):{ok:true});
       await flush();
       // An applied superseded write refetches the same profile's list; the detail stays put.
-      const followups=requests.slice(settled).map(r=>[r.path,r.profile]);
       const refetched={runtime_scope:'profile',skills:[{...payload('A').skills[0],description:'refetched'}]};
       requests.slice(settled).filter(r=>r.path==='/api/skills').forEach(r=>r.resolve(refetched));await flush();
+      const followups=requests.slice(settled).map(r=>[r.path,r.profile]);
       return {before,after:snapshot(),followups};
     },{scenario,error});
     reports.push({scenario,error,...report});await page.close();

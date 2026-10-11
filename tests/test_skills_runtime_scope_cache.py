@@ -310,8 +310,10 @@ def test_older_toggle_settling_last_still_invalidates_and_refetches():
       finish[0]({ok:true}); await older;
       await flush();
       if(requests.length!==1) throw Error('superseded toggle did not refetch');
-      requests[0].resolve({runtime_scope:'profile',skills:[{name:'x',disabled:true}]});
+      requests[0].resolve({runtime_scope:'profile',skills:[{name:'x',disabled:true,description:'refetched'}]});
       await flush();
-      return {skills:_skillsData,cron:_cronSkillsCache,slash:slashInvalidations-before};
+      return {skills:_skillsData,cron:_cronSkillsCache,slash:slashInvalidations-before,
+              requests:requests.length};
     """)
-    assert result == {'skills': [{'name': 'x', 'disabled': True}], 'cron': None, 'slash': 1}
+    assert result == {'skills': [{'name': 'x', 'disabled': True, 'description': 'refetched'}],
+                      'cron': None, 'slash': 1, 'requests': 1}
