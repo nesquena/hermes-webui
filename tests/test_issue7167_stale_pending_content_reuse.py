@@ -702,3 +702,315 @@ def test_marker_promotion_keeps_tool_anchor_on_assistant(hermes_home):
     assert anchored is second_journaled, (
         "the card must still anchor the SAME assistant row, not a neighbour"
     )
+
+
+# ── #7167 review 2026-10-10: durable marker ownership + fallback claims ──────
+#
+# The 10-10 review re-gated four findings in api/models.py; these regressions
+# pin the NEW contracts:
+#
+#   * a resolved marker keeps a DURABLE same-stream ownership field
+#     (``_journal_marker_stream_id``) so `_marker_reuse_index` still finds it
+#     on the next repair pass (previously every pass stacked a fresh marker);
+#   * the reachable `consumed_tool_card_indexes` claim in the reused-card
+#     branch stays, so two distinct idless journal starts consume one legacy
+#     fallback card each, while a single event stays idempotent;
+#   * crash/process-restart repair markers are never stamped
+#     ``retry_kind='cancelled'`` — only the genuine Stop call site marks a
+#     user cancel;
+#   * the completed-stream branch explicitly authorizes reuse of an
+#     ownership-proven current-turn row even when ``context_messages`` does
+#     not carry the answer yet (cold lookup).
+
+
+def test_two_idless_tool_starts_keep_two_cards(hermes_home):
+    """Two DISTINCT idless journal ``tool`` starts (same name/preview, no
+    tool id) matched against ONE persisted legacy card must consume it once —
+    the second start appends its own card. The reachable
+    ``consumed_tool_card_indexes.add(tool_match_idx)`` claim was dropped from
+    the reused-card branch, so both starts re-matched the very same legacy
+    card (no ``_recovered_event_id`` to key identity off) and the second
+    journaled call vanished. Same-event idempotence must survive: a single
+    idless start replayed across passes still claims the legacy card once.
+    """
+    from api.models import _append_journaled_partial_output
+
+    sid = "regate_tool_two_idless_starts"
+    stream_id = "dead-stream-tool-two"
+    started_at = 1_700_009_999.5
+    token = f"{stream_id}:{started_at:.17g}"
+
+    # Two distinct journal ``tool`` starts, identical name + preview, no tid.
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls -la"})
+    append_run_event(sid, stream_id, "tool", {"name": "terminal", "preview": "ls -la"})
+
+    def _session_with_legacy_card():
+        s = Session(
+            session_id=sid,
+            title="repro",
+            messages=[
+                {"role": "user", "content": "run ls", "timestamp": int(started_at),
+                 "_active_turn_token": token},
+                {"role": "assistant", "content": "", "_active_turn_token": token},
+            ],
+            pending_user_message="run ls",
+            pending_started_at=started_at,
+            pending_attachments=[],
+            pending_user_source=None,
+            active_stream_id=stream_id,
+        )
+        # One persisted LEGACY card: pre-dates event stamping (no
+        # ``_recovered_event_id``), no stream tag — the preview fallback
+        # path is the only way it can match a journal event.
+        s.tool_calls = [
+            {"name": "terminal", "preview": "ls -la",
+             "assistant_msg_idx": 1, "tid": "legacy-tid"},
+        ]
+        return s
+
+    session = _session_with_legacy_card()
+    _append_journaled_partial_output(
+        session, stream_id, dedupe_existing=True, dedupe_tools=True,
+    )
+    cards = [tc for tc in (session.tool_calls or []) if tc.get("name") == "terminal"]
+    assert len(cards) == 2, (
+        "one legacy fallback card cannot absorb two DISTINCT idless tool "
+        f"starts: got {len(cards)}"
+    )
+    fresh = [
+        tc
+        for tc in cards
+        if tc.get("_recovered_from_run_journal")
+        and tc.get("_recovered_stream_id") == stream_id
+        and tc.get("_recovered_event_id") == f"{stream_id}:2"
+    ]
+    assert len(fresh) == 1, (
+        "the second distinct start must append its own card, got "
+        f"{len(fresh)} fresh card(s)"
+    )
+    assert cards[0].get("tid") == "legacy-tid", (
+        "the persisted legacy card must survive untouched"
+    )
+
+    # Same-event idempotency: a SINGLE idless start replayed across passes is
+    # the same preview match every pass — always one card, never a new one.
+    sid2 = "regate_tool_one_idless_start"
+    stream_b = "stream-tool-one"
+    started_b = 1_700_010_000.5
+    token_b = f"{stream_b}:{started_b:.17g}"
+    append_run_event(sid2, stream_b, "tool", {"name": "terminal", "preview": "ls -la"})
+
+    def _session_with_one_legacy_card():
+        s = Session(
+            session_id=sid2,
+            title="repro",
+            messages=[
+                {"role": "user", "content": "run ls", "timestamp": int(started_b),
+                 "_active_turn_token": token_b},
+                {"role": "assistant", "content": "", "_active_turn_token": token_b},
+            ],
+        )
+        s.pending_user_message = "run ls"
+        s.pending_started_at = started_b
+        s.pending_attachments = []
+        s.pending_user_source = None
+        s.active_stream_id = stream_b
+        s.tool_calls = [
+            {"name": "terminal", "preview": "ls -la",
+             "assistant_msg_idx": 1, "tid": "legacy-tid"},
+        ]
+        return s
+
+    first = _session_with_one_legacy_card()
+    _append_journaled_partial_output(
+        first, stream_b, dedupe_existing=True, dedupe_tools=True,
+    )
+    second = _session_with_one_legacy_card()
+    second.messages = [dict(m) for m in first.messages]
+    second.tool_calls = [dict(tc) for tc in (first.tool_calls or [])]
+    _append_journaled_partial_output(
+        second, stream_b, dedupe_existing=True, dedupe_tools=True,
+    )
+    one_cards = [tc for tc in (second.tool_calls or []) if tc.get("name") == "terminal"]
+    assert len(one_cards) == 1, (
+        "the same idless start replayed twice must keep ONE legacy card, "
+        f"got {len(one_cards)}"
+    )
+
+
+def test_resolved_marker_keeps_durable_stream_ownership(hermes_home):
+    """A RESOLVED marker (``recovered_output=True``) must stay reusable by
+    its stream. ``_journal_marker_stream_id`` is durable same-stream
+    ownership: written unconditionally, kept after resolution, and matched by
+    ``_marker_reuse_index`` — so repeated repairs reuse the marker instead of
+    stacking a fresh one each pass. ``_recovered_stream_id`` stays forbidden
+    on a marker, and an identity-less/other-stream marker is never reused.
+    """
+    from api.models import (
+        _interrupted_recovery_marker, _marker_reuse_index,
+        _strip_journal_retry_meta,
+    )
+
+    marker = _interrupted_recovery_marker(
+        recovered_output=True,
+        stream_id="dead-stream-resolved",
+        pending_started_at=None,
+    )
+    # Resolved markers arm no retry hook, yet the durable ownership is there.
+    assert marker.get("_journal_marker_stream_id") == "dead-stream-resolved"
+    assert "_recovered_stream_id" not in marker, (
+        "the recovered-row provenance tag must never appear on a marker"
+    )
+    assert marker.get("_journal_retry_stream_id") is None
+
+    # The resolved path strips retry capability but keeps durable ownership.
+    _strip_journal_retry_meta(marker)
+    assert marker.get("_journal_marker_stream_id") == "dead-stream-resolved"
+    assert marker.get("_journal_retry_stream_id") is None
+
+    session = Session(
+        session_id="marker_contract", title="probe",
+        messages=[
+            {"role": "user", "content": "crash-turn prompt"},
+            marker,
+        ],
+    )
+    assert _marker_reuse_index(session, "dead-stream-resolved") == 1, (
+        "the resolved marker's durable ownership must stay matchable"
+    )
+
+    # An identity-less resolved marker is never reused...
+    legacy = _interrupted_recovery_marker(recovered_output=True, stream_id=None)
+    session_no_id = Session(
+        session_id="marker_contract_no_id", title="probe",
+        messages=[{"role": "user", "content": "u"}, legacy],
+    )
+    assert _marker_reuse_index(session_no_id, "dead-stream-resolved") is None
+    # ...and neither is another stream's marker.
+    other_stream = _interrupted_recovery_marker(
+        recovered_output=True, stream_id="other-stream",
+    )
+    session_other = Session(
+        session_id="marker_contract_other", title="probe",
+        messages=[{"role": "user", "content": "u"}, other_stream],
+    )
+    assert _marker_reuse_index(session_other, "dead-stream-resolved") is None
+
+
+def test_completed_stream_reuse_authorizes_owned_current_turn_row(hermes_home):
+    """CORE #7167 (2026-10-10): the completed-stream branch may reuse an
+    ownership-proven current-turn assistant row even when ``context_messages``
+    does not carry the answer yet (cold lookup).
+
+    The new authorization gate rejected every row that was neither a recovery
+    artifact nor a core-transcript bearer, so the exact-stream completion
+    re-appended the already-saved answer on every cold read — two answers
+    where master keeps one (``context_messages`` reconstruction grew 1 -> 2).
+    The branch is explicitly opted in via
+    ``authorize_completed_turn_rows=True``; other callers keep the strict gate.
+    """
+    from api.models import _append_journaled_partial_output
+
+    sid = "regate_completed_stream_reuse"
+    stream_id = "dead-stream-completed-reuse"
+    started_at = 1_700_009_999.5
+    token = f"{stream_id}:{started_at:.17g}"
+
+    append_run_event(sid, stream_id, "token", {"text": ANSWER})
+
+    session = Session(
+        session_id=sid,
+        title="completed stream reuse",
+        messages=[
+            {"role": "user", "content": "crash-turn prompt",
+             "timestamp": int(started_at), "_source": "webui",
+             "attachments": [], "_active_turn_token": token},
+            # Ownership-proven current-turn answer, but NOT a recovery
+            # artifact and NOT (yet) projected into context_messages.
+            {"role": "assistant", "content": ANSWER,
+             "_active_turn_token": token},
+        ],
+        pending_user_message="crash-turn prompt",
+        pending_started_at=started_at,
+        pending_user_source="webui",
+        pending_attachments=[],
+        active_stream_id=stream_id,
+        # Cold lookup: the projection has not been rebuilt, so the answer is
+        # absent from context_messages (the auth gate's context-membership
+        # branch cannot prove reuse on its own).
+        context_messages=[],
+    )
+
+    appended_any, output_accounted_for = _append_journaled_partial_output(
+        session, stream_id, dedupe_existing=True,
+        authorize_completed_turn_rows=True,
+    )
+    assert appended_any is False, (
+        "the saved current-turn answer must be reused, not re-appended"
+    )
+    assert output_accounted_for is True
+    assert _count(session, ANSWER, "assistant") == 1, (
+        "exactly one answer row must remain after the completed-stream reuse"
+    )
+
+
+def test_crash_repair_marker_is_not_a_cancel_hook(hermes_home):
+    """A crash/process-restart repair marker must never be stamped
+    ``retry_kind='cancelled'``: only the genuine Stop call site
+    (api/streaming.py cancel marker) marks a user cancel. The cancel-hook
+    predicate must reject the crash marker while still accepting the genuine
+    cancel marker, and the retry hook itself stays armed (only the
+    cancellation KIND was removed from the crash path).
+    """
+    from api.models import (
+        _build_recovery_marker_with_retry_hook, _is_cancel_journal_retry_marker,
+    )
+
+    sid = "regate_crash_not_cancel"
+    stream_id = "dead-stream-crash"
+    # Missing journal: nothing to recover, so the repair path must write the
+    # crash marker (messages stay non-empty -> the stale-pending marker arm).
+    session = _make_session(sid, stream_id)
+    assert (
+        _apply_core_sync_or_error_marker(
+            session,
+            hermes_home / "sessions" / f"session_{sid}.json",
+            stream_id_for_recheck=stream_id,
+        )
+        is True
+    )
+
+    markers = [
+        m
+        for m in session.messages
+        if isinstance(m, dict)
+        and (
+            m.get("_pending_journal_recovery")
+            or (m.get("type") == "interrupted" and m.get("_error"))
+        )
+    ]
+    assert len(markers) == 1, (
+        f"exactly one crash marker expected, got {len(markers)}"
+    )
+    crash_marker = markers[0]
+    assert _is_cancel_journal_retry_marker(crash_marker) is False, (
+        "a crash/restart marker must never read as a user Stop"
+    )
+    assert crash_marker.get("_journal_retry_kind") is None, (
+        "the crash path must not stamp a cancellation kind"
+    )
+    # The retry capability (and durable ownership) remain armed.
+    assert crash_marker.get("_pending_journal_recovery") is True
+    assert crash_marker.get("_journal_retry_stream_id") == stream_id
+    assert crash_marker.get("_journal_marker_stream_id") == stream_id
+
+    # Control: the genuine user-Stop marker still registers as a cancel hook.
+    cancel_marker = _build_recovery_marker_with_retry_hook(
+        recovered_output=False,
+        stream_id="stream-cancel",
+        pending_started_at=None,
+        retry_kind="cancelled",
+    )
+    assert _is_cancel_journal_retry_marker(cancel_marker) is True, (
+        "the genuine cancel marker must keep its cancellation kind"
+    )

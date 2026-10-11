@@ -3055,21 +3055,13 @@ def _interrupted_recovery_marker(
         'interruption_cause': interruption_cause,
     }
     if stream_id:
-        # #7167 MUST-FIX (2026-10-10 re-gate): the marker's stream identity is
-        # carried as ``_journal_retry_stream_id``, NOT as
-        # ``_recovered_stream_id``. That field is the provenance tag a
-        # RECOVERED ROW wears, so consumers that select recovered output by it
-        # ("which rows came from stream X?") picked up the marker itself —
-        # the carrier was counted as its own payload, a plain repair produced
-        # two rows where master produces one, and the crash stale-pending
-        # repairs wrote ``_journal_retry_kind='cancelled'`` on top of it.
-        #
-        # Only a marker that still ARMS a retry hook may carry the identity:
-        # a resolved marker (``recovered_output=True``, or ``pending_retry``
-        # suppressed) has no hook to key on, so writing it would leave a
-        # resolved carrier looking like a pending one to every consumer that
-        # selects hooks by this field (tests/
-        # test_cancel_restart_journal_recovery.py::_pending_stream_hook).
+        # #7167 review 2026-10-10: the marker's durable same-stream ownership
+        # (``_journal_marker_stream_id``, written unconditionally and kept even
+        # after the marker is resolved) is separate from its retry capability
+        # (``_journal_retry_stream_id``, written only while still pending and
+        # stripped on resolution). ``_recovered_stream_id`` remains forbidden on
+        # a marker — that field is the provenance tag a RECOVERED ROW wears.
+        marker['_journal_marker_stream_id'] = str(stream_id)
         if pending_retry and not recovered_output:
             marker['_journal_retry_stream_id'] = str(stream_id)
     if pending_retry and not recovered_output:
@@ -4168,6 +4160,11 @@ def _append_journaled_partial_output(
     # represented. Default False keeps every existing caller byte-identical;
     # only the core-sync repair path opts in.
     authorize_core_rows: bool = False,
+    # #7167 CORE (2026-10-10): exact-stream completion proves the journal
+    # output is already saved. When True, an ownership-proven current-turn
+    # row is authorized for reuse even though it is not a recovery artifact;
+    # only the completed-stream branch opts in.
+    authorize_completed_turn_rows: bool = False,
 ) -> tuple[bool, bool]:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -4496,6 +4493,10 @@ def _append_journaled_partial_output(
                         authorize_core_rows
                         and _cand.get('_from_core_transcript') is True
                     )
+                    or (
+                        authorize_completed_turn_rows
+                        and content_match_owned_by_current_turn(candidate_idx)
+                    )
                     # The core transcript is also projected into
                     # context_messages; a row the projection already carries is
                     # the durable copy the journal is replayed against.
@@ -4754,6 +4755,12 @@ def _append_journaled_partial_output(
                 # was appended, so session_mutated stays False.
                 current_assistant_idx = anchor_idx
                 output_accounted_for = True
+                # Claim the matched card so a later identical journal event
+                # cannot dedupe against the very same card again (#7167 review
+                # 2026-10-10: the unreachable duplicate was removed; the
+                # reachable claim must stay, or two distinct idless starts
+                # consume one legacy fallback card).
+                consumed_tool_card_indexes.add(tool_match_idx)
                 # Remember the reused card so a later ``tool_complete`` for the
                 # same event updates IT (not only freshly built cards): a card
                 # reused while ``done=False`` used to stay incomplete and
@@ -5335,6 +5342,9 @@ def _strip_journal_retry_meta(marker: dict) -> None:
     marker.pop('_journal_retry_kind', None)
     marker.pop('_journal_retry_owner_token', None)
     marker.pop('_journal_retry_process_token', None)
+    # ``_journal_marker_stream_id`` is DURABLE ownership (#7167 review
+    # 2026-10-10) and is deliberately not cleaned here: a resolved marker must
+    # still be reusable by stream identity, so it survives resolution.
 
 
 def _reorder_journal_tail_above_marker(session, marker_idx: int) -> None:
@@ -5897,14 +5907,17 @@ def _marker_reuse_index(session, stream_id: str | None) -> int | None:
     """Return the index of an interruption marker owned by ``stream_id``.
 
     Reuse sites must require EXPLICIT same-stream identity: only a marker whose
-    recorded stream id (``_journal_retry_stream_id`` or ``_recovered_stream_id``)
-    equals ``str(stream_id)`` may stand in for the marker the repair is about to
-    write. An identity-less marker — a legacy marker written before stream
-    tagging, or a demoted retry marker whose ``_journal_retry_meta`` was
-    stripped — proves nothing about which stream it belongs to, so reusing it
-    for the current stream appends no notice of its own and the user loses the
-    only signal for THIS stream's interruption (SILENT finding from the
-    2026-09-23 re-gate).
+    recorded stream id equals ``str(stream_id)`` may stand in for the marker the
+    repair is about to write. Identity resolution consults, in order,
+    ``_journal_marker_stream_id`` (durable ownership — written unconditionally
+    and kept after resolution), then ``_journal_retry_stream_id`` (the retry
+    hook's capability field, stripped when the marker is resolved), then the
+    legacy ``_recovered_stream_id``. An identity-less marker — a legacy marker
+    written before stream tagging, or a demoted retry marker whose
+    ``_journal_retry_meta`` was stripped — proves nothing about which stream it
+    belongs to, so reusing it for the current stream appends no notice of its
+    own and the user loses the only signal for THIS stream's interruption
+    (SILENT finding from the 2026-09-23 re-gate).
     """
     if stream_id is None:
         return None
@@ -5917,7 +5930,9 @@ def _marker_reuse_index(session, stream_id: str | None) -> int | None:
         if not (is_interrupted or is_pending_retry):
             continue
         marker_stream = (
-            message.get('_journal_retry_stream_id') or message.get('_recovered_stream_id')
+            message.get('_journal_marker_stream_id')
+            or message.get('_journal_retry_stream_id')
+            or message.get('_recovered_stream_id')
         )
         if not marker_stream or str(marker_stream) != target:
             # Never reuse an identity-less or other-stream marker.
@@ -6086,6 +6101,7 @@ def _apply_core_sync_or_error_marker(
                 session,
                 _stream_id,
                 dedupe_existing=True,
+                authorize_completed_turn_rows=True,
             )
             session.active_stream_id = None
             session.pending_user_message = None
@@ -6233,13 +6249,13 @@ def _apply_core_sync_or_error_marker(
                         recovered_output=recovered_output or _output_accounted_for,
                         stream_id=_stream_id,
                         pending_started_at=_pending_started_at,
-                        # #7167: this marker stands for a USER Stop. The
-                        # interrupted-recovery wording and type describe why
-                        # the agent process died, not who asked it to stop, so
-                        # record the kind explicitly — otherwise
-                        # _cancelled_journal_turn_owner skips the segment and
-                        # the state.db replay row survives the merge.
-                        retry_kind='cancelled',
+                        # #7167 review 2026-10-10: a crash/process-restart
+                        # repair is NOT a user Stop. ``retry_kind='cancelled'``
+                        # here made the cancel-hook predicate
+                        # (``_is_cancel_journal_retry_marker``) mis-identify
+                        # this marker as a genuine Stop; cancellation kind is
+                        # only stamped by the real Stop/cancel call site
+                        # (api/streaming.py cancel marker).
                     )
                 )
         session.save(touch_updated_at=touch_updated_at)

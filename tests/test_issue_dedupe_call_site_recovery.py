@@ -914,13 +914,20 @@ def test_untagged_interruption_marker_is_not_reused_across_streams(hermes_home):
 
     # A marker for THIS stream must exist. The untagged legacy marker cannot
     # stand in for it, so recovery must append its own stream-tagged marker.
+    # #7167 review 2026-10-10: marker stream identity is the DURABLE
+    # ``_journal_marker_stream_id`` (kept after resolution) plus the retry
+    # capability's ``_journal_retry_stream_id`` — ``_recovered_stream_id``
+    # stays a recovered-ROW provenance tag and must never appear on a marker.
     this_stream_markers = [
         m
         for m in session.messages
         if isinstance(m, dict)
         and m.get("_error")
         and m.get("type") == "interrupted"
-        and m.get("_recovered_stream_id") == stream_id
+        and (
+            m.get("_journal_marker_stream_id") == stream_id
+            or m.get("_journal_retry_stream_id") == stream_id
+        )
     ]
     assert this_stream_markers, (
         f"SILENT 1: recovery reused the identity-less marker and appended no "
@@ -935,7 +942,11 @@ def test_untagged_interruption_marker_is_not_reused_across_streams(hermes_home):
         if isinstance(m, dict)
         and m.get("_error")
         and m.get("type") == "interrupted"
-        and not m.get("_recovered_stream_id")
+        and not (
+            m.get("_journal_marker_stream_id")
+            or m.get("_journal_retry_stream_id")
+            or m.get("_recovered_stream_id")
+        )
     ]
     assert len(legacy_markers) == 1, (
         f"the pre-existing identity-less marker must survive untouched "

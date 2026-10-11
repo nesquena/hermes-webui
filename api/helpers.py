@@ -26,6 +26,7 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "_active_turn_user",
     "_fork_child_turn",
     "_pending_journal_recovery",
+    "_journal_marker_stream_id",
     "_journal_retry_stream_id",
     "_journal_retry_attempts",
     "_journal_retry_first_seen_ts",
