@@ -241,3 +241,61 @@ def test_session_new_worktree_fallback_workspace_is_resolved(tmp_path, monkeypat
     assert captured["status"] == 200
     session = captured["payload"]["session"]
     assert session["workspace"] == str(worktree.resolve())
+
+
+def _git(repo, *args):
+    return subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True, text=True)
+
+
+def test_find_main_worktree_root_resolves_linked_worktree(tmp_path):
+    from api.worktrees import find_main_worktree_root
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t.t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f").write_text("x")
+    _git(repo, "add", "f")
+    _git(repo, "commit", "-m", "init")
+    linked = repo / ".worktrees" / "hermes-abc"
+    _git(repo, "worktree", "add", str(linked), "-b", "hermes/hermes-abc")
+
+    # The linked worktree's own toplevel is itself, but the *main* root is repo.
+    assert find_main_worktree_root(linked) == repo.resolve()
+    assert find_main_worktree_root(repo) == repo.resolve()
+
+
+def test_create_worktree_from_linked_worktree_uses_main_root(tmp_path, monkeypatch):
+    """A session started inside a linked worktree must branch the new tree from
+    the *main* repo, not nest it inside the current worktree."""
+    import api.worktrees as worktrees
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "t@t.t")
+    _git(repo, "config", "user.name", "t")
+    (repo / "f").write_text("x")
+    _git(repo, "add", "f")
+    _git(repo, "commit", "-m", "init")
+    linked = repo / ".worktrees" / "hermes-abc"
+    _git(repo, "worktree", "add", str(linked), "-b", "hermes/hermes-abc")
+
+    seen = {}
+
+    def fake_setup(repo_root):
+        seen["repo_root"] = repo_root
+        return {
+            "path": str(repo / ".worktrees" / "hermes-new"),
+            "branch": "hermes/hermes-new",
+            "repo_root": repo_root,
+        }
+
+    monkeypatch.setattr(worktrees, "_setup_agent_worktree", fake_setup)
+
+    info = worktrees.create_worktree_for_workspace(linked)
+
+    assert seen["repo_root"] == str(repo.resolve())
+    assert Path(info["path"]) == repo / ".worktrees" / "hermes-new"
+    assert info["repo_root"] == str(repo.resolve())

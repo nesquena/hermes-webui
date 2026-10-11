@@ -341,6 +341,43 @@ def find_git_repo_root(workspace: str | Path) -> Path:
     return Path(root).expanduser().resolve()
 
 
+def find_main_worktree_root(workspace: str | Path) -> Path | None:
+    """Return the *main* working-tree root, resolving linked worktrees.
+
+    ``find_git_repo_root`` returns ``git rev-parse --show-toplevel``, which for
+    a session started inside a linked worktree (e.g. ``<repo>/.worktrees/x``)
+    is that worktree itself.  Passing it to the agent's ``_setup_worktree``
+    nests the new tree *inside* the current one, and no pruner ever reclaims a
+    nest.  Ask git for the common git dir instead: it always points at the
+    main tree's ``.git``, so its parent is the root every session should branch
+    from.  Returns ``None`` when the workspace is not in a git repo.
+    """
+    ws = Path(workspace).expanduser().resolve()
+    if not ws.is_dir():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=ws,
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+            creationflags=windows_hide_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    common = result.stdout.strip()
+    if not common:
+        return None
+    common_path = Path(common).expanduser()
+    # ``<main>/.git`` -> ``<main>``.  A bare repo's common dir *is* its root.
+    root = common_path.parent if common_path.name == ".git" else common_path
+    return root.resolve() if root.is_dir() else None
+
+
 def _setup_agent_worktree(repo_root: str) -> dict:
     try:
         import importlib.util
@@ -378,7 +415,11 @@ def _setup_agent_worktree(repo_root: str) -> dict:
 
 
 def create_worktree_for_workspace(workspace: str | Path) -> dict:
-    repo_root = find_git_repo_root(workspace)
+    # Place the tree under the *main* working tree, never under the current
+    # linked worktree: a workspace that is itself a worktree (the common case
+    # once webui_state/last_workspace.txt carries a session's tree) would
+    # otherwise nest the new tree inside it, out of reach of every pruner.
+    repo_root = find_main_worktree_root(workspace) or find_git_repo_root(workspace)
     info = _setup_agent_worktree(str(repo_root))
     path = info.get("path")
     branch = info.get("branch")
