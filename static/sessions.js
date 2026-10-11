@@ -9640,6 +9640,9 @@ function renderSessionListFromCache(){
         // then, so the one-shot guard that would have swallowed it is cleared
         // here, or it would swallow the next deliberate tap on the fork.
         rowEl.addEventListener('touchend',(e)=>{
+          // A touch on the ⋮ button begins no gesture here, so the flag can be
+          // left over from an earlier long press: that tap keeps its click.
+          if(_isForkActionTarget(e.target)) return;
           if(!_longPressMenuOpened||!e.cancelable) return;
           e.preventDefault();
           rowEl._skipNextChildOpen=false;
@@ -10181,6 +10184,9 @@ function renderSessionListFromCache(){
     el.addEventListener('touchend',(e)=>{
       const touch=e.changedTouches&&e.changedTouches[0];
       if(!touch) return;
+      // A touch on the ⋮ button begins no gesture on the row, so the flag below
+      // can be left over from an earlier long press: that tap keeps its click.
+      if(_isSessionActionTarget(e.target)) return;
       // The long press opened the menu, which may now lie under the finger:
       // without this the browser's own click for the touch lands on whichever
       // menu row is there and runs it.

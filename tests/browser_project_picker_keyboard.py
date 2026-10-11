@@ -1043,6 +1043,98 @@ def _check_fork_long_press_runs_nothing(browser, seed):
     return failures
 
 
+# A row's own ⋮ button: its centre, whether a tap there reaches it, and the
+# clicks since COUNT_CLICKS_JS: all of them, and those that landed on a ⋮ button.
+TRIGGER_JS = """({sid, fork}) => {
+  const item = document.querySelector('.session-item[data-sid="' + sid + '"]');
+  const row = fork ? item && item.querySelector('.session-child-session') : item;
+  const button = row && row.querySelector('.session-actions-trigger');
+  if (!button) return null;
+  const box = button.getBoundingClientRect();
+  const x = box.left + box.width / 2, y = box.top + box.height / 2;
+  const hit = document.elementFromPoint(x, y);
+  const counted = window.__counted || {all: 0, onButton: 0};
+  return {x, y, reachable: !!hit && button.contains(hit), clicks: counted.all, onButton: counted.onButton,
+          menu: !!document.querySelector('.session-action-menu')};
+}"""
+
+COUNT_CLICKS_JS = """() => {
+  if (window.__counted) { window.__counted.all = 0; window.__counted.onButton = 0; return; }
+  window.__counted = {all: 0, onButton: 0};
+  document.addEventListener('click', e => {
+    window.__counted.all += 1;
+    if (e.target.closest && e.target.closest('.session-actions-trigger')) window.__counted.onButton += 1;
+  }, true);
+}"""
+
+
+def _check_button_tap_after_long_press(browser, seed, *, fork):
+    """A touch that opened the ⋮ menu by a long press cancels its own click.
+    Once that menu is dismissed, a touch on the row's ⋮ button begins no
+    gesture on the row, so nothing may be left over from the long press to
+    cancel it too: the tap must open the menu.
+
+    The button only exists where the mouse is the main pointer (the touch
+    layout hides it), so this is a touch laptop: no touch emulation, real
+    touch events, and the mouse resting on the row, which is what shows a
+    conversation's button and holds a fork's still under the tap. Returns
+    failure lines."""
+    what = "a fork" if fork else "a conversation"
+    label = f"⋮ button, a tap after a long press on {what}, touch laptop 1280x800"
+    ctx, page, errors = _new_page(browser, viewport={"width": 1280, "height": 800})
+    if page is None:
+        return [f"  [{label}] {errors}"]
+    failures = []
+    try:
+        page.evaluate("renderSessionList()")
+        page.wait_for_timeout(SETTLE_MS)
+        if fork:
+            placed = page.evaluate(TALL_ANCHOR_AT_JS, {"sid": seed["beta"], "offset": 300})
+            if placed.get("problem"):
+                return [f"  [{label}] {placed['problem']}"]
+            page.wait_for_timeout(SETTLE_MS)
+            point = page.evaluate(FORK_ROW_JS, seed["beta"])
+            sid = seed["beta"]
+        else:
+            point = page.evaluate(MIDDLE_ROW_JS)
+            sid = point and page.evaluate(
+                "(p) => document.elementFromPoint(p.x, p.y).closest('.session-item').dataset.sid", point
+            )
+        if not point:
+            return [f"  [{label}] no row to press"]
+        touch = ctx.new_cdp_session(page)
+        _touch(touch, "touchStart", point)
+        page.wait_for_timeout(LONG_PRESS_MS)
+        _touch(touch, "touchEnd")
+        page.wait_for_timeout(SETTLE_MS)
+        if not page.evaluate("() => !!document.querySelector('.session-action-menu')"):
+            return [f"  [{label}] the long press did not open the ⋮ menu"]
+        page.keyboard.press("Escape")
+        page.wait_for_timeout(SETTLE_MS)
+        if page.evaluate("() => !!document.querySelector('.session-action-menu')"):
+            return [f"  [{label}] Escape did not dismiss the ⋮ menu"]
+        page.mouse.move(point["x"], point["y"])
+        page.wait_for_timeout(300)
+        button = page.evaluate(TRIGGER_JS, {"sid": sid, "fork": fork})
+        if not button or not button["reachable"]:
+            return [f"  [{label}] the ⋮ button cannot be tapped, so nothing was tested"]
+        page.evaluate(COUNT_CLICKS_JS)
+        _touch(touch, "touchStart", button)
+        page.wait_for_timeout(60)
+        _touch(touch, "touchEnd")
+        page.wait_for_timeout(SETTLE_MS)
+        counted = page.evaluate("() => window.__counted")
+        if not page.evaluate("() => !!document.querySelector('.session-action-menu')"):
+            failures.append(
+                f"  [{label}] a tap on the ⋮ button did not open the menu"
+                f" ({counted['all']} clicks followed it, {counted['onButton']} on the button)"
+            )
+        failures.extend(f"  [{label}] pageerror: {err}" for err in errors)
+    finally:
+        ctx.close()
+    return failures
+
+
 # The focused row of the open single picker, as its ring and wash are painted,
 # and the two custom properties a ring can come from, resolved to colours.
 FOCUS_CUE_JS = """() => {
@@ -2194,6 +2286,11 @@ def main():
             failures.extend(found)
             if not found:
                 print("OK  ⋮ menu, real long press and release on a fork at 844x390 — nothing opens, and the next tap on the fork opens it")
+            for fork in (False, True):
+                found = _check_button_tap_after_long_press(browser, seed, fork=fork)
+                failures.extend(found)
+                if not found:
+                    print(f"OK  ⋮ button, touch laptop — after a long press on {'a fork' if fork else 'a conversation'} and Escape, a tap on its ⋮ button opens the menu")
 
             # Still three projects, and the long list of conversations.
             found = _check_resize(browser) + _check_resize_hides_the_sidebar(browser)

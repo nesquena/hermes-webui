@@ -672,3 +672,21 @@ def test_a_fork_row_cancels_the_same_click_and_disarms_its_one_shot_guard():
     assert handler.index("e.preventDefault();") < handler.index("rowEl._skipNextChildOpen=false;")
     assert handler.rstrip().endswith("},{passive:false});")
 
+
+def test_a_touch_on_the_menu_button_is_never_the_one_that_gets_cancelled():
+    """The long-press flag is reset when a press begins on the row, and a press
+    on the ⋮ button begins none. Left over from an earlier long press, it would
+    cancel a tap on the button, which then opens nothing. Both handlers leave
+    before they read the flag."""
+    end = SESSIONS_JS.index("    el.addEventListener('touchend',(e)=>{")
+    handler = SESSIONS_JS[end : SESSIONS_JS.index("    return el;", end)]
+    leave = "if(_isSessionActionTarget(e.target)) return;"
+    assert handler.count(leave) == 1
+    assert handler.index(leave) < handler.index("_longPressMenuOpened")
+
+    start = SESSIONS_JS.index("        rowEl.addEventListener('touchend',(e)=>{")
+    handler = SESSIONS_JS[start : SESSIONS_JS.index("        rowEl.onpointercancel=", start)]
+    leave = "if(_isForkActionTarget(e.target)) return;"
+    assert handler.count(leave) == 1
+    assert handler.index(leave) < handler.index("_longPressMenuOpened")
+

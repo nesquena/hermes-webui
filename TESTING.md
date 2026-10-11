@@ -185,8 +185,12 @@ scrolling the conversation list; and a touch held on a row in the middle of the
 screen, where the menu opens over the finger (390x844 and 844x390, and a fork's
 row at 844x390), and lifted there, after which no menu row may have been
 clicked, no request sent, the menu must still be open with focus in it, and a
-tap on a menu row or on the fork must then work. A hardware keyboard on a
-phone, a real rotation and a real finger are not checked. In a long list the
+tap on a menu row or on the fork must then work; and, at 1280x800 with the
+mouse as the main pointer and touch events as well (a touch laptop, the only
+place a row's ⋮ button and touch meet), a long press on a conversation and on
+a fork, Escape, the mouse resting on the row, and then a tap on the row's ⋮
+button, which must open the menu. A hardware keyboard on a phone, a real
+rotation and a real finger are not checked. In a long list the
 focused row must be inside
 the picker's box, or, in the batch picker, scrolled onto the screen by the
 conversation list. With a mouse on the light theme, a keyboard-focused row's
