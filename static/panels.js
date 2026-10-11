@@ -5094,15 +5094,21 @@ async function toggleSkill(name, currentlyEnabled) {
       method: 'POST', timeoutToast: false, retries: 0,
       body: JSON.stringify({ name, enabled: newEnabled })
     });
+    if (result && result.ok && profile === S.activeProfile && !owns()) {
+      // Superseded but applied: the local working set can't be patched safely, so refetch.
+      _invalidateSkillCachesAfterWrite();
+      loadSkills();
+      return;
+    }
     if (!owns()) return;
     if (result && result.ok) {
       if (_skillsData) {
         const skill = _skillsData.find(s => s.name === name);
         if (skill) skill.disabled = !newEnabled;
       }
-      invalidateSkillListCaches(true);
-      if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
-      renderSkills(_skillsData || []);
+      _invalidateSkillCachesAfterWrite(true);
+      if (_skillsData) renderSkills(_skillsData);
+      else loadSkills();
     } else {
       setStatus((result && result.error) || t('skill_toggle_failed'));
     }
@@ -5140,8 +5146,8 @@ function _ownsSkillProfile(owner) {
   return owner.profile === S.activeProfile;
 }
 
-function _invalidateSkillCachesAfterWrite() {
-  invalidateSkillListCaches();
+function _invalidateSkillCachesAfterWrite(keepSkills=false) {
+  invalidateSkillListCaches(keepSkills);
   if(typeof window!=='undefined'&&typeof window.invalidateSlashSkillCaches==='function') window.invalidateSlashSkillCaches();
 }
 
