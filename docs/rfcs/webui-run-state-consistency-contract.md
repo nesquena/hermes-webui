@@ -608,6 +608,9 @@ are at least 44px tall on narrow layouts or coarse pointers, while fine-pointer
 desktop rows remain compact.
 Keyboard toggles retain focus on the replacement chip for the same conversation
 owner. Repaints do not take focus from another control or restore a missing owner.
+On narrow/coarse chip rows, touch-generated hover hides the adjacent timestamp's
+paint without removing its layout space, so the compact disclosure does not move
+between touchend and the synthesized click.
 
 Large sidebars remain windowed in both densities, including compressed parents
 with child summaries. The rendered list owns transient row-height measurements

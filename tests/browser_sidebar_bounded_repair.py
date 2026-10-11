@@ -79,7 +79,7 @@ def main():
                                  profile='default') for i, s in enumerate(seeds[120:135])]
                 # Concurrent child work belongs inside the aggregate chip.
                 for i, child in enumerate(children):
-                    if i % 3 == 0:
+                    if i % 3 == 0 and i < 12:
                         child['attention'] = {'kind': 'approval', 'count': 1}
                     if i % 3 == 1:
                         child['is_streaming'] = True
@@ -176,7 +176,7 @@ def main():
                           const l=c.querySelector('.session-child-count-label'),r=document.createRange();r.selectNodeContents(l);
                           const b=l.getBoundingClientRect(),glyph=r.getBoundingClientRect(),owner=c.closest('.session-item');
                           const title=owner.querySelector('.session-title').getBoundingClientRect();
-                          return {text:l.textContent,available:b.width,glyph:glyph.width,titleWidth:title.width,
+                          return {owner:owner.dataset.sid,text:l.textContent,available:b.width,glyph:glyph.width,titleWidth:title.width,
                             aria:c.getAttribute('aria-label'),tooltip:c.title,expected:t('session_meta_children',3),
                             sidebar:document.querySelector('.sidebar').getBoundingClientRect().width,
                             marks:[...c.querySelectorAll('.session-child-count-state,.session-child-activity-indicator')].map(m=>{
@@ -194,7 +194,8 @@ def main():
                                 issues.append('full localized accessible meaning lost')
                             if d['titleWidth'] < 24:
                                 issues.append('primary title budget lost')
-                            if len(d['marks']) != 2 or not all(m['width'] >= 10 and m['inside'] for m in d['marks']):
+                            expected_marks = 1 if d['owner'] == parents[4]['session_id'] else 2
+                            if len(d['marks']) != expected_marks or not all(m['width'] >= 10 and m['inside'] for m in d['marks']):
                                 issues.append('concurrent child marks missing or clipped')
                             if abs(d['sidebar']-sidebar)>1:
                                 issues.append('wrong real sidebar width')
@@ -203,7 +204,9 @@ def main():
                     page.screenshot(path=str(args.output/f'{width}-{sidebar}-{skin}-{dark}.png'))
                     if width==390:
                         page.evaluate("setLocale('en');renderSessionListFromCache()")
-                        chip = page.locator('.session-child-count[role=button]').first
+                        # The smallest running-only count is the risky touch target:
+                        # synthetic hover must not remove the adjacent timestamp's width.
+                        chip = page.locator(f'.session-item[data-sid="{parents[4]["session_id"]}"] .session-child-count')
                         chip.tap()
                         page.wait_for_timeout(350)
                         expanded = chip.get_attribute('aria-expanded')

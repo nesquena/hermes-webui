@@ -5760,6 +5760,11 @@ main.main > #mainPlugin{display:none;}
 }
 .session-child-count-label{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .session-child-count:focus-visible{outline:2px solid var(--accent);outline-offset:2px;}
+/* A touch-generated hover must not move the compact disclosure between
+   touchend and click. Hide the timestamp's paint, not its layout space. */
+@media (max-width:768px), (pointer:coarse){
+  .session-item:has(.session-child-count):hover .session-time:not(.is-hidden){display:inline-flex;visibility:hidden;}
+}
 .session-child-count-state{width:10px;height:10px;}
 /* #7976 gate (Codex): with fork/worktree/project badges at a 180px sidebar the 6px title-row gaps
    plus the chip margin pushed the child status mark past the .session-text clip. Tighten only
