@@ -1609,6 +1609,13 @@ def _custom_record_declares_credential_source(record: object) -> bool:
 # user wrote themselves never carries it, and the recorded id must still be the
 # block's own provider for it to mean anything. The Agent never reads the field.
 PICKER_WRITTEN_FOR_FIELD = "picker_written_for"
+# The connection the Save cleanup left on the block when it wrote that mark: the
+# endpoint and every credential source the block carried at the moment of the write.
+# The mark is only trustworthy while the block still declares this connection. A CLI
+# or hand edit of ``model.base_url``/``api_key`` after the picker Save leaves the mark
+# behind on a block that no longer matches it, so the block is the user's own route
+# again (#8026 r18). The Agent never reads this field either.
+PICKER_WRITTEN_CONNECTION_FIELD = "picker_written_connection"
 
 
 def _model_block_mirrors_fallback_entry(
@@ -1634,11 +1641,19 @@ def _model_block_mirrors_fallback_entry(
     A same-slug fallback entry must still exist. That keeps every refusal this
     predicate makes one it already made: a block whose entry the user removed is
     the only thing left on that slug, and it keeps master's lookup.
+
+    The mark is only read while the block still declares the connection the Save
+    cleanup recorded beside it (``model.picker_written_connection``). A CLI or hand
+    edit of the block's endpoint or key after the picker Save leaves the mark behind
+    on a block that no longer matches, so the mark is stale and the edited block is
+    the user's own route again (#8026 r18).
     """
     if not isinstance(model_cfg, dict) or not isinstance(custom_providers, list):
         return False
     written_for = str(model_cfg.get(PICKER_WRITTEN_FOR_FIELD) or "").strip()
     if not written_for:
+        return False
+    if not _picker_written_mark_still_describes_block(model_cfg):
         return False
     key = _custom_provider_slug_key(model_provider)
     if not key or _custom_provider_slug_key(written_for) != key:
@@ -1669,6 +1684,43 @@ def _model_block_connection_changed(before: object, after: object) -> bool:
         if before.get(field) != after.get(field):
             return True
     return False
+
+
+def _model_block_connection_fingerprint(model_cfg: object) -> dict:
+    """The connection fields a ``model:`` block declares, as plain values.
+
+    Exactly the endpoint and credential sources :func:`_model_block_connection_changed`
+    compares. A field the block does not carry is absent from the result, so an absent
+    field and an explicit ``None`` stay one state here too. Stored beside the copy mark
+    and re-derived at read time, so a block edited after the picker wrote it no longer
+    matches its own mark (#8026 r18).
+    """
+    if not isinstance(model_cfg, dict):
+        return {}
+    fingerprint: dict[str, object] = {}
+    for field in ("base_url", *CUSTOM_CREDENTIAL_SOURCE_FIELDS):
+        value = model_cfg.get(field)
+        if value is not None:
+            fingerprint[field] = value
+    return fingerprint
+
+
+def _picker_written_mark_still_describes_block(model_cfg: object) -> bool:
+    """True when the picker's copy mark still describes ``model_cfg``'s connection.
+
+    The Save cleanup writes the mark and, beside it, the connection it wrote
+    (``model.picker_written_connection``). A CLI or hand edit of ``model.base_url`` or
+    a credential source after the picker Save leaves the mark on a block that no longer
+    matches, so the mark is stale and the block is the user's own route again (#8026
+    r18). A block that carries the mark but no recorded connection predates the
+    fingerprint, so the mark is read exactly as it was before.
+    """
+    if not isinstance(model_cfg, dict):
+        return False
+    recorded = model_cfg.get(PICKER_WRITTEN_CONNECTION_FIELD)
+    if not isinstance(recorded, dict):
+        return True
+    return _model_block_connection_fingerprint(model_cfg) == recorded
 
 
 def _custom_provider_entry_identity(
@@ -7097,6 +7149,7 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             if persisted_provider != previous_provider
             else None
         )
+        mark_written = False
         if persisted_provider != previous_provider:
             # Record the provenance of THIS write, so the ownership scan can tell this
             # block from one the user wrote: the block serves a fallback entry now, and
@@ -7104,8 +7157,10 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             # so a block that has moved on does not keep a stale mark (#8026 r15).
             if selected_fallback_entry is not None:
                 model_cfg[PICKER_WRITTEN_FOR_FIELD] = persisted_provider
+                mark_written = True
             else:
                 model_cfg.pop(PICKER_WRITTEN_FOR_FIELD, None)
+                model_cfg.pop(PICKER_WRITTEN_CONNECTION_FIELD, None)
         # The block now serves a fallback entry it did not serve before the click, so
         # whatever credential source it still carries was minted for the route it just
         # left. The picker rewrites ``model.provider`` and copies the entry's URL into
@@ -7128,6 +7183,16 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             for _cred_field in CUSTOM_CREDENTIAL_SOURCE_FIELDS:
                 model_cfg.pop(_cred_field, None)
 
+        if mark_written:
+            # Persist the connection this write leaves on the block, beside the mark.
+            # The mark is only read while the block still declares it, so a later CLI or
+            # hand edit (which leaves the mark behind) is told apart from the picker's
+            # own write (#8026 r18). Captured here, AFTER the credential drop above, so
+            # it records the connection the block actually keeps on disk.
+            model_cfg[PICKER_WRITTEN_CONNECTION_FIELD] = _model_block_connection_fingerprint(
+                model_cfg
+            )
+
         before_advanced = dict(model_cfg)
         _apply_advanced_model_options(model_cfg, advanced)
         # The mark records a COPY: the block the picker wrote to serve a fallback entry.
@@ -7146,6 +7211,7 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             and _model_block_connection_changed(previous_config_data.get("model"), model_cfg)
         ):
             model_cfg.pop(PICKER_WRITTEN_FOR_FIELD, None)
+            model_cfg.pop(PICKER_WRITTEN_CONNECTION_FIELD, None)
         if not _main_model_supports_service_tier(persisted_model, persisted_provider):
             model_cfg.pop("service_tier", None)
 

@@ -1864,3 +1864,60 @@ def test_a_pick_with_an_endpoint_and_key_override_keeps_the_override(
     assert config.PICKER_WRITTEN_FOR_FIELD not in on_disk["model"], (
         "an override is the user's own route, so the picker's mark does not survive it"
     )
+
+
+def test_a_cli_edit_after_a_picker_save_makes_the_mark_stale(monkeypatch, tmp_path):
+    """r18 CORE: an edit of the marked block stops it reading as the entry's copy.
+
+    The Save cleanup writes the mark beside a fingerprint of the connection it wrote
+    (``model.picker_written_connection``). A user who then edits ``model.base_url`` /
+    ``model.api_key`` with the installed CLI, or by hand in ``config.yaml``, leaves the
+    mark on a block that no longer declares that connection: the mark is stale, so the
+    edited block is the user's own route again and the route serves it, as master does,
+    instead of the entry's old endpoint and key (#8026 r18).
+
+    Reproduced red on ``21d8e54093f3``, where the mark alone decided and the edit was
+    ignored.
+    """
+    U = "http://127.0.0.1:8317/v1"
+    U2 = "http://cli-edited.example/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        f"  base_url: {U}\n"
+        "custom_providers:\n"
+        "  - name: 晨光\n"
+        f"    base_url: {U}\n"
+        "    api_key: sk-entry\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    assert config.set_hermes_default_model("chat-model", provider="custom:晨光")["ok"] is True
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert on_disk["model"].get(config.PICKER_WRITTEN_FOR_FIELD) == "custom:晨光"
+    assert isinstance(on_disk["model"].get(config.PICKER_WRITTEN_CONNECTION_FIELD), dict), (
+        "the picker's write records the connection it left on the block"
+    )
+    assert config._model_block_mirrors_fallback_entry(
+        on_disk["model"], "custom:晨光", on_disk.get("custom_providers")
+    ), "and the mark is trusted while the block still matches it"
+
+    # The CLI (or a hand edit) rewrites the block's own connection but leaves the mark
+    # and its fingerprint behind, so the block no longer declares the recorded one.
+    edited = config._load_yaml_config_file(cfg_path)
+    edited["model"]["base_url"] = U2
+    edited["model"]["api_key"] = "sk-user"
+    config._save_yaml_config_file(cfg_path, edited)
+    on_disk = _load(cfg_path)
+
+    assert not config._model_block_mirrors_fallback_entry(
+        on_disk["model"], "custom:晨光", on_disk.get("custom_providers")
+    ), "an edited block is not the picker's copy any more"
+    assert config.resolve_custom_provider_connection("custom:晨光") == ("sk-user", U2), (
+        "the route serves the connection the user edited, not the entry's old one"
+    )
