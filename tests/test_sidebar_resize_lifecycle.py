@@ -139,6 +139,7 @@ window.__renderGroups = (labels, rowsPerGroup) => {
 // real loop again.
 window.__buildGroups = () => {
   const list = document.getElementById('sessionList');
+__FOCUS_CAPTURE__
   list.innerHTML = '';
   const groups = window.__groups || [];
   const virtualWindow = {virtualized:false, start:0, end:1000000, itemHeight:24};
@@ -173,8 +174,11 @@ window.__seedGroupsFixture = () => {
 
 def _build_harness_html() -> str:
     collapse = _extract_collapse_state_block()
+    focus_start = SESSIONS_JS.index('  const focusedChildOwner=')
+    focus_end = SESSIONS_JS.index("  list.innerHTML='';", focus_start)
     return (
         HARNESS_HTML.replace("__INIT_RESIZE__", _extract_init_resize())
+        .replace("__FOCUS_CAPTURE__", SESSIONS_JS[focus_start:focus_end])
         .replace("__COLLAPSE_STATE__", collapse)
         .replace("__GROUP_LOOP__", _extract_group_loop())
     )
