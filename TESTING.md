@@ -174,7 +174,16 @@ bar's Move button. "No project" and "+ New project" must follow the interface
 language; in a touch context, with the drawer open, every row must be at least
 44px tall, and so must every row of the ⋮ menu that opens the picker, which on
 a phone on its side must stay on the screen, scroll to its last row, and reveal
-the row a key moves focus to; and in a long list the focused row must be inside
+the row a key moves focus to. That last part is checked with the menu opened by
+the script's own call and keys sent by the browser, and on two paths of real
+input: a right click on the row followed by End and the screen turned from
+390x844 to 844x390 (a viewport resize, not a rotated device), after which the
+row that has focus must still be inside the menu's box; and a touch (browser
+touch events) held on the row until the menu opens and lifted beside it, after
+which focus must still be in the menu and End must reach its last row without
+scrolling the conversation list. A touch lifted over the open menu, a hardware
+keyboard on a phone and a real rotation are not checked. In a long list the
+focused row must be inside
 the picker's box, or, in the batch picker, scrolled onto the screen by the
 conversation list. With a mouse on the light theme, a keyboard-focused row's
 ring must be the skin's `--accent-text` at 3:1 or more against the picker

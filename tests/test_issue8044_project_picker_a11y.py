@@ -623,3 +623,28 @@ def test_a_hidden_sidebar_is_a_collapsed_one_or_a_closed_drawer():
     assert "function _isDesktopWidth(){" in boot
     assert "window.matchMedia('(min-width:641px)').matches" in boot
 
+
+def test_a_resize_reveals_the_menu_row_that_has_focus():
+    """Turning a phone caps the menu shorter than its rows and leaves it
+    scrolled to the top. What that does on a real screen is in the browser
+    gate."""
+    resize = _between(SESSIONS_JS, "window.addEventListener('resize',()=>{\n  if(!_sessionActionMenu", "// Generation counter")
+    position = "_positionSessionActionMenu(_sessionActionAnchor);"
+    reveal = "if(focused && _sessionActionMenu.contains(focused)) focused.scrollIntoView({block:'nearest'});"
+
+    assert resize.count(reveal) == 1
+    assert resize.index(position) < resize.index(reveal)
+
+
+def test_focus_that_falls_out_of_the_open_menu_onto_nothing_comes_back():
+    """A touch that opened the menu lifts over something unfocusable, and the
+    browser's mousedown for it leaves focus on <body>. Focus that goes to
+    another control is left where it went."""
+    mount = _between(SESSIONS_JS, "function _mountSessionActionMenu(", "function _findSessionRenameRow(")
+    handler = _between(mount, "menu.addEventListener('focusout',e=>{", "const firstAction=menuItems()[0];")
+
+    assert "if(e.relatedTarget) return;" in handler
+    assert "if(_sessionActionMenu!==menu||!menu.isConnected) return;" in handler
+    assert "if(active&&active!==document.body&&active!==document.documentElement) return;" in handler
+    assert "row.focus({preventScroll:true})" in handler
+

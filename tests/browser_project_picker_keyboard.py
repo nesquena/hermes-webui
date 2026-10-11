@@ -45,7 +45,12 @@ WHAT IT CHECKS
     side, where ten such rows do not fit, the menu stays on the screen and
     scrolls to its last row, and End, Home and the arrow keys bring the row
     they move focus to into the menu's box; the same in a 300px-tall desktop
-    window, which the compact rows do not fit either.
+    window, which the compact rows do not fit either;
+  - opened by a real right click upright, End, then the screen turned on its
+    side: the row that has focus is brought back into the menu's box;
+  - opened by a real touch held on the row and lifted beside the menu (CDP
+    touch events, not a helper): focus stays in the menu, and End goes to its
+    last row and not to the conversation list.
   the focus cue, on the dark and on the light theme
   - on the light theme the focused row's ring is the skin's --accent-text,
     solid, at least 3:1 against the picker (the translucent --focus-ring was
@@ -120,6 +125,8 @@ WAIT_MS = 5000
 # repainted once more about 300 ms later, which replaces every row, trigger and
 # selection-bar button. A person is slower than that; the driver waits it out.
 SETTLE_MS = 600
+# Longer than the app's SESSION_LONG_PRESS_DELAY_MS (400).
+LONG_PRESS_MS = 700
 MIN_TOUCH_ROW_PX = 44
 PROJECTS = ["Research", "Client work", "Reading list"]
 LONG_PROJECTS = [
@@ -713,6 +720,139 @@ def _check_menu_keyboard_reveal(page, seed, label, *, from_row=True):
     return failures
 
 
+# Where the conversation list is scrolled to, and the box of the open ⋮ menu.
+LIST_AND_MENU_JS = """() => {
+  const list = document.querySelector('.session-list, #sessionList');
+  const menu = document.querySelector('.session-action-menu');
+  const box = menu ? menu.getBoundingClientRect() : null;
+  return {
+    listScroll: list ? Math.round(list.scrollTop) : null,
+    menu: box ? {left: box.left, right: box.right, top: box.top, bottom: box.bottom} : null,
+  };
+}"""
+
+# The left end of a conversation's row: a point the ⋮ menu, which hangs from
+# the row's right end, does not cover once it is open.
+ROW_LEFT_END_JS = """(sid) => {
+  const row = document.querySelector('.session-item[data-sid="' + sid + '"]');
+  if (!row) return null;
+  const rect = row.getBoundingClientRect();
+  return {x: rect.left + 6, y: rect.top + rect.height / 2};
+}"""
+
+
+def _focus_outside_menu_box(state):
+    return state["top"] < state["boxTop"] - 1 or state["bottom"] > state["boxBottom"] + 1
+
+
+def _check_menu_resize_reveal(browser, seed):
+    """The ⋮ menu opened by a real right click on a phone upright, End, and
+    then the screen turns: the menu is capped shorter than its rows and the
+    cap leaves it scrolled to the top, with focus on a row below the fold.
+    Returns failure lines."""
+    label = "⋮ menu, 390x844 turned to 844x390"
+    ctx, page, errors = _new_page(
+        browser, viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True
+    )
+    if page is None:
+        return [f"  [{label}] {errors}"]
+    failures = []
+    try:
+        _open_mobile_drawer(page)
+        page.click(f'.session-item[data-sid="{seed["beta"]}"] .session-title', button="right")
+        page.wait_for_timeout(SETTLE_MS)
+        page.keyboard.press("End")
+        page.wait_for_timeout(150)
+        before = page.evaluate(MENU_FOCUS_JS)
+        if before.get("problem"):
+            return [f"  [{label}] after a right click and End: {before['problem']}"]
+        page.set_viewport_size({"width": 844, "height": 390})
+        page.wait_for_timeout(SETTLE_MS)
+        after = page.evaluate(MENU_FOCUS_JS)
+        if after.get("problem"):
+            return [f"  [{label}] after the turn: {after['problem']}"]
+        if after["text"] != before["text"]:
+            failures.append(f"  [{label}] focus moved from '{before['text']}' to '{after['text']}'")
+        if _focus_outside_menu_box(after):
+            failures.append(
+                f"  [{label}] '{after['text']}' has focus at y={after['top']}..{after['bottom']},"
+                f" outside the menu's {after['boxTop']}..{after['boxBottom']}"
+            )
+        if not after["scrolls"]:
+            # Guard: turned, the menu must be taller than its box, or the row
+            # would be in view without anything having revealed it.
+            failures.append(f"  [{label}] the menu does not scroll after the turn, so nothing was tested")
+        failures.extend(f"  [{label}] pageerror: {err}" for err in errors)
+    finally:
+        ctx.close()
+    return failures
+
+
+def _check_touch_release_keeps_menu_focus(browser, seed):
+    """A real touch held on a conversation until the ⋮ menu opens, then
+    lifted where the menu is not: the browser's own mousedown for that touch
+    lands on the row, which takes no focus. Focus must stay in the menu, so
+    that End reaches its last row and not the list behind. Returns failure
+    lines."""
+    label = "⋮ menu, long press and release at 844x390"
+    ctx, page, errors = _new_page(
+        browser, viewport={"width": 844, "height": 390}, has_touch=True, is_mobile=True
+    )
+    if page is None:
+        return [f"  [{label}] {errors}"]
+    failures = []
+    try:
+        _open_mobile_drawer(page)
+        point = page.evaluate(ROW_LEFT_END_JS, seed["beta"])
+        if not point:
+            return [f"  [{label}] the conversation has no row"]
+        touch = ctx.new_cdp_session(page)
+        touch.send(
+            "Input.dispatchTouchEvent",
+            {"type": "touchStart", "touchPoints": [{"x": point["x"], "y": point["y"], "id": 1}]},
+        )
+        page.wait_for_timeout(LONG_PRESS_MS)
+        held = page.evaluate(LIST_AND_MENU_JS)
+        touch.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        page.wait_for_timeout(SETTLE_MS)
+        if not held["menu"]:
+            return [f"  [{label}] the long press did not open the ⋮ menu"]
+        box = held["menu"]
+        if box["left"] <= point["x"] <= box["right"] and box["top"] <= point["y"] <= box["bottom"]:
+            # Guard: lifted over the menu, the touch would press one of its rows.
+            return [f"  [{label}] the finger is over the menu, so the release was not tested"]
+        released = page.evaluate(MENU_FOCUS_JS)
+        if released.get("problem"):
+            return [f"  [{label}] after the finger lifts: {released['problem']}"]
+        page.keyboard.press("End")
+        page.wait_for_timeout(150)
+        end = page.evaluate(MENU_FOCUS_JS)
+        if end.get("problem"):
+            return [f"  [{label}] after End: {end['problem']}"]
+        last = page.evaluate(
+            "() => { const rows = document.querySelectorAll('.session-action-menu .session-action-opt:not([disabled])');"
+            " return rows[rows.length - 1].textContent.trim(); }"
+        )
+        if end["text"] != last:
+            failures.append(f"  [{label}] End put focus on '{end['text']}', not on the last row '{last}'")
+        if _focus_outside_menu_box(end):
+            failures.append(
+                f"  [{label}] after End '{end['text']}' is at y={end['top']}..{end['bottom']},"
+                f" outside the menu's {end['boxTop']}..{end['boxBottom']}"
+            )
+        if not end["scrolls"]:
+            failures.append(f"  [{label}] the menu does not scroll here, so End revealed nothing")
+        scrolled = page.evaluate(LIST_AND_MENU_JS)["listScroll"]
+        if scrolled != held["listScroll"]:
+            failures.append(
+                f"  [{label}] End scrolled the conversation list from {held['listScroll']} to {scrolled}"
+            )
+        failures.extend(f"  [{label}] pageerror: {err}" for err in errors)
+    finally:
+        ctx.close()
+    return failures
+
+
 # The focused row of the open single picker, as its ring and wash are painted,
 # and the two custom properties a ring can come from, resolved to colours.
 FOCUS_CUE_JS = """() => {
@@ -773,6 +913,7 @@ HOVER_WASH_JS = """() => {
   return {
     wash: row ? getComputedStyle(row).backgroundColor : null,
     create: !!row && row.classList.contains('project-picker-create'),
+    focused: !!row && row === document.activeElement,
     hoverBg: resolved('--hover-bg'), accentBg: resolved('--accent-bg'),
   };
 }"""
@@ -878,10 +1019,16 @@ def _check_focus_cue(page, seed):
                         )
             # The pointer on another row: the wash under it. On light it is the
             # theme's own --hover-bg, on dark the white wash the rows always had.
-            page.hover(f"{SINGLE} .project-picker-item >> nth=0")
+            # Home left keyboard focus on the first row, so the pointer goes to
+            # the second: a row under the pointer and nothing else.
+            page.hover(f"{SINGLE} .project-picker-item >> nth=1")
             page.wait_for_timeout(250)
             hovered = page.evaluate(HOVER_WASH_JS)
             wanted = "rgba(255, 255, 255, 0.08)" if theme == "dark" else hovered["hoverBg"]
+            if hovered["focused"]:
+                failures.append(
+                    f"  [focus cue, {theme}] the hovered row also has keyboard focus: the wash is not told from the focus"
+                )
             if hovered["create"] or hovered["wash"] != wanted:
                 failures.append(
                     f"  [focus cue, {theme}] a hovered row's background is {hovered['wash']}, expected {wanted}"
@@ -1836,6 +1983,15 @@ def main():
                     print(f"OK  ⋮ menu {size} — finger-sized rows, on the screen, the last one reachable, and End, Home and the arrows reveal the row they focus")
                 failures.extend(f"  [tall anchor, short list {size}] pageerror: {err}" for err in errors)
                 ctx.close()
+
+            for check, done in (
+                (_check_menu_resize_reveal, "⋮ menu, right click, End, 390x844 turned to 844x390 — the focused last row is still in the menu's box"),
+                (_check_touch_release_keeps_menu_focus, "⋮ menu, real long press and release at 844x390 — focus stays in the menu, End reaches its last row"),
+            ):
+                found = check(browser, seed)
+                failures.extend(found)
+                if not found:
+                    print(f"OK  {done}")
 
             # Still three projects, and the long list of conversations.
             found = _check_resize(browser) + _check_resize_hides_the_sidebar(browser)
