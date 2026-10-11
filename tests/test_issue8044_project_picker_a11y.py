@@ -488,6 +488,46 @@ def test_a_focused_row_can_be_seen():
     assert ".project-picker-item.active:focus-visible{color:var(--blue);}" in STYLE_CSS
 
 
+def test_on_a_light_theme_the_ring_is_the_text_accent_and_the_pointer_has_a_wash():
+    """The white wash and the translucent --focus-ring are both near invisible
+    on a light picker. Scoped to :root:not(.dark), so a dark theme keeps both.
+    The ring is --accent-text, not --accent, which is under 3:1 against the
+    picker on the palest skins; the numbers are the browser gate's."""
+    assert (
+        ":root:not(.dark) .project-picker-item:focus-visible{outline-color:var(--accent-text);}"
+        in STYLE_CSS
+    )
+    assert "outline-color:var(--accent);}" not in _between(
+        STYLE_CSS, ":root:not(.dark) .project-picker-item:hover{", "@media (pointer:coarse){.project-picker-item{"
+    )
+    # "+ New project" is drawn at 70% opacity, which would dim its ring too.
+    assert ":root:not(.dark) .project-picker-create:focus-visible{opacity:1;}" in STYLE_CSS
+    assert ":root:not(.dark) .project-picker-item:hover{background:var(--hover-bg);}" in STYLE_CSS
+    # That rule outranks ".project-picker-create:hover", so the row's accent
+    # tint is restated right after it.
+    create = ":root:not(.dark) .project-picker-create:hover{background:var(--accent-bg);}"
+    assert STYLE_CSS.index(":root:not(.dark) .project-picker-item:hover{") < STYLE_CSS.index(create)
+
+
+def test_the_menu_that_opens_the_picker_has_finger_tall_rows_on_touch():
+    assert (
+        "@media (pointer:coarse){.session-action-opt .ws-opt-action{min-height:44px;}}" in STYLE_CSS
+    )
+    # The row's own box is the .ws-opt-action inside it: that is what is padded.
+    assert ".session-action-opt .ws-opt-action{display:flex;flex-direction:row;align-items:center;" in STYLE_CSS
+
+
+def test_a_key_that_moves_focus_in_the_menu_reveals_the_row():
+    """With 44px rows the menu scrolls inside itself on a phone on its side,
+    and its rows are focused with preventScroll. What this does on a real
+    screen is in the browser gate."""
+    mount = _between(SESSIONS_JS, "function _mountSessionActionMenu(", "function _findSessionRenameRow(")
+    focus = "try{items[nextIndex].focus({preventScroll:true});}catch(_){items[nextIndex].focus();}"
+
+    assert mount.count("items[nextIndex].scrollIntoView({block:'nearest'});") == 1
+    assert mount.index(focus) < mount.index("items[nextIndex].scrollIntoView({block:'nearest'});")
+
+
 def test_the_button_keeps_the_rows_look():
     """A bare <button> brings its own border, background, font and centring. The
     reset has no specificity and sits before the row rules, so the create row's
