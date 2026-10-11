@@ -10,7 +10,6 @@ import os
 from pathlib import Path
 import socket
 import subprocess
-import sys
 import time
 import urllib.request
 
@@ -49,7 +48,7 @@ def main():
                     break
                 except OSError:
                     if proc.poll() is not None or time.monotonic() > deadline:
-                        raise RuntimeError('isolated server did not become healthy; see server.log')
+                        raise RuntimeError('isolated server did not become healthy; see server.log') from None
                     time.sleep(.1)
             with sync_playwright() as pw:
                 browser = pw.chromium.launch()
