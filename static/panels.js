@@ -6335,6 +6335,13 @@ function _renderWorkspaceForm({ name, path, isEdit }){
           </div>
           ${pathHint}
         </div>
+        ${isEdit ? '' : `
+        <div class="detail-form-row">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="workspaceFormAsProject">
+            <span>${esc(t('workspace_as_hermes_project') || 'Register as Hermes Project (shared with Desktop/CLI)')}</span>
+          </label>
+        </div>`}
         <div id="workspaceFormError" class="detail-form-error" style="display:none"></div>
       </form>
     </div>`;
@@ -6380,6 +6387,23 @@ async function saveWorkspaceForm(){
       openWorkspaceDetail(targetPath);
       return;
     }
+    const asProjectEl = $('workspaceFormAsProject');
+    const asProject = asProjectEl ? asProjectEl.checked : false;
+    if (asProject) {
+      const data = await api('/api/workspaces/create_project', { method:'POST', body: JSON.stringify({ path, name, create: true }) });
+      _workspaceList = data.workspaces || [];
+      _workspacePreFormDetail = null;
+      renderWorkspacesPanel(_workspaceList);
+      const proj = data.project || {};
+      showToast(proj.error ? (t('error_prefix') + proj.error) : (t('workspace_project_created') || 'Hermes Project created'));
+      // Match on the server-normalized path (proj.path): the user may have
+      // typed '~/x' or a trailing slash, which never equals the stored row,
+      // and the last-element fallback would open a DB-only neighbor instead.
+      const want = proj.path || path;
+      const added = _workspaceList.find(w => w.path === want) || _workspaceList.find(w => w.path === path);
+      if (added) openWorkspaceDetail(added.path);
+      return;
+    }
     const data = await api('/api/workspaces/add', { method:'POST', body: JSON.stringify({ path }) });
     _workspaceList = data.workspaces || [];
     _workspacePreFormDetail = null;
@@ -6391,7 +6415,9 @@ async function saveWorkspaceForm(){
     }
     renderWorkspacesPanel(_workspaceList);
     showToast(t('workspace_added'));
-    const added = _workspaceList.find(w => w.path === path) || _workspaceList[_workspaceList.length - 1];
+    // Match on the server-normalized path (data.path): the user may have
+    // typed '~/x' or a trailing slash, which never equals the stored row.
+    const added = _workspaceList.find(w => w.path === (data.path || path)) || _workspaceList.find(w => w.path === path);
     if (added) openWorkspaceDetail(added.path);
   } catch (e) {
     errEl.textContent = t('error_prefix') + e.message;
@@ -6486,7 +6512,10 @@ async function promptWorkspacePath(){
   try{
     const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path})});
     _workspaceList=data.workspaces||[];
-    const target=_workspaceList[_workspaceList.length-1];
+    // Find the added row by the server-normalized path (data.path): the
+    // response is the merged projection and may end with DB-only neighbours,
+    // and the typed path ('~/x', trailing slash) never equals the stored row.
+    const target=_workspaceList.find(w=>w.path===(data.path||path));
     if(!target) throw new Error(t('workspace_not_added'));
     await switchToWorkspace(target.path,target.name);
   }catch(e){

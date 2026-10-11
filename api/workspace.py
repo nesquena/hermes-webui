@@ -502,7 +502,16 @@ def _clean_workspace_list(workspaces: list, profile: str | Path | None = None) -
         # Rename confusing 'default' label to 'Home'
         if name.lower() == 'default':
             name = 'Home'
-        result.append({'path': str(p), 'name': name})
+        # Preserve mirror provenance (#5763): rows created from a
+        # projects.db registration carry project_mirror=True so the merge
+        # can hide exactly the rows whose shared project was archived —
+        # without that flag a plain local re-add at an archived project's
+        # path would be hidden and then refused as a duplicate (re-gate
+        # must-fix 1). Any other extra keys are still dropped on purpose.
+        entry = {'path': str(p), 'name': name}
+        if w.get('project_mirror'):
+            entry['project_mirror'] = True
+        result.append(entry)
     return result
 
 
@@ -1081,6 +1090,9 @@ def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Pat
           This covers self-hosted deployments where workspaces live outside home
           (e.g. /data/projects, /opt/workspace) — once a workspace is saved by
           an admin, it can be reused without re-validation.
+      (B2) It is a folder owned by a non-archived project in the profile's
+          projects.db (#5763): DB-only projects appear in the picker via the
+          read bridge, so they must also pass trust resolution.
 
     Additionally enforced regardless of (A)/(B):
       1. The path must exist.
@@ -1133,6 +1145,23 @@ def resolve_trusted_workspace(path: str | Path | None = None, profile: str | Pat
         saved = load_workspaces()
         saved_paths = {_resolve_path(w["path"]) for w in saved if w.get("path")}
         if candidate in saved_paths:
+            return candidate
+    except Exception:
+        pass
+
+    # (B2) Trusted if the profile's projects.db owns it (#5763): DB-only
+    # projects (created from Desktop/CLI, never added to workspaces.json)
+    # appear in the picker via the read bridge, so selecting them must pass
+    # the trust check too. Fail-safe: bridge errors widen nothing.
+    try:
+        from api.projects_bridge import load_hermes_project_workspaces
+        profile_home = _resolve_profile_home_param(profile) if profile is not None else None
+        db_paths = {
+            _resolve_path(e["path"], profile) if profile is not None else _resolve_path(e["path"])
+            for e in load_hermes_project_workspaces(profile_home=profile_home)
+            if e.get("path")
+        }
+        if candidate in db_paths:
             return candidate
     except Exception:
         pass
