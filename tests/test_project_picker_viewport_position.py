@@ -1285,7 +1285,9 @@ const row = {classList: {remove() {}}};
 const otherRowMenuButton = {
   isConnected: true,
   _projectPickerContextPoint: {clientX: 310, clientY: 420},
-  classList: {contains: () => true, remove() {}, add() {}},
+  // The opener is a row's own ⋮ trigger, and the handoff probes the held-gesture
+  // classes too, so contains() must answer accurately instead of always-true.
+  classList: {contains: name => name === 'session-actions-trigger', remove() {}, add() {}},
   setAttribute() {},
   removeAttribute() {},
   closest: () => row,
@@ -1368,4 +1370,103 @@ console.log(JSON.stringify({
         "repaints": 1,
         "labels": {"parent": "renamed parent", "child": "renamed child"},
         "flagCleared": True,
+    }
+
+
+def _repaint_sidebar_for_background_churn_source() -> str:
+    start = SESSIONS_JS.find("function _repaintSidebarForBackgroundChurn(")
+    assert start >= 0, "_repaintSidebarForBackgroundChurn not found in static/sessions.js"
+    end = SESSIONS_JS.find("\nfunction ", start + 1)
+    assert end > start
+    return SESSIONS_JS[start:end] + "\n"
+
+
+def _project_picker_blocks_repaint_source() -> str:
+    start = SESSIONS_JS.find("function _projectPickerBlocksRepaint(")
+    assert start >= 0, "_projectPickerBlocksRepaint not found in static/sessions.js"
+    end = SESSIONS_JS.find("\nfunction ", start + 1)
+    assert end > start
+    return SESSIONS_JS[start:end] + "\n"
+
+
+def test_sidebar_repaint_guard_defers_background_churn_and_retires_for_user_intent():
+    """The inverted picker guard: background churn defers, user intent paints.
+
+    Background producers (list refresh, stream/unread sync, poll timers,
+    panel-resync repairs) run their repaints through the background-churn
+    wrapper, so the guard defers them while the picker is open and the picker's
+    close replays them. Every other repaint is user intent: the guard retires
+    the picker first, folding any pending deferral into that repaint.
+    """
+    assert NODE is not None
+    script = r"""
+let _sessionListRepaintDeferredByPicker = false;
+let _sidebarRepaintBackgroundChurn = false;
+let _projectPickerTeardown = null;
+let retired = 0;
+const renderCalls = [];
+function renderSessionListFromCache(){ renderCalls.push(_sidebarRepaintBackgroundChurn); }
+""" + _retire_project_picker_for_explicit_repaint_source() + _repaint_sidebar_for_background_churn_source() + _project_picker_blocks_repaint_source() + r"""
+_repaintSidebarForBackgroundChurn();
+const wrapper = {callSawFlag: renderCalls[0] === true, flagRestored: _sidebarRepaintBackgroundChurn === false};
+const retireSpy = () => { retired += 1; };
+const noPicker = {blocks: _projectPickerBlocksRepaint(), retired};
+_projectPickerTeardown = retireSpy;
+_sidebarRepaintBackgroundChurn = true;
+const background = {blocks: _projectPickerBlocksRepaint(), retired, teardownKept: _projectPickerTeardown === retireSpy};
+_sidebarRepaintBackgroundChurn = false;
+_sessionListRepaintDeferredByPicker = true;
+const userIntent = {blocks: _projectPickerBlocksRepaint(), retired, teardownCleared: _projectPickerTeardown === null, flagFolded: _sessionListRepaintDeferredByPicker === false};
+console.log(JSON.stringify({wrapper, noPicker, background, userIntent}));
+"""
+    result = subprocess.run([NODE, "-e", script], check=False, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data == {
+        "wrapper": {"callSawFlag": True, "flagRestored": True},
+        "noPicker": {"blocks": False, "retired": 0},
+        "background": {"blocks": True, "retired": 0, "teardownKept": True},
+        "userIntent": {"blocks": False, "retired": 1, "teardownCleared": True, "flagFolded": True},
+    }
+
+
+def test_picker_handoff_resolves_current_state_for_a_menu_opened_during_a_kept_deferral():
+    """A second menu opened while a held-gesture menu keeps the repaint deferred.
+
+    The held-gesture handoff retires the picker but keeps the repaint deferred,
+    so the rows on screen trail the caches until the menu-close drain. A menu
+    opened in that window must resolve its action owner from the caches without
+    repainting (and without rebinding the deferred replay).
+    """
+    assert NODE is not None
+    script = r"""
+const classes = (...names) => ({contains: name => names.includes(name)});
+const staleSession = {session_id: 'kept-row', pinned: false};
+const freshSession = {session_id: 'kept-row', pinned: true};
+const _allSessions = [freshSession];
+const S = {session: null};
+let repaints = 0;
+let _projectPickerTeardown = null;              // the first menu already retired the picker
+let _sessionListRepaintDeferredByPicker = true; // its held gesture keeps the repaint pending
+function renderSessionListFromCache() { repaints += 1; }
+const anchor = {isConnected: true, classList: classes('session-actions-trigger')};
+""" + _project_picker_session_action_handoff_source() + r"""
+const result = _projectPickerSessionActionHandoff(staleSession, anchor);
+console.log(JSON.stringify({
+  repaints,
+  resolvedCurrentSession: result && result.session === freshSession,
+  staleClosureNotBound: result && result.session !== staleSession,
+  keptAnchor: result && result.anchorEl === anchor,
+  stillDeferred: _sessionListRepaintDeferredByPicker === true,
+}));
+"""
+    result = subprocess.run([NODE, "-e", script], check=False, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert data == {
+        "repaints": 0,
+        "resolvedCurrentSession": True,
+        "staleClosureNotBound": True,
+        "keptAnchor": True,
+        "stillDeferred": True,
     }

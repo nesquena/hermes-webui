@@ -117,7 +117,7 @@ def test_session_time_refresh_has_own_visibility_hook():
     block = SESSIONS_JS[start:start + 900]
     assert "_sessionTimeRefreshVisibilityHandler" in SESSIONS_JS
     assert "document.addEventListener('visibilitychange', _sessionTimeRefreshVisibilityHandler);" in block
-    assert "if(!document.hidden) renderSessionListFromCache();" in block
+    assert "if(!document.hidden) _repaintSidebarForBackgroundChurn();" in block
     assert "startStreamingPoll re-renders the list" not in block
 
 

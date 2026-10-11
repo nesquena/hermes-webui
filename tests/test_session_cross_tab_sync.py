@@ -27,7 +27,7 @@ def test_storage_event_does_not_globally_switch_tabs():
     block = SESSIONS_JS[handler_pos:next_pos]
     assert "loadSession(sid)" not in block
     assert "Each tab owns its" in block
-    assert "renderSessionListFromCache" in block
+    assert "_repaintSidebarForBackgroundChurn" in block
 
 
 def test_session_switch_updates_url_path_for_tab_local_anchor():

@@ -102,7 +102,8 @@ function _markActiveSessionViewedOnReturn() {
   if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;
   _markSessionViewed(S.session.session_id, S.session.message_count || (S.messages&&S.messages.length) || 0);
   if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(S.session.session_id);
-  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  if(typeof _repaintSidebarForBackgroundChurn==='function') _repaintSidebarForBackgroundChurn();
+  else if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
 }
 
 function _chatPayloadModel(){
@@ -1277,7 +1278,7 @@ function applySessionTitleUpdate(sid, titleText, options={}){
   }
   if(row) row.title=newTitle;
   if(options.rememberProvisional) _sessionTitleProvisionalBySid.set(sid,newTitle);
-  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  if(typeof _repaintSidebarForBackgroundChurn==='function') _repaintSidebarForBackgroundChurn();
   else if(typeof renderSessionList==='function') renderSessionList();
   return true;
 }

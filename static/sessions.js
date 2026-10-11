@@ -885,11 +885,11 @@ function _markSessionCompletionUnreadIfBackground(sid, messageCount = null, meta
   }
   if (_isSessionActivelyViewedForList(sid)) {
     _setSessionViewedCount(sid, count);
-    if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+    if (typeof _repaintSidebarForBackgroundChurn === 'function') _repaintSidebarForBackgroundChurn();
     return false;
   }
   _markSessionCompletionUnread(sid, count, meta);
-  if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
+  if (typeof _repaintSidebarForBackgroundChurn === 'function') _repaintSidebarForBackgroundChurn();
   return true;
 }
 
@@ -1742,7 +1742,7 @@ function _markSessionCompletedInList(session, previousSid = null) {
     message_count: messageCount,
     last_message_at: lastMessageAt,
   });
-  renderSessionListFromCache();
+  _repaintSidebarForBackgroundChurn();
 }
 
 function _markPollingCompletionUnreadTransitions(sessions) {
@@ -2189,6 +2189,10 @@ async function newSession(flash, options={}){
     // handlers used to guarantee this with their own awaited render (#7936);
     // now that newSession() owns the sole refresh it must force the paint,
     // matching the project "+" path (#5002: "newSession doesn't render; callers must").
+    // User intent (Ctrl/Cmd+K, New-chat controls): retire an open project
+    // picker first, or this refresh is swallowed by the picker's
+    // background-repaint deferral and the new chat stays unpainted.
+    if(typeof _retireProjectPickerForExplicitRepaint==='function') _retireProjectPickerForExplicitRepaint();
     if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session',{force:true})).catch(()=>{})}
   })();
   try{
@@ -5809,13 +5813,6 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
 }
 
 function _projectPickerSessionActionHandoff(session, anchorEl){
-  if(!_projectPickerTeardown) return {session,anchorEl};
-  const contextPoint=anchorEl&&anchorEl._projectPickerContextPoint;
-  const retireProjectPicker=_projectPickerTeardown;
-  _projectPickerTeardown=null;
-  retireProjectPicker();
-  if(!_sessionListRepaintDeferredByPicker) return {session,anchorEl};
-
   const sid=session&&session.session_id;
   // A refresh accepted while the picker held the old layout updates the list
   // cache but skips its repaint, so the row closures can carry stale canonical
@@ -5844,17 +5841,34 @@ function _projectPickerSessionActionHandoff(session, anchorEl){
     return found;
   };
 
+  if(!_projectPickerTeardown){
+    // No picker to retire. While a repaint is still deferred (a held-gesture
+    // menu kept it pending), the rows on screen trail the caches — a second
+    // menu must not bind a stale row closure; the menu-close drain still owns
+    // the replay.
+    if(typeof _sessionListRepaintDeferredByPicker!=='undefined'&&_sessionListRepaintDeferredByPicker){
+      return {session:currentFromCaches()||session,anchorEl};
+    }
+    return {session,anchorEl};
+  }
+  const contextPoint=anchorEl&&anchorEl._projectPickerContextPoint;
+  const retireProjectPicker=_projectPickerTeardown;
+  _projectPickerTeardown=null;
+  retireProjectPicker();
+  if(!_sessionListRepaintDeferredByPicker) return {session,anchorEl};
+
   // A fork long-press opens its menu while the finger is still down and arms
-  // its one-click open-suppression on the pressed row. Chromium dispatches the
-  // release click at the physical release point, so replacing the rows now can
-  // move that point off the suppressed row (a peer message plus the refresh it
-  // triggered were accepted while the picker held the old layout), strand the
-  // suppression and let the stray click close the menu. Postpone the
-  // destructive replacement until the gesture, its compatibility click and
-  // this menu are finished: closing the menu drains the deferral like any
-  // other blocked render, and the menu stays anchored on the live row the
-  // suppression is armed on.
-  if(anchorEl&&anchorEl._skipNextChildOpen){
+  // its one-click open-suppression on the pressed row; an ordinary long-press
+  // is held the same way, identified by the row's `.long-pressing` state.
+  // Chromium dispatches the release click at the physical release point, so
+  // replacing the rows now can move that point off the pressed row (a peer
+  // message plus the refresh it triggered were accepted while the picker held
+  // the old layout), strand the suppression and let the stray click close the
+  // menu. Postpone the destructive replacement until the gesture, its
+  // compatibility click and this menu are finished: closing the menu drains
+  // the deferral like any other blocked render, and the menu stays anchored on
+  // the live row the suppression is armed on.
+  if(anchorEl&&(anchorEl._skipNextChildOpen||(anchorEl.classList&&anchorEl.classList.contains('session-item')&&anchorEl.classList.contains('long-pressing')))){
     // The replacement stays postponed, but the menu must not bind the stale
     // row closure: resolve the owner from the caches without repainting.
     return {session:currentFromCaches()||session,anchorEl};
@@ -6548,7 +6562,7 @@ function _applySessionListPayload(sessData, projData, opts){
     return;
   }
   if(_canRenderNow) _lastSessionListRenderSig = _renderSig;
-  renderSessionListFromCache();  // no-ops if rename is in progress
+  _repaintSidebarForBackgroundChurn();  // no-ops if rename is in progress
 }
 
 function _mergeRenderSessionListOptions(prev, next){
@@ -6712,13 +6726,13 @@ async function _runRenderSessionListRefresh(opts, _gen){
     // up-front profile-switch skeleton instead of stranding it.
     _sessionListSkeletonActive = false;
     if (_scopeMatches) {
-      renderSessionListFromCache();
+      _repaintSidebarForBackgroundChurn();
     } else {
       _allSessions = [];
       _sidebarReferenceSessions = [];
       _allSessionsScope = _curScope;
       _clearSessionSourceTabCounts();
-      renderSessionListFromCache();
+      _repaintSidebarForBackgroundChurn();
     }
   }
 }
@@ -6864,11 +6878,11 @@ function ensureSessionTimeRefreshPoll(){
     // Relative-time labels only matter when visible; the visibilitychange
     // handler below refreshes timestamps immediately when the tab is shown.
     if(typeof document !== 'undefined' && document.hidden) return;
-    renderSessionListFromCache();
+    _repaintSidebarForBackgroundChurn();
   }, _sessionTimeRefreshMs);
   if(typeof document !== 'undefined' && !_sessionTimeRefreshVisibilityHandler){
     _sessionTimeRefreshVisibilityHandler = () => {
-      if(!document.hidden) renderSessionListFromCache();
+      if(!document.hidden) _repaintSidebarForBackgroundChurn();
     };
     document.addEventListener('visibilitychange', _sessionTimeRefreshVisibilityHandler);
   }
@@ -8475,7 +8489,7 @@ function clearOptimisticSessionStreaming(sid){
     _sessionStreamingById.set(sid,false);
   }
   if(typeof _forgetObservedStreamingSession==='function') _forgetObservedStreamingSession(sid);
-  renderSessionListFromCache();
+  _repaintSidebarForBackgroundChurn();
 }
 
 
@@ -8597,7 +8611,7 @@ function _resyncSessionVirtualWindowAfterRender(list, expectedScrollTop, virtual
     const actualScrollTop=Number(list.scrollTop)||0;
     const tolerance=Math.max(2, Number(virtualWindow.itemHeight||SESSION_VIRTUAL_ROW_HEIGHT)/2);
     if(Math.abs(actualScrollTop-expectedScrollTop)<=tolerance) return;
-    renderSessionListFromCache();
+    _repaintSidebarForBackgroundChurn();
   });
 }
 
@@ -8849,8 +8863,10 @@ function renderSessionListFromCache(){
   if(_sessionActionMenu) return;
   // Same for the "Move to project" picker opened from that menu: rebuilding the
   // rows removes its anchor, and the picker closes itself when its row goes away.
-  // Remember the skipped repaint so closing the picker replays it.
-  if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null){ if(typeof _sessionListRepaintDeferredByPicker!=='undefined') _sessionListRepaintDeferredByPicker=true; return; }
+  // Background churn defers — remembering the skipped repaint so closing the
+  // picker replays it; a user-intent repaint retires the picker first and paints
+  // now (see _projectPickerBlocksRepaint).
+  if(_projectPickerBlocksRepaint()){ if(typeof _sessionListRepaintDeferredByPicker!=='undefined') _sessionListRepaintDeferredByPicker=true; return; }
   closeSessionActionMenu();
   // Purge stale INFLIGHT entries for sessions the server confirms are NOT
   // streaming. This runs on every list refresh to prevent memory leaks from
@@ -10292,7 +10308,7 @@ async function _handleActiveSessionStorageEvent(e){
   // Do not treat localStorage as a global active-session bus. Each tab owns its
   // active conversation via its URL (/session/<id>), so another tab switching
   // sessions must not force this tab to navigate away from an in-flight turn.
-  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  if(typeof _repaintSidebarForBackgroundChurn==='function') _repaintSidebarForBackgroundChurn();
 }
 
 async function _handleShowAllProfilesStorageEvent(e){
@@ -10502,6 +10518,33 @@ let _projectPickerTeardown=null;
 // Set when a sidebar repaint was skipped because the project picker was open, so the
 // picker's teardown can replay it (same contract as the ⋮ menu guard, minus the lost repaint).
 let _sessionListRepaintDeferredByPicker=false;
+
+// Sidebar repaints that are background churn — list refreshes, stream/unread
+// syncs, poll timers, panel-resync repairs — defer while the project picker is
+// open instead of tearing the rows out from under it, and the picker's close
+// replays them. Producers run through the wrapper below; every unmarked repaint
+// is user intent and retires the picker first, so a transition the user just
+// asked for is never swallowed by the deferral (the earlier default deferred
+// every caller and had to be taught user-intent call sites one at a time).
+let _sidebarRepaintBackgroundChurn=false;
+function _repaintSidebarForBackgroundChurn(){
+  const previous=_sidebarRepaintBackgroundChurn;
+  _sidebarRepaintBackgroundChurn=true;
+  try{ renderSessionListFromCache(); }
+  finally{ _sidebarRepaintBackgroundChurn=previous; }
+}
+
+// Decide what a sidebar repaint does while the project picker is open. Returns
+// true when the caller must skip this repaint (background churn: defer, and the
+// picker's close replays it). Otherwise the picker is retired first and the
+// caller paints now; the retire folds any pending deferral into that repaint,
+// exactly like _retireProjectPickerForExplicitRepaint().
+function _projectPickerBlocksRepaint(){
+  if(typeof _projectPickerTeardown==='undefined'||_projectPickerTeardown===null) return false;
+  if(typeof _sidebarRepaintBackgroundChurn!=='undefined'&&_sidebarRepaintBackgroundChurn) return true;
+  if(typeof _retireProjectPickerForExplicitRepaint==='function') _retireProjectPickerForExplicitRepaint();
+  return false;
+}
 
 // Retire the picker ahead of an explicit repaint the user just asked for
 // (child-count toggle, tag filter, inline project create). The deferral guard

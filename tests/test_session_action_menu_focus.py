@@ -1111,3 +1111,434 @@ def test_inline_project_create_retires_picker_and_completes_in_browser(width, he
         "flagCleared": True,
         "repaints": 1,
     }
+
+
+def _ordinary_long_press_snippets() -> str:
+    """Extract the production ordinary-row long-press scheduler.
+
+    The deferred-repaint fixture below runs these exact snippets, including the
+    `.long-pressing` held state and the menu open, so the regression binds to
+    the shipped behavior instead of a re-implementation.
+    """
+    clear_start = SESSIONS_JS.index("const _clearLongPressTimer=()=>{")
+    clear_end = SESSIONS_JS.index("\n    };", clear_start) + len("\n    };")
+    schedule_start = SESSIONS_JS.index("const _scheduleSessionLongPressMenu=()=>{")
+    delay_at = SESSIONS_JS.index("SESSION_LONG_PRESS_DELAY_MS);", schedule_start)
+    schedule_end = SESSIONS_JS.index("\n    };", delay_at) + len("\n    };")
+    snippet = SESSIONS_JS[clear_start:clear_end] + "\n" + SESSIONS_JS[schedule_start:schedule_end]
+    assert "long-pressing" in snippet
+    assert "_openSessionActionMenu(s, el)" in snippet
+    return snippet
+
+
+def _menu_outside_click_listener_snippet() -> str:
+    """Extract the production outside-click dismissal of the action menu."""
+    marker = "document.addEventListener('click',e=>{\n  if(!_sessionActionMenu) return;"
+    start = SESSIONS_JS.index(marker)
+    end = SESSIONS_JS.index("\n});", start) + len("\n});")
+    snippet = SESSIONS_JS[start:end]
+    assert "closeSessionActionMenu();" in snippet
+    return snippet
+
+
+def _picker_deferred_ordinary_release_script() -> str:
+    """Ordinary long-press release while a picker-deferred refresh is pending.
+
+    The ordinary long-press (as `_scheduleSessionLongPressMenu` performs it)
+    holds the row in its `.long-pressing` state and opens its action menu while
+    the refresh a peer message triggered is still unpainted. Chromium dispatches
+    the release click at the physical release point, so the pending repaint must
+    be postponed: the live row is kept, the menu survives the release, and the
+    deferred repaint paints once the menu closes. The press state, the menu
+    open, the outside-click dismissal and the click handlers below are the
+    production ones.
+    """
+    return "\n".join(
+        _picker_handoff_common_stubs()
+        + [
+            "const S = {session: {session_id: 'ordinary-row'}};",
+            "const _allSessions = [{session_id: 'ordinary-row', pinned: true}, {session_id: 'other-row', pinned: true}];",
+            "let repaintCount = 0;",
+            "let peerLayout = false;",
+            "let pressedRow = null;",
+            "let renameStarted = false;",
+            "let _gestureState = 'idle';",
+            "let _renamingSid = null;",
+            "let _sessionSelectMode = false;",
+            "let _longPressMenuOpened = false;",
+            "let _longPressTimer = null;",
+            "let _tapTimer = null;",
+            "let _lastTapTime = 0;",
+            "const readOnly = false;",
+            "let el = null;",
+            "let s = null;",
+            "const SESSION_LONG_PRESS_DELAY_MS = 0;",
+            "let _sidebarRepaintBackgroundChurn = false;",
+            "function paintRows(){",
+            "  const host = document.getElementById('sessionList');",
+            "  const row = document.createElement('div'); row.className = 'session-item'; row.dataset.sid = 'ordinary-row';",
+            "  const rowTop = peerLayout ? (window.innerHeight - 186) : (window.innerHeight - 140);",
+            "  row.style.cssText = 'position:fixed;top:' + rowTop + 'px;left:16px;width:340px;height:48px';",
+            "  const text = document.createElement('div'); text.className = 'session-text'; text.textContent = 'Ordinary conversation';",
+            "  row.appendChild(text);",
+            "  row._startRename = () => { renameStarted = true; };",
+            "  const actions = document.createElement('div'); actions.className = 'session-actions';",
+            "  const trigger = document.createElement('button'); trigger.className = 'session-actions-trigger'; trigger.textContent = 'Actions'; trigger.setAttribute('aria-expanded','false');",
+            "  actions.appendChild(trigger); row.appendChild(actions);",
+            "  const picker = document.createElement('div'); picker.className = 'project-picker'; document.body.appendChild(picker);",
+            "  host.replaceChildren(row);",
+            "  return {row, trigger, picker};",
+            "}",
+            "function renderSessionListFromCache(){",
+            "  // Mirror the shipped guard: background churn defers while the picker owns",
+            "  // its row; a user-intent repaint retires the picker first.",
+            "  if(_projectPickerTeardown !== null){",
+            "    if(_sidebarRepaintBackgroundChurn){ _sessionListRepaintDeferredByPicker = true; return; }",
+            "    _retireProjectPickerForExplicitRepaint();",
+            "  }",
+            "  repaintCount += 1;",
+            "  paintRows();",
+            "}",
+            _function_source("_positionSessionActionMenu"),
+            _function_source("_focusSessionActionMenuRestoreTarget"),
+            _function_source("closeSessionActionMenu"),
+            _function_source("_buildSessionAction"),
+            _function_source("_mountSessionActionMenu"),
+            _function_source("_findSessionRenameRow"),
+            _function_source("_retireProjectPickerForExplicitRepaint"),
+            _function_source("_projectPickerSessionActionHandoff"),
+            _function_source("_openSessionActionMenu"),
+            _ordinary_long_press_snippets(),
+            _menu_outside_click_listener_snippet(),
+            """
+            window.__pickerOrdinaryPaint = () => {
+              const first = paintRows();
+              const picker = document.querySelector('.project-picker');
+              _projectPickerTeardown = () => picker.remove();
+              const rect = first.row.getBoundingClientRect();
+              window.__pickerOrdinaryTap = {tapX: rect.x + rect.width / 2, tapY: rect.y + rect.height / 2};
+              return {
+                tapX: window.__pickerOrdinaryTap.tapX,
+                tapY: window.__pickerOrdinaryTap.tapY,
+                pressOnRow: first.row.contains(document.elementFromPoint(window.__pickerOrdinaryTap.tapX, window.__pickerOrdinaryTap.tapY)),
+              };
+            };
+            window.__pickerOrdinaryPeerRefresh = () => {
+              // A peer message arrives and the normal list refresh is accepted
+              // while the picker holds the old layout, so its repaint defers.
+              peerLayout = true;
+              _sidebarRepaintBackgroundChurn = true;
+              try { renderSessionListFromCache(); } finally { _sidebarRepaintBackgroundChurn = false; }
+              return {deferred: _sessionListRepaintDeferredByPicker === true, repaintCount};
+            };
+            window.__pickerOrdinaryLongPress = async () => {
+              // Exactly what _scheduleSessionLongPressMenu() does when the
+              // long-press fires on an ordinary row: hold the row, open its menu
+              // with the row closure still carrying the pre-refresh fields.
+              pressedRow = document.querySelector('.session-item[data-sid="ordinary-row"]');
+              el = pressedRow; s = {session_id: 'ordinary-row', pinned: false}; _gestureState = 'pressing';
+              _scheduleSessionLongPressMenu();
+              await new Promise(resolve => setTimeout(resolve, 0));
+              const current = document.querySelector('.session-item[data-sid="ordinary-row"]');
+              const tap = window.__pickerOrdinaryTap;
+              const menu = document.querySelector('.session-action-menu');
+              return {
+                repaintDuringGesture: repaintCount,
+                rowNotReplaced: current === pressedRow && pressedRow.isConnected,
+                heldStatePresent: pressedRow.classList.contains('long-pressing'),
+                menuOpened: Boolean(menu),
+                menuShowsCurrentPinState: Boolean(menu) && menu.textContent.includes('Unpin conversation'),
+                anchorIsPressedRow: _sessionActionAnchor === pressedRow,
+                releaseTargetOnRow: pressedRow.contains(document.elementFromPoint(tap.tapX, tap.tapY)),
+              };
+            };
+            window.__pickerOrdinaryAfterRelease = () => ({
+              menuSurvivedRelease: Boolean(document.querySelector('.session-action-menu')),
+              releaseClickRanNoMenuItem: renameStarted === false,
+            });
+            window.__pickerOrdinaryCloseMenu = () => { closeSessionActionMenu(); };
+            window.__pickerOrdinaryDrained = () => {
+              const current = document.querySelector('.session-item[data-sid="ordinary-row"]');
+              return {
+                repaintsAfterMenuClose: repaintCount,
+                flagCleared: _sessionListRepaintDeferredByPicker === false,
+                rowPaintedAtRefreshedPosition: Boolean(current) && Math.abs(current.getBoundingClientRect().top - (window.innerHeight - 186)) <= 1,
+              };
+            };
+            """,
+        ]
+    )
+
+
+@pytest.mark.parametrize("width,height", [(390, 844), (768, 1024)])
+def test_picker_deferred_ordinary_long_press_survives_release_in_browser(width, height):
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": width, "height": height}, has_touch=True)
+        page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
+        page.add_script_tag(content=_picker_deferred_ordinary_release_script())
+        press = page.evaluate("window.__pickerOrdinaryPaint()")
+        refresh = page.evaluate("window.__pickerOrdinaryPeerRefresh()")
+        # Start the touch on the row, hold it through the long-press handoff,
+        # then release it: the deferred repaint must not have moved the row,
+        # so the browser's compatibility click still lands on it.
+        cdp = page.context.new_cdp_session(page)
+        cdp.send(
+            "Input.dispatchTouchEvent",
+            {"type": "touchStart", "touchPoints": [{"x": press["tapX"], "y": press["tapY"]}]},
+        )
+        setup = page.evaluate("window.__pickerOrdinaryLongPress()")
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": []})
+        page.wait_for_timeout(50)
+        after_release = page.evaluate("window.__pickerOrdinaryAfterRelease()")
+        page.evaluate("window.__pickerOrdinaryCloseMenu()")
+        page.wait_for_timeout(50)
+        drained = page.evaluate("window.__pickerOrdinaryDrained()")
+        browser.close()
+
+    assert press["pressOnRow"] is True
+    assert refresh == {"deferred": True, "repaintCount": 0}
+    assert setup == {
+        "repaintDuringGesture": 0,
+        "rowNotReplaced": True,
+        "heldStatePresent": True,
+        "menuOpened": True,
+        "menuShowsCurrentPinState": True,
+        "anchorIsPressedRow": True,
+        "releaseTargetOnRow": True,
+    }
+    assert after_release == {
+        "menuSurvivedRelease": True,
+        "releaseClickRanNoMenuItem": True,
+    }
+    assert drained == {
+        "repaintsAfterMenuClose": 1,
+        "flagCleared": True,
+        "rowPaintedAtRefreshedPosition": True,
+    }
+
+
+def _explicit_select_mode_script() -> str:
+    """Select-mode toggle while the picker is open (gate finding M2)."""
+    return "\n".join(
+        [
+            "let _projectPickerTeardown = null;",
+            "let _sessionListRepaintDeferredByPicker = false;",
+            "let _sidebarRepaintBackgroundChurn = false;",
+            "let _sessionSelectMode = false;",
+            "const _selectedSessions = new Set();",
+            "let repaints = 0;",
+            "const rowCount = 15;",
+            "function renderSessionListFromCache(){",
+            "  // Mirror the shipped guard: background churn defers while the picker",
+            "  // owns its row; a user-intent repaint retires the picker first.",
+            "  if(_projectPickerBlocksRepaint()){ _sessionListRepaintDeferredByPicker = true; return; }",
+            "  repaints += 1;",
+            "  paintRows();",
+            "}",
+            "function paintRows(){",
+            "  const host = document.getElementById('sessionList');",
+            "  const list = document.createElement('div');",
+            "  if(_sessionSelectMode){",
+            "    const bar = document.createElement('div'); bar.className = 'session-select-bar'; bar.textContent = 'Select all'; list.appendChild(bar);",
+            "  }",
+            "  for(let i = 0; i < rowCount; i += 1){",
+            "    const row = document.createElement('div'); row.className = 'session-item'; row.dataset.sid = 'row-' + i;",
+            "    if(_sessionSelectMode){",
+            "      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.className = 'session-select-cb';",
+            "      row.appendChild(cb);",
+            "    }",
+            "    list.appendChild(row);",
+            "  }",
+            "  if(!_sessionSelectMode){",
+            "    const toggle = document.createElement('div'); toggle.className = 'session-select-toggle'; toggle.textContent = 'Select';",
+            "    toggle.onclick = (e) => { e.stopPropagation(); toggleSessionSelectMode(); };",
+            "    list.appendChild(toggle);",
+            "  }",
+            "  host.replaceChildren(list);",
+            "}",
+            _function_source("toggleSessionSelectMode"),
+            _function_source("_retireProjectPickerForExplicitRepaint"),
+            _function_source("_projectPickerBlocksRepaint"),
+            """
+            window.__explicitSelectModeCase = () => {
+              paintRows();
+              const before = {checkboxes: document.querySelectorAll('.session-select-cb').length, repaints};
+              const picker = document.createElement('div'); picker.className = 'project-picker'; document.body.appendChild(picker);
+              _projectPickerTeardown = () => picker.remove();
+              _sidebarRepaintBackgroundChurn = true;
+              try { renderSessionListFromCache(); } finally { _sidebarRepaintBackgroundChurn = false; }
+              const deferred = {flag: _sessionListRepaintDeferredByPicker, repaints};
+              document.querySelector('.session-select-toggle').click();
+              return {
+                before,
+                deferred,
+                after: {
+                  checkboxes: document.querySelectorAll('.session-select-cb').length,
+                  repaints,
+                  selectBar: Boolean(document.querySelector('.session-select-bar')),
+                  toggleGone: !document.querySelector('.session-select-toggle'),
+                  pickerRemoved: picker.isConnected === false,
+                  pickerTeardownCleared: _projectPickerTeardown === null,
+                  flagCleared: _sessionListRepaintDeferredByPicker === false,
+                  selectMode: _sessionSelectMode,
+                },
+              };
+            };
+            """,
+        ]
+    )
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+def test_select_mode_toggle_retires_picker_and_paints_in_browser(width, height):
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
+        page.add_script_tag(content=_explicit_select_mode_script())
+        result = page.evaluate("window.__explicitSelectModeCase()")
+        browser.close()
+
+    assert result == {
+        "before": {"checkboxes": 0, "repaints": 0},
+        "deferred": {"flag": True, "repaints": 0},
+        "after": {
+            "checkboxes": 15,
+            "repaints": 1,
+            "selectBar": True,
+            "toggleGone": True,
+            "pickerRemoved": True,
+            "pickerTeardownCleared": True,
+            "flagCleared": True,
+            "selectMode": True,
+        },
+    }
+
+
+def _new_session_refresh_snippet() -> str:
+    """Extract the production newSession sidebar-refresh tail."""
+    start = SESSIONS_JS.index("// Refresh sidebar to include the newly created session (#3874).")
+    end = SESSIONS_JS.index(").catch(()=>{})}", start) + len(").catch(()=>{})}")
+    snippet = SESSIONS_JS[start:end]
+    assert "refreshSessionList" in snippet
+    return snippet
+
+
+def _explicit_new_session_script() -> str:
+    """Ctrl/Cmd+K new-session refresh while the picker is open (gate finding M3)."""
+    return "\n".join(
+        [
+            "let _projectPickerTeardown = null;",
+            "let _sessionListRepaintDeferredByPicker = false;",
+            "let _sidebarRepaintBackgroundChurn = false;",
+            "let repaints = 0;",
+            "let activeSid = 'old-chat';",
+            "const S = {session: {session_id: 'old-chat'}};",
+            "function renderSessionListFromCache(){",
+            "  // Mirror the shipped guard: background churn defers while the picker",
+            "  // owns its row; a user-intent repaint retires the picker first.",
+            "  if(_projectPickerTeardown !== null){",
+            "    if(_sidebarRepaintBackgroundChurn){ _sessionListRepaintDeferredByPicker = true; return; }",
+            "    _retireProjectPickerForExplicitRepaint();",
+            "  }",
+            "  repaints += 1;",
+            "  paintRows();",
+            "}",
+            "async function refreshSessionList(){",
+            "  // The real pipeline lands its payload through the background-marked",
+            "  // repaint, which defers while the picker is open.",
+            "  _sidebarRepaintBackgroundChurn = true;",
+            "  try { renderSessionListFromCache(); } finally { _sidebarRepaintBackgroundChurn = false; }",
+            "}",
+            "function paintRows(){",
+            "  const host = document.getElementById('sessionList');",
+            "  const rows = [];",
+            "  if(S.session && S.session.session_id === 'new-chat'){",
+            "    const row = document.createElement('div'); row.className = 'session-item active'; row.dataset.sid = 'new-chat'; rows.push(row);",
+            "  }",
+            "  const old = document.createElement('div'); old.className = 'session-item' + (activeSid === 'old-chat' ? ' active' : ''); old.dataset.sid = 'old-chat'; rows.push(old);",
+            "  host.replaceChildren(...rows);",
+            "}",
+            _function_source("_retireProjectPickerForExplicitRepaint"),
+            "window.__runNewSessionRefreshTail = () => {",
+            _new_session_refresh_snippet(),
+            "};",
+            """
+            window.__explicitNewSessionCase = async () => {
+              paintRows();
+              const picker = document.createElement('div'); picker.className = 'project-picker'; document.body.appendChild(picker);
+              _projectPickerTeardown = () => picker.remove();
+              _sidebarRepaintBackgroundChurn = true;
+              try { renderSessionListFromCache(); } finally { _sidebarRepaintBackgroundChurn = false; }
+              const deferred = {flag: _sessionListRepaintDeferredByPicker, repaints};
+              // Ctrl/Cmd+K: the new session replaces the active one, then
+              // newSession() runs its own sidebar-refresh tail.
+              S.session = {session_id: 'new-chat'};
+              activeSid = 'new-chat';
+              window.__runNewSessionRefreshTail();
+              await new Promise(resolve => setTimeout(resolve, 20));
+              return {
+                deferred,
+                after: {
+                  repaints,
+                  newChatRow: Boolean(document.querySelector('.session-item[data-sid="new-chat"]')),
+                  newChatHighlighted: Boolean(document.querySelector('.session-item[data-sid="new-chat"].active')),
+                  oldChatHighlighted: Boolean(document.querySelector('.session-item[data-sid="old-chat"].active')),
+                  pickerRemoved: picker.isConnected === false,
+                  pickerTeardownCleared: _projectPickerTeardown === null,
+                  flagCleared: _sessionListRepaintDeferredByPicker === false,
+                },
+              };
+            };
+            """,
+        ]
+    )
+
+
+@pytest.mark.parametrize("width,height", [(1440, 900), (390, 844)])
+def test_new_session_refresh_retires_picker_and_shows_new_chat_in_browser(width, height):
+    try:
+        from playwright.sync_api import sync_playwright
+    except Exception:  # pragma: no cover - dependency missing path
+        pytest.skip("playwright is unavailable; run the session action menu browser test")
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.set_content('<!doctype html><html><body><div id="sessionList"></div></body></html>')
+        page.add_script_tag(content=_explicit_new_session_script())
+        result = page.evaluate("window.__explicitNewSessionCase()")
+        browser.close()
+
+    assert result == {
+        "deferred": {"flag": True, "repaints": 0},
+        "after": {
+            "repaints": 1,
+            "newChatRow": True,
+            "newChatHighlighted": True,
+            "oldChatHighlighted": False,
+            "pickerRemoved": True,
+            "pickerTeardownCleared": True,
+            "flagCleared": True,
+        },
+    }
