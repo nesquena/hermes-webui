@@ -60,6 +60,9 @@ def test_production_skills_detail_and_mutation_ownership():
                 assert report['mutationsAfterSwitch'] == [], report
                 continue
             assert report['after'] == report['before'], report
+            if 'refetches' in report:
+                applied = report['scenario'] in ('toggle', 'save', 'delete') and not report['error']
+                assert report['refetches'] == (1 if applied else 0), report
             if report['scenario'].startswith('transport-'):
                 assert report['fetches'] == 1, report
                 assert report['mutationsAfterSwitch'] == [], report

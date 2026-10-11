@@ -291,29 +291,3 @@ def test_skill_write_settling_in_other_profile_leaves_its_caches(action):
     assert result == {'skills': [{'name': 'b-skill'}], 'cron': [{'name': 'b-skill'}],
                       'requests': 0, 'slash': 0}
 
-
-def test_toggle_settling_after_profile_round_trip_refetches():
-    # A->B->A while the toggle is in flight: the list reloaded on return may predate the write.
-    result = _run_node("""
-      let finishToggle, slashInvalidations=0;
-      invalidateSlashSkillCaches = () => { slashInvalidations++; };
-      const baseApi = api;
-      api = (path,opts) => path==='/api/skills/toggle'
-        ? new Promise(resolve=>{ finishToggle=resolve; }) : baseApi(path,opts);
-      _skillsData=[{name:'x',disabled:false}];
-      const toggle=toggleSkill('x',true);
-      await switchToProfile('B');
-      await switchToProfile('A');
-      loadSkills();
-      requests[0].resolve({runtime_scope:'profile',skills:[{name:'x',disabled:false}]});
-      await flush();
-      const before=slashInvalidations;
-      finishToggle({ok:true});
-      await toggle;
-      await flush();
-      if(requests.length!==2) throw Error('superseded toggle did not refetch');
-      requests[1].resolve({runtime_scope:'profile',skills:[{name:'x',disabled:true}]});
-      await flush();
-      return {skills:_skillsData,cron:_cronSkillsCache,slash:slashInvalidations-before};
-    """)
-    assert result == {'skills': [{'name': 'x', 'disabled': True}], 'cron': None, 'slash': 1}

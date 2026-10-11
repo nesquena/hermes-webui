@@ -140,11 +140,14 @@ const compose = () => {
       }else{
         const latest=openSkill('new',null);requests.at(-1).resolve(content('B'));await latest;
       }
-      const before=snapshot();
+      const before=snapshot();const settled=requests.length;
       if(error)old.reject(Error('superseded failure'));
       else old.resolve(scenario==='detail'||scenario==='file'?content('A'):{ok:true});
       await flush();
-      return {before,after:snapshot()};
+      // An applied superseded write refetches the same profile's list; the detail stays put.
+      const refetches=requests.slice(settled).filter(r=>r.path==='/api/skills');
+      refetches.forEach(r=>r.resolve(payload('A')));await flush();
+      return {before,after:snapshot(),refetches:refetches.length};
     },{scenario,error});
     reports.push({scenario,error,...report});await page.close();
    }

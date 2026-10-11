@@ -5094,7 +5094,7 @@ async function toggleSkill(name, currentlyEnabled) {
       method: 'POST', timeoutToast: false, retries: 0,
       body: JSON.stringify({ name, enabled: newEnabled })
     });
-    if (result && result.ok && _ownsSkillProfile({profile}) && !owns()) {
+    if (result && result.ok && _ownsSkillProfile({profile, generation}) && !owns()) {
       // Superseded but applied: the local working set can't be patched safely, so refetch.
       _invalidateSkillCachesAfterWrite();
       loadSkills();
@@ -5141,9 +5141,9 @@ function _ownsSkillDetail(owner) {
 }
 
 // A write that reached the server changes this profile's skill set even after the
-// detail pane moved on, so cache invalidation follows the profile, not the pane.
+// detail pane moved on, so cache invalidation follows the profile generation, not the pane.
 function _ownsSkillProfile(owner) {
-  return owner.profile === S.activeProfile;
+  return owner.profile === S.activeProfile && owner.generation === _skillDetailGeneration;
 }
 
 function _invalidateSkillCachesAfterWrite(keepSkills=false) {
