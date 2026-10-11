@@ -677,6 +677,39 @@ def _clear_cached_sessions_for_project(project_id, lock_timeout=None, cleared_id
     return cleared
 
 
+def _adopt_session_state(target, source) -> bool:
+    """Refresh ``target`` in place from ``source``, keeping its identity.
+
+    The cache must hold ONE object per session id. Writers fetch the session
+    BEFORE they take its agent lock — ``/api/session/draft`` does exactly that,
+    then merges its text into ``composer_draft`` and saves the whole object
+    under the lock — so replacing the cached entry with a different object
+    leaves such a writer holding the pre-refresh copy, and its save writes that
+    older state back over the newer one: it erases a draft (or a reply) another
+    request saved while it waited (Greptile P1 2026-10-11T03:49:18Z).
+
+    Refreshing the shared object instead gives every waiter the newest state:
+    it merges onto the refreshed session and persists that, so nothing newer is
+    lost. Both objects are the same id's full ``Session``; a plain class
+    instance carries its state in ``__dict__``, and the two key sets are the
+    same shape by construction, so a whole-dict swap is the faithful refresh.
+    """
+    state = dict(getattr(source, "__dict__", {}) or {})
+    if not state:
+        return False
+    try:
+        target.__dict__.clear()
+        target.__dict__.update(state)
+    except Exception:
+        logger.debug(
+            "projects/delete: could not refresh session %s in place",
+            getattr(source, "session_id", None),
+            exc_info=True,
+        )
+        return False
+    return True
+
+
 def _delete_target_session(sid, active_ids):
     """Return the freshest FULL session object for a delete target, or ``None``.
 
@@ -695,12 +728,15 @@ def _delete_target_session(sid, active_ids):
     replaced the two newer persisted ones and the project was cleared on a chat
     that had already moved to project B; master preserved both.
 
-    An inactive persisted target is therefore resolved from the SIDECAR itself
-    and published into the cache, so the ``project_id`` this caller clears lands
-    on the newest state on disk — and so the delete handler's index pass, which
-    resolves through the cache, cannot fall back to the stale entry. The cached
-    object is kept only when it is genuinely AHEAD of the sidecar (strictly more
-    messages: a draft whose debounced save has not landed yet).
+    An inactive persisted target is therefore resolved from the SIDECAR itself,
+    and the cache is refreshed with it (``_adopt_session_state``, IN PLACE), so
+    the ``project_id`` this caller clears lands on the newest state on disk —
+    and so the delete handler's index pass, which resolves through the cache,
+    cannot fall back to the stale entry. The refresh keeps the SAME object, or a
+    writer that fetched the session before it took the lock would save its
+    pre-refresh copy over the newer one (Greptile P1 2026-10-11T03:49:18Z). A
+    cached entry that is genuinely AHEAD of the sidecar (strictly more messages:
+    a draft whose debounced save has not landed yet) is kept as it is.
 
     Ownership and streaming are re-checked by the CALLER on the object this
     returns, because the resolution may have replaced the entry the caller's
@@ -728,10 +764,23 @@ def _delete_target_session(sid, active_ids):
         # Strictly ahead of the sidecar: that copy is the newest one. Saving the
         # sidecar instead would drop the draft this cache entry still holds.
         return resident
+    if resident is None:
+        with LOCK:
+            SESSIONS[sid] = fresh
+            SESSIONS.move_to_end(sid)
+        return fresh
     with LOCK:
-        SESSIONS[sid] = fresh
+        if SESSIONS.get(sid) is not resident:
+            # Something rebound the entry while the sidecar was loading: leave
+            # that object alone rather than fight over the id.
+            return None
+        if not _adopt_session_state(resident, fresh):
+            # No usable ``__dict__`` to refresh: fall back to rebinding.
+            SESSIONS[sid] = fresh
+            SESSIONS.move_to_end(sid)
+            return fresh
         SESSIONS.move_to_end(sid)
-    return fresh
+    return resident
 
 
 def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:

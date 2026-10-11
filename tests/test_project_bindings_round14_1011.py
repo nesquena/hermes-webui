@@ -154,6 +154,55 @@ def test_delete_write_through_refreshes_a_stale_cache_entry(_isolated_store):
     assert len(config.SESSIONS[sid].messages) == 2
 
 
+def test_delete_write_through_refreshes_the_cached_object_in_place(
+    _isolated_store,
+):
+    """A waiting writer keeps the object it fetched (Greptile P1 4240154030).
+
+    ``/api/session/draft`` fetches the session BEFORE it takes the session's
+    agent lock and saves the object it holds afterwards. If the write-through
+    rebound the cache to a freshly loaded object, that writer would be left
+    holding the PRE-refresh copy — and its save would write the older state back
+    over the newer one, erasing a draft another request had just stored. So the
+    refresh must keep the object identity: the cache entry IS the object the
+    writer holds, and it carries the sidecar's newer state.
+    """
+    session_dir, _index, routes, models, config = _isolated_store
+    pid = "proj_round15_inplace"
+    sid = "sess-round15-inplace"
+
+    disk = models.Session(
+        session_id=sid,
+        workspace="/ws/round15",
+        messages=_messages(2, "disk"),
+        project_id=pid,
+    )
+    disk.save()
+
+    # The writer's object: a full entry that lags the sidecar by one message,
+    # which is exactly when the old resolution rebound the entry.
+    held = models.Session(
+        session_id=sid,
+        workspace="/ws/round15",
+        messages=_messages(1, "cache"),
+        project_id=pid,
+    )
+    config.SESSIONS[sid] = held
+
+    assert _delete_unlink(routes, pid, sid) == 1
+
+    assert config.SESSIONS[sid] is held, (
+        "the cache entry was rebound to a new object: a writer that fetched the "
+        "session before the lock would save its pre-refresh copy over this one"
+    )
+    assert len(held.messages) == 2, (
+        "the held object still carries the older history, so its next save "
+        "would erase the newer persisted messages"
+    )
+    assert held.project_id is None
+    assert _sidecar(session_dir, sid)["message_count"] == 2
+
+
 def test_delete_write_through_keeps_a_newer_draft_and_a_reassigned_row(
     _isolated_store,
 ):
@@ -291,10 +340,18 @@ def test_delete_target_resolver_loads_the_sidecar_and_publishes_it():
         "the resolver must load the sidecar itself: get_session's freshness "
         "check is count-based and leaves an equal-count stale entry in place"
     )
-    assert "SESSIONS[sid] = fresh" in body, (
-        "the refreshed session must be published into the cache, or the delete "
-        "handler's index pass can still fall back to the stale entry"
+    # The refresh publishes the fresh state into the cache (or the delete
+    # handler's index pass could still fall back to the stale entry) WITHOUT
+    # rebinding a resident entry: writers fetch the session before they take its
+    # lock, so a rebound entry leaves them saving the pre-refresh copy
+    # (Greptile P1 2026-10-11T03:49:18Z).
+    assert "_adopt_session_state(resident, fresh)" in body, (
+        "the resident cache entry must be refreshed IN PLACE"
     )
+    no_resident = body.index("if resident is None:")
+    rebind = body.index("SESSIONS[sid] = fresh")
+    adopt = body.index("_adopt_session_state(resident, fresh)")
+    assert no_resident < rebind < adopt, (no_resident, rebind, adopt)
     assert '"messages"' in body, (
         "the resolver must compare message counts to keep a genuinely newer "
         "cache entry (an unsaved draft)"
