@@ -89,9 +89,11 @@ def main():
                     for count, index, density, start in scenes:
                         now = time.time() - 86400
                         parents = [dict(s, title=f'Conversation {i:03}', updated_at=now-i*60,
+                                        last_message_at=now-i*60, created_at=now-i*60,
                                         session_source='webui', profile='default') for i, s in enumerate(seeds[:120])]
                         parent = parents[100]
                         children = [dict(s, title=f'Delegated child {i:02}', updated_at=parent['updated_at'],
+                                         last_message_at=parent['updated_at'], created_at=parent['updated_at'],
                                          profile='default', parent_session_id=parent['session_id'],
                                          relationship_type='child_session', raw_source='subagent', session_source='other')
                                     for i, s in enumerate(seeds[120:120+count])]
@@ -113,6 +115,12 @@ def main():
                             page.evaluate('_openMobileSidebarFromGesture()')
                             page.wait_for_timeout(300)
                             assert page.evaluate("document.querySelector('.sidebar').classList.contains('mobile-open')")
+                        parent_position = page.evaluate('''parent=>{
+                          const layout=$('sessionList')._sessionVirtualLayout;
+                          return layout?layout.rows.findIndex(row=>row.id===parent):
+                            _allSessions.filter(s=>!s.parent_session_id).sort(_sessionSidebarSortCompare).findIndex(s=>s.session_id===parent);
+                        }''', parent['session_id'])
+                        assert parent_position == 100, f'parent position {parent_position} does not reproduce reviewed scene'
                         data = page.evaluate('''sid=>{
                           const l=$('sessionList'),title=_allSessions.find(s=>s.session_id===sid)?.title;
                           const r=l.querySelector('.session-child-session[data-sid="'+sid+'"]')
@@ -132,7 +140,7 @@ def main():
                             failures.append('virtual DOM unbounded')
                         name = f'{mobile}-{count}-{index}-{density}-{start}'
                         page.screenshot(path=str(args.output / (name+'.png')))
-                        results.append(dict(scene=name, data=data, failures=failures))
+                        results.append(dict(scene=name, parent_position=parent_position, data=data, failures=failures))
                 browser.close()
         finally:
             proc.terminate()
