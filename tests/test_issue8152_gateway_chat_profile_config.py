@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from email.message import Message
 import json
+import os
 import shutil
 import urllib.error
 
@@ -520,3 +521,441 @@ class TestTheProfileConfigHelper:
         """Profiles are islands (``get_config_for_profile_home``): a session
         whose profile home no longer exists reads no other profile's file."""
         assert gateway_chat._gateway_config_for_profile("gone8152") == {}
+
+
+class TestVariablesInTheProfilesConfig:
+    """``${VAR}`` in a profile's ``config.yaml`` is expanded from that profile's
+    own environment: the same snapshot its Gateway key comes from (#8153 review).
+
+    The snapshot is the process environment without the values another
+    profile's ``.env`` loaded into it, with the session profile's own on top.
+    """
+
+    def _profile(self, profiles_on_disk, monkeypatch, *, env_file, ambient=None, foreign=True):
+        import api.profiles as profiles
+
+        home = profiles_on_disk[PROFILE]
+        (home / "config.yaml").write_text(
+            "webui_gateway_base_url: ${REVIEW8153_PARENT_URL}\n", encoding="utf-8"
+        )
+        (home / ".env").write_text(env_file, encoding="utf-8")
+        if ambient is not None:
+            monkeypatch.setenv("REVIEW8153_PARENT_URL", ambient)
+            if foreign:
+                # as if the process-active profile's .env had loaded it
+                monkeypatch.setattr(
+                    profiles, "_loaded_profile_env_keys",
+                    set(profiles._loaded_profile_env_keys) | {"REVIEW8153_PARENT_URL"},
+                )
+
+    def test_the_url_and_the_key_come_from_the_same_profile(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        self._profile(
+            profiles_on_disk, monkeypatch,
+            env_file="REVIEW8153_PARENT_URL=http://owned-profile.test\nAPI_SERVER_KEY=owned-key\n",
+            ambient="http://foreign-ambient.test",
+        )
+
+        _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+
+        chat = _chat(requests)
+        assert chat["url"] == "http://owned-profile.test/v1/chat/completions"
+        assert chat["authorization"] == "Bearer owned-key"
+        assert [r["url"] for r in requests if "foreign-ambient" in r["url"]] == []
+
+    def test_a_variable_the_profile_does_not_set_is_not_filled_from_another_profiles(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """The profile's key must never travel to another profile's Gateway.
+        With nothing to expand to, the URL stays the literal text and the turn
+        fails before any request is made."""
+        self._profile(
+            profiles_on_disk, monkeypatch,
+            env_file="API_SERVER_KEY=owned-key\n",
+            ambient="http://foreign-ambient.test",
+        )
+
+        _, requests, events = _send(PROFILE, tmp_path, monkeypatch)
+
+        assert [r["url"] for r in requests if "foreign-ambient" in r["url"]] == []
+        assert [r for r in requests if r["url"].endswith("/v1/chat/completions")] == []
+        assert [item[0] for item in events if item[0] in ("apperror", "error")]
+
+    def test_a_variable_set_for_the_whole_process_is_still_expanded(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """Exported by the operator, not loaded from a profile's ``.env``: it
+        belongs to every profile's environment."""
+        self._profile(
+            profiles_on_disk, monkeypatch,
+            env_file="API_SERVER_KEY=owned-key\n",
+            ambient="http://operator-wide.test", foreign=False,
+        )
+
+        _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+
+        chat = _chat(requests)
+        assert chat["url"] == "http://operator-wide.test/v1/chat/completions"
+        assert chat["authorization"] == "Bearer owned-key"
+
+
+class TestAConfigFileOutsideTheHome:
+    """``HERMES_CONFIG_PATH`` may point outside the Hermes home. A relative
+    prefill path of the ambient profile has always been looked up beside that
+    file, and still is (#8153 review); only another profile's is looked up in
+    its own home."""
+
+    @pytest.fixture
+    def config_elsewhere(self, profiles_on_disk, tmp_path, monkeypatch):
+        import api.config as config
+
+        elsewhere = tmp_path / "etc hermes"
+        elsewhere.mkdir()
+        (elsewhere / "prefill.json").write_text(json.dumps(PREFILL), encoding="utf-8")
+        (elsewhere / "recall.py").write_text(
+            "#!/usr/bin/env python3\nimport json\nprint(json.dumps(" + repr(PREFILL) + "))\n",
+            encoding="utf-8",
+        )
+        (elsewhere / "recall.py").chmod(0o755)
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(elsewhere / "config.yaml"))
+        yield elsewhere
+        monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+        config.reload_config()
+
+    def _prefill_status(self, events):
+        status = [item[1]["prefill"] for item in events if item[0] == "context_status"]
+        assert status
+        return status[-1]
+
+    def test_the_ambient_profiles_relative_file_is_found_beside_its_config(
+        self, config_elsewhere, tmp_path, monkeypatch
+    ):
+        (config_elsewhere / "config.yaml").write_text(
+            "prefill_messages_file: prefill.json\n", encoding="utf-8"
+        )
+
+        _, requests, events = _send(None, tmp_path, monkeypatch)
+
+        assert self._prefill_status(events)["status"] == "loaded"
+        messages = _chat(requests)["body"]["messages"]
+        assert [m["content"] for m in messages[1:-1]] == [PREFILL[0]["content"]]
+
+    def test_the_ambient_profiles_relative_script_is_found_beside_its_config(
+        self, config_elsewhere, tmp_path, monkeypatch
+    ):
+        import os
+
+        if os.name == "nt":
+            pytest.skip("a script path is run directly; needs a shebang")
+        (config_elsewhere / "config.yaml").write_text(
+            "webui_prefill_messages_script: recall.py\n", encoding="utf-8"
+        )
+
+        _, _, events = _send(None, tmp_path, monkeypatch)
+
+        status = self._prefill_status(events)
+        assert status["status"] == "loaded", status
+        assert status["source"] == "script"
+
+    def test_another_profile_still_uses_its_own_home(
+        self, config_elsewhere, tmp_path, monkeypatch
+    ):
+        """The named profile's relative path is not looked up beside the
+        ambient config, which has a ``prefill.json`` of its own."""
+        (config_elsewhere / "config.yaml").write_text(
+            "prefill_messages_file: prefill.json\n", encoding="utf-8"
+        )
+        (config_elsewhere / "prefill.json").write_text(
+            json.dumps([{"role": "assistant", "content": "the ambient profile's notes"}]),
+            encoding="utf-8",
+        )
+
+        _, requests, events = _send(PROFILE, tmp_path, monkeypatch)
+
+        assert self._prefill_status(events)["status"] == "loaded"
+        contents = [m["content"] for m in _chat(requests)["body"]["messages"]]
+        assert PREFILL[0]["content"] in contents
+        assert "the ambient profile's notes" not in contents
+
+
+class TestSettingsReadFromTheEnvironment:
+    """The prefill overrides and the runs-API switch can also be set in the
+    environment. For a Gateway chat that is the session profile's snapshot too:
+    its own ``.env`` counts, another profile's ``.env`` does not, and what the
+    operator exported for the whole process still does (#8153 review)."""
+
+    def _foreign(self, monkeypatch, name, value):
+        """``name`` is in the process environment because the process-active
+        profile's ``.env`` put it there."""
+        import api.profiles as profiles
+
+        monkeypatch.setenv(name, value)
+        monkeypatch.setattr(
+            profiles, "_loaded_profile_env_keys", set(profiles._loaded_profile_env_keys) | {name}
+        )
+
+    def _other_prefill(self, tmp_path, text):
+        path = tmp_path / f"{text.replace(' ', '-')}.json"
+        path.write_text(json.dumps([{"role": "assistant", "content": text}]), encoding="utf-8")
+        return path
+
+    def _prefill_contents(self, requests):
+        return [m["content"] for m in _chat(requests)["body"]["messages"][1:-1]]
+
+    def test_another_profiles_prefill_override_does_not_replace_this_profiles_prefill(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        self._foreign(
+            monkeypatch, "HERMES_PREFILL_MESSAGES_FILE",
+            str(self._other_prefill(tmp_path, "the default profile's notes")),
+        )
+
+        _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+
+        assert self._prefill_contents(requests) == [PREFILL[0]["content"]]
+
+    def test_this_profiles_own_env_file_can_set_the_prefill_override(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        own = self._other_prefill(tmp_path, "from the work profile's env file")
+        (profiles_on_disk[PROFILE] / ".env").write_text(
+            f"API_SERVER_KEY=work-key\nHERMES_PREFILL_MESSAGES_FILE={own.as_posix()}\n",
+            encoding="utf-8",
+        )
+
+        _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+
+        assert self._prefill_contents(requests) == ["from the work profile's env file"]
+
+    def test_an_override_exported_for_the_whole_process_still_wins(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv(
+            "HERMES_PREFILL_MESSAGES_FILE", str(self._other_prefill(tmp_path, "the operator's notes"))
+        )
+
+        _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+
+        assert self._prefill_contents(requests) == ["the operator's notes"]
+
+    def test_a_default_profile_chat_reads_the_process_environment_as_before(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """Loaded from the process-active profile's ``.env``: for a chat in
+        that profile it is its own."""
+        self._foreign(
+            monkeypatch, "HERMES_PREFILL_MESSAGES_FILE",
+            str(self._other_prefill(tmp_path, "the default profile's notes")),
+        )
+        # get_profile_runtime_env reads the default home's files, which do not
+        # have it in this test, so hand the snapshot what the real .env would.
+        real = gateway_chat._gateway_environment_for_profile
+
+        def with_its_own_env_file(profile_name):
+            environ = real(profile_name)
+            if not str(profile_name or "").strip() or profile_name == "default":
+                environ["HERMES_PREFILL_MESSAGES_FILE"] = os.environ["HERMES_PREFILL_MESSAGES_FILE"]
+            return environ
+
+        monkeypatch.setattr(gateway_chat, "_gateway_environment_for_profile", with_its_own_env_file)
+
+        _, requests, _ = _send(None, tmp_path, monkeypatch)
+
+        assert self._prefill_contents(requests) == ["the default profile's notes"]
+
+    def _runs_switch(self, monkeypatch):
+        seen = []
+        real = gateway_chat._gateway_use_runs_api_enabled
+
+        def recording(config_data=None, environ=None):
+            seen.append(real(config_data, environ))
+            return False
+
+        monkeypatch.setattr(gateway_chat, "_gateway_use_runs_api_enabled", recording)
+        return seen
+
+    def test_the_runs_api_switch_in_this_profiles_env_file_is_read(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        home = profiles_on_disk[OTHER_PROFILE]  # its config.yaml does not set the switch
+        (home / ".env").write_text(
+            "API_SERVER_KEY=play-key\nHERMES_WEBUI_GATEWAY_USE_RUNS_API=true\n", encoding="utf-8"
+        )
+        seen = self._runs_switch(monkeypatch)
+
+        _send(OTHER_PROFILE, tmp_path, monkeypatch)
+
+        assert seen == [True]
+
+    def test_another_profiles_runs_api_switch_is_not_read(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        self._foreign(monkeypatch, "HERMES_WEBUI_GATEWAY_USE_RUNS_API", "true")
+        seen = self._runs_switch(monkeypatch)
+
+        _send(OTHER_PROFILE, tmp_path, monkeypatch)
+
+        assert seen == [False]
+
+
+class TestTheEnvironmentScope:
+    def test_it_is_thread_local_and_put_back_afterwards(self, monkeypatch):
+        from api.config import _thread_ctx, _thread_local_env_value
+
+        monkeypatch.setenv("REVIEW8153_ONLY_IN_PROCESS", "process")
+        before_env = dict(getattr(_thread_ctx, "env", {}) or {})
+        before_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+        before_process = dict(os.environ)
+
+        with gateway_chat._gateway_profile_environment({"REVIEW8153_IN_SNAPSHOT": "snapshot"}):
+            assert _thread_local_env_value("REVIEW8153_IN_SNAPSHOT", "") == "snapshot"
+            # the process environment is not a fallback inside the scope
+            assert _thread_local_env_value("REVIEW8153_ONLY_IN_PROCESS", "") == ""
+            assert "REVIEW8153_IN_SNAPSHOT" not in os.environ
+
+        assert dict(getattr(_thread_ctx, "env", {}) or {}) == before_env
+        assert bool(getattr(_thread_ctx, "block_process_env_fallback", False)) is before_block
+        assert _thread_local_env_value("REVIEW8153_ONLY_IN_PROCESS", "") == "process"
+        assert dict(os.environ) == before_process
+
+    def test_it_is_put_back_when_the_body_raises(self):
+        from api.config import _thread_ctx
+
+        before_env = dict(getattr(_thread_ctx, "env", {}) or {})
+        before_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+
+        with pytest.raises(RuntimeError):
+            with gateway_chat._gateway_profile_environment({"REVIEW8153_IN_SNAPSHOT": "x"}):
+                raise RuntimeError("boom")
+
+        assert dict(getattr(_thread_ctx, "env", {}) or {}) == before_env
+        assert bool(getattr(_thread_ctx, "block_process_env_fallback", False)) is before_block
+
+    def test_an_outer_scope_is_restored_by_an_inner_one(self):
+        from api.config import _thread_local_env_value
+
+        with gateway_chat._gateway_profile_environment({"REVIEW8153_NAME": "outer"}):
+            with gateway_chat._gateway_profile_environment({"REVIEW8153_NAME": "inner"}):
+                assert _thread_local_env_value("REVIEW8153_NAME", "") == "inner"
+            assert _thread_local_env_value("REVIEW8153_NAME", "") == "outer"
+
+    def test_another_thread_does_not_see_it(self):
+        import threading
+
+        from api.config import _thread_local_env_value
+
+        seen = []
+        with gateway_chat._gateway_profile_environment({"REVIEW8153_NAME": "mine"}):
+            worker = threading.Thread(
+                target=lambda: seen.append(_thread_local_env_value("REVIEW8153_NAME", "unset"))
+            )
+            worker.start()
+            worker.join()
+
+        assert seen == ["unset"]
+
+    def test_a_resumed_runs_endpoint_expands_from_the_same_snapshot(
+        self, profiles_on_disk, monkeypatch
+    ):
+        """``_gateway_endpoint_for_profile`` is what a run resumed after a
+        restart uses. It had the same gap; the two paths stay in step."""
+        import api.profiles as profiles
+
+        home = profiles_on_disk[PROFILE]
+        (home / "config.yaml").write_text(
+            "webui_gateway_base_url: ${REVIEW8153_PARENT_URL}\n", encoding="utf-8"
+        )
+        (home / ".env").write_text(
+            "REVIEW8153_PARENT_URL=http://owned-profile.test\nAPI_SERVER_KEY=owned-key\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("REVIEW8153_PARENT_URL", "http://foreign-ambient.test")
+        monkeypatch.setattr(
+            profiles, "_loaded_profile_env_keys",
+            set(profiles._loaded_profile_env_keys) | {"REVIEW8153_PARENT_URL"},
+        )
+
+        assert gateway_chat._gateway_endpoint_for_profile(PROFILE) == (
+            "http://owned-profile.test", "owned-key",
+        )
+
+
+class TestEachPrefillSettingFollowsTheBoundEnvironment:
+    """The five places the prefill loaders read the environment. Inside a
+    bound profile environment each one reads the snapshot and not the process;
+    outside one, the process, as before."""
+
+    @pytest.fixture
+    def scope(self):
+        def bind(**environ):
+            return gateway_chat._gateway_profile_environment(environ)
+
+        return bind
+
+    def test_the_context_budget(self, scope, monkeypatch):
+        from api.streaming import _prefill_context_max_chars
+
+        monkeypatch.setenv("HERMES_WEBUI_PREFILL_CONTEXT_MAX_CHARS", "111")
+        assert _prefill_context_max_chars({}) == 111
+        with scope(HERMES_WEBUI_PREFILL_CONTEXT_MAX_CHARS="222"):
+            assert _prefill_context_max_chars({}) == 222
+        with scope():
+            assert _prefill_context_max_chars({"webui_prefill_context_max_chars": 333}) == 333
+
+    def test_the_script_timeout(self, scope, monkeypatch):
+        from api.streaming import _prefill_script_timeout
+
+        monkeypatch.setenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT", "7")
+        assert _prefill_script_timeout({}) == 7.0
+        with scope(HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT_TIMEOUT="9"):
+            assert _prefill_script_timeout({}) == 9.0
+        with scope():
+            assert _prefill_script_timeout({"webui_prefill_messages_script_timeout": 3}) == 3.0
+
+    def test_the_script(self, scope, monkeypatch):
+        from api.streaming import _load_prefill_messages_script
+
+        monkeypatch.setenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", "/nonexistent/process-script")
+        assert _load_prefill_messages_script({})["label"] == "process-script"
+        with scope(HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT="/nonexistent/snapshot-script"):
+            assert _load_prefill_messages_script({})["label"] == "snapshot-script"
+        with scope():
+            assert _load_prefill_messages_script({})["status"] == "not_configured"
+
+    def test_the_file(self, scope, monkeypatch, tmp_path):
+        from api.streaming import _load_webui_prefill_context
+
+        process = tmp_path / "process.json"
+        process.write_text(json.dumps([{"role": "assistant", "content": "process"}]), encoding="utf-8")
+        snapshot = tmp_path / "snapshot.json"
+        snapshot.write_text(json.dumps([{"role": "assistant", "content": "snapshot"}]), encoding="utf-8")
+        monkeypatch.setenv("HERMES_PREFILL_MESSAGES_FILE", str(process))
+
+        assert _load_webui_prefill_context({})["messages"][0]["content"] == "process"
+        with scope(HERMES_PREFILL_MESSAGES_FILE=str(snapshot)):
+            assert _load_webui_prefill_context({})["messages"][0]["content"] == "snapshot"
+        with scope():
+            assert _load_webui_prefill_context({})["status"] == "not_configured"
+
+    def test_the_file_named_in_a_budget_fallback(self, scope, monkeypatch, tmp_path):
+        """``_apply_prefill_context_budget`` reads the file setting again when
+        a script's output is over the budget."""
+        from api.streaming import _apply_prefill_context_budget
+
+        compact = tmp_path / "compact.json"
+        compact.write_text(json.dumps([{"role": "assistant", "content": "compact"}]), encoding="utf-8")
+        oversized = {
+            "status": "loaded", "source": "script", "label": "recall.py", "message_count": 1,
+            "messages": [{"role": "assistant", "content": "x" * 400}],
+        }
+        config = {"webui_prefill_context_max_chars": 100}
+        monkeypatch.setenv("HERMES_PREFILL_MESSAGES_FILE", "/nonexistent/process.json")
+
+        with scope(HERMES_PREFILL_MESSAGES_FILE=str(compact)):
+            inside = _apply_prefill_context_budget(dict(oversized), config)
+        with scope():
+            without = _apply_prefill_context_budget(dict(oversized), config)
+
+        assert [m["content"] for m in inside["messages"]] == ["compact"]
+        assert without["source"] == "budget_compacted"
