@@ -59,10 +59,18 @@ def test_production_skills_detail_and_mutation_ownership():
                 assert report['destinationRequests'] == 1, report
                 assert report['mutationsAfterSwitch'] == [], report
                 continue
+            if 'followups' in report and report['followups']:
+                # An applied superseded write reloads only this profile's list.
+                assert report['scenario'] in ('toggle', 'save', 'delete') and not report['error'], report
+                assert report['followups'] == [['/api/skills', 'A']], report
+                assert report['after']['data'][0]['description'] == 'refetched', report
+                assert 'refetched' in report['after']['list'], report
+                unchanged = lambda snap: {k: v for k, v in snap.items() if k not in ('data', 'list')}
+                assert unchanged(report['after']) == unchanged(report['before']), report
+                continue
+            if 'followups' in report:
+                assert report['scenario'] not in ('toggle', 'save', 'delete') or report['error'], report
             assert report['after'] == report['before'], report
-            if 'refetches' in report:
-                applied = report['scenario'] in ('toggle', 'save', 'delete') and not report['error']
-                assert report['refetches'] == (1 if applied else 0), report
             if report['scenario'].startswith('transport-'):
                 assert report['fetches'] == 1, report
                 assert report['mutationsAfterSwitch'] == [], report

@@ -5126,6 +5126,8 @@ let _editingSkillName = null;
 
 // Detail navigation and mutations belong to the accepted profile generation.
 // Request identity also prevents an older same-profile selection from publishing.
+// Bump the generation only on profile transitions: _ownsSkillProfile gates
+// post-write cache invalidation on it.
 let _skillDetailGeneration = 0;
 let _skillDetailRequest = 0;
 let _skillDeleteRequest = 0;
