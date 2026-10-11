@@ -8450,8 +8450,15 @@ function _sessionVirtualLayout(list, rows, query, activeSid){
     const lineageKey=_sidebarLineageKeyForRow(s);
     // Search can add/remove a preview without changing lineage. Include its
     // text and title/query inputs so offscreen measurements cannot survive it.
+    const lineageExpanded=_expandedLineageKeys.has(lineageKey);
+    // Batch checkboxes reduce the text width. Expanded earlier-turn rows also
+    // change after a report resolves, including while this parent is offscreen.
+    // Use the same report/local merge as the renderer, not the advertised count.
+    const segments=lineageExpanded&&window._sidebarDensity==='detailed'
+      ? _lineageSegmentsForRender(s,lineageKey,_lineageReportNeedsFetch(s,lineageKey,_sessionSegmentCount(s))) : [];
     const shape=JSON.stringify([summary,_sessionSegmentCount(s),s._child_session_count,
-      _expandedLineageKeys.has(lineageKey),_expandedChildSessionKeys.has(lineageKey),
+      lineageExpanded,_expandedChildSessionKeys.has(lineageKey),_sessionSelectMode,
+      segments.map(seg=>seg.session_id),
       query||'',query?_sessionDisplayTitle(s):'',_sessionSearchContentPreview(s,query),
       active?activeSid:'',_isSessionEffectivelyStreaming(s),_hasUnreadForSession(s)&&!active,!!_sessionAttentionState(s)]);
     const id=s.session_id,old=previous.get(id);

@@ -612,6 +612,12 @@ typography, theme or locale changes. Search query/title and content-preview text
 or visibility changes also invalidate a row's measurement, including offscreen
 rows. Selection changes, including selection through a lineage member, invalidate
 that row's retained height; selected heights do not seed unselected-row estimates.
+Batch-select entry and exit also invalidate retained heights because checkboxes
+reduce the text width. Expanded earlier-turn shapes include the identities from
+the renderer's local/report merge (not just the advertised segment count), so
+asynchronous report completion invalidates an offscreen parent's measurement
+before that parent reenters the window. Unseen expanded rows still use estimates;
+invalidation does not claim their exact height is known without rendering.
 Window selection and scroll callbacks, including pending animation frames,
 use content-coordinate offsets that include measured project/profile/archive
 controls and date headers. Group spacers use row-only prefix sums, so controls
