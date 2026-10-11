@@ -1812,3 +1812,55 @@ def test_the_save_marks_the_block_it_wrote_and_clears_it_on_the_next_pick(monkey
     assert config.PICKER_WRITTEN_FOR_FIELD not in on_disk["model"], (
         "a later pick for another provider must not keep a stale mark"
     )
+
+
+def test_a_pick_with_an_endpoint_and_key_override_keeps_the_override(
+    monkeypatch, tmp_path
+):
+    """The connection override in the same request is the user's own route (r17).
+
+    The mark records a COPY: the block the picker wrote to serve the selected fallback
+    entry, and the Save path clears it when the save rewrote the block's own connection
+    (r16). That cleanup ran only when the provider stayed the same, so a request that
+    picks ``晨光`` AND edits its endpoint and key in "Main model options" changed the
+    provider and rewrote the connection at once: the mark was written and kept, so
+    ``_model_block_mirrors_fallback_entry`` read the overridden block as a copy of the
+    entry's route, and the route kept sending to the entry's endpoint with the entry's
+    key instead of the connection the user had just saved. Master serves the saved
+    override here; this pins that pair.
+    """
+    U = "http://127.0.0.1:8317/v1"
+    U2 = "http://override.example/v1"
+    U_PREVIOUS = "http://previous.example/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        f"  base_url: {U_PREVIOUS}\n"
+        "custom_providers:\n"
+        "  - name: 晨光\n"
+        f"    base_url: {U}\n"
+        "    api_key: sk-entry\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    assert config.set_hermes_default_model(
+        "chat-model",
+        provider="custom:晨光",
+        advanced={"base_url": U2, "api_key": "sk-user"},
+    )["ok"] is True
+    on_disk = config._load_yaml_config_file(cfg_path)
+    config.cfg.clear()
+    config.cfg.update(on_disk)
+    assert config.resolve_custom_provider_connection("custom:晨光") == ("sk-user", U2), (
+        "the route serves the connection the user just saved, not the entry's"
+    )
+    assert on_disk["model"].get("base_url") == U2
+    assert on_disk["model"].get("api_key") == "sk-user"
+    assert config.PICKER_WRITTEN_FOR_FIELD not in on_disk["model"], (
+        "an override is the user's own route, so the picker's mark does not survive it"
+    )

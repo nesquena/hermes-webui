@@ -7128,16 +7128,22 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             for _cred_field in CUSTOM_CREDENTIAL_SOURCE_FIELDS:
                 model_cfg.pop(_cred_field, None)
 
+        before_advanced = dict(model_cfg)
         _apply_advanced_model_options(model_cfg, advanced)
         # The mark records a COPY: the block the picker wrote to serve a fallback entry.
-        # A save that keeps the provider but rewrites the block's own connection is not
-        # that write — it is the user editing the route through "Main model options" —
-        # so the copy is no longer faithful and the mark goes with it. Keeping it made
+        # A save that rewrites the block's own connection is not that write — it is the
+        # user editing the route through "Main model options" — so the copy is no longer
+        # faithful and the mark goes with it. Keeping it made
         # ``_model_block_mirrors_fallback_entry`` read the edited block as the entry's,
         # so the saved ``base_url`` lost to the list entry's old endpoint and its key,
         # and chat kept sending to the connection the user had just replaced (#8026 r16).
-        if persisted_provider == previous_provider and _model_block_connection_changed(
-            previous_config_data.get("model"), model_cfg
+        # That comparison is made against the block as the picker left it, i.e. before the
+        # advanced options are applied, and it holds whether or not the provider changed:
+        # one request can pick a fallback entry AND edit that entry's endpoint and key,
+        # and the override is the user's own route just as much (#8026 r17).
+        if _model_block_connection_changed(before_advanced, model_cfg) or (
+            persisted_provider == previous_provider
+            and _model_block_connection_changed(previous_config_data.get("model"), model_cfg)
         ):
             model_cfg.pop(PICKER_WRITTEN_FOR_FIELD, None)
         if not _main_model_supports_service_tier(persisted_model, persisted_provider):

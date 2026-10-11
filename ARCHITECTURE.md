@@ -1055,13 +1055,14 @@ endpoint. Two rules:
   mark for its own provider beside a same-slug fallback entry
   (`_model_block_mirrors_fallback_entry`) is that entry's connection, not a second
   authority — counting it would hide the entry the moment it was selected. The
-  Save path clears the mark on every later change that rewrites the block's own
-  connection without a selection: a pick of another provider, or a "Main model
-  options" save that changes `base_url` or a credential source. An edited block is
-  the user's own route again, so it owns the slug and its saved endpoint is the one
-  the route uses, as it did before the picker wrote anything; a block the user
-  wrote never carries the mark at all, and one the user has moved on from keeps
-  master's lookup.
+  Save path clears the mark on every save that rewrites the block's own connection:
+  a pick of another provider that writes nothing else, a "Main model options" save
+  that changes `base_url` or a credential source, or one request that does both at
+  once, where the connection the user saved is the route rather than the entry's
+  copy. An edited block is the user's own route again, so it owns the slug and its
+  saved endpoint is the one the route uses, as it did before the picker wrote
+  anything; a block the user wrote never carries the mark at all, and one the user
+  has moved on from keeps master's lookup.
 
 The connection a named route resolves and the slug it routes under are separate
 answers. An EXACT fallback entry that declares no credential of its own and either
