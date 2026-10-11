@@ -8566,7 +8566,15 @@ function _scheduleSessionVirtualizedRender(){
       const currentEnd=Number(liveList.dataset.sessionVirtualEnd||0);
       if(nextWindow.virtualized&&nextWindow.start===currentStart&&nextWindow.end===currentEnd) return;
     }
-    _repaintSidebarForBackgroundChurn();
+    if(typeof _projectPickerTeardown!=='undefined'&&_projectPickerTeardown!==null
+       &&typeof _projectPickerAnchorWithinSessionList==='function'&&!_projectPickerAnchorWithinSessionList()){
+      // The picker's anchor is outside the rows this rebuild replaces: paint
+      // now (deferring would show blank space while scrolling) and leave the
+      // picker to its own anchor observer.
+      _repaintSidebarKeepingProjectPicker();
+    }else{
+      _repaintSidebarForBackgroundChurn();
+    }
   });
 }
 
@@ -10542,8 +10550,33 @@ function _repaintSidebarForBackgroundChurn(){
 function _projectPickerBlocksRepaint(){
   if(typeof _projectPickerTeardown==='undefined'||_projectPickerTeardown===null) return false;
   if(typeof _sidebarRepaintBackgroundChurn!=='undefined'&&_sidebarRepaintBackgroundChurn) return true;
+  if(typeof _sidebarRepaintKeepProjectPicker!=='undefined'&&_sidebarRepaintKeepProjectPicker) return false;
   if(typeof _retireProjectPickerForExplicitRepaint==='function') _retireProjectPickerForExplicitRepaint();
   return false;
+}
+
+// True when the open picker is anchored to a row inside the session list — the
+// domain a sidebar rebuild replaces. A picker anchored outside it is untouched
+// by a row rebuild, so scroll-driven rebuilds must proceed instead of deferring
+// on it.
+function _projectPickerAnchorWithinSessionList(){
+  const open=typeof _openProjectPicker!=='undefined'?_openProjectPicker:null;
+  const anchor=open&&open.anchorEl;
+  if(!anchor||typeof anchor.closest!=='function') return false;
+  return Boolean(anchor.closest('#sessionList, .session-list'));
+}
+
+// A repaint that must not wait for the picker and must not retire it either:
+// the scroll-driven rebuild while the picker's anchor lives outside the rows
+// being replaced. A picker anchored elsewhere (a topbar title, a project chip)
+// survives a list rebuild, and deferring would leave blank space while the
+// user scrolls.
+let _sidebarRepaintKeepProjectPicker=false;
+function _repaintSidebarKeepingProjectPicker(){
+  const previous=_sidebarRepaintKeepProjectPicker;
+  _sidebarRepaintKeepProjectPicker=true;
+  try{ renderSessionListFromCache(); }
+  finally{ _sidebarRepaintKeepProjectPicker=previous; }
 }
 
 // Retire the picker ahead of an explicit repaint the user just asked for

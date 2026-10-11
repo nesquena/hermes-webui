@@ -1381,6 +1381,14 @@ def _repaint_sidebar_for_background_churn_source() -> str:
     return SESSIONS_JS[start:end] + "\n"
 
 
+def _repaint_sidebar_keeping_project_picker_source() -> str:
+    start = SESSIONS_JS.find("function _repaintSidebarKeepingProjectPicker(")
+    assert start >= 0, "_repaintSidebarKeepingProjectPicker not found in static/sessions.js"
+    end = SESSIONS_JS.find("\nfunction ", start + 1)
+    assert end > start
+    return SESSIONS_JS[start:end] + "\n"
+
+
 def _project_picker_blocks_repaint_source() -> str:
     start = SESSIONS_JS.find("function _projectPickerBlocksRepaint(")
     assert start >= 0, "_projectPickerBlocksRepaint not found in static/sessions.js"
@@ -1402,13 +1410,17 @@ def test_sidebar_repaint_guard_defers_background_churn_and_retires_for_user_inte
     script = r"""
 let _sessionListRepaintDeferredByPicker = false;
 let _sidebarRepaintBackgroundChurn = false;
+let _sidebarRepaintKeepProjectPicker = false;
 let _projectPickerTeardown = null;
 let retired = 0;
 const renderCalls = [];
-function renderSessionListFromCache(){ renderCalls.push(_sidebarRepaintBackgroundChurn); }
-""" + _retire_project_picker_for_explicit_repaint_source() + _repaint_sidebar_for_background_churn_source() + _project_picker_blocks_repaint_source() + r"""
+const keepCalls = [];
+function renderSessionListFromCache(){ renderCalls.push(_sidebarRepaintBackgroundChurn); keepCalls.push(_sidebarRepaintKeepProjectPicker); }
+""" + _retire_project_picker_for_explicit_repaint_source() + _repaint_sidebar_for_background_churn_source() + _repaint_sidebar_keeping_project_picker_source() + _project_picker_blocks_repaint_source() + r"""
 _repaintSidebarForBackgroundChurn();
 const wrapper = {callSawFlag: renderCalls[0] === true, flagRestored: _sidebarRepaintBackgroundChurn === false};
+_repaintSidebarKeepingProjectPicker();
+const keepWrapper = {callSawFlag: keepCalls[1] === true, flagRestored: _sidebarRepaintKeepProjectPicker === false};
 const retireSpy = () => { retired += 1; };
 const noPicker = {blocks: _projectPickerBlocksRepaint(), retired};
 _projectPickerTeardown = retireSpy;
@@ -1417,26 +1429,35 @@ const background = {blocks: _projectPickerBlocksRepaint(), retired, teardownKept
 _sidebarRepaintBackgroundChurn = false;
 _sessionListRepaintDeferredByPicker = true;
 const userIntent = {blocks: _projectPickerBlocksRepaint(), retired, teardownCleared: _projectPickerTeardown === null, flagFolded: _sessionListRepaintDeferredByPicker === false};
-console.log(JSON.stringify({wrapper, noPicker, background, userIntent}));
+_projectPickerTeardown = retireSpy;
+_sidebarRepaintKeepProjectPicker = true;
+const kept = {blocks: _projectPickerBlocksRepaint(), retired, teardownKept: _projectPickerTeardown === retireSpy};
+_sidebarRepaintKeepProjectPicker = false;
+console.log(JSON.stringify({wrapper, keepWrapper, noPicker, background, userIntent, kept}));
 """
     result = subprocess.run([NODE, "-e", script], check=False, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
     data = json.loads(result.stdout)
     assert data == {
         "wrapper": {"callSawFlag": True, "flagRestored": True},
+        "keepWrapper": {"callSawFlag": True, "flagRestored": True},
         "noPicker": {"blocks": False, "retired": 0},
         "background": {"blocks": True, "retired": 0, "teardownKept": True},
         "userIntent": {"blocks": False, "retired": 1, "teardownCleared": True, "flagFolded": True},
+        "kept": {"blocks": False, "retired": 1, "teardownKept": True},
     }
 
 
 def test_automatic_repaints_route_through_the_background_wrapper():
-    """Greptile P1 on the first push: automatic repaints must defer, not retire.
+    """Greptile P1s on the routing push: automatic repaints must defer, not retire.
 
     The lineage-report callbacks, the content-search reply and the scroll-driven
     virtual-window rebuild repaint from automatic updates; with the inverted
     guard an unmarked call would retire an open picker while the user is
-    choosing a project. All of them must run through the background wrapper.
+    choosing a project. All of them must run through the background wrapper —
+    and the scroll rebuild must still proceed (without retiring the picker)
+    when the picker's anchor is outside the list, or scrolling would show
+    blank space.
     """
     js = SESSIONS_JS
     assert js.count("_fetchLineageReportForRow(s,lineageKey).then(()=>_repaintSidebarForBackgroundChurn());") == 2
@@ -1453,7 +1474,12 @@ def test_automatic_repaints_route_through_the_background_wrapper():
     scroll_start = js.index("function _scheduleSessionVirtualizedRender(){")
     scroll_end = js.index("\nfunction ", scroll_start + 1)
     scroll_body = js[scroll_start:scroll_end]
+    # A picker anchored inside the list defers the rebuild; one anchored
+    # outside it must not stall the rebuild (blank space while scrolling).
+    assert "function _projectPickerAnchorWithinSessionList()" in js
+    assert "_projectPickerAnchorWithinSessionList()" in scroll_body
     assert "_repaintSidebarForBackgroundChurn();" in scroll_body
+    assert "_repaintSidebarKeepingProjectPicker();" in scroll_body
     assert "renderSessionListFromCache();" not in scroll_body
 
 
