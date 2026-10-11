@@ -42,6 +42,9 @@ def _deferred_parent_focus_script() -> str:
             "function paint(){",
             "  const host = document.getElementById('sessionList');",
             "  const owner = document.createElement('div'); owner.className = 'session-item'; owner.dataset.sid = 'owner';",
+            "  const actions = document.createElement('div'); actions.className = 'session-actions'; actions.style.display = 'none';",
+            "  const ownerAction = document.createElement('button'); ownerAction.className = 'session-actions-trigger'; ownerAction.dataset.sid = 'owner-action';",
+            "  actions.appendChild(ownerAction); owner.appendChild(actions);",
             "  const nested = document.createElement('div'); nested.className = 'session-child-session session-child-session-fork'; nested.dataset.sid = 'fork';",
             "  const nestedMain = document.createElement('button'); nestedMain.className = 'session-child-session-main'; nestedMain.dataset.sid = 'fork'; nestedMain.textContent = 'Fork'; nestedMain.onclick = () => opened.push('fork');",
             "  nested.appendChild(nestedMain); owner.appendChild(nested); host.replaceChildren(owner);",
@@ -86,7 +89,9 @@ def test_deferred_focus_restore_targets_only_owner_controls():
     close = _function_source("closeSessionActionMenu")
     assert "row.querySelector(':scope > .session-child-session-main')" in close
     assert "row.querySelector('.session-child-session-main')" not in close
-    assert "if(!ownAction&&!ownMain) row.tabIndex=-1;" in close
+    assert "if(!restored){" in close
+    assert "row.tabIndex=-1;" in close
+    assert close.index("if(!restored){") < close.index("row.tabIndex=-1;")
 
 
 def _fixture_script() -> str:

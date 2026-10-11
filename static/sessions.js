@@ -5359,12 +5359,20 @@ function closeSessionActionMenu({restoreFocus=false}={}){
       const ownMain=row.querySelector(':scope > .session-child-session-main');
       // A top-level row can contain expanded fork buttons. Never hand focus to
       // one of those descendants when restoring the owning conversation. If
-      // this read-only/hidden-action row has no direct control, make the owner
-      // itself programmatically focusable for this restoration.
-      if(!ownAction&&!ownMain) row.tabIndex=-1;
-      const candidates=[ownAction,ownMain,row];
+      // Try direct controls first. A touch layout can keep its direct action
+      // trigger in the DOM while hiding it, so only make the owner row
+      // programmatically focusable after neither direct control accepted focus.
+      let restored=false;
+      const candidates=[ownAction,ownMain];
       for(const candidate of candidates){
-        if(candidate&&_focusSessionActionMenuRestoreTarget(candidate)) break;
+        if(candidate&&_focusSessionActionMenuRestoreTarget(candidate)){
+          restored=true;
+          break;
+        }
+      }
+      if(!restored){
+        row.tabIndex=-1;
+        _focusSessionActionMenuRestoreTarget(row);
       }
     },0);
   }
