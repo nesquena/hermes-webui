@@ -1603,34 +1603,44 @@ def _custom_record_declares_credential_source(record: object) -> bool:
     return False
 
 
+# The provenance the Save cleanup writes on the ``model:`` block it rewrites: the
+# provider id the block now serves (#8026 r15). Nothing else sets it, so a block the
+# user wrote themselves never carries it, and the recorded id must still be the
+# block's own provider for it to mean anything. The Agent never reads the field.
+PICKER_WRITTEN_FOR_FIELD = "picker_written_for"
+
+
 def _model_block_mirrors_fallback_entry(
     model_cfg: object,
     model_provider: object,
     custom_providers: object = None,
 ) -> bool:
-    """True when a ``model:`` block is a WRITTEN COPY of a same-slug fallback entry.
+    """True when the picker WROTE this ``model:`` block for a fallback entry.
 
-    The default-model picker persists the selected entry's provider and
-    ``base_url`` into the ``model:`` block. For a non-ASCII entry the persisted
-    ``base_url`` is the entry's own endpoint, so the block adds no authority the
-    entry does not already hold — treating it as an owner hides the entry from
-    the picker and drops its credential. Count it as mirrored (not an owner) only
-    when the endpoint matches a same-slug fallback-derived entry's own endpoint;
-    a different or absent endpoint stays a genuine owner.
+    The Save cleanup records the provider id it rewrote the block for, in
+    ``model.picker_written_for`` (:data:`PICKER_WRITTEN_FOR_FIELD`). That write is
+    the only writer, so a block the user wrote never carries the mark, and the
+    recorded id has to still be the block's own provider: a block later aimed
+    elsewhere is an authority again.
 
-    Matching endpoints alone do not prove a copy: two credentialed authorities at
-    one URL are two accounts, and the request cannot say which to use. The match
-    counts only when at least one side declares no credential of its own — a
-    picker-written mirror is credentialless on the side the click did not serve,
-    while an independent ``model:`` route keeps its own key (#8026 r11).
+    Endpoint equality used to stand in for the mark, and it cannot tell the two
+    apart. A user-authored ``model: {provider: custom:<slug>, base_url: U}`` keyed
+    only through the convention variable, beside a keyless same-name list entry at
+    ``U``, read as a picker-written copy; its convention key was then refused, so
+    the route sent the dummy placeholder and answered ``auth_mismatch`` where master
+    completed (#8026 r15). The mark decides, equality no longer does.
+
+    A same-slug fallback entry must still exist. That keeps every refusal this
+    predicate makes one it already made: a block whose entry the user removed is
+    the only thing left on that slug, and it keeps master's lookup.
     """
     if not isinstance(model_cfg, dict) or not isinstance(custom_providers, list):
         return False
-    model_url = _normalize_base_url_for_match(model_cfg.get("base_url"))
-    if not model_url:
+    written_for = str(model_cfg.get(PICKER_WRITTEN_FOR_FIELD) or "").strip()
+    if not written_for:
         return False
     key = _custom_provider_slug_key(model_provider)
-    if not key:
+    if not key or _custom_provider_slug_key(written_for) != key:
         return False
     for entry in custom_providers:
         if not isinstance(entry, dict):
@@ -1638,22 +1648,7 @@ def _model_block_mirrors_fallback_entry(
         name = entry.get("name")
         if not str(name or "").strip() or not _custom_provider_slug_is_fallback(name):
             continue
-        if _custom_provider_slug_key(name) != key:
-            continue
-        entry_url = _normalize_base_url_for_match(entry.get("base_url"))
-        if entry_url == model_url and not (
-            _custom_record_declares_credential_source(model_cfg)
-            and _custom_record_declares_credential_source(entry)
-        ):
-            return True
-        if not entry_url:
-            # No endpoint of its own: the entry inherits the model connection (see
-            # ``_select_custom_provider_record``), so the block IS that entry's
-            # connection rather than a second authority. That holds whatever
-            # credential the entry declares: without an endpoint of its own the
-            # declared key has nowhere of its own to go, and refusing the
-            # inheritance left the newly named route with no endpoint at all
-            # (r9 CORE, 4223).
+        if _custom_provider_slug_key(name) == key:
             return True
     return False
 
@@ -7084,6 +7079,15 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
             if persisted_provider != previous_provider
             else None
         )
+        if persisted_provider != previous_provider:
+            # Record the provenance of THIS write, so the ownership scan can tell this
+            # block from one the user wrote: the block serves a fallback entry now, and
+            # only the Save path can know that. Cleared on every other provider change,
+            # so a block that has moved on does not keep a stale mark (#8026 r15).
+            if selected_fallback_entry is not None:
+                model_cfg[PICKER_WRITTEN_FOR_FIELD] = persisted_provider
+            else:
+                model_cfg.pop(PICKER_WRITTEN_FOR_FIELD, None)
         # The block now serves a fallback entry it did not serve before the click, so
         # whatever credential source it still carries was minted for the route it just
         # left. The picker rewrites ``model.provider`` and copies the entry's URL into

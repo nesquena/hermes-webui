@@ -977,13 +977,22 @@ def test_a_model_block_written_from_a_fallback_entry_does_not_shadow_it(monkeypa
     authenticated endpoint). An ASCII entry in the identical shape kept its
     identity, so this is the Unicode row failing to match the ASCII one.
 
+    The fixture carries the provenance mark that write leaves on the block
+    (``model.picker_written_for``, #8026 r15). Without it the block is a block the
+    user wrote, which is a different case with its own test.
+
     Asserted as a PAIR on the resolver (key AND url) and on the routed slug,
     because a wrong route with the right url is exactly the failure: the key is
     what went missing.
     """
     u = "http://one.example/v1"
     cfg_shape = {
-        "model": {"provider": "custom:晨光鑫遇专用", "base_url": u, "default": "chat-model"},
+        "model": {
+            "provider": "custom:晨光鑫遇专用",
+            "base_url": u,
+            "default": "chat-model",
+            config.PICKER_WRITTEN_FOR_FIELD: "custom:晨光鑫遇专用",
+        },
         "custom_providers": [
             {"name": "晨光鑫遇专用", "base_url": u, "api_key": "sk-entry", "model": "chat-model"},
         ],
@@ -1374,11 +1383,19 @@ def test_a_model_block_serving_a_keyless_fallback_entry_does_not_read_the_shared
     ``custom_providers``. A variable belonging to another provider then travelled to
     the newly selected endpoint. The block is that entry's route, so the fallback
     restriction applies to the model source too and the route fails closed.
+
+    The block carries the mark the picker's write leaves on it (#8026 r15), which is
+    what says it is a copy; a block the user wrote at the same endpoint is not one.
     """
     monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "sk-SHARED")
     u = "http://new-endpoint.example/v1"
     cfg_shape = {
-        "model": {"provider": "custom:晨光", "default": "chat-model", "base_url": u},
+        "model": {
+            "provider": "custom:晨光",
+            "default": "chat-model",
+            "base_url": u,
+            config.PICKER_WRITTEN_FOR_FIELD: "custom:晨光",
+        },
         "custom_providers": [{"name": "晨光", "base_url": u, "model": "chat-model"}],
     }
     monkeypatch.setattr(config, "cfg", dict(cfg_shape))
@@ -1634,3 +1651,88 @@ def test_a_model_blocks_name_never_names_a_provider(monkeypatch):
         cfg_shape["model"],
     ) == "custom:晨光", "an unclaimed fallback entry is still admitted"
 
+
+
+def test_a_user_written_block_keeps_its_convention_key_beside_a_keyless_entry(monkeypatch):
+    """r15 CORE: the refusal rests on provenance, not on endpoint equality.
+
+    The maintainer's case: a ``model: {provider: custom:晨光, base_url: U}`` block the
+    user wrote, keyed only through the convention variable, plus a keyless same-name
+    list entry at the same ``U`` (or with no ``base_url`` at all). Endpoint equality read
+    the block as a picker-written copy and refused ``CUSTOM_CUSTOM_API_KEY``, so the
+    request went out as ``Bearer dummy-key`` and answered ``auth_mismatch`` where master
+    completes.
+
+    Only the Save path writes the mark (``model.picker_written_for``), so a block without
+    it is an authority of its own and keeps master's lookup. The marked half of the same
+    shape is refused, so the mark is what decides rather than the pair of endpoints.
+    """
+    monkeypatch.setenv("CUSTOM_CUSTOM_API_KEY", "sk-user")
+    u = "http://user-authored.example/v1"
+    for entry in ({"name": "晨光", "base_url": u}, {"name": "晨光"}):
+        cfg_shape = {
+            "model": {"provider": "custom:晨光", "default": "chat-model", "base_url": u},
+            "custom_providers": [dict(entry)],
+        }
+        monkeypatch.setattr(config, "cfg", dict(cfg_shape))
+        monkeypatch.setattr(config, "get_config", lambda c=cfg_shape: c)
+
+        assert config._custom_provider_record_may_take_convention_key(
+            cfg_shape["model"], "model", cfg_shape
+        ), "a block the user wrote is not a picker-written copy"
+        assert config.resolve_custom_provider_connection("custom:晨光") == ("sk-user", u), (
+            "the user-authored route keeps the convention key at its own endpoint"
+        )
+
+        cfg_marked = {
+            "model": dict(
+                cfg_shape["model"], **{config.PICKER_WRITTEN_FOR_FIELD: "custom:晨光"}
+            ),
+            "custom_providers": [dict(entry)],
+        }
+        monkeypatch.setattr(config, "cfg", dict(cfg_marked))
+        monkeypatch.setattr(config, "get_config", lambda c=cfg_marked: c)
+        assert not config._custom_provider_record_may_take_convention_key(
+            cfg_marked["model"], "model", cfg_marked
+        ), "the picker's own write is a copy of the entry's route, and is refused"
+
+
+def test_the_save_marks_the_block_it_wrote_and_clears_it_on_the_next_pick(monkeypatch, tmp_path):
+    """The Save path is the only writer of the provenance mark (r15).
+
+    Picking the fallback entry records the provider the block now serves, which is the
+    fact the ownership scan cannot otherwise know. Picking anything else clears it: the
+    block has moved on, and a stale mark would refuse the convention key on a route that
+    has nothing to do with an entry any more.
+    """
+    U = "http://127.0.0.1:8317/v1"
+    cfg_path = _write_cfg(
+        tmp_path,
+        "model:\n"
+        "  provider: custom\n"
+        "  default: old-model\n"
+        f"  base_url: {U}\n"
+        "custom_providers:\n"
+        "  - name: 晨光\n"
+        f"    base_url: {U}\n"
+        "    model: chat-model\n",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+
+    _load(cfg_path)
+    assert config.set_hermes_default_model("chat-model", provider="custom:晨光")["ok"] is True
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert on_disk["model"].get(config.PICKER_WRITTEN_FOR_FIELD) == "custom:晨光", (
+        "the picker's write records the entry it wrote the block for"
+    )
+    assert config._model_block_mirrors_fallback_entry(
+        on_disk["model"], "custom:晨光", on_disk.get("custom_providers")
+    ), "and the ownership scan reads that mark"
+
+    assert config.set_hermes_default_model("gpt-5.5", provider="openai")["ok"] is True
+    on_disk = config._load_yaml_config_file(cfg_path)
+    assert config.PICKER_WRITTEN_FOR_FIELD not in on_disk["model"], (
+        "a later pick for another provider must not keep a stale mark"
+    )
