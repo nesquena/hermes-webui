@@ -81,6 +81,24 @@ def contrast(a, b):
     return (light + .05) / (dark + .05)
 
 
+def settled_row_style(page, selector):
+    """Wait for CSS transitions and three identical rendered-style frames."""
+    return page.evaluate('''selector=>new Promise((resolve,reject)=>{
+      const deadline=setTimeout(()=>reject(new Error('row styles did not settle in 3s')),3000);
+      let previous=null,stable=0;
+      const sample=()=>{
+        const row=document.querySelector(selector),ancestors=[];
+        for(let e=row;e;e=e.parentElement) ancestors.push(e);
+        const transitioning=ancestors.some(e=>e.getAnimations({subtree:false}).some(a=>
+          a instanceof CSSTransition&&a.playState==='running'));
+        const value=rowStyle(selector),serialized=JSON.stringify(value);
+        stable=!transitioning&&serialized===previous?stable+1:0;
+        previous=serialized;
+        if(stable>=3){clearTimeout(deadline);resolve(value);}else requestAnimationFrame(sample);
+      };requestAnimationFrame(sample);
+    })''', selector)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path, required=True)
@@ -138,19 +156,15 @@ def main():
                             selector = '.session-child-session-' + kind
                             page.evaluate('s=>scene(false,s,"other",true)', state)
                             page.mouse.move(viewport-1, 799)
-                            page.wait_for_timeout(180)
-                            idle = page.evaluate('rowStyle', selector)
+                            idle = settled_row_style(page, selector)
                             page.locator(selector).hover()
-                            page.wait_for_timeout(180)
-                            hover = page.evaluate('rowStyle', selector)
+                            hover = settled_row_style(page, selector)
                             if skin == 'graphite' and state == 'approval' and kind == 'delegated':
                                 page.screenshot(path=str(args.output / f'{viewport}-{dark}-hover.png'))
                             page.mouse.move(viewport-1, 799)
-                            page.wait_for_timeout(180)
-                            leave = page.evaluate('rowStyle', selector)
+                            leave = settled_row_style(page, selector)
                             page.evaluate('([s,k])=>scene(false,s,k,true)', [state, kind])
-                            page.wait_for_timeout(180)
-                            selected = page.evaluate('rowStyle', selector)
+                            selected = settled_row_style(page, selector)
                             failures = []
                             if idle['background'] == selected['background'] or hover['background'] != selected['background']:
                                 failures.append('hover/selection not distinguishable from idle attention')

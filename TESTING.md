@@ -300,6 +300,35 @@ exercised without relying on hover. `--before-ref <commit>` exercises the exact 
 and returns failure when the regression is present. JSON and screenshots are
 written to the chosen artifact directory.
 
+## Restored-child and sidebar state-projection gates
+
+```bash
+python tests/browser_session_child_restore.py --output /path/to/restore-artifacts
+python tests/browser_session_state_projection.py --output /path/to/projection-artifacts
+```
+
+The restore gate starts an isolated Agent-free `server.py`, API-imports 200
+conversations and overlays only delegated metadata on the sidebar payload.
+It drives real `loadSession` navigation with 120 parent conversations (the
+expanded parent at position 100), first/last of 80 children from scroll 0/2000,
+20 children in Detailed density, 30 children, 12 children from the bottom and
+last of 40. Its 16 desktop/mobile scenes require the active child wholly inside
+the real list viewport and bounded virtual DOM. Mobile screenshots open the
+production drawer; `--repo PATH` replays the same probe against a control tree.
+A failure on master is control evidence, not automatically a candidate regression.
+
+The 12-case state-projection gate uses production rendering and CSS: it caches a
+Russian prior-turns summary at 180px with 1,000 segments, scrolls it offscreen,
+and changes the parent's running/unread/approval gutter in both directions.
+It demonstrates the real height change and requires stale measurements to be
+invalidated. Separate collapsed→expanded→collapsed scenes pair a visible approval
+child with reference-only archived running work; the chip keeps that activity,
+without duplicating supplemental activity when only visible children run. Both
+scripts have exact-count pytest wrappers in `test_session_child_restore_browser.py`.
+The finishing-UX driver waits for CSS transitions and three identical rendered
+style frames, bounded to three seconds, before comparing idle/hover/leave/selected
+paint; the selection/attention assertions are unchanged.
+
 ## Project picker keyboard and touch gate
 
 The browser smoke job also runs `tests/browser_project_picker_keyboard.py`, which imports two

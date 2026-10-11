@@ -8015,6 +8015,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
     delete row._child_sessions;
     delete row._child_session_count;
     delete row._child_session_streaming;
+    delete row._child_session_hidden_streaming;
     delete row._child_session_has_unread;
     delete row._child_session_attention;
     delete row._child_session_latest_at;
@@ -8170,6 +8171,7 @@ function _attachChildSessionsToSidebarRows(collapsedRows, rawSessions, rawRefere
         parentRow._child_session_count=parentRow._child_sessions.length;
       }
       bubbleSidebarState(parentRow, childCopy);
+      if((!childRenderable||isHiddenLineageReferenceChild)&&isChildStreaming(childCopy)) parentRow._child_session_hidden_streaming=true;
       visibleBySegmentSid.set(childCopy.session_id,{row: parentRow, seg: childCopy});
     } else if(childRenderable) {
       // #5305: a delegated subagent child whose WebUI parent is NOT a visible
@@ -8451,7 +8453,7 @@ function _sessionVirtualLayout(list, rows, query, activeSid){
     const shape=JSON.stringify([summary,_sessionSegmentCount(s),s._child_session_count,
       _expandedLineageKeys.has(lineageKey),_expandedChildSessionKeys.has(lineageKey),
       query||'',query?_sessionDisplayTitle(s):'',_sessionSearchContentPreview(s,query),
-      active?activeSid:'']);
+      active?activeSid:'',_isSessionEffectivelyStreaming(s),_hasUnreadForSession(s)&&!active,!!_sessionAttentionState(s)]);
     const id=s.session_id,old=previous.get(id);
     if(old&&old.shape===shape) layout.measured.set(id,old);
     return {id,shape,summary,active,group:row.group.label};
@@ -9306,8 +9308,10 @@ function renderSessionListFromCache(){
     const activeRow=renderedVirtualRows.find(row=>row.index===activeIndex);
     list.scrollTop=listScrollTopBeforeRender;
     if(activeRow){
-      const rect=activeRow.el.getBoundingClientRect(),top=list.getBoundingClientRect().top;
-      const alreadyVisible=rect.bottom>top&&rect.top<top+list.clientHeight;
+      const target=Array.from(activeRow.el.querySelectorAll('[data-sid]')).find(el=>el.dataset.sid===activeSidForSidebar)
+        ||activeRow.el.querySelector('.session-title-row')||activeRow.el;
+      const rect=target.getBoundingClientRect(),top=list.getBoundingClientRect().top;
+      const alreadyVisible=rect.top>=top&&rect.bottom<=top+list.clientHeight;
       if(!alreadyVisible) list.scrollTop=Math.max(0,list.scrollTop+rect.top-top-(list.clientHeight-rect.height)/2);
     }
   }else if(listScrollTopBeforeRender>0){
@@ -9533,7 +9537,7 @@ function renderSessionListFromCache(){
         const concurrentUnread=childState.hasUnread&&(childAttention||childState.isStreaming)?` · ${t('session_child_unread')}`:'';
         childCountEl.title=`${state.title}${concurrentRunning}${concurrentUnread} · ${childBadgeTip}`;
         // Both marks belong to the child aggregate, never to the parent's dot.
-        if(childAttention&&childState.isStreaming&&!childrenExpanded){
+        if(childAttention&&childState.isStreaming&&(!childrenExpanded||s._child_session_hidden_streaming)){
           childCountEl.appendChild(_createChildSessionStateIndicator(
             {isStreaming:true},'session-child-activity-indicator'));
         }

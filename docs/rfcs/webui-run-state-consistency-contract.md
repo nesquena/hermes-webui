@@ -566,8 +566,9 @@ from notification: when children are collapsed and an attention mark occupies
 the child chip's slot, a second spinner inside that chip exposes concurrent
 child work without implying parent activity or replacing the parent's own unread
 or attention cue. Running-only children use the chip's single spinner. Expanded
-children show activity on their own rows; the parent's own running spinner
-remains regardless of expansion. A
+children show activity on their own rows; reference-only running work retains
+the in-chip spinner even when other, navigable children are expanded. The parent's
+own running spinner remains regardless of expansion. A
 reference-only archived child with no expandable rows is treated as collapsed.
 The activity projection clears when child work settles and does not acknowledge
 anything. A separate status mark on the
@@ -622,8 +623,12 @@ of following a moved conversation into its new group, including non-virtual list
 reload and leaving search can bring an off-window active conversation into view
 using the rendered row's position, including preceding controls and date headers.
 Overscan membership is not viewport visibility: activation/filter transitions
-check the actual row rectangle, preserving an already visible target. Ordinary
-scroll refreshes do not recenter an unchanged active conversation.
+check the actual nested child/lineage row matching the active session, falling
+back to the parent's title row. A target is already visible only when its whole
+rectangle is inside the viewport; the height of an expanded parent block is not
+an active-child anchor. Own running/unread/attention gutter changes invalidate
+retained offscreen heights because they can wrap the prior-turns summary.
+Ordinary scroll refreshes do not recenter an unchanged active conversation.
 After measurement and anchor restoration, the measured content-coordinate
 window must cover the viewport without requiring another scroll event. An
 uncovered viewport queues one generation-guarded animation-frame correction;
