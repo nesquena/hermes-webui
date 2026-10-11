@@ -5299,6 +5299,12 @@ function _showBatchProjectPicker(openerEl){
   _focusProjectPickerItem(picker);
 }
 
+// A finger's events all go to the element it first touched. A pen's go to
+// whatever is under it, unless the pointer is captured, as here, until it lifts.
+function _keepPenOnPressedElement(e){
+  try{e.target.setPointerCapture(e.pointerId);}catch(_){}
+}
+
 function _focusSessionActionMenuRestoreTarget(target){
   if(!target||!target.isConnected||typeof target.focus!=='function') return false;
   try{target.focus({preventScroll:true});}catch(_){target.focus();}
@@ -5461,7 +5467,13 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   _positionSessionActionMenu(anchorEl);
   _playSessionActionMenuEntrance(menu);
   const menuItems=()=>Array.from(menu.querySelectorAll('.session-action-opt:not([disabled])'));
+  // True while a Tab pressed in the menu moves the focus.
+  let leavingByTab=false;
   menu.addEventListener('keydown',e=>{
+    if(e.key==='Tab'){
+      leavingByTab=true;
+      setTimeout(()=>{leavingByTab=false;},0);
+    }
     const items=menuItems();
     if(e.key==='Escape'){
       e.preventDefault();
@@ -5487,8 +5499,10 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   // focus, and the browser's own mousedown for that touch drops focus on
   // <body>: the arrow keys, Home and End then go to the page behind. While
   // this menu is open, focus that lands nowhere comes back to the row it left.
+  // Tab from the last row lands nowhere too, on its way out of the page: that
+  // is the keyboard leaving the menu, and it is let go.
   menu.addEventListener('focusout',e=>{
-    if(e.relatedTarget) return;
+    if(e.relatedTarget||leavingByTab) return;
     const from=e.target;
     setTimeout(()=>{
       if(_sessionActionMenu!==menu||!menu.isConnected) return;
@@ -5804,6 +5818,8 @@ function _openSessionActionMenu(session, anchorEl){
     return;
   }
   closeSessionActionMenu();
+  // A long press or a right click sends no click to close an open picker.
+  _dismissOpenProjectPicker();
   const isMessagingSession = _isMessagingSession(session);
   const isCliSession = _isCliSession(session);
   const isExternalSession = isMessagingSession || isCliSession;
@@ -9603,6 +9619,8 @@ function renderSessionListFromCache(){
         rowEl.onpointerdown=(e)=>{
           if(e.pointerType==='mouse'||e.button!==0||_isForkActionTarget(e.target)) return;
           _beginForkGesture(e.clientX,e.clientY,e.pointerType||'');
+          // As on a conversation's row: a pen's release and click stay here.
+          if(e.pointerType==='pen') _keepPenOnPressedElement(e);
           if(e.pointerType==='touch'||e.pointerType==='pen') _scheduleForkLongPressMenu();
         };
         rowEl.onpointermove=(e)=>{
@@ -10105,6 +10123,11 @@ function renderSessionListFromCache(){
       if(_isSessionActionTarget(e.target)) return;
       _beginSessionGesture(e.clientX,e.clientY,e.pointerType||'');
       if(e.pointerType==='pen'){
+        // The long press opens the ⋮ menu, which may lie under the pen when
+        // it lifts. Its release and its click must still come to this row,
+        // which ends the press and counts the click as its own; on the menu
+        // the click belongs to neither and closes the menu as one outside it.
+        _keepPenOnPressedElement(e);
         _scheduleSessionLongPressMenu();
       }
     };
@@ -10529,6 +10552,16 @@ function _showProjectPicker(session, anchorEl){
 // The open single-conversation picker, for the resize listener below. A closed
 // picker is found out by being detached, so no close path has to clear this.
 let _openProjectPicker=null;
+
+// For the ⋮ menu that opens next. A click outside the picker closes it, but a
+// long press has its click cancelled (it would run the menu row under the
+// finger) and a right click sends none. Focus is not handed back: the menu
+// takes it.
+function _dismissOpenProjectPicker(){
+  const open=_openProjectPicker;
+  _openProjectPicker=null;
+  if(open&&open.picker.isConnected) open.dismiss({restoreFocus:false});
+}
 
 function _positionProjectPicker(picker, anchorEl){
   const rect=anchorEl.getBoundingClientRect();

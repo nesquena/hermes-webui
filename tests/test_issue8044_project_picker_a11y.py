@@ -643,7 +643,7 @@ def test_focus_that_falls_out_of_the_open_menu_onto_nothing_comes_back():
     mount = _between(SESSIONS_JS, "function _mountSessionActionMenu(", "function _findSessionRenameRow(")
     handler = _between(mount, "menu.addEventListener('focusout',e=>{", "const firstAction=menuItems()[0];")
 
-    assert "if(e.relatedTarget) return;" in handler
+    assert "if(e.relatedTarget||leavingByTab) return;" in handler
     assert "if(_sessionActionMenu!==menu||!menu.isConnected) return;" in handler
     assert "if(active&&active!==document.body&&active!==document.documentElement) return;" in handler
     assert "row.focus({preventScroll:true})" in handler
@@ -690,3 +690,49 @@ def test_a_touch_on_the_menu_button_is_never_the_one_that_gets_cancelled():
     assert handler.count(leave) == 1
     assert handler.index(leave) < handler.index("_longPressMenuOpened")
 
+
+def test_tab_out_of_the_menu_is_not_brought_back():
+    """Tab from the last row also leaves focus on nothing, on its way out of
+    the page. The flag is up only while that key moves the focus: a finger
+    lifting later is still brought back."""
+    mount = _between(SESSIONS_JS, "function _mountSessionActionMenu(", "function _findSessionRenameRow(")
+    keys = _between(mount, "menu.addEventListener('keydown',e=>{", "menu.addEventListener('focusout',e=>{")
+
+    assert mount.count("let leavingByTab=false;") == 1
+    assert "if(e.key==='Tab'){\n      leavingByTab=true;\n      setTimeout(()=>{leavingByTab=false;},0);\n    }" in keys
+    # Before the Escape branch returns, and Tab itself is left to the browser.
+    assert keys.index("leavingByTab=true;") < keys.index("if(e.key==='Escape'){")
+    assert "e.key==='Tab'" not in keys[keys.index("if(e.key==='Escape'){") :]
+
+
+def test_a_pen_stays_on_the_row_it_pressed_until_it_lifts():
+    """A pen sends no touch events, and its release and click go to what is
+    under it: the menu its own long press opened. Captured, they come to the
+    row, as a finger's do. What a pen pointer then does is in the browser gate."""
+    helper = _between(SESSIONS_JS, "function _keepPenOnPressedElement(e){", "\n}\n")
+    assert "try{e.target.setPointerCapture(e.pointerId);}catch(_){}" in helper
+
+    down = _between(SESSIONS_JS, "    el.onpointerdown=(e)=>{", "    el.onpointermove=(e)=>{")
+    pen = _between(down, "if(e.pointerType==='pen'){", "\n    };")
+    assert pen.index("_keepPenOnPressedElement(e);") < pen.index("_scheduleSessionLongPressMenu();")
+    # Not for a press on the ⋮ button, which begins no gesture on the row.
+    assert down.index("if(_isSessionActionTarget(e.target)) return;") < down.index("_keepPenOnPressedElement(e);")
+
+    fork = _between(SESSIONS_JS, "        rowEl.onpointerdown=(e)=>{", "        rowEl.onpointermove=(e)=>{")
+    assert "if(e.pointerType==='pen') _keepPenOnPressedElement(e);" in fork
+    assert fork.index("_isForkActionTarget(e.target)) return;") < fork.index("_keepPenOnPressedElement(e);")
+    assert SESSIONS_JS.count("_keepPenOnPressedElement(e);") == 2
+
+
+def test_opening_the_menu_closes_a_picker_left_open():
+    """A long press sends no click any more and a right click never did, so
+    the picker's own close-on-outside-click cannot be what closes it."""
+    opener = _between(SESSIONS_JS, "function _openSessionActionMenu(session, anchorEl){", "const menu=document.createElement('div');")
+    assert opener.count("_dismissOpenProjectPicker();") == 1
+    # After the toggle that closes the same row's menu and leaves.
+    assert opener.index("return;") < opener.index("_dismissOpenProjectPicker();")
+    assert SESSIONS_JS.count("_dismissOpenProjectPicker();") == 1
+
+    dismiss = _between(SESSIONS_JS, "function _dismissOpenProjectPicker(){", "\n}\n")
+    assert "if(open&&open.picker.isConnected) open.dismiss({restoreFocus:false});" in dismiss
+    assert "_openProjectPicker=null;" in dismiss
