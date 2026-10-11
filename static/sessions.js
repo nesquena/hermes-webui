@@ -5300,9 +5300,13 @@ function _showBatchProjectPicker(openerEl){
 }
 
 // A finger's events all go to the element it first touched. A pen's go to
-// whatever is under it, unless the pointer is captured, as here, until it lifts.
-function _keepPenOnPressedElement(e){
-  try{e.target.setPointerCapture(e.pointerId);}catch(_){}
+// whatever is under it, unless the pointer is captured, as here, until it
+// lifts. `press` is the pen's pointerdown: done when its long press opens the
+// ⋮ menu and not from the press on, or a pen dragged off a button and lifted
+// elsewhere would click the button.
+function _keepPenOnPressedElement(press){
+  if(!press) return;
+  try{press.target.setPointerCapture(press.pointerId);}catch(_){}
 }
 
 function _focusSessionActionMenuRestoreTarget(target){
@@ -9480,6 +9484,7 @@ function renderSessionListFromCache(){
         let _gestureState='idle';
         let _swipeTracking=false;
         let _gesturePointerType='';
+        let _penPress=null;  // the pen's pointerdown, for the long press
         let _clearDragTimer=null;
         let _longPressTimer=null;
         let _longPressMenuOpened=false;
@@ -9510,6 +9515,8 @@ function renderSessionListFromCache(){
             if(_gestureState!=='pressing'||_renamingSid||_sessionSelectMode) return;
             _longPressMenuOpened=true;
             rowEl._skipNextChildOpen=true;
+            // As on a conversation's row: the pen's release and click stay here.
+            if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);
             _openSessionActionMenu(childSession, rowEl);
           },SESSION_LONG_PRESS_DELAY_MS);
         };
@@ -9619,8 +9626,7 @@ function renderSessionListFromCache(){
         rowEl.onpointerdown=(e)=>{
           if(e.pointerType==='mouse'||e.button!==0||_isForkActionTarget(e.target)) return;
           _beginForkGesture(e.clientX,e.clientY,e.pointerType||'');
-          // As on a conversation's row: a pen's release and click stay here.
-          if(e.pointerType==='pen') _keepPenOnPressedElement(e);
+          if(e.pointerType==='pen') _penPress=e;
           if(e.pointerType==='touch'||e.pointerType==='pen') _scheduleForkLongPressMenu();
         };
         rowEl.onpointermove=(e)=>{
@@ -9893,6 +9899,7 @@ function renderSessionListFromCache(){
     let _pointerX=0;
     let _pointerY=0;
     let _gesturePointerType='';
+    let _penPress=null;  // the pen's pointerdown, for the long press
     const _clearLongPressTimer=()=>{
       if(_longPressTimer){clearTimeout(_longPressTimer);_longPressTimer=null;}
       if(!_longPressMenuOpened) el.classList.remove('long-pressing');
@@ -9920,6 +9927,11 @@ function renderSessionListFromCache(){
         clearTimeout(_tapTimer);
         _tapTimer=null;
         _lastTapTime=0;
+        // The menu may open under the pen. Its release and its click must
+        // still come to this row, which ends the press and counts the click
+        // as its own; on the menu the click belongs to neither and closes the
+        // menu as one outside it.
+        if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);
         _openSessionActionMenu(s, el);
       },SESSION_LONG_PRESS_DELAY_MS);
     };
@@ -10123,11 +10135,7 @@ function renderSessionListFromCache(){
       if(_isSessionActionTarget(e.target)) return;
       _beginSessionGesture(e.clientX,e.clientY,e.pointerType||'');
       if(e.pointerType==='pen'){
-        // The long press opens the ⋮ menu, which may lie under the pen when
-        // it lifts. Its release and its click must still come to this row,
-        // which ends the press and counts the click as its own; on the menu
-        // the click belongs to neither and closes the menu as one outside it.
-        _keepPenOnPressedElement(e);
+        _penPress=e;
         _scheduleSessionLongPressMenu();
       }
     };

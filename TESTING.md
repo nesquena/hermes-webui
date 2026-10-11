@@ -193,16 +193,18 @@ button, which must open the menu. Three more paths of real input follow: at
 1440x900 a right click on a row and then keys only, where Tab from the first
 row must reach the second (and focus the script then blurs must come back to
 it), End the last, and three Tabs from there must leave the menu and reach a
-control of the page, with the menu still open and Escape closing it; a pen (the browser's pen pointer, which sends pointer events and a
-click and no touch events) held on a conversation at 390x844 and on a fork at
-844x390 where the menu opens over it, and lifted, after which the menu must
-still be open with focus in it, no menu row clicked and no request sent, and
-the next pen tap must run the menu row it lands on, or open the fork; and one
-conversation's picker left open while another row's ⋮ menu is opened, by a
-long press at 390x844 and by a right click at 1440x900, after which the picker
-must be gone and Escape must leave neither open. A hardware keyboard on a
-phone, a real rotation, a real finger and a real stylus are not checked. In a
-long list the focused row must be inside
+control of the page, with the menu still open and Escape closing it; a pen (the
+browser's pen pointer, which sends pointer events and a click and no touch
+events) held on a conversation at 390x844 and on a fork at 844x390 where the
+menu opens over it, and lifted, after which the menu must still be open with
+focus in it, no menu row clicked and no request sent, and the next pen tap must
+run the menu row it lands on, or open the fork, while a pen pressed on a fork
+at 390x844, dragged off it at once and lifted on another row must neither click
+nor open the fork; and one conversation's picker left open while another row's
+⋮ menu is opened, by a long press at 390x844 and by a right click at 1440x900,
+after which the picker must be gone and Escape must leave neither open. A
+hardware keyboard on a phone, a real rotation, a real finger and a real stylus
+are not checked. In a long list the focused row must be inside
 the picker's box, or, in the batch picker, scrolled onto the screen by the
 conversation list. With a mouse on the light theme, a keyboard-focused row's
 ring must be the skin's `--accent-text` at 3:1 or more against the picker

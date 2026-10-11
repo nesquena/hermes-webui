@@ -65,7 +65,8 @@ WHAT IT CHECKS
     touch events) held on a row where the menu opens over it, 390x844, and on
     a fork at 844x390, and lifted: the menu stays open with focus in it, no
     menu row is clicked, no request is sent, and the next pen tap runs the
-    menu row or opens the fork;
+    menu row or opens the fork; and a pen pressed on a fork, dragged off it at
+    once and lifted on another row (390x844) neither clicks nor opens the fork;
   - with one conversation's picker open, another row's menu opened by a long
     press (390x844) or a right click (1440x900): the picker closes, and
     Escape leaves neither open.
@@ -930,7 +931,7 @@ def _pen(session, kind, point):
     session.send(
         "Input.dispatchMouseEvent",
         {"type": kind, "x": point["x"], "y": point["y"], "button": "left", "clickCount": 1,
-         "buttons": 1 if kind == "mousePressed" else 0, "pointerType": "pen"},
+         "buttons": 0 if kind == "mouseReleased" else 1, "pointerType": "pen"},
     )
 
 
@@ -1348,6 +1349,66 @@ def _check_pen_long_press_keeps_the_menu(browser, seed, *, fork):
             opened = page.evaluate(FORK_ROW_JS, seed["beta"])
             if opened and not opened["active"]:
                 failures.append(f"  [{label}] a pen tap on the fork afterwards did not open it")
+        failures.extend(f"  [{label}] pageerror: {err}" for err in errors)
+    finally:
+        ctx.close()
+    return failures
+
+
+# What is under a point: the fork's own button, or something else.
+ON_FORK_BUTTON_JS = """({sid, x, y}) => {
+  const parent = document.querySelector('.session-item[data-sid="' + sid + '"]');
+  const main = parent && parent.querySelector('.session-child-session .session-child-session-main');
+  const hit = document.elementFromPoint(x, y);
+  return !!(main && hit && main.contains(hit));
+}"""
+
+
+def _check_pen_drag_off_a_fork_opens_nothing(browser, seed):
+    """A pen pressed on a fork, dragged off it at once and lifted somewhere
+    else. That is no click on the fork, and it must not open it: the pen is
+    kept on the row it pressed only once its long press has opened the menu,
+    not from the press on. Returns failure lines."""
+    label = "pen pressed on a fork, dragged off and lifted at 390x844"
+    ctx, page, errors = _new_page(
+        browser, viewport={"width": 390, "height": 844}, has_touch=True, is_mobile=True
+    )
+    if page is None:
+        return [f"  [{label}] {errors}"]
+    failures = []
+    try:
+        _open_mobile_drawer(page)
+        page.evaluate("renderSessionList()")
+        page.wait_for_timeout(SETTLE_MS)
+        placed = page.evaluate(TALL_ANCHOR_AT_JS, {"sid": seed["beta"], "offset": 300})
+        if placed.get("problem"):
+            return [f"  [{label}] {placed['problem']}"]
+        page.wait_for_timeout(SETTLE_MS)
+        fork = page.evaluate(FORK_ROW_JS, seed["beta"])
+        if not fork:
+            return [f"  [{label}] the parent has no fork row"]
+        if fork["active"]:
+            return [f"  [{label}] the fork is already the open conversation, so nothing can be told"]
+        # Straight up, past the parent's own row and onto the conversation above.
+        away = {"x": fork["x"], "y": fork["y"] - 160}
+        if page.evaluate(ON_FORK_BUTTON_JS, {"sid": seed["beta"], **away}):
+            return [f"  [{label}] the pen would lift on the fork's button, so nothing was tested"]
+        page.evaluate(RECORD_CLICKS_JS)
+        pen = ctx.new_cdp_session(page)
+        _pen(pen, "mousePressed", fork)
+        for step in range(1, 9):
+            _pen(pen, "mouseMoved", {"x": fork["x"], "y": fork["y"] - 20 * step})
+            page.wait_for_timeout(20)
+        _pen(pen, "mouseReleased", away)
+        page.wait_for_timeout(SETTLE_MS)
+        clicks = [click for click in page.evaluate("() => window.__clicks") if click.startswith("fork")]
+        if clicks:
+            failures.append(f"  [{label}] lifting the pen away from the fork clicked {clicks}")
+        after = page.evaluate(FORK_ROW_JS, seed["beta"])
+        if after and after["active"]:
+            failures.append(f"  [{label}] the fork was opened")
+        if page.evaluate("() => !!document.querySelector('.session-action-menu')"):
+            failures.append(f"  [{label}] the ⋮ menu opened")
         failures.extend(f"  [{label}] pageerror: {err}" for err in errors)
     finally:
         ctx.close()
@@ -2630,6 +2691,10 @@ def main():
                 failures.extend(found)
                 if not found:
                     print(f"OK  ⋮ menu, pen held and lifted over the menu on {'a fork at 844x390' if fork else 'a conversation at 390x844'} — the menu stays open, nothing runs, the next pen tap works")
+            found = _check_pen_drag_off_a_fork_opens_nothing(browser, seed)
+            failures.extend(found)
+            if not found:
+                print("OK  pen pressed on a fork, dragged off it and lifted at 390x844 — the fork is not clicked and does not open")
             for touch in (True, False):
                 found = _check_a_new_menu_closes_the_picker(browser, seed, touch=touch)
                 failures.extend(found)

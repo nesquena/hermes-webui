@@ -705,23 +705,34 @@ def test_tab_out_of_the_menu_is_not_brought_back():
     assert "e.key==='Tab'" not in keys[keys.index("if(e.key==='Escape'){") :]
 
 
-def test_a_pen_stays_on_the_row_it_pressed_until_it_lifts():
+def test_a_pen_stays_on_the_row_it_pressed_once_its_long_press_opens_the_menu():
     """A pen sends no touch events, and its release and click go to what is
     under it: the menu its own long press opened. Captured, they come to the
-    row, as a finger's do. What a pen pointer then does is in the browser gate."""
-    helper = _between(SESSIONS_JS, "function _keepPenOnPressedElement(e){", "\n}\n")
-    assert "try{e.target.setPointerCapture(e.pointerId);}catch(_){}" in helper
+    row, as a finger's do. Captured from the press on, a pen dragged off a
+    fork's button and lifted elsewhere would click the button, so the press is
+    only noted, and the capture is the long press's. What a pen pointer then
+    does is in the browser gate."""
+    helper = _between(SESSIONS_JS, "function _keepPenOnPressedElement(press){", "\n}\n")
+    assert "try{press.target.setPointerCapture(press.pointerId);}catch(_){}" in helper
+    capture = "if(_gesturePointerType==='pen') _keepPenOnPressedElement(_penPress);"
+    assert SESSIONS_JS.count("_keepPenOnPressedElement(") == 3  # the helper and the two long presses
 
     down = _between(SESSIONS_JS, "    el.onpointerdown=(e)=>{", "    el.onpointermove=(e)=>{")
-    pen = _between(down, "if(e.pointerType==='pen'){", "\n    };")
-    assert pen.index("_keepPenOnPressedElement(e);") < pen.index("_scheduleSessionLongPressMenu();")
+    assert "_penPress=e;" in _between(down, "if(e.pointerType==='pen'){", "\n    };")
+    assert "setPointerCapture" not in down and "_keepPenOnPressedElement" not in down
     # Not for a press on the ⋮ button, which begins no gesture on the row.
-    assert down.index("if(_isSessionActionTarget(e.target)) return;") < down.index("_keepPenOnPressedElement(e);")
+    assert down.index("if(_isSessionActionTarget(e.target)) return;") < down.index("_penPress=e;")
+    timer = _between(SESSIONS_JS, "    const _scheduleSessionLongPressMenu=()=>{", "    const _isSessionSwipeTarget=")
+    assert timer.count(capture) == 1
+    assert timer.index("_longPressMenuOpened=true;") < timer.index(capture) < timer.index("_openSessionActionMenu(s, el);")
 
     fork = _between(SESSIONS_JS, "        rowEl.onpointerdown=(e)=>{", "        rowEl.onpointermove=(e)=>{")
-    assert "if(e.pointerType==='pen') _keepPenOnPressedElement(e);" in fork
-    assert fork.index("_isForkActionTarget(e.target)) return;") < fork.index("_keepPenOnPressedElement(e);")
-    assert SESSIONS_JS.count("_keepPenOnPressedElement(e);") == 2
+    assert "if(e.pointerType==='pen') _penPress=e;" in fork
+    assert "setPointerCapture" not in fork and "_keepPenOnPressedElement" not in fork
+    assert fork.index("_isForkActionTarget(e.target)) return;") < fork.index("_penPress=e;")
+    timer = _between(SESSIONS_JS, "        const _scheduleForkLongPressMenu=()=>{", "        const _paintForkSwipe=")
+    assert timer.count(capture) == 1
+    assert timer.index("_longPressMenuOpened=true;") < timer.index(capture) < timer.index("_openSessionActionMenu(childSession, rowEl);")
 
 
 def test_opening_the_menu_closes_a_picker_left_open():
