@@ -1408,6 +1408,352 @@ def _is_known_model_provider(provider_id: str) -> bool:
     return False
 
 
+def _non_ascii_fallback_slug(raw: str) -> str:
+    """Slug for a name whose ASCII identifier characters are all absent.
+
+    A name such as a pure-CJK ``晨光鑫遇专用`` has none of ``[a-z0-9._-]``, so the
+    ASCII slug would be empty and the whole ``custom_providers[]`` entry dropped
+    from the catalog. The Agent resolves such a name to ``custom:<name>`` by
+    keeping its characters (``custom_provider_slug()`` lowercases and folds
+    spaces, nothing else), so stripping them here is what puts the WebUI out of
+    step with the identity the CLI mints — the entry vanishes from the picker
+    while ``hermes`` keeps using it.
+
+    This reproduces that vocabulary CHARACTER FOR CHARACTER, because the picker
+    emits the id the Agent has to resolve: lowercase, ``" "`` -> ``"-"``, and
+    every other character kept. Folding ``:`` or collapsing repeated dashes here
+    would mint an id the Agent does not recognize for the same entry, so
+    selecting such a model would not reach its endpoint. ``raw`` arrives already
+    lowercased and stripped by the caller.
+
+    A ``:`` is the one exception, and it is fatal rather than cosmetic: the
+    qualified-model hint is ``@custom:<name>:<model>``, and a name that itself
+    carries a colon gives that string a segment the parser cannot attribute —
+    ``@custom:晨光:鑫遇:model-a`` splits into provider ``custom:晨光`` and model
+    ``鑫遇:model-a``. The endpoint then vanishes and sending fails with
+    ``unowned_custom_provider``. The ASCII path folds ``:`` for exactly this
+    reason, so a name with one takes the same route rather than keeping its own
+    characters, and returns ``""`` here to fall through to the ASCII slug.
+
+    The other guard is that ``raw`` must actually contain a non-ASCII character.
+    An all-ASCII name reaches this fallback exactly when its ASCII fold is empty,
+    and those names never had a fallback identity: on master they minted nothing.
+    The names that fold to empty are ``-`` and ``()`` — punctuation that the
+    ASCII class drops. ``_`` and ``.`` do NOT fold away; they are identifier
+    characters, so a name made of them keeps the ASCII slug (``custom:_``) on
+    both master and this branch. Only a name whose characters the ASCII class
+    cannot represent needs the name kept.
+    """
+    if raw.isascii() or ":" in raw:
+        return ""
+    return raw.replace(" ", "-")
+
+
+def _ascii_provider_slug(raw: str) -> str:
+    """The ASCII-only slug shape for ``raw`` (lowercased, stripped by caller).
+
+    ONE definition, because two rules depend on it staying in lockstep: the
+    producer below mints with it, and :func:`_custom_provider_slug_is_fallback`
+    decides a name took the fallback precisely when this returns empty.
+    """
+    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
+    return re.sub(r"-{2,}", "-", slug)
+
+
+def _custom_provider_slug_is_fallback(name: object) -> bool:
+    """True when ``name``'s identity comes from the non-ASCII fallback (#8017).
+
+    A ``custom:``-prefixed name, or one with ANY ASCII identifier character,
+    already had an identity before this change. Only a name whose ASCII fold is
+    empty takes :func:`_non_ascii_fallback_slug`, and only those identities are
+    new — so only those can collide with an owner that predates them.
+    """
+    raw = str(name or "").strip().lower()
+    if not raw or raw.startswith("custom:"):
+        return False
+    return not _ascii_provider_slug(raw) and bool(_non_ascii_fallback_slug(raw))
+
+
+def _custom_provider_identity_owners(
+    custom_providers: object = None,
+    providers_cfg: object = None,
+    model_cfg: object = None,
+) -> set[str]:
+    """Bare slugs that an EXISTING rule already owns, ignoring fallback identities.
+
+    "Existing" means a ``custom:``-prefixed name or a name with ASCII identifier
+    characters (both pre-date #8017), plus every ``providers:`` record key or
+    display name, plus an explicitly named, connection-owning ``model:`` record. A
+    fallback-derived identity is admissible only when this set does not already
+    contain its slug, which is what stops a legacy entry (or a keyed
+    ``providers:`` record) from being shadowed by a newer identity.
+
+    The ``model:`` arm is load-bearing for a real setup: with
+    ``model.provider: custom:晨光`` pointing at its own url and key, plus a list
+    entry named ``晨光``, the list entry is fallback-derived and would otherwise
+    claim ``custom:晨光`` and REPLACE the model-owned connection, so the resolved
+    key became the dummy and the request 401'd. The model block names this slug by
+    its ``provider`` field, so it is an existing owner. It counts only when it
+    actually owns a connection (see :func:`_custom_record_owns_connection`), since
+    a bare ``model:`` block that only sets ``provider`` declares no endpoint or
+    credential of its own to protect.
+
+    Both vocabularies are covered the same way the rest of this module does:
+    ``_custom_provider_slug_key`` for the WebUI's own mint, applied to the record
+    key AND its ``name``, so ``providers: {custom:晨光: ...}`` and
+    ``providers: {晨光: {name: custom:晨光}}`` both count as owners.
+
+    A generic record that belongs to no slug by its own key — ``providers['custom']``,
+    or a bare-``custom`` ``model:`` block — owns one only by NAMING it, through its
+    display ``name`` or its ``provider_key``. ``name`` is read only for a
+    ``providers:`` record: a ``model:`` block's ``name`` is the MODEL's name and names
+    no provider (#8026 r14).
+    """
+    owners: set[str] = set()
+    if isinstance(custom_providers, list):
+        for entry in custom_providers:
+            if not isinstance(entry, dict):
+                continue
+            name = entry.get("name")
+            if not str(name or "").strip() or _custom_provider_slug_is_fallback(name):
+                continue
+            key = _custom_provider_slug_key(name)
+            if key:
+                owners.add(key)
+    if isinstance(providers_cfg, dict):
+        for record_key, record in providers_cfg.items():
+            values = [record_key]
+            if isinstance(record, dict):
+                # A generic ``providers['custom']`` record belongs to no slug by its own
+                # key, so it owns one only by NAMING it: by display ``name`` (the Hermes
+                # v12 alias shape) or by ``provider_key``, the identity field the
+                # installed Agent's own alias matcher reads. Omitting ``provider_key``
+                # left such a record invisible here, so a new same-slug fallback entry
+                # minted the identity and the alias-owned route switched endpoints and
+                # failed ``auth_mismatch`` where master completed (#8026 r14).
+                values.append(record.get("name"))
+                values.append(record.get("provider_key"))
+            for value in values:
+                if not str(value or "").strip():
+                    continue
+                key = _custom_provider_slug_key(value)
+                if key:
+                    owners.add(key)
+    if isinstance(model_cfg, dict) and model_cfg:
+        model_provider = str(model_cfg.get("provider") or "").strip().lower()
+        # Which slug does this block claim? A ``custom:<slug>`` provider names it
+        # directly. A bare ``custom`` block belongs to no slug by itself, so it claims
+        # one only through an identity field of its own (``provider_key`` /
+        # ``custom_provider``): ``name`` is excluded because a ``model:`` block's
+        # ``name`` is the MODEL's name and names no provider (#8026 r14).
+        model_slug = (
+            _custom_provider_slug_key(model_provider) if model_provider.startswith("custom:") else ""
+        )
+        if not model_slug and model_provider == "custom":
+            for _identity_field in _CUSTOM_RECORD_IDENTITY_FIELDS:
+                if _identity_field == "name":
+                    continue
+                claimed = _custom_provider_slug_key(model_cfg.get(_identity_field))
+                if claimed and claimed != "custom":
+                    model_slug = claimed
+                    break
+        # ``enabled`` is checked HERE as well as at selection time. A disabled
+        # record is invisible to the Agent's resolver, so it must not own a route
+        # either: without this, a switched-off ``model:`` block still claimed its
+        # slug and hid a valid same-slug ``custom_providers[]`` entry, leaving the
+        # named route with no connection at all.
+        if (
+            model_slug
+            and _raw_provider_record_enabled(model_cfg)
+            and _custom_record_owns_connection(model_cfg, model_provider)
+            # A ``model:`` block that the default-model picker wrote carries the
+            # entry's OWN endpoint (see ``set_hermes_default_model``) and the mark
+            # that records that write. It names the slug, but it is a copy of the
+            # entry's connection rather than a separate authority, so it must not
+            # shadow the entry it was written from — otherwise the first click
+            # removes the entry from the picker and routes the next send by the
+            # keyless placeholder (401). A block the user wrote never carries the
+            # mark and still counts, and so does one whose connection a later save
+            # rewrote: that block is the user's own route again.
+            and not _model_block_mirrors_fallback_entry(model_cfg, model_slug, custom_providers)
+        ):
+            owners.add(model_slug)
+    return owners
+
+
+def _custom_record_declares_credential_source(record: object) -> bool:
+    """True when ``record`` carries a credential-source field of its own.
+
+    Used to tell a picker-WRITTEN mirror of a fallback entry from an INDEPENDENT
+    model route at the same endpoint. Two credentialed authorities at one URL are
+    ambiguous — they can be two accounts, and URL equality cannot say which the
+    request should use — so equality is evidence of a copy only when at least one
+    side declares no credential of its own (#8026 r11). Declaration only: a
+    literal key, ``${ENV}``, ``key_env``, ``key_cmd`` or a configured pool all
+    count, resolved or not.
+    """
+    if not isinstance(record, dict):
+        return False
+    for field in CUSTOM_CREDENTIAL_SOURCE_FIELDS:
+        if field == "credential_pool":
+            if record.get(field) is not None:
+                return True
+            continue
+        if str(record.get(field) or "").strip():
+            return True
+    return False
+
+
+# The provenance the Save cleanup writes on the ``model:`` block it rewrites: the
+# provider id the block now serves (#8026 r15). Nothing else sets it, so a block the
+# user wrote themselves never carries it, and the recorded id must still be the
+# block's own provider for it to mean anything. The Agent never reads the field.
+PICKER_WRITTEN_FOR_FIELD = "picker_written_for"
+# The connection the Save cleanup left on the block when it wrote that mark: the
+# endpoint and every credential source the block carried at the moment of the write.
+# The mark is only trustworthy while the block still declares this connection. A CLI
+# or hand edit of ``model.base_url``/``api_key`` after the picker Save leaves the mark
+# behind on a block that no longer matches it, so the block is the user's own route
+# again (#8026 r18). The Agent never reads this field either.
+PICKER_WRITTEN_CONNECTION_FIELD = "picker_written_connection"
+
+
+def _model_block_mirrors_fallback_entry(
+    model_cfg: object,
+    model_provider: object,
+    custom_providers: object = None,
+) -> bool:
+    """True when the picker WROTE this ``model:`` block for a fallback entry.
+
+    The Save cleanup records the provider id it rewrote the block for, in
+    ``model.picker_written_for`` (:data:`PICKER_WRITTEN_FOR_FIELD`). That write is
+    the only writer, so a block the user wrote never carries the mark, and the
+    recorded id has to still be the block's own provider: a block later aimed
+    elsewhere is an authority again.
+
+    Endpoint equality used to stand in for the mark, and it cannot tell the two
+    apart. A user-authored ``model: {provider: custom:<slug>, base_url: U}`` keyed
+    only through the convention variable, beside a keyless same-name list entry at
+    ``U``, read as a picker-written copy; its convention key was then refused, so
+    the route sent the dummy placeholder and answered ``auth_mismatch`` where master
+    completed (#8026 r15). The mark decides, equality no longer does.
+
+    A same-slug fallback entry must still exist. That keeps every refusal this
+    predicate makes one it already made: a block whose entry the user removed is
+    the only thing left on that slug, and it keeps master's lookup.
+
+    The mark is only read while the block still declares the connection the Save
+    cleanup recorded beside it (``model.picker_written_connection``). A CLI or hand
+    edit of the block's endpoint or key after the picker Save leaves the mark behind
+    on a block that no longer matches, so the mark is stale and the edited block is
+    the user's own route again (#8026 r18).
+    """
+    if not isinstance(model_cfg, dict) or not isinstance(custom_providers, list):
+        return False
+    written_for = str(model_cfg.get(PICKER_WRITTEN_FOR_FIELD) or "").strip()
+    if not written_for:
+        return False
+    if not _picker_written_mark_still_describes_block(model_cfg):
+        return False
+    key = _custom_provider_slug_key(model_provider)
+    if not key or _custom_provider_slug_key(written_for) != key:
+        return False
+    for entry in custom_providers:
+        if not isinstance(entry, dict):
+            continue
+        name = entry.get("name")
+        if not str(name or "").strip() or not _custom_provider_slug_is_fallback(name):
+            continue
+        if _custom_provider_slug_key(name) == key:
+            return True
+    return False
+
+
+def _model_block_connection_changed(before: object, after: object) -> bool:
+    """True when two ``model:`` blocks declare different connections.
+
+    Compares the endpoint and every credential source, because those are what the
+    route resolver and the ownership scan read. An absent field and an explicit
+    ``None`` are one state: a block that never carried a key has not changed one
+    away. Used to tell the picker's own write (a copy of a fallback entry) from a
+    later edit of the same block, which is the user's own route again (#8026 r16).
+    """
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    for field in ("base_url", *CUSTOM_CREDENTIAL_SOURCE_FIELDS):
+        if before.get(field) != after.get(field):
+            return True
+    return False
+
+
+def _model_block_connection_fingerprint(model_cfg: object) -> dict:
+    """The connection fields a ``model:`` block declares, as plain values.
+
+    Exactly the endpoint and credential sources :func:`_model_block_connection_changed`
+    compares. A field the block does not carry is absent from the result, so an absent
+    field and an explicit ``None`` stay one state here too. Stored beside the copy mark
+    and re-derived at read time, so a block edited after the picker wrote it no longer
+    matches its own mark (#8026 r18).
+    """
+    if not isinstance(model_cfg, dict):
+        return {}
+    fingerprint: dict[str, object] = {}
+    for field in ("base_url", *CUSTOM_CREDENTIAL_SOURCE_FIELDS):
+        value = model_cfg.get(field)
+        if value is not None:
+            fingerprint[field] = value
+    return fingerprint
+
+
+def _picker_written_mark_still_describes_block(model_cfg: object) -> bool:
+    """True when the picker's copy mark still describes ``model_cfg``'s connection.
+
+    The Save cleanup writes the mark and, beside it, the connection it wrote
+    (``model.picker_written_connection``). A CLI or hand edit of ``model.base_url`` or
+    a credential source after the picker Save leaves the mark on a block that no longer
+    matches, so the mark is stale and the block is the user's own route again (#8026
+    r18). A block that carries the mark but no recorded connection predates the
+    fingerprint, so the mark is read exactly as it was before.
+    """
+    if not isinstance(model_cfg, dict):
+        return False
+    recorded = model_cfg.get(PICKER_WRITTEN_CONNECTION_FIELD)
+    if not isinstance(recorded, dict):
+        return True
+    return _model_block_connection_fingerprint(model_cfg) == recorded
+
+
+def _custom_provider_entry_identity(
+    entry: object,
+    custom_providers: object = None,
+    providers_cfg: object = None,
+    model_cfg: object = None,
+) -> str:
+    """The identity ONE ``custom_providers[]`` entry may own, or ``""`` when shadowed.
+
+    Existing owners come first: a fallback-derived identity is admitted only when
+    no pre-existing entry, ``providers:`` record or connection-owning ``model:``
+    block already owns its slug. A shadowed entry mints nothing, which is exactly
+    what it did on master for the names that produced no slug, so it is excluded
+    from routing and from catalog ownership instead of taking the identity of the
+    record that was already there.
+
+    The unconstrained producer :func:`_custom_provider_slug_from_name` still mints
+    the fallback id for a name in isolation; this is the cfg-aware view the
+    consumers of an ENTRY use.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    name = entry.get("name")
+    produced = _custom_provider_slug_from_name(name)
+    if not produced or not _custom_provider_slug_is_fallback(name):
+        return produced
+    owners = _custom_provider_identity_owners(custom_providers, providers_cfg, model_cfg)
+    if _custom_provider_slug_key(name) in owners:
+        return ""
+    return produced
+
+
 def _custom_provider_slug_from_name(name: object) -> str:
     raw = str(name or "").strip().lower()
     if not raw:
@@ -1416,9 +1762,15 @@ def _custom_provider_slug_from_name(name: object) -> str:
         return raw
     # Keep name-derived custom provider slugs out of the @provider:model colon
     # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
-    # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
-    slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
-    slug = re.sub(r"-{2,}", "-", slug)
+    # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'. The
+    # ASCII substitution folds a ':' to '-' below; the non-ASCII fallback refuses
+    # one too, for the same reason (see its docstring).
+    slug = _ascii_provider_slug(raw)
+    if not slug:
+        # No ASCII identifier characters survived. Falling back to the empty
+        # string drops the entry; keep the name's own characters so the WebUI
+        # mints the same ``custom:<name>`` the Agent resolves it to.
+        slug = _non_ascii_fallback_slug(raw)
     if not slug:
         return ""
     return "custom:" + slug
@@ -1527,11 +1879,15 @@ def _merge_model_option_rows(*row_lists: object) -> list[dict[str, str]]:
 
 
 def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    entries = _custom_provider_entries(source)
+    providers_cfg = source.get("providers") if isinstance(source, dict) else None
+    model_cfg = source.get("model") if isinstance(source, dict) else None
     return {
         slug
         for slug in (
-            _custom_provider_slug_from_name(entry.get("name"))
-            for entry in _custom_provider_entries(config_obj)
+            _custom_provider_entry_identity(entry, entries, providers_cfg, model_cfg)
+            for entry in entries
         )
         if slug
     }
@@ -1545,9 +1901,12 @@ def _named_custom_provider_slug_for_provider(
     if not raw:
         return ""
     raw_suffix = raw.removeprefix("custom:")
-    for entry in _custom_provider_entries(config_obj):
+    entries = _custom_provider_entries(config_obj)
+    providers_cfg = config_obj.get("providers") if isinstance(config_obj, dict) else None
+    model_cfg = config_obj.get("model") if isinstance(config_obj, dict) else None
+    for entry in entries:
         entry_name = str(entry.get("name") or "").strip().lower()
-        slug = _custom_provider_slug_from_name(entry_name)
+        slug = _custom_provider_entry_identity(entry, entries, providers_cfg, model_cfg)
         if not entry_name or not slug:
             continue
         if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
@@ -1686,13 +2045,75 @@ _LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
 
 
 def _api_key_env_name(provider_id: object) -> str:
-    """Return the POSIX-safe default API-key env var for a custom provider id."""
+    """Return the POSIX-safe default API-key env var for a custom provider id.
+
+    Derived from the WHOLE id, so ids that differ stay distinct: ``custom:foo``
+    -> ``CUSTOM_FOO_API_KEY`` and ``custom:custom_foo`` ->
+    ``CUSTOM_CUSTOM_FOO_API_KEY``. Deriving it from only the part after
+    ``custom:`` collapses those two onto one variable, which is the same leak in
+    the opposite direction.
+
+    This is deliberately the WHOLE-id rule and nothing narrower. An id alone
+    cannot tell a pre-existing ``custom:晨光`` entry from one the #8026 fallback
+    minted from the bare name ``晨光``: both ids are ``custom:晨光``, and
+    ``custom:晨光鑫遇专用`` sanitizes to the same constant ``CUSTOM`` as the plain
+    ``custom:_``. Narrowing here by the id's characters therefore also denies
+    the convention variable to entries that read it on master (the #8026 round-4
+    regression). Deciding which entry may take the shared name is a RECORD-level
+    question, answered by the caller from the record's own ``name``: see
+    :func:`_custom_provider_record_may_take_convention_key`.
+    """
     sanitized = re.sub(r"[^A-Za-z0-9]", "_", str(provider_id or "")).upper().strip("_")
     if not sanitized:
         sanitized = "CUSTOM"
     if not sanitized.startswith("CUSTOM_"):
         sanitized = f"CUSTOM_{sanitized}"
     return f"{sanitized}_API_KEY"
+
+
+def _custom_provider_record_may_take_convention_key(
+    record: object,
+    source: object = None,
+    cfg_data: object = None,
+) -> bool:
+    """May this custom-provider RECORD read the ``CUSTOM_<SLUG>_API_KEY`` name?
+
+    False only for a NEWLY ADMITTED fallback entry: a record that comes from the
+    ``custom_providers`` list AND whose ``name`` is one the #8026 fallback minted
+    (see :func:`_custom_provider_slug_is_fallback`). Those ids sanitize to the
+    shared constant ``CUSTOM``, so two of them would read one variable and the
+    key of the first would travel to the second's endpoint.
+
+    The ``model:`` source is refused on the same terms when its block MIRRORS a
+    fallback entry (see :func:`_model_block_mirrors_fallback_entry`). The picker
+    rewrites ``model.provider`` to the entry's id on selection, so the block reads
+    the shared name that the entry itself is denied, and a variable belonging to
+    another provider would travel to the newly selected endpoint (#8026 r11).
+
+    Every other record keeps master's lookup: a ``custom:``-prefixed name and a
+    name with ASCII identifier characters both pre-date #8026, and a ``providers:``
+    record or an ordinary ``model:`` route is an already-keyed authority.
+    Suppressing the lookup for those would send ``dummy-key`` to an endpoint that
+    authenticates today.
+    """
+    if str(source or "") == "model":
+        # Only a MIRROR is refused: the block is that fallback entry's route rather
+        # than a separate authority. A ``model:`` route at its own endpoint, or
+        # one naming an ASCII/prefixed provider, keeps master's lookup.
+        if (
+            isinstance(cfg_data, dict)
+            and isinstance(record, dict)
+            and _model_block_mirrors_fallback_entry(
+                record, record.get("provider"), cfg_data.get("custom_providers")
+            )
+        ):
+            return False
+        return True
+    if str(source or "") != "custom_providers":
+        return True
+    if not isinstance(record, dict):
+        return True
+    return not _custom_provider_slug_is_fallback(record.get("name"))
 
 
 def _legacy_custom_api_key_env_name(provider_id: object) -> str:
@@ -1704,7 +2125,12 @@ def _legacy_custom_api_key_env_name(provider_id: object) -> str:
 
 
 def _lookup_custom_api_key_env(provider_id: object) -> str | None:
-    """Look up sanitized custom-provider env first, then legacy broken shape."""
+    """Look up sanitized custom-provider env first, then legacy broken shape.
+
+    This reads whatever variable the NAME resolves to; it does not decide whether
+    this provider is entitled to it. That is a record-level question, answered by
+    the caller through :func:`_custom_provider_record_may_take_convention_key`.
+    """
     env_name = _api_key_env_name(provider_id)
     api_key = _thread_local_env_value(env_name).strip()
     if api_key:
@@ -1732,11 +2158,14 @@ def _named_custom_provider_slug_for_base_url(
     target = _normalize_base_url_for_match(base_url)
     if not target:
         return ""
-    for entry in _custom_provider_entries(config_obj):
+    entries = _custom_provider_entries(config_obj)
+    providers_cfg = config_obj.get("providers") if isinstance(config_obj, dict) else None
+    model_cfg = config_obj.get("model") if isinstance(config_obj, dict) else None
+    for entry in entries:
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        return _custom_provider_entry_identity(entry, entries, providers_cfg, model_cfg) or "custom"
     return ""
 
 
@@ -2596,8 +3025,14 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     prov = str(config_provider or "").strip().lower()
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
-        for entry in _custom_provider_entries():
-            slug = _custom_provider_slug_from_name(entry.get("name"))
+        _entries = _custom_provider_entries()
+        for entry in _entries:
+            slug = _custom_provider_entry_identity(
+                entry,
+                _entries,
+                cfg.get("providers") if isinstance(cfg, dict) else None,
+                cfg.get("model") if isinstance(cfg, dict) else None,
+            )
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
                 continue
@@ -2822,7 +3257,12 @@ def _custom_provider_slug_key(value: object) -> str:
     return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
 
 
-def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> dict | None:
+def _unique_custom_provider_entry(
+    custom_providers: object,
+    slug_key: str,
+    providers_cfg: object = None,
+    model_cfg: object = None,
+) -> dict | None:
     """Return the single named ``custom_providers`` entry matching ``slug_key``.
 
     Pure and lock-safe: operates only on the passed-in list, so it can be called
@@ -2834,9 +3274,17 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     entries share the key so an endpoint and an API key can never be resolved
     from different entries on any path. Returns the matching entry, or ``None``
     when no entry matches.
+
+    An entry that only reaches this slug through the non-ASCII fallback is
+    skipped when a pre-existing entry or keyed ``providers:`` record already owns
+    it (#8026): the fallback identity is admitted only for a slug no legacy name
+    claims, so a config holding both ``custom:晨光`` and ``晨光`` keeps resolving
+    the entry it always did instead of failing closed on an identity this change
+    introduced.
     """
     if not slug_key or not isinstance(custom_providers, list):
         return None
+    owners = _custom_provider_identity_owners(custom_providers, providers_cfg, model_cfg)
     matches: list[dict] = []
     for entry in custom_providers:
         if not isinstance(entry, dict):
@@ -2844,8 +3292,13 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        if _custom_provider_slug_key(name) == slug_key:
-            matches.append(entry)
+        if _custom_provider_slug_key(name) != slug_key:
+            continue
+        if _custom_provider_slug_is_fallback(name) and slug_key in owners:
+            # Fallback-derived, and a legacy entry or keyed record already owns
+            # this slug: this entry minted nothing before the change either.
+            continue
+        matches.append(entry)
     if len(matches) >= 2:
         names = [str(e.get("name") or "").strip() for e in matches]
         raise AmbiguousCustomProviderError(
@@ -2927,6 +3380,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             _unique_custom_provider_entry(
                 cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider),
+                cfg.get('providers'),
+                cfg.get('model'),
             )
         return model, provider, base_url
 
@@ -3033,11 +3488,16 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # never blocks a request that resolves to a different provider.
         if _active_custom_slug:
             _active_key = _custom_provider_slug_key(_active_custom_slug)
+            _providers_cfg_for_identity = cfg.get('providers')
+            _model_cfg_for_identity = cfg.get('model')
             _active_owner = next(
                 (
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
+                    and _custom_provider_entry_identity(
+                        e, custom_providers, _providers_cfg_for_identity, _model_cfg_for_identity
+                    )
                     and _custom_provider_slug_key(e.get('name')) == _active_key
                 ),
                 None,
@@ -3065,7 +3525,18 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 entry_model_ids.add(entry_model)
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
-                provider_hint = _custom_provider_slug_from_name(entry_name)
+                provider_hint = _custom_provider_entry_identity(
+                    entry, custom_providers, cfg.get('providers'), cfg.get('model')
+                )
+                if not provider_hint:
+                    # No identity at all for this entry: keep master's pair anyway, which
+                    # is the EMPTY provider plus the entry's own URL. Do NOT skip here. A
+                    # ``continue`` looks safe because a fallback-derived name mints nothing
+                    # on its own, but when a prefixed sibling already owns the identity the
+                    # skip drops the model to the DEFAULT endpoint (404) where master routed
+                    # it to this entry's URL (200). The empty hint is the answer, not a
+                    # reason to keep looking.
+                    return _finalize(model_id, provider_hint, entry_base_url or None)
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
                 return _finalize(model_id, provider_hint, entry_base_url or None)
@@ -3166,6 +3637,8 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             entry = _unique_custom_provider_entry(
                 cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider_hint),
+                cfg.get('providers'),
+                cfg.get('model'),
             )
             if entry is not None:
                 base_url = str(entry.get('base_url') or '').strip() or None
@@ -3219,7 +3692,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
-                        _slug = _custom_provider_slug_from_name(prefix)
+                        _slug = _custom_provider_entry_identity(
+                            _entry, _custom_cfg, cfg.get("providers"), cfg.get("model")
+                        )
+                        # Keep master's pair even when the identity is empty: the empty
+                        # slug plus this entry's own URL. The empty slug is not a reason to
+                        # skip; skipping drops the request to the default endpoint where
+                        # master answered from this entry.
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 
@@ -3374,6 +3853,8 @@ def _resolve_custom_record_key(
     raw_api_key: object,
     raw_key_env: object,
     provider_hint: object = None,
+    *,
+    allow_convention_key: bool = True,
 ) -> str | None:
     """Static credential declared by ONE custom record.
 
@@ -3381,6 +3862,14 @@ def _resolve_custom_record_key(
     hint, then falls back to the ``CUSTOM_<SLUG>_API_KEY`` convention. Reading
     every form from the SAME record is what keeps an endpoint and a credential
     from being resolved out of two different authorities.
+
+    ``allow_convention_key`` is False only for a newly admitted fallback entry
+    (see :func:`_custom_provider_record_may_take_convention_key`). For those the
+    convention variable is shared with a pre-existing provider, so resolving it
+    would hand this endpoint another provider's credential. Every other record,
+    including an existing ``custom:``-prefixed entry with its key in the
+    convention variable, keeps the lookup: suppressing it there would break a
+    credential that works today.
     """
     api_key = None
     if raw_api_key is not None:
@@ -3393,7 +3882,7 @@ def _resolve_custom_record_key(
         key_env = str(raw_key_env or "").strip()
         if key_env:
             api_key = _thread_local_env_value(key_env).strip() or None
-    if not api_key and provider_hint:
+    if not api_key and provider_hint and allow_convention_key:
         api_key = _lookup_custom_api_key_env(provider_hint)
     return api_key
 
@@ -3848,10 +4337,59 @@ def _select_custom_provider_record(
     if not isinstance(custom_providers, list):
         custom_providers = []
 
+    # An EXACT list entry that declares no credential of its own, and either
+    # shares the configured model connection's endpoint or declares no endpoint
+    # at all, adds no authority: before #8017 it minted nothing, so it was never
+    # reached and ``model.base_url``/``key_env`` served its declared model. Once
+    # it is admitted as a fallback identity the exact-row rule would replace that
+    # complete connection with the keyless or endpoint-less entry, so the send
+    # went out with ``dummy-key`` (401) or failed with
+    # ``custom_provider_endpoint_unresolved``. Return the model block instead,
+    # which is the connection that actually served this endpoint. A same-endpoint
+    # entry that declares its OWN credential is a real authority and is left
+    # untouched.
+    # Ownership is decided FIRST (r9 CORE, 4213). The model preference below must
+    # apply only when the slug's own authority IS this keyless / endpoint-less
+    # fallback entry. Scanning the list independently let a keyless entry hijack a
+    # slug that a prefixed entry or a keyed ``providers`` record already owned, so
+    # an existing provider was redirected to the block's endpoint and credential: a
+    # real chat that master completed returned ``auth_mismatch`` after HTTP 401.
+    #
     # Fail closed when the slug maps to multiple entries (raises); otherwise use
     # the single matching entry. Shared with resolve_model_provider so endpoint
     # and credential are always resolved from the SAME entry.
-    matched_entry = _unique_custom_provider_entry(custom_providers, slug)
+    matched_entry = _unique_custom_provider_entry(
+        custom_providers, slug, cfg_data.get("providers"), cfg_data.get("model")
+    )
+
+    model_cfg_for_conn = cfg_data.get("model")
+    if (
+        isinstance(model_cfg_for_conn, dict)
+        and isinstance(matched_entry, dict)
+        # Bare ``custom`` OR a block that names THIS slug: the default-model
+        # picker rewrites ``model.provider`` to ``custom:<slug>`` on selection
+        # and leaves the block's own ``api_key``/``key_env`` in place, so the
+        # same connection keeps serving the entry after the click.
+        and str(model_cfg_for_conn.get("provider") or "").strip().lower() in {"custom", pid}
+        and _raw_provider_record_enabled(model_cfg_for_conn)
+        and _custom_record_owns_connection(model_cfg_for_conn, pid)
+        and _custom_provider_slug_is_fallback(matched_entry.get("name"))
+        and _custom_provider_slug_key(matched_entry.get("name")) == slug
+    ):
+        entry_url = _normalize_base_url_for_match(matched_entry.get("base_url"))
+        model_url = _normalize_base_url_for_match(model_cfg_for_conn.get("base_url"))
+        if not entry_url:
+            # No endpoint of its own: it inherits the model connection, and a
+            # declared credential has nowhere of its own to go, so the block is the
+            # authority whatever the entry's static key fields say. Popping the
+            # block's endpoint here would leave the route with none at all
+            # (``custom_provider_endpoint_unresolved``) (r9 CORE, 4223).
+            return model_cfg_for_conn, "model", False, CUSTOM_SELECTION_KEYED
+        if entry_url == model_url and not _custom_record_declares_credential_source(matched_entry):
+            # Exactly that endpoint AND no credential of its own: the entry adds no
+            # authority, so the block is the connection that served this endpoint.
+            return model_cfg_for_conn, "model", False, CUSTOM_SELECTION_KEYED
+
     if matched_entry is not None:
         return matched_entry, "custom_providers", True, CUSTOM_SELECTION_EXACT
 
@@ -3989,7 +4527,8 @@ def resolve_custom_provider_connection(
 
     # Read the live config snapshot to avoid stale module-level cache edge
     # cases after profile switches or runtime config edits.
-    record, _source, is_exact, _status = _select_custom_provider_record(pid, slug, get_config())
+    cfg_data = get_config()
+    record, source, is_exact, _status = _select_custom_provider_record(pid, slug, cfg_data)
     if record is None:
         # Nothing owns this slug. Returning ``(None, None)`` is the whole point:
         # an unknown named route must not inherit an unrelated row's endpoint or
@@ -3999,7 +4538,12 @@ def resolve_custom_provider_connection(
         return None, None
 
     base_url = _custom_record_base_url(record)
-    api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+    api_key = _resolve_custom_record_key(
+        record.get("api_key"),
+        record.get("key_env"),
+        pid,
+        allow_convention_key=_custom_provider_record_may_take_convention_key(record, source, cfg_data),
+    )
     if return_provenance:
         return api_key, base_url, is_exact
     return api_key, base_url
@@ -4014,6 +4558,14 @@ def resolve_custom_provider_connection(
 # could still mint a credential is what turned a working ``key_cmd`` endpoint
 # into a 401.
 KEYLESS_CUSTOM_API_KEY = "dummy-key"
+
+# Credential-source fields a record, or the ``model:`` block once the picker
+# rewrites ``model.provider`` to name a fallback entry's slug, can carry. When
+# that block did NOT already serve the selected entry, every one of these still
+# belongs to the previous route and must be dropped together; dropping only
+# ``api_key``/``key_env`` left a ``key_cmd``'s minted bearer and a rotating pool
+# pointed at the new host (#8017 review).
+CUSTOM_CREDENTIAL_SOURCE_FIELDS = ("api_key", "key_env", "key_cmd", "credential_pool")
 
 # The constructor-routing fields AIAgent takes beside provider/base_url/api_key.
 # They travel with the connection: a bundle that replaces the endpoint and the
@@ -4314,7 +4866,8 @@ def resolve_custom_provider_bundle(
             "owned": {},
         }
 
-    record, source, is_exact, status = _select_custom_provider_record(pid, slug, get_config())
+    cfg_data = get_config()
+    record, source, is_exact, status = _select_custom_provider_record(pid, slug, cfg_data)
     if record is None:
         return _unowned_custom_provider_bundle(pid, slug, status)
 
@@ -4336,7 +4889,12 @@ def resolve_custom_provider_bundle(
             owned["credential_pool"] = pool_runtime.get("credential_pool")
 
     if not api_key:
-        api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+        api_key = _resolve_custom_record_key(
+            record.get("api_key"),
+            record.get("key_env"),
+            pid,
+            allow_convention_key=_custom_provider_record_may_take_convention_key(record, source, cfg_data),
+        )
     if not api_key:
         api_key = _host_gated_env_key(base_url)
 
@@ -4969,7 +5527,10 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
             custom_providers = cfg.get("custom_providers") if isinstance(cfg, dict) else []
             if (
                 _unique_custom_provider_entry(
-                    custom_providers, _custom_provider_slug_key(provider)
+                    custom_providers,
+                    _custom_provider_slug_key(provider),
+                    cfg.get("providers") if isinstance(cfg, dict) else None,
+                    cfg.get("model") if isinstance(cfg, dict) else None,
                 )
                 is not None
             ):
@@ -5812,8 +6373,14 @@ def _resolve_model_reasoning_efforts_impl(
     _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
-            for _entry in _custom_provider_entries():
-                if _custom_provider_slug_from_name(_entry.get("name")) == provider:
+            _re_entries = _custom_provider_entries()
+            for _entry in _re_entries:
+                if _custom_provider_entry_identity(
+                    _entry,
+                    _re_entries,
+                    cfg.get("providers") if isinstance(cfg, dict) else None,
+                    cfg.get("model") if isinstance(cfg, dict) else None,
+                ) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
@@ -6445,6 +7012,62 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
+def _model_block_serves_selected_custom_provider(provider: object, config_data: object) -> bool:
+    """True when ``provider``'s connection resolves to the ``model:`` block itself.
+
+    A fallback ``custom_providers[]`` entry that declares no endpoint (and no
+    credential) inherits the model connection (``_select_custom_provider_record``
+    returns the block with source ``model``). ``set_hermes_default_model`` must
+    then keep ``model.base_url`` on the provider change instead of dropping it.
+    """
+    pid = str(provider or "").strip().lower()
+    if not pid.startswith("custom:") or not isinstance(config_data, dict):
+        return False
+    slug = _custom_provider_slug_key(pid)
+    if not slug:
+        return False
+    try:
+        _record, source, _is_exact, _status = _select_custom_provider_record(pid, slug, config_data)
+    except Exception:
+        return False
+    return source == "model"
+
+
+def _selected_fallback_entry(provider: object, config_data: object) -> dict | None:
+    """The fallback-derived ``custom_providers[]`` entry ``provider`` names, or ``None``."""
+    pid = str(provider or "").strip().lower()
+    if not pid.startswith("custom:") or not isinstance(config_data, dict):
+        return None
+    slug = _custom_provider_slug_key(pid)
+    if not slug:
+        return None
+    for entry in _custom_provider_entries(config_data):
+        name = entry.get("name")
+        if not _custom_provider_slug_is_fallback(name) or _custom_provider_slug_key(name) != slug:
+            continue
+        return entry
+    return None
+
+
+def _selected_fallback_entry_declares_no_credential(provider: object, config_data: object) -> bool:
+    """True when ``provider`` names a fallback-derived ``custom_providers[]`` entry with no credential.
+
+    Such an entry is served by the ``model:`` block after the picker names its slug
+    (``_select_custom_provider_record``'s preference block). When the block did NOT
+    serve that entry before the click, the block's credential sources belong to
+    the previous route, and leaving them in place would send that credential to
+    this entry's endpoint. The caller then drops them so the route fails closed
+    exactly as an ASCII keyless entry does.
+
+    "No credential" means no credential SOURCE at all, not merely no literal
+    ``api_key``: a ``key_cmd`` mints a live bearer and a pool rotates one, and both
+    the Agent's named-custom resolver and this module's own routing honour them, so
+    an entry carrying one is a real authority (#8026 r12, senior SHOULD-FIX).
+    """
+    entry = _selected_fallback_entry(provider, config_data)
+    return entry is not None and not _custom_record_declares_credential_source(entry)
+
+
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
@@ -6486,6 +7109,20 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         if persisted_provider.lower() == "local":
             persisted_provider = "custom"
 
+        # Snapshot BEFORE the block is rewritten below: whether the selected
+        # provider's connection is this block must be judged against the
+        # previous provider, not against a block that already names the new one.
+        previous_config_data = dict(config_data)
+        previous_config_data["model"] = dict(model_cfg)
+        # Judge "the block served the selected entry" against the PRE-CLICK snapshot
+        # once and reuse it: the picker copies the selected entry's own URL into the
+        # block, so after the click the on-disk "same URL" test can no longer tell
+        # shape A (the block served that URL, correct) from shape K (the block served
+        # a different host, a credential leak).
+        block_served_selected = persisted_provider != previous_provider and (
+            _model_block_serves_selected_custom_provider(persisted_provider, previous_config_data)
+        )
+
         model_cfg["default"] = persisted_model
         if persisted_provider:
             model_cfg["provider"] = persisted_provider
@@ -6495,15 +7132,86 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         elif persisted_provider != previous_provider:
             if persisted_provider == "openai":
                 model_cfg["base_url"] = "https://api.openai.com/v1"
-            else:
+            elif not block_served_selected:
                 # Provider changed and we have no resolved URL for the new one.
                 # Drop the previous provider's base_url so New Chat doesn't route
                 # to the old endpoint — this MUST also cover custom:* providers
                 # (a different custom provider has a different URL); leaving the
-                # stale base_url sent requests to the wrong host (#4728).
+                # stale base_url sent requests to the wrong host (#4728). The one
+                # exception is a provider whose connection IS this block (a
+                # fallback entry with no endpoint of its own inherits
+                # ``model.base_url``): popping it would leave that route with no
+                # endpoint at all.
                 model_cfg.pop("base_url", None)
 
+        selected_fallback_entry = (
+            _selected_fallback_entry(persisted_provider, config_data)
+            if persisted_provider != previous_provider
+            else None
+        )
+        mark_written = False
+        if persisted_provider != previous_provider:
+            # Record the provenance of THIS write, so the ownership scan can tell this
+            # block from one the user wrote: the block serves a fallback entry now, and
+            # only the Save path can know that. Cleared on every other provider change,
+            # so a block that has moved on does not keep a stale mark (#8026 r15).
+            if selected_fallback_entry is not None:
+                model_cfg[PICKER_WRITTEN_FOR_FIELD] = persisted_provider
+                mark_written = True
+            else:
+                model_cfg.pop(PICKER_WRITTEN_FOR_FIELD, None)
+                model_cfg.pop(PICKER_WRITTEN_CONNECTION_FIELD, None)
+        # The block now serves a fallback entry it did not serve before the click, so
+        # whatever credential source it still carries was minted for the route it just
+        # left. The picker rewrites ``model.provider`` and copies the entry's URL into
+        # the block, but leaves the block's own key in place: the old route's credential
+        # travelled to the new host whether or not the endpoint happened to change
+        # (#8026 r12), and a URL-equality test skipped exactly the case where it did not
+        # — a keyed entry at the host the block already served kept the block's key,
+        # which then shadowed the entry in the owner scan and disappeared it from the
+        # picker (#8026 r14 MUST-FIX). Drop every source here instead: the block then
+        # serves with the entry's OWN credential, and a keyless entry fails closed
+        # exactly as its ASCII counterpart does (an explicit key in ``advanced`` below
+        # still wins).
+        if (
+            persisted_provider != previous_provider
+            and not block_served_selected
+            and selected_fallback_entry is not None
+        ):
+            # A ``key_cmd`` mints a live bearer and a pool rotates one, so dropping only
+            # ``api_key``/``key_env`` left the old route's token reachable on the new host.
+            for _cred_field in CUSTOM_CREDENTIAL_SOURCE_FIELDS:
+                model_cfg.pop(_cred_field, None)
+
+        if mark_written:
+            # Persist the connection this write leaves on the block, beside the mark.
+            # The mark is only read while the block still declares it, so a later CLI or
+            # hand edit (which leaves the mark behind) is told apart from the picker's
+            # own write (#8026 r18). Captured here, AFTER the credential drop above, so
+            # it records the connection the block actually keeps on disk.
+            model_cfg[PICKER_WRITTEN_CONNECTION_FIELD] = _model_block_connection_fingerprint(
+                model_cfg
+            )
+
+        before_advanced = dict(model_cfg)
         _apply_advanced_model_options(model_cfg, advanced)
+        # The mark records a COPY: the block the picker wrote to serve a fallback entry.
+        # A save that rewrites the block's own connection is not that write — it is the
+        # user editing the route through "Main model options" — so the copy is no longer
+        # faithful and the mark goes with it. Keeping it made
+        # ``_model_block_mirrors_fallback_entry`` read the edited block as the entry's,
+        # so the saved ``base_url`` lost to the list entry's old endpoint and its key,
+        # and chat kept sending to the connection the user had just replaced (#8026 r16).
+        # That comparison is made against the block as the picker left it, i.e. before the
+        # advanced options are applied, and it holds whether or not the provider changed:
+        # one request can pick a fallback entry AND edit that entry's endpoint and key,
+        # and the override is the user's own route just as much (#8026 r17).
+        if _model_block_connection_changed(before_advanced, model_cfg) or (
+            persisted_provider == previous_provider
+            and _model_block_connection_changed(previous_config_data.get("model"), model_cfg)
+        ):
+            model_cfg.pop(PICKER_WRITTEN_FOR_FIELD, None)
+            model_cfg.pop(PICKER_WRITTEN_CONNECTION_FIELD, None)
         if not _main_model_supports_service_tier(persisted_model, persisted_provider):
             model_cfg.pop("service_tier", None)
 
@@ -6735,6 +7443,8 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                     _cp_match = _unique_custom_provider_entry(
                         config_data.get("custom_providers", []),
                         _custom_provider_slug_key(provider),
+                        config_data.get("providers"),
+                        config_data.get("model"),
                     )
                     if _cp_match is not None:
                         resolved_base_url = str(_cp_match.get("base_url") or "").strip() or None
@@ -7511,9 +8221,14 @@ def _static_models_catalog_without_live_probes() -> dict:
                     detected_providers.add(provider)
                     _append_model_id(provider, entry.get("model"))
 
-        for entry in _custom_provider_entries(cfg):
+        _static_custom_entries = _custom_provider_entries(cfg)
+        _static_providers_cfg = cfg.get("providers") if isinstance(cfg, dict) else None
+        _static_model_cfg = cfg.get("model") if isinstance(cfg, dict) else None
+        for entry in _static_custom_entries:
             provider_name = str(entry.get("name") or "").strip()
-            provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
+            provider_slug = _custom_provider_entry_identity(
+                entry, _static_custom_entries, _static_providers_cfg, _static_model_cfg
+            ) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
@@ -10014,7 +10729,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         continue
                     entry_name = str(entry.get("name") or "").strip()
                     if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
+                        return _custom_provider_entry_identity(
+                            entry, custom_providers_cfg, cfg.get("providers"), cfg.get("model")
+                        )
                     return "custom"
 
             return ""
@@ -10358,12 +11075,23 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         _named_custom_groups: dict = {}
         _named_custom_errors: dict[str, dict] = {}
         if isinstance(_custom_providers_cfg, list):
+            _providers_cfg_for_identity = cfg.get("providers") if isinstance(cfg, dict) else None
+            _model_cfg_for_identity = cfg.get("model") if isinstance(cfg, dict) else None
             _seen_custom_ids = set()
             for _cp in _custom_providers_cfg:
                 if not isinstance(_cp, dict):
                     continue
                 _cp_name = (_cp.get("name") or "").strip()
-                _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
+                # Ownership uses the cfg-aware view so a fallback-derived entry
+                # that a legacy name already claims is NOT catalogued under an
+                # identity it does not own (#8026).
+                _slug = (
+                    _custom_provider_entry_identity(
+                        _cp, _custom_providers_cfg, _providers_cfg_for_identity, _model_cfg_for_identity
+                    )
+                    if _cp_name
+                    else None
+                )
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
