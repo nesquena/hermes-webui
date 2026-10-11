@@ -69,6 +69,11 @@ WHAT IT CHECKS
     once and lifted on another row (390x844) neither clicks nor opens the fork;
     and a pen pressed on a conversation or a fork, moved off its row in one
     step and lifted before the long press is due, gets no menu afterwards;
+  - a finger and a pen held on a conversation and on a fork until the menu
+    opens (844x390), then dragged right, left or up and lifted: no request is
+    sent (a swipe to the right archives, one to the left asks to delete), no
+    row is drawn swiped or dragged, no dialog opens, and the menu stays open
+    on the row that was pressed;
   - with one conversation's picker open, another row's menu opened by a long
     press (390x844) or a right click (1440x900): the picker closes, and
     Escape leaves neither open.
@@ -1468,6 +1473,131 @@ def _check_pen_lifted_off_a_row_opens_no_menu(browser, seed, *, fork):
     return failures
 
 
+# After a long press: is the ⋮ menu open and whose is it, is any row drawn
+# part-way through a swipe or a drag, and is the confirm dialog up.
+AFTER_LONG_PRESS_JS = """() => {
+  const rows = Array.from(document.querySelectorAll('.session-item, .session-child-session'));
+  const offset = row => row.style.getPropertyValue('--session-swipe-offset');
+  const dialog = document.getElementById('appDialogOverlay');
+  const shown = !!dialog && getComputedStyle(dialog).display !== 'none';
+  return {
+    menu: !!document.querySelector('.session-action-menu'),
+    menuFor: typeof _sessionActionSessionId === 'undefined' ? null : _sessionActionSessionId,
+    moved: rows.filter(row => row.classList.contains('dragging') || row.classList.contains('swipe-committed')
+      || (offset(row) && parseFloat(offset(row)) !== 0))
+      .map(row => (row.classList.contains('session-child-session') ? 'fork' : 'conversation') + ' ' + (row.dataset.sid || '').slice(0, 8)),
+    dialog: shown ? dialog.textContent.trim().replace(/\\s+/g, ' ').slice(0, 80) : '',
+    opened: (S.session && S.session.session_id) || null,
+  };
+}"""
+
+DRAGS_AFTER_LONG_PRESS = ("right", "left", "up")
+
+
+def _check_drag_after_long_press_does_nothing(browser, seed, *, fork, pointer):
+    """Once a long press has opened the ⋮ menu, the rest of that gesture does
+    nothing. The finger or the pen is held until the menu opens, dragged, and
+    lifted: to the right (a swipe that far archives the conversation), to the
+    left (it asks to delete it) and up. No request may be sent, no row may be
+    drawn swiped or dragged, during the drag or after it, no dialog may open,
+    no conversation may be opened, and the menu must still be open on the row
+    that was pressed. Each drag has a page of its own, and requests other than
+    GET are refused, so that a failure cannot archive the fixtures the later
+    checks use. Returns failure lines."""
+    failures = []
+    for direction in DRAGS_AFTER_LONG_PRESS:
+        failures += _drag_after_long_press(browser, seed, fork=fork, pointer=pointer, direction=direction)
+    return failures
+
+
+def _drag_after_long_press(browser, seed, *, fork, pointer, direction):
+    what = "a fork" if fork else "a conversation"
+    label = f"long press on {what}, then a drag {direction}, {pointer}, 844x390"
+    ctx, page, errors = _new_page(
+        browser, viewport={"width": 844, "height": 390}, has_touch=True, is_mobile=True
+    )
+    if page is None:
+        return [f"  [{label}] {errors}"]
+    failures = []
+    writes = []
+
+    def refuse_writes(route, request):
+        if request.method == "GET":
+            route.continue_()
+            return
+        writes.append(f"{request.method} {request.url.split('/api/')[-1]}")
+        route.abort()
+
+    try:
+        _open_mobile_drawer(page)
+        page.evaluate("renderSessionList()")
+        page.wait_for_timeout(SETTLE_MS)
+        if fork:
+            placed = page.evaluate(TALL_ANCHOR_AT_JS, {"sid": seed["beta"], "offset": 60})
+            if placed.get("problem"):
+                return [f"  [{label}] {placed['problem']}"]
+            page.wait_for_timeout(SETTLE_MS)
+            start = page.evaluate(FORK_ROW_JS, seed["beta"])
+        else:
+            start = page.evaluate(MIDDLE_ROW_JS)
+        if not start:
+            return [f"  [{label}] no row to press"]
+        pressed = page.evaluate(
+            "(p) => { const row = document.elementFromPoint(p.x, p.y).closest('.session-child-session, .session-item');"
+            " return row ? row.dataset.sid : null; }",
+            start,
+        )
+        if not pressed or (fork and pressed != start["sid"]):
+            return [f"  [{label}] the press would not land on the row, so nothing was tested"]
+        dx, dy = {"right": (464, 0), "left": (4 - start["x"], 0), "up": (0, -120)}[direction]
+        if dy == 0 and abs(dx) < 136:
+            return [f"  [{label}] only {abs(dx):.0f}px to drag, too near a swipe's 128px, so nothing was tested"]
+        page.route("**/api/**", refuse_writes)
+        before = page.evaluate(AFTER_LONG_PRESS_JS)
+        session = ctx.new_cdp_session(page)
+        if pointer == "touch":
+            _touch(session, "touchStart", start)
+        else:
+            _pen(session, "mousePressed", start)
+        page.wait_for_timeout(LONG_PRESS_MS)
+        held = page.evaluate(AFTER_LONG_PRESS_JS)
+        end = start
+        if held["menu"]:
+            for step in range(1, 11):
+                end = {"x": start["x"] + dx * step / 10, "y": start["y"] + dy * step / 10}
+                if pointer == "touch":
+                    _touch(session, "touchMove", end)
+                else:
+                    _pen(session, "mouseMoved", end)
+                page.wait_for_timeout(25)
+        dragging = page.evaluate(AFTER_LONG_PRESS_JS)
+        if pointer == "touch":
+            _touch(session, "touchEnd")
+        else:
+            _pen(session, "mouseReleased", end)
+        page.wait_for_timeout(SETTLE_MS + 400)
+        if not held["menu"] or held["menuFor"] != pressed:
+            return [f"  [{label}] the long press did not open the pressed row's ⋮ menu"]
+        after = page.evaluate(AFTER_LONG_PRESS_JS)
+        if writes:
+            failures.append(f"  [{label}] sent {sorted(set(writes))}")
+        if dragging["moved"] or after["moved"]:
+            failures.append(
+                f"  [{label}] a row is drawn swiped or dragged"
+                f" (during the drag: {dragging['moved']}, after it: {after['moved']})"
+            )
+        if after["dialog"]:
+            failures.append(f"  [{label}] a dialog opened: {after['dialog']!r}")
+        if not after["menu"] or after["menuFor"] != pressed:
+            failures.append(f"  [{label}] the ⋮ menu is no longer open on the row that was pressed")
+        if after["opened"] != before["opened"]:
+            failures.append(f"  [{label}] a conversation was opened")
+        failures.extend(f"  [{label}] pageerror: {err}" for err in errors)
+    finally:
+        ctx.close()
+    return failures
+
+
 # The conversation rows on screen that a press can reach, each by the centre of
 # its title; and how many pickers and ⋮ menus are open, and whose the menu is.
 PRESSABLE_ROWS_JS = """() => Array.from(document.querySelectorAll('#sessionList .session-item[data-sid]')).map(row => {
@@ -2753,6 +2883,12 @@ def main():
                 failures.extend(found)
                 if not found:
                     print(f"OK  pen pressed on {'a fork' if fork else 'a conversation'} and lifted off its row before the long press at 390x844 — no ⋮ menu opens afterwards")
+            for fork in (False, True):
+                for pointer in ("touch", "pen"):
+                    found = _check_drag_after_long_press_does_nothing(browser, seed, fork=fork, pointer=pointer)
+                    failures.extend(found)
+                    if not found:
+                        print(f"OK  long press on {'a fork' if fork else 'a conversation'}, then a drag right, left and up, {pointer}, 844x390 — nothing is sent, swiped or opened, and the menu stays open")
             for touch in (True, False):
                 found = _check_a_new_menu_closes_the_picker(browser, seed, touch=touch)
                 failures.extend(found)

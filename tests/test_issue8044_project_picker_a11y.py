@@ -748,6 +748,31 @@ def test_a_pen_that_leaves_a_conversation_row_ends_its_press():
     assert "if(_gesturePointerType!=='mouse'&&_gestureState!=='idle') _clearForkPointerState();" in fork
 
 
+def test_once_the_long_press_has_opened_the_menu_the_gesture_does_nothing_more():
+    """A drag after the long press used to go on as a swipe: the row was drawn
+    sliding under the open menu, and lifting far enough to the right archived
+    the conversation (to the left, asked to delete it). Every path that moves
+    or releases reads the flag before it acts, on both kinds of row. What a
+    finger and a pen then do is in the browser gate."""
+    update = _between(SESSIONS_JS, "    const _updateSessionGesture=(clientX,clientY)=>{", "    const _canSwipeDeleteSession=")
+    guard = "if(_longPressMenuOpened){"
+    assert update.count(guard) == 1
+    assert update.index("if(_gestureState==='idle') return false;") < update.index(guard)
+    assert update.index(guard) < update.index("_promoteSessionDrag(dx,dy);") < update.index("_paintSessionSwipe(signedDx);")
+
+    finish = _between(SESSIONS_JS, "    const _finishSessionGesture=(clientX,clientY,target,pointerType)=>{", "    el.onpointerdown=(e)=>{")
+    leave = "if(_longPressMenuOpened){_gestureState='idle';return true;}"
+    assert finish.count(leave) == 1
+    assert finish.index(leave) < finish.index("_commitSessionSwipe();")
+
+    move = _between(SESSIONS_JS, "        rowEl.onpointermove=(e)=>{", "        rowEl.onpointerup=(e)=>{")
+    assert move.count("if(_longPressMenuOpened) return;") == 1
+    assert move.index("if(_longPressMenuOpened) return;") < move.index("rowEl.classList.add('dragging');")
+    assert move.index("if(_longPressMenuOpened) return;") < move.index("_paintForkSwipe(signedDx);")
+    up = _between(SESSIONS_JS, "        rowEl.onpointerup=(e)=>{", "        rowEl.addEventListener('touchend',(e)=>{")
+    assert up.index("if(_longPressMenuOpened){_gestureState='idle';return;}") < up.index("_handleForkSwipe(")
+
+
 def test_opening_the_menu_closes_a_picker_left_open():
     """A long press sends no click any more and a right click never did, so
     the picker's own close-on-outside-click cannot be what closes it."""
