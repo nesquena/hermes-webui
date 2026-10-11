@@ -13,10 +13,10 @@ write-through outside the catalog lock."
 The fix moves the CLEAR out of the catalog-lock block; the row removal
 (``save_projects(projects)``) stays inside it. The mutual exclusion the old
 placement provided is unchanged, because it is the ROW REMOVAL that is
-serialized with the create path's implicit assignment + cache publication
-(api/routes.py:17307): a session either already published its ``project_id``
-when the scan runs (so the scan clears it) or it reads the catalog after the
-removal and is created unassigned.
+serialized with the paths that publish a ``project_id`` (an explicit id on
+``/api/session/new``, and ``/api/session/move``): a session either already
+published its ``project_id`` when the scan runs (so the scan clears it) or it
+validates against the catalog after the removal and stays unassigned.
 
 The tests below reproduce the symptom directly: while the delete is inside the
 clear (waiting for a busy session's agent lock), another thread — the one a New
@@ -183,16 +183,20 @@ def _install_delete_stubs(monkeypatch, tmp_path, pid, sid, session_dir, catalog)
     )
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
     monkeypatch.setattr(routes, "_PROJECTS_CATALOG_LOCK", catalog)
-    # The write-through resolves each id through the canonical freshness path
-    # (`get_session`) so a stale full cache entry cannot be saved over a newer
-    # sidecar (maintainer re-gate 2026-10-10T23:49:54Z). This fixture keeps its
-    # fake rows in `sessions`, so the resolver must answer from there: a real
+    # The write-through resolves each target by loading a FRESH sidecar through
+    # ``Session.load`` (a stale FULL cache entry must not be saved back over a
+    # newer sidecar — maintainer re-gates 2026-10-10T23:49:54Z and
+    # 2026-10-11T02:08:20Z). This fixture keeps its fake rows in ``sessions``
+    # and its sidecars are JSON stubs, so the loader answers from there: a real
     # load would go to disk and bypass the row's recorded save() calls.
-    monkeypatch.setattr(
-        routes,
-        "get_session",
-        lambda sid, metadata_only=False: sessions.get(sid),
-    )
+    import api.models as models
+
+    class _FakeSession:
+        @staticmethod
+        def load(sid):
+            return sessions.get(sid)
+
+    monkeypatch.setattr(models, "Session", _FakeSession)
     return routes, sessions, locks
 
 

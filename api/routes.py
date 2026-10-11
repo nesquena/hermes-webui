@@ -568,186 +568,17 @@ def _project_default_workspace(proj) -> str | None:
     return ws[0] if ws else None
 
 
-# ── Auto-assign sweep registry ──────────────────────────────────────────────
-# Backfill sweeps run in a background thread from /api/projects/bind. Deleting
-# a project while its sweep is still walking the session index used to orphan
-# sessions: the sweep kept writing ``project_id`` for a project that no longer
-# exists, and rows it reached after the unlink pass were re-filed immediately
-# after being cleared. Admission is therefore serialized with deletion — a
-# project being deleted refuses NEW sweeps, and deletion cancels + joins the
-# in-flight ones before removing the project and unlinking its sessions.
-_AUTO_ASSIGN_SWEEPS: dict = {}
-_AUTO_ASSIGN_SWEEPS_LOCK = threading.Lock()
-_AUTO_ASSIGN_DELETING: set = set()
-
 # Catalog mutation lock — ONE lock for every load → modify → save pair of the
 # projects catalog. It is DEFINED in the catalog layer (``api/models.py``)
 # because the pairs are not all in this module: the cron / webhook system-project
 # bookkeeping (``ensure_cron_project`` / ``ensure_webhook_project``) rewrites the
 # same file from background scans, and a scan that read first and saved last
-# wrote back its stale copy — erasing the workspace / model / auto_assign the
-# user had just saved through /api/projects/bind, under a success toast
+# wrote back its stale copy — erasing the workspace / model the user had just
+# saved through /api/projects/bind, under a success toast
 # (Greptile P1 2026-10-10T13:00:52Z). This module keeps the historical private
 # alias, so every existing call site (and the tests that patch it) reads the
 # same object. Reentrant so a mutation may call helpers that take it again.
 from api.models import PROJECTS_CATALOG_LOCK as _PROJECTS_CATALOG_LOCK
-
-
-def _auto_assign_sweep_begin(project_id, thread=None) -> bool:
-    """Admit ``thread`` (default: the caller) as a sweep for ``project_id``.
-
-    Returns False while the project is being deleted, so no sweep can be
-    started that deletion would not join. ``thread`` is explicit because
-    /api/projects/bind admits the worker it starts (see
-    ``_auto_assign_start_sweep``).
-    """
-    if not project_id:
-        return True
-    thr = threading.current_thread() if thread is None else thread
-    with _AUTO_ASSIGN_SWEEPS_LOCK:
-        if project_id in _AUTO_ASSIGN_DELETING:
-            return False
-        _AUTO_ASSIGN_SWEEPS.setdefault(project_id, set()).add(thr)
-        return True
-
-
-def _auto_assign_start_sweep(project_id, thread) -> bool:
-    """Admit AND start ``thread`` atomically against deletion.
-
-    Registering the sweep inside the worker left a window: a delete landing
-    between ``bind`` starting the thread and the worker's own admission found
-    nothing to join, removed the project, cleared its deleting marker in the
-    ``finally``, and the late worker then filed sessions under the removed
-    project. Registering under the same lock that deletion snapshots keeps the
-    invariant deletion relies on — every registered sweep is already running,
-    so it can always be joined.
-    """
-    if not project_id:
-        thread.start()
-        return True
-    with _AUTO_ASSIGN_SWEEPS_LOCK:
-        if project_id in _AUTO_ASSIGN_DELETING:
-            return False
-        # Start while holding the lock, then register: the worker cannot
-        # finish (and deregister itself) before it is in the bucket, because
-        # `_auto_assign_sweep_end` needs this same lock.
-        try:
-            thread.start()
-        except Exception:
-            raise
-        _AUTO_ASSIGN_SWEEPS.setdefault(project_id, set()).add(thread)
-        return True
-
-
-def _auto_assign_sweep_end(project_id, thread=None) -> None:
-    """Unregister a sweep thread (never leave a dead Thread behind)."""
-    if not project_id:
-        return
-    thr = threading.current_thread() if thread is None else thread
-    with _AUTO_ASSIGN_SWEEPS_LOCK:
-        bucket = _AUTO_ASSIGN_SWEEPS.get(project_id)
-        if not bucket:
-            return
-        bucket.discard(thr)
-        if not bucket:
-            _AUTO_ASSIGN_SWEEPS.pop(project_id, None)
-
-
-def _auto_assign_sweep_cancelled(project_id) -> bool:
-    """True once deletion has claimed ``project_id`` — the sweep must stop."""
-    if not project_id:
-        return False
-    with _AUTO_ASSIGN_SWEEPS_LOCK:
-        return project_id in _AUTO_ASSIGN_DELETING
-
-
-def _auto_assign_cancel_sweeps(project_id, timeout: float = 10.0) -> bool:
-    """Mark ``project_id`` deleting and join its in-flight sweeps.
-
-    Called by /api/projects/delete BEFORE the project is removed and its
-    sessions unlinked, so a sweep can neither persist a project_id for a
-    project that no longer exists nor re-file rows the unlink just cleared.
-
-    Returns True only when every admitted sweep has exited. False means one is
-    still alive (join failed, or it outlived ``timeout``): the caller MUST NOT
-    remove the project then — that worker can still persist ``project_id``.
-    """
-    if not project_id:
-        return True
-    with _AUTO_ASSIGN_SWEEPS_LOCK:
-        _AUTO_ASSIGN_DELETING.add(project_id)
-        threads = list(_AUTO_ASSIGN_SWEEPS.get(project_id, ()))
-    current = threading.current_thread()
-    for thr in threads:
-        if thr is current:
-            continue
-        try:
-            thr.join(timeout)
-        except Exception:
-            logger.debug("auto-assign sweep join failed for project %s", project_id)
-    # Re-check under the lock: any registered thread still alive blocks the
-    # deletion instead of being silently ignored.
-    with _AUTO_ASSIGN_SWEEPS_LOCK:
-        alive = [
-            thr for thr in _AUTO_ASSIGN_SWEEPS.get(project_id, ())
-            if thr is not current and thr.is_alive()
-        ]
-    if alive:
-        logger.warning(
-            "auto-assign sweep for project %s still running after %.1fs; "
-            "refusing deletion", project_id, timeout,
-        )
-        return False
-    return True
-
-
-def _auto_assign_abort_deleting(project_id) -> None:
-    """Release the deletion claim WITHOUT removing the project.
-
-    Used when a delete is refused because its sweeps could not be drained: the
-    project stays intact (so a late sweep's write is harmless and correct) and
-    must remain both sweepable and deletable once that worker exits.
-    """
-    if not project_id:
-        return
-    with _AUTO_ASSIGN_SWEEPS_LOCK:
-        _AUTO_ASSIGN_DELETING.discard(project_id)
-
-
-def _auto_assign_finish_deleting(project_id) -> None:
-    """Drop the deleting marker once the project has been fully removed."""
-    if not project_id:
-        return
-    with _AUTO_ASSIGN_SWEEPS_LOCK:
-        _AUTO_ASSIGN_DELETING.discard(project_id)
-        _AUTO_ASSIGN_SWEEPS.pop(project_id, None)
-
-
-def _project_row_exists(project_id) -> bool:
-    """True while ``project_id`` still has a row in the projects catalog.
-
-    Deletion removes that row while holding ``_PROJECTS_CATALOG_LOCK``, so a
-    caller that already holds the lock can treat this as atomic against a
-    completed deletion. The deleting marker alone was not enough: deletion
-    CLEARS it in its ``finally`` (so a future sweep for a reused id can still
-    be admitted), which left a window where ``/api/projects/bind`` — paused
-    after its catalog save — resumed and admitted a sweep for a project whose
-    row was already gone, filing sessions under a dead project id (re-gate
-    2026-10-07, api/routes.py:19186).
-    """
-    if not project_id:
-        return False
-    with _PROJECTS_CATALOG_LOCK:
-        try:
-            return any(
-                p.get("project_id") == project_id for p in load_projects()
-            )
-        except Exception:
-            logger.debug(
-                "project catalog read failed while checking %s", project_id,
-                exc_info=True,
-            )
-            return False
 
 
 # Bounded wait for a session lock while /api/projects/delete clears cached
@@ -768,11 +599,12 @@ def _clear_cached_sessions_for_project(project_id, lock_timeout=None, cleared_id
     target session's own agent lock with a bounded wait, and doing that behind
     the catalog lock stalled New Chat and every workspace edit for the whole
     wait budget (maintainer re-gate 2026-10-10T15:11:33Z — seven busy sessions
-    made New Chat time out after 30.03 s). The ordering against the create
-    path's implicit assignment + cache publication is provided by the delete
-    handler's ROW REMOVAL, which stays under that lock: a session either already
-    published its ``project_id`` when this scan runs (and is cleared here) or it
-    reads the catalog after the row is gone and is created unassigned.
+    made New Chat time out after 30.03 s). The ordering against the paths that
+    publish a ``project_id`` (an explicit id on ``/api/session/new``, and
+    ``/api/session/move``) is provided by the delete handler's ROW REMOVAL,
+    which stays under that lock: a session either already published its
+    ``project_id`` when this scan runs (and is cleared here) or it validates
+    against the catalog after the row is gone and stays unassigned.
 
     Each clear is taken under the session's OWN agent lock: clearing outside it
     let a ``save()`` that had already serialized ``project_id`` land its file
@@ -845,6 +677,63 @@ def _clear_cached_sessions_for_project(project_id, lock_timeout=None, cleared_id
     return cleared
 
 
+def _delete_target_session(sid, active_ids):
+    """Return the freshest FULL session object for a delete target, or ``None``.
+
+    Call with the target's own agent lock held. ``None`` means "skip": an
+    actively streaming session belongs to its worker (whose next
+    checkpoint/final save persists the cleared id), and a session whose sidecar
+    cannot be read has nothing to write through.
+
+    The delete write-through must not be yet another stale-cache writer
+    (maintainer re-gate 2026-10-11T02:08:20Z). ``get_session`` heals a LAGGING
+    entry through ``_cached_session_lags_disk``, but that check compares message
+    COUNTS: a full cache entry whose sidecar holds the SAME number of messages
+    while being otherwise newer — a newer draft, or a row re-filed under another
+    project — was served as-is, and ``save()`` then wrote the stale copy back
+    over it. Reproduced over real HTTP: the two messages of a stale cache entry
+    replaced the two newer persisted ones and the project was cleared on a chat
+    that had already moved to project B; master preserved both.
+
+    An inactive persisted target is therefore resolved from the SIDECAR itself
+    and published into the cache, so the ``project_id`` this caller clears lands
+    on the newest state on disk — and so the delete handler's index pass, which
+    resolves through the cache, cannot fall back to the stale entry. The cached
+    object is kept only when it is genuinely AHEAD of the sidecar (strictly more
+    messages: a draft whose debounced save has not landed yet).
+
+    Ownership and streaming are re-checked by the CALLER on the object this
+    returns, because the resolution may have replaced the entry the caller's
+    clear acted on.
+    """
+    with LOCK:
+        resident = SESSIONS.get(sid)
+    stream_id = str(getattr(resident, "active_stream_id", "") or "")
+    if stream_id and stream_id in active_ids:
+        return None
+    try:
+        from api.models import Session as _Session
+
+        fresh = _Session.load(sid)
+    except Exception:
+        logger.debug(
+            "projects/delete: could not reload session %s", sid, exc_info=True,
+        )
+        return None
+    if fresh is None:
+        return None
+    if resident is not None and len(
+        getattr(resident, "messages", None) or []
+    ) > len(getattr(fresh, "messages", None) or []):
+        # Strictly ahead of the sidecar: that copy is the newest one. Saving the
+        # sidecar instead would drop the draft this cache entry still holds.
+        return resident
+    with LOCK:
+        SESSIONS[sid] = fresh
+        SESSIONS.move_to_end(sid)
+    return fresh
+
+
 def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
     """Write a cleared ``project_id`` through to each session's sidecar.
 
@@ -865,10 +754,11 @@ def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
     handler's index pass uses). A row re-filed under ANOTHER project meanwhile is
     left alone.
 
-    The session is resolved through the canonical freshness path
-    (``get_session``) rather than read straight out of the LRU: a FULL but STALE
-    cached object must not be written back over a sidecar that is ahead of it
-    (maintainer re-gate 2026-10-10T23:49:54Z — see the loop comment).
+    Each target is resolved from its SIDECAR (``_delete_target_session``) rather
+    than read straight out of the LRU: a FULL but STALE cached object must not be
+    written back over a sidecar that is ahead of it — not even when the message
+    counts match, which is the hole the count-based freshness check leaves
+    (maintainer re-gates 2026-10-10T23:49:54Z and 2026-10-11T02:08:20Z).
     """
     if not project_id or not sids:
         return 0
@@ -894,26 +784,19 @@ def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
             )
             continue
         try:
-            # Resolve through the canonical freshness path instead of reading the
-            # LRU entry directly. A FULL but STALE cached object — the cache kept
-            # the one message it held while a reply that arrived afterwards went
-            # to disk — used to be saved straight back over its sidecar, so the
-            # delete silently dropped the newer messages: data loss in an
-            # ordinary flow (maintainer re-gate 2026-10-10T23:49:54Z, reproduced
-            # over real HTTP with 1 cached vs 2 persisted messages). get_session
-            # reloads a lagging entry from disk; a cache miss is resolved from
-            # the sidecar the exists() guard above just confirmed.
-            try:
-                cached = get_session(sid)
-            except KeyError:
-                # Sidecar vanished between the guard and the load: nothing to
-                # write through.
-                continue
+            # Resolve the target from its SIDECAR, never from the LRU entry: a
+            # FULL but STALE cache entry — the same message count, a newer draft
+            # or a re-filed row on disk — used to be saved straight back over its
+            # sidecar, so the delete silently dropped the newer state and cleared
+            # the project on a chat that had already moved on: data loss in an
+            # ordinary flow (maintainer re-gates 2026-10-10T23:49:54Z and
+            # 2026-10-11T02:08:20Z, both reproduced over real HTTP). The resolver
+            # also skips a streaming session and publishes the fresh object into
+            # the cache; a metadata-only stub can no longer be reached here
+            # because the sidecar load is always full (#1558).
+            cached = _delete_target_session(sid, active_ids)
             if cached is None:
                 continue
-            # A metadata-only stub refuses save() by design (#1558); upgrade it
-            # the way every other metadata mutation does.
-            cached = _ensure_full_session_before_mutation(sid, cached)
             with LOCK:
                 # Ownership and streaming are re-checked on the REFRESHED object
                 # (the two answers the caller's clear acted on), because the
@@ -922,11 +805,10 @@ def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
                 if str(getattr(cached, "active_stream_id", "") or "") in active_ids:
                     continue
                 if getattr(cached, "project_id", None) not in (None, project_id):
-                    # Re-filed under another project while we waited: leave it.
+                    # Re-filed under another project while we waited (or the
+                    # sidecar is simply not this project's): leave it.
                     continue
                 cached.project_id = None
-                SESSIONS[sid] = cached
-                SESSIONS.move_to_end(sid)
             # Not touch_updated_at: a delete must not re-date the chat it was
             # just un-filed from (same rule as the backfill sweep).
             cached.save(touch_updated_at=False)
@@ -939,489 +821,6 @@ def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
         finally:
             lock.release()
     return written
-
-
-def _auto_assign_target_is_view_only(session, sid: str) -> bool:
-    """True when the backfill sweep must NOT file ``sid`` under a project.
-
-    The sweep is a second write path into session metadata, so it has to honour
-    the same guards as ``/api/session/move`` (see
-    ``_get_or_materialize_session``): read-only imported sessions and delegated
-    subagent children are view-only and owned by their origin (the CLI importer
-    / the delegate runner). Stamping ``project_id`` on such a row would rewrite
-    state WebUI does not own (re-gate 2026-10-07T17:06Z, [SHOULD-FIX]).
-
-    Fails CLOSED: when the state.db ownership lookup cannot be performed at all,
-    the row is treated as view-only and skipped, because "unknown is not
-    allowed" (AGENTS.md) — an unconfirmable row may be a delegated child, and
-    filing it would rewrite state the delegate runner owns (Greptile P2
-    2026-10-10T00:47:29Z). Only a readable state.db that simply has no such row
-    (a genuinely deleted/legacy WebUI session) is filed.
-    """
-    if getattr(session, "read_only", False):
-        return True
-    source = str(
-        getattr(session, "source_tag", "")
-        or getattr(session, "raw_source", "")
-        or getattr(session, "session_source", "")
-        or ""
-    ).strip().lower()
-    if source == "subagent":
-        return True
-    try:
-        db_source = _state_db_session_source_strict(sid)
-    except Exception:
-        return True
-    if db_source is None:
-        return True
-    return db_source == "subagent"
-
-
-def _apply_project_auto_assign(proj) -> int:
-    """Run one backfill sweep under the deletion-serialized registry."""
-    pid = proj.get("project_id") if isinstance(proj, dict) else None
-    # Refuse a sweep for a project that is already being deleted; register
-    # this one so /api/projects/delete can cancel + join it.
-    if not _auto_assign_sweep_begin(pid):
-        return 0
-    try:
-        return _auto_assign_sweep_body(proj)
-    finally:
-        _auto_assign_sweep_end(pid)
-
-
-def _auto_assign_live_binding_locked(project_id):
-    """``_auto_assign_live_binding`` with ``_PROJECTS_CATALOG_LOCK`` ALREADY held.
-
-    Split out for the per-assignment re-check: the sweep has to read the live
-    row AND make the ``project_id`` assignment inside ONE catalog critical
-    section (maintainer re-gate 2026-10-10T18:19:55Z), so the reader cannot
-    take the lock itself there. ``_PROJECTS_CATALOG_LOCK`` is a
-    ``threading.RLock`` (api/models.py), so the public wrapper and this helper
-    may be nested in the same thread.
-    """
-    try:
-        projects = load_projects()
-    except Exception:
-        return None
-    for p in projects:
-        if isinstance(p, dict) and p.get("project_id") == project_id:
-            return bool(p.get("auto_assign")), set(_project_workspaces(p))
-    return None
-
-
-def _auto_assign_live_binding(project_id):
-    """The CURRENT (auto_assign, bound workspaces) for ``project_id``.
-
-    ``_auto_assign_sweep_body`` runs in a background thread started by
-    /api/projects/bind, so the project snapshot it was handed can go stale
-    while it runs: removing a bound workspace (or switching ``auto_assign``
-    off) mid-sweep must stop it filing chats into a workspace the user has just
-    detached (Greptile P1 2026-10-10T02:22:51Z).  Re-read the on-disk row and
-    answer:
-
-      * ``(True, {...})``  — still auto-assigning, these are the live bindings;
-      * ``(False, {...})`` — the row exists but auto_assign is off;
-      * ``None``           — the row is GONE, or the catalog could not be read.
-
-    ``None`` is deliberately shared by both "gone" and "unknown": the caller
-    fails CLOSED (AGENTS.md - unknown is not allowed to file a chat).
-
-    The read shares ``_PROJECTS_CATALOG_LOCK`` with every catalog mutation
-    (create / rename / bind / delete), because each of those does
-    load -> modify -> save and ``save_projects`` TRUNCATES the file before it
-    rewrites it: a reader that slipped in between observed an empty catalog and
-    the sweep stopped as though its project had been deleted, leaving chats
-    unassigned while automatic filing was still on (Greptile P1
-    2026-10-10T08:08:52Z "Another save stops filing"). Lock order is
-    CATALOG -> LOCK (see ``_clear_cached_sessions_for_project``); this call site
-    holds neither lock.
-    """
-    try:
-        with _PROJECTS_CATALOG_LOCK:
-            return _auto_assign_live_binding_locked(project_id)
-    except Exception:
-        return None
-
-
-def _auto_assign_claim_session(project_id, session, workspace) -> bool:
-    """File ``session`` under ``project_id`` iff the LIVE binding still allows it.
-
-    Call with the session's own agent lock held; the caller saves AFTER this
-    returns. This is the ONLY place the sweep may write a project id.
-
-    Why it exists (maintainer re-gate 2026-10-10T18:19:55Z, "[SILENT]
-    api/routes.py:1069 — chats are filed after auto-assign is turned off or the
-    workspace is detached"): the loop's cheap binding check runs BEFORE the
-    sweep waits for the session lock, so a bind that switched ``auto_assign``
-    off (or saved ``workspaces: null``, or deleted the project) while the sweep
-    waited on a held lock used to be acted on with the stale answer, and the
-    chat gained the project id anyway. Verified over real HTTP by holding an
-    unassigned chat's lock, enabling auto-assign, letting the sweep reach that
-    lock, disabling auto-assign successfully, then releasing the lock.
-
-    The re-read and the assignment therefore share ONE
-    ``_PROJECTS_CATALOG_LOCK`` critical section: a catalog mutation either
-    completes before it (and this sees the new row) or starts after it (and
-    this already filed under the binding that was live). The catalog lock is
-    released BEFORE the caller's ``save()`` — that write is full-history I/O
-    and must never run behind the shared lock (Greptile P1 2026-10-10T12:41:25Z,
-    maintainer re-gate 2026-10-10T15:11:33Z).
-
-    Lock order is SESSION -> CATALOG here, and CATALOG is a LEAF in this path
-    (nothing below it takes a session lock), so it cannot deadlock against the
-    CATALOG -> LOCK order documented on ``_clear_cached_sessions_for_project``:
-    no other call site holds the catalog lock while acquiring a session lock.
-    ``_auto_assign_live_binding`` re-acquires the same RLock (re-entrant, same
-    thread) so the stubbed readers in tests keep working and the read above
-    stays inside this critical section.
-
-    Returns True when the assignment was made, False when the live binding no
-    longer covers ``workspace`` (auto_assign off, workspace detached, project
-    deleted/unknown, or an unreadable catalog — fail CLOSED, AGENTS.md).
-    """
-    with _PROJECTS_CATALOG_LOCK:
-        live = _auto_assign_live_binding(project_id)
-        if live is None or not live[0]:
-            return False
-        if not workspace or str(workspace) not in live[1]:
-            return False
-        session.project_id = project_id
-    return True
-
-
-def _auto_assign_sweep_body(proj) -> int:
-    """File every existing session whose workspace is bound to ``proj`` under it.
-
-    Iterates the session index (metadata rows only — cheap), and for each
-    session whose workspace matches one of the project's bound workspaces,
-    sets ``project_id`` on the session and saves it. Actively-streaming
-    sessions are updated on the live cached object (the streaming thread's
-    own save persists it), mirroring the projects/delete unlink path.
-
-    Returns the number of sessions reassigned. Runs in a background thread
-    from /api/projects/bind so a large index never stalls the response.
-
-    Every project-id write goes through ``_auto_assign_claim_session``, which
-    re-reads the live binding and files inside one ``_PROJECTS_CATALOG_LOCK``
-    critical section while the caller holds the session's agent lock — that is
-    the rule for this sweep (maintainer re-gate 2026-10-10T18:19:55Z), so the
-    snapshot this function was handed can never file a chat the user has just
-    un-bound, disabled auto-assign for, or detached the workspace from.
-    """
-    if not SESSION_INDEX_FILE.exists():
-        return 0
-    bound = set(_project_workspaces(proj))
-    if not bound:
-        return 0
-    pid = proj.get("project_id")
-    profile = proj.get("profile") or "default"
-    try:
-        index = json.loads(SESSION_INDEX_FILE.read_bytes())
-    except Exception:
-        return 0
-    active_ids = set(_active_stream_ids())
-    changed = 0
-    deferred_to_stream = 0
-    # Profile boundary: a project may only claim sessions from its OWN
-    # profile. The root/default project may take unprofiled (legacy) rows
-    # too; a NAMED-profile project must never sweep default/unprofiled
-    # sessions (they would end up tagged with a foreign project_id).
-    # _profiles_match handles the renamed-root alias (kinni == default).
-    for entry in index:
-        # Deletion may have claimed this project mid-sweep — stop before
-        # writing any further project_id for a project that no longer exists
-        # (and before re-filing rows the unlink pass just cleared).
-        if _auto_assign_sweep_cancelled(pid):
-            logger.info(
-                "auto-assign %s: cancelled (project being deleted); stopping sweep",
-                pid,
-            )
-            break
-        entry_profile = entry.get("profile") or "default"
-        if not _profiles_match(entry_profile, profile):
-            continue
-        ws = entry.get("workspace")
-        if not ws or str(ws) not in bound:
-            continue
-        sid = entry.get("session_id")
-        if not sid or entry.get("project_id"):
-            # Already filed somewhere (this project or another) — never steal
-            # a session the user (or another auto-assign) has placed. Auto-
-            # assign only sweeps up unowned sessions in the bound workspace.
-            continue
-        # Re-read the LIVE bindings before filing anything: the snapshot this
-        # sweep started with was handed to a background thread, so a workspace
-        # removed (or auto_assign switched off, or the project deleted) while
-        # the sweep runs must stop it filing chats the user has just detached
-        # (Greptile P1 2026-10-10T02:22:51Z).  The loop only reaches this point
-        # for rows it would otherwise file, so the read is bounded by the work
-        # actually done.  `None` means gone/unknown -> fail CLOSED and stop.
-        _live = _auto_assign_live_binding(pid)
-        if _live is None or not _live[0]:
-            logger.info(
-                "auto-assign %s: stopping sweep - %s",
-                pid,
-                "bindings unknown or project gone" if _live is None else "auto_assign switched off",
-            )
-            break
-        if str(ws) not in _live[1]:
-            # This workspace is no longer bound (others may still be) - skip it
-            # rather than stopping the sweep.
-            continue
-        # Stale snapshot check above is necessary but not sufficient: a
-        # concurrent /api/session/move or a parallel auto-assign may have
-        # filed the session between reading _index.json and now. Recheck
-        # the authoritative source under lock before writing (P1 — race).
-        assigned_via_stream = False
-        try:
-            if entry.get("active_stream_id") in active_ids:
-                # Canonical mutation order is per-session lock -> LOCK.
-                # Hold the session lock outer so we serialize with
-                # _persist_generated_session_title and streaming saves,
-                # and only take LOCK briefly to fetch the cached session.
-                # Assign+continue ONLY when the cached object is still the
-                # same active stream; otherwise fall through to the
-                # authoritative non-streaming load instead of skipping the
-                # session entirely (fixes stale-cache/ended-stream race).
-                with _get_session_agent_lock(sid):
-                    with LOCK:
-                        cached = SESSIONS.get(sid)
-                    if cached is not None:
-                        # A resident metadata-only stub refuses save() by design
-                        # (#1558), so a project id assigned to it would live in
-                        # the cache only and be lost on restart (Greptile P1
-                        # 2026-10-10T22:39:21Z). Upgrade to the full session
-                        # before mutating — the same rule the projects/delete
-                        # unlink path follows. No-op for a full session.
-                        try:
-                            cached = _ensure_full_session_before_mutation(sid, cached)
-                        except KeyError:
-                            cached = None
-                    if cached is not None:
-                        if _auto_assign_target_is_view_only(cached, sid):
-                            # View-only row (read-only imported / subagent
-                            # child) sitting in the live cache: never file it,
-                            # and do not fall through to the authoritative
-                            # path either.
-                            continue
-                        if not getattr(cached, "project_id", None):
-                            if _profiles_match(getattr(cached, "profile", None) or "default", profile):
-                                c_ws = getattr(cached, "workspace", None)
-                                if c_ws and str(c_ws) in bound:
-                                    c_active = getattr(cached, "active_stream_id", None)
-                                    if c_active in active_ids:
-                                        # The loop's binding check above ran
-                                        # BEFORE this session lock was taken: a
-                                        # bind that switched auto_assign off /
-                                        # detached this workspace / deleted the
-                                        # project while we waited must win, so
-                                        # re-read and file inside the catalog
-                                        # critical section (maintainer re-gate
-                                        # 2026-10-10T18:19:55Z).
-                                        if _auto_assign_claim_session(pid, cached, c_ws):
-                                            changed += 1
-                                            deferred_to_stream += 1
-                                            assigned_via_stream = True
-                if assigned_via_stream:
-                    continue
-                # Stale/missing cache or ended stream — fall through to
-                # the authoritative non-streaming path below.  Do NOT
-                # `continue` the outer loop here; the snapshot race leaves
-                # the session unassigned otherwise.
-            # Load authoritative session while holding the per-session lock
-            # to close the move-vs-backfill TOCTOU.
-            with _get_session_agent_lock(sid):
-                try:
-                    live = get_session(sid, metadata_only=True)  # noqa: B009 - defensive getattr below
-                except Exception:
-                    live = None
-                if live is not None and getattr(live, "project_id", None):  # noqa: B009
-                    continue
-                if live is not None:
-                    if not _profiles_match(getattr(live, "profile", None) or "default", profile):  # noqa: B009
-                        continue
-                    live_ws = getattr(live, "workspace", None)  # noqa: B009
-                    if not live_ws or str(live_ws) not in bound:
-                        continue
-                s = get_session(sid)
-                if s is None or getattr(s, "project_id", None):  # noqa: B009
-                    continue
-                if _auto_assign_target_is_view_only(s, sid):
-                    # Read-only imported session / delegated subagent child —
-                    # view-only, must not be re-filed (same guards as
-                    # /api/session/move).
-                    continue
-                if not _profiles_match(getattr(s, "profile", None) or "default", profile):  # noqa: B009
-                    continue
-                s_ws = getattr(s, "workspace", None)  # noqa: B009
-                if not s_ws or str(s_ws) not in bound:
-                    continue
-                # `get_session` may hand back a resident metadata-only stub
-                # (messages=[] by design), and save() refuses those (#1558), so
-                # the assignment below would be swallowed and live in the cache
-                # only — lost on restart (Greptile P1 2026-10-10T22:39:21Z).
-                # Upgrade to the full session before mutating, the same rule the
-                # projects/delete unlink path and _rename_session follow. No-op
-                # for a full session.
-                try:
-                    s = _ensure_full_session_before_mutation(sid, s)
-                except KeyError:
-                    # Sidecar vanished between the two loads — nothing to file.
-                    continue
-                if getattr(s, "project_id", None):  # noqa: B009
-                    # Another writer filed it while we were upgrading: never
-                    # steal an id (same rule as the already-filed guard above).
-                    continue
-                # The upgrade can REPLACE the object: `s_ws`, the profile and the
-                # view-only verdict above were read from the resident stub, and a
-                # stub's metadata can disagree with the full sidecar (workspace A
-                # on the stub, unbound workspace B in the file). Claiming with the
-                # stale `s_ws` filed B's chat into A's project (maintainer
-                # re-gate 2026-10-10T23:49:54Z), so re-derive all three from the
-                # refreshed session before the claim.
-                if _auto_assign_target_is_view_only(s, sid):
-                    continue
-                if not _profiles_match(getattr(s, "profile", None) or "default", profile):  # noqa: B009
-                    continue
-                s_ws = getattr(s, "workspace", None)  # noqa: B009
-                if not s_ws or str(s_ws) not in bound:
-                    continue
-                # Same stale-answer hole as the cached path above: the live
-                # binding was read before this session lock was acquired, so
-                # re-read it and file inside the catalog critical section
-                # (maintainer re-gate 2026-10-10T18:19:55Z). A binding that no
-                # longer covers this workspace is skipped, not filed.
-                if not _auto_assign_claim_session(pid, s, s_ws):
-                    continue
-                # Backfill must not rewrite historical activity dates: a plain
-                # save() stamps updated_at=now, so an imported/legacy session
-                # without message timestamps would jump into "Today".
-                s.save(touch_updated_at=False)
-            changed += 1
-        except Exception:
-            logger.debug("auto-assign: failed to update session %s", sid)
-    if deferred_to_stream:
-        logger.info(
-            "auto-assign %s: %d session(s) updated in-cache; streaming thread will persist",
-            pid, deferred_to_stream,
-        )
-    logger.info("auto-assign %s: filed %d session(s) by workspace", pid, changed)
-    return changed
-
-
-def _auto_assign_candidate_count(workspaces, profile=None) -> int | None:
-    """Count the sessions a workspace backfill would file for ``workspaces``.
-
-    Read-only preview behind ``/api/projects/auto-assign-preview``: the bind
-    dialog confirms with this number before switching auto-assign on, because
-    switching it on files every existing chat in the bound workspaces while
-    switching it off only clears the flag — nothing is ever un-filed
-    (re-gate 2026-10-07T19:22:30Z, item 3).
-
-    Mirrors ``_auto_assign_sweep_body``'s metadata gate (profile match,
-    workspace bound, not already owned) reading the session index alone. The
-    workspaces are canonicalized exactly like ``/api/projects/bind`` does
-    (``validate_workspace_to_add`` → ``resolve_trusted_workspace``), because the
-    sweep compares against the CANONICAL paths the bind stores: comparing the
-    raw typed strings under-counted a "Type a path…" entry ("alpha/",
-    "~/ws/alpha", "/ws/./alpha" all previewed 0 while the bind canonicalized the
-    path and the sweep then filed every chat in it). It is deliberately
-    metadata-only: the sweep additionally skips view-only rows (read-only
-    imports / delegated subagent children) via
-    ``_auto_assign_target_is_view_only``, which needs the session object, so a
-    preview may over-count by those rows while never under-counting.
-    (re-gate 2026-10-07T22:04:16Z, [SHOULD-FIX] 3.)
-
-    Answers ``None`` — "unknown", not 0 — when the session index cannot be read
-    (missing file, torn write, unparseable JSON). A 0 is not a neutral fallback
-    here: the bind dialog treats a definite 0 as "a sweep would file nothing"
-    and CACHES it as the confirmation for that workspace snapshot, so an index
-    that was merely absent/unreadable at preview time and is rebuilt before Save
-    would let the background sweep file every existing chat with no prompt at
-    all. The client already has an unknown-count confirmation for ``null``
-    (``pb_auto_assign_confirm_unknown``), so an unreadable index fails CLOSED
-    through the same gate (Greptile P1 2026-10-10T12:11:07Z).
-    """
-    bound = set()
-    for w in (workspaces or []):
-        if w is None or str(w).strip() == "":
-            continue
-        try:
-            # The two steps /api/projects/bind's _resolve_ws_list applies, minus
-            # its auto-registration (a preview must not mutate the saved list).
-            registered = validate_workspace_to_add(str(w))
-            try:
-                bound.add(str(resolve_trusted_workspace(registered)))
-            except (TypeError, ValueError):
-                # A not-yet-saved path outside home resolves only AFTER the bind
-                # registers it; the registered form is the same canonical string
-                # the bind stores, so the count cannot diverge.
-                bound.add(str(registered))
-        except (TypeError, ValueError, OSError):
-            # The bind would reject this entry (missing dir / system root), so it
-            # can never be bound and cannot contribute sessions.
-            continue
-    if not bound:
-        return 0
-    if not profile:
-        profile = _get_active_profile_name() or "default"
-    try:
-        index = json.loads(SESSION_INDEX_FILE.read_bytes())
-    except Exception:
-        # Unknown beats a wrong "nothing to file": see the docstring above.
-        return None
-    count = 0
-    for entry in index:
-        if not _profiles_match(entry.get("profile") or "default", profile):
-            continue
-        ws = entry.get("workspace")
-        if not ws or str(ws) not in bound:
-            continue
-        if not entry.get("session_id") or entry.get("project_id"):
-            continue
-        count += 1
-    return count
-
-
-def _auto_assign_project_for_workspace(workspace, profile=None) -> str | None:
-    """Return the project_id that should own a NEW session in ``workspace``.
-
-    Scans projects with ``auto_assign`` enabled whose bound workspace list
-    contains ``workspace``. First match in the on-disk list order wins (the
-    same ordering /api/projects returns). Returns None when no project
-    claims the workspace.
-
-    ``profile`` resolves exactly like ``new_session`` does: an omitted value
-    means the ACTIVE profile (``get_active_profile_name()``), never
-    ``None``-as-default. Auto-assignment and session creation must agree on
-    the effective profile, otherwise a named-profile session could be filed
-    under a default-profile project (or vice versa) when the caller omits
-    ``profile`` (Greptile P1 on #6836).
-    """
-    if not workspace:
-        return None
-    if not profile:
-        profile = _get_active_profile_name() or "default"
-    try:
-        projects = load_projects()
-    except Exception:
-        return None
-    ws_str = str(workspace)
-    for p in projects:
-        if not p.get("auto_assign"):
-            continue
-        proj_profile = p.get("profile") or "default"
-        # Profile boundary: a NAMED-profile project only claims sessions
-        # explicitly created under that profile. The root/default project
-        # claims default-profile (and unprofiled) sessions. _profiles_match
-        # handles the renamed-root alias (kinni == default) for us.
-        req_profile = (profile or "default")
-        if not _profiles_match(proj_profile, req_profile):
-            continue
-        if ws_str in _project_workspaces(p):
-            return p.get("project_id")
-    return None
 
 
 def _retag_empty_session_profile(session, requested_profile):
@@ -9603,49 +9002,31 @@ def _session_deleted_tombstone_marks_was_webui(sid: str) -> bool:
         return False
 
 
-def _state_db_session_source_strict(sid: str) -> str | None:
-    """Like ``_state_db_session_source``, but keeps "unavailable" distinct.
-
-    Returns the lowercased ``sessions.source``, ``""`` when state.db is readable
-    but holds no such row, and ``None`` when state.db could not be consulted at
-    all (no configured path, missing file, unreadable/corrupt database). The
-    auto-assign sweep needs that difference to fail CLOSED — an ownership it
-    cannot confirm must not authorise a write (AGENTS.md: unknown is not
-    allowed) — while every other caller keeps the historical
-    "unknown -> ''" behaviour through ``_state_db_session_source``
-    (Greptile P2 2026-10-10T00:47:29Z).
-    """
-    try:
-        if not sid or not is_safe_session_id(sid):
-            return ""
-        from api.models import _active_state_db_path
-
-        db_path = _active_state_db_path()
-        if not db_path or not Path(db_path).exists():
-            return None
-        import sqlite3 as _sqlite
-
-        with closing(_sqlite.connect(str(db_path))) as _conn:
-            row = _conn.execute(
-                "SELECT source FROM sessions WHERE id = ?", (sid,)
-            ).fetchone()
-    except Exception:
-        return None
-    if not row:
-        return ""
-    return str(row[0] or "").strip().lower()
-
-
 def _state_db_session_source(sid: str) -> str:
     """Return the lowercased ``sessions.source`` for ``sid`` from state.db.
 
     Cheap single-row lookup used to distinguish delegated ``subagent`` children
     (which have a recoverable state.db transcript) from genuinely-deleted WebUI
     sessions.  Returns "" on any error / missing row so callers fall back to
-    their existing behaviour; ``_state_db_session_source_strict`` is the variant
-    that keeps "could not look it up" distinct from "no such row".
+    their existing behaviour.
     """
-    return _state_db_session_source_strict(sid) or ""
+    if not sid or not is_safe_session_id(sid):
+        return ""
+    try:
+        from api.models import _active_state_db_path
+        db_path = _active_state_db_path()
+        if not db_path or not Path(db_path).exists():
+            return ""
+        import sqlite3 as _sqlite
+        with closing(_sqlite.connect(str(db_path))) as _conn:
+            row = _conn.execute(
+                "SELECT source FROM sessions WHERE id = ?", (sid,)
+            ).fetchone()
+    except Exception:
+        return ""
+    if not row:
+        return ""
+    return str(row[0] or "").strip().lower()
 
 
 def _is_subagent_child_session_id(sid: str) -> bool:
@@ -17398,75 +16779,15 @@ def handle_post(handler, parsed) -> bool:
                 # thread the drain snapshot already missed).
                 if _register_background_commit_thread(t):
                     t.start()
-        # Project assignment: explicit project_id wins; otherwise, if an
-        # auto-assign project claims this workspace, the session is filed
-        # under it automatically (multi-workspace auto-classification).
-
-        def _create_session(_project_id, resolved_workspace=None):
-            # ``resolved_workspace`` is the workspace the auto-assign branch has
-            # ALREADY resolved for its project lookup.  Passing it through keeps
-            # the session and its project on ONE read of the profile's last
-            # workspace: letting new_session read it again could land the chat in
-            # workspace B while it is filed under workspace A's project
-            # (Greptile P1 2026-10-10T02:58:01Z).  None keeps master's path, where
-            # new_session resolves the fallback itself.
-            return new_session(
-                workspace=resolved_workspace if resolved_workspace is not None else workspace,
-                model=model,
-                model_provider=model_provider,
-                profile=body.get("profile") or None,
-                project_id=_project_id,
-                worktree_info=worktree_info,
-                enabled_toolsets=enabled_toolsets,
-            )
-
-        # Explicit ``project_id: null`` means "no project" and must round-trip:
-        # only an ABSENT field opts into auto-assignment. Master's handler
-        # preserves null, so null-with-a-workspace already means "unassigned"
-        # everywhere else; treating null like an omission filed a New Chat
-        # started from the "No project" sidebar view into an auto-assigned
-        # project, which then hid it from the very view that created it
-        # (maintainer re-gate 2026-10-09T23:55:01Z). '' keeps master's meaning
-        # (falsy → unassigned) rather than becoming an auto-assign trigger.
-        _project_id_supplied = "project_id" in body
-        project_id = body.get("project_id") or None
-        if _project_id_supplied:
-            s = _create_session(project_id)
-        else:
-            # Auto-assignment keys off the session's EFFECTIVE workspace, which
-            # new_session resolves as `workspace or get_last_workspace(profile)`.
-            # Testing the RAW body field instead skipped auto-assignment for a
-            # request that omits `workspace` even though the chat still lands in
-            # the profile's last workspace, so a workspace an auto-assign
-            # project already owns produced an unassigned chat (Greptile P1
-            # 2026-10-10T02:22:52Z).  The profile is resolved exactly like
-            # new_session resolves it (active profile when the body omits it).
-            # An explicit ``project_id: null`` still short-circuits above, so
-            # the "No project" view keeps meaning unassigned.
-            _auto_profile = body.get("profile") or _get_active_profile_name()
-            _effective_workspace = workspace or get_last_workspace(
-                profile=_auto_profile
-            )
-            if not _effective_workspace:
-                s = _create_session(project_id)
-            else:
-                # Serialize the implicit assignment WITH the session's publication
-                # into the cache, under the same lock /api/projects/delete takes to
-                # remove the catalog row and to clear the cached sessions that
-                # referenced it. A new chat is cache-only until its first save
-                # (new_session writes nothing to disk), so if the delete's row
-                # removal landed between this assignment and the publication, the
-                # session kept the dead project_id in the cache and persisted it on
-                # the draft-save — the index-only unlink never saw it. Holding the
-                # lock across both makes the two orderings the only ones possible:
-                # either the session is already published when deletion clears the
-                # cache, or the row is already gone so the session is created
-                # unassigned (re-gate 2026-10-07, api/routes.py:16855).
-                with _PROJECTS_CATALOG_LOCK:
-                    project_id = _auto_assign_project_for_workspace(
-                        _effective_workspace, profile=body.get("profile") or None
-                    )
-                    s = _create_session(project_id, _effective_workspace)
+        s = new_session(
+            workspace=workspace,
+            model=model,
+            model_provider=model_provider,
+            profile=body.get("profile") or None,
+            project_id=body.get("project_id") or None,
+            worktree_info=worktree_info,
+            enabled_toolsets=enabled_toolsets,
+        )
         if worktree_info:
             publish_session_list_changed(
                 "session_new",
@@ -19533,72 +18854,19 @@ def handle_post(handler, parsed) -> bool:
             save_projects(projects)
         return j(handler, {"ok": True, "project": proj})
 
-    if parsed.path == "/api/projects/auto-assign-preview":
-        # Read-only preview for the bind dialog: how many existing sessions
-        # would be filed if auto-assign were switched on for these workspaces?
-        # Ticking the box files EVERY existing chat in the bound workspaces and
-        # unticking it does not un-file them, so the dialog confirms with this
-        # count first (re-gate 2026-10-07T19:22:30Z, item 3).
-        #
-        # Body fields:
-        #   workspaces: [str]  — the workspace list the dialog is about to save
-        #   project_id: str    — the project the dialog belongs to (optional)
-        #
-        # The profile is deliberately NOT a caller input. Forwarding a
-        # request-selected profile into the counter made the shared session
-        # index filterable by the caller, so a POSTed profile name returned
-        # that foreign profile's unowned-session count (Greptile P1 + security,
-        # 2026-10-07T22:59:48Z). The count is pinned to the project's own
-        # profile, which is also what the sweep files
-        # (``_auto_assign_sweep_body`` uses the project's own profile, and a
-        # profile can only see its own projects).
-        #
-        # ``project_id`` IS an input and is authorized exactly like
-        # /api/projects/bind: the caller may only preview a project the ACTIVE
-        # profile owns, and the count then runs under that project's profile.
-        # Without it a dialog left open across a profile switch previewed the
-        # other profile's workspaces (count 0), cached that as "nothing to
-        # file", and reused it for its own project — filing chats with no
-        # confirmation (re-gate 2026-10-08T02:11:02Z, [SILENT] 2.).
-        raw_ws = body.get("workspaces")
-        if raw_ws is None:
-            ws_list = []
-        elif isinstance(raw_ws, list):
-            ws_list = [str(w) for w in raw_ws if w]
-        else:
-            return bad(handler, "workspaces must be a list")
-        profile = None
-        project_id = body.get("project_id")
-        if project_id:
-            try:
-                projects = load_projects()
-            except Exception:
-                projects = []
-            proj = next(
-                (p for p in projects if p.get("project_id") == project_id), None
-            )
-            # #1614: a project can only be previewed by the profile that owns it.
-            if not proj or not _profiles_match(
-                proj.get("profile"), get_active_profile_name()
-            ):
-                return bad(handler, "Project not found", 404)
-            profile = proj.get("profile") or "default"
-        return j(
-            handler,
-            {"count": _auto_assign_candidate_count(ws_list, profile=profile)},
-        )
-
     if parsed.path == "/api/projects/bind":
         # Project bindings: attach workspaces (multi-value, with one marked
-        # default), a model, a reasoning effort, and an auto-assign flag to a
-        # project so the quick-create (+) button opens a new session already
-        # configured for that project's context, and (with auto_assign) every
-        # session in a bound workspace is filed under this project.
+        # default), a model and a reasoning effort to a project so the
+        # quick-create (+) button opens a new session already configured for
+        # that project's context.
         #
         # Body fields (all optional):
         #   workspaces: [str]        — replace the full workspace list
         #   default_workspace: str   — must be in workspaces (auto-added if not)
-        #   auto_assign: bool        — auto-file sessions by workspace
+        #   auto_assign: bool        — accepted and STORED but DORMANT: the
+        #                              backfill sweep, its toggle and the
+        #                              workspace-keyed filing it drove live in a
+        #                              follow-up PR, so nothing reads it here.
         #   workspace: str           — legacy single-workspace binding (kept for
         #                              compat; maps to workspaces=[w])
         #   model / model_provider   — single-value model binding (null clears)
@@ -19742,12 +19010,13 @@ def handle_post(handler, parsed) -> bool:
                         )
             if "auto_assign" in body:
                 _aa_pre = body.get("auto_assign")
-                # A JSON BOOLEAN only: `bool("false")` is True, so a stringly-typed
-                # client value turned auto-filing ON — and started filing existing
-                # chats, which clearing the flag afterwards does not undo — instead
-                # of being rejected (Greptile P2 2026-10-10T06:00:25Z). Checked in
-                # the pre-flight so the rejected request cannot leave the paths
-                # validated above registered on the saved workspace list either.
+                # Dormant but still shape-checked: the field is stored (see the
+                # field block below) and a JSON BOOLEAN is the only shape it ever
+                # accepted — `bool("false")` is True, so a stringly-typed client
+                # value was rejected rather than silently stored (Greptile P2
+                # 2026-10-10T06:00:25Z). Checked in the pre-flight so a rejected
+                # request cannot leave the paths validated above registered on
+                # the saved workspace list either.
                 if _aa_pre is not None and not isinstance(_aa_pre, bool):
                     return bad(handler, "auto_assign must be a boolean")
 
@@ -19762,7 +19031,7 @@ def handle_post(handler, parsed) -> bool:
                     # A scalar iterated as characters (a string) or raised an
                     # uncaught TypeError mid-loop (a number/bool), so the client
                     # got a 500 instead of a bad-request. Reject the shape up
-                    # front, exactly like /api/projects/auto-assign-preview
+                    # front, the same shape check its siblings use
                     # (Greptile P2 2026-10-09T21:47:48Z).
                     return bad(handler, "workspaces must be a list of paths")
                 else:
@@ -19830,8 +19099,8 @@ def handle_post(handler, parsed) -> bool:
                         # canonical accessor (not `proj.get("workspaces") or []`) so a
                         # LEGACY project carrying only `workspace: A` keeps A in the
                         # bound set: starting from an empty list would store just B and
-                        # then overwrite the compatibility alias, dropping A from both
-                        # quick-create and auto-assignment.
+                        # then overwrite the compatibility alias, dropping A from
+                        # quick-create (and from the default-workspace fallback).
                         ws_list = _project_workspaces(proj)
                         if dw_resolved not in ws_list:
                             try:
@@ -19844,9 +19113,13 @@ def handle_post(handler, parsed) -> bool:
                         if ws_list:
                             proj["workspace"] = ws_list[0]
 
-            # ── auto_assign flag ──
-            # The value's TYPE was validated in the pre-flight above, so a plain
-            # truthiness test is safe here (a string "false" can no longer reach it).
+            # ── auto_assign flag (stored but dormant) ──
+            # Kept accept-and-store so an older client that still sends the field
+            # round-trips instead of erroring; NOTHING in this build reads it —
+            # the sweep it used to drive, its toggle and the workspace-keyed
+            # filing of new sessions moved to a follow-up PR. The value's TYPE was
+            # validated in the pre-flight above, so a plain truthiness test is
+            # safe here (a string "false" can no longer reach it).
             if "auto_assign" in body:
                 if body.get("auto_assign"):
                     proj["auto_assign"] = True
@@ -19911,94 +19184,6 @@ def handle_post(handler, parsed) -> bool:
 
             save_projects(projects)
 
-        # When auto_assign is (now) enabled, file every existing session whose
-        # workspace is in this project's bound list under this project. Runs in
-        # a background thread so a large index doesn't stall the response.
-        # ``_project_workspaces`` (not the raw ``workspaces`` field) so a LEGACY
-        # project carrying only ``workspace: A`` still backfills: reading the
-        # absent multi-value field skipped the historical sweep while the
-        # future-session path (which uses the accessor) kept assigning.
-        if proj.get("auto_assign") and _project_workspaces(proj):
-            from api.session_lifecycle import (
-                _register_background_commit_thread,
-                _unregister_background_commit_thread,
-            )
-
-            def _file_existing_sessions(_proj=None):
-                target = _proj if _proj is not None else proj
-                try:
-                    # A detached worker inherits NEITHER the spawning request's
-                    # profile TLS nor its os.environ, so a NAMED-profile
-                    # project's sweep resolved the DEFAULT profile: it read that
-                    # profile's session store and filed rows the profile
-                    # boundary (and /api/session/move) refuses to touch — the
-                    # sweep happily wrote a delegated alpha-profile child's
-                    # project id while a manual Move of the same child 403'd.
-                    # Enter the project's own profile for the whole sweep
-                    # (re-gate 2026-10-08T02:11:02Z, [SILENT] 4.).
-                    with profile_scope_for_detached_worker(
-                        (target or {}).get("profile") or "default",
-                        "project auto-assign",
-                    ):
-                        _apply_project_auto_assign(target)
-                except Exception as exc:
-                    logger.warning("auto-assign for project %s failed: %s",
-                                   (proj or {}).get("project_id"), exc)
-                finally:
-                    # The sweep was registered by the bind handler (atomically
-                    # with its start), so drop that registration here too — not
-                    # only the one _apply_project_auto_assign manages.
-                    try:
-                        _auto_assign_sweep_end(
-                            proj["project_id"], threading.current_thread()
-                        )
-                    except Exception:
-                        pass
-                    # Self-unregister so the background-commit registry does not
-                    # leak a dead Thread per bind (mirrors the memory worker's
-                    # finally-block at api/routes.py:16544-16550); the drain only
-                    # tracks live workers, so a completed thread must drop out.
-                    try:
-                        _unregister_background_commit_thread(threading.current_thread())
-                    except Exception:
-                        pass
-
-            t = threading.Thread(
-                target=_file_existing_sessions,
-                daemon=True,
-                name=f"auto-assign-{proj['project_id']}",
-            )
-            # Respect shutdown drain refusal — do NOT start a worker the
-            # drain snapshot already missed (mirrors memory-worker pattern
-            # at api/routes.py:14799-14804).
-            #
-            # Admission is serialized with deletion under the projects-catalog
-            # lock AND re-checks that the project row still exists. The deleting
-            # marker alone left a window: deletion clears that marker in its
-            # `finally`, so a bind paused after the catalog save above could
-            # resume, see no marker, and file sessions under a project whose row
-            # was already removed (re-gate 2026-10-07, api/routes.py:19186).
-            # Holding the same lock deletion takes to remove the row makes the
-            # check + registration atomic against it: the delete either joins
-            # this worker (it is registered before we release) or the row is
-            # already gone and we refuse.
-            with _PROJECTS_CATALOG_LOCK:
-                if not _project_row_exists(proj["project_id"]):
-                    # The project was deleted while this bind was paused. Do not
-                    # resurrect it and do not start a sweep for it.
-                    return bad(handler, "Project not found", 404)
-                if _register_background_commit_thread(t):
-                    # Admit AND start the sweep before this response returns, so
-                    # a concurrent delete either joins this worker or refuses the
-                    # sweep outright. Starting it from the worker's own body left
-                    # a window where the delete found nothing to join and the
-                    # late sweep filed sessions under the removed project.
-                    if not _auto_assign_start_sweep(proj["project_id"], t):
-                        try:
-                            _unregister_background_commit_thread(t)
-                        except Exception:
-                            pass
-
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/delete":
@@ -20016,139 +19201,117 @@ def handle_post(handler, parsed) -> bool:
         active_profile = get_active_profile_name()
         if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
-        # Serialize deletion with an in-flight auto-assign backfill: refuse new
-        # sweeps for this project and cancel + JOIN the running ones BEFORE the
-        # project is removed and its sessions unlinked. Otherwise a sweep
-        # admitted a moment earlier would keep writing project_id for a project
-        # that no longer exists (its sessions then vanish from Unassigned), and
-        # rows it reached after the unlink pass would be re-filed right after
-        # being cleared.
-        if not _auto_assign_cancel_sweeps(body["project_id"]):
-            # A registered sweep outlived the join timeout and can still write
-            # project_id. Refuse the deletion and leave the project (and its
-            # sessions) intact — removing it now would let that worker orphan
-            # sessions under a project id that no longer exists. Releasing the
-            # marker keeps the project usable and deletable once it exits.
-            _auto_assign_abort_deleting(body["project_id"])
-            return bad(
-                handler,
-                "Project is busy: an auto-assign sweep is still running; retry",
-                503,
+        # Ids the in-memory clear unlinked from the cache; their SIDECARS are
+        # written through below. Both the clear itself and that write-through
+        # run OUTSIDE the catalog lock: a per-session lock wait (clear) or a
+        # full-history write (persist) must not stall New Chat / workspace
+        # edits behind a delete (maintainer re-gate 2026-10-10T15:11:33Z).
+        cleared_ids: list = []
+        with _PROJECTS_CATALOG_LOCK:
+            # Reload (rather than reuse the `projects` list read for the
+            # ownership check above) so a project created meanwhile is not
+            # erased by saving the stale list (new regression on
+            # api/routes.py:19127). The read → filter → save runs under the
+            # catalog lock shared with create / rename / bind so no mutation
+            # can interleave.
+            projects = [
+                p for p in load_projects()
+                if p["project_id"] != body["project_id"]
+            ]
+            save_projects(projects)
+        # Clear the CACHED sessions that still carry this project_id. An
+        # unsaved new chat lives only in the LRU cache (new_session writes
+        # nothing to disk), so the index-only unlink below never saw it and
+        # its draft-save persisted the dead id.
+        #
+        # This runs AFTER the catalog lock is released, on purpose: the clear
+        # takes each session's own agent lock with a bounded wait (up to 5 s
+        # each), so holding the catalog lock across it stalled every New Chat
+        # and workspace edit behind a delete of a project with busy cached
+        # chats (maintainer re-gate 2026-10-10T15:11:33Z: seven held session
+        # locks made New Chat time out after 30.03 s; with the call moved
+        # here it finished in 0.037 s and the transcript was preserved).
+        #
+        # The mutual exclusion the old placement provided is unchanged: the
+        # ROW REMOVAL above stays serialized (under the catalog lock) with the
+        # explicit assignment paths (``/api/session/new`` with an explicit id,
+        # ``/api/session/move``) and their cache publication, so either that
+        # session already published its project_id — and this scan sees and
+        # clears it — or it validates against the catalog after the removal and
+        # stays unassigned. Never an orphan (re-gate 2026-10-07,
+        # api/routes.py:16855).
+        cleared_cached = _clear_cached_sessions_for_project(
+            body["project_id"], cleared_ids=cleared_ids
+        )
+        if cleared_cached:
+            logger.info(
+                "projects/delete: cleared project_id on %d cached session(s)",
+                cleared_cached,
             )
-        try:
-            # Ids the in-memory clear unlinked from the cache; their SIDECARS are
-            # written through below. Both the clear itself and that write-through
-            # run OUTSIDE the catalog lock: a per-session lock wait (clear) or a
-            # full-history write (persist) must not stall New Chat / workspace
-            # edits behind a delete (maintainer re-gate 2026-10-10T15:11:33Z).
-            cleared_ids: list = []
-            with _PROJECTS_CATALOG_LOCK:
-                # Reload AFTER the drain: `projects` was read before the (up to
-                # 10 s) join above, and saving that stale list erased a project
-                # created meanwhile (new regression on api/routes.py:19127).
-                # The read → filter → save runs under the catalog lock shared
-                # with create / rename / bind so no mutation can interleave.
-                projects = [
-                    p for p in load_projects()
-                    if p["project_id"] != body["project_id"]
-                ]
-                save_projects(projects)
-            # Clear the CACHED sessions that still carry this project_id. An
-            # unsaved new chat lives only in the LRU cache (new_session writes
-            # nothing to disk), so the index-only unlink below never saw it and
-            # its draft-save persisted the dead id.
-            #
-            # This runs AFTER the catalog lock is released, on purpose: the clear
-            # takes each session's own agent lock with a bounded wait (up to 5 s
-            # each), so holding the catalog lock across it stalled every New Chat
-            # and workspace edit behind a delete of a project with busy cached
-            # chats (maintainer re-gate 2026-10-10T15:11:33Z: seven held session
-            # locks made New Chat time out after 30.03 s; with the call moved
-            # here it finished in 0.037 s and the transcript was preserved).
-            #
-            # The mutual exclusion the old placement provided is unchanged: the
-            # ROW REMOVAL above stays serialized (under the catalog lock) with
-            # the create path's implicit assignment + cache publication
-            # (api/routes.py:17307), so either that session already published its
-            # project_id — and this scan sees and clears it — or it reads the
-            # catalog after the removal and is created unassigned. Never an
-            # orphan (re-gate 2026-10-07, api/routes.py:16855).
-            cleared_cached = _clear_cached_sessions_for_project(
-                body["project_id"], cleared_ids=cleared_ids
+        # The catalog lock is now released: write the unlink through to the
+        # sidecars of the cached sessions that have one. A session without a
+        # sidecar is a "+ New Chat" draft and stays cache-only, and an
+        # actively streaming one is left to its worker's next save — both are
+        # skipped inside the helper (Greptile P1 2026-10-10T12:41:25Z: no
+        # full-history write may run while the catalog lock is held).
+        persisted_cleared = _persist_cleared_project_ids(
+            body["project_id"], cleared_ids
+        )
+        if persisted_cleared:
+            logger.info(
+                "projects/delete: persisted the unlink on %d session file(s)",
+                persisted_cleared,
             )
-            if cleared_cached:
-                logger.info(
-                    "projects/delete: cleared project_id on %d cached session(s)",
-                    cleared_cached,
-                )
-            # The catalog lock is now released: write the unlink through to the
-            # sidecars of the cached sessions that have one. A session without a
-            # sidecar is a "+ New Chat" draft and stays cache-only, and an
-            # actively streaming one is left to its worker's next save — both are
-            # skipped inside the helper (Greptile P1 2026-10-10T12:41:25Z: no
-            # full-history write may run while the catalog lock is held).
-            persisted_cleared = _persist_cleared_project_ids(
-                body["project_id"], cleared_ids
-            )
-            if persisted_cleared:
-                logger.info(
-                    "projects/delete: persisted the unlink on %d session file(s)",
-                    persisted_cleared,
-                )
-            # Unassign all sessions that belonged to this project.
-            # #3746: this loop is O(N) full-JSON read+save per session, and each
-            # save() reserializes the entire messages array. For a project with many
-            # messageful sessions that throughput alone can blow past the client's
-            # 30s timeout. For an actively-streaming session we must NOT issue our own
-            # s.save() — it would race the streaming thread's atomic writer and it
-            # carries the largest in-memory message array. Instead we clear project_id
-            # on the live cached Session object (under LOCK); the streaming thread owns
-            # that object and persists it on its next checkpoint/final save (the worker
-            # always does a final s.save() at turn completion), so the unlink still
-            # lands without a competing write. (If the streaming session isn't in the
-            # cache for some reason, fall back to a direct save.) Guard each per-session
-            # update so one slow/failing session can't abort the whole request.
-            if SESSION_INDEX_FILE.exists():
-                try:
-                    index = json.loads(SESSION_INDEX_FILE.read_bytes())
-                    active_ids = _active_stream_ids()
-                    deferred_to_stream = []
-                    for entry in index:
-                        if entry.get("project_id") != body["project_id"]:
-                            continue
-                        sid = entry.get("session_id")
-                        try:
-                            if entry.get("active_stream_id") in active_ids:
-                                # Clear on the live cached object so the streaming
-                                # thread's own next save persists project_id=None.
-                                cleared_in_cache = False
-                                with LOCK:
-                                    cached = SESSIONS.get(sid)
-                                    if cached is not None:
-                                        cached.project_id = None
-                                        cleared_in_cache = True
-                                if cleared_in_cache:
-                                    deferred_to_stream.append(sid)
-                                    continue
-                                # Not cached — fall through to a direct save.
-                            s = get_session(sid)
-                            s.project_id = None
-                            s.save()
-                        except Exception:
-                            logger.debug("Failed to update session %s", sid)
-                    if deferred_to_stream:
-                        logger.info(
-                            "projects/delete: cleared project_id on %d streaming session(s) "
-                            "in-cache; streaming thread will persist: %s",
-                            len(deferred_to_stream), deferred_to_stream,
-                        )
-                except Exception:
-                    logger.debug("Failed to load session index for project unlink")
-            return j(handler, {"ok": True})
-        finally:
-            # The project is gone — let a future sweep for this id (there should
-            # be none) be admitted again instead of leaking the marker forever.
-            _auto_assign_finish_deleting(body["project_id"])
+        # Unassign all sessions that belonged to this project.
+        # #3746: this loop is O(N) full-JSON read+save per session, and each
+        # save() reserializes the entire messages array. For a project with many
+        # messageful sessions that throughput alone can blow past the client's
+        # 30s timeout. For an actively-streaming session we must NOT issue our own
+        # s.save() — it would race the streaming thread's atomic writer and it
+        # carries the largest in-memory message array. Instead we clear project_id
+        # on the live cached Session object (under LOCK); the streaming thread owns
+        # that object and persists it on its next checkpoint/final save (the worker
+        # always does a final s.save() at turn completion), so the unlink still
+        # lands without a competing write. (If the streaming session isn't in the
+        # cache for some reason, fall back to a direct save.) Guard each per-session
+        # update so one slow/failing session can't abort the whole request.
+        if SESSION_INDEX_FILE.exists():
+            try:
+                index = json.loads(SESSION_INDEX_FILE.read_bytes())
+                active_ids = _active_stream_ids()
+                deferred_to_stream = []
+                for entry in index:
+                    if entry.get("project_id") != body["project_id"]:
+                        continue
+                    sid = entry.get("session_id")
+                    try:
+                        if entry.get("active_stream_id") in active_ids:
+                            # Clear on the live cached object so the streaming
+                            # thread's own next save persists project_id=None.
+                            cleared_in_cache = False
+                            with LOCK:
+                                cached = SESSIONS.get(sid)
+                                if cached is not None:
+                                    cached.project_id = None
+                                    cleared_in_cache = True
+                            if cleared_in_cache:
+                                deferred_to_stream.append(sid)
+                                continue
+                            # Not cached — fall through to a direct save.
+                        s = get_session(sid)
+                        s.project_id = None
+                        s.save()
+                    except Exception:
+                        logger.debug("Failed to update session %s", sid)
+                if deferred_to_stream:
+                    logger.info(
+                        "projects/delete: cleared project_id on %d streaming session(s) "
+                        "in-cache; streaming thread will persist: %s",
+                        len(deferred_to_stream), deferred_to_stream,
+                    )
+            except Exception:
+                logger.debug("Failed to load session index for project unlink")
+        return j(handler, {"ok": True})
 
     # ── Session import from JSON (POST) ──
     if parsed.path == "/api/session/import":

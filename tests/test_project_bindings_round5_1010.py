@@ -466,64 +466,7 @@ def test_all_four_workspace_handlers_write_under_the_catalog_lock():
 # empty file, load_projects returned [], and the sweep stopped as though its
 # project had been deleted - leaving chats unassigned while auto_assign was
 # still ON. The read now holds _PROJECTS_CATALOG_LOCK.
-def test_auto_assign_live_binding_reads_the_catalog_under_the_lock(monkeypatch):
-    routes = _routes()
-    probe = _ProbeLock()
-    monkeypatch.setattr(routes, "_PROJECTS_CATALOG_LOCK", probe)
-
-    def _load():
-        assert probe.held(), (
-            "load_projects ran OUTSIDE _PROJECTS_CATALOG_LOCK - a concurrent "
-            "save can truncate the file mid-read and the sweep stops filing"
-        )
-        return [{"project_id": "p1", "auto_assign": True, "workspaces": ["/ws/a"]}]
-
-    monkeypatch.setattr(routes, "load_projects", _load)
-    live = routes._auto_assign_live_binding("p1")
-    assert probe.entries == 1, "the live-binding read must take the shared lock"
-    assert live == (True, {"/ws/a"}), live
 
 
-def test_auto_assign_live_binding_still_fails_closed(monkeypatch):
-    """The lock must not soften the fail-CLOSED contract: a catalog that cannot
-    be read (or that no longer has the row) still answers None, so the sweep
-    stops instead of filing a chat it cannot prove is still wanted."""
-    routes = _routes()
-    monkeypatch.setattr(routes, "_PROJECTS_CATALOG_LOCK", _ProbeLock())
-    monkeypatch.setattr(routes, "load_projects", lambda: [])
-    assert routes._auto_assign_live_binding("gone") is None
-
-    def _boom():
-        raise RuntimeError("catalog unreadable")
-
-    monkeypatch.setattr(routes, "load_projects", _boom)
-    assert routes._auto_assign_live_binding("gone") is None
-
-    monkeypatch.setattr(
-        routes,
-        "load_projects",
-        lambda: [{"project_id": "p1", "auto_assign": False, "workspaces": ["/ws/a"]}],
-    )
-    assert routes._auto_assign_live_binding("p1") == (False, {"/ws/a"})
 
 
-def test_auto_assign_live_binding_takes_the_lock_in_source():
-    src = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
-    start = src.index("def _auto_assign_live_binding(")
-    end = src.index("\ndef ", start + 1)
-    body = src[start:end]
-    assert "with _PROJECTS_CATALOG_LOCK:" in body, "the live read does not take the shared lock"
-    assert "_auto_assign_live_binding_locked(project_id)" in body, (
-        "the wrapper must do its catalog read inside the shared lock"
-    )
-    # The reader itself is the function that touches the catalog, and it must
-    # NOT take the lock: its callers (this wrapper, and
-    # _auto_assign_claim_session's read+assign critical section) hold it.
-    l_start = src.index("def _auto_assign_live_binding_locked(")
-    l_end = src.index("\ndef ", l_start + 1)
-    reader = src[l_start:l_end]
-    assert "load_projects()" in reader, "the catalog read must live in the reader"
-    assert "with _PROJECTS_CATALOG_LOCK:" not in reader, (
-        "the reader must not take the lock itself - it runs inside the caller's "
-        "critical section"
-    )

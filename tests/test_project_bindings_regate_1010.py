@@ -7,8 +7,10 @@ Three findings, one section each:
     an explicit ``project_id: null`` like an omitted field, so a New Chat
     started from the sidebar's unassigned-only view was auto-assigned to a
     project and then hidden from the view that created it (master's handler
-    preserves null). The server now auto-assigns only when the field is ABSENT,
-    and the client sends an explicit null for the "No project" filter.
+    preserves null). The fix restored master's ``project_id or None`` handling
+    and the client now sends an explicit null for the "No project" filter — the
+    auto-assignment branch itself (the field-ABSENT case) moved to a follow-up
+    PR with the sweep, maintainer re-gate 2026-10-11T02:08:20Z.
 
 [SHOULD-FIX] **Partial write on the default-only path.** ``default_workspace``
     without ``workspaces`` re-resolves the project's STORED workspace list, so a
@@ -41,11 +43,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 # ---------------------------------------------------------------------------
-# 1 — /api/session/new: null is "no project", absent is "auto-assign"
+# 1 — /api/session/new: an explicit project_id is used verbatim, and the
+#     "No project" view still sends an explicit null
+#     (the absent-field auto-assignment this section also covered moved to a
+#     follow-up PR — maintainer re-gate 2026-10-11T02:08:20Z)
 # ---------------------------------------------------------------------------
 
 _WS = "D:/ws-regate-1010"
-_AUTO_PID = "proj_regate_auto_1010"
 
 
 @pytest.fixture
@@ -53,7 +57,6 @@ def session_new_env(monkeypatch):
     """Drive /api/session/new in-process with only the leaf lookups faked."""
     import api.routes as routes
 
-    auto_calls: list[str] = []
     created: list[dict] = []
     responses: list[dict] = []
 
@@ -75,14 +78,6 @@ def session_new_env(monkeypatch):
         routes, "_session_model_state_from_request", lambda m, p: ("model-x", None)
     )
     monkeypatch.setattr(routes, "_validate_session_toolsets_shape", lambda v: None)
-
-    def _auto_assign(workspace, profile=None):  # noqa: ARG001
-        auto_calls.append(workspace)
-        return _AUTO_PID
-
-    monkeypatch.setattr(
-        routes, "_auto_assign_project_for_workspace", _auto_assign
-    )
 
     class _Sess:
         session_id = "s_regate_1010"
@@ -123,64 +118,41 @@ def session_new_env(monkeypatch):
 
     return SimpleNamespace(
         routes=routes,
-        auto_calls=auto_calls,
         created=created,
         responses=responses,
         drive=_drive,
     )
 
 
-def test_an_explicit_null_project_id_is_not_auto_assigned(session_new_env):
-    """[SILENT] The "No project" view sends null; that must stay unassigned.
-
-    Reproduced on fcb070d7: ``body.get("project_id") or None`` made null look
-    like an omission, so the chat was filed under ``_AUTO_PID`` and the
-    unassigned-only sidebar view (which filters on the project id) showed zero
-    rows for the chat it had just created.
-    """
-    env = session_new_env
-    env.drive({"workspace": _WS, "project_id": None})
-
-    assert env.responses and env.responses[-1]["status"] == 200, env.responses
-    assert env.created, "new_session was never called"
-    assert env.created[-1]["project_id"] is None, env.created[-1]
-    assert env.auto_calls == [], (
-        "an explicit null must never trigger auto-assignment, got " + repr(env.auto_calls)
-    )
 
 
-def test_an_absent_project_id_still_auto_assigns(session_new_env):
-    """The auto-assign feature itself must survive the fix (absent = opt in)."""
-    env = session_new_env
-    env.drive({"workspace": _WS})
-
-    assert env.responses and env.responses[-1]["status"] == 200, env.responses
-    assert env.auto_calls == [_WS], env.auto_calls
-    assert env.created[-1]["project_id"] == _AUTO_PID, env.created[-1]
 
 
 def test_an_explicit_project_id_is_used_verbatim(session_new_env):
-    """A caller that names a project keeps it, and is not re-assigned."""
+    """A caller that names a project keeps it."""
     env = session_new_env
     env.drive({"workspace": _WS, "project_id": "proj_named_1010"})
 
     assert env.responses and env.responses[-1]["status"] == 200, env.responses
     assert env.created[-1]["project_id"] == "proj_named_1010", env.created[-1]
-    assert env.auto_calls == [], env.auto_calls
 
 
 def test_an_explicit_empty_project_id_keeps_masters_meaning(session_new_env):
-    """'' was falsy on master too (unassigned); it must not start assigning."""
+    """'' was falsy on master too (unassigned); it must stay unassigned."""
     env = session_new_env
     env.drive({"workspace": _WS, "project_id": ""})
 
     assert env.responses and env.responses[-1]["status"] == 200, env.responses
     assert env.created[-1]["project_id"] is None, env.created[-1]
-    assert env.auto_calls == [], env.auto_calls
 
 
 def test_the_no_project_view_sends_an_explicit_null():
-    """The client half: the unassigned view must not omit the field."""
+    """The client half: the unassigned view must not omit the field.
+
+    The server no longer auto-assigns an omitted project_id (that sweep moved to
+    a follow-up PR), so this pins the CLIENT contract: the unassigned view keeps
+    sending an explicit null rather than depending on the omission.
+    """
     src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
     start = src.index(
         "if(Object.prototype.hasOwnProperty.call(options,'project_id')){"
@@ -615,247 +587,28 @@ def test_the_moved_highlight_is_scrolled_into_view():
 # ---------------------------------------------------------------------------
 
 
-def _row(**extra):
-    row = SimpleNamespace(
-        session_id="s_failclosed",
-        read_only=False,
-        source_tag="",
-        raw_source="",
-        session_source="",
-    )
-    for key, value in extra.items():
-        setattr(row, key, value)
-    return row
 
 
-def _broken_state_db(monkeypatch, tmp_path, name="broken-state.db"):
-    """Point state.db at an unreadable sqlite file (exists, cannot be queried)."""
-    import api.models as models
-
-    path = tmp_path / name
-    path.write_bytes(b"this is not a sqlite database\n" * 8)
-    monkeypatch.setattr(models, "_active_state_db_path", lambda: path)
-    return path
 
 
-def test_an_unreadable_state_db_makes_the_sweep_skip_the_row(monkeypatch, tmp_path):
-    """Greptile P2 (2026-10-10T00:47:29Z): an ownership that cannot be confirmed
-    must not authorise a write — AGENTS.md: unknown is not allowed.
-
-    Pre-fix the guard returned False on a failed lookup, so the sweep filed a row
-    it could not prove was not a delegated child.
-    """
-    import api.routes as routes
-
-    _broken_state_db(monkeypatch, tmp_path)
-    assert routes._state_db_session_source_strict("s_failclosed") is None
-    # ...while the historical seam still collapses it to "" for every other caller.
-    assert routes._state_db_session_source("s_failclosed") == ""
-    assert routes._auto_assign_target_is_view_only(_row(), "s_failclosed") is True
 
 
-def test_a_missing_state_db_also_fails_closed(monkeypatch, tmp_path):
-    """No state.db at all is "cannot confirm" too, not "nothing recorded"."""
-    import api.models as models
-    import api.routes as routes
-
-    monkeypatch.setattr(models, "_active_state_db_path", lambda: tmp_path / "nope.db")
-    assert routes._state_db_session_source_strict("s_failclosed") is None
-    assert routes._auto_assign_target_is_view_only(_row(), "s_failclosed") is True
 
 
-def test_a_readable_state_db_keeps_the_previous_decisions(monkeypatch, tmp_path):
-    """Control: a real state.db still files ordinary rows and skips children."""
-    import sqlite3
-
-    import api.models as models
-    import api.routes as routes
-
-    path = tmp_path / "state.db"
-    conn = sqlite3.connect(str(path))
-    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, source TEXT)")
-    conn.execute("INSERT INTO sessions (id, source) VALUES ('s_child', 'subagent')")
-    conn.commit()
-    conn.close()
-    monkeypatch.setattr(models, "_active_state_db_path", lambda: path)
-
-    assert routes._state_db_session_source_strict("s_child") == "subagent"
-    assert routes._state_db_session_source_strict("s_absent") == ""
-    assert routes._auto_assign_target_is_view_only(_row(), "s_child") is True
-    assert routes._auto_assign_target_is_view_only(_row(), "s_absent") is False
-    # The source tag / read-only short-circuits still win before any lookup.
-    assert routes._auto_assign_target_is_view_only(_row(read_only=True), "s_absent") is True
-    assert routes._auto_assign_target_is_view_only(_row(source_tag="Subagent"), "s_absent") is True
 
 
-def test_a_lookup_that_raises_is_skipped_too(monkeypatch):
-    """Even an exception escaping the strict probe must not file the row."""
-    import api.routes as routes
-
-    def _boom(sid):
-        raise RuntimeError("state.db exploded")
-
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", _boom)
-    assert routes._auto_assign_target_is_view_only(_row(), "s_failclosed") is True
 
 
-# ---------------------------------------------------------------------------
-# 5 — Greptile 2026-10-10T02:20-02:22Z (three findings on this head)
-# ---------------------------------------------------------------------------
 
 
-def test_a_missing_workspace_still_auto_assigns_the_last_workspace(
-    session_new_env, monkeypatch
-):
-    """Greptile P1 (2026-10-10T02:22:52Z): /api/session/new hands new_session
-    `workspace or get_last_workspace(profile)`, so a body that omits `workspace`
-    still lands in the profile's last workspace — and that workspace must be
-    auto-assigned like any other.  The old branch tested the RAW body field and
-    skipped the lookup entirely."""
-    routes = session_new_env.routes
-    # The request has no `workspace`, so the resolver answers None (master's
-    # contract) and the effective workspace comes from the profile.
-    monkeypatch.setattr(routes, "_resolve_new_session_workspace", lambda *a, **k: None)
-    seen = []
-    monkeypatch.setattr(
-        routes, "get_last_workspace", lambda profile=None: seen.append(profile) or "D:/last-ws"
-    )
-    session_new_env.drive({"profile": "default"})
-    assert session_new_env.auto_calls == ["D:/last-ws"], session_new_env.auto_calls
-    assert session_new_env.created[0]["project_id"] == _AUTO_PID
-    # The session is created in the SAME workspace the project was resolved
-    # from: letting new_session read the last workspace again could file a chat
-    # in workspace B under workspace A's project (Greptile P1 2026-10-10T02:58:01Z).
-    assert session_new_env.created[0]["workspace"] == "D:/last-ws", session_new_env.created[0]
-    # The profile is resolved exactly like new_session resolves it.
-    assert seen == ["default"], seen
 
 
-def test_a_missing_workspace_with_an_explicit_null_project_stays_unassigned(
-    session_new_env, monkeypatch
-):
-    """The "No project" view still wins: an explicit `project_id: null` never
-    auto-assigns, even when the effective workspace is the profile's last one."""
-    routes = session_new_env.routes
-    monkeypatch.setattr(routes, "_resolve_new_session_workspace", lambda *a, **k: None)
-    monkeypatch.setattr(routes, "get_last_workspace", lambda profile=None: "D:/last-ws")
-    session_new_env.drive({"profile": "default", "project_id": None})
-    assert session_new_env.auto_calls == [], session_new_env.auto_calls
-    assert session_new_env.created[0]["project_id"] is None
 
 
-def test_a_missing_workspace_and_no_last_workspace_skips_the_lookup(
-    session_new_env, monkeypatch
-):
-    """Control: nothing to resolve means no auto-assign lookup at all."""
-    routes = session_new_env.routes
-    monkeypatch.setattr(routes, "_resolve_new_session_workspace", lambda *a, **k: None)
-    monkeypatch.setattr(routes, "get_last_workspace", lambda profile=None: "")
-    session_new_env.drive({"profile": "default"})
-    assert session_new_env.auto_calls == [], session_new_env.auto_calls
-    assert session_new_env.created[0]["project_id"] is None
 
 
-def _sweep_env(tmp_path, monkeypatch, live_projects):
-    """An index with two unfiled sessions in two workspaces + live rows."""
-    import json
-
-    import api.routes as routes
-
-    gone_dir = tmp_path / "ws-gone"
-    gone_dir.mkdir()
-    live_dir = tmp_path / "ws-live"
-    live_dir.mkdir()
-    gone, live = str(gone_dir), str(live_dir)
-    index_file = tmp_path / "_index.json"
-    index_file.write_text(
-        json.dumps(
-            [
-                {"session_id": "s_gone", "workspace": gone, "profile": "default", "project_id": None},
-                {"session_id": "s_live", "workspace": live, "profile": "default", "project_id": None},
-            ]
-        )
-    )
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-
-    class _Row:
-        def __init__(self, sid, workspace):
-            self.session_id = sid
-            self.workspace = workspace
-            self.profile = "default"
-            self.project_id = None
-
-        def save(self, touch_updated_at=True):  # noqa: ARG002
-            pass
-
-    rows = {"s_gone": _Row("s_gone", gone), "s_live": _Row("s_live", live)}
-    monkeypatch.setattr(
-        routes,
-        "get_session",
-        lambda sid, metadata_only=False: None if metadata_only else rows.get(sid),
-    )
-    monkeypatch.setattr(routes, "load_projects", live_projects)
-    return routes, rows, gone, live
 
 
-def test_a_mid_sweep_workspace_removal_stops_that_row_being_filed(tmp_path, monkeypatch):
-    """Greptile P1 (2026-10-10T02:22:51Z): /api/projects/bind hands the snapshot
-    to a BACKGROUND sweep, so a workspace removed while it runs must not keep
-    filing chats — the live bindings are re-read before each assignment.  A
-    workspace that is STILL bound keeps filing."""
-    pid = "proj_mid_sweep_remove"
-    routes, rows, gone, live = _sweep_env(
-        tmp_path,
-        monkeypatch,
-        lambda *a, **k: [
-            {"project_id": pid, "profile": "default", "auto_assign": True, "workspaces": [live]}
-        ],
-    )
-    # The stale snapshot the worker was handed still lists BOTH workspaces.
-    stale = {"project_id": pid, "profile": "default", "workspaces": [gone, live]}
-    try:
-        filed = routes._apply_project_auto_assign(stale)
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-    assert filed == 1, filed
-    assert rows["s_live"].project_id == pid, "a still-bound workspace must keep filing"
-    assert rows["s_gone"].project_id is None, "the detached workspace must not be filed"
-
-
-def test_a_mid_sweep_auto_assign_toggle_off_and_an_unreadable_catalog_fail_closed(
-    tmp_path, monkeypatch
-):
-    """The sweep stops when `auto_assign` was switched off mid-run, and when the
-    catalog cannot be read at all (AGENTS.md: unknown must not file a chat)."""
-    pid = "proj_mid_sweep_off"
-    routes, rows, gone, live = _sweep_env(
-        tmp_path,
-        monkeypatch,
-        lambda *a, **k: [
-            {"project_id": pid, "profile": "default", "auto_assign": False, "workspaces": [gone, live]}
-        ],
-    )
-    stale = {"project_id": pid, "profile": "default", "workspaces": [gone, live]}
-    try:
-        assert routes._apply_project_auto_assign(stale) == 0
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-    assert rows["s_live"].project_id is None and rows["s_gone"].project_id is None
-
-    def _boom(*a, **k):
-        raise OSError("catalog unreadable")
-
-    monkeypatch.setattr(routes, "load_projects", _boom)
-    try:
-        assert routes._apply_project_auto_assign(stale) == 0
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-    assert rows["s_live"].project_id is None and rows["s_gone"].project_id is None
-
-
-# --- the dialog stays open until the server accepts the save -----------------
 
 _SAVE_BINDINGS_PROBE = r"""
 let apiMode = 'fail';

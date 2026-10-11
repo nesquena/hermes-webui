@@ -273,17 +273,14 @@ def _project(**extra):
     return proj
 
 
-def test_auto_assign_string_false_is_rejected_and_does_not_start_filing(
-    bind_env, monkeypatch
-):
-    """The reported repro: `"auto_assign": "false"` used to turn filing ON."""
-    import api.routes as routes
+def test_auto_assign_string_false_is_rejected(bind_env, monkeypatch):
+    """The reported repro: `"auto_assign": "false"` used to turn filing ON.
 
-    swept: list = []
-    monkeypatch.setattr(
-        routes, "_apply_project_auto_assign", lambda proj: swept.append(proj) or 0
-    )
-
+    The field is stored but dormant since the auto-assign sweep moved to a
+    follow-up PR, so what this pins now is the shape check itself: a
+    stringly-typed value is still rejected, and it is rejected in the
+    pre-flight, so it never reaches the stored row either.
+    """
     _handled, responses, proj = _drive_bind(
         monkeypatch, _project(), {"project_id": "proj_round6", "auto_assign": "false"}
     )
@@ -291,7 +288,6 @@ def test_auto_assign_string_false_is_rejected_and_does_not_start_filing(
     assert responses and responses[0]["status"] == 400, responses
     assert "boolean" in responses[0]["error"], responses
     assert "auto_assign" not in proj, proj
-    assert swept == [], "no sweep may be started for a rejected value"
 
 
 def test_other_non_boolean_auto_assign_shapes_are_rejected(bind_env, monkeypatch):
@@ -331,10 +327,6 @@ def test_a_rejected_auto_assign_registers_no_workspace(bind_env, monkeypatch):
 
 def test_a_real_boolean_still_sets_and_clears_the_flag(bind_env, monkeypatch):
     """Control: booleans keep working (True sets, False clears)."""
-    import api.routes as routes
-
-    monkeypatch.setattr(routes, "_apply_project_auto_assign", lambda proj: 0)
-
     _handled, responses, proj = _drive_bind(
         monkeypatch, _project(), {"project_id": "proj_round6", "auto_assign": True}
     )

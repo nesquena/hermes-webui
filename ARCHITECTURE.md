@@ -729,8 +729,7 @@ A session project can carry **bindings**: a set of workspaces (one of them the
 default), a model, and — API-only since the dialog row is hidden and no session
 applies it yet — a stored reasoning effort. The chip's quick-create (`+`) button, and the top-level New Chat button
 while that project filter is active, open a new session already configured for
-the project's context; with **auto-assign** on, unfiled sessions in the bound
-workspaces are filed under the project after a counted confirmation. Right-click
+the project's context. Right-click
 a project chip and pick **Project settings…** to edit them: one row in the chip
 menu (no inline summary, no per-axis unbind rows), a dialog built on the shared
 `.app-dialog*` classes (skins, Escape, focus trap) that stays below the shared
@@ -754,28 +753,18 @@ field is optional and only the supplied ones are touched:
   multi-workspace bindings. It is still accepted and kept in sync as
   `workspaces: [w]`, so pre-existing rows that only set `workspace` keep
   working; `_project_workspaces` reads the list first and falls back to it.
-- `auto_assign: bool` — see below.
+- `auto_assign: bool` — accepted and **stored but dormant**. The backfill
+  sweep it used to drive, the dialog toggle that set it and the
+  workspace-keyed filing of new sessions were split out into a follow-up PR, so
+  this build reads the stored value nowhere. It is shape-checked (a JSON
+  boolean) in the request pre-flight, like `reasoning_effort`, and `null`/`false`
+  still clears it.
 - `model` / `model_provider` / `reasoning_effort` — single-value bindings per
   project; `null` clears that axis (the project is then unbound on it). The
   dialog renders the model row only: it never submits `reasoning_effort`, so
   saving a binding PRESERVES an existing effort value instead of clearing it —
   and, since the UX re-gate of 2026-10-08, no session applies that stored value
   either (see below).
-
-`POST /api/projects/auto-assign-preview` is the read-only companion the dialog
-calls before submitting `auto_assign: true`. Its body takes
-`workspaces: [str]` (canonicalized through the same
-`validate_workspace_to_add` → `resolve_trusted_workspace` chain the bind stores,
-so a typed `alpha/`, `~/ws/alpha` or `/ws/./alpha` counts the chats in the
-canonical path) and `project_id` (optional; authorized exactly like
-`/api/projects/bind` — 404 unless the ACTIVE profile owns that project, whose
-own profile then runs the count); it
-answers `{"count": N}` — how many unfiled sessions in those workspaces a sweep
-would file. It reads the session index only, so it may over-count the
-read-only/subagent rows the sweep skips but never under-counts. The caller's
-`profile` is deliberately **not** an input — the route has ignored a body
-`profile` since the c16 fix, because a caller-selected profile made the shared
-session index filterable by the caller (see the route's own comment).
 
 `reasoning_effort` is **stored but dormant**. `/api/projects/bind` still accepts
 it (and `null` still clears it), and the dialog still renders no row for it
@@ -812,29 +801,9 @@ Where the bindings take effect:
   axes are forwarded, and only when the caller did not pass an explicit value,
   so the chip's own `+` click (which passes its own `project_id`) is never
   double-applied.
-- **Auto-assign for new sessions** — `/api/session/new` with no explicit
-  `project_id` calls `_auto_assign_project_for_workspace`, which returns the
-  first `auto_assign` project (in on-disk list order, the same order
-  `/api/projects` serves) whose bound workspaces contain the session's
-  workspace. An omitted `profile` resolves to the ACTIVE profile exactly as
-  `new_session` does, so auto-classification and session creation always agree
-  on the effective profile.
-- **Auto-assign for existing sessions** — turning `auto_assign` on runs
-  `_apply_project_auto_assign` in a background thread, so a large session index
-  never stalls the response. It sweeps only **unowned** sessions in the bound
-  workspaces: a session the user already placed in another project is never
-  stolen, and a session being streamed is updated on the live cached object so
-  the streaming thread's own save persists it. Because the sweep runs on EVERY
-  bind while the flag is on, the dialog confirms it with the
-  `/api/projects/auto-assign-preview` count: the checkbox handler confirms on
-  tick, and Save awaits the same confirmation for the EXACT workspace snapshot
-  it submits (declining prevents the bind POST), so ticking and saving before
-  the count arrives, or adding a workspace after ticking, can no longer file
-  chats without a confirmation.
 - **Profile boundary** — a NAMED-profile project only claims sessions from its
   own profile; the root/default project claims default-profile (and unprofiled
-  legacy) rows. `_profiles_match` handles the renamed-root alias for both the
-  bind and the sweep.
+  legacy) rows. `_profiles_match` handles the renamed-root alias for the bind.
 
 
 ---

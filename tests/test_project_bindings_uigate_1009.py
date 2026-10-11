@@ -14,8 +14,11 @@ reviewer's order:
 3 **Use the lucide X for the row remove control**, with an aria-label from the
   existing unbind title string (the 12px "×" glyph only reached ~2.2:1 on a 1x
   dark desktop).
-4 **One noun for chats.** The checkbox label and hint said "sessions" while the
-  confirmation said "chats"; every locale now uses its own chat noun.
+4 **One noun for chats.** The dialog's own user-visible strings used to say
+  "sessions" while the confirm said "chats"; every locale now uses its own chat
+  noun. (The checkbox label / hint / confirmation this item was written against
+  moved to a follow-up PR with the auto-assign toggle; the default-workspace
+  tooltip below is the surviving user-visible string and keeps the same rule.)
 
 The reviewer's optional ask (auto-add a saved workspace when it is picked) is
 deliberately not implemented and not asserted here.
@@ -387,43 +390,40 @@ def _locale_value(chunk: str, key: str) -> str:
 
 
 def test_the_dialog_uses_one_noun_for_chats():
-    """Item 4: the checkbox label and hint said "sessions" while the confirm
-    said "chats"; every locale must speak with one noun."""
-    en = _locale_chunks(_read_static("i18n.js"))["en"]
-    label = _locale_value(en, "pb_auto_assign_label")
-    hint = _locale_value(en, "pb_auto_assign_hint")
+    """Item 4: the dialog's user-visible strings must speak with one noun.
+
+    The auto-assign label / hint / confirmation that item 4 was reported against
+    moved to a follow-up PR together with the toggle, so the surviving
+    user-visible string is the default-workspace tooltip — same rule, and its
+    keys must be GONE from every locale's text (not merely unreferenced).
+    """
+    src = _read_static("i18n.js")
+    en = _locale_chunks(src)["en"]
     title = _locale_value(en, "pb_set_default_title")
-    assert "sessions" not in label, label
-    assert "sessions" not in hint, hint
     assert "sessions" not in title, title
-    assert "chats" in label, label
-    assert "chats" in hint, hint
     assert "chats" in title, title
-    assert "chats" in _locale_value(en, "pb_auto_assign_confirm")
-    assert "chats" in _locale_value(en, "pb_auto_assign_confirm_btn")
+    for gone in ("pb_auto_assign_label", "pb_auto_assign_hint",
+                 "pb_auto_assign_confirm", "pb_auto_assign_confirm_btn"):
+        assert ("%s:" % gone) not in src, "%s must be gone with the toggle" % gone
+    for gone in ("pb_auto_assign_confirm_unknown",):
+        assert ("%s:" % gone) not in src, "%s must be gone with the toggle" % gone
 
 
 def test_every_locale_speaks_the_sidebar_noun():
     chunks = _locale_chunks(_read_static("i18n.js"))
     for loc, (session_word, chat_word) in _CHAT_NOUNS.items():
-        chunk = chunks[loc]
-        label = _locale_value(chunk, "pb_auto_assign_label")
-        hint = _locale_value(chunk, "pb_auto_assign_hint")
-        # The default-workspace tooltip is user-visible text too: it kept saying
-        # the locale's "sessions" word in 12 locales (maintainer LOW,
-        # 2026-10-09T23:55:01Z), so it is asserted with the label and the hint.
-        title = _locale_value(chunk, "pb_set_default_title")
-        title_noun = _TITLE_CHAT_NOUNS.get(loc, chat_word)
-        for value, key in (
-            (label, "pb_auto_assign_label"),
-            (hint, "pb_auto_assign_hint"),
-            (title, "pb_set_default_title"),
-        ):
-            if session_word is not None:
-                assert session_word.lower() not in value.lower(), (
-                    f"locale {loc!r} {key} still uses {session_word!r}: {value}"
-                )
-            noun = title_noun if key == "pb_set_default_title" else chat_word
-            assert noun.lower() in value.lower(), (
-                f"locale {loc!r} {key} must use {noun!r}: {value}"
+        # The default-workspace tooltip is user-visible text: it kept saying the
+        # locale's "sessions" word in 12 locales (maintainer LOW,
+        # 2026-10-09T23:55:01Z). It is the surviving string of this item, and it
+        # is asserted alone now that the auto-assign label/hint (and the
+        # confirmation they had to agree with) moved to a follow-up PR.
+        title = _locale_value(chunks[loc], "pb_set_default_title")
+        noun = _TITLE_CHAT_NOUNS.get(loc, chat_word)
+        if session_word is not None:
+            assert session_word.lower() not in title.lower(), (
+                f"locale {loc!r} pb_set_default_title still uses "
+                f"{session_word!r}: {title}"
             )
+        assert noun.lower() in title.lower(), (
+            f"locale {loc!r} pb_set_default_title must use {noun!r}: {title}"
+        )

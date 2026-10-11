@@ -1,17 +1,7 @@
 """Round-8 re-review of the merge-pushed heads (Greptile P1s 2026-10-10T12:11:07Z,
 2026-10-10T12:41:25Z and 2026-10-10T13:00:52Z).
 
-1. "Preview errors skip confirmation" — ``_auto_assign_candidate_count``
-   answered ``0`` when the session index was missing or unreadable. The bind
-   dialog reads a definite 0 as "a sweep would file nothing" and CACHES that
-   answer for the workspace snapshot it covered (``_aaConfirmedKey``), while the
-   background sweep re-reads the index when it actually runs: an index that was
-   absent at preview time and rebuilt before Save let the sweep file every
-   existing chat with no confirmation at all. Fixed by answering ``None``
-   (unknown) so the dialog keeps its existing unknown-count confirmation
-   (``pb_auto_assign_confirm_unknown``).
-
-2. "Deleted project survives on disk" — ``_clear_cached_sessions_for_project``
+1. "Deleted project survives on disk" — ``_clear_cached_sessions_for_project``
    cleared ``project_id`` on live cached sessions without taking their
    per-session agent lock and without writing the clear through, so a ``save()``
    that had already serialized the old ``project_id`` could still land its file
@@ -19,14 +9,14 @@
    broken association then came back on reload. Fixed by clearing under that
    session's own lock, the lock every "mutate + save" pair takes.
 
-3. "Deleting blocks other requests" — that write-through then ran while deletion
+2. "Deleting blocks other requests" — that write-through then ran while deletion
    held ``_PROJECTS_CATALOG_LOCK``, so deleting a project with large cached
    chats stalled New Chat and every workspace edit behind full-history writes.
    The disk half now lives in ``_persist_cleared_project_ids``, which the handler
    calls AFTER releasing the catalog lock (each write still holding the session's
    own lock, so the ordering guarantee is unchanged).
 
-4. "Saved project settings disappear" — ``ensure_cron_project`` /
+3. "Saved project settings disappear" — ``ensure_cron_project`` /
    ``ensure_webhook_project`` load and rewrite ``projects.json`` from background
    scans under their own locks, so a scan that read first and saved last erased a
    binding the user had just saved. The catalog lock now lives in the catalog
@@ -47,20 +37,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-_PREVIEW_PATH = "/api/projects/auto-assign-preview"
 _DELETE_PATH = "/api/projects/delete"
 
 
 def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
-
-
-def _dialog_source() -> str:
-    """The bindings-dialog slice of ``static/sessions.js``."""
-    src = _read("static/sessions.js")
-    start = src.index("// Ticking the box files EVERY existing chat")
-    end = src.index("\n  _seedWsList();", start)
-    return src[start:end]
 
 
 class _ProbeLock:
@@ -125,78 +106,8 @@ def _post_project_route(monkeypatch, path, body, responses):
 # ---------------------------------------------------------------------------
 
 
-def test_preview_without_a_readable_index_answers_unknown(tmp_path, monkeypatch):
-    """``None`` (unknown), so the dialog confirms with the unknown-count copy."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-round8-unknown"
-    ws.mkdir()
-    ws_str = str(ws)
-    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
-    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
-    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
-
-    # A missing index must NOT be reported as a definite 0: the dialog caches a
-    # 0 as "the sweep would file nothing" and skips the confirmation, while the
-    # sweep re-reads the index once it runs.
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", tmp_path / "no-such-index.json")
-    assert routes._auto_assign_candidate_count([ws_str], "default") is None
-
-    # An unparseable (torn) index is the same answer as a missing one...
-    torn = tmp_path / "_index.json"
-    torn.write_text("{ this is not json", encoding="utf-8")
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", torn)
-    assert routes._auto_assign_candidate_count([ws_str], "default") is None
-
-    # ...and the route exposes it as JSON null, which is what the client keys its
-    # unknown-count confirmation on (never a "0 chats" skip).
-    responses = []
-    assert _post_project_route(
-        monkeypatch, _PREVIEW_PATH, {"workspaces": [ws_str]}, responses
-    ) is True
-    assert [r["status"] for r in responses] == [200], responses
-    assert responses[0]["payload"] == {"count": None}, responses
-
-    # The client half of the contract: null routes to the unknown-count prompt.
-    dialog = _dialog_source()
-    assert "typeof res.count==='number'" in dialog
-    assert "count===null" in dialog
-    assert "pb_auto_assign_confirm_unknown" in dialog
-
-    # Control: a readable index still answers the real number.
-    good = tmp_path / "_index-good.json"
-    good.write_text(
-        json.dumps(
-            [
-                {
-                    "session_id": "u1",
-                    "workspace": ws_str,
-                    "profile": "default",
-                    "project_id": None,
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", good)
-    assert routes._auto_assign_candidate_count([ws_str], "default") == 1
 
 
-def test_preview_without_bound_workspaces_is_still_a_definite_zero(
-    tmp_path, monkeypatch
-):
-    """Nothing can be filed without a bound workspace — that 0 needs no index."""
-    import api.routes as routes
-
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", tmp_path / "no-such-index.json")
-    assert routes._auto_assign_candidate_count([], "default") == 0
-    assert routes._auto_assign_candidate_count(None, "default") == 0
-
-
-# ---------------------------------------------------------------------------
-# 2/3 — the delete's clear is ordered with a concurrent save, and its disk half
-#       runs OUTSIDE the catalog lock
-# ---------------------------------------------------------------------------
 
 
 class _CachedRow:
@@ -261,16 +172,21 @@ def _install_clear_stubs(monkeypatch, session_dir, catalog_probe=None):
         lambda sid: locks.setdefault(sid, real_lock_factory(sid)),
     )
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-    # The write-through resolves each id through the canonical freshness path
-    # (`get_session`) so a stale full cache entry cannot be saved over a newer
-    # sidecar (maintainer re-gate 2026-10-10T23:49:54Z). These fixtures keep
-    # their fake rows in `sessions`, so the resolver must answer from there:
-    # a real load would go to disk and bypass the row's recorded save() calls.
-    monkeypatch.setattr(
-        routes,
-        "get_session",
-        lambda sid, metadata_only=False: sessions.get(sid),
-    )
+    # The write-through resolves each target by loading a FRESH sidecar through
+    # ``Session.load`` — a FULL but stale cache entry must not be saved back over
+    # a sidecar that is ahead of it, not even when the message counts match
+    # (maintainer re-gates 2026-10-10T23:49:54Z and 2026-10-11T02:08:20Z). These
+    # fixtures keep their fake rows in ``sessions`` and their sidecars are JSON
+    # stubs (not Session payloads), so the loader answers from there: a real
+    # load would go to disk and bypass the row's recorded save() calls.
+    import api.models as models
+
+    class _FakeSession:
+        @staticmethod
+        def load(sid):
+            return sessions.get(sid)
+
+    monkeypatch.setattr(models, "Session", _FakeSession)
     if catalog_probe is not None:
         monkeypatch.setattr(routes, "_PROJECTS_CATALOG_LOCK", catalog_probe)
     return routes, sessions, locks

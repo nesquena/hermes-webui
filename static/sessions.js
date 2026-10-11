@@ -10850,23 +10850,19 @@ async function _saveProjectBindings(proj, fields){
     }
     if(updated){
       // Keep the OPEN dialog's snapshot in step with what the server just
-      // accepted. The "restore the stored value" paths (declining a later
-      // auto-assign confirmation, in aaCb.onchange and Save) read `proj`, so a
-      // stale `proj` put the box back to the PRE-save value and a following Save
-      // silently undid the setting that had just succeeded. Copy the persisted
-      // fields IN PLACE: the dialog closure holds THIS object, so replacing the
-      // reference would detach the dialog from `_allProjects`. The dialog's
-      // unsaved controls are DOM state and are left untouched (Greptile P2
-      // 2026-10-10T10:11:13Z).
-      for(const _k of ['name','workspaces','default_workspace','model','model_provider','auto_assign']){
+      // accepted. Copy the persisted fields IN PLACE: the dialog closure holds
+      // THIS object, so replacing the reference would detach it from
+      // `_allProjects`, and a stale `proj` would put a control back to its
+      // PRE-save value. The dialog's unsaved controls are DOM state and are left
+      // untouched (Greptile P2 2026-10-10T10:11:13Z).
+      for(const _k of ['name','workspaces','default_workspace','model','model_provider']){
         // The server POPS a CLEARED field instead of echoing it as false/''
-        // (``proj.pop("auto_assign", None)`` and friends in /api/projects/bind),
+        // (``proj.pop("workspaces", None)`` and friends in /api/projects/bind),
         // so a key ABSENT from the response means "cleared" and must be deleted
-        // from the snapshot too. Copying only the present keys left the old
-        // value behind, and the restore paths (aaCb.onchange / Save's decline
-        // branch both read ``!!proj.auto_assign``) then put a stale ON back —
-        // a following Save silently re-enabled filing the user had just turned
-        // off (maintainer review 5478955688, 2026-10-10T12:35:21Z).
+        // from the snapshot too: copying only the present keys left the old
+        // value behind. `auto_assign` is deliberately NOT tracked here — the
+        // dialog never submits it, because the field is stored but dormant
+        // (maintainer review 5478955688, 2026-10-10T12:35:21Z).
         if(Object.prototype.hasOwnProperty.call(updated,_k)) proj[_k]=updated[_k];
         else delete proj[_k];
       }
@@ -11544,101 +11540,13 @@ function _showProjectBindingsDialog(proj){
   // existing reasoning_effort binding is left untouched.
   // (re-gate 2026-10-07T19:22:30Z, item 2.)
 
-  // ── Workspaces list + auto-assign (below the model config) ──
+  // ── Workspaces list (below the model config) ──
   body.appendChild(wsWrap);
   body.appendChild(addRow);
 
-  const aaRow=document.createElement('label');
-  aaRow.className='project-bindings-auto-assign';
-  const aaCb=document.createElement('input');
-  aaCb.type='checkbox';
-  aaCb.checked=!!proj.auto_assign;
-  aaRow.appendChild(aaCb);
-  const aaText=document.createElement('span');
-  const aaTitle=document.createElement('div');
-  aaTitle.className='aa-label';
-  aaTitle.textContent=t('pb_auto_assign_label');
-  const aaHint=document.createElement('div');
-  aaHint.className='aa-hint';
-  aaHint.textContent=t('pb_auto_assign_hint');
-  aaText.appendChild(aaTitle);
-  aaText.appendChild(aaHint);
-  aaRow.appendChild(aaText);
-  body.appendChild(aaRow);
-
-  // Ticking the box files EVERY existing chat in the bound workspaces under
-  // this project and unticking only clears the flag — nothing is ever
-  // un-filed. Confirm with a real count first, and put the checkbox back when
-  // the user declines. (re-gate 2026-10-07T19:22:30Z, item 3.)
-  // Save goes through the SAME gate (re-gate 2026-10-07T22:04:16Z): it used to
-  // read the ticked box while the preview was still in flight, so a sweep filed
-  // chats before the user answered the confirm, and a workspace ADDED after the
-  // box was ticked was never counted at all. The confirmation is keyed on the
-  // exact workspace snapshot it covered, so any change to the list re-arms it.
-  let _aaConfirmedKey=null;     // JSON of the snapshot (profile+project+list) the user confirmed
-  let _aaConfirmInFlight=null;  // at most one confirmation at a time (toggle + Save share it)
   // At most one save request in flight: a second press would race a competing
   // bind with different settings (Greptile P2 2026-10-10T02:58:01Z).
   let _saveInFlight=false;
-  // The confirmation is keyed on the ACTIVE PROFILE + the project + the exact
-  // workspace snapshot it covered. Keying it on the workspace paths alone let a
-  // dialog left open across a profile switch keep the OTHER profile's cached
-  // answer, so switching back and saving filed this profile's chats with no
-  // prompt at all (re-gate 2026-10-08T02:11:02Z, [SILENT] 2.).
-  const _dlgProfile=()=>((typeof S!=='undefined'&&S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
-    ? S.activeProfile.trim() : 'default');
-  const _wsKey=(paths)=>JSON.stringify([_dlgProfile(),proj.project_id,paths||[]]);
-  const _aaPathsNow=()=>wsList.map(x=>x.value).filter(Boolean);
-  const _aaConfirmed=()=>_aaConfirmedKey!==null&&_aaConfirmedKey===_wsKey(_aaPathsNow());
-  const _autoAssignCount=async(wsPaths)=>{
-    try{
-      const res=await api('/api/projects/auto-assign-preview',{
-        method:'POST',
-        body:JSON.stringify({project_id:proj.project_id, workspaces:wsPaths}),
-      });
-      if(res&&typeof res.count==='number') return res.count;
-    }catch(_){}
-    return null;   // preview unavailable => fail closed and still confirm
-  };
-  const _ensureAutoAssignConfirmed=(wsPaths)=>{
-    if(_aaConfirmed()) return Promise.resolve(true);
-    if(_aaConfirmInFlight) return _aaConfirmInFlight;
-    _aaConfirmInFlight=(async()=>{
-      const key=_wsKey(wsPaths);
-      const count=await _autoAssignCount(wsPaths);
-      // Cancel/Escape can close the dialog while this preview is in flight; a
-      // closed dialog must neither prompt nor hand back a confirmation its
-      // owner never gave (re-gate 2026-10-08T02:11:02Z, [SILENT] 3.).
-      if(_closed) return false;
-      // A definite 0 means the sweep would file nothing, so there is nothing to
-      // guard (the counter may over-count view-only rows but never under-counts).
-      if(count===0){ _aaConfirmedKey=key; return true; }
-      const ok=await showConfirmDialog({
-        title:t('pb_auto_assign_label'),
-        message:(count===null)
-          ? t('pb_auto_assign_confirm_unknown',proj.name)
-          : t('pb_auto_assign_confirm',count,proj.name),
-        confirmLabel:t('pb_auto_assign_confirm_btn'),
-        cancelLabel:t('pb_cancel'),
-      });
-      if(_closed) return false;
-      if(ok) _aaConfirmedKey=key;
-      return ok;
-    })().finally(()=>{ _aaConfirmInFlight=null; });
-    return _aaConfirmInFlight;
-  };
-  aaCb.onchange=async()=>{
-    if(!aaCb.checked) return;
-    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
-    if(!wsPaths.length) return;   // nothing bound yet => no sweep to guard
-    const confirmed=await _ensureAutoAssignConfirmed(wsPaths);
-    if(_closed) return;
-    // Declining leaves the STORED flag untouched: put the box back to the value
-    // the project already carries, so a later Save re-submits what is stored
-    // instead of silently turning auto-assign off (re-gate 2026-10-08T02:11:02Z,
-    // [should-fix] 5.).
-    if(!confirmed) aaCb.checked=!!proj.auto_assign;
-  };
 
   _seedWsList();
 
@@ -11659,46 +11567,19 @@ function _showProjectBindingsDialog(proj){
     // server is applying, so a competing press with different settings must not
     // race it (Greptile P2 2026-10-10T02:58:01Z).
     if(_saveInFlight) return;
-    // Workspaces: the EXACT snapshot Save submits (empty → unbind all), captured
-    // once and never re-read after an await, so what the auto-assign
-    // confirmation covers is precisely what the server sweeps.
+    // Workspaces: the EXACT snapshot Save submits (empty → unbind all),
+    // captured once and never re-read after an await.
     // (re-gate 2026-10-07T22:04:16Z.)
     const wsPaths=wsList.map(x=>x.value).filter(Boolean);
     const def=_wsDefault();
-    let autoAssign=!!aaCb.checked;
-    if(autoAssign&&wsPaths.length&&!_aaConfirmed()){
-      // Save must await the preview + confirmation itself: it used to post
-      // auto_assign:true off the ticked box while the confirmation was still in
-      // flight (filing chats nobody had agreed to yet), and a workspace added
-      // AFTER the box was ticked was never counted at all.
-      const ok=await _ensureAutoAssignConfirmed(wsPaths);
-      // Cancel/Escape while the preview/confirmation was in flight leaves this
-      // dialog closed: never POST the bind the user cancelled
-      // (re-gate 2026-10-08T02:11:02Z, [SILENT] 3.).
-      if(_closed) return;
-      if(!ok){
-        // Declining must leave the STORED flag untouched — put the box back to
-        // the value the project already has (not a hard false), so a later Save
-        // re-submits what is stored instead of silently turning auto-assign off
-        // — and leave the dialog open. (re-gate 2026-10-08T02:11:02Z,
-        // [should-fix] 5.)
-        aaCb.checked=!!proj.auto_assign;
-        _aaConfirmedKey=null;
-        return;
-      }
-      // Compare the CONFIRMED key against Save's OWN snapshot (`wsPaths`), not
-      // against the live list: `_aaConfirmed()` re-reads the list now, so
-      // removing a workspace that was added while the prompt was open made it
-      // pass again while Save still posted the wider snapshot the user never
-      // confirmed (re-gate 2026-10-08T19:21:36Z).
-      if(_aaConfirmedKey!==_wsKey(wsPaths)) return;   // the snapshot moved while prompting: save again
-      autoAssign=!!aaCb.checked;
-    }
     const modelVal=modelCombo.getValue();
     const fields={};
     fields.workspaces=wsPaths.length?wsPaths:null;
     fields.default_workspace=(def&&def.value)||null;
-    fields.auto_assign=autoAssign;
+    // auto_assign is deliberately NOT submitted: the field is stored by
+    // /api/projects/bind but dormant in this build (its sweep, toggle and
+    // workspace-keyed filing moved to a follow-up PR), so a Save must leave a
+    // stored value untouched rather than clear it.
     // Model: empty → unbind; else bind model (+ provider from the option).
     // Always send model_provider — a selected model WITHOUT provider metadata
     // must CLEAR any previously-bound provider, otherwise the server keeps the
@@ -11749,7 +11630,7 @@ function _showProjectBindingsDialog(proj){
     // and only close when the controls still match (Greptile P2
     // 2026-10-10T02:58:01Z).  A second press is ignored for the same reason.
     const _submitted=JSON.stringify([
-      wsPaths, (def&&def.value)||null, modelVal, autoAssign,
+      wsPaths, (def&&def.value)||null, modelVal,
     ]);
     _saveInFlight=true;
     try{
@@ -11760,7 +11641,6 @@ function _showProjectBindingsDialog(proj){
         wsList.map(x=>x.value).filter(Boolean),
         (_nowDefault&&_nowDefault.value)||null,
         modelCombo.getValue(),
-        !!aaCb.checked,
       ]);
       if(_current===_submitted) _closeBindingsDialog();
     }finally{

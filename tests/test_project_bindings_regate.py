@@ -47,19 +47,6 @@ class _AnyWorkspace(set):
         return True
 
 
-@pytest.fixture(autouse=True)
-def _live_bindings_unchanged(monkeypatch):
-    """Assume the project's bindings did NOT change mid-sweep.
-
-    ``_auto_assign_sweep_body`` re-reads the live project row before filing
-    anything (Greptile P1 2026-10-10T02:22:51Z), but these tests drive the sweep
-    with an in-memory snapshot and no projects catalog, so the live row would
-    read as "unknown" and the sweep would stop.  Pin the unchanged case: still
-    auto-assigning, with every snapshot workspace still bound.
-    """
-    import api.routes as routes
-
-    monkeypatch.setattr(routes, "_auto_assign_live_binding", lambda pid: (True, _AnyWorkspace()))
 
 
 def _read_routes_py() -> str:
@@ -86,21 +73,24 @@ PB_I18N_KEYS = (
     "pb_add_workspace_title",
     "pb_add_workspace_message",
     "pb_workspace_already_bound",
-    "pb_auto_assign_label",
-    "pb_auto_assign_hint",
-    "pb_auto_assign_confirm",
-    "pb_auto_assign_confirm_unknown",
-    "pb_auto_assign_confirm_btn",
     "pb_cancel",
     "pb_save",
     "pb_updated",
     "pb_update_failed",
 )
 
-# Keys the 2026-10-07T19:22:30Z UX re-gate retired: the chip menu no longer
-# carries an inline binding summary or per-field "Unbind …" rows, and the
-# per-project "Reasoning effort" row is hidden (it is profile-wide; #7881).
+# Keys the UX work retired. The 2026-10-07T19:22:30Z re-gate dropped the chip
+# menu's inline binding summary and its per-field "Unbind …" rows, and hid the
+# per-project "Reasoning effort" row (it is profile-wide; #7881). The
+# 2026-10-11T02:08:20Z re-gate moved the auto-assign sweep, its dialog toggle and
+# the confirm it opened into a follow-up PR, so the five keys that only rendered
+# that toggle/confirm are retired with it (nothing reads them).
 PB_I18N_KEYS_RETIRED = (
+    "pb_auto_assign_label",
+    "pb_auto_assign_hint",
+    "pb_auto_assign_confirm",
+    "pb_auto_assign_confirm_unknown",
+    "pb_auto_assign_confirm_btn",
     "pb_bindings_menu_bound",
     "pb_ws_summary",
     "pb_chip_model",
@@ -253,7 +243,7 @@ def test_project_bindings_ui_strings_are_localized():
         assert literal not in src, f"hard-coded string still present: {literal}"
     assert "t('pb_bindings_title',proj.name)" in src
     assert "t('pb_add_workspace_message')" in src
-    assert "t('pb_auto_assign_hint')" in src
+    assert "t('pb_unbind_ws_title')" in src
 
 
 def test_project_bindings_i18n_keys_present_in_all_locales():
@@ -265,282 +255,26 @@ def test_project_bindings_i18n_keys_present_in_all_locales():
         missing = [k for k in PB_I18N_KEYS if ("%s: '" % k) not in chunk]
         assert not missing, f"locale {loc!r} is missing pb_* keys: {missing}"
 
-    # Non-English sanity: the long auto-assign sentence must be translated.
-    en_hint = "'All existing and future chats in the bound workspaces are filed under this project.'"
-    for loc in I18N_LOCALES:
-        if loc == "en":
-            continue
-        assert en_hint not in _i18n_locale_chunk(src, loc), (
-            f"locale {loc!r} leaks the English auto-assign hint"
-        )
-
 
 # ---------------------------------------------------------------------------
 # SILENT — backfill rewrites historical activity dates
 # ---------------------------------------------------------------------------
 
 
-def test_apply_project_auto_assign_preserves_updated_at(tmp_path, monkeypatch):
-    """Filing a session must not bump updated_at (imported rows jump to Today)."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-touch"
-    ws.mkdir()
-    ws_str = str(ws)
-    index_file = tmp_path / "_index.json"
-    index_file.write_text(json.dumps([
-        {"session_id": "s_touch", "workspace": ws_str, "profile": "default", "project_id": None},
-    ]))
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
-    # Deterministic ownership probe: "" = state.db is readable and holds no
-    # such row. Without this stub the sweep fails closed whenever the machine
-    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-
-    calls = []
-
-    class _Row:
-        def __init__(self):
-            self.session_id = "s_touch"
-            self.project_id = None
-            self.profile = "default"
-            self.workspace = ws_str
-
-        def save(self, touch_updated_at=True):
-            calls.append(touch_updated_at)
-
-    row = _Row()
-
-    def _fake_get_session(sid, metadata_only=False):
-        if sid != "s_touch":
-            return None
-        return None if metadata_only else row
-
-    monkeypatch.setattr(routes, "get_session", _fake_get_session)
-
-    marker = "proj_touch"
-    try:
-        assert routes._apply_project_auto_assign(
-            {"project_id": marker, "profile": "default", "workspaces": [ws_str]}
-        ) == 1
-    finally:
-        routes._auto_assign_finish_deleting(marker)
-    assert row.project_id == marker
-    assert calls == [False], f"save must not touch updated_at, got {calls}"
 
 
-# ---------------------------------------------------------------------------
-# CORE 4 — deleting a project during backfill orphans sessions
-# ---------------------------------------------------------------------------
 
 
-def test_auto_assign_sweep_admission_refused_while_deleting():
-    """A project being deleted refuses new sweeps; the marker is released after."""
-    import api.routes as routes
-
-    pid = "proj_delete_serial_1"
-    assert routes._auto_assign_sweep_begin(pid) is True
-    routes._auto_assign_sweep_end(pid)
-    assert pid not in routes._AUTO_ASSIGN_DELETING
-
-    routes._AUTO_ASSIGN_DELETING.add(pid)
-    try:
-        assert routes._auto_assign_sweep_begin(pid) is False
-        assert routes._auto_assign_sweep_cancelled(pid) is True
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-
-    assert routes._auto_assign_sweep_cancelled(pid) is False
-    assert routes._auto_assign_sweep_begin(pid) is True
-    routes._auto_assign_sweep_end(pid)
-    assert pid not in routes._AUTO_ASSIGN_SWEEPS
 
 
-def test_apply_project_auto_assign_refuses_while_project_deleting(tmp_path, monkeypatch):
-    """A sweep admitted after deletion started must not touch any session."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-del-refuse"
-    ws.mkdir()
-    ws_str = str(ws)
-    index_file = tmp_path / "_index.json"
-    index_file.write_text(json.dumps([
-        {"session_id": "s_refuse", "workspace": ws_str, "profile": "default", "project_id": None},
-    ]))
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
-    # Deterministic ownership probe: "" = state.db is readable and holds no
-    # such row. Without this stub the sweep fails closed whenever the machine
-    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-
-    def _boom(*a, **k):
-        raise AssertionError("sweep must not read/write sessions while deleting")
-
-    monkeypatch.setattr(routes, "get_session", _boom)
-
-    pid = "proj_delete_serial_2"
-    routes._AUTO_ASSIGN_DELETING.add(pid)
-    try:
-        assert routes._apply_project_auto_assign({"project_id": pid, "workspaces": [ws_str]}) == 0
-    finally:
-        routes._auto_assign_finish_deleting(pid)
 
 
-def test_auto_assign_sweep_stops_when_cancelled_midway(tmp_path, monkeypatch):
-    """A delete landing mid-sweep stops it: no further project_id is written."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-del-stop"
-    ws.mkdir()
-    ws_str = str(ws)
-    index_file = tmp_path / "_index.json"
-    index_file.write_text(json.dumps([
-        {"session_id": f"s{i}", "workspace": ws_str, "profile": "default", "project_id": None}
-        for i in range(5)
-    ]))
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index_file)
-    # Deterministic ownership probe: "" = state.db is readable and holds no
-    # such row. Without this stub the sweep fails closed whenever the machine
-    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-
-    pid = "proj_delete_serial_3"
-    saved = []
-
-    class _Row:
-        def __init__(self, sid):
-            self.session_id = sid
-            self.project_id = None
-            self.profile = "default"
-            self.workspace = ws_str
-
-        def save(self, touch_updated_at=True):
-            saved.append(self.session_id)
-            # The concurrent /api/projects/delete lands right here.
-            routes._AUTO_ASSIGN_DELETING.add(pid)
-
-    rows = {f"s{i}": _Row(f"s{i}") for i in range(5)}
-
-    def _fake_get_session(sid, metadata_only=False):
-        return None if metadata_only else rows.get(sid)
-
-    monkeypatch.setattr(routes, "get_session", _fake_get_session)
-
-    try:
-        changed = routes._apply_project_auto_assign(
-            {"project_id": pid, "workspaces": [ws_str], "profile": "default"}
-        )
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-    assert changed == 1, f"sweep must stop at the cancellation point, filed {changed}"
-    assert saved == ["s0"]
-    assert pid not in routes._AUTO_ASSIGN_SWEEPS
 
 
-def test_auto_assign_cancel_sweeps_joins_an_inflight_sweep():
-    """_auto_assign_cancel_sweeps marks deleting and joins the registered thread."""
-    import api.routes as routes
-
-    pid = "proj_delete_serial_4"
-    started = threading.Event()
-
-    def _sweep():
-        assert routes._auto_assign_sweep_begin(pid) is True
-        started.set()
-        try:
-            # Mimics the sweep loop: spin until cancellation, then return.
-            for _ in range(1000):
-                if routes._auto_assign_sweep_cancelled(pid):
-                    break
-                threading.Event().wait(0.01)
-        finally:
-            routes._auto_assign_sweep_end(pid)
-
-    t = threading.Thread(target=_sweep, daemon=True)
-    t.start()
-    assert started.wait(5)
-    try:
-        assert pid in routes._AUTO_ASSIGN_SWEEPS
-        routes._auto_assign_cancel_sweeps(pid)
-        t.join(5)
-        assert not t.is_alive(), "cancel_sweeps must join the in-flight sweep"
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-    assert pid not in routes._AUTO_ASSIGN_SWEEPS
 
 
-def test_delete_endpoint_cancels_sweeps_before_removing_project():
-    """The delete handler cancels + joins sweeps before it unlinks sessions."""
-    src = _read_routes_py()
-    i = src.index('parsed.path == "/api/projects/delete"')
-    seg = src[i:i + 9000]
-    cancel_i = seg.index('_auto_assign_cancel_sweeps(body["project_id"])')
-    save_i = seg.index("save_projects(projects)")
-    assert cancel_i < save_i, "cancellation must precede project removal"
-    assert '_auto_assign_finish_deleting(body["project_id"])' in seg
-    # A drain that fails must refuse the deletion entirely (503) instead of
-    # removing a project whose sweep can still write project_id (re-gate
-    # 2026-10-07, finding 3).
-    assert 'if not _auto_assign_cancel_sweeps(body["project_id"]):' in seg
-    assert '_auto_assign_abort_deleting(body["project_id"])' in seg
-    assert "503" in seg
-    # The catalog is RELOADED after the drain, inside the shared mutation lock:
-    # saving the list read before the join erased a project created meanwhile
-    # (re-gate 2026-10-07, finding 4).
-    lock_i = seg.index("with _PROJECTS_CATALOG_LOCK:")
-    assert cancel_i < lock_i < save_i, "reload must follow the drain"
-    assert "p for p in load_projects()" in seg
 
 
-# ---------------------------------------------------------------------------
-# SHOULD-FIX — drain-registry leak
-# ---------------------------------------------------------------------------
-
-
-def test_bind_auto_assign_worker_self_unregisters():
-    """The auto-assign bind worker must not leak a dead Thread in the registry."""
-    src = _read_routes_py()
-    i = src.index("def _file_existing_sessions(")
-    # The window covers the whole worker body, including the profile scope it now
-    # enters (re-gate 2026-10-08T02:11:02Z, [SILENT] 4.).
-    seg = src[i:i + 2600]
-    assert "finally:" in seg
-    assert "_unregister_background_commit_thread(threading.current_thread())" in seg
-
-    # The pattern is effective: a registered thread drops out once it finishes.
-    import api.session_lifecycle as sl
-
-    done = threading.Event()
-
-    def _worker():
-        try:
-            pass
-        finally:
-            sl._unregister_background_commit_thread(threading.current_thread())
-            done.set()
-
-    t = threading.Thread(target=_worker, daemon=True)
-    assert sl._register_background_commit_thread(t) is True
-    assert t in sl._background_commit_threads
-    t.start()
-    assert done.wait(5)
-    t.join(5)
-    assert t not in sl._background_commit_threads
-
-
-def test_backfill_uses_touch_updated_at_false_call_site():
-    """The sweep body must call save(touch_updated_at=False)."""
-    src = _read_routes_py()
-    assert "s.save(touch_updated_at=False)" in src
-
-
-# ---------------------------------------------------------------------------
-# greptile re-review P1 (2026-10-07T06:37:09Z) — default_workspace drops the
-# legacy workspace on a project that only carries `workspace: A`.
-# ---------------------------------------------------------------------------
 
 
 def test_default_workspace_update_seeds_from_canonical_workspace_accessor():
@@ -564,25 +298,6 @@ def test_project_workspaces_falls_back_to_legacy_single_workspace():
     assert routes._project_workspaces(None) == []
 
 
-def test_auto_assign_launch_guard_uses_canonical_workspace_accessor():
-    """The bind handler must launch the sweep for a legacy `workspace: A` project."""
-    src = _read_routes_py()
-    assert 'if proj.get("auto_assign") and _project_workspaces(proj):' in src
-    assert 'if proj.get("auto_assign") and proj.get("workspaces"):' not in src
-
-
-# ---------------------------------------------------------------------------
-# Re-gate 2026-10-07T10:29:19Z — the three backend findings are one race
-# between deletion and the sweep lifecycle, seen from three orderings:
-#
-#   (a) "worker admitted late"      — a delete that lands between bind starting
-#                                     its worker and the worker's own admission;
-#   (b) "worker stuck past the join"— a sweep that outlives the join timeout;
-#   (c) "create during the drain"   — the catalog saved after the join is the
-#                                     stale list read before it.
-#
-# One ordering per test, each deterministic.
-# ---------------------------------------------------------------------------
 
 
 def _install_project_route_stubs(monkeypatch, projects, index_path=None):
@@ -643,186 +358,14 @@ def _post_project_route(monkeypatch, path, body, responses):
     )
 
 
-def test_bind_refuses_to_start_a_sweep_for_a_project_being_deleted():
-    """Ordering (a): admission is atomic with the start, so nothing is launched.
-
-    The old flow started the worker unconditionally and admitted it from inside
-    the worker: a delete landing in that window found nothing to join, cleared
-    its deleting marker in the `finally`, and the late sweep then filed
-    sessions under the removed project.
-    """
-    import api.routes as routes
-
-    pid = "proj_regate_admit_late"
-    started = threading.Event()
-    t = threading.Thread(target=lambda: started.set(), daemon=True)
-    routes._AUTO_ASSIGN_DELETING.add(pid)
-    try:
-        assert routes._auto_assign_start_sweep(pid, t) is False
-        assert not started.wait(0.2), "a refused admission must not start the worker"
-        assert pid not in routes._AUTO_ASSIGN_SWEEPS
-    finally:
-        routes._auto_assign_finish_deleting(pid)
 
 
-def test_admitted_sweep_is_registered_and_always_joinable():
-    """Every registered sweep is already running, so a delete can always join it."""
-    import api.routes as routes
-
-    pid = "proj_regate_joinable"
-    ran = threading.Event()
-    t = threading.Thread(target=lambda: ran.set(), daemon=True)
-    try:
-        assert routes._auto_assign_start_sweep(pid, t) is True
-        assert pid in routes._AUTO_ASSIGN_SWEEPS
-        assert ran.wait(5)
-        assert routes._auto_assign_cancel_sweeps(pid, timeout=5.0) is True
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-        routes._auto_assign_sweep_end(pid, t)
-    assert pid not in routes._AUTO_ASSIGN_SWEEPS
 
 
-def test_cancel_sweeps_reports_failure_when_a_worker_outlives_the_join():
-    """Ordering (b): a stuck sweep makes the drain report failure, not success."""
-    import api.routes as routes
-
-    pid = "proj_regate_stuck"
-    release = threading.Event()
-
-    def _sweep():
-        routes._auto_assign_sweep_begin(pid)
-        try:
-            release.wait(10)
-        finally:
-            routes._auto_assign_sweep_end(pid)
-
-    t = threading.Thread(target=_sweep, daemon=True)
-    assert routes._auto_assign_start_sweep(pid, t) is True
-    try:
-        assert routes._auto_assign_cancel_sweeps(pid, timeout=0.2) is False
-        # ...and the claim can be released so the intact project stays usable.
-        routes._auto_assign_abort_deleting(pid)
-        assert pid not in routes._AUTO_ASSIGN_DELETING
-    finally:
-        release.set()
-        t.join(5)
-        routes._auto_assign_finish_deleting(pid)
-    assert not t.is_alive()
 
 
-def test_delete_returns_503_and_keeps_the_project_when_a_sweep_cannot_drain(
-    tmp_path, monkeypatch
-):
-    """Ordering (b) end-to-end: the handler refuses instead of orphaning rows."""
-    import api.routes as routes
-
-    pid = "proj_regate_503"
-    projects = [{"project_id": pid, "name": "Busy", "profile": "default"}]
-    _install_project_route_stubs(monkeypatch, projects, tmp_path / "no-index.json")
-    release = threading.Event()
-
-    def _sweep():
-        routes._auto_assign_sweep_begin(pid)
-        try:
-            release.wait(10)
-        finally:
-            routes._auto_assign_sweep_end(pid)
-
-    t = threading.Thread(target=_sweep, daemon=True)
-    assert routes._auto_assign_start_sweep(pid, t) is True
-    real_cancel = routes._auto_assign_cancel_sweeps
-    # The handler joins with its 10 s default; shrink it for the test.
-    monkeypatch.setattr(
-        routes,
-        "_auto_assign_cancel_sweeps",
-        lambda project_id, timeout=10.0: real_cancel(project_id, timeout=0.2),
-    )
-    captured = []
-    try:
-        assert (
-            _post_project_route(
-                monkeypatch, "/api/projects/delete", {"project_id": pid}, captured
-            )
-            is True
-        )
-        assert [r["status"] for r in captured] == [503], captured
-        assert [p["project_id"] for p in projects] == [pid], "project must stay intact"
-        assert pid not in routes._AUTO_ASSIGN_DELETING, "claim released for a retry"
-    finally:
-        release.set()
-        t.join(5)
-        routes._auto_assign_finish_deleting(pid)
 
 
-def test_create_during_the_delete_drain_survives_the_save(tmp_path, monkeypatch):
-    """Ordering (c): the delete must not erase a project created while it waits.
-
-    The handler read the catalog BEFORE joining its sweeps and saved that stale
-    list afterwards; a project created during the (up to 10 s) join vanished.
-    """
-    import api.routes as routes
-
-    pid = "proj_regate_drain"
-    other = "proj_regate_other"
-    projects = [
-        {"project_id": pid, "name": "Doomed", "profile": "default"},
-        {"project_id": other, "name": "Keeper", "profile": "default"},
-    ]
-    _install_project_route_stubs(monkeypatch, projects, tmp_path / "no-index.json")
-
-    hold = threading.Event()
-    entered = threading.Event()
-
-    def _sweep():
-        routes._auto_assign_sweep_begin(pid)
-        try:
-            hold.wait(10)
-        finally:
-            routes._auto_assign_sweep_end(pid)
-
-    t = threading.Thread(target=_sweep, daemon=True)
-    assert routes._auto_assign_start_sweep(pid, t) is True
-
-    real_cancel = routes._auto_assign_cancel_sweeps
-
-    def _hooked_cancel(project_id, timeout=10.0):
-        entered.set()
-        return real_cancel(project_id, timeout)
-
-    monkeypatch.setattr(routes, "_auto_assign_cancel_sweeps", _hooked_cancel)
-
-    responses = []
-
-    def _delete():
-        _post_project_route(
-            monkeypatch, "/api/projects/delete", {"project_id": pid}, responses
-        )
-
-    del_thread = threading.Thread(target=_delete)
-    del_thread.start()
-    try:
-        assert entered.wait(5), "delete never reached the sweep drain"
-        _post_project_route(
-            monkeypatch, "/api/projects/create", {"name": "BornDuringDrain"}, responses
-        )
-        # Only the create's response is in yet (the delete is still draining).
-        assert [r["status"] for r in responses if r["payload"].get("project")] == [200], responses
-    finally:
-        hold.set()
-        del_thread.join(10)
-        routes._auto_assign_finish_deleting(pid)
-
-    names = [p["name"] for p in projects]
-    assert "BornDuringDrain" in names, f"the drain save erased a new project: {names}"
-    assert "Doomed" not in names, names
-    assert "Keeper" in names, names
-    assert [r["status"] for r in responses if r["payload"] == {"ok": True}] == [200], responses
-
-
-# ---------------------------------------------------------------------------
-# CORE 1 (re-gate follow-up) — provider binding restoration, run for real
-# ---------------------------------------------------------------------------
 
 
 def _run_node(tmp_path: Path, name: str, script: str) -> str:
@@ -974,61 +517,6 @@ def test_binding_save_keeps_a_provider_scoped_reinjection():
     assert "if(_hasDuplicateModelValues){\n        _prov=_modelProvFor(modelVal)||null;\n      }" not in src
 
 
-def test_bind_refuses_admission_when_the_project_row_was_removed(monkeypatch):
-    """[CORE] api/routes.py:19186 — a bind paused after its catalog save, with a
-    delete completing in between, must not start a sweep.
-
-    Deletion clears its deleting marker in the ``finally``, so the marker check
-    alone let the resumed bind file sessions under the removed project. The
-    admission now re-checks the catalog row under the projects-catalog lock.
-    """
-    import api.routes as routes
-
-    pid = "proj_regate_row_removed"
-    ws = "D:/ws-row-removed"
-    projects = [{
-        "project_id": pid, "name": "Gone", "profile": "default",
-        "workspaces": [ws], "auto_assign": True,
-    }]
-    _install_project_route_stubs(monkeypatch, projects)
-
-    reads = {"n": 0}
-
-    def _load(*a, **k):
-        reads["n"] += 1
-        # Read #1 is the bind's own catalog block (the row is still there); the
-        # delete completes before read #2 — the admission re-check — which is
-        # exactly the ordering the review reproduced 20/20.
-        return [dict(p) for p in projects] if reads["n"] == 1 else []
-
-    monkeypatch.setattr(routes, "load_projects", _load)
-    # Neither a worker nor a sweep admission may happen for the removed row.
-    # Both are recorded rather than started so a regression cannot launch a real
-    # sweep against the live state directory.
-    registered = []
-    started = []
-    monkeypatch.setattr(
-        routes, "SESSION_INDEX_FILE", Path(routes.SESSION_INDEX_FILE.parent) / "_missing_regate.json"
-    )
-    monkeypatch.setattr(
-        routes, "_auto_assign_start_sweep", lambda pid_, t: (started.append(pid_), True)[1]
-    )
-    import api.session_lifecycle as _sl
-
-    monkeypatch.setattr(
-        _sl, "_register_background_commit_thread",
-        lambda t: (registered.append(t), True)[1],
-    )
-
-    responses = []
-    _post_project_route(
-        monkeypatch, "/api/projects/bind", {"project_id": pid, "auto_assign": True}, responses
-    )
-    assert reads["n"] >= 2, "the admission must re-read the catalog"
-    assert responses and responses[-1]["status"] == 404, responses
-    assert not registered, "no sweep worker may be considered for a removed project"
-    assert not started, "no sweep may be admitted for a removed project"
-    assert pid not in routes._AUTO_ASSIGN_SWEEPS
 
 
 def test_delete_clears_a_cache_only_session_for_the_removed_project(tmp_path, monkeypatch):
@@ -1103,59 +591,6 @@ class _DepthProbeLock:
         return False
 
 
-def test_session_new_publishes_the_implicit_assignment_under_the_catalog_lock(monkeypatch):
-    """[SILENT] api/routes.py:16855 — the implicit assignment AND the session's
-    publication into the cache must be atomic with deletion, which is what makes
-    the two orderings exhaustive (published-then-cleared / row-gone-then-unassigned).
-    """
-    import api.routes as routes
-
-    pid = "proj_regate_publish_under_lock"
-    ws = "D:/ws-publish-under-lock"
-    probe = _DepthProbeLock()
-    monkeypatch.setattr(routes, "_PROJECTS_CATALOG_LOCK", probe)
-    _install_project_route_stubs(monkeypatch, [])
-    monkeypatch.setattr(routes, "_resolve_new_session_workspace", lambda *a, **k: ws)
-    monkeypatch.setattr(routes, "_worktree_default_from_config", lambda profile=None: False)
-    monkeypatch.setattr(routes, "_session_model_state_from_request", lambda m, p: ("model-x", None))
-    monkeypatch.setattr(routes, "_validate_session_toolsets_shape", lambda v: None)
-    monkeypatch.setattr(
-        routes, "_auto_assign_project_for_workspace", lambda workspace, profile=None: pid
-    )
-
-    depths = []
-
-    class _Sess:
-        session_id = "s_regate_new"
-        messages = []
-        profile = "default"
-
-        def compact(self):
-            return {}
-
-    def _fake_new_session(**kw):
-        depths.append(probe.depth)
-        assert kw.get("project_id") == pid
-        return _Sess()
-
-    monkeypatch.setattr(routes, "new_session", _fake_new_session)
-    monkeypatch.setattr(routes, "public_session_projection", lambda row: row)
-
-    responses = []
-    _post_project_route(monkeypatch, "/api/session/new", {"workspace": ws}, responses)
-    assert depths, "new_session was never called"
-    assert depths[0] >= 1, (
-        "the implicit assignment + cache publication must run inside the "
-        "projects-catalog lock deletion holds while removing the row"
-    )
-    assert responses and responses[-1]["status"] == 200, responses
-
-
-# ---------------------------------------------------------------------------
-# re-gate 2026-10-07T17:06Z — [SHOULD-FIX] the backfill sweep must apply the
-# same view-only guards as /api/session/move: read-only imported sessions and
-# delegated subagent children are never filed under a bound project.
-# ---------------------------------------------------------------------------
 
 
 def _write_index(tmp_path, rows):
@@ -1164,183 +599,12 @@ def _write_index(tmp_path, rows):
     return index_file
 
 
-def test_auto_assign_sweep_skips_read_only_imported_sessions(tmp_path, monkeypatch):
-    """A read-only imported row is never filed; a writable sibling still is."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-ro-guard"
-    ws.mkdir()
-    ws_str = str(ws)
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", _write_index(tmp_path, [
-        {"session_id": "s_ro", "workspace": ws_str, "profile": "default", "project_id": None},
-        {"session_id": "s_ok", "workspace": ws_str, "profile": "default", "project_id": None},
-    ]))
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-    # The sweep's ownership probe is the strict (tri-state) lookup: "" here
-    # means "state.db is readable and has no such row".
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
-
-    saved = []
-
-    class _Row:
-        def __init__(self, sid, read_only=False):
-            self.session_id = sid
-            self.project_id = None
-            self.profile = "default"
-            self.workspace = ws_str
-            self.read_only = read_only
-
-        def save(self, touch_updated_at=True):
-            saved.append(self.session_id)
-
-    rows = {"s_ro": _Row("s_ro", read_only=True), "s_ok": _Row("s_ok")}
-    monkeypatch.setattr(
-        routes, "get_session",
-        lambda sid, metadata_only=False: None if metadata_only else rows.get(sid),
-    )
-
-    pid = "proj_viewonly_ro"
-    try:
-        assert routes._apply_project_auto_assign(
-            {"project_id": pid, "profile": "default", "workspaces": [ws_str]}
-        ) == 1
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-    assert rows["s_ro"].project_id is None, "read-only imported session was filed"
-    assert saved == ["s_ok"]
-    assert rows["s_ok"].project_id == pid
 
 
-def test_auto_assign_sweep_skips_subagent_sidecars_by_source_tag(tmp_path, monkeypatch):
-    """A sidecar tagged ``subagent`` (read_only=False) is still view-only."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-sub-tag"
-    ws.mkdir()
-    ws_str = str(ws)
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", _write_index(tmp_path, [
-        {"session_id": "s_sub_tag", "workspace": ws_str, "profile": "default", "project_id": None},
-    ]))
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
-
-    class _Row:
-        session_id = "s_sub_tag"
-        project_id = None
-        profile = "default"
-        workspace = ws_str
-        read_only = False
-        source_tag = "subagent"
-
-        def save(self, touch_updated_at=True):
-            raise AssertionError("subagent child must never be filed")
-
-    row = _Row()
-    monkeypatch.setattr(
-        routes, "get_session",
-        lambda sid, metadata_only=False: None if metadata_only else row,
-    )
-
-    pid = "proj_viewonly_sub_tag"
-    try:
-        assert routes._apply_project_auto_assign(
-            {"project_id": pid, "profile": "default", "workspaces": [ws_str]}
-        ) == 0
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-    assert row.project_id is None
 
 
-def test_auto_assign_sweep_skips_subagent_children_known_only_to_state_db(tmp_path, monkeypatch):
-    """A pre-fix sidecar (read_only=False, no tag) is caught via state.db."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-sub-db"
-    ws.mkdir()
-    ws_str = str(ws)
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", _write_index(tmp_path, [
-        {"session_id": "s_sub_db", "workspace": ws_str, "profile": "default", "project_id": None},
-    ]))
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-    monkeypatch.setattr(
-        routes, "_state_db_session_source_strict",
-        lambda sid: "subagent" if sid == "s_sub_db" else "",
-    )
-
-    class _Row:
-        session_id = "s_sub_db"
-        project_id = None
-        profile = "default"
-        workspace = ws_str
-        read_only = False
-
-        def save(self, touch_updated_at=True):
-            raise AssertionError("subagent child must never be filed")
-
-    row = _Row()
-    monkeypatch.setattr(
-        routes, "get_session",
-        lambda sid, metadata_only=False: None if metadata_only else row,
-    )
-
-    pid = "proj_viewonly_sub_db"
-    try:
-        assert routes._apply_project_auto_assign(
-            {"project_id": pid, "profile": "default", "workspaces": [ws_str]}
-        ) == 0
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-    assert row.project_id is None
 
 
-def test_auto_assign_sweep_skips_a_view_only_session_in_the_live_cache(tmp_path, monkeypatch):
-    """The streaming/cached branch must honour the guard before writing."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-ro-cache"
-    ws.mkdir()
-    ws_str = str(ws)
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", _write_index(tmp_path, [
-        {
-            "session_id": "s_ro_cache",
-            "workspace": ws_str,
-            "profile": "default",
-            "project_id": None,
-            "active_stream_id": "st_ro",
-        },
-    ]))
-    # Deterministic ownership probe: "" = state.db is readable and holds no
-    # such row. Without this stub the sweep fails closed whenever the machine
-    # has no state.db (Greptile P1 2026-10-10T01:04:32Z).
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"st_ro"})
-
-    class _Cached:
-        session_id = "s_ro_cache"
-        project_id = None
-        profile = "default"
-        workspace = ws_str
-        active_stream_id = "st_ro"
-        read_only = True
-
-    cached = _Cached()
-    routes.SESSIONS["s_ro_cache"] = cached
-    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: None)
-
-    pid = "proj_viewonly_cache"
-    try:
-        assert routes._apply_project_auto_assign(
-            {"project_id": pid, "profile": "default", "workspaces": [ws_str]}
-        ) == 0
-    finally:
-        routes._auto_assign_finish_deleting(pid)
-        routes.SESSIONS.pop("s_ro_cache", None)
-    assert cached.project_id is None, "a read-only cached active stream was filed"
-
-
-# ---------------------------------------------------------------------------
-# Re-gate 2026-10-07T19:22:30Z — the six-item UX pass, items 1-5.
-# ---------------------------------------------------------------------------
 
 
 def _dialog_source() -> str:
@@ -1425,140 +689,12 @@ def test_bindings_dialog_hides_the_reasoning_effort_row():
     assert "VALID_REASONING_EFFORTS" in routes_src
 
 
-def test_auto_assign_toggle_is_guarded_by_a_count_confirmation():
-    """[item 3] Ticking the box confirms the sweep (with a count) first."""
-    seg = _dialog_source()
-    assert "aaCb.onchange=async()=>{" in seg
-    assert "'/api/projects/auto-assign-preview'" in seg
-    assert "pb_auto_assign_confirm" in seg
-    # Declining restores the STORED value (re-gate 2026-10-08T02:11:02Z,
-    # [should-fix] 5.) — a hard false would be persisted as "off" by the next Save.
-    assert "if(!confirmed) aaCb.checked=!!proj.auto_assign;" in seg
-    # The count is what the sweep's metadata gate would file.
-    assert "_auto_assign_candidate_count" in _read_routes_py()
 
 
-def test_auto_assign_preview_counts_only_unowned_rows(tmp_path, monkeypatch):
-    """The preview counter mirrors the sweep's metadata gate."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-preview"
-    ws.mkdir()
-    ws_str = str(ws)
-    # A second REAL bound workspace: paths the bind would reject (missing dirs)
-    # can never be bound, so the preview no longer counts their rows.
-    elsewhere = tmp_path / "elsewhere"
-    elsewhere.mkdir()
-    other_str = str(elsewhere)
-    index = tmp_path / "_index.json"
-    index.write_text(json.dumps([
-        # counted: unowned + bound workspace + own profile
-        {"session_id": "p1", "workspace": ws_str, "profile": "default", "project_id": None},
-        {"session_id": "p2", "workspace": ws_str, "profile": "default"},
-        # skipped: already filed under a project
-        {"session_id": "p3", "workspace": ws_str, "profile": "default", "project_id": "other"},
-        # counted only when its own workspace is bound
-        {"session_id": "p4", "workspace": other_str, "profile": "default"},
-        # skipped: different profile
-        {"session_id": "p5", "workspace": ws_str, "profile": "work"},
-        # skipped: no session id
-        {"workspace": ws_str, "profile": "default"},
-    ]))
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index)
-    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
-    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: str(a) == str(b))
-
-    assert routes._auto_assign_candidate_count([ws_str], "default") == 2
-    assert routes._auto_assign_candidate_count([ws_str], "work") == 1
-    assert routes._auto_assign_candidate_count([], "default") == 0
-    assert routes._auto_assign_candidate_count(
-        [ws_str, other_str], "default"
-    ) == 3
 
 
-def test_auto_assign_preview_route_returns_the_count(tmp_path, monkeypatch):
-    """POST /api/projects/auto-assign-preview answers {"count": N}."""
-    import api.routes as routes
-
-    ws = tmp_path / "ws-preview-route"
-    ws.mkdir()
-    ws_str = str(ws)
-    index = tmp_path / "_index.json"
-    index.write_text(json.dumps([
-        {"session_id": "r1", "workspace": ws_str, "profile": "default", "project_id": None},
-        {"session_id": "r2", "workspace": ws_str, "profile": "default", "project_id": "x"},
-    ]))
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index)
-    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
-    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
-    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
-
-    responses = []
-    assert _post_project_route(
-        monkeypatch, "/api/projects/auto-assign-preview", {"workspaces": [ws_str]}, responses
-    ) is True
-    assert [r["status"] for r in responses] == [200], responses
-    assert responses[0]["payload"] == {"count": 1}, responses
-
-    # An absent list counts nothing; a non-list is a 400, not a silent zero.
-    responses = []
-    _post_project_route(monkeypatch, "/api/projects/auto-assign-preview", {}, responses)
-    assert [r["status"] for r in responses] == [200], responses
-    assert responses[0]["payload"] == {"count": 0}, responses
-
-    responses = []
-    _post_project_route(
-        monkeypatch, "/api/projects/auto-assign-preview", {"workspaces": "nope"}, responses
-    )
-    assert [r["status"] for r in responses] == [400], responses
 
 
-def test_auto_assign_preview_ignores_a_caller_supplied_profile(tmp_path, monkeypatch):
-    """Greptile P1 + security: the preview must not be profile-selectable.
-
-    The route used to forward ``body.profile`` into the counter, so any caller
-    could count another profile's unowned sessions through the shared session
-    index (finding 2026-10-07T22:59:48Z). The count is pinned to the ACTIVE
-    profile instead: a ``profile`` field in the body is ignored, and the same
-    request under a different active profile counts that profile's rows.
-    """
-    import api.routes as routes
-
-    ws = tmp_path / "ws-preview-profile"
-    ws.mkdir()
-    ws_str = str(ws)
-    index = tmp_path / "_index.json"
-    index.write_text(json.dumps([
-        {"session_id": "d1", "workspace": ws_str, "profile": "default", "project_id": None},
-        {"session_id": "w1", "workspace": ws_str, "profile": "work", "project_id": None},
-        {"session_id": "w2", "workspace": ws_str, "profile": "work", "project_id": None},
-    ]))
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index)
-    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
-    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: str(a) == str(b))
-    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
-
-    # A foreign profile in the body changes nothing: only "default" is counted.
-    responses = []
-    assert _post_project_route(
-        monkeypatch,
-        "/api/projects/auto-assign-preview",
-        {"workspaces": [ws_str], "profile": "work"},
-        responses,
-    ) is True
-    assert [r["status"] for r in responses] == [200], responses
-    assert responses[0]["payload"] == {"count": 1}, responses
-
-    # The active profile is what moves the number.
-    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "work")
-    responses = []
-    _post_project_route(
-        monkeypatch,
-        "/api/projects/auto-assign-preview",
-        {"workspaces": [ws_str], "profile": "default"},
-        responses,
-    )
-    assert responses[0]["payload"] == {"count": 2}, responses
 
 
 def test_retired_bindings_i18n_keys_are_gone_from_every_locale():
@@ -1571,8 +707,10 @@ def test_retired_bindings_i18n_keys_are_gone_from_every_locale():
 
 
 # ---------------------------------------------------------------------------
-# Re-gate 2026-10-07T22:04:16Z — keyboard ownership under a stacked dialog, the
-# Save-side auto-assign confirmation, canonical preview counts, stale docs.
+# Re-gate 2026-10-07T22:04:16Z — keyboard ownership under a stacked dialog and
+# stale docs. (The Save-side auto-assign confirmation and the canonical preview
+# counts this re-gate also covered moved out with the auto-assign split,
+# maintainer re-gate 2026-10-11T02:08:20Z.)
 # ---------------------------------------------------------------------------
 
 
@@ -1600,156 +738,12 @@ def test_stacked_app_dialog_owns_the_keyboard():
     assert "if(!_isAppDialogOpen()) return;" in ui
 
 
-def test_save_awaits_the_auto_assign_confirmation_for_its_exact_snapshot():
-    """[SILENT] static/sessions.js:10927 + [SHOULD-FIX] 1/2.
-
-    Save read the ticked box while the preview was still in flight (filing chats
-    before the user answered) and a workspace added after ticking was never
-    counted; the fix makes Save await the shared confirmation for the exact
-    workspace snapshot it submits, and declining prevents the bind POST.
-    """
-    seg = _dialog_source()
-    save_start = seg.index("saveBtn.onclick=async()=>{")
-    post = seg.index("await _saveProjectBindings(proj,fields);", save_start)
-    # One shared gate, defined once and awaited by BOTH the toggle and Save.
-    assert seg.count("_ensureAutoAssignConfirmed=(") >= 1
-    assert seg.count("await _ensureAutoAssignConfirmed(wsPaths);") == 2
-    assert "if(autoAssign&&wsPaths.length&&!_aaConfirmed()){" in seg
-    # The snapshot is captured ONCE, before the await, and only that array is
-    # posted — never re-read after the confirmation resolves.
-    capture = seg.index("const wsPaths=wsList.map(x=>x.value).filter(Boolean);", save_start)
-    confirm = seg.index("const ok=await _ensureAutoAssignConfirmed(wsPaths);", save_start)
-    assert capture < confirm < post
-    assert "fields.workspaces=wsPaths.length?wsPaths:null;" in seg
-    assert "fields.auto_assign=autoAssign;" in seg
-    assert "fields.auto_assign=!!aaCb.checked;" not in seg
-    # Declining the confirmation returns BEFORE the POST (the only one in the
-    # handler) and puts the checkbox back to the STORED value — never a hard
-    # false, which the next Save would persist as "off" (re-gate
-    # 2026-10-08T02:11:02Z, [should-fix] 5.).
-    decline = seg.index("aaCb.checked=!!proj.auto_assign;", confirm)
-    assert confirm < decline < post
-    assert "return;" in seg[decline:post]
-    # The confirmation is keyed on the whole workspace list, so adding or
-    # removing a workspace re-arms it (that is the SHOULD-FIX 2 case: the flag
-    # was already on and a workspace was added after the tick).
-    assert "const _aaConfirmed=()=>_aaConfirmedKey!==null&&_aaConfirmedKey===_wsKey(_aaPathsNow());" in seg
-    # ...and Save re-checks the confirmed key against its OWN snapshot, not the
-    # live list (re-gate 2026-10-08T19:21:36Z):
-    #   A's preview delayed, B added, Save, B removed, then confirm A's count.
-    #   `_aaConfirmed()` re-read the list at that moment, saw [A] again and
-    #   passed while Save still POSTed [A, B] — B's chat got the project ID with
-    #   no confirmation. The guard is therefore a snapshot comparison.
-    assert "if(_aaConfirmedKey!==_wsKey(wsPaths)) return;" in seg
-    assert "if(!_aaConfirmed()) return;" not in seg
-    # A definite 0-count preview needs no prompt (the sweep would file nothing);
-    # an unavailable preview fails CLOSED and still confirms.
-    assert "if(count===0){ _aaConfirmedKey=key; return true; }" in seg
-    assert "pb_auto_assign_confirm_unknown" in seg
 
 
-# ---------------------------------------------------------------------------
-# Re-gate 2026-10-08T19:21:36Z — Save must re-check the snapshot it POSTs
-# ---------------------------------------------------------------------------
-
-_SAVE_GUARD_PROBE = """
-const proj = {project_id: 'p1'};
-let S = {activeProfile: 'default'};
-const wsList = [];
-function assert(cond, msg) { if (!cond) throw new Error(msg); }
-
-__HELPERS__
-__SAVE_GUARD__
-
-// The maintainer's reproduction on head 1ad78dc2676a: delay A's preview, add B,
-// click Save, remove B, then confirm A's count. Save captures [A, B] and posts
-// that snapshot, but the confirmation it waited for was written for [A] — and
-// the old guard re-read the LIVE list at that moment, saw [A] again and passed.
-const A = '/ws/a';
-const B = '/ws/b';
-const snapshot = [A, B];                 // what Save captured and will POST
-wsList.length = 0;                       // the live list at guard time: B removed
-wsList.push({value: A});
-_aaConfirmedKey = _wsKey([A]);           // the only count the user ever confirmed
-
-assert(
-  _wsKey(_aaPathsNow()) === _aaConfirmedKey,
-  'precondition: the live list is back to [A], so the old guard would pass'
-);
-assert(
-  _aaConfirmedKey !== _wsKey(snapshot),
-  'precondition: the [A, B] snapshot was never confirmed'
-);
-assert(
-  _saveGuard(snapshot) !== 'POST',
-  'Save must not post the [A, B] snapshot the user never confirmed'
-);
-
-// Positive control: the snapshot the user DID confirm still saves.
-wsList.push({value: B});
-_aaConfirmedKey = _wsKey([A, B]);
-assert(
-  _saveGuard([A, B]) === 'POST',
-  'the confirmed snapshot still saves'
-);
-console.log('ok');
-"""
 
 
-def test_save_guard_rechecks_the_snapshot_it_posts(tmp_path):
-    """[SILENT] static/sessions.js:11222 (re-gate 2026-10-08T19:21:36Z).
-
-    The shipped guard line and the shipped key helpers are extracted and run
-    under node — the reproduction above is the maintainer's own, so the old
-    ``if(!_aaConfirmed()) return;`` semantics really does fail this probe.
-    """
-    src = _read_sessions_js()
-    helpers = src[
-        src.index("let _aaConfirmedKey=null;") : src.index("const _ensureAutoAssignConfirmed=")
-    ]
-    assert "_wsKey=(paths)=>JSON.stringify(" in helpers
-    guard_at = src.index("if(_aaConfirmedKey!==_wsKey(wsPaths)) return;")
-    guard_line = src[guard_at : src.index("\n", guard_at)] + "\n"
-    guard_fn = "function _saveGuard(wsPaths){\n" + guard_line + "  return 'POST';\n}\n"
-    probe = _SAVE_GUARD_PROBE.replace("__HELPERS__", helpers).replace("__SAVE_GUARD__", guard_fn)
-    assert "if(!_aaConfirmed()) return;" not in probe
-    assert _run_node(tmp_path, "save_guard_snapshot_probe.js", probe).strip() == "ok"
 
 
-def test_auto_assign_preview_canonicalizes_typed_paths(tmp_path, monkeypatch):
-    """[SHOULD-FIX] 3 — the preview count must canonicalize like the bind does.
-
-    routes.py:971 compared the raw typed strings against the canonical paths the
-    bind stores, so "alpha/", "~/ws/alpha" and "/ws/./alpha" each previewed 0 and
-    the sweep then filed every chat in the path anyway.
-    """
-    import api.routes as routes
-
-    ws = tmp_path / "ws-canon"
-    ws.mkdir()
-    ws_str = str(ws)
-    index = tmp_path / "_index.json"
-    index.write_text(json.dumps([
-        # counted: unowned + bound workspace + own profile
-        {"session_id": "c1", "workspace": ws_str, "profile": "default", "project_id": None},
-        {"session_id": "c2", "workspace": ws_str, "profile": "default"},
-        # skipped: already filed somewhere
-        {"session_id": "c3", "workspace": ws_str, "profile": "default", "project_id": "other"},
-    ]))
-    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index)
-    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "default")
-    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: str(a) == str(b))
-
-    # Every non-canonical spelling of the SAME directory counts its chats.
-    for typed in (ws_str + "/", ws_str + "/.", ws_str + "/../" + ws.name):
-        assert routes._auto_assign_candidate_count([typed], "default") == 2, typed
-    # The canonical spelling still counts the same rows (no regression).
-    assert routes._auto_assign_candidate_count([ws_str], "default") == 2
-    # A path the bind would reject (it does not exist) can never be bound, so it
-    # cannot count anything — this must not raise.
-    assert routes._auto_assign_candidate_count([str(tmp_path / "not-there")], "default") == 0
-    # A bound path with no unowned rows counts 0.
-    assert routes._auto_assign_candidate_count([str(tmp_path)], "default") == 0
 
 
 def test_docs_match_the_project_settings_ui():
@@ -1763,6 +757,12 @@ def test_docs_match_the_project_settings_ui():
         assert stale not in arch, stale
     assert "Project settings…" in readme
     assert "Project settings…" in arch
-    # The counted confirmation and the endpoint behind it are documented.
-    assert "File 23 existing chats under" in readme
-    assert "auto-assign-preview" in arch
+    # The auto-assign sweep, its toggle, the counted confirmation it opened and
+    # the preview endpoint behind that confirmation moved to a follow-up PR, so
+    # no doc may still sell them as part of this build. `auto_assign` itself is
+    # documented as a stored-but-dormant field (like `reasoning_effort`).
+    for gone in ("Auto-assign sessions by workspace", "auto-assign-preview",
+                 "File 23 existing chats under"):
+        assert gone not in readme, gone
+        assert gone not in arch, gone
+    assert "stored but dormant" in arch

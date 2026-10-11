@@ -1,34 +1,25 @@
-"""Round-14 re-gate of the merge-pushed head (maintainer review 5481233439,
-2026-10-10T23:49:54Z, anchored ``b2f9924a``).
+"""Round-14/15 re-gates of the delete write-through (maintainer reviews
+5481233439 @ 2026-10-10T23:49:54Z and 5481568957 @ 2026-10-11T02:08:20Z).
 
-Two findings, both about a stale object being acted on after the thing it
-described had already moved on:
+Round 14 — [CORE] ``api/routes.py:903``: "project deletion overwrites newer
+replies with stale cached history". The write-through upgraded only
+metadata-only stubs, so a FULL but STALE cached session skipped the freshness
+check entirely and ``save()`` wrote the short in-memory history back over a
+sidecar that was already ahead of it (reproduced over real HTTP: one message
+cached, two persisted on disk, and the delete left only one message).
 
-1. [CORE] ``api/routes.py:903`` — "project deletion overwrites newer replies
-   with stale cached history". The delete's write-through upgraded only
-   metadata-only stubs, so a FULL but STALE cached session skipped the
-   freshness check entirely and ``save()`` wrote the short in-memory history
-   back over a sidecar that was already ahead of it. Reproduced by the
-   maintainer over real HTTP with one message cached and two persisted on
-   disk: the delete returned success and the next GET showed only one
-   message. Fixed by resolving each id through ``get_session(sid)`` (the
-   canonical freshness path, which reloads a lagging entry) instead of
-   reading the LRU directly, and by re-checking project ownership and
-   streaming status on the REFRESHED object before clearing and saving.
+Round 15 — [CORE] ``api/routes.py:907``: the ``get_session`` resolution that
+fixed round 14 still trusts a FULL cache entry whose sidecar holds the SAME
+number of messages, because ``_cached_session_lags_disk`` compares message
+COUNTS. Reproduced over real HTTP: a stale two-message cache entry replaced the
+two newer persisted messages (the newer draft was lost) and cleared the project
+on a chat that had already been reassigned to project B. Both live in
+``_persist_cleared_project_ids`` / ``_delete_target_session``.
 
-2. [SILENT] ``api/routes.py:1259`` — "the new stub upgrade can file a chat
-   into the wrong project". ``b2f9924a`` upgrades a resident stub before the
-   sweep claims it, but the claim still used the workspace read from the
-   stub/index BEFORE the upgrade, so a stub naming bound workspace A whose
-   full sidecar says unbound workspace B filed B's chat into A's project.
-   Fixed by recomputing the workspace from the refreshed session and
-   repeating the profile and view-only eligibility checks before the claim.
-
-Coverage here is deliberately split: the two behavioural tests drive the real
-functions over real ``Session`` objects on a temporary session store (so the
-freshness resolution, the stub upgrade and the claim all run for real), and
-the source-order guards pin the shape of the shipped code so a later edit
-cannot quietly restore either hole.
+The behavioural tests drive the real functions over real ``Session`` objects on
+a temporary session store, so the sidecar resolution, the ownership re-check and
+the streaming deferral all run for real, and source guards pin the shape of the
+shipped write-through (a reformatting must not restore the hole).
 """
 
 from __future__ import annotations
@@ -41,26 +32,24 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
-# A parsed ``cached = get_session(sid)`` — whitespace tolerant, since the 6775
-# P2 lesson is that a shape guard written as a bare substring stays green for
-# every reformatting of the same code.
-_GET_SESSION_CALL = re.compile(r"cached\s*=\s*get_session\(\s*sid\s*\)")
-_SESSIONS_GET = re.compile(r"SESSIONS\s*\.\s*get\(\s*sid\s*\)")
-_S_WS_FROM_SESSION = re.compile(r"s_ws\s*=\s*getattr\(\s*s\s*,\s*[\"']workspace[\"']")
-_UPGRADE_CALL = re.compile(r"s\s*=\s*_ensure_full_session_before_mutation\(\s*sid\s*,\s*s\)")
-_CLAIM_CALL = re.compile(r"_auto_assign_claim_session\(\s*pid\s*,\s*s\s*,\s*s_ws\s*\)")
-_VIEW_ONLY_ON_S = re.compile(r"_auto_assign_target_is_view_only\(\s*s\s*,\s*sid\s*\)")
+# A parsed call to the sidecar resolver — whitespace tolerant, since the 6775 P2
+# lesson is that a shape guard written as a bare substring stays green for every
+# reformatting of the same code.
+_RESOLVER_CALL = re.compile(r"cached\s*=\s*_delete_target_session\([^)]*\)")
+_STALE_SOURCE = re.compile(
+    r"cached\s*=\s*(SESSIONS\s*\.\s*get\(|get_session\()"
+)
 
 
 def _read(path: str) -> str:
     return (REPO_ROOT / path).read_text(encoding="utf-8")
 
 
-def _function_source(name: str, *, end_marker: str) -> str:
+def _function_source(name: str) -> str:
     """Slice one module-level function out of ``api/routes.py``."""
     src = _read("api/routes.py")
     start = src.index(f"def {name}(")
-    end = src.index(end_marker, start)
+    end = src.index("\n\ndef ", start + 1)
     return src[start:end]
 
 
@@ -69,11 +58,11 @@ def _isolated_store(tmp_path, monkeypatch):
     """A private session store plus the module names the code paths read.
 
     ``api.routes`` binds ``SESSION_DIR`` / ``SESSION_INDEX_FILE`` /
-    ``SESSIONS`` / ``LOCK`` / ``get_session`` at import time, while
-    ``Session.save()`` writes through ``api.models.SESSION_DIR``: both name the
-    same temporary directory here so the real load/save round trip runs against
-    it. ``SESSIONS`` is cleared, never rebound, because ``api.config``,
-    ``api.models`` and ``api.routes`` all hold the same dict object.
+    ``SESSIONS`` / ``LOCK`` at import time, while ``Session.save()`` writes
+    through ``api.models.SESSION_DIR``: both name the same temporary directory
+    here so the real load/save round trip runs against it. ``SESSIONS`` is
+    cleared, never rebound, because ``api.config``, ``api.models`` and
+    ``api.routes`` all hold the same dict object.
     """
     import api.config as config
     import api.models as models
@@ -108,16 +97,23 @@ def _sidecar(session_dir: Path, sid: str) -> dict:
     return json.loads((session_dir / f"{sid}.json").read_text(encoding="utf-8"))
 
 
+def _delete_unlink(routes, pid, sid):
+    """The delete's real two-step flow: clear in cache, then write through."""
+    cleared_ids: list = []
+    routes._clear_cached_sessions_for_project(pid, cleared_ids=cleared_ids)
+    return routes._persist_cleared_project_ids(pid, cleared_ids)
+
+
 # ---------------------------------------------------------------------------
-# 1 — [CORE] the delete write-through must not save a stale history back
+# [CORE] the delete write-through must not save a stale history back
 # ---------------------------------------------------------------------------
 
 
 def test_delete_write_through_refreshes_a_stale_cache_entry(_isolated_store):
     """One cached message must not overwrite the two that are on disk.
 
-    The exact maintainer reproduction: a reply landed AFTER the cache entry was
-    populated, so the cache is a full session that merely lags. Pre-fix the
+    The round-14 maintainer reproduction: a reply landed AFTER the cache entry
+    was populated, so the cache is a full session that merely lags. Pre-fix the
     write-through read the LRU object, ``_ensure_full_session_before_mutation``
     was a no-op for it, and ``save()`` truncated the sidecar to one message.
     """
@@ -144,7 +140,7 @@ def test_delete_write_through_refreshes_a_stale_cache_entry(_isolated_store):
     )
     config.SESSIONS[sid] = stale
 
-    assert routes._persist_cleared_project_ids(pid, [sid]) == 1
+    assert _delete_unlink(routes, pid, sid) == 1
 
     payload = _sidecar(session_dir, sid)
     assert payload["project_id"] is None, "the unlink must still land"
@@ -156,6 +152,60 @@ def test_delete_write_through_refreshes_a_stale_cache_entry(_isolated_store):
     # The refreshed object is what the cache now holds, with the clear applied.
     assert config.SESSIONS[sid].project_id is None
     assert len(config.SESSIONS[sid].messages) == 2
+
+
+def test_delete_write_through_keeps_a_newer_draft_and_a_reassigned_row(
+    _isolated_store,
+):
+    """[CORE] Equal message counts must not hide a newer sidecar.
+
+    The round-15 reproduction: the stale cache entry and the sidecar carry the
+    SAME number of messages, but the sidecar is otherwise newer — it holds the
+    user's newer draft and the chat has already been re-filed under project B.
+    ``_cached_session_lags_disk`` compares counts, so a ``get_session``-based
+    resolution still served the stale copy: its save cleared the project the
+    chat had just moved to and dropped the newer draft. Pre-fix this asserted
+    the loss; post-fix the write-through skips the row entirely.
+    """
+    session_dir, _index, routes, models, config = _isolated_store
+    pid = "proj_round15_delete"
+    other = "proj_round15_other"
+    sid = "sess-round15-delete"
+
+    # Disk truth: two messages, the NEWER draft, and the chat re-filed under B.
+    disk = models.Session(
+        session_id=sid,
+        workspace="/ws/round15",
+        messages=_messages(2, "disk"),
+        project_id=other,
+    )
+    disk.composer_draft = {"text": "newer draft"}
+    disk.save()
+
+    # The cache: a full, stale two-message entry that still belongs to A and
+    # carries the OLDER draft.
+    stale = models.Session(
+        session_id=sid,
+        workspace="/ws/round15",
+        messages=_messages(2, "cache"),
+        project_id=pid,
+    )
+    stale.composer_draft = {"text": "older draft"}
+    config.SESSIONS[sid] = stale
+
+    # Deleting project A: the cached entry matches, so the clear collects the id
+    # and the write-through is asked to unlink it. It must refuse.
+    assert _delete_unlink(routes, pid, sid) == 0
+
+    payload = _sidecar(session_dir, sid)
+    assert payload["project_id"] == other, (
+        "the chat had already been re-filed under another project; the delete "
+        "cleared it from the cache's older copy"
+    )
+    assert payload["message_count"] == 2
+    assert payload["composer_draft"] == {"text": "newer draft"}, (
+        "the newer persisted draft was overwritten by the stale cache entry"
+    )
 
 
 def test_delete_write_through_upgrades_a_metadata_stub_without_losing_history(
@@ -178,7 +228,7 @@ def test_delete_write_through_upgrades_a_metadata_stub_without_losing_history(
     assert stub is not None and stub._loaded_metadata_only
     config.SESSIONS[sid] = stub
 
-    assert routes._persist_cleared_project_ids(pid, [sid]) == 1
+    assert _delete_unlink(routes, pid, sid) == 1
 
     payload = _sidecar(session_dir, sid)
     assert payload["project_id"] is None
@@ -204,179 +254,50 @@ def test_delete_write_through_leaves_a_streaming_session_to_its_worker(
     config.SESSIONS[sid] = live
     monkeypatch.setattr(routes, "_active_stream_ids", lambda: {"stream-14"})
 
-    assert routes._persist_cleared_project_ids(pid, [sid]) == 0
+    assert _delete_unlink(routes, pid, sid) == 0
     assert _sidecar(session_dir, sid)["project_id"] == pid
 
 
 # ---------------------------------------------------------------------------
-# 2 — [SILENT] the sweep must not claim with the pre-upgrade workspace
+# Source guards — the shipped shape, not a copy of it
 # ---------------------------------------------------------------------------
 
 
-def test_sweep_refuses_a_claim_the_refreshed_workspace_does_not_cover(
-    _isolated_store, monkeypatch, tmp_path
-):
-    """Stub says bound workspace A, the full sidecar says unbound B.
-
-    Pre-fix the sweep claimed with the stub's stale ``s_ws`` (A) and filed B's
-    chat into A's project. Post-fix the workspace is re-derived from the
-    refreshed session and the claim is skipped.
-    """
-    session_dir, index_file, routes, models, config = _isolated_store
-    pid = "proj_round14_sweep"
-    sid = "sess-round14-sweep"
-    # Real directories: Session normalizes a workspace to its absolute form, so
-    # the index row, the project's bound list and the sidecar must all use the
-    # same spelling for the loop's `str(ws) in bound` gate to mean anything.
-    ws_a = tmp_path / "round14-a"
-    ws_b = tmp_path / "round14-b"
-    ws_a.mkdir()
-    ws_b.mkdir()
-    ws_a_s, ws_b_s = str(ws_a), str(ws_b)
-
-    # Disk truth: an EMPTY chat in the UNBOUND workspace B.
-    disk = models.Session(session_id=sid, workspace=ws_b_s, messages=[])
-    disk.save()
-    assert _sidecar(session_dir, sid)["workspace"] == ws_b_s
-
-    # A resident metadata-only stub whose workspace attribute names A (the same
-    # divergence the maintainer described: the stub is what the cache holds).
-    stub = models.Session.load_metadata_only(sid)
-    assert stub is not None and getattr(stub, "_loaded_metadata_only", False)
-    stub.workspace = ws_a_s
-    stub.project_id = None
-    config.SESSIONS[sid] = stub
-
-    index_file.write_text(
-        json.dumps(
-            [
-                {
-                    "session_id": sid,
-                    "workspace": ws_a_s,
-                    "profile": "default",
-                    "project_id": None,
-                    "active_stream_id": None,
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-    proj = {
-        "project_id": pid,
-        "profile": "default",
-        "workspaces": [ws_a_s],
-        "auto_assign": True,
-    }
-    monkeypatch.setattr(routes, "load_projects", lambda: [dict(proj)])
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
-    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
-
-    changed = routes._auto_assign_sweep_body(proj)
-
-    assert changed == 0, (
-        "the sweep filed the chat into A's project using the stale stub "
-        "workspace instead of the refreshed one (B, unbound)"
-    )
-    assert _sidecar(session_dir, sid)["project_id"] is None
-
-
-def test_sweep_still_files_when_the_refreshed_workspace_is_bound(
-    _isolated_store, monkeypatch, tmp_path
-):
-    """Control: the new post-upgrade checks must not over-block a real match."""
-    session_dir, index_file, routes, models, config = _isolated_store
-    pid = "proj_round14_ok"
-    sid = "sess-round14-ok"
-    ws_a = tmp_path / "round14-ok"
-    ws_a.mkdir()
-    ws_a_s = str(ws_a)
-
-    disk = models.Session(session_id=sid, workspace=ws_a_s, messages=[])
-    disk.save()
-
-    stub = models.Session.load_metadata_only(sid)
-    assert stub is not None and getattr(stub, "_loaded_metadata_only", False)
-    config.SESSIONS[sid] = stub
-
-    index_file.write_text(
-        json.dumps(
-            [
-                {
-                    "session_id": sid,
-                    "workspace": ws_a_s,
-                    "profile": "default",
-                    "project_id": None,
-                    "active_stream_id": None,
-                }
-            ]
-        ),
-        encoding="utf-8",
-    )
-    proj = {
-        "project_id": pid,
-        "profile": "default",
-        "workspaces": [ws_a_s],
-        "auto_assign": True,
-    }
-    monkeypatch.setattr(routes, "load_projects", lambda: [dict(proj)])
-    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
-    monkeypatch.setattr(routes, "_state_db_session_source_strict", lambda sid: "")
-    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
-
-    assert routes._auto_assign_sweep_body(proj) == 1
-    assert _sidecar(session_dir, sid)["project_id"] == pid
-
-
-# ---------------------------------------------------------------------------
-# 3 — source-order guards: the shipped shape, not a copy of it
-# ---------------------------------------------------------------------------
-
-
-def test_write_through_resolves_through_get_session():
+def test_write_through_resolves_through_the_sidecar_resolver():
     """``_persist_cleared_project_ids`` must not read the LRU directly."""
-    body = _function_source(
-        "_persist_cleared_project_ids", end_marker="\ndef _auto_assign_target_is_view_only("
+    body = _function_source("_persist_cleared_project_ids")
+    assert _RESOLVER_CALL.search(body), (
+        "the write-through must resolve each target through "
+        "_delete_target_session so a stale cache entry is never saved back"
     )
-    assert _GET_SESSION_CALL.search(body), (
-        "the write-through must resolve the session through get_session(sid) so "
-        "a lagging full cache entry is reloaded before it is saved back"
+    assert not _STALE_SOURCE.search(body), (
+        "the write-through resolves its target straight from the cache again; "
+        "that is the stale-object hole the maintainers reproduced twice"
     )
-    assert not _SESSIONS_GET.search(body), (
-        "the write-through still reads SESSIONS.get(sid) as its session source; "
-        "that is the stale-object hole the maintainer reproduced"
-    )
-    # The two answers the caller's clear acted on are re-checked after the
-    # refresh, and only then is the id cleared and published.
-    get_i = _GET_SESSION_CALL.search(body).start()
-    stream_i = body.index("active_stream_id", get_i)
-    proj_i = body.index('getattr(cached, "project_id", None)', get_i)
-    clear_i = body.index("cached.project_id = None", get_i)
-    assert get_i < proj_i < clear_i, (get_i, proj_i, clear_i)
-    assert get_i < stream_i < clear_i, (get_i, stream_i, clear_i)
-    # The ownership re-check happens BEFORE the clear, so a row re-filed under
-    # another project is never un-filed by the delete (round-8 regression).
-    assert proj_i < clear_i
+    # Ownership and streaming are re-checked on the REFRESHED object, BEFORE the
+    # clear: a row re-filed under another project is never un-filed.
+    resolve_i = _RESOLVER_CALL.search(body).start()
+    stream_i = body.index("active_stream_id", resolve_i)
+    proj_i = body.index('getattr(cached, "project_id", None)', resolve_i)
+    clear_i = body.index("cached.project_id = None", resolve_i)
+    assert resolve_i < proj_i < clear_i, (resolve_i, proj_i, clear_i)
+    assert resolve_i < stream_i < clear_i, (resolve_i, stream_i, clear_i)
 
 
-def test_sweep_rederives_the_workspace_after_the_stub_upgrade():
-    """The claim must use the workspace of the REFRESHED session."""
-    body = _function_source(
-        "_auto_assign_sweep_body", end_marker="\ndef _auto_assign_candidate_count("
+def test_delete_target_resolver_loads_the_sidecar_and_publishes_it():
+    """The resolver's own rule: fresh sidecar first, cache only when ahead."""
+    body = _function_source("_delete_target_session")
+    assert "_Session.load(sid)" in body, (
+        "the resolver must load the sidecar itself: get_session's freshness "
+        "check is count-based and leaves an equal-count stale entry in place"
     )
-    upgrade_i = _UPGRADE_CALL.search(body)
-    assert upgrade_i is not None, "the stub upgrade is missing from the sweep"
-    claim_i = _CLAIM_CALL.search(body)
-    assert claim_i is not None, "the sweep no longer claims through the helper"
-
-    after = body[upgrade_i.end():claim_i.start()]
-    assert _S_WS_FROM_SESSION.search(after), (
-        "after the upgrade the sweep must re-derive s_ws from the refreshed "
-        "session; the pre-upgrade workspace filed B's chat into A's project"
+    assert "SESSIONS[sid] = fresh" in body, (
+        "the refreshed session must be published into the cache, or the delete "
+        "handler's index pass can still fall back to the stale entry"
     )
-    assert _VIEW_ONLY_ON_S.search(after), (
-        "after the upgrade the sweep must repeat the view-only eligibility "
-        "check on the refreshed session"
+    assert '"messages"' in body, (
+        "the resolver must compare message counts to keep a genuinely newer "
+        "cache entry (an unsaved draft)"
     )
-    # And the profile check too, between the upgrade and the claim.
-    assert "profile" in after, "the post-upgrade profile re-check is missing"
+    # The streaming deferral stays a pre-check, before the (full) load.
+    assert body.index("active_stream_id") < body.index("_Session.load(sid)")
