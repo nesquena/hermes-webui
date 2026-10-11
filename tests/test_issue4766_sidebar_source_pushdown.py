@@ -497,6 +497,7 @@ global.ensureActiveSessionExternalRefreshPoll = () => {{}};
     global.ensureSessionEventsSSE = () => {{}};
     global.animateNextSessionListRefresh = () => {{}};
     global.renderSessionListFromCache = () => {{}};
+    global._repaintSidebarForBackgroundChurn = () => {{ global.renderSessionListFromCache(); }};
     {clear_fn}
     {count_fn}
     {requested_source_fn}
@@ -700,6 +701,7 @@ global.renderSessionListFromCache = () => {{
     inflightKeys: Object.keys(global.INFLIGHT || {{}}).sort(),
   }});
 }};
+global._repaintSidebarForBackgroundChurn = () => {{ global.renderSessionListFromCache(); }};
 global.api = () => Promise.reject(new Error('boom'));
     global.clearInflightState = sid => cleared.push(sid);
     {purge_fn}
