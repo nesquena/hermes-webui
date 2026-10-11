@@ -6659,10 +6659,13 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
 /* Usage row (Token Breakdown + Models): 25/75 split so long model IDs
    (e.g. "vendor/org/model:quant") render in full instead of ellipsizing.
+   The 160px floor keeps the token rows usable at narrow desktop widths
+   (just above the 640px mobile breakpoint, where 25% of the content
+   column is too tight for "Output" + a value like "12.3M").
    Equal specificity to .insights-row but later in the cascade, so it wins
    for the row that carries both classes; the #2104 mobile block below
    (also later) still collapses this row to one column under 640px. */
-.insights-usage-grid{grid-template-columns:minmax(0,1fr) minmax(0,3fr);}
+.insights-usage-grid{grid-template-columns:minmax(160px,1fr) minmax(0,3fr);}
 .insights-card{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px;}
 .wiki-status-card{margin-bottom:16px;}
 .wiki-status-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}

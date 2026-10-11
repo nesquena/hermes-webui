@@ -345,15 +345,24 @@ def test_insights_usage_grid_desktop_split_favors_models():
                    if line.startswith('.insights-usage-grid{')]
     assert usage_rules, 'a desktop .insights-usage-grid rule must exist'
     rule = usage_rules[0]
-    assert 'minmax(0,1fr) minmax(0,3fr)' in rule, f'usage row must split 25/75, got: {rule}'
+    assert 'minmax(160px,1fr) minmax(0,3fr)' in rule, f'usage row must split 25/75 with a 160px floor, got: {rule}'
     # Cascade: equal specificity to .insights-row, so the 25/75 rule must come
     # AFTER it in the file to win for the row that carries both classes.
     assert STYLE_CSS.index('.insights-usage-grid{') > STYLE_CSS.index('.insights-row{'), \
         'the 25/75 rule must follow .insights-row so it wins the cascade'
-    # The #2104 mobile collapse must still win below 640px: its block must come
-    # after the desktop rule in the file.
-    mobile_block = STYLE_CSS.find('/* ── Mobile layout for Token Breakdown + Models')
-    assert mobile_block > STYLE_CSS.index('.insights-usage-grid{'), \
+    # The #2104 mobile collapse must still win below 640px: the single-column
+    # declaration must live INSIDE the scoped mobile block, and that block must
+    # start after the desktop rule so it wins the cascade at narrow widths.
+    mobile_start = STYLE_CSS.find('/* ── Mobile layout for Token Breakdown + Models')
+    mobile_end = STYLE_CSS.find('/* ── Checkpoints', mobile_start)
+    mobile_block = STYLE_CSS[mobile_start:mobile_end]
+    assert '@media (max-width: 640px)' in mobile_block, 'mobile block must be scoped to <=640px'
+    mobile_rule = [line for line in mobile_block.splitlines()
+                   if '.insights-usage-grid' in line and '{' in line]
+    assert mobile_rule, 'mobile block must contain a .insights-usage-grid rule'
+    assert 'grid-template-columns: 1fr' in mobile_block, \
+        'mobile block must force single-column for the usage grid'
+    assert mobile_start > STYLE_CSS.index('.insights-usage-grid{'), \
         'the mobile single-column block must follow the desktop 25/75 rule'
 
 
