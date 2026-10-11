@@ -2007,19 +2007,52 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // Explicit profile switch wins, then the current conversation, then the profile default.
+    // Chat-header/rail "+" (btnNewChat) with an active project filter applies
+    // that project's bindings (default workspace / model) exactly
+    // like the project-chip quick-create (+): selecting a project then
+    // pressing the top-level New Chat button must open the session in the
+    // project's pinned workspace. Only merge when the caller did NOT pass an
+    // explicit project_id (chip + passes one — never double-apply), and only
+    // fill fields the caller did not already set explicitly.
+    if(!Object.prototype.hasOwnProperty.call(options,'project_id')
+       && _activeProject && _activeProject!==NO_PROJECT_FILTER){
+      const _proj=(typeof _allProjects!=='undefined'?_allProjects:[]).find(p=>p.project_id===_activeProject);
+      // Profile boundary: right after a profile switch the sidebar may still
+      // expose the PREVIOUS profile's project chips (session list repaints
+      // before _allProjects refreshes), and merging its workspace/model would
+      // file the new session under the wrong profile. Only merge bindings from
+      // a project that belongs to the ACTIVE profile.
+      const _projOnActiveProfile=_proj&&(typeof _profileMatchesActiveProfile==='function'
+        ? _profileMatchesActiveProfile(_proj.profile,S.activeProfile)
+        : true);
+      if(_projOnActiveProfile){
+        const _pb=_projectBindingsForNewSession(_proj);
+        const _merged=Object.assign({},options);
+        if(_pb.workspace&&!Object.prototype.hasOwnProperty.call(_merged,'workspace')) _merged.workspace=_pb.workspace;
+        if(_pb.model&&!Object.prototype.hasOwnProperty.call(_merged,'model')) _merged.model=_pb.model;
+        if(_pb.model_provider&&!Object.prototype.hasOwnProperty.call(_merged,'model_provider')) _merged.model_provider=_pb.model_provider;
+        options=_merged;
+      }
+    }
+    // Project-bound workspace (quick-create with bindings) wins first,
+    // then explicit profile-switch, then current conversation, then profile default.
     // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
     const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
-    const inheritWs=switchWs||sessionWs||(S._profileDefaultWorkspace||null);
+    const boundWs=(options&&options.workspace)||null;
+    const inheritWs=boundWs||switchWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
     };
     if(S.session&&S.session.session_id){
       reqBody.prev_session_id=S.session.session_id;
-      if(sessionWs) reqBody.workspace_inherited_from_prev_session=true;
+      // Provenance flag ONLY when the workspace actually came from the previous
+      // session: the server uses it to RECOVER a deleted inherited path from the
+      // last workspace, so flagging an explicit project-bound path let a project
+      // chat silently open elsewhere (Greptile P1 2026-10-10T05:08:54Z).
+      if(sessionWs&&!boundWs) reqBody.workspace_inherited_from_prev_session=true;
     }
     // Three-value worktree contract (#6022): explicit true/false is forwarded
     // verbatim; an ABSENT key lets the server apply the agent's config-level
@@ -2028,7 +2061,14 @@ async function newSession(flash, options={}){
     if(options&&Object.prototype.hasOwnProperty.call(options,'worktree')) reqBody.worktree=!!options.worktree;
     if(Object.prototype.hasOwnProperty.call(options,'project_id')){
       reqBody.project_id=options.project_id;
-    } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
+    } else if(_activeProject===NO_PROJECT_FILTER){
+      // The sidebar's "No project" view: send an EXPLICIT null. The server
+      // treats an absent field as "opt into auto-assignment", so omitting it
+      // filed the new chat under an auto-assigned project and then hid it from
+      // the unassigned-only list that created it (maintainer re-gate
+      // 2026-10-09T23:55:01Z). null is the "no project" the server preserves.
+      reqBody.project_id=null;
+    } else if(_activeProject){
       reqBody.project_id=_activeProject;
     }
     // Forward a pre-session toolset override only from the empty composer (#4490).
@@ -2037,11 +2077,17 @@ async function newSession(flash, options={}){
     const explicitModelOverride=(typeof _readEmptyComposerModelOverride==='function')
       ? _readEmptyComposerModelOverride()
       : null;
+    // Project-bound model (quick-create with bindings) wins over everything
+    // else — the project pins the model for sessions opened from its + button.
+    const boundModel=(options&&options.model)||null;
+    const boundProvider=(options&&options.model_provider)||null;
     const hasLoadedSession=!!(S.session&&S.session.session_id);
     let newModelState=null;
     let consumedExplicitModelOverride=false;
     let usingConfiguredDefault=false;
-    if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
+    if(boundModel){
+      newModelState={model:boundModel, model_provider:boundProvider||null};
+    }else if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
       newModelState=explicitModelOverride;
       consumedExplicitModelOverride=true;
     }else if(window._defaultModel){
@@ -2084,9 +2130,12 @@ async function newSession(flash, options={}){
       // server fast path passes the pair through verbatim (no validation) and
       // silently routes to the wrong backend — so leave model_provider=null and
       // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
-      const _fallbackProvider=_bareModel
-        ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
-        : '';
+      const _fallbackProvider=boundModel&&!boundProvider
+        ? ''  // project-bound model without an explicit provider: pin nothing,
+              // let the server's slow-path normalization resolve the family
+        : (_bareModel
+          ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
+          : '');
       const _familyProvider=(m=>{const s=String(m||'').toLowerCase();
         if(s.startsWith('gpt'))return 'openai';if(s.startsWith('claude'))return 'anthropic';
         if(s.startsWith('gemini'))return 'google';return '';})(newModelState.model);
@@ -2115,6 +2164,35 @@ async function newSession(flash, options={}){
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
+    // Project-bound reasoning effort: apply after the session exists so the
+    // effort chip / agent config reflects the project's pinned level. The
+    // binding's own model+provider are used as the effort context (falling
+    // back to the session's model) so the effort is attached to the right
+    // model family rather than the currently-selected one.
+    // Authority: this intentionally mutates the profile-default preference
+    // (agent.reasoning_effort per model family in config.yaml via
+    // /api/reasoning), not a session-local override. Nathan to decide if
+    // project/session-local scoping is desired — current contract matches
+    // the existing global reasoning_effort model.
+    //
+    // DORMANT since the UX re-gate 2026-10-08T23:39:33Z (item A): no caller
+    // forwards reasoning_effort any more — _projectBindingsForNewSession no
+    // longer does — because the per-project dialog cannot show or clear the
+    // stored value, so applying it read as a silent profile-wide change. The
+    // branch stays for per-session effort (#7881), which will re-supply the
+    // option.
+    const boundEffort=(options&&options.reasoning_effort)||null;
+    if(boundEffort&&typeof api==='function'){
+      const effModel=boundModel||(data.session&&data.session.model)||null;
+      const effProvider=boundProvider||(data.session&&data.session.model_provider)||null;
+      const effBody={effort:boundEffort};
+      if(effModel) effBody.model=effModel;
+      if(effProvider) effBody.provider=effProvider;
+      try{
+        const st=await api('/api/reasoning',{method:'POST',body:JSON.stringify(effBody)});
+        if(typeof _applyReasoningChip==='function') _applyReasoningChip((st&&st.reasoning_effort)||boundEffort, st||{});
+      }catch(_){ /* effort is a preference; a failed apply must not fail the session */ }
+    }
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -8660,6 +8738,43 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
 }
 
+function _projectBindingsForNewSession(project){
+  // Assemble the newSession options that carry a project's pinned context:
+  // default workspace / model / model_provider. Only fields that are actually
+  // bound are forwarded — an unbound project creates sessions with the usual
+  // defaults.
+  //
+  // reasoning_effort is deliberately NOT forwarded (UX re-gate
+  // 2026-10-08T23:39:33Z, item A). The dialog can no longer show or clear a
+  // stored effort, yet forwarding it made the project's + (new chat) silently
+  // change the PROFILE-wide effort for that model family (POST /api/reasoning)
+  // while the chip read "Default". The binding itself is still stored by
+  // /api/projects/bind; it comes back into play with per-session effort
+  // (#7881).
+  const o={};
+  if(project){
+    // Profile boundary: never forward a project's bindings across a profile
+    // switch. Until the project cache refreshes, a chip (or the active
+    // project filter) can still point at the PREVIOUS profile's project — its
+    // workspace/model would then be applied to the new profile's session.
+    // Only the ACTIVE profile's projects contribute bindings.
+    if(typeof _profileMatchesActiveProfile==='function'
+       && !_profileMatchesActiveProfile(project.profile, S.activeProfile)){
+      return o;
+    }
+    // Multi-workspace projects use the marked default (falls back to the
+    // first bound workspace; legacy single `workspace` field still works).
+    const ws=project.default_workspace
+      ||(Array.isArray(project.workspaces)&&project.workspaces[0])
+      ||project.workspace
+      ||null;
+    if(ws) o.workspace=ws;
+    if(project.model) o.model=project.model;
+    if(project.model_provider) o.model_provider=project.model_provider;
+  }
+  return o;
+}
+
 function _attachProjectQuickCreateButton(chip, project){
   const btn=document.createElement('button');
   btn.type='button';
@@ -8680,10 +8795,11 @@ function _attachProjectQuickCreateButton(chip, project){
   };
   btn.onclick=async(e)=>{
     stop(e);
+    const bindings=_projectBindingsForNewSession(project);
     if(_newSessionInFlight){
       // The initiating tap already owns the filter change and rollback path.
       try{
-        await newSession(false,{project_id:project.project_id});
+        await newSession(false,Object.assign({project_id:project.project_id},bindings));
       }catch(_){
         // The initiating tap already owns the visible failure path.
       }
@@ -8692,7 +8808,7 @@ function _attachProjectQuickCreateButton(chip, project){
     const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
     _setActiveProjectFilter(project.project_id);
     try{
-      await newSession(false,{project_id:project.project_id});
+      await newSession(false,Object.assign({project_id:project.project_id},bindings));
       // newSession() does not repaint the sidebar (callers own that — see the
       // newSession contract). Repaint from the post-create state so the new
       // project-assigned session appears deterministically.
@@ -10716,6 +10832,900 @@ function _startProjectCreate(bar, addBtn){
   setTimeout(()=>inp.focus(),10);
 }
 
+async function _saveProjectBindings(proj, fields){
+  // Persist one or more binding fields via /api/projects/bind (null clears a
+  // field), then refresh the in-memory project cache + sidebar so chips and
+  // future quick-creates see the new bindings immediately.
+  //
+  // Returns true only when the server ACCEPTED the bind: the dialog stays open
+  // on a failure so the user's unsaved edits survive (Greptile P2
+  // 2026-10-10T02:22:52Z).
+  const body=Object.assign({project_id:proj.project_id}, fields||{});
+  try{
+    const res=await api('/api/projects/bind',{method:'POST',body:JSON.stringify(body)});
+    const updated=res&&res.project;
+    if(updated&&Array.isArray(_allProjects)){
+      const idx=_allProjects.findIndex(p=>p.project_id===proj.project_id);
+      if(idx>=0) _allProjects[idx]=updated;
+    }
+    if(updated){
+      // Keep the OPEN dialog's snapshot in step with what the server just
+      // accepted. Copy the persisted fields IN PLACE: the dialog closure holds
+      // THIS object, so replacing the reference would detach it from
+      // `_allProjects`, and a stale `proj` would put a control back to its
+      // PRE-save value. The dialog's unsaved controls are DOM state and are left
+      // untouched (Greptile P2 2026-10-10T10:11:13Z).
+      for(const _k of ['name','workspaces','default_workspace','model','model_provider']){
+        // The server POPS a CLEARED field instead of echoing it as false/''
+        // (``proj.pop("workspaces", None)`` and friends in /api/projects/bind),
+        // so a key ABSENT from the response means "cleared" and must be deleted
+        // from the snapshot too: copying only the present keys left the old
+        // value behind. `auto_assign` is deliberately NOT tracked here — the
+        // dialog never submits it, because the field is stored but dormant
+        // (maintainer review 5478955688, 2026-10-10T12:35:21Z).
+        if(Object.prototype.hasOwnProperty.call(updated,_k)) proj[_k]=updated[_k];
+        else delete proj[_k];
+      }
+    }
+    try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+    try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+    if(typeof showToast==='function') showToast(t('pb_updated'));
+    return true;
+  }catch(e){
+    if(typeof showToast==='function') showToast(t('pb_update_failed')+(e&&e.message||e));
+    return false;
+  }
+}
+
+// Custom combobox for the bindings dialog: same look as a native select
+// (see .project-bindings-combo-* in style.css), but rendered as divs so an
+// option can carry a primary name AND a secondary path/subtitle. All three
+// binding fields share this component, so the dropdowns are visually
+// identical across workspace / model / effort.
+
+// Which bindings combo currently owns an open menu. The trigger's click handler
+// stops propagation, so opening a second combo could never run the first one's
+// document-level close and two menus stayed open together (both triggers
+// reporting aria-expanded="true"); _open() now closes the previous owner
+// explicitly, which is what a native <select> does (maintainer UX re-gate
+// 2026-10-10T02:01:36Z).
+let _openBindingsCombo=null;
+// Monotonic id source for the combobox a11y wiring (list id + option ids +
+// the trigger's aria-activedescendant). Declared next to the open-combo slot so
+// the combo probes' extractor picks it up with the component.
+let _comboIdSeq=0;
+
+function _makeBindingsCombo(o){
+  const _cid='pbc-'+(++_comboIdSeq);
+  const wrap=document.createElement('div');
+  wrap.className='project-bindings-combo';
+  const trigger=document.createElement('div');
+  trigger.className='project-bindings-combo-trigger';
+  trigger.tabIndex=0;
+  trigger.setAttribute('role','combobox');
+  trigger.setAttribute('aria-haspopup','listbox');
+  trigger.setAttribute('aria-expanded','false');
+  const nameSpan=document.createElement('span');
+  nameSpan.className='combo-trigger-name';
+  const subSpan=document.createElement('span');
+  subSpan.className='combo-trigger-sub';
+  trigger.appendChild(nameSpan);
+  trigger.appendChild(subSpan);
+  const menu=document.createElement('div');
+  menu.className='project-bindings-combo-menu';
+  menu.setAttribute('role','listbox');
+  menu.setAttribute('id',_cid+'-list');
+  // Screen-reader wiring: the arrows never move DOM focus off the trigger, so the
+  // trigger must name the list it controls and the option currently highlighted
+  // (Greptile P2 2026-10-10T03:29:51Z). The highlight helper keeps
+  // aria-activedescendant in step with the 'active' row.
+  trigger.setAttribute('aria-controls',_cid+'-list');
+  // Accessible name: the visible field labels are sibling divs with no id link,
+  // so a screen reader could not tell a model change from a workspace add
+  // (Greptile P2 2026-10-10T05:08:46Z). Callers pass a localized name; the
+  // add-workspace combo has no visible label at all, so it MUST have one.
+  if(o&&o.ariaLabel) trigger.setAttribute('aria-label',o.ariaLabel);
+  wrap.appendChild(trigger);
+  wrap.appendChild(menu);
+
+  const state={value:(o&&o.value)||'', options:Array.isArray(o&&o.options)?o.options:[], onChange:(o&&typeof o.onChange==='function')?o.onChange:null, filterOptions:(o&&typeof o.filterOptions==='function')?o.filterOptions:null};
+
+  function _currentOption(){
+    return state.options.find(opt=>opt.value===state.value)||null;
+  }
+  function _renderTrigger(){
+    const cur=_currentOption();
+    nameSpan.textContent=(cur&&cur.name)||(o&&o.placeholder)||'';
+    subSpan.textContent=(cur&&cur.sub)||'';
+    subSpan.style.display=(cur&&cur.sub)?'':'none';
+  }
+  // Keep the trigger's aria-activedescendant pointing at the highlighted row so
+  // the arrow move is announced even though focus never leaves the trigger.
+  function _clearActiveDescendant(){
+    // A real DOM drops the attribute; the probes' mini-DOM has no
+    // removeAttribute, so fall back to an empty (equally "no active option")
+    // value there.
+    if(typeof trigger.removeAttribute==='function') trigger.removeAttribute('aria-activedescendant');
+    else trigger.setAttribute('aria-activedescendant','');
+  }
+  function _syncActiveDescendant(){
+    const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+    const row=rows.find(r=>r.classList.contains('active'));
+    const id=row&&row.getAttribute('id');
+    if(id){ trigger.setAttribute('aria-activedescendant',id); return; }
+    _clearActiveDescendant();
+  }
+  function _close(){
+    menu.classList.remove('open');
+    trigger.classList.remove('open');
+    trigger.setAttribute('aria-expanded','false');
+    _clearActiveDescendant();
+    if(_openBindingsCombo===api) _openBindingsCombo=null;
+  }
+  function _open(){
+    // One popup at a time: close whichever bindings combo was open before this
+    // one. The sibling's own click handler stopPropagation()s, so its
+    // document-level close never fires when the OTHER trigger is clicked or
+    // arrowed into (maintainer UX re-gate 2026-10-10T02:01:36Z).
+    if(_openBindingsCombo&&_openBindingsCombo!==api){
+      try{ _openBindingsCombo.close(); }catch(_){ _openBindingsCombo=null; }
+    }
+    // Rebuild options so freshly-fetched lists (workspace names) appear, and
+    // let the caller drop entries that are only invalid NOW: the workspace add
+    // list hides already-bound workspaces, and that bound list changes after
+    // the fetch resolves (a row removed, a path typed in), so filtering once
+    // at fetch time would leave stale rows selectable.
+    menu.innerHTML='';
+    let items=state.options;
+    if(typeof state.filterOptions==='function'){
+      try{ const filtered=state.filterOptions(state.options); if(Array.isArray(filtered)) items=filtered; }catch(_){}
+    }
+    if(!items.length){
+      const empty=document.createElement('div');
+      empty.className='project-bindings-combo-empty';
+      empty.textContent=t('pb_no_options');
+      menu.appendChild(empty);
+    }else{
+      items.forEach((opt,i)=>{
+        const row=document.createElement('div');
+        row.className='ws-opt'+(opt.value===state.value?' active':'');
+        row.setAttribute('role','option');
+        row.setAttribute('id',_cid+'-opt-'+i);
+        row.setAttribute('aria-selected',String(opt.value===state.value));
+        const n=document.createElement('span');
+        n.className='ws-opt-name';
+        n.textContent=opt.name||opt.value||'';
+        row.appendChild(n);
+        if(opt.sub){
+          const p=document.createElement('span');
+          p.className='ws-opt-path';
+          p.textContent=opt.sub;
+          row.appendChild(p);
+        }
+        row.onmousedown=(e)=>{e.preventDefault();};
+        row.onclick=(e)=>{
+          e.stopPropagation();
+          state.value=opt.value;
+          _renderTrigger();
+          _close();
+          if(typeof state.onChange==='function') state.onChange(opt);
+        };
+        menu.appendChild(row);
+      });
+    }
+    // Position the menu FIXED to the trigger's viewport rect so the dialog's
+    // overflow:auto can never clip it. Flip upward when the bottom edge of
+    // the viewport would be hit.
+    const rect=trigger.getBoundingClientRect();
+    const vh=window.innerHeight||0;
+    // The rendered box is capped by CSS at max-height:min(60vh,320px). The flip
+    // decision must use that REAL height, and reading scrollHeight while the menu
+    // is still display:none always returns 0, so the old 240px fallback opened a
+    // long list downward past the viewport edge, where its last options cannot be
+    // clicked or tapped (maintainer must-fix 2026-10-10T03:06:13Z; Greptile P2
+    // 2026-10-10T03:29:51Z). Lay the menu out FIRST — position:fixed at the
+    // trigger's width with visibility:hidden (kept in flow, so it is measurable,
+    // but invisible) — read the true height, choose up/down, cap the box to the
+    // space actually available on that side, then reveal.
+    const cssCap=vh?Math.min(vh*0.6,320):320;
+    menu.style.position='fixed';
+    menu.style.left=rect.left+'px';
+    menu.style.width=rect.width+'px';
+    menu.style.visibility='hidden';
+    menu.classList.add('open');
+    const menuHeight=Math.min(menu.scrollHeight||cssCap, cssCap);
+    const spaceBelow=vh-rect.bottom-8;
+    const spaceAbove=rect.top-8;
+    const flipUp=spaceBelow<menuHeight+8&&spaceAbove>spaceBelow;
+    const avail=Math.max(flipUp?spaceAbove:spaceBelow, 120);
+    menu.style.maxHeight=Math.min(cssCap, avail)+'px';
+    if(flipUp){
+      menu.style.top='auto';
+      menu.style.bottom=(vh-rect.top+6)+'px';
+    }else{
+      menu.style.top=(rect.bottom+4)+'px';
+      menu.style.bottom='auto';
+    }
+    menu.style.visibility='';
+    trigger.classList.add('open');
+    trigger.setAttribute('aria-expanded','true');
+    // Point the trigger at the row that is highlighted on open (the current
+    // value, if it is in the list) so a screen reader announces it.
+    _syncActiveDescendant();
+    _openBindingsCombo=api;
+  }
+  // Move the keyboard highlight over the CURRENTLY RENDERED rows (the filter
+  // runs per open, and the add list both hides bound paths and prepends the
+  // "Type a path…" entry, so the highlight is tracked on the DOM — the same
+  // place the rendered 'active' class lives). Nothing is committed here:
+  // committing is Enter/Space's job.
+  function _setHighlight(row){
+    const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+    rows.forEach(r=>{
+      const on=(r===row);
+      r.classList.toggle('active',on);
+      r.setAttribute('aria-selected',String(on));
+    });
+    // Announce the move: the trigger never loses focus, so it must name the
+    // highlighted option (Greptile P2 2026-10-10T03:29:51Z).
+    _syncActiveDescendant();
+    // The menu is height-capped and scrolls (max-height:min(60vh,320px)), so a
+    // highlight moved past the visible rows must be brought into view —
+    // otherwise Enter commits an option the keyboard user cannot see (Greptile
+    // P2 2026-10-10T00:24:37Z). Guarded: the probes' mini-DOM has no layout.
+    if(row&&typeof row.scrollIntoView==='function'){
+      try{ row.scrollIntoView({block:'nearest'}); }catch(_){ row.scrollIntoView(false); }
+    }
+  }
+  function _moveHighlight(delta){
+    const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+    if(!rows.length) return null;
+    const idx=rows.findIndex(r=>r.classList.contains('active'));
+    const next=delta>0
+      ?(idx<0?0:(idx+1)%rows.length)
+      :(idx<=0?rows.length-1:idx-1);
+    const row=rows[next]||null;
+    if(row){_setHighlight(row);}
+    return row;
+  }
+  trigger.onclick=(e)=>{
+    e.stopPropagation();
+    if(menu.classList.contains('open')){_close();}else{_open();}
+  };
+  trigger.onkeydown=(e)=>{
+    // Two states, two jobs. The old handler tested ArrowDown in the FIRST
+    // branch, so the later "menu is open" ArrowDown branch was unreachable and
+    // down-arrow did nothing once the list was open; Enter/Space were
+    // preventDefault()ed without ever choosing the highlighted row, so the
+    // usual open -> arrow -> Enter flow could not pick a model or workspace
+    // (Greptile P2 2026-10-09T21:47:48Z). Opening the menu and moving/choosing
+    // inside it are now separate branches; inside the open menu the arrows move
+    // the highlight only and Enter/Space commits it (maintainer SHOULD-FIX
+    // 2026-10-09T23:55:01Z).
+    if(!menu.classList.contains('open')){
+      if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
+        e.preventDefault();
+        _open();
+      }
+      return;
+    }
+    if(e.key==='Escape'){e.preventDefault();_close();return;}
+    if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+      // Move the HIGHLIGHT only — never the value. Committing on the arrow
+      // press closed the menu on the first keystroke, which on the add list
+      // (whose first row is "Type a path…") meant open -> ArrowDown opened the
+      // path prompt, and a saved workspace was reachable only by wrapping
+      // ArrowUp from the end. Enter/Space is what commits now
+      // (maintainer SHOULD-FIX 2026-10-09T23:55:01Z).
+      e.preventDefault();
+      _moveHighlight(e.key==='ArrowDown'?1:-1);
+      return;
+    }
+    if(e.key==='Enter'||e.key===' '){
+      // Confirm the row the arrows highlighted (falling back to the first one)
+      // instead of swallowing the key.
+      e.preventDefault();
+      const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+      const idx=rows.findIndex(r=>r.classList.contains('active'));
+      const pick=idx>=0?rows[idx]:rows[0];
+      if(pick){pick.click();}else{_close();}
+    }
+  };
+  // Named so the dialog can drop it again: an anonymous document listener that
+  // outlives the overlay kept the closed dialog's controls (and their captured
+  // state) alive and re-ran them on every later click (Greptile P2
+  // 2026-10-09T21:47:48Z).
+  const _onDocClick=(e)=>{
+    if(!wrap.contains(e.target)) _close();
+  };
+  // The menu is position:fixed and placed ONCE from the trigger's viewport rect,
+  // so any ancestor scroll — the dialog hits its 80vh cap with ten workspaces
+  // and scrolls, and the page scrolls on mobile — left it floating away from its
+  // trigger (maintainer UX re-gate 2026-10-10T02:01:36Z). Close on a capture
+  // scroll like a native <select>, but ignore the menu's OWN scrolling: its list
+  // is height-capped and _setHighlight() scrollIntoView()s the highlighted row.
+  const _onDocScroll=(e)=>{
+    if(menu.classList.contains('open')&&!menu.contains(e.target)) _close();
+  };
+  document.addEventListener('click',_onDocClick);
+  document.addEventListener('scroll',_onDocScroll,true);
+  _renderTrigger();
+  const api={
+    el:wrap,
+    getValue:()=>state.value,
+    setValue:(v)=>{state.value=v||'';_renderTrigger();},
+    setOptions:(opts)=>{state.options=Array.isArray(opts)?opts:[];_renderTrigger();},
+    setOnChange:(fn)=>{state.onChange=typeof fn==='function'?fn:null;},
+    // Exposed so the sibling combo can be closed when this one opens (see
+    // _openBindingsCombo).
+    close:_close,
+    destroy:()=>{
+      document.removeEventListener('click',_onDocClick);
+      document.removeEventListener('scroll',_onDocScroll,true);
+      if(_openBindingsCombo===api) _openBindingsCombo=null;
+    },
+  };
+  return api;
+}
+
+// Close whichever bindings dropdown owns `menu` from OUTSIDE the component — the
+// dialog's capture-phase Escape handler only has the DOM node. Prefer the
+// component's own close when the node belongs to the current open-combo slot:
+// that releases the shared slot AND clears the a11y state (aria-expanded /
+// aria-activedescendant) instead of only dropping the CSS class, which left
+// aria-activedescendant pointing at a now-hidden option (Greptile P2
+// 2026-10-10T04:21:38Z). The DOM fallback stays for a node whose owner is gone.
+function _closeBindingsComboMenu(menu){
+  if(!menu) return false;
+  const owner=_openBindingsCombo;
+  if(owner&&owner.el&&typeof owner.el.contains==='function'&&owner.el.contains(menu)){
+    try{ owner.close(); return true; }catch(_){ _openBindingsCombo=null; }
+  }
+  menu.classList.remove('open');
+  const wrap=menu.closest('.project-bindings-combo');
+  const triggers=wrap?wrap.querySelectorAll('.project-bindings-combo-trigger'):[];
+  const trigger=(triggers&&triggers.length)?triggers[0]:null;
+  if(trigger){trigger.classList.remove('open');trigger.setAttribute('aria-expanded','false');}
+  return true;
+}
+
+// Modal dialog for editing a project's bindings (workspace / model / effort).
+// All three fields use the SAME custom combobox component so the dropdowns
+// look identical; workspace options show name-first with the path as the
+// secondary line. Each field has a "(none)" option to unbind it.
+
+// Provider-scoped model keys for the bindings dialog. Two providers can offer
+// the same bare model id; the synthetic key is "provider\u001fvalue" so each
+// route stays independently selectable, while the WIRE value stays the model id
+// and the provider is sent separately.
+const _modelValueKeyFor=(val,prov)=>prov?(prov+"\u001f"+val):val;
+const _modelValueFor=(k)=>{const i=k.indexOf("\u001f");return i>=0?k.slice(i+1):k;};
+const _modelProvFor=(k)=>{const i=k.indexOf("\u001f");return i>=0?k.slice(0,i):"";};
+
+// Resolve the model-combobox key for a project's saved (model, provider)
+// binding.
+//
+// The server canonicalizes a provider-qualified id — '@custom:backup:model-a:free'
+// is stored as model 'model-a:free' with provider 'custom:backup' — so comparing
+// that bare id with the catalog option VALUE never matched. The dialog then
+// reopened on "(none)"/inherit-default and saving dropped model_provider, which
+// rerouted new sessions to whichever backend owned the bare id. Resolution is
+// therefore by IDENTITY (model + provider): the exact pair first, then the
+// composer's own provider-aware matcher; a saved pair that is missing from the
+// current catalog is re-injected under a provider-scoped key so it stays
+// selectable AND re-savable — and, crucially, never falls back to a DIFFERENT
+// provider that merely offers the same bare model id (re-gate 2026-10-07,
+// static/sessions.js:10566).
+function _bindingModelKeyFor(proj, modelOptions, opts){
+  const o=opts||{};
+  const duplicates=!!o.duplicates;
+  const keyOf=(item)=>duplicates?((item&&item._key)||(item&&item.value)||''):((item&&item.value)||'');
+  const wantModel=String((proj&&proj.model)||'');
+  if(!wantModel) return '';
+  const wantProv=String((proj&&proj.model_provider)||'');
+  if(wantProv){
+    const exact=modelOptions.find(x=>x.value&&x._modelId===wantModel&&String(x._providerId||'')===wantProv);
+    if(exact) return keyOf(exact);
+  }else{
+    // No saved provider: a bare-model hit IS the identity.
+    const bare=modelOptions.find(x=>x.value&&x._modelId===wantModel);
+    if(bare) return keyOf(bare);
+  }
+  if(typeof o.findModelInDropdown==='function'&&o.select){
+    let resolved=null;
+    try{ resolved=o.findModelInDropdown(wantModel,o.select,wantProv||undefined); }catch(_){}
+    if(resolved){
+      const hit=modelOptions.find(x=>x.value===resolved);
+      // With a saved provider, only accept a resolver answer that still carries
+      // it. The resolver is provider-aware, but its last-resort normalization
+      // step can still answer with the row that happens to own the current
+      // value, which is how a 'custom:backup' binding reopened as
+      // 'custom:primary' (only primary offered that model id).
+      if(hit&&(!wantProv||String(hit._providerId||'')===wantProv)) return keyOf(hit);
+    }
+  }
+  // Nothing in the catalog carries the saved (model, provider) pair. Restoring
+  // the bare model would silently reroute new sessions to another backend that
+  // merely shares the model id, so preserve the exact pair under a
+  // provider-scoped key that can never collide with a catalog option.
+  const scoped=duplicates||!!wantProv;
+  const savedKey=scoped?_modelValueKeyFor(wantModel,wantProv):wantModel;
+  modelOptions.push({
+    value:duplicates?wantModel:savedKey,name:wantModel,sub:wantProv,
+    _key:savedKey,_provider:wantProv,_modelId:wantModel,_providerId:wantProv,
+    _saved:true,
+  });
+  return savedKey;
+}
+
+function _wsPathPlaceholderFor(path){
+  // UX re-gate 2026-10-08T23:39:33Z (item B): the "Type a path…" prompt used to
+  // hard-code the Windows drive in `D:\projects\…` on every host. Derive the
+  // hint from a path the dialog already shows so it matches the local path
+  // style (a POSIX host gets `/home/…`, Windows `D:\projects\…`), and fall back
+  // to the localized instruction when there is no path to learn from.
+  const s=String(path||'').trim();
+  const cut=Math.max(s.lastIndexOf('/'),s.lastIndexOf('\\'));
+  return cut>=0 ? s.slice(0,cut+1)+'…' : t('pb_enter_ws_path');
+}
+
+function _showProjectBindingsDialog(proj){
+  // The dialog is built on the app's shared dialog classes (.app-dialog*) so
+  // the registered skins (light mode / geist-contrast / zeus) restyle it, the
+  // Save button picks up the theme's dark-on-accent text instead of white on
+  // yellow, Escape closes it and Tab stays inside it. The overlay intentionally
+  // sits BELOW the shared app dialog's z-index (see .project-bindings-overlay)
+  // so a prompt/confirm opened from inside still stacks on top.
+  // (re-gate 2026-10-07T19:22:30Z, item 4.)
+  const overlay=document.createElement('div');
+  overlay.className='app-dialog-overlay project-bindings-overlay';
+  const dialog=document.createElement('div');
+  dialog.className='app-dialog project-bindings-dialog';
+  dialog.setAttribute('role','dialog');
+  dialog.setAttribute('aria-modal','true');
+  dialog.setAttribute('aria-labelledby','projectBindingsTitle');
+
+  const header=document.createElement('div');
+  header.className='app-dialog-header';
+  const title=document.createElement('div');
+  title.className='app-dialog-title';
+  title.id='projectBindingsTitle';
+  title.textContent=t('pb_bindings_title',proj.name);
+  const closeBtn=document.createElement('button');
+  closeBtn.type='button';
+  closeBtn.className='app-dialog-close';
+  closeBtn.setAttribute('aria-label',t('pb_close'));
+  closeBtn.innerHTML=li('x',14);
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+  dialog.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='project-bindings-body';
+  dialog.appendChild(body);
+
+  const _field=(labelText,control)=>{
+    const wrap=document.createElement('div');
+    wrap.className='project-bindings-field';
+    const lab=document.createElement('div');
+    lab.className='project-bindings-label';
+    lab.textContent=labelText;
+    wrap.appendChild(lab);
+    wrap.appendChild(control);
+    return wrap;
+  };
+
+  // ── Workspace: multi-value list with default marking + add control ──
+  // Bound workspaces render as rows (name-first with path subtitle). One
+  // row can be marked default (used when the + button starts a session);
+  // the add combobox below pulls from saved workspaces or accepts a fresh
+  // path (server auto-registers it).
+  const wsList=[];   // [{value,name,sub}]
+  const wsListEl=document.createElement('div');
+  wsListEl.className='project-bindings-ws-list';
+  const _wsDefault=()=>wsList.find(x=>x.isDefault)||wsList[0]||null;
+
+  const _wsNameFromPath=(p)=>String(p||'').split(/[\\/]/).pop()||'';
+  function _seedWsList(){
+    const seeded=(Array.isArray(proj.workspaces)&&proj.workspaces.length)
+      ? proj.workspaces.map(p=>({value:p,name:_wsNameFromPath(p),sub:p}))
+      : (proj.workspace?[{value:proj.workspace,name:_wsNameFromPath(proj.workspace),sub:proj.workspace}]:[]);
+    wsList.length=0;
+    seeded.forEach(x=>wsList.push(x));
+    const def=proj.default_workspace||null;
+    if(def){
+      const hit=wsList.find(x=>x.value===def);
+      if(hit) hit.isDefault=true;
+      else if(wsList.length) wsList[0].isDefault=true;
+    }else if(wsList.length){
+      wsList[0].isDefault=true;
+    }
+    _renderWsList();
+  }
+  function _renderWsList(){
+    wsListEl.innerHTML='';
+    if(!wsList.length){
+      const empty=document.createElement('div');
+      empty.className='project-bindings-combo-empty';
+      empty.textContent=t('pb_no_workspaces');
+      wsListEl.appendChild(empty);
+      return;
+    }
+    wsList.forEach((item,idx)=>{
+      const row=document.createElement('div');
+      row.className='project-bindings-ws-row';
+      const info=document.createElement('div');
+      info.className='ws-row-info';
+      const n=document.createElement('div');
+      n.className='ws-row-name';
+      n.textContent=item.name||item.value;
+      info.appendChild(n);
+      const p=document.createElement('div');
+      p.className='ws-row-path';
+      p.textContent=item.sub||item.value;
+      info.appendChild(p);
+      row.appendChild(info);
+      const defBtn=document.createElement('button');
+      defBtn.type='button';
+      defBtn.className='ws-row-default'+(item.isDefault?' is-default':'');
+      defBtn.textContent=item.isDefault?t('pb_mark_default'):t('pb_set_default');
+      defBtn.title=t('pb_set_default_title');
+      defBtn.onclick=(e)=>{
+        e.stopPropagation();
+        wsList.forEach(x=>x.isDefault=false);
+        item.isDefault=true;
+        _renderWsList();
+      };
+      row.appendChild(defBtn);
+      const rm=document.createElement('button');
+      rm.type='button';
+      rm.className='ws-row-remove';
+      // Lucide X (ISC, https://lucide.dev/icons/x): the 12px "×" text glyph
+      // only reached ~2.2:1 on a 1x dark desktop. The SVG strokes currentColor.
+      rm.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+      rm.title=t('pb_unbind_ws_title');
+      rm.setAttribute('aria-label',t('pb_unbind_ws_title'));
+      rm.onclick=(e)=>{
+        e.stopPropagation();
+        wsList.splice(idx,1);
+        if(!_wsDefault()&&wsList.length) wsList[0].isDefault=true;
+        _renderWsList();
+      };
+      row.appendChild(rm);
+      wsListEl.appendChild(row);
+    });
+  }
+
+  // Add-workspace combobox: saved workspaces not yet bound + a "type a path"
+  // entry that opens a small input dialog (the server auto-registers fresh
+  // paths).
+  const addCombo=_makeBindingsCombo({
+    placeholder:t('pb_add_workspace_placeholder'),
+    ariaLabel:t('pb_add_workspace_title'),
+    value:'',
+    options:[],
+    // Drop workspaces this project already binds, evaluated on every open: the
+    // bound list changes after the initial fetch (a row removed, a path typed
+    // in), so the comment-only promise below was never enough. The custom
+    // "type a path…" entry always survives.
+    filterOptions:(opts)=>opts.filter(o=>o&&(o.value==='__custom_path__'||!wsList.some(x=>x.value===o.value))),
+  });
+  addCombo._customOption={value:'__custom_path__',name:t('pb_type_path'),sub:t('pb_enter_ws_path')};
+  const addRow=document.createElement('div');
+  addRow.className='project-bindings-ws-add';
+  addRow.appendChild(addCombo.el);
+  const addBtn=document.createElement('button');
+  addBtn.type='button';
+  addBtn.className='ws-add-btn';
+  addBtn.textContent=t('pb_add');
+  const _applyAdd=(val)=>{
+    val=String(val||'').trim();
+    if(!val) return;
+    if(wsList.some(x=>x.value===val)){ showToast(t('pb_workspace_already_bound')); return; }
+    wsList.push({value:val,name:_wsNameFromPath(val),sub:val});
+    if(!_wsDefault()) wsList[0].isDefault=true;
+    addCombo.setValue('');
+    _renderWsList();
+  };
+  addCombo.setOnChange((opt)=>{
+    if(opt&&opt.value==='__custom_path__'){
+      // The combo selected the custom entry — clear it and prompt instead.
+      addCombo.setValue('');
+      showPromptDialog({
+        title:t('pb_add_workspace_title'),
+        message:t('pb_add_workspace_message'),
+        value:'',
+        placeholder:_wsPathPlaceholderFor(
+          (wsList[0]&&wsList[0].value)
+          ||(typeof S!=='undefined'&&S.session&&S.session.workspace)
+          ||(typeof S!=='undefined'&&S._profileDefaultWorkspace)),
+        confirmLabel:t('pb_add'),
+      }).then(inp=>{
+        if(inp===null||inp===undefined) return;
+        _applyAdd(inp);
+      });
+    }
+  });
+  addBtn.onclick=()=>{ _applyAdd(addCombo.getValue()); };
+  addRow.appendChild(addBtn);
+  // Fill the add list with the saved workspaces + the custom entry. The
+  // already-bound ones are dropped at OPEN time by addCombo's filterOptions,
+  // because the bound list can change after this fetch resolves.
+  (async()=>{
+    try{
+      const wsRes=await api('/api/workspaces');
+      const rows=(wsRes&&wsRes.workspaces||[]).map(w=>({
+        value:w&&w.path||'',
+        name:(w&&w.name)||_wsNameFromPath(w&&w.path)||'',
+        sub:w&&w.path||'',
+      })).filter(x=>x.value);
+      addCombo.setOptions([addCombo._customOption,...rows]);
+    }catch(_){ addCombo.setOptions([addCombo._customOption]); }
+  })();
+
+  const wsWrap=_field(t('pb_field_workspaces'),wsListEl);
+
+  // ── Model: name-first combobox cloned from the composer modelSelect ──
+  const modelOptions=[{value:'',name:t('pb_none_inherit')}];
+  const srcModelSel=(typeof $==='function')?$('modelSelect'):null;
+  // Authoritative provider for a catalog option: a badge'd <option> carries
+  // dataset.provider, but most options inherit it from the enclosing
+  // <optgroup> (api/ui.js `_getOptionProviderId` walks that chain, and also
+  // parses provider-qualified ids such as '@custom:backup:model-a:free').
+  // Reading dataset alone dropped the provider, so re-opening a binding saved
+  // `model_provider: null` and new sessions routed to the wrong backend.
+  const _optProviderId=(o)=>{
+    try{ if(typeof _getOptionProviderId==='function') return _getOptionProviderId(o)||''; }catch(_){}
+    return (o&&o.dataset&&o.dataset.provider)||'';
+  };
+  if(srcModelSel&&srcModelSel.options){
+    Array.from(srcModelSel.options).forEach(o=>{
+      const val=o.value||'';
+      if(!val) return;
+      const label=(o.textContent||val).trim();
+      const provider=_optProviderId(o);
+      if(!modelOptions.some(x=>x.value===val&&x.sub===provider)){
+        modelOptions.push({value:val,name:label,sub:provider});
+      }
+    });
+  }
+  // Canonical (model, provider) identity per catalog option, resolved through
+  // the composer's own helper. Restoration must match on identity, not on the
+  // raw option value: the server canonicalizes '@custom:backup:model-a:free'
+  // to model 'model-a:free' + provider 'custom:backup', so value equality
+  // never hit and the dialog reopened on inherit-default. (Provider-scoped
+  // keys come from the module-level _modelValueKeyFor/_modelValueFor/
+  // _modelProvFor helpers.)
+  modelOptions.forEach(o=>{
+    if(!o.value){ o._modelId=''; o._providerId=''; return; }
+    let st=null;
+    try{
+      if(typeof _modelStateForSelect==='function'&&srcModelSel) st=_modelStateForSelect(srcModelSel,o.value);
+    }catch(_){}
+    o._modelId=(st&&st.model)||o.value;
+    // The option's OWN captured provider wins (re-gate 2026-10-07,
+    // static/sessions.js:10788): `o.sub` is read off the real <option> when the
+    // list is built (data-provider / <optgroup> chain / qualified-id parse),
+    // whereas `_optProviderId(o)` on this cloned, metadata-less entry and
+    // `_modelStateForSelect(sel,o.value)` both answer with whichever route
+    // currently OWNS that value. With two providers offering the same bare
+    // model id that restored — and then re-saved — the wrong provider.
+    o._providerId=o.sub||(st&&st.model_provider)||'';
+  });
+  const _hasDuplicateModelValues=(()=>{const c={};for(const o of modelOptions){if(!o.value)continue;c[o.value]=(c[o.value]||0)+1;}return Object.values(c).some(n=>n>1);})();
+  if(_hasDuplicateModelValues){
+    // Rewrite options to use provider-scoped keys so each provider route is independently selectable.
+    modelOptions.forEach(o=>{ if(o.value) o._key=_modelValueKeyFor(o.value,o.sub||""); else o._key=""; });
+    // Preserve providers detail under _provider for clarity
+    modelOptions.forEach(o=>{ o._provider=o.sub||""; });
+  }
+  const _initialModelKey=_bindingModelKeyFor(proj, modelOptions, {
+    duplicates:_hasDuplicateModelValues,
+    findModelInDropdown:(typeof _findModelInDropdown==='function')?_findModelInDropdown:null,
+    select:srcModelSel,
+  });
+  const modelCombo=_makeBindingsCombo({
+    placeholder:t('pb_none_inherit'),
+    ariaLabel:t('pb_field_model'),
+    value:_initialModelKey,
+    options:(()=>{ if(!_hasDuplicateModelValues) return modelOptions; return modelOptions.map(o=>({value:o._key, name:o.name, sub:o.sub})); })(),
+  });
+  body.appendChild(_field(t('pb_field_model'),modelCombo.el));
+
+  // ── Reasoning effort: NOT rendered. The value is applied through
+  // /api/reasoning, which sets the effort for that model family across the
+  // WHOLE profile, so a row inside a per-project dialog read as per-project.
+  // The API field is kept (see /api/projects/bind), the row comes back with
+  // per-session effort (#7881). Because the field is not submitted here, an
+  // existing reasoning_effort binding is left untouched.
+  // (re-gate 2026-10-07T19:22:30Z, item 2.)
+
+  // ── Workspaces list (below the model config) ──
+  body.appendChild(wsWrap);
+  body.appendChild(addRow);
+
+  // At most one save request in flight: a second press would race a competing
+  // bind with different settings (Greptile P2 2026-10-10T02:58:01Z).
+  let _saveInFlight=false;
+
+  _seedWsList();
+
+  // ── Actions ──
+  const btnRow=document.createElement('div');
+  btnRow.className='app-dialog-actions';
+  const cancelBtn=document.createElement('button');
+  cancelBtn.type='button';
+  cancelBtn.className='app-dialog-btn';
+  cancelBtn.textContent=t('pb_cancel');
+  cancelBtn.onclick=()=>{ _closeBindingsDialog(); };
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='app-dialog-btn confirm';
+  saveBtn.textContent=t('pb_save');
+  saveBtn.onclick=async()=>{
+    // One save at a time: while a request is pending its snapshot is what the
+    // server is applying, so a competing press with different settings must not
+    // race it (Greptile P2 2026-10-10T02:58:01Z).
+    if(_saveInFlight) return;
+    // Workspaces: the EXACT snapshot Save submits (empty → unbind all),
+    // captured once and never re-read after an await.
+    // (re-gate 2026-10-07T22:04:16Z.)
+    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
+    const def=_wsDefault();
+    const modelVal=modelCombo.getValue();
+    const fields={};
+    fields.workspaces=wsPaths.length?wsPaths:null;
+    fields.default_workspace=(def&&def.value)||null;
+    // auto_assign is deliberately NOT submitted: the field is stored by
+    // /api/projects/bind but dormant in this build (its sweep, toggle and
+    // workspace-keyed filing moved to a follow-up PR), so a Save must leave a
+    // stored value untouched rather than clear it.
+    // Model: empty → unbind; else bind model (+ provider from the option).
+    // Always send model_provider — a selected model WITHOUT provider metadata
+    // must CLEAR any previously-bound provider, otherwise the server keeps the
+    // stale one and quick-create submits an incompatible pair.
+    if(modelVal){
+      const _bare=_modelValueFor(modelVal);
+      fields.model=_bare;
+      const hit=modelOptions.find(x=>_hasDuplicateModelValues ? (x._key===modelVal) : (x.value===modelVal));
+      // `_modelProvFor` recovers the provider from a provider-scoped key and is
+      // a no-op ('') for a plain catalog value, so it is safe to apply
+      // unconditionally: a saved pair re-injected under a scoped key in a
+      // NON-duplicate catalog would otherwise be saved back with the bare model
+      // and no provider (re-gate 2026-10-07, static/sessions.js:10875).
+      let _prov=_modelProvFor(modelVal)||null;
+      // `hit.sub` is the option's own authoritative provider (optgroup chain);
+      // `_providerId` is the fallback for an option we re-injected for a saved
+      // binding that is no longer in the catalog.
+      if(!_prov&&hit) _prov=(hit.sub||hit._providerId||null);
+      // Selection came from outside the catalog (a re-injected canonicalized
+      // binding), so resolve the pair through the composer's own model→provider
+      // resolver before falling back to parsing the raw id.
+      if(!_prov&&typeof _modelStateForSelect==='function'&&srcModelSel){
+        try{
+          const st=_modelStateForSelect(srcModelSel,_bare);
+          if(st&&st.model_provider) _prov=st.model_provider;
+        }catch(_){}
+      }
+      // Last resort: derive the provider from the model id itself (handles a
+      // provider-qualified id whose catalog option isn't loaded yet, e.g.
+      // '@custom:backup:model-a:free' → 'custom:backup'). Never save null for
+      // such an id, or the server keeps/binds the wrong provider route.
+      if(!_prov){
+        try{ if(typeof _getOptionProviderId==='function') _prov=_getOptionProviderId({value:_bare})||null; }catch(_){}
+      }
+      fields.model_provider=_prov;
+    }else{
+      fields.model=null;
+      fields.model_provider=null;
+    }
+    // Close only AFTER the server accepts the bind. The dialog used to close
+    // before the request settled, so a mistyped workspace path (or any failed
+    // request) showed only a toast and threw away every unsaved workspace and
+    // model edit — reopening the dialog rebuilt it from the STORED project
+    // (Greptile P2 2026-10-10T02:22:52Z).  _saveProjectBindings returns true
+    // only on success; a failure keeps the dialog (and its edits) on screen.
+    // The dialog also stays EDITABLE while the request is in flight, so a slow
+    // round-trip must not close over newer edits: snapshot what was submitted
+    // and only close when the controls still match (Greptile P2
+    // 2026-10-10T02:58:01Z).  A second press is ignored for the same reason.
+    const _submitted=JSON.stringify([
+      wsPaths, (def&&def.value)||null, modelVal,
+    ]);
+    _saveInFlight=true;
+    try{
+      const _saved=await _saveProjectBindings(proj,fields);
+      if(!_saved) return;
+      const _nowDefault=_wsDefault();
+      const _current=JSON.stringify([
+        wsList.map(x=>x.value).filter(Boolean),
+        (_nowDefault&&_nowDefault.value)||null,
+        modelCombo.getValue(),
+      ]);
+      if(_current===_submitted) _closeBindingsDialog();
+    }finally{
+      _saveInFlight=false;
+    }
+  };
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(saveBtn);
+  dialog.appendChild(btnRow);
+
+  // Escape closes; Tab cycles inside the dialog (same trap the shared app
+  // dialog installs) — the private overlay used to do neither.
+  const _lastFocus=document.activeElement;
+  let _closed=false;
+  const _focusables=()=>Array.from(
+    overlay.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')
+  ).filter(el=>!el.disabled&&el.offsetParent!==null);
+  function _onKey(e){
+    // A shared app dialog (the "Type a path…" prompt / the counted confirm)
+    // opened from INSIDE this one owns the keyboard: ui.js installs its own
+    // document-capture listener that preventDefault()s Escape/Tab/Enter. Both
+    // listeners run for one keydown — stopPropagation() does not stop same-node
+    // listeners — so without this guard Escape closed the prompt AND this
+    // dialog (throwing away unsaved workspace/model edits) and Tab escaped the
+    // modal that was actually on top. Yield in both orders: if the shared
+    // handler ran first it has already called preventDefault(); if this one ran
+    // first, the shared dialog is open. (re-gate 2026-10-07T22:04:16Z —
+    // [CORE] static/sessions.js:10981 + senior-review MUST-FIX.)
+    if(e.defaultPrevented||_isAppDialogOpen()) return;
+    // A combobox dropdown open INSIDE this dialog owns Escape: close only the
+    // dropdown and consume the key so the dialog and its unsaved workspace/model
+    // edits stay. The trigger's own keydown handler cannot do this alone — this
+    // listener is installed on the document in the CAPTURE phase, so it runs
+    // first and used to close the whole dialog with the dropdown still open
+    // (re-gate 2026-10-08T02:11:02Z, [CORE] 1.).
+    if(e.key==='Escape'&&_closeOpenCombo()){
+      e.preventDefault();e.stopPropagation();return;
+    }
+    if(e.key==='Escape'){
+      e.preventDefault();e.stopPropagation();_closeBindingsDialog();return;
+    }
+    if(e.key==='Tab'){
+      const nodes=_focusables();
+      if(!nodes.length) return;
+      const idx=nodes.indexOf(document.activeElement);
+      let next;
+      if(e.shiftKey) next=idx<=0?nodes.length-1:idx-1;
+      else next=(idx===-1||idx===nodes.length-1)?0:idx+1;
+      e.preventDefault();
+      nodes[next].focus();
+    }
+  }
+  function _closeBindingsDialog(){
+    if(_closed) return;
+    _closed=true;
+    document.removeEventListener('keydown',_onKey,true);
+    // Each combobox installs a document click listener; drop both with the
+    // dialog, or every reopen leaves another live listener plus the old
+    // controls it closed over (Greptile P2 2026-10-09T21:47:48Z).
+    try{ if(typeof addCombo.destroy==='function') addCombo.destroy(); }catch(_){}
+    try{ if(typeof modelCombo.destroy==='function') modelCombo.destroy(); }catch(_){}
+    overlay.remove();
+    try{ if(_lastFocus&&typeof _lastFocus.focus==='function') _lastFocus.focus(); }catch(_){}
+  }
+  // Close an open binding-combobox dropdown inside this dialog, mirroring the
+  // combo's own _close() (the same two classes + aria-expanded). Returns true
+  // when a dropdown was actually open, so Escape can be consumed by it instead
+  // of closing the dialog (re-gate 2026-10-08T02:11:02Z, [CORE] 1.).
+  function _closeOpenCombo(){
+    const menu=overlay.querySelector('.project-bindings-combo-menu.open');
+    if(!menu) return false;
+    // Delegate to the component's close so the shared open-combo slot is
+    // released and the a11y state is cleared with the class (Greptile P2
+    // 2026-10-10T04:21:38Z).
+    return _closeBindingsComboMenu(menu);
+  }
+  closeBtn.onclick=()=>{ _closeBindingsDialog(); };
+  overlay.appendChild(dialog);
+  overlay.onclick=(e)=>{if(e.target===overlay) _closeBindingsDialog();};
+  document.addEventListener('keydown',_onKey,true);
+  document.body.appendChild(overlay);
+  try{overlay.querySelector('.project-bindings-combo-trigger').focus();}catch(_){}
+}
+
+
 function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
@@ -10797,6 +11807,30 @@ function _showProjectContextMenu(e, proj, chip){
   });
   menu.appendChild(colorRow);
 
+  // Divider before bindings
+  const bindSep=document.createElement('hr');
+  bindSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(bindSep);
+
+  // ── Project settings: ONE row, nothing else ─────────────────────────────
+  // The chip menu used to grow from 3 rows to 6 + N (an inline binding summary
+  // plus one "Unbind …" row per bound workspace, model and effort) and from
+  // ~193px to ~355px wide, because the longest row is the workspace path —
+  // exactly why _buildSessionAction keeps menus to icon + label. The unbind
+  // rows were redundant too: the dialog already carries an × per workspace and
+  // a "(none)" option for model and effort. One row opens the dialog.
+  // (re-gate 2026-10-07T19:22:30Z, item 1.)
+  const bindItem=document.createElement('div');
+  bindItem.textContent=t('pb_bindings_menu');
+  bindItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  bindItem.onmouseenter=()=>bindItem.style.background='var(--hover-bg)';
+  bindItem.onmouseleave=()=>bindItem.style.background='';
+  bindItem.onclick=()=>{
+    menu.remove();
+    _showProjectBindingsDialog(proj);
+  };
+  menu.appendChild(bindItem);
+
   // Divider + Delete
   const sep=document.createElement('hr');
   sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
@@ -10810,6 +11844,21 @@ function _showProjectContextMenu(e, proj, chip){
   menu.appendChild(delItem);
 
   document.body.appendChild(menu);
+  // Clamp the menu to the viewport the way the session ⋮ menu does (8px
+  // margins + a width cap): with several bound workspaces the old long rows
+  // pushed it off-screen on a 390px phone. (re-gate 2026-10-07T19:22:30Z,
+  // item 5.)
+  const menuW=Math.min(menu.offsetWidth||menu.getBoundingClientRect().width||140, window.innerWidth-16);
+  menu.style.width=menuW+'px';
+  let menuLeft=e.clientX;
+  if(menuLeft+menuW>window.innerWidth-8) menuLeft=window.innerWidth-menuW-8;
+  if(menuLeft<8) menuLeft=8;
+  menu.style.left=menuLeft+'px';
+  const menuH=menu.offsetHeight||0;
+  let menuTop=e.clientY;
+  if(menuTop+menuH>window.innerHeight-8) menuTop=window.innerHeight-menuH-8;
+  if(menuTop<8) menuTop=8;
+  menu.style.top=menuTop+'px';
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }

@@ -542,6 +542,336 @@ def _session_visible_to_active_profile(session_profile, handler=None) -> bool:
     return _profiles_match(session_profile, active_profile)
 
 
+def _project_workspaces(proj) -> list:
+    """Return a project's bound workspace paths (multi-value canonical form).
+
+    Prefers the ``workspaces`` list; falls back to the legacy single
+    ``workspace`` field so pre-migration projects keep working.
+    """
+    if not isinstance(proj, dict):
+        return []
+    ws = proj.get("workspaces")
+    if isinstance(ws, list):
+        return [str(p) for p in ws if p]
+    legacy = proj.get("workspace")
+    return [str(legacy)] if legacy else []
+
+
+def _project_default_workspace(proj) -> str | None:
+    """Return the workspace used for new sessions (default → first bound)."""
+    if not isinstance(proj, dict):
+        return None
+    dw = proj.get("default_workspace")
+    if dw:
+        return str(dw)
+    ws = _project_workspaces(proj)
+    return ws[0] if ws else None
+
+
+# Catalog mutation lock — ONE lock for every load → modify → save pair of the
+# projects catalog. It is DEFINED in the catalog layer (``api/models.py``)
+# because the pairs are not all in this module: the cron / webhook system-project
+# bookkeeping (``ensure_cron_project`` / ``ensure_webhook_project``) rewrites the
+# same file from background scans, and a scan that read first and saved last
+# wrote back its stale copy — erasing the workspace / model the user had just
+# saved through /api/projects/bind, under a success toast
+# (Greptile P1 2026-10-10T13:00:52Z). This module keeps the historical private
+# alias, so every existing call site (and the tests that patch it) reads the
+# same object. Reentrant so a mutation may call helpers that take it again.
+from api.models import PROJECTS_CATALOG_LOCK as _PROJECTS_CATALOG_LOCK
+
+
+# Bounded wait for a session lock while /api/projects/delete clears cached
+# project ids (#3746: never block a request thread on session file I/O).
+_CLEAR_CACHED_SESSION_LOCK_TIMEOUT = 5.0
+
+
+def _clear_cached_sessions_for_project(project_id, lock_timeout=None, cleared_ids=None) -> int:
+    """Drop ``project_id`` from every cached session that still carries it.
+
+    Returns the number of cached sessions cleared. ``/api/projects/delete``
+    unlinks by walking the session INDEX (``_index.json``), but a session
+    created by "+ New Chat" is cache-only until its first save —
+    ``new_session`` writes nothing to disk — so an unsaved chat whose workspace
+    was claimed by the removed project kept the dead id in the LRU cache and
+    persisted it on its draft-save (re-gate 2026-10-07, api/routes.py:16855).
+    The caller must NOT hold ``_PROJECTS_CATALOG_LOCK``: this scan takes every
+    target session's own agent lock with a bounded wait, and doing that behind
+    the catalog lock stalled New Chat and every workspace edit for the whole
+    wait budget (maintainer re-gate 2026-10-10T15:11:33Z — seven busy sessions
+    made New Chat time out after 30.03 s). The ordering against the paths that
+    publish a ``project_id`` (an explicit id on ``/api/session/new``, and
+    ``/api/session/move``) is provided by the delete handler's ROW REMOVAL,
+    which stays under that lock: a session either already published its
+    ``project_id`` when this scan runs (and is cleared here) or it validates
+    against the catalog after the row is gone and stays unassigned.
+
+    Each clear is taken under the session's OWN agent lock: clearing outside it
+    let a ``save()`` that had already serialized ``project_id`` land its file
+    (and its index row) AFTER this scan, and the deleted project came back on
+    reload. Holding the lock every "mutate + save" pair takes orders the two
+    writes, and the ids are handed to ``_persist_cleared_project_ids`` — called
+    by the delete handler AFTER it releases the catalog lock — so the disk half
+    of the fix never runs behind that shared lock (Greptile P1s 2026-10-10T12:11:07Z
+    and 2026-10-10T12:41:25Z).
+
+    ``cleared_ids`` (optional list) collects the session ids whose persisted row
+    still needs the unlink written through. ``lock_timeout`` overrides the
+    bounded wait for a session lock (tests).
+    """
+    if not project_id:
+        return 0
+    # Snapshot the targets BEFORE taking any session lock: every other path takes
+    # the session lock first and LOCK second, so holding LOCK across an acquire
+    # here would invert that order.
+    with LOCK:
+        targets = [
+            (str(getattr(cached, "session_id", "") or ""), cached)
+            for cached in list(SESSIONS.values())
+            if getattr(cached, "project_id", None) == project_id
+        ]
+    cleared = 0
+    for sid, snapshot in targets:
+        if not sid:
+            # No session id means no sidecar to rewrite either (the layout is
+            # SESSION_DIR/<session_id>.json), so the in-memory clear is all
+            # there is to do — and there is no session lock to take.
+            with LOCK:
+                if getattr(snapshot, "project_id", None) == project_id:
+                    snapshot.project_id = None
+                    cleared += 1
+            continue
+        try:
+            lock = _get_session_agent_lock(sid)
+        except Exception:
+            continue
+        # Bounded acquire, like /api/session/move: a streaming checkpoint save
+        # holds this lock and the delete request must not block on file I/O
+        # (#3746). A session we could not lock keeps the caller's index pass as
+        # its safety net.
+        timeout = (
+            _CLEAR_CACHED_SESSION_LOCK_TIMEOUT if lock_timeout is None else lock_timeout
+        )
+        if not lock.acquire(timeout=timeout):
+            logger.debug(
+                "projects/delete: session %s is busy; leaving its unlink to the "
+                "index pass", sid,
+            )
+            continue
+        try:
+            with LOCK:
+                cached = SESSIONS.get(sid)
+                if cached is None or getattr(cached, "project_id", None) != project_id:
+                    continue
+                cached.project_id = None
+                cleared += 1
+            if cleared_ids is not None:
+                cleared_ids.append(sid)
+        except Exception:
+            logger.debug(
+                "projects/delete: could not clear project_id on %s", sid,
+                exc_info=True,
+            )
+        finally:
+            lock.release()
+    return cleared
+
+
+def _adopt_session_state(target, source) -> bool:
+    """Refresh ``target`` in place from ``source``, keeping its identity.
+
+    The cache must hold ONE object per session id. Writers fetch the session
+    BEFORE they take its agent lock — ``/api/session/draft`` does exactly that,
+    then merges its text into ``composer_draft`` and saves the whole object
+    under the lock — so replacing the cached entry with a different object
+    leaves such a writer holding the pre-refresh copy, and its save writes that
+    older state back over the newer one: it erases a draft (or a reply) another
+    request saved while it waited (Greptile P1 2026-10-11T03:49:18Z).
+
+    Refreshing the shared object instead gives every waiter the newest state:
+    it merges onto the refreshed session and persists that, so nothing newer is
+    lost. Both objects are the same id's full ``Session``; a plain class
+    instance carries its state in ``__dict__``, and the two key sets are the
+    same shape by construction, so a whole-dict swap is the faithful refresh.
+    """
+    state = dict(getattr(source, "__dict__", {}) or {})
+    if not state:
+        return False
+    try:
+        target.__dict__.clear()
+        target.__dict__.update(state)
+    except Exception:
+        logger.debug(
+            "projects/delete: could not refresh session %s in place",
+            getattr(source, "session_id", None),
+            exc_info=True,
+        )
+        return False
+    return True
+
+
+def _delete_target_session(sid, active_ids):
+    """Return the freshest FULL session object for a delete target, or ``None``.
+
+    Call with the target's own agent lock held. ``None`` means "skip": an
+    actively streaming session belongs to its worker (whose next
+    checkpoint/final save persists the cleared id), and a session whose sidecar
+    cannot be read has nothing to write through.
+
+    The delete write-through must not be yet another stale-cache writer
+    (maintainer re-gate 2026-10-11T02:08:20Z). ``get_session`` heals a LAGGING
+    entry through ``_cached_session_lags_disk``, but that check compares message
+    COUNTS: a full cache entry whose sidecar holds the SAME number of messages
+    while being otherwise newer — a newer draft, or a row re-filed under another
+    project — was served as-is, and ``save()`` then wrote the stale copy back
+    over it. Reproduced over real HTTP: the two messages of a stale cache entry
+    replaced the two newer persisted ones and the project was cleared on a chat
+    that had already moved to project B; master preserved both.
+
+    An inactive persisted target is therefore resolved from the SIDECAR itself,
+    and the cache is refreshed with it (``_adopt_session_state``, IN PLACE), so
+    the ``project_id`` this caller clears lands on the newest state on disk —
+    and so the delete handler's index pass, which resolves through the cache,
+    cannot fall back to the stale entry. The refresh keeps the SAME object, or a
+    writer that fetched the session before it took the lock would save its
+    pre-refresh copy over the newer one (Greptile P1 2026-10-11T03:49:18Z). A
+    cached entry that is genuinely AHEAD of the sidecar (strictly more messages:
+    a draft whose debounced save has not landed yet) is kept as it is.
+
+    Ownership and streaming are re-checked by the CALLER on the object this
+    returns, because the resolution may have replaced the entry the caller's
+    clear acted on.
+    """
+    with LOCK:
+        resident = SESSIONS.get(sid)
+    stream_id = str(getattr(resident, "active_stream_id", "") or "")
+    if stream_id and stream_id in active_ids:
+        return None
+    try:
+        from api.models import Session as _Session
+
+        fresh = _Session.load(sid)
+    except Exception:
+        logger.debug(
+            "projects/delete: could not reload session %s", sid, exc_info=True,
+        )
+        return None
+    if fresh is None:
+        return None
+    if resident is not None and len(
+        getattr(resident, "messages", None) or []
+    ) > len(getattr(fresh, "messages", None) or []):
+        # Strictly ahead of the sidecar: that copy is the newest one. Saving the
+        # sidecar instead would drop the draft this cache entry still holds.
+        return resident
+    if resident is None:
+        with LOCK:
+            SESSIONS[sid] = fresh
+            SESSIONS.move_to_end(sid)
+        return fresh
+    with LOCK:
+        if SESSIONS.get(sid) is not resident:
+            # Something rebound the entry while the sidecar was loading: leave
+            # that object alone rather than fight over the id.
+            return None
+        if not _adopt_session_state(resident, fresh):
+            # No usable ``__dict__`` to refresh: fall back to rebinding.
+            SESSIONS[sid] = fresh
+            SESSIONS.move_to_end(sid)
+            return fresh
+        SESSIONS.move_to_end(sid)
+    return resident
+
+
+def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
+    """Write a cleared ``project_id`` through to each session's sidecar.
+
+    Split from ``_clear_cached_sessions_for_project`` on purpose: these are
+    FULL-HISTORY writes, and nothing here may run while the delete handler holds
+    ``_PROJECTS_CATALOG_LOCK``. Doing them there — like doing the clear's
+    per-session lock waits there — stalled New Chat and every workspace edit
+    behind a delete of a project with large cached chats (Greptile P1
+    2026-10-10T12:41:25Z; maintainer re-gate 2026-10-10T15:11:33Z), so the
+    handler calls this with that lock released.
+
+    Each write still holds the session's own agent lock — that is what makes the
+    ordering safe: a concurrent save either finished before it (and this
+    overwrite wins) or starts afterwards and reads the cleared value. A session
+    without a sidecar is skipped (a "+ New Chat" draft must not be materialized
+    by a delete), and an actively streaming session is left to its worker, whose
+    next checkpoint/final save persists the cleared value (the same deferral the
+    handler's index pass uses). A row re-filed under ANOTHER project meanwhile is
+    left alone.
+
+    Each target is resolved from its SIDECAR (``_delete_target_session``) rather
+    than read straight out of the LRU: a FULL but STALE cached object must not be
+    written back over a sidecar that is ahead of it — not even when the message
+    counts match, which is the hole the count-based freshness check leaves
+    (maintainer re-gates 2026-10-10T23:49:54Z and 2026-10-11T02:08:20Z).
+    """
+    if not project_id or not sids:
+        return 0
+    try:
+        active_ids = _active_stream_ids()
+    except Exception:
+        active_ids = set()
+    written = 0
+    for sid in sids:
+        if not sid or not (SESSION_DIR / f"{sid}.json").exists():
+            continue
+        try:
+            lock = _get_session_agent_lock(sid)
+        except Exception:
+            continue
+        timeout = (
+            _CLEAR_CACHED_SESSION_LOCK_TIMEOUT if lock_timeout is None else lock_timeout
+        )
+        if not lock.acquire(timeout=timeout):
+            logger.debug(
+                "projects/delete: session %s is busy; its unlink stays in cache",
+                sid,
+            )
+            continue
+        try:
+            # Resolve the target from its SIDECAR, never from the LRU entry: a
+            # FULL but STALE cache entry — the same message count, a newer draft
+            # or a re-filed row on disk — used to be saved straight back over its
+            # sidecar, so the delete silently dropped the newer state and cleared
+            # the project on a chat that had already moved on: data loss in an
+            # ordinary flow (maintainer re-gates 2026-10-10T23:49:54Z and
+            # 2026-10-11T02:08:20Z, both reproduced over real HTTP). The resolver
+            # also skips a streaming session and publishes the fresh object into
+            # the cache; a metadata-only stub can no longer be reached here
+            # because the sidecar load is always full (#1558).
+            cached = _delete_target_session(sid, active_ids)
+            if cached is None:
+                continue
+            with LOCK:
+                # Ownership and streaming are re-checked on the REFRESHED object
+                # (the two answers the caller's clear acted on), because the
+                # resolution above may have replaced the object cached under this
+                # id.
+                if str(getattr(cached, "active_stream_id", "") or "") in active_ids:
+                    continue
+                if getattr(cached, "project_id", None) not in (None, project_id):
+                    # Re-filed under another project while we waited (or the
+                    # sidecar is simply not this project's): leave it.
+                    continue
+                cached.project_id = None
+            # Not touch_updated_at: a delete must not re-date the chat it was
+            # just un-filed from (same rule as the backfill sweep).
+            cached.save(touch_updated_at=False)
+            written += 1
+        except Exception:
+            logger.debug(
+                "projects/delete: could not persist the unlink on %s", sid,
+                exc_info=True,
+            )
+        finally:
+            lock.release()
+    return written
+
+
 def _retag_empty_session_profile(session, requested_profile):
     """Atomically retag an empty, unpinned placeholder with pin admission."""
     # Warm the canonical root-alias cache before LOCK, then use its snapshot
@@ -18524,25 +18854,26 @@ def handle_post(handler, parsed) -> bool:
         color = body.get("color")
         if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
             return bad(handler, "Invalid color format")
-        projects = load_projects()
-        # #3331 follow-up (Codex+Opus gate): validate the optional client-supplied
-        # `profile` before stamping it, mirroring /api/profile/switch — otherwise a
-        # client could create a project tagged with an arbitrary/unknown profile,
-        # producing hidden cross-profile rows that can't be managed normally.
-        _requested_profile = str(body.get('profile') or "").strip()
-        if _requested_profile and _requested_profile != "default":
-            from api.profiles import _PROFILE_ID_RE
-            if not _PROFILE_ID_RE.fullmatch(_requested_profile):
-                return bad(handler, "invalid profile")
-        proj = {
-            "project_id": uuid.uuid4().hex[:12],
-            "name": name,
-            "color": color,
-            "profile": _requested_profile or get_active_profile_name() or 'default',
-            "created_at": time.time(),
-        }
-        projects.append(proj)
-        save_projects(projects)
+        with _PROJECTS_CATALOG_LOCK:
+            projects = load_projects()
+            # #3331 follow-up (Codex+Opus gate): validate the optional client-supplied
+            # `profile` before stamping it, mirroring /api/profile/switch — otherwise a
+            # client could create a project tagged with an arbitrary/unknown profile,
+            # producing hidden cross-profile rows that can't be managed normally.
+            _requested_profile = str(body.get('profile') or "").strip()
+            if _requested_profile and _requested_profile != "default":
+                from api.profiles import _PROFILE_ID_RE
+                if not _PROFILE_ID_RE.fullmatch(_requested_profile):
+                    return bad(handler, "invalid profile")
+            proj = {
+                "project_id": uuid.uuid4().hex[:12],
+                "name": name,
+                "color": color,
+                "profile": _requested_profile or get_active_profile_name() or 'default',
+                "created_at": time.time(),
+            }
+            projects.append(proj)
+            save_projects(projects)
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/rename":
@@ -18552,23 +18883,356 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e))
         import re as _re
 
-        projects = load_projects()
-        proj = next(
-            (p for p in projects if p["project_id"] == body["project_id"]), None
-        )
-        if not proj:
-            return bad(handler, "Project not found", 404)
-        # #1614: a project can only be renamed by the profile that owns it.
-        active_profile = get_active_profile_name()
-        if not _profiles_match(proj.get("profile"), active_profile):
-            return bad(handler, "Project not found", 404)
-        proj["name"] = body["name"].strip()[:128]
-        if "color" in body:
-            color = body["color"]
-            if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
-                return bad(handler, "Invalid color format")
-            proj["color"] = color
-        save_projects(projects)
+        with _PROJECTS_CATALOG_LOCK:
+            projects = load_projects()
+            proj = next(
+                (p for p in projects if p["project_id"] == body["project_id"]), None
+            )
+            if not proj:
+                return bad(handler, "Project not found", 404)
+            # #1614: a project can only be renamed by the profile that owns it.
+            active_profile = get_active_profile_name()
+            if not _profiles_match(proj.get("profile"), active_profile):
+                return bad(handler, "Project not found", 404)
+            proj["name"] = body["name"].strip()[:128]
+            if "color" in body:
+                color = body["color"]
+                if color and not _re.match(r"^#[0-9a-fA-F]{3,8}$", color):
+                    return bad(handler, "Invalid color format")
+                proj["color"] = color
+            save_projects(projects)
+        return j(handler, {"ok": True, "project": proj})
+
+    if parsed.path == "/api/projects/bind":
+        # Project bindings: attach workspaces (multi-value, with one marked
+        # default), a model and a reasoning effort to a project so the
+        # quick-create (+) button opens a new session already configured for
+        # that project's context.
+        #
+        # Body fields (all optional):
+        #   workspaces: [str]        — replace the full workspace list
+        #   default_workspace: str   — must be in workspaces (auto-added if not)
+        #   auto_assign: bool        — accepted and STORED but DORMANT: the
+        #                              backfill sweep, its toggle and the
+        #                              workspace-keyed filing it drove live in a
+        #                              follow-up PR, so nothing reads it here.
+        #   workspace: str           — legacy single-workspace binding (kept for
+        #                              compat; maps to workspaces=[w])
+        #   model / model_provider   — single-value model binding (null clears)
+        #   reasoning_effort         — single-value effort binding (null clears)
+        try:
+            require(body, "project_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+
+        with _PROJECTS_CATALOG_LOCK:
+            projects = load_projects()
+            proj = next(
+                (p for p in projects if p["project_id"] == body["project_id"]), None
+            )
+            if not proj:
+                return bad(handler, "Project not found", 404)
+            # #1614: a project can only be bound by the profile that owns it.
+            active_profile = get_active_profile_name()
+            if not _profiles_match(proj.get("profile"), active_profile):
+                return bad(handler, "Project not found", 404)
+
+            def _resolve_ws_list(raw_list):
+                """Validate + canonicalize a list of workspace paths. Each entry
+                must pass the same trusted-path check as /api/session/new; paths
+                are ALSO auto-registered in the saved workspace list so an
+                admin-style path outside home can be bound in one step.
+
+                Every entry is validated BEFORE any of them is registered, so a
+                list whose later entry is rejected cannot leave the earlier
+                paths saved (the field blocks below run after the whole-request
+                pre-flight, which is what actually guarantees no partial write).
+                """
+                validated = []
+                for entry in raw_list or []:
+                    if entry is None or str(entry).strip() == "":
+                        continue
+                    ws_str = str(entry).strip()
+                    try:
+                        validated.append(validate_workspace_to_add(ws_str))
+                    except (TypeError, ValueError) as e:
+                        raise ValueError(str(e)) from e
+                out = []
+                for registered in validated:
+                    try:
+                        wss = load_workspaces()
+                        if not any(w["path"] == str(registered) for w in wss):
+                            wss.append({"path": str(registered), "name": registered.name})
+                            save_workspaces(wss)
+                        out.append(str(resolve_trusted_workspace(registered)))
+                    except (TypeError, ValueError) as e:
+                        raise ValueError(str(e)) from e
+                # Dedupe, keep order.
+                seen = set()
+                return [p for p in out if not (p in seen or seen.add(p))]
+
+            # ── Pre-flight validation (Greptile P2 2026-10-09T21:47:48Z) ──
+            # Registering a workspace path is a side effect on the SAVED
+            # workspace list, so nothing may be registered until the WHOLE
+            # request is known to be acceptable. Validate every path-shaped
+            # field and the reasoning_effort value here, in one pass, before the
+            # field blocks below mutate or register anything: a rejected entry
+            # (or a rejected effort) then can no longer leave the earlier paths
+            # registered for a binding that was never saved. The field blocks
+            # themselves cannot fail after this pass, since they re-run the same
+            # validator over the same strings.
+            _preflight = []
+            if isinstance(body.get("workspaces"), list):
+                _preflight.extend(body["workspaces"])
+            for _field in ("workspace", "default_workspace"):
+                if _field == "workspace" and "workspaces" in body:
+                    # The legacy alias is IGNORED by the update branch whenever
+                    # a replacement list is sent (see `if "workspace" in body and
+                    # "workspaces" not in body`), so validating it here would
+                    # reject an otherwise valid request whenever the client's
+                    # old alias points at a directory that has since been
+                    # removed (Greptile P2 2026-10-09T22:17:42Z).
+                    continue
+                if _field in body:
+                    _preflight.append(body.get(_field))
+            # The default-only path (``default_workspace`` without
+            # ``workspaces``) re-resolves the project's STORED workspace list,
+            # because the default is auto-added to it. Those stored paths are
+            # validated AFTER the field blocks are allowed to run — and the
+            # candidate's own resolve has by then already registered it — so a
+            # stored path that has since been removed from disk made the second
+            # resolve raise on a binding that was never saved. That is exactly
+            # the partial write this pre-flight exists to prevent, and it made
+            # the "the field blocks cannot fail after this pass" comment above
+            # false on this path (maintainer SHOULD-FIX 2026-10-09T23:55:01Z).
+            # Pre-flight those stored paths too, but ONLY when the second
+            # resolve can actually run: an already-bound default short-circuits
+            # before it, so extending the list there would reject a request that
+            # is saved successfully today. A legacy ``workspace`` alias is
+            # excluded for the same reason — it REPLACES the stored set before
+            # the default block runs, so a replacement of a deleted binding
+            # never touches the deleted path (Greptile P2 2026-10-10T00:24:37Z).
+            if (
+                "default_workspace" in body
+                and "workspaces" not in body
+                and "workspace" not in body
+            ):
+                _dw_pre = body.get("default_workspace")
+                if _dw_pre is not None and str(_dw_pre).strip() != "":
+                    _dw_pre_str = str(_dw_pre).strip()
+                    _stored_ws = _project_workspaces(proj)
+                    # "Already stored" is judged on the path itself, not through
+                    # the strict trust gate: an outside-home default that the
+                    # field block will re-register is trusted only AFTER that
+                    # registration, so resolving it here can raise even though
+                    # the stored list already carries it. The lenient validator
+                    # (same one _resolve_ws_list runs first) plus the strict form
+                    # when it is available cover both shapes.
+                    _dw_forms = set()
+                    for _probe in (
+                        lambda: validate_workspace_to_add(_dw_pre_str),
+                        lambda: resolve_trusted_workspace(_dw_pre_str),
+                    ):
+                        try:
+                            _dw_forms.add(str(_probe()))
+                        except (TypeError, ValueError):
+                            pass
+                    if not (_dw_forms & set(_stored_ws)):
+                        _preflight.extend(_stored_ws)
+            for _cand in _preflight:
+                if _cand is None or str(_cand).strip() == "":
+                    continue
+                try:
+                    validate_workspace_to_add(str(_cand).strip())
+                except (TypeError, ValueError) as e:
+                    return bad(handler, str(e))
+            if "reasoning_effort" in body:
+                _effort_pre = body.get("reasoning_effort")
+                if _effort_pre is not None and str(_effort_pre).strip() != "":
+                    from api.config import VALID_REASONING_EFFORTS as _VALID_EFFORTS
+
+                    if str(_effort_pre).strip().lower() not in _VALID_EFFORTS:
+                        return bad(
+                            handler,
+                            "reasoning_effort must be one of "
+                            f"{', '.join(_VALID_EFFORTS)}",
+                        )
+            if "auto_assign" in body:
+                _aa_pre = body.get("auto_assign")
+                # Dormant but still shape-checked: the field is stored (see the
+                # field block below) and a JSON BOOLEAN is the only shape it ever
+                # accepted — `bool("false")` is True, so a stringly-typed client
+                # value was rejected rather than silently stored (Greptile P2
+                # 2026-10-10T06:00:25Z). Checked in the pre-flight so a rejected
+                # request cannot leave the paths validated above registered on
+                # the saved workspace list either.
+                if _aa_pre is not None and not isinstance(_aa_pre, bool):
+                    return bad(handler, "auto_assign must be a boolean")
+
+            # ── Workspaces (multi-value) ──
+            if "workspaces" in body:
+                raw = body.get("workspaces")
+                if raw is None:
+                    proj.pop("workspaces", None)
+                    proj.pop("default_workspace", None)
+                    proj.pop("workspace", None)  # keep legacy alias in sync
+                elif not isinstance(raw, list):
+                    # A scalar iterated as characters (a string) or raised an
+                    # uncaught TypeError mid-loop (a number/bool), so the client
+                    # got a 500 instead of a bad-request. Reject the shape up
+                    # front, the same shape check its siblings use
+                    # (Greptile P2 2026-10-09T21:47:48Z).
+                    return bad(handler, "workspaces must be a list of paths")
+                else:
+                    try:
+                        resolved = _resolve_ws_list(raw)
+                    except ValueError as e:
+                        return bad(handler, str(e))
+                    proj["workspaces"] = resolved
+                    # Keep the default valid: drop a default no longer in the list.
+                    if proj.get("default_workspace") not in resolved:
+                        proj.pop("default_workspace", None)
+                    # Legacy alias must mirror the new list (or disappear).
+                    if resolved:
+                        proj["workspace"] = resolved[0]
+                    else:
+                        proj.pop("workspace", None)
+
+            # ── Legacy single-workspace field (compat) ──
+            if "workspace" in body and "workspaces" not in body:
+                ws = body.get("workspace")
+                if ws is None or str(ws).strip() == "":
+                    proj.pop("workspace", None)
+                    proj.pop("workspaces", None)
+                    proj.pop("default_workspace", None)
+                else:
+                    try:
+                        resolved = _resolve_ws_list([ws])
+                    except ValueError as e:
+                        return bad(handler, str(e))
+                    if not resolved:
+                        proj.pop("workspace", None)
+                        proj.pop("workspaces", None)
+                        proj.pop("default_workspace", None)
+                    else:
+                        proj["workspace"] = resolved[0]  # legacy alias
+                        proj["workspaces"] = resolved
+                        # This binding REPLACES the workspace set with exactly
+                        # ``resolved``, so a default left over from the previous
+                        # set would point at an unbound workspace and send
+                        # quick-create to a path the project no longer owns.
+                        # Assign (not setdefault) so "default ∈ workspaces" holds.
+                        proj["default_workspace"] = resolved[0]
+
+            # ── default_workspace ──
+            if "default_workspace" in body:
+                dw = body.get("default_workspace")
+                if dw is None or str(dw).strip() == "":
+                    proj.pop("default_workspace", None)
+                else:
+                    # Same helper as `workspaces`: it strips a pasted quote pair
+                    # and auto-registers a fresh path before resolving, so a
+                    # default outside home (or one pasted from Finder with
+                    # surrounding quotes) is no longer rejected before that
+                    # registration can run (Greptile P1 2026-10-09T21:47:48Z).
+                    try:
+                        dw_list = _resolve_ws_list([dw])
+                    except (TypeError, ValueError) as e:
+                        return bad(handler, str(e))
+                    dw_resolved = dw_list[0] if dw_list else None
+                    if not dw_resolved:
+                        proj.pop("default_workspace", None)
+                    else:
+                        # Must be one of the bound workspaces — auto-add if needed so
+                        # the invariant "default ∈ workspaces" always holds. Use the
+                        # canonical accessor (not `proj.get("workspaces") or []`) so a
+                        # LEGACY project carrying only `workspace: A` keeps A in the
+                        # bound set: starting from an empty list would store just B and
+                        # then overwrite the compatibility alias, dropping A from
+                        # quick-create (and from the default-workspace fallback).
+                        ws_list = _project_workspaces(proj)
+                        if dw_resolved not in ws_list:
+                            try:
+                                ws_list = _resolve_ws_list([*ws_list, dw_resolved])
+                            except ValueError as e:
+                                return bad(handler, str(e))
+                            proj["workspaces"] = ws_list
+                        proj["default_workspace"] = dw_resolved
+                        # Keep the legacy alias in sync.
+                        if ws_list:
+                            proj["workspace"] = ws_list[0]
+
+            # ── auto_assign flag (stored but dormant) ──
+            # Kept accept-and-store so an older client that still sends the field
+            # round-trips instead of erroring; NOTHING in this build reads it —
+            # the sweep it used to drive, its toggle and the workspace-keyed
+            # filing of new sessions moved to a follow-up PR. The value's TYPE was
+            # validated in the pre-flight above, so a plain truthiness test is
+            # safe here (a string "false" can no longer reach it).
+            if "auto_assign" in body:
+                if body.get("auto_assign"):
+                    proj["auto_assign"] = True
+                else:
+                    proj.pop("auto_assign", None)
+
+            # model / model_provider: pair stored with canonicalization so a
+            # stale/foreign provider cannot silently rebind. Null/'' clears.
+            # When the model IS provided via a slash/@ qualified string, derive
+            # the implied family and prefer that over the free-form provider.
+            if "model" in body:
+                model = body.get("model")
+                if model is None or str(model).strip() == "":
+                    proj.pop("model", None)
+                    proj.pop("model_provider", None)
+                else:
+                    # An @-qualified model carries its own provider (see
+                    # _split_provider_qualified_model), so store the pair
+                    # canonically — quick-create then resolves the backend the
+                    # caller actually named. A BARE model with no model_provider in
+                    # this payload must NOT keep the previously stored provider:
+                    # that provider belonged to the model it was bound with, and
+                    # the stale pair would route quick-create to an incompatible
+                    # backend (or fail session startup). An explicit
+                    # model_provider in the same payload always wins (below).
+                    bare_model, implied_provider = _split_provider_qualified_model(
+                        str(model).strip()
+                    )
+                    proj["model"] = bare_model or str(model).strip()
+                    if "model_provider" not in body:
+                        if implied_provider:
+                            proj["model_provider"] = (
+                                _canonical_context_provider(implied_provider)
+                                or implied_provider
+                            )
+                        else:
+                            proj.pop("model_provider", None)
+            if "model_provider" in body:
+                mp = body.get("model_provider")
+                if mp is None or str(mp).strip() == "":
+                    proj.pop("model_provider", None)
+                else:
+                    # Canonicalize via _canonical_context_provider so e.g.
+                    # "OpenAI" / "openai:gpt-4o" / "custom:foo" normalize.
+                    proj["model_provider"] = _canonical_context_provider(str(mp).strip()) or str(mp).strip()
+
+            # reasoning_effort: must be a valid effort level or empty (clear).
+            if "reasoning_effort" in body:
+                from api.config import VALID_REASONING_EFFORTS
+
+                effort = body.get("reasoning_effort")
+                if effort is None or str(effort).strip() == "":
+                    proj.pop("reasoning_effort", None)
+                else:
+                    effort = str(effort).strip().lower()
+                    if effort not in VALID_REASONING_EFFORTS:
+                        return bad(
+                            handler,
+                            f"reasoning_effort must be one of {', '.join(VALID_REASONING_EFFORTS)}",
+                        )
+                    proj["reasoning_effort"] = effort
+
+            save_projects(projects)
+
         return j(handler, {"ok": True, "project": proj})
 
     if parsed.path == "/api/projects/delete":
@@ -18586,8 +19250,67 @@ def handle_post(handler, parsed) -> bool:
         active_profile = get_active_profile_name()
         if not _profiles_match(proj.get("profile"), active_profile):
             return bad(handler, "Project not found", 404)
-        projects = [p for p in projects if p["project_id"] != body["project_id"]]
-        save_projects(projects)
+        # Ids the in-memory clear unlinked from the cache; their SIDECARS are
+        # written through below. Both the clear itself and that write-through
+        # run OUTSIDE the catalog lock: a per-session lock wait (clear) or a
+        # full-history write (persist) must not stall New Chat / workspace
+        # edits behind a delete (maintainer re-gate 2026-10-10T15:11:33Z).
+        cleared_ids: list = []
+        with _PROJECTS_CATALOG_LOCK:
+            # Reload (rather than reuse the `projects` list read for the
+            # ownership check above) so a project created meanwhile is not
+            # erased by saving the stale list (new regression on
+            # api/routes.py:19127). The read → filter → save runs under the
+            # catalog lock shared with create / rename / bind so no mutation
+            # can interleave.
+            projects = [
+                p for p in load_projects()
+                if p["project_id"] != body["project_id"]
+            ]
+            save_projects(projects)
+        # Clear the CACHED sessions that still carry this project_id. An
+        # unsaved new chat lives only in the LRU cache (new_session writes
+        # nothing to disk), so the index-only unlink below never saw it and
+        # its draft-save persisted the dead id.
+        #
+        # This runs AFTER the catalog lock is released, on purpose: the clear
+        # takes each session's own agent lock with a bounded wait (up to 5 s
+        # each), so holding the catalog lock across it stalled every New Chat
+        # and workspace edit behind a delete of a project with busy cached
+        # chats (maintainer re-gate 2026-10-10T15:11:33Z: seven held session
+        # locks made New Chat time out after 30.03 s; with the call moved
+        # here it finished in 0.037 s and the transcript was preserved).
+        #
+        # The mutual exclusion the old placement provided is unchanged: the
+        # ROW REMOVAL above stays serialized (under the catalog lock) with the
+        # explicit assignment paths (``/api/session/new`` with an explicit id,
+        # ``/api/session/move``) and their cache publication, so either that
+        # session already published its project_id — and this scan sees and
+        # clears it — or it validates against the catalog after the removal and
+        # stays unassigned. Never an orphan (re-gate 2026-10-07,
+        # api/routes.py:16855).
+        cleared_cached = _clear_cached_sessions_for_project(
+            body["project_id"], cleared_ids=cleared_ids
+        )
+        if cleared_cached:
+            logger.info(
+                "projects/delete: cleared project_id on %d cached session(s)",
+                cleared_cached,
+            )
+        # The catalog lock is now released: write the unlink through to the
+        # sidecars of the cached sessions that have one. A session without a
+        # sidecar is a "+ New Chat" draft and stays cache-only, and an
+        # actively streaming one is left to its worker's next save — both are
+        # skipped inside the helper (Greptile P1 2026-10-10T12:41:25Z: no
+        # full-history write may run while the catalog lock is held).
+        persisted_cleared = _persist_cleared_project_ids(
+            body["project_id"], cleared_ids
+        )
+        if persisted_cleared:
+            logger.info(
+                "projects/delete: persisted the unlink on %d session file(s)",
+                persisted_cleared,
+            )
         # Unassign all sessions that belonged to this project.
         # #3746: this loop is O(N) full-JSON read+save per session, and each
         # save() reserializes the entire messages array. For a project with many
@@ -28435,17 +29158,23 @@ def _handle_workspace_add(handler, body):
         p = validate_workspace_to_add(path_str, profile=active_profile)
     except ValueError as e:
         return bad(handler, str(e))
-    try:
-        wss = load_workspaces(profile=active_profile)
-    except TypeError:
-        wss = load_workspaces()
-    if any(w["path"] == str(p) for w in wss):
-        return bad(handler, "Workspace already in list")
-    wss.append({"path": str(p), "name": name or p.name})
-    try:
-        save_workspaces(wss, profile=active_profile)
-    except TypeError:
-        save_workspaces(wss)
+    # One shared lock with the bindings save path: /api/projects/bind's
+    # _resolve_ws_list reads AND rewrites this same saved workspace list under
+    # _PROJECTS_CATALOG_LOCK, so a workspace add that read it outside the lock
+    # could have its entry dropped by a bind that read the list before the add
+    # (Greptile P1 2026-10-10T03:29:51Z: "Workspace edits get overwritten").
+    with _PROJECTS_CATALOG_LOCK:
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        if any(w["path"] == str(p) for w in wss):
+            return bad(handler, "Workspace already in list")
+        wss.append({"path": str(p), "name": name or p.name})
+        try:
+            save_workspaces(wss, profile=active_profile)
+        except TypeError:
+            save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -28455,15 +29184,16 @@ def _handle_workspace_remove(handler, body):
         return bad(handler, "path is required")
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
-    try:
-        wss = load_workspaces(profile=active_profile)
-    except TypeError:
-        wss = load_workspaces()
-    wss = [w for w in wss if w["path"] != path_str]
-    try:
-        save_workspaces(wss, profile=active_profile)
-    except TypeError:
-        save_workspaces(wss)
+    with _PROJECTS_CATALOG_LOCK:
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        wss = [w for w in wss if w["path"] != path_str]
+        try:
+            save_workspaces(wss, profile=active_profile)
+        except TypeError:
+            save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -28474,20 +29204,21 @@ def _handle_workspace_rename(handler, body):
         return bad(handler, "path and name are required")
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
-    try:
-        wss = load_workspaces(profile=active_profile)
-    except TypeError:
-        wss = load_workspaces()
-    for w in wss:
-        if w["path"] == path_str:
-            w["name"] = name
-            break
-    else:
-        return bad(handler, "Workspace not found", 404)
-    try:
-        save_workspaces(wss, profile=active_profile)
-    except TypeError:
-        save_workspaces(wss)
+    with _PROJECTS_CATALOG_LOCK:
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        for w in wss:
+            if w["path"] == path_str:
+                w["name"] = name
+                break
+        else:
+            return bad(handler, "Workspace not found", 404)
+        try:
+            save_workspaces(wss, profile=active_profile)
+        except TypeError:
+            save_workspaces(wss)
     return j(handler, {"ok": True, "workspaces": wss})
 
 
@@ -28503,28 +29234,29 @@ def _handle_workspace_reorder(handler, body):
         return bad(handler, "paths is required and must be a list")
     from api.profiles import get_active_profile_name
     active_profile = get_active_profile_name()
-    try:
-        wss = load_workspaces(profile=active_profile)
-    except TypeError:
-        wss = load_workspaces()
-    by_path = {w["path"]: w for w in wss}
-    # Build reordered list: given order first, then any omitted entries
-    reordered = []
-    seen = set()
-    for p in paths:
-        p = p.strip()
-        if p in by_path and p not in seen:
-            reordered.append(by_path[p])
-            seen.add(p)
-    # Append any workspaces not mentioned (safety net)
-    for w in wss:
-        if w["path"] not in seen:
-            reordered.append(w)
-    try:
-        save_workspaces(reordered, profile=active_profile)
-    except TypeError:
-        # Legacy signature (test doubles with single-arg lambdas, older forks).
-        save_workspaces(reordered)
+    with _PROJECTS_CATALOG_LOCK:
+        try:
+            wss = load_workspaces(profile=active_profile)
+        except TypeError:
+            wss = load_workspaces()
+        by_path = {w["path"]: w for w in wss}
+        # Build reordered list: given order first, then any omitted entries
+        reordered = []
+        seen = set()
+        for p in paths:
+            p = p.strip()
+            if p in by_path and p not in seen:
+                reordered.append(by_path[p])
+                seen.add(p)
+        # Append any workspaces not mentioned (safety net)
+        for w in wss:
+            if w["path"] not in seen:
+                reordered.append(w)
+        try:
+            save_workspaces(reordered, profile=active_profile)
+        except TypeError:
+            # Legacy signature (test doubles with single-arg lambdas, older forks).
+            save_workspaces(reordered)
     return j(handler, {"ok": True, "workspaces": reordered})
 
 

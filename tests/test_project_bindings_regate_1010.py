@@ -1,0 +1,685 @@
+"""Regressions for the maintainer re-gate of PR #6836 on head ``fcb070d7``
+(review 5476450595, 2026-10-09T23:55:01Z).
+
+Three findings, one section each:
+
+[SILENT]  **"No project" silently files the chat.** ``/api/session/new`` treated
+    an explicit ``project_id: null`` like an omitted field, so a New Chat
+    started from the sidebar's unassigned-only view was auto-assigned to a
+    project and then hidden from the view that created it (master's handler
+    preserves null). The fix restored master's ``project_id or None`` handling
+    and the client now sends an explicit null for the "No project" filter — the
+    auto-assignment branch itself (the field-ABSENT case) moved to a follow-up
+    PR with the sweep, maintainer re-gate 2026-10-11T02:08:20Z.
+
+[SHOULD-FIX] **Partial write on the default-only path.** ``default_workspace``
+    without ``workspaces`` re-resolves the project's STORED workspace list, so a
+    stored path that has since been removed from disk made that second resolve
+    raise AFTER the candidate had already been registered. The whole-request
+    pre-flight now validates those stored paths too — but only when the second
+    resolve can actually run.
+
+[SHOULD-FIX] **Arrows commit instead of highlighting.** The dropdown's
+    ArrowDown/ArrowUp branches called ``click()`` on the next row, so the first
+    ArrowDown committed: on the add list (first row "Type a path…") it opened
+    the path prompt, and a saved workspace was reachable only by wrapping
+    ArrowUp from the end. Arrows now move the highlight; Enter/Space commits.
+
+Also covers the LOW noun item: ``pb_set_default_title`` used the locale's
+"sessions" word in 12 locales — the per-locale noun assertion for that key lives
+in ``test_project_bindings_uigate_1009.py`` next to the label/hint one.
+"""
+
+from __future__ import annotations
+
+import shutil
+import subprocess
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+# ---------------------------------------------------------------------------
+# 1 — /api/session/new: an explicit project_id is used verbatim, and the
+#     "No project" view still sends an explicit null
+#     (the absent-field auto-assignment this section also covered moved to a
+#     follow-up PR — maintainer re-gate 2026-10-11T02:08:20Z)
+# ---------------------------------------------------------------------------
+
+_WS = "D:/ws-regate-1010"
+
+
+@pytest.fixture
+def session_new_env(monkeypatch):
+    """Drive /api/session/new in-process with only the leaf lookups faked."""
+    import api.routes as routes
+
+    created: list[dict] = []
+    responses: list[dict] = []
+
+    monkeypatch.setattr(routes, "load_projects", lambda *a, **k: [])
+    monkeypatch.setattr(routes, "save_projects", lambda ps: None)
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "load_workspaces", lambda: [])
+    monkeypatch.setattr(routes, "save_workspaces", lambda wss: None)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda p, **_kw: Path(p))
+    monkeypatch.setattr(
+        routes, "_resolve_new_session_workspace", lambda *a, **k: _WS
+    )
+    monkeypatch.setattr(
+        routes, "_worktree_default_from_config", lambda profile=None: False
+    )
+    monkeypatch.setattr(
+        routes, "_session_model_state_from_request", lambda m, p: ("model-x", None)
+    )
+    monkeypatch.setattr(routes, "_validate_session_toolsets_shape", lambda v: None)
+
+    class _Sess:
+        session_id = "s_regate_1010"
+        messages: list = []
+        profile = "default"
+
+        def compact(self):
+            return {}
+
+    def _fake_new_session(**kw):
+        created.append(dict(kw))
+        return _Sess()
+
+    monkeypatch.setattr(routes, "new_session", _fake_new_session)
+    monkeypatch.setattr(routes, "public_session_projection", lambda row: row)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None, **kw: responses.append(
+            {"payload": payload, "status": status}
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: responses.append(
+            {"error": msg, "status": status}
+        )
+        or True,
+    )
+    def _drive(body):
+        monkeypatch.setattr(routes, "read_body", lambda handler: dict(body))
+        return routes.handle_post(
+            SimpleNamespace(command="POST"),
+            SimpleNamespace(path="/api/session/new"),
+        )
+
+    return SimpleNamespace(
+        routes=routes,
+        created=created,
+        responses=responses,
+        drive=_drive,
+    )
+
+
+
+
+
+
+def test_an_explicit_project_id_is_used_verbatim(session_new_env):
+    """A caller that names a project keeps it."""
+    env = session_new_env
+    env.drive({"workspace": _WS, "project_id": "proj_named_1010"})
+
+    assert env.responses and env.responses[-1]["status"] == 200, env.responses
+    assert env.created[-1]["project_id"] == "proj_named_1010", env.created[-1]
+
+
+def test_an_explicit_empty_project_id_keeps_masters_meaning(session_new_env):
+    """'' was falsy on master too (unassigned); it must stay unassigned."""
+    env = session_new_env
+    env.drive({"workspace": _WS, "project_id": ""})
+
+    assert env.responses and env.responses[-1]["status"] == 200, env.responses
+    assert env.created[-1]["project_id"] is None, env.created[-1]
+
+
+def test_the_no_project_view_sends_an_explicit_null():
+    """The client half: the unassigned view must not omit the field.
+
+    The server no longer auto-assigns an omitted project_id (that sweep moved to
+    a follow-up PR), so this pins the CLIENT contract: the unassigned view keeps
+    sending an explicit null rather than depending on the omission.
+    """
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = src.index(
+        "if(Object.prototype.hasOwnProperty.call(options,'project_id')){"
+    )
+    end = src.index("// Forward a pre-session toolset override", start)
+    block = src[start:end]
+
+    assert "reqBody.project_id=options.project_id;" in block, block
+    assert "else if(_activeProject===NO_PROJECT_FILTER){" in block, block
+    assert "reqBody.project_id=null;" in block, block
+    assert "reqBody.project_id=_activeProject;" in block, block
+    assert block.index("reqBody.project_id=null;") < block.index(
+        "reqBody.project_id=_activeProject;"
+    ), "the unassigned view is matched before the project filter"
+    # The old guard omitted the field for the "No project" view entirely, which
+    # is what let the server auto-assign it.
+    assert "_activeProject&&_activeProject!==NO_PROJECT_FILTER" not in block, block
+
+
+# ---------------------------------------------------------------------------
+# 2 — the pre-flight must cover the stored workspaces the default-only path
+#     re-resolves (otherwise a dead stored path writes before it 400s)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def bind_env(monkeypatch, tmp_path):
+    """A fake home + a fake workspace registry, real trust helpers."""
+    import api.routes as routes
+    import api.workspace as workspace
+
+    home = tmp_path / "fake-home"
+    home.mkdir()
+    outside = tmp_path / "outside-home"
+    outside.mkdir()
+    registry: list[dict] = []
+
+    def _load_ws(profile=None):  # noqa: ARG001
+        return [dict(w) for w in registry]
+
+    def _save_ws(items, profile=None):  # noqa: ARG001
+        registry[:] = [dict(w) for w in items]
+
+    monkeypatch.setattr(routes, "load_workspaces", _load_ws)
+    monkeypatch.setattr(routes, "save_workspaces", _save_ws)
+    monkeypatch.setattr(workspace, "load_workspaces", _load_ws)
+    monkeypatch.setattr(workspace, "save_workspaces", _save_ws)
+    monkeypatch.setattr(workspace, "_home_path", lambda: home)
+    monkeypatch.setattr(
+        workspace, "_BOOT_DEFAULT_WORKSPACE", str(tmp_path / "no-boot-default")
+    )
+    return SimpleNamespace(home=home, outside=outside, registry=registry)
+
+
+def _drive_bind(monkeypatch, project, body):
+    """POST /api/projects/bind in-process; returns (handled, responses, project)."""
+    import api.routes as routes
+
+    projects = [project]
+    monkeypatch.setattr(routes, "load_projects", lambda: projects)
+    monkeypatch.setattr(
+        routes, "save_projects", lambda ps: projects.__setitem__(slice(None), ps)
+    )
+    monkeypatch.setattr(routes, "get_active_profile_name", lambda: "default")
+    monkeypatch.setattr(routes, "_profiles_match", lambda a, b: True)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: dict(body))
+    responses: list[dict] = []
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None, **kw: responses.append(
+            {"payload": payload, "status": status}
+        )
+        or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, msg, status=400: responses.append(
+            {"error": msg, "status": status}
+        )
+        or True,
+    )
+    handled = routes.handle_post(
+        SimpleNamespace(command="POST"),
+        SimpleNamespace(path="/api/projects/bind"),
+    )
+    return handled, responses, projects[0]
+
+
+def _project(**extra):
+    proj = {"project_id": "proj_regate_1010", "name": "regate1010", "profile": "default"}
+    proj.update(extra)
+    return proj
+
+
+def test_a_default_only_bind_with_a_dead_stored_workspace_writes_nothing(
+    bind_env, monkeypatch
+):
+    """[SHOULD-FIX] Reproduced on fcb070d7: 400, but the candidate was saved.
+
+    The project still binds ``removed-workspace`` (deleted from disk). A
+    default-only bind of a FRESH path resolves the candidate (registering it)
+    and only then re-resolves the stored list, which raises on the dead path.
+    The request must fail before anything is registered.
+    """
+    dead = str(bind_env.outside.parent / "removed-workspace")
+    fresh = str(bind_env.outside)
+    handled, responses, proj = _drive_bind(
+        monkeypatch,
+        _project(workspaces=[dead], default_workspace=dead),
+        {"project_id": "proj_regate_1010", "default_workspace": fresh},
+    )
+
+    assert handled is True, "the route must answer, not raise"
+    assert responses[-1]["status"] == 400, responses
+    assert bind_env.registry == [], (
+        "the rejected bind must not leave the candidate registered: "
+        + repr(bind_env.registry)
+    )
+    assert proj["workspaces"] == [dead], proj
+    assert proj["default_workspace"] == dead, proj
+
+
+def test_a_default_only_bind_whose_default_is_already_bound_still_saves(
+    bind_env, monkeypatch
+):
+    """The already-bound case must keep working: its second resolve never runs.
+
+    The stored form is established by an ordinary bind first, exactly as the
+    route writes it, because the field block compares the canonicalized default
+    against the stored strings.
+    """
+    good = str(bind_env.outside)
+    dead = str(bind_env.outside.parent / "removed-workspace")
+    handled, responses, proj = _drive_bind(
+        monkeypatch,
+        _project(),
+        {"project_id": "proj_regate_1010", "workspaces": [good]},
+    )
+    assert responses[-1].get("status", 200) == 200, responses
+    stored = proj["workspaces"][0]
+    assert stored == good, stored
+
+    # The default is the bound workspace, and an unrelated stored path is gone
+    # from disk: the field block short-circuits before re-resolving the list, so
+    # this request must still succeed (and the pre-flight must not over-reach
+    # and validate the dead stored path).
+    proj["workspaces"] = [stored, dead]
+    proj["default_workspace"] = stored
+    handled, responses, proj = _drive_bind(
+        monkeypatch,
+        proj,
+        {"project_id": "proj_regate_1010", "default_workspace": stored},
+    )
+
+    assert handled is True
+    assert responses[-1].get("status", 200) == 200, responses
+    assert proj["default_workspace"] == stored, proj
+    assert proj["workspaces"] == [stored, dead], proj
+
+
+def test_a_legacy_workspace_replacement_of_a_dead_binding_still_saves(
+    bind_env, monkeypatch
+):
+    """Greptile P2 (2026-10-10T00:24:37Z): the legacy alias REPLACES the stored
+    set before the default block runs, so replacing a deleted binding with a
+    live one is valid and must not be rejected by the stored-path pre-flight."""
+    good = str(bind_env.outside)
+    dead = str(bind_env.outside.parent / "removed-workspace")
+    handled, responses, proj = _drive_bind(
+        monkeypatch,
+        _project(workspaces=[dead], default_workspace=dead, workspace=dead),
+        {
+            "project_id": "proj_regate_1010",
+            "workspace": good,
+            "default_workspace": good,
+        },
+    )
+
+    assert handled is True, "the route must answer, not raise"
+    assert responses[-1].get("status", 200) == 200, responses
+    assert proj["workspaces"] == [good], proj
+    assert proj["workspace"] == good, proj
+    assert proj["default_workspace"] == good, proj
+
+
+# ---------------------------------------------------------------------------
+# 3 — frontend: arrows move the highlight, Enter/Space commits
+# ---------------------------------------------------------------------------
+
+
+def _run_node(tmp_path: Path, name: str, script: str) -> str:
+    if shutil.which("node") is None:
+        pytest.skip("node is required for the frontend behavior probe")
+    script_path = tmp_path / name
+    script_path.write_text(script, encoding="utf-8")
+    result = subprocess.run(
+        ["node", str(script_path)],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr or result.stdout
+    return result.stdout
+
+
+_DOM_STUB = r"""
+function assert(cond, msg) { if (!cond) throw new Error(msg); }
+
+function _classList(node) {
+  const set = node.__classSet || (node.__classSet = new Set());
+  const sync = () => { node._className = [...set].join(' '); };
+  return {
+    add: (...xs) => { xs.forEach((x) => x && set.add(x)); sync(); },
+    remove: (...xs) => { xs.forEach((x) => set.delete(x)); sync(); },
+    contains: (x) => set.has(x),
+    toggle: (x, f) => { const on = f === undefined ? !set.has(x) : !!f; if (on) set.add(x); else set.delete(x); sync(); return on; },
+  };
+}
+
+function makeElement(tag) {
+  const node = {
+    tagName: String(tag).toUpperCase(),
+    children: [],
+    parentNode: null,
+    _className: '',
+    dataset: {},
+    style: {},
+    attrs: {},
+    textContent: '',
+    innerHTML: '',
+    scrollHeight: 0,
+    type: '',
+    title: '',
+    appendChild(child) { child.parentNode = node; node.children.push(child); return child; },
+    setAttribute(k, v) { node.attrs[k] = String(v); },
+    getAttribute(k) { return Object.prototype.hasOwnProperty.call(node.attrs, k) ? node.attrs[k] : null; },
+    getBoundingClientRect() { return { top: 10, bottom: 30, left: 5, width: 120 }; },
+    querySelectorAll(sel) {
+      const cls = sel.replace(/^\./, '');
+      return node.children.filter((c) => (c._className || '').split(/\s+/).includes(cls));
+    },
+    closest() { return node.parentNode; },
+    contains(other) { let p = other; while (p) { if (p === node) return true; p = p.parentNode; } return false; },
+    click() {
+      // Real .click() dispatches a click event; the shipped rows listen via
+      // onclick, so that is what the probe must drive.
+      if (typeof node.onclick === 'function') {
+        node.onclick({ stopPropagation() {}, preventDefault() {} });
+      }
+    },
+    addEventListener() {},
+  };
+  Object.defineProperty(node, 'className', {
+    get() { return node._className; },
+    set(v) {
+      node._className = String(v);
+      const set = node.__classSet || (node.__classSet = new Set());
+      set.clear();
+      String(v).split(/\s+/).forEach((c) => { if (c) set.add(c); });
+    },
+  });
+  Object.defineProperty(node, 'innerHTML', {
+    get() { return node._innerHTML || ''; },
+    set(v) { node._innerHTML = String(v); node.children = []; },
+  });
+  node.classList = _classList(node);
+  return node;
+}
+
+const __docClick = [];
+const _document = {
+  createElement: (tag) => makeElement(tag),
+  addEventListener: (type, fn) => { if (type === 'click') __docClick.push(fn); },
+  removeEventListener: (type, fn) => {
+    if (type !== 'click') return;
+    const i = __docClick.indexOf(fn);
+    if (i >= 0) __docClick.splice(i, 1);
+  },
+};
+globalThis.document = _document;
+globalThis.window = { innerHeight: 800, addEventListener: () => {} };
+globalThis.t = (key) => key;
+"""
+
+_COMBO_SLOT_DECL = "let _openBindingsCombo=null;"
+_COMBO_FN = (
+    (REPO_ROOT / "static" / "sessions.js")
+    .read_text(encoding="utf-8")
+    .split(_COMBO_SLOT_DECL, 1)[1]
+    .split("\n// Modal dialog for editing a project's bindings", 1)[0]
+)
+_COMBO_FN = _COMBO_SLOT_DECL + _COMBO_FN
+
+
+_HIGHLIGHT_PROBE = (
+    _DOM_STUB
+    + _COMBO_FN
+    + r"""
+const combo = _makeBindingsCombo({
+  value: 'b',
+  options: [{ value: 'a', name: 'A' }, { value: 'b', name: 'B' }, { value: 'c', name: 'C' }],
+});
+const trigger = combo.el.children[0];
+const menu = combo.el.children[1];
+
+function rows() { return menu.querySelectorAll('.ws-opt'); }
+function activeName() {
+  const r = rows().find((x) => x.classList.contains('active'));
+  if (!r) return null;
+  return (r.children[0] && r.children[0].textContent) || null;
+}
+function key(k) {
+  const event = { key: k, _prevented: false, preventDefault() { event._prevented = true; } };
+  trigger.onkeydown(event);
+  return event._prevented;
+}
+
+// --- open, then move the highlight: nothing may be committed ---
+key('ArrowDown');
+assert(menu.classList.contains('open'), 'ArrowDown on a closed combo must open the menu');
+assert(combo.getValue() === 'b', 'opening the menu must not change the value');
+assert(activeName() === 'B', 'the current value starts highlighted, got ' + activeName());
+
+key('ArrowDown');
+assert(combo.getValue() === 'b',
+  'ArrowDown must NOT commit a value, got ' + combo.getValue());
+assert(menu.classList.contains('open'), 'ArrowDown must leave the menu open');
+assert(activeName() === 'C', 'ArrowDown must move the highlight to C, got ' + activeName());
+
+key('ArrowDown');
+assert(activeName() === 'A', 'ArrowDown must wrap to the first row, got ' + activeName());
+assert(combo.getValue() === 'b', 'wrapping must not commit either');
+
+key('ArrowUp');
+assert(activeName() === 'C', 'ArrowUp must wrap to the last row, got ' + activeName());
+
+// --- Enter commits the highlighted row ---
+const prevented = key('Enter');
+assert(prevented === true, 'Enter must be consumed by the combobox');
+assert(combo.getValue() === 'c', 'Enter must commit the highlighted row, got ' + combo.getValue());
+assert(!menu.classList.contains('open'), 'committing closes the menu');
+
+// --- Space commits too ---
+key('ArrowDown');            // reopen; value 'C' is highlighted
+key('ArrowUp');              // C -> B
+key(' ');
+assert(combo.getValue() === 'b', 'Space must commit like Enter, got ' + combo.getValue());
+assert(!menu.classList.contains('open'), 'Space commits and closes');
+
+// --- Escape still closes without committing ---
+key('ArrowDown');            // reopen; value 'B' is highlighted
+key('ArrowUp');              // B -> A (highlight only)
+key('Escape');
+assert(!menu.classList.contains('open'), 'Escape closes the dropdown');
+assert(combo.getValue() === 'b', 'Escape must not commit, got ' + combo.getValue());
+
+// --- the reported bug: the add list opens with the "type a path" row ---
+const add = _makeBindingsCombo({
+  value: '',
+  options: [
+    { value: '__custom_path__', name: 'Type a path' },
+    { value: '/ws/saved', name: 'saved' },
+  ],
+});
+const aTrigger = add.el.children[0];
+const aMenu = add.el.children[1];
+function aRows() { return aMenu.querySelectorAll('.ws-opt'); }
+function aActiveName() {
+  const r = aRows().find((x) => x.classList.contains('active'));
+  if (!r) return null;
+  return (r.children[0] && r.children[0].textContent) || null;
+}
+let commits = 0;
+add.setOnChange(() => { commits += 1; });
+function aKey(k) {
+  const event = { key: k, _prevented: false, preventDefault() { event._prevented = true; } };
+  aTrigger.onkeydown(event);
+  return event._prevented;
+}
+
+aKey('ArrowDown');
+assert(aMenu.classList.contains('open'), 'the add list opens');
+assert(add.getValue() === '' && commits === 0, 'opening must not pick anything');
+aKey('ArrowDown');
+assert(aActiveName() === 'Type a path',
+  'the first arrow press highlights the first row, got ' + aActiveName());
+assert(add.getValue() === '' && commits === 0,
+  'ArrowDown over the custom row must NOT commit (that opened the path prompt)');
+assert(aMenu.classList.contains('open'), 'the add list stays open');
+aKey('ArrowDown');
+assert(aActiveName() === 'saved',
+  'ArrowDown must reach the saved workspace, got ' + aActiveName());
+assert(commits === 0, 'moving must not commit');
+aKey('Enter');
+assert(commits === 1 && add.getValue() === '/ws/saved',
+  'Enter commits the highlighted row, got value=' + add.getValue() + ' commits=' + commits);
+assert(!aMenu.classList.contains('open'), 'committing closes the add list');
+console.log('ok');
+"""
+)
+
+
+def test_arrows_move_the_highlight_and_enter_commits(tmp_path):
+    """[SHOULD-FIX]: arrows must not commit; Enter/Space must."""
+    assert _run_node(tmp_path, "combo_highlight.js", _HIGHLIGHT_PROBE).strip().endswith(
+        "ok"
+    )
+
+
+def test_the_moved_highlight_is_scrolled_into_view():
+    """Greptile P2 (2026-10-10T00:24:37Z): a highlight moved past the visible
+    rows must scroll into view, or Enter commits an option the keyboard user
+    cannot see (the menu is height-capped and scrolls)."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    fn = src[
+        src.index("function _setHighlight(row){") : src.index(
+            "function _moveHighlight(delta){"
+        )
+    ]
+    assert "scrollIntoView" in fn, fn
+    # Guarded so the layout-less mini-DOM probes keep working.
+    assert "typeof row.scrollIntoView==='function'" in fn, fn
+    assert "block:'nearest'" in fn, fn
+
+
+# ---------------------------------------------------------------------------
+# 4 — the sweep must fail CLOSED when it cannot confirm who owns a row
+# ---------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+_SAVE_BINDINGS_PROBE = r"""
+let apiMode = 'fail';
+async function api(){
+  if(apiMode === 'fail') throw new Error('boom');
+  return {project: {project_id: 'p1', name: 'new'}};
+}
+const _allProjects = [{project_id: 'p1', name: 'old'}];
+const toasts = [];
+function showToast(m){ toasts.push(String(m)); }
+function t(k){ return 'T:' + k; }
+__SAVE__
+function assert(cond, msg){ if(!cond) throw new Error(msg); }
+(async () => {
+  let ok = await _saveProjectBindings({project_id: 'p1'}, {workspaces: null});
+  assert(ok === false, 'a rejected bind must report false, got ' + ok);
+  assert(toasts[toasts.length - 1].indexOf('T:pb_update_failed') === 0,
+    'failure toast: ' + toasts[toasts.length - 1]);
+  assert(_allProjects[0].name === 'old', 'the cache must not be touched on failure');
+
+  apiMode = 'ok';
+  ok = await _saveProjectBindings({project_id: 'p1'}, {workspaces: null});
+  assert(ok === true, 'an accepted bind must report true');
+  assert(_allProjects[0].name === 'new', 'the cache must be refreshed on success');
+  assert(toasts[toasts.length - 1] === 'T:pb_updated', 'success toast');
+  console.log('ok');
+})().catch(function (e) { console.error(e && e.stack || e); process.exit(1); });
+"""
+
+
+def test_a_failed_save_keeps_the_dialog_open(tmp_path):
+    """Greptile P2 (2026-10-10T02:22:52Z): Save closed the dialog before the
+    server accepted the bind, so a failed request discarded every unsaved
+    workspace/model edit.  _saveProjectBindings now reports success and the
+    dialog closes only on true."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    save_fn = src[src.index("async function _saveProjectBindings(proj, fields){"):src.index(
+        "\n// Custom combobox for the bindings dialog"
+    )]
+    assert "return true;" in save_fn and "return false;" in save_fn, save_fn
+    # The call site captures the result and bails out before closing when the
+    # save failed, and the dialog's own close no longer runs before the await.
+    assert "const _saved=await _saveProjectBindings(proj,fields);" in src
+    assert "if(!_saved) return;" in src
+    assert "\n    _closeBindingsDialog();\n    await _saveProjectBindings(proj,fields);" not in src
+    assert _run_node(
+        tmp_path,
+        "save_bindings_probe.js",
+        _SAVE_BINDINGS_PROBE.replace("__SAVE__", save_fn),
+    ).strip().endswith("ok")
+
+
+def test_a_save_in_flight_ignores_a_second_press_and_newer_edits():
+    """Greptile P2 (2026-10-10T02:58:01Z): the dialog now stays EDITABLE while
+    the save is pending, so a second press must not race it and the response
+    must not close over edits made after Save was pressed.
+
+    The behaviour itself is verified in a real browser on the PR (a slow bind,
+    a second press and an edit during the flight: one POST, the dialog and the
+    new edit survive); this pins the shipped wiring so it cannot regress."""
+    src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    save_start = src.index("saveBtn.onclick=async()=>{")
+    body = src[save_start:src.index("btnRow.appendChild(cancelBtn);", save_start)]
+    assert "if(_saveInFlight) return;" in body, body
+    assert "let _saveInFlight=false;" in src, "the flag must live in the dialog scope"
+    assert "_saveInFlight=true;" in body, body
+    finally_block = body.split("}finally{", 1)[1]
+    assert "_saveInFlight=false;" in finally_block, finally_block
+    # The submitted snapshot and the live controls are both serialized, and the
+    # dialog closes only when they still match.
+    assert "const _submitted=JSON.stringify([" in body, body
+    assert "const _current=JSON.stringify([" in body, body
+    assert "if(_current===_submitted) _closeBindingsDialog();" in body, body
+    assert "if(_saved) _closeBindingsDialog();" not in body, body

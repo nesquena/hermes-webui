@@ -723,6 +723,89 @@ with the queued commit, so ownership still spans the durable write. The out-of-b
 commits directly, which is correct because it holds no catalog lock by then.
 
 
+### 4.12 Project Bindings (`/api/projects/bind`)
+
+A session project can carry **bindings**: a set of workspaces (one of them the
+default), a model, and — API-only since the dialog row is hidden and no session
+applies it yet — a stored reasoning effort. The chip's quick-create (`+`) button, and the top-level New Chat button
+while that project filter is active, open a new session already configured for
+the project's context. Right-click
+a project chip and pick **Project settings…** to edit them: one row in the chip
+menu (no inline summary, no per-axis unbind rows), a dialog built on the shared
+`.app-dialog*` classes (skins, Escape, focus trap) that stays below the shared
+app dialog's z-index so a prompt it opens stacks on top, and a menu clamped to
+the viewport.
+
+`POST /api/projects/bind` updates a single project by `project_id`. Every body
+field is optional and only the supplied ones are touched:
+
+- `workspaces: [str]` — replaces the full bound list. Each entry passes the
+  same trusted-path check as `/api/session/new` (`validate_workspace_to_add`
+  then `resolve_trusted_workspace`) and is auto-registered in the saved
+  workspace list, so a path outside the default root can be bound in one step.
+  Entries are de-duplicated, keeping first-seen order. `null` clears the list
+  (and the default with it).
+- `default_workspace: str` — the workspace a new session starts in. It must be
+  a member of `workspaces`; a value outside the list is auto-added so the
+  invariant "`default_workspace` ∈ `workspaces`" always holds. Removing the
+  workspace that was the default also drops the default.
+- `workspace: str` — the legacy single-workspace field from before
+  multi-workspace bindings. It is still accepted and kept in sync as
+  `workspaces: [w]`, so pre-existing rows that only set `workspace` keep
+  working; `_project_workspaces` reads the list first and falls back to it.
+- `auto_assign: bool` — accepted and **stored but dormant**. The backfill
+  sweep it used to drive, the dialog toggle that set it and the
+  workspace-keyed filing of new sessions were split out into a follow-up PR, so
+  this build reads the stored value nowhere. It is shape-checked (a JSON
+  boolean) in the request pre-flight, like `reasoning_effort`, and `null`/`false`
+  still clears it.
+- `model` / `model_provider` / `reasoning_effort` — single-value bindings per
+  project; `null` clears that axis (the project is then unbound on it). The
+  dialog renders the model row only: it never submits `reasoning_effort`, so
+  saving a binding PRESERVES an existing effort value instead of clearing it —
+  and, since the UX re-gate of 2026-10-08, no session applies that stored value
+  either (see below).
+
+`reasoning_effort` is **stored but dormant**. `/api/projects/bind` still accepts
+it (and `null` still clears it), and the dialog still renders no row for it
+(re-gate 2026-10-07) — but since the UX re-gate of 2026-10-08 nothing forwards
+it into a new session, so creating a project-bound session no longer changes
+anything effort-related. The only mechanism it could use is the **profile-wide**
+preference: `POST /api/reasoning` persists one shared `agent.reasoning_effort`
+value in the active profile's `config.yaml` — the same key the CLI `/reasoning`
+and the composer's effort chip use. The bound `model` / `model_provider` only
+*interpret* that single value (they select which ladder applies); they do not
+get separately stored effort preferences, so two projects bound to different
+models still share one effort setting. Applying a project's stored effort
+therefore moved the effective effort of every other session and project in that
+profile, while the dialog offered no way to see or clear the value — it read as
+a silent profile-wide change behind a chip that says *Default* — so
+`_projectBindingsForNewSession` stopped forwarding it (UX re-gate
+2026-10-08T23:39:33Z, item A). The apply branch in `newSession` stays in place,
+dormant, for per-session effort (#7881), which will re-supply the option; the
+stored binding itself is still what that future mechanism will read.
+
+The endpoint only binds a project its own profile owns (`_profiles_match`,
+otherwise 404), mirroring the `/api/session/new` profile boundary. The stored
+fields ride along in the plain `/api/projects` payload (the raw project rows),
+so the sidebar can render the chip menu row and the dialog without a second
+request.
+
+Where the bindings take effect:
+
+- **Quick-create and New Chat with an active project filter** —
+  `_projectBindingsForNewSession` forwards the default workspace (falling back
+  to the first bound workspace, then the legacy `workspace`) plus `model` and
+  `model_provider` as `newSession` options — deliberately NOT `reasoning_effort`
+  (see above). Only bound
+  axes are forwarded, and only when the caller did not pass an explicit value,
+  so the chip's own `+` click (which passes its own `project_id`) is never
+  double-applied.
+- **Profile boundary** — a NAMED-profile project only claims sessions from its
+  own profile; the root/default project claims default-profile (and unprofiled
+  legacy) rows. `_profiles_match` handles the renamed-root alias for the bind.
+
+
 ---
 
 ## 5. Frontend Architecture: Current State
