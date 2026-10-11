@@ -114,6 +114,39 @@ def _effective_session_payload(p: Path) -> dict | None:
     return effective
 
 
+def _with_marked_message_count(payload: dict) -> dict:
+    """Return *payload* with a vouched ``message_count`` placed before ``messages``.
+
+    Recovery writers serialize a payload whose ``messages`` array they just
+    derived, so ``len(messages)`` is exact for that same atomic write. Stamping
+    it with the current writer marker (``_mc_v``) immediately before
+    ``messages`` (or a legacy leading ``anchor_activity_scenes``) lets bounded prefix readers (``_prefix_message_count``: the
+    per-subscribe SSE catch-up count, the #1558 save shrink check) trust it
+    instead of treating the restored/materialized sidecar as an unvouched
+    legacy file (#7673 gate). Every other key keeps its position.
+    """
+    if not isinstance(payload, dict) or not isinstance(payload.get('messages'), list):
+        return payload
+    try:
+        from api.models import _MESSAGE_COUNT_MARKER
+    except Exception:
+        return payload
+    count = len(payload['messages'])
+    out: dict = {}
+    placed = False
+    for key, value in payload.items():
+        if key in ('message_count', '_mc_v'):
+            continue
+        # The bounded prefix reader stops at whichever of these comes first;
+        # a legacy layout serializes anchor_activity_scenes BEFORE messages.
+        if not placed and key in ('messages', 'anchor_activity_scenes'):
+            out['message_count'] = count
+            out['_mc_v'] = _MESSAGE_COUNT_MARKER
+            placed = True
+        out[key] = value
+    return out
+
+
 def _rebuild_recovery_session_index(session_dir: Path) -> None:
     """Rebuild ``session_dir/_index.json`` from persisted sidecars only.
 
@@ -466,8 +499,16 @@ def recover_session(session_path: Path) -> dict:
         f'.json.recover.tmp.{os.getpid()}.{threading.current_thread().ident}'
     )
     try:
+        marked_payload = _with_marked_message_count(backup_payload)
+        payload = json.dumps(marked_payload, ensure_ascii=False, indent=2)
+        try:
+            payload.encode('utf-8')
+        except UnicodeEncodeError:
+            # Restore the same guarded snapshot losslessly, including lone
+            # provider surrogates preserved in raw or rewritten backups.
+            payload = json.dumps(marked_payload, ensure_ascii=True, indent=2)
         with open(tmp_path, 'w', encoding='utf-8') as fh:
-            fh.write(json.dumps(backup_payload, ensure_ascii=False, indent=2))
+            fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp_path, session_path)
@@ -724,7 +765,7 @@ def recover_missing_sidecars_from_state_db(session_dir: Path, state_db_path: Pat
         target = session_dir / f"{sid}.json"
         if target.exists():
             continue
-        payload = _state_db_row_to_sidecar(row)
+        payload = _with_marked_message_count(_state_db_row_to_sidecar(row))
         # Per-process/per-thread tmp suffix to avoid corruption under
         # concurrent reconciliation calls (matches api/models.py:484
         # Session.save() convention).
