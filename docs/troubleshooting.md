@@ -144,13 +144,20 @@ application modules can be imported. Importing skills under the launch/base home
 before selecting a named profile can disable their context-local home resolution
 and force turns and model-catalog scopes into the legacy whole-turn lock.
 
-The dependency layer retains Agent-owned activation and re-exec behavior; WebUI
-does not choose generation directories or install into an obsolete Agent venv.
+The dependency layer stays Agent-owned — WebUI still does not choose generation
+directories or install into an obsolete Agent venv — but its launch-time relaunch
+is suppressed for the import WebUI performs: `HERMES_DISABLE_LAZY_INSTALLS` is set
+only around that import and restored right after it, so a pending lazy install
+cannot replace the server process with the Agent's sandbox interpreter. The same
+boundary puts back the environment variables and the `sys.path` entries the
+activation rewrote, keeping a venv built for the running interpreter and dropping
+one built for another release (#7982).
 Legacy Agents and browser-only fixtures without `hermes_bootstrap.py` skip this
 early activation. A failure inside a present bootstrap is logged as a warning
 and startup continues, as it did when the Agent import was lazy, so the UI,
-diagnostics and updater stay reachable; the Agent's own relaunch or repair exit
-still stops the process. The interpreter compatibility probe may still import
+diagnostics and updater stay reachable; an Agent exit that terminates the process
+(`SystemExit`) is still not swallowed. The interpreter compatibility probe may
+still import
 `run_agent` in its disposable subprocess; that import must not leak into server
 startup. If a restart fails, inspect the current service journal and selected
 interpreter. This ordering repair does not remove the static fallback lock or
