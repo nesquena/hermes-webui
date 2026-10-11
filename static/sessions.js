@@ -2925,7 +2925,7 @@ async function loadSession(sid){
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
     _loadingSessionId=null;
-    const continuationOpts={...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true};
+    const continuationOpts={...opts,_continuationParentSid:opts._continuationParentSid||sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true};
     if(_expectedLoadSessionId===sid) continuationOpts.ownerSessionId=continuationSid;
     return loadSession(continuationSid,continuationOpts);
   }

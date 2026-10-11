@@ -144,7 +144,8 @@ def _run_node(scenario: str, branch: str) -> dict:
         const _clearApprovalCommandRetry=()=>{};
         const _rememberApprovalCommandRetry=()=>{};
         const _cronProfileNameIsRootAlias=()=>false;
-        const _resolveSessionIdFromSidebarLineage=(sid)=>sid;
+        const _resolveSessionIdFromSidebarLineage=(sid)=>
+          %(scenario_json)s==='sidebar-continuation'||%(scenario_json)s==='sidebar-metadata-new-chat'||%(scenario_json)s==='sidebar-metadata-profile-switch' ? 'sid-sidebar' : sid;
         const _messageReloadLimitForSession=()=>2;
         const _currentMessageRenderWindowSize=()=>1;
         const _messageRenderableMessageCount=()=>1;
@@ -266,16 +267,43 @@ def _run_node(scenario: str, branch: str) -> dict:
           const callerDone=runCaller();
           for(let i=0;i<10000&&!metadataRequested;i++) await Promise.resolve();
           if(!metadataRequested) throw new Error('metadata request was not reached');
-          if(%(scenario_json)s==='continuation'||%(scenario_json)s==='continuation-new-chat'||%(scenario_json)s==='continuation-profile-switch'||%(scenario_json)s==='continuation-new-chat-reject'||%(scenario_json)s==='continuation-profile-switch-reject'){
+          if(%(scenario_json)s==='sidebar-metadata-new-chat'||%(scenario_json)s==='sidebar-metadata-profile-switch'){
+            if(%(scenario_json)s==='sidebar-metadata-new-chat'){
+              S.session={session_id:'sid-new',message_count:0};
+              S.messages=[{role:'assistant',content:'new-chat-transcript'}];
+              _loadingSessionId='sid-new';
+            }else{
+              S.activeProfile='profile-new';
+              S.activeProfileIsDefault=false;
+              S.session={session_id:'sid-new-profile',message_count:0};
+              S.messages=[{role:'assistant',content:'profile-new-transcript'}];
+              _loadingSessionId='sid-new-profile';
+            }
+          }
+          if(%(scenario_json)s==='continuation'||%(scenario_json)s==='sidebar-continuation'||%(scenario_json)s==='continuation-new-chat'||%(scenario_json)s==='continuation-profile-switch'||%(scenario_json)s==='continuation-new-chat-reject'||%(scenario_json)s==='continuation-profile-switch-reject'){
             _metadataResolve({session:{
-              session_id:'sid-old',message_count:4,active_stream_id:null,
+              session_id:%(scenario_json)s==='sidebar-continuation'?'sid-sidebar':'sid-old',message_count:4,active_stream_id:null,
               continuation_session_id:'sid-child'
             }});
             for(let i=0;i<10000&&!continuationMetadataRequested;i++) await Promise.resolve();
             if(!continuationMetadataRequested) throw new Error('continuation metadata request was not reached');
             _continuationMetadataResolve({session:{session_id:'sid-child',message_count:5,active_stream_id:null}});
           }else{
-            _metadataResolve({session:{session_id:'sid-old',message_count:4,active_stream_id:%(stream)s}});
+            _metadataResolve({session:{session_id:%(scenario_json)s==='sidebar-metadata-new-chat'||%(scenario_json)s==='sidebar-metadata-profile-switch'?'sid-sidebar':'sid-old',message_count:4,active_stream_id:%(stream)s}});
+          }
+          if(%(scenario_json)s==='sidebar-metadata-new-chat'||%(scenario_json)s==='sidebar-metadata-profile-switch'){
+            await callerDone;
+            await Promise.resolve();
+            console.log(JSON.stringify({
+              scenario:%(scenario_json)s,branch:%(branch_json)s,
+              sid:S.session&&S.session.session_id,profile:S.activeProfile,
+              messages:S.messages,metadataRequested,messagesRequested,
+              renderCalls,clearLiveCalls,rearmCalls,
+              metadataRequestCount,messagesRequestCount,apiCalls,
+              loadingSessionId:_loadingSessionId,msgInner:msgInner.innerHTML,
+              continuationDuringLoad,
+            }));
+            return;
           }
           for(let i=0;i<10000&&!messagesRequested;i++) await Promise.resolve();
           if(!messagesRequested) throw new Error('message request was not reached');
@@ -293,7 +321,7 @@ def _run_node(scenario: str, branch: str) -> dict:
           }
           if(%(scenario_json)s==='new-chat-reject'||%(scenario_json)s==='profile-switch-reject'||%(scenario_json)s==='continuation-new-chat-reject'||%(scenario_json)s==='continuation-profile-switch-reject'){
             _messagesReject(new Error('old message response rejected after ownership change'));
-          }else if(%(scenario_json)s==='continuation'||%(scenario_json)s==='continuation-new-chat'||%(scenario_json)s==='continuation-profile-switch'){
+          }else if(%(scenario_json)s==='continuation'||%(scenario_json)s==='sidebar-continuation'||%(scenario_json)s==='continuation-new-chat'||%(scenario_json)s==='continuation-profile-switch'){
             _messagesResolve({session:{
               session_id:'sid-child',_messages_truncated:false,_messages_offset:0,
               messages:[{role:'assistant',content:'child-command-transcript',_webui_command_id:'command-old'}],
@@ -390,6 +418,37 @@ def test_owner_scoped_command_load_adopts_canonical_continuation():
     assert [m["content"] for m in out["messages"]] == ["child-command-transcript"]
     assert out["loadingSessionId"] is None
     assert out["msgInner"] == ""
+
+
+def test_caller_composes_sidebar_lineage_with_backend_continuation():
+    """A sidebar A→B handoff must retain ownership through backend B→C."""
+    out = _run_node("sidebar-continuation", "idle")
+
+    assert out["apiCalls"] == [
+        "/api/commands/exec",
+        "/api/session?session_id=sid-sidebar&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-child&messages=0&resolve_model=0",
+        "/api/session?session_id=sid-child&messages=1&resolve_model=0&msg_limit=2&expand_renderable=1",
+    ]
+    assert out["sid"] == "sid-child"
+    assert [m["content"] for m in out["messages"]] == ["child-command-transcript"]
+    assert out["loadingSessionId"] is None
+    assert out["msgInner"] == ""
+
+
+@pytest.mark.parametrize("scenario", ["sidebar-metadata-new-chat", "sidebar-metadata-profile-switch"])
+def test_sidebar_lineage_metadata_race_preserves_new_foreground(scenario: str):
+    """Navigation/profile changes while B metadata loads cannot be overwritten."""
+    out = _run_node(scenario, "idle")
+    expected_profile = "profile-new" if scenario.endswith("profile-switch") else "default"
+    expected_sid = "sid-new-profile" if scenario.endswith("profile-switch") else "sid-new"
+    expected_message = "profile-new-transcript" if scenario.endswith("profile-switch") else "new-chat-transcript"
+
+    assert out["metadataRequestCount"] == 1
+    assert out["messagesRequestCount"] == 0
+    assert out["sid"] == expected_sid
+    assert out["profile"] == expected_profile
+    assert [m["content"] for m in out["messages"]] == [expected_message]
 
 
 @pytest.mark.parametrize(
