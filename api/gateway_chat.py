@@ -1652,7 +1652,18 @@ def _gateway_home_for_profile(profile_name):
     return _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
 
 
-def _gateway_environment_for_profile(profile_name) -> dict[str, str]:
+def _gateway_runtime_env_for_profile(profile_name) -> dict[str, str]:
+    """What the session profile itself supplies to its environment (its ``.env`` and terminal config)."""
+    from api import profiles as _profiles
+
+    return _profiles.filter_runtime_env_for_gateway_parity(
+        _profiles.get_profile_runtime_env(_gateway_home_for_profile(profile_name))
+    )
+
+
+def _gateway_environment_for_profile(
+    profile_name, runtime_env: dict[str, str] | None = None
+) -> dict[str, str]:
     """The session profile's own environment, as a snapshot.
 
     The process environment without the values another profile's ``.env``
@@ -1661,12 +1672,10 @@ def _gateway_environment_for_profile(profile_name) -> dict[str, str]:
     """
     from api import profiles as _profiles
 
+    if runtime_env is None:
+        runtime_env = _gateway_runtime_env_for_profile(profile_name)
     environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
-    environ.update(
-        _profiles.filter_runtime_env_for_gateway_parity(
-            _profiles.get_profile_runtime_env(_gateway_home_for_profile(profile_name))
-        )
-    )
+    environ.update(runtime_env)
     return environ
 
 
@@ -2140,7 +2149,8 @@ def _run_gateway_chat_streaming(
         # One snapshot for the whole prelude: the config's ${VAR} expansion,
         # the Gateway URL and key, and the settings read from the environment
         # all come from it, so they cannot belong to different profiles.
-        _profile_environ = _gateway_environment_for_profile(_session_profile)
+        _profile_runtime_env = _gateway_runtime_env_for_profile(_session_profile)
+        _profile_environ = _gateway_environment_for_profile(_session_profile, _profile_runtime_env)
         cfg = _gateway_config_for_profile(_session_profile, _profile_environ)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
@@ -2171,20 +2181,22 @@ def _run_gateway_chat_streaming(
         try:
             from api.streaming import (
                 _load_webui_prefill_context,
-                _prefill_config_for_home,
+                _prefill_profile_scope,
                 _prefill_messages_with_webui_context,
                 _normalize_prefill_messages_before_user_turn,
                 _public_prefill_context_status,
                 _webui_ephemeral_system_prompt,
             )
 
-            # The prefill loaders read their overrides from the environment
-            # (HERMES_PREFILL_MESSAGES_FILE and the script settings): from the
-            # profile's snapshot here, not from the process.
-            with _gateway_profile_environment(_profile_environ):
-                prefill_context = _load_webui_prefill_context(
-                    _prefill_config_for_home(cfg, _gateway_home_for_profile(_session_profile))
-                )
+            # The prefill loaders take their settings, their relative paths
+            # and a recall script's environment from the profile's snapshot
+            # here, not from the process.
+            with _prefill_profile_scope(
+                _gateway_home_for_profile(_session_profile),
+                _profile_environ,
+                _profile_runtime_env,
+            ):
+                prefill_context = _load_webui_prefill_context(cfg)
             # #3324: the WebUI session/delivery context (connected platforms,
             # home channels, delivery hints, session framing) is now carried in
             # the ephemeral system prompt rather than a prefill `user` message.

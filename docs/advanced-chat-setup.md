@@ -327,7 +327,8 @@ relative `prefill_messages_file` is looked up in that profile's home (for the
 profile the WebUI process itself runs as, beside its `config.yaml`, as before).
 A `${VAR}` in a profile's `config.yaml` is filled from that profile's own
 environment, and so are settings a profile's `.env` provides, such as
-`HERMES_PREFILL_MESSAGES_FILE`. A profile does not inherit another profile's
+`HERMES_PREFILL_MESSAGES_FILE`; a prefill script a profile names runs with that
+profile's environment. A profile does not inherit another profile's
 `config.yaml` or `.env`.
 `HERMES_WEBUI_GATEWAY_BASE_URL` and `HERMES_WEBUI_GATEWAY_API_KEY` set in the
 WebUI process's environment win over a profile's `webui_gateway_base_url` and

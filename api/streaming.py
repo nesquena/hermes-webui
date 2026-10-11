@@ -38,7 +38,7 @@ from api.config import (
     release_stream_owned_registries,
     LOCK, SESSIONS, SESSIONS_MAX, SESSION_DIR,
     _get_session_agent_lock, _alias_session_agent_lock,
-    _set_thread_env, _clear_thread_env, _thread_local_env_value,
+    _set_thread_env, _clear_thread_env,
     register_active_run, update_active_run, unregister_active_run,
     unregister_stream_owner,
     peek_stream,
@@ -1425,43 +1425,26 @@ def _valid_prefill_messages(value) -> list[dict]:
     return messages
 
 
-def _resolve_prefill_path(raw: str) -> Path:
-    path = Path(str(raw)).expanduser()
-    if not path.is_absolute():
-        try:
-            from api.config import _get_config_path
-            path = _get_config_path().parent / path
-        except Exception:
-            path = Path.cwd() / path
-    return path
+# ── Prefill for a named profile (worker threads) ─────────────────────────────
+# The prefill loaders take three things from their surroundings: the directory
+# a relative path is looked up in, the environment a setting is read from, and
+# the environment a recall script runs with. On a request thread all three are
+# the active profile's. A worker thread that serves another profile's session
+# binds that profile's instead, for the duration of the load (#8152).
+_prefill_ctx = threading.local()
 
 
-def _prefill_env(name: str) -> str:
-    """A prefill setting from the environment.
+def _prefill_bound() -> Optional[dict]:
+    return getattr(_prefill_ctx, "bound", None)
 
-    Through ``_thread_local_env_value``: a worker that has bound a profile's
-    environment to its thread reads that profile's value (and, when the binding
-    blocks the process environment, nothing else); every other caller reads the
-    process environment as before.
+
+def _prefill_base_for_home(home) -> Path:
+    """Directory a profile's relative prefill paths are looked up in.
+
+    Its home, except for the ambient profile: that one's have always been
+    looked up beside its config file, which ``HERMES_CONFIG_PATH`` may put
+    outside the home.
     """
-    return _thread_local_env_value(name, "")
-
-
-def _prefill_config_for_home(config_data: Optional[dict], home) -> dict:
-    """Copy of ``config_data`` whose relative prefill paths are anchored at ``home``.
-
-    ``_resolve_prefill_path`` anchors a relative ``prefill_messages_file`` (and a
-    single-path prefill script) at the ambient config's directory. A worker
-    thread with no profile context has the process profile's there, so a
-    session of another profile hands in its own home first (#8152). Absolute
-    paths, ``~`` paths and script commands with arguments are left as they are.
-    """
-    cfg = dict(config_data) if isinstance(config_data, dict) else {}
-    if home is None:
-        return cfg
-    # The ambient profile's relative paths have always been looked up beside
-    # its config file, which HERMES_CONFIG_PATH may put outside the home. Keep
-    # that; only another profile's are anchored at its own home.
     from api.workspace import _safe_resolve
 
     base = _safe_resolve(Path(home).expanduser())
@@ -1473,24 +1456,73 @@ def _prefill_config_for_home(config_data: Optional[dict], home) -> dict:
             base = _safe_resolve(_get_config_path().parent)
     except Exception:
         logger.debug("Could not compare the prefill home with the ambient one", exc_info=True)
+    return base
 
-    def is_relative(raw: str) -> bool:
-        return not Path(raw).expanduser().is_absolute()
 
-    file_raw = cfg.get("prefill_messages_file")
-    if isinstance(file_raw, str) and file_raw.strip() and is_relative(file_raw):
-        cfg["prefill_messages_file"] = str(base / file_raw)
-    script_raw = cfg.get("webui_prefill_messages_script")
-    if isinstance(script_raw, str):
+@contextlib.contextmanager
+def _prefill_profile_scope(home, environ, profile_keys=()):
+    """Load prefill on this thread for the profile whose home is ``home``.
+
+    ``environ`` is that profile's environment snapshot: the prefill settings are
+    read from it and a recall script runs with it, so neither sees another
+    profile's values. ``profile_keys`` are the names the profile itself
+    supplied (its ``.env``): a relative path given under one of them is the
+    profile's and is looked up with its other relative paths; a relative path
+    in a variable exported for the whole process keeps the place it always had.
+    Thread-local; ``os.environ`` is not touched.
+    """
+    previous = _prefill_bound()
+    _prefill_ctx.bound = {
+        "base": _prefill_base_for_home(home),
+        "environ": {str(k): str(v) for k, v in dict(environ).items() if v is not None},
+        "profile_keys": frozenset(profile_keys),
+    }
+    try:
+        yield
+    finally:
+        _prefill_ctx.bound = previous
+
+
+def _prefill_env(name: str) -> str:
+    """A prefill setting from the environment: the bound profile's, else the process's."""
+    bound = _prefill_bound()
+    if bound is not None:
+        return bound["environ"].get(name, "")
+    return os.getenv(name, "")
+
+
+def _prefill_base(env_name: Optional[str] = None) -> Optional[Path]:
+    """Where a relative path is looked up, or None for the ambient rule.
+
+    ``env_name`` is the variable the path came from, None for a config value.
+    """
+    bound = _prefill_bound()
+    if bound is None:
+        return None
+    if env_name is not None and env_name not in bound["profile_keys"]:
+        return None
+    return bound["base"]
+
+
+def _prefill_file_setting(config_data: dict) -> tuple[str, Optional[Path]]:
+    """The prefill file to read and the directory a relative one is looked up in."""
+    env_value = _prefill_env("HERMES_PREFILL_MESSAGES_FILE")
+    if env_value:
+        return env_value, _prefill_base("HERMES_PREFILL_MESSAGES_FILE")
+    return str(config_data.get("prefill_messages_file") or ""), _prefill_base()
+
+
+def _resolve_prefill_path(raw: str, base: Optional[Path] = None) -> Path:
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        if base is not None:
+            return base / path
         try:
-            parts = shlex.split(script_raw)
-        except ValueError:
-            parts = []
-        if len(parts) == 1 and is_relative(parts[0]):
-            # As a list, which the loader takes as the exact argv: stored as
-            # text it would be split again, at any space in the home's path.
-            cfg["webui_prefill_messages_script"] = [str(base / parts[0])]
-    return cfg
+            from api.config import _get_config_path
+            path = _get_config_path().parent / path
+        except Exception:
+            path = Path.cwd() / path
+    return path
 
 
 _PREFILL_SCRIPT_OUTPUT_LIMIT = 262_144
@@ -1547,9 +1579,9 @@ def _apply_prefill_context_budget(context: dict, config_data: dict) -> dict:
     if char_count <= max_chars:
         return context
 
-    file_raw = _prefill_env("HERMES_PREFILL_MESSAGES_FILE") or str(config_data.get("prefill_messages_file") or "")
+    file_raw, file_base = _prefill_file_setting(config_data)
     if context.get("source") == "script" and file_raw:
-        fallback = _load_prefill_messages_file(file_raw, source="file_budget_fallback")
+        fallback = _load_prefill_messages_file(file_raw, source="file_budget_fallback", base=file_base)
         fallback_messages = fallback.get("messages") if isinstance(fallback, dict) else []
         fallback_chars = _prefill_context_char_count(fallback_messages if isinstance(fallback_messages, list) else [])
         if fallback.get("status") == "loaded" and fallback_chars <= max_chars:
@@ -1568,8 +1600,10 @@ def _prefill_not_configured() -> dict:
     return {"status": "not_configured", "source": "none", "label": "", "messages": [], "message_count": 0}
 
 
-def _load_prefill_messages_file(file_raw: str, *, source: str = "file", status: str = "loaded") -> dict:
-    path = _resolve_prefill_path(file_raw)
+def _load_prefill_messages_file(
+    file_raw: str, *, source: str = "file", status: str = "loaded", base: Optional[Path] = None
+) -> dict:
+    path = _resolve_prefill_path(file_raw, base)
     label = path.name or "prefill file"
     if not path.exists():
         return {"status": "error", "source": source, "label": label, "messages": [], "message_count": 0, "error": "prefill file not found"}
@@ -1588,7 +1622,7 @@ def _prefill_script_timeout(config_data: dict) -> float:
         return 5.0
 
 
-def _prefill_script_command(raw) -> list[str]:
+def _prefill_script_command(raw, base: Optional[Path] = None) -> list[str]:
     if isinstance(raw, (list, tuple)):
         return [str(part) for part in raw if str(part)]
     parts = shlex.split(str(raw or ""))
@@ -1597,7 +1631,7 @@ def _prefill_script_command(raw) -> list[str]:
     # A single script path mirrors prefill_messages_file path resolution.  More
     # complex commands keep their argv untouched so admins can pass arguments.
     if len(parts) == 1:
-        parts[0] = str(_resolve_prefill_path(parts[0]))
+        parts[0] = str(_resolve_prefill_path(parts[0], base))
     return parts
 
 
@@ -1618,10 +1652,18 @@ def _messages_from_prefill_script_output(text: str) -> list[dict]:
 
 
 def _load_prefill_messages_script(config_data: dict) -> dict:
-    script_raw = _prefill_env("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT") or config_data.get("webui_prefill_messages_script")
+    script_raw = _prefill_env("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT")
+    script_base = _prefill_base("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT")
+    if not script_raw:
+        script_raw = config_data.get("webui_prefill_messages_script")
+        script_base = _prefill_base()
     if not script_raw:
         return _prefill_not_configured()
-    command = _prefill_script_command(script_raw)
+    command = _prefill_script_command(script_raw, script_base)
+    # A script run for a bound profile gets that profile's environment; without
+    # one it inherits the process's, as before.
+    bound = _prefill_bound()
+    script_env = dict(bound["environ"]) if bound is not None else None
     label = Path(command[0]).name if command else "prefill script"
     if not command:
         return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script is empty"}
@@ -1633,6 +1675,7 @@ def _load_prefill_messages_script(config_data: dict) -> dict:
             stderr=subprocess.PIPE,
             timeout=_prefill_script_timeout(config_data),
             check=False,
+            env=script_env,
         )
     except subprocess.TimeoutExpired:
         return {"status": "error", "source": "script", "label": label, "messages": [], "message_count": 0, "error": "prefill script timed out"}
@@ -1666,13 +1709,15 @@ def _load_webui_prefill_context(
     """
     cfg = config_data if isinstance(config_data, dict) else get_config()
     script_context = _load_prefill_messages_script(cfg)
-    file_raw = _prefill_env("HERMES_PREFILL_MESSAGES_FILE") or str(cfg.get("prefill_messages_file") or "")
+    file_raw, file_base = _prefill_file_setting(cfg)
     if script_context.get("status") == "not_configured":
         if file_raw:
-            return _apply_prefill_context_budget(_load_prefill_messages_file(file_raw), cfg)
+            return _apply_prefill_context_budget(
+                _load_prefill_messages_file(file_raw, base=file_base), cfg
+            )
         return _prefill_not_configured()
     if script_context.get("status") == "error" and file_raw:
-        file_context = _load_prefill_messages_file(file_raw, source="file_fallback")
+        file_context = _load_prefill_messages_file(file_raw, source="file_fallback", base=file_base)
         if file_context.get("status") == "loaded":
             file_context["script_error"] = script_context.get("error", "")
             return _apply_prefill_context_budget(file_context, cfg)

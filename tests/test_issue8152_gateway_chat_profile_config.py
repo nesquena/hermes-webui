@@ -362,146 +362,210 @@ class TestTheDeliveryPromptsHome:
         assert "discord" not in _webui_delivery_context_prompt({}, profiles_on_disk[OTHER_PROFILE])
 
 
-class TestRelativePrefillPaths:
-    """``_prefill_config_for_home``: what the worker hands the prefill loader."""
+class TestWhereARelativePrefillPathIsLookedUp:
+    """``_prefill_profile_scope``: what the worker binds around the prefill load."""
 
-    def _anchor(self, config, home):
-        from api.streaming import _prefill_config_for_home
+    @pytest.fixture
+    def bind(self):
+        from api.streaming import _prefill_profile_scope
 
-        return _prefill_config_for_home(config, home)
+        def scope(home, environ=None, profile_keys=()):
+            return _prefill_profile_scope(home, environ or {}, profile_keys)
 
-    def test_a_relative_file_is_put_under_the_home(self, tmp_path):
-        out = self._anchor({"prefill_messages_file": "notes/prefill.json"}, tmp_path)
+        return scope
 
-        assert out["prefill_messages_file"] == str(tmp_path / "notes" / "prefill.json")
+    def test_a_relative_file_is_looked_up_in_the_home(self, bind, tmp_path):
+        from api.streaming import _prefill_base, _resolve_prefill_path
+
+        with bind(tmp_path):
+            assert _resolve_prefill_path("notes/prefill.json", _prefill_base()) == (
+                tmp_path.resolve() / "notes" / "prefill.json"
+            )
 
     @pytest.mark.parametrize("raw", ["/abs/prefill.json", "~/prefill.json"])
-    def test_an_absolute_or_home_relative_file_is_left_alone(self, tmp_path, raw):
-        assert self._anchor({"prefill_messages_file": raw}, tmp_path)["prefill_messages_file"] == raw
+    def test_an_absolute_or_home_relative_file_is_left_alone(self, bind, tmp_path, raw):
+        from pathlib import Path
 
-    def test_a_script_given_as_one_relative_path_is_put_under_the_home(self, tmp_path):
-        from api.streaming import _prefill_script_command
+        from api.streaming import _prefill_base, _resolve_prefill_path
 
-        out = self._anchor({"webui_prefill_messages_script": "recall.py"}, tmp_path)
+        with bind(tmp_path):
+            assert _resolve_prefill_path(raw, _prefill_base()) == Path(raw).expanduser()
 
-        assert _prefill_script_command(out["webui_prefill_messages_script"]) == [
-            str(tmp_path / "recall.py")
-        ]
+    def test_a_script_given_as_one_relative_path_is_looked_up_in_the_home(self, bind, tmp_path):
+        from api.streaming import _prefill_base, _prefill_script_command
 
-    @pytest.mark.parametrize(
-        "raw",
-        ["python3 recall.py", "/abs/recall.py", ["python3", "recall.py"], "", 'unbalanced "quote'],
-    )
-    def test_any_other_script_is_left_alone(self, tmp_path, raw):
-        """A command with arguments keeps its argv, as in
-        ``_prefill_script_command``; a list is the admin's exact argv."""
-        out = self._anchor({"webui_prefill_messages_script": raw}, tmp_path)
+        with bind(tmp_path):
+            assert _prefill_script_command("recall.py", _prefill_base()) == [
+                str(tmp_path.resolve() / "recall.py")
+            ]
 
-        assert out["webui_prefill_messages_script"] == raw
-
-    @pytest.mark.parametrize("config", [{}, {"prefill_messages_file": ""}, {"prefill_messages_file": None}, None])
-    def test_nothing_configured_stays_that_way(self, tmp_path, config):
-        out = self._anchor(config, tmp_path)
-
-        assert not out.get("prefill_messages_file")
-        assert "webui_prefill_messages_script" not in out
-
-    def test_a_home_with_a_space_in_it_still_gives_one_script_argument(self, tmp_path):
-        """The loader splits a script given as text with ``shlex``. An anchored
-        path stored as plain text would fall apart at the space."""
-        from api.streaming import _prefill_script_command
+    def test_a_home_with_a_space_in_it_still_gives_one_script_argument(self, bind, tmp_path):
+        from api.streaming import _prefill_base, _prefill_script_command
 
         home = tmp_path / "Application Support" / "hermes"
-        out = self._anchor({"webui_prefill_messages_script": "recall.py"}, home)
+        home.mkdir(parents=True)
+        with bind(home):
+            assert _prefill_script_command("recall.py", _prefill_base()) == [
+                str(home.resolve() / "recall.py")
+            ]
 
-        assert _prefill_script_command(out["webui_prefill_messages_script"]) == [
-            str(home / "recall.py")
-        ]
+    def test_a_quoted_script_name_with_a_space_is_one_argument_too(self, bind, tmp_path):
+        from api.streaming import _prefill_base, _prefill_script_command
 
-    def test_a_quoted_script_name_with_a_space_is_one_argument_too(self, tmp_path):
-        from api.streaming import _prefill_script_command
+        with bind(tmp_path):
+            assert _prefill_script_command('"my recall.py"', _prefill_base()) == [
+                str(tmp_path.resolve() / "my recall.py")
+            ]
 
-        out = self._anchor({"webui_prefill_messages_script": '"my recall.py"'}, tmp_path)
+    @pytest.mark.parametrize(
+        ("raw", "argv"),
+        [
+            ('"/opt/my tools/recall.py"', ["/opt/my tools/recall.py"]),
+            ("/abs/recall.py", ["/abs/recall.py"]),
+            ("python3 recall.py", ["python3", "recall.py"]),
+            (["python3", "recall.py"], ["python3", "recall.py"]),
+        ],
+    )
+    def test_any_other_script_keeps_its_arguments(self, bind, tmp_path, raw, argv):
+        """An absolute path is not moved; a command with arguments and a list
+        are the admin's exact argv, as in ``_prefill_script_command``."""
+        from api.streaming import _prefill_base, _prefill_script_command
 
-        assert _prefill_script_command(out["webui_prefill_messages_script"]) == [
-            str(tmp_path / "my recall.py")
-        ]
+        with bind(tmp_path):
+            assert _prefill_script_command(raw, _prefill_base()) == argv
 
-    def test_a_quoted_absolute_script_keeps_its_quotes(self, tmp_path):
-        """Already absolute: nothing to anchor, so the text is not rewritten
-        and the loader still sees one argument."""
-        from api.streaming import _prefill_script_command
-
-        raw = '"/opt/my tools/recall.py"'
-        out = self._anchor({"webui_prefill_messages_script": raw}, tmp_path)
-
-        assert out["webui_prefill_messages_script"] == raw
-        assert _prefill_script_command(out["webui_prefill_messages_script"]) == [
-            "/opt/my tools/recall.py"
-        ]
-
-    def test_a_script_in_a_home_with_a_space_runs(self, tmp_path):
+    def test_a_script_in_a_home_with_a_space_runs(self, bind, tmp_path):
         """End of the chain, with a real script."""
-        import os
-        import stat
-
         from api.streaming import _load_webui_prefill_context
 
+        if os.name == "nt":
+            pytest.skip("a script path is run directly; needs a shebang")
         home = tmp_path / "Application Support"
         home.mkdir()
         script = home / "recall.py"
         script.write_text(
-            "#!/usr/bin/env python3\nimport json\nprint(json.dumps("
-            + repr(PREFILL) + "))\n", encoding="utf-8",
+            "#!/usr/bin/env python3\nimport json\nprint(json.dumps(" + repr(PREFILL) + "))\n",
+            encoding="utf-8",
         )
-        script.chmod(script.stat().st_mode | stat.S_IXUSR)
-        if os.name == "nt":
-            pytest.skip("a script path is run directly; needs a shebang")
+        script.chmod(0o755)
 
-        loaded = _load_webui_prefill_context(
-            self._anchor({"webui_prefill_messages_script": "recall.py"}, home)
-        )
+        with bind(home, dict(os.environ)):
+            loaded = _load_webui_prefill_context({"webui_prefill_messages_script": "recall.py"})
 
         assert loaded.get("status") == "loaded", loaded
         assert loaded["message_count"] == 1
 
-    def test_a_relative_file_in_a_home_with_a_space_is_found(self, tmp_path):
+    def test_a_relative_file_in_a_home_with_a_space_is_found(self, bind, tmp_path):
         from api.streaming import _load_webui_prefill_context
 
         home = tmp_path / "Application Support"
         home.mkdir()
         (home / "prefill.json").write_text(json.dumps(PREFILL), encoding="utf-8")
 
-        loaded = _load_webui_prefill_context(
-            self._anchor({"prefill_messages_file": "prefill.json"}, home)
-        )
+        with bind(home):
+            loaded = _load_webui_prefill_context({"prefill_messages_file": "prefill.json"})
 
         assert loaded["status"] == "loaded"
 
-    def test_the_config_handed_in_is_not_changed(self, tmp_path):
-        config = {"prefill_messages_file": "prefill.json", "agent": {"reasoning_effort": "high"}}
-
-        out = self._anchor(config, tmp_path)
-
-        assert config["prefill_messages_file"] == "prefill.json"
-        assert out is not config and out["agent"] is config["agent"]
-
-    def test_without_a_home_nothing_is_anchored(self):
-        assert self._anchor({"prefill_messages_file": "prefill.json"}, None) == {
-            "prefill_messages_file": "prefill.json"
-        }
-
-    def test_the_loader_then_finds_the_file(self, tmp_path):
-        """End of the chain: the loader reads the anchored path."""
+    def test_the_file_a_failed_script_falls_back_to_is_looked_up_in_the_home(self, bind, tmp_path):
         from api.streaming import _load_webui_prefill_context
 
         (tmp_path / "prefill.json").write_text(json.dumps(PREFILL), encoding="utf-8")
 
-        loaded = _load_webui_prefill_context(
-            self._anchor({"prefill_messages_file": "prefill.json"}, tmp_path)
-        )
+        with bind(tmp_path, dict(os.environ)):
+            loaded = _load_webui_prefill_context({
+                "webui_prefill_messages_script": "/nonexistent/recall-script",
+                "prefill_messages_file": "prefill.json",
+            })
 
-        assert loaded["status"] == "loaded" and loaded["message_count"] == 1
+        assert (loaded["status"], loaded["source"]) == ("loaded", "file_fallback"), loaded
+
+    def test_the_file_an_oversized_script_falls_back_to_is_looked_up_in_the_home(
+        self, bind, tmp_path
+    ):
+        from api.streaming import _apply_prefill_context_budget
+
+        (tmp_path / "compact.json").write_text(
+            json.dumps([{"role": "assistant", "content": "compact"}]), encoding="utf-8"
+        )
+        oversized = {
+            "status": "loaded", "source": "script", "label": "recall.py", "message_count": 1,
+            "messages": [{"role": "assistant", "content": "x" * 400}],
+        }
+
+        with bind(tmp_path):
+            result = _apply_prefill_context_budget(
+                oversized,
+                {"webui_prefill_context_max_chars": 100, "prefill_messages_file": "compact.json"},
+            )
+
+        assert [m["content"] for m in result["messages"]] == ["compact"]
+
+    def test_a_path_from_the_profiles_own_variable_is_the_profiles(self, bind, tmp_path):
+        from api.streaming import _prefill_base
+
+        with bind(tmp_path, profile_keys={"HERMES_PREFILL_MESSAGES_FILE"}):
+            assert _prefill_base("HERMES_PREFILL_MESSAGES_FILE") == tmp_path.resolve()
+            # exported for the whole process: the ambient rule, as before
+            assert _prefill_base("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT") is None
+
+    def test_the_ambient_profiles_base_is_beside_its_config_file(self, tmp_path, monkeypatch):
+        import api.config as config
+        import api.profiles as profiles
+        from api.streaming import _prefill_base_for_home
+
+        elsewhere = tmp_path / "etc hermes"
+        elsewhere.mkdir()
+        (elsewhere / "config.yaml").write_text("{}\n", encoding="utf-8")
+        ambient = profiles.get_active_hermes_home()
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(elsewhere / "config.yaml"))
+        try:
+            assert _prefill_base_for_home(ambient) == elsewhere.resolve()
+            assert _prefill_base_for_home(tmp_path) == tmp_path.resolve()
+        finally:
+            monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+            config.reload_config()
+
+    def test_outside_a_scope_nothing_is_bound(self, monkeypatch):
+        from api.streaming import _prefill_base, _prefill_bound, _prefill_env
+
+        monkeypatch.setenv("REVIEW8153_NAME", "process")
+
+        assert _prefill_bound() is None
+        assert _prefill_base() is None and _prefill_base("REVIEW8153_NAME") is None
+        assert _prefill_env("REVIEW8153_NAME") == "process"
+
+    def test_the_scope_is_put_back_also_when_the_body_raises(self, bind, tmp_path):
+        from api.streaming import _prefill_bound, _prefill_env
+
+        with bind(tmp_path, {"REVIEW8153_NAME": "outer"}):
+            with pytest.raises(RuntimeError):
+                with bind(tmp_path / "inner", {"REVIEW8153_NAME": "inner"}):
+                    assert _prefill_env("REVIEW8153_NAME") == "inner"
+                    raise RuntimeError("boom")
+            assert _prefill_env("REVIEW8153_NAME") == "outer"
+        assert _prefill_bound() is None
+
+    def test_another_thread_does_not_see_it(self, bind, tmp_path):
+        import threading
+
+        from api.streaming import _prefill_bound
+
+        seen = []
+        with bind(tmp_path, {"REVIEW8153_NAME": "mine"}):
+            worker = threading.Thread(target=lambda: seen.append(_prefill_bound()))
+            worker.start()
+            worker.join()
+
+        assert seen == [None]
+
+    def test_the_process_environment_is_not_changed(self, bind, tmp_path):
+        before = dict(os.environ)
+
+        with bind(tmp_path, {"REVIEW8153_NAME": "snapshot"}):
+            assert "REVIEW8153_NAME" not in os.environ
+
+        assert dict(os.environ) == before
 
 
 class TestTheProfileConfigHelper:
@@ -748,17 +812,17 @@ class TestSettingsReadFromTheEnvironment:
             monkeypatch, "HERMES_PREFILL_MESSAGES_FILE",
             str(self._other_prefill(tmp_path, "the default profile's notes")),
         )
-        # get_profile_runtime_env reads the default home's files, which do not
-        # have it in this test, so hand the snapshot what the real .env would.
-        real = gateway_chat._gateway_environment_for_profile
+        # The default home of the test environment has no .env file, so hand
+        # the worker what reading a real one would give it.
+        real = gateway_chat._gateway_runtime_env_for_profile
 
         def with_its_own_env_file(profile_name):
-            environ = real(profile_name)
+            runtime_env = dict(real(profile_name))
             if not str(profile_name or "").strip() or profile_name == "default":
-                environ["HERMES_PREFILL_MESSAGES_FILE"] = os.environ["HERMES_PREFILL_MESSAGES_FILE"]
-            return environ
+                runtime_env["HERMES_PREFILL_MESSAGES_FILE"] = os.environ["HERMES_PREFILL_MESSAGES_FILE"]
+            return runtime_env
 
-        monkeypatch.setattr(gateway_chat, "_gateway_environment_for_profile", with_its_own_env_file)
+        monkeypatch.setattr(gateway_chat, "_gateway_runtime_env_for_profile", with_its_own_env_file)
 
         _, requests, _ = _send(None, tmp_path, monkeypatch)
 
@@ -883,13 +947,15 @@ class TestTheEnvironmentScope:
 
 class TestEachPrefillSettingFollowsTheBoundEnvironment:
     """The five places the prefill loaders read the environment. Inside a
-    bound profile environment each one reads the snapshot and not the process;
-    outside one, the process, as before."""
+    bound profile scope each one reads the snapshot and not the process;
+    outside one, the process, exactly as before."""
 
     @pytest.fixture
-    def scope(self):
+    def scope(self, tmp_path):
+        from api.streaming import _prefill_profile_scope
+
         def bind(**environ):
-            return gateway_chat._gateway_profile_environment(environ)
+            return _prefill_profile_scope(tmp_path, environ)
 
         return bind
 
@@ -959,3 +1025,166 @@ class TestEachPrefillSettingFollowsTheBoundEnvironment:
 
         assert [m["content"] for m in inside["messages"]] == ["compact"]
         assert without["source"] == "budget_compacted"
+
+
+class TestPrefillSourcesNamedInAProfilesEnvFile:
+    """A prefill file or script can be named in a profile's ``.env`` as well as
+    in its ``config.yaml``. It is still that profile's source: a relative path
+    is looked up in its home, and its script runs with its environment
+    (#8153 review)."""
+
+    SCRIPT = (
+        "#!/usr/bin/env python3\n"
+        "import json, os\n"
+        "print(json.dumps([{'role': 'assistant', 'content': "
+        "'token=' + os.environ.get('REVIEW8153_NOTES_TOKEN', 'unset')}]))\n"
+    )
+
+    def _status(self, events):
+        status = [item[1]["prefill"] for item in events if item[0] == "context_status"]
+        assert status
+        return status[-1]
+
+    def _contents(self, requests):
+        return [m["content"] for m in _chat(requests)["body"]["messages"][1:-1]]
+
+    def _script(self, home, name="recall.py"):
+        if os.name == "nt":
+            pytest.skip("a script path is run directly; needs a shebang")
+        script = home / name
+        script.write_text(self.SCRIPT, encoding="utf-8")
+        script.chmod(0o755)
+        return script
+
+    def test_a_relative_file_in_the_env_file_is_found_in_that_profiles_home(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        home = profiles_on_disk[OTHER_PROFILE]
+        (home / "notes.json").write_text(
+            json.dumps([{"role": "assistant", "content": "the play profile's notes"}]),
+            encoding="utf-8",
+        )
+        (home / ".env").write_text(
+            "API_SERVER_KEY=play-key\nHERMES_PREFILL_MESSAGES_FILE=notes.json\n", encoding="utf-8"
+        )
+
+        _, requests, events = _send(OTHER_PROFILE, tmp_path, monkeypatch)
+
+        assert self._status(events)["status"] == "loaded"
+        assert self._contents(requests) == ["the play profile's notes"]
+
+    def test_a_relative_script_in_the_env_file_is_run_from_that_profiles_home(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        home = profiles_on_disk[OTHER_PROFILE]
+        self._script(home)
+        (home / ".env").write_text(
+            "API_SERVER_KEY=play-key\nHERMES_WEBUI_PREFILL_MESSAGES_SCRIPT=recall.py\n",
+            encoding="utf-8",
+        )
+
+        _, _, events = _send(OTHER_PROFILE, tmp_path, monkeypatch)
+
+        status = self._status(events)
+        assert (status["status"], status["source"]) == ("loaded", "script"), status
+
+    def test_the_script_runs_with_the_profiles_environment(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """The token the script needs is in the profile's ``.env``; the process
+        has another profile's under the same name."""
+        import api.profiles as profiles
+
+        home = profiles_on_disk[OTHER_PROFILE]
+        self._script(home)
+        (home / "config.yaml").write_text(
+            f"webui_gateway_base_url: {PLAY_GATEWAY}\nwebui_prefill_messages_script: recall.py\n",
+            encoding="utf-8",
+        )
+        (home / ".env").write_text(
+            "API_SERVER_KEY=play-key\nREVIEW8153_NOTES_TOKEN=play-token\n", encoding="utf-8"
+        )
+        monkeypatch.setenv("REVIEW8153_NOTES_TOKEN", "default-token")
+        monkeypatch.setattr(
+            profiles, "_loaded_profile_env_keys",
+            set(profiles._loaded_profile_env_keys) | {"REVIEW8153_NOTES_TOKEN"},
+        )
+
+        _, requests, events = _send(OTHER_PROFILE, tmp_path, monkeypatch)
+
+        assert self._status(events)["status"] == "loaded", self._status(events)
+        assert self._contents(requests) == ["token=play-token"]
+
+    def test_the_script_does_not_see_another_profiles_value_it_has_none_of(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        import api.profiles as profiles
+
+        home = profiles_on_disk[OTHER_PROFILE]
+        self._script(home)
+        (home / "config.yaml").write_text(
+            f"webui_gateway_base_url: {PLAY_GATEWAY}\nwebui_prefill_messages_script: recall.py\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("REVIEW8153_NOTES_TOKEN", "default-token")
+        monkeypatch.setattr(
+            profiles, "_loaded_profile_env_keys",
+            set(profiles._loaded_profile_env_keys) | {"REVIEW8153_NOTES_TOKEN"},
+        )
+
+        _, requests, _ = _send(OTHER_PROFILE, tmp_path, monkeypatch)
+
+        assert self._contents(requests) == ["token=unset"]
+
+    def test_a_relative_override_exported_for_the_whole_process_keeps_its_old_place(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """Not from any profile's ``.env``: the operator's. It has always been
+        looked up beside the process profile's config file, and still is, also
+        for a chat in another profile."""
+        import api.config as config
+
+        elsewhere = tmp_path / "etc hermes"
+        elsewhere.mkdir()
+        (elsewhere / "config.yaml").write_text("{}\n", encoding="utf-8")
+        (elsewhere / "operator.json").write_text(
+            json.dumps([{"role": "assistant", "content": "the operator's notes"}]), encoding="utf-8"
+        )
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(elsewhere / "config.yaml"))
+        monkeypatch.setenv("HERMES_PREFILL_MESSAGES_FILE", "operator.json")
+        try:
+            _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+        finally:
+            monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+            config.reload_config()
+
+        assert self._contents(requests) == ["the operator's notes"]
+
+    def test_a_relative_script_exported_for_the_whole_process_keeps_its_old_place(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """The operator's, as the file override above: beside the process
+        profile's config file, also for a chat in another profile. The named
+        profile's home has a script of the same name that must not be the one."""
+        import api.config as config
+
+        elsewhere = tmp_path / "etc hermes"
+        elsewhere.mkdir()
+        (elsewhere / "config.yaml").write_text("{}\n", encoding="utf-8")
+        operator = self._script(elsewhere)
+        operator.write_text(
+            "#!/usr/bin/env python3\nimport json\n"
+            "print(json.dumps([{'role': 'assistant', 'content': 'the operator script'}]))\n",
+            encoding="utf-8",
+        )
+        self._script(profiles_on_disk[PROFILE])
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(elsewhere / "config.yaml"))
+        monkeypatch.setenv("HERMES_WEBUI_PREFILL_MESSAGES_SCRIPT", "recall.py")
+        try:
+            _, requests, events = _send(PROFILE, tmp_path, monkeypatch)
+        finally:
+            monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+            config.reload_config()
+
+        assert self._status(events)["status"] == "loaded", self._status(events)
+        assert self._contents(requests) == ["the operator script"]
