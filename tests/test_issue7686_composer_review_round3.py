@@ -82,9 +82,10 @@ def test_the_fitter_restores_the_button_box_in_finally() -> None:
     assert "_btnStyle.width='auto'" in body, (
         "the fitter must measure at the pill's own width, not the circle's"
     )
-    assert "_btnStyle.minWidth='0'" in body, (
-        "min-width:0 is what lets width:auto survive the burger stage's "
-        "width:34px during the measurement"
+    assert "_btnStyle.minWidth=(window.innerWidth<=640?'44px':'34px')" in body, (
+        "the fitter must reserve the button's real minimum while measuring "
+        "(34px desktop / 44px phone); min-width:0 measures the bare 16px "
+        "SVG in idle and clips the composer controls"
     )
     assert "_btnStyle.width=prevBtnWidth" in body
     assert "_btnStyle.minWidth=prevBtnMinWidth" in body

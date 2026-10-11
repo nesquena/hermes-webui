@@ -204,56 +204,24 @@ def _locale_block(text, lang):
     return m.group(1) if m else None
 
 
-@pytest.mark.parametrize("lang", [
-    "it", "ja", "ru", "es", "de", "zh", "pt", "ko", "fr", "cs", "tr", "pl", "vi",
-])
 @pytest.mark.parametrize("key", [
     "composer_action_stop",
     "composer_action_queue",
     "composer_action_interrupt",
     "composer_action_steer",
 ])
-def test_label_key_absent_from_non_english_locale_block(lang, key):
-    """#1804 re-gate 9/24 maintainer finding: the four new keys were
-    English in all 14 non-English locales while the neighbouring tooltip
-    keys (``composer_stop`` and friends) are translated. Fix is to make
-    the English fallback explicit — drop the keys from every non-English
-    block so ``t()`` resolves them via ``LOCALES.en`` (see static/i18n.js
-    line ~27065: ``val = _locale[key] ?? LOCALES.en[key]``). The 9/24
-    review accepted either translating or dropping; dropping keeps the
-    i18n.js diff small and the English fallback honest in the locale
-    files instead of a duplicate copy-paste of the en values.
-    """
-    body = _locale_block(I18N_JS, lang)
-    assert body is not None, f"locale {lang!r} not present in i18n.js"
-    # The key MUST NOT appear in non-English blocks. ``t()`` falls back
-    # to LOCALES.en, so the busy-mode pill renders the English label
-    # (the maintainer-accepted trade-off — see the comment in this file
-    # and the review on PR #7686).
-    assert not re.search(rf"^\s{{4}}{re.escape(key)}:", body, re.MULTILINE), (
-        f"key {key!r} should be absent from locale {lang!r}; "
-        "non-English blocks must rely on the LOCALES.en fallback so the "
-        "English fallback is explicit (see #1804 re-gate 9/24 review)."
-    )
-
-
-@pytest.mark.parametrize("key", [
-    "composer_action_stop",
-    "composer_action_queue",
-    "composer_action_interrupt",
-    "composer_action_steer",
-])
-def test_label_key_present_only_in_en_block(key):
-    """The four keys live in ``LOCALES.en`` (the i18n fallback) and
-    nowhere else. With the 14 non-English blocks dropping them, the
-    total occurrence count is exactly 1 (the en block).
+def test_label_key_present_in_en_block(key):
+    """The four keys must live in ``LOCALES.en`` so ``t()`` can fall back
+    to them. Non-English blocks are free to translate them later — this
+    test no longer forbids a translated copy (the #1804 re-gate 9/24
+    absence pins were dropped per the #7686 review; the English fallback
+    is what the pill relies on, not the absence of translations).
     """
     pattern = re.compile(rf"\n    {re.escape(key)}:\s*'([^']*)',")
     matches = pattern.findall(I18N_JS)
-    assert len(matches) == 1, (
-        f"Expected exactly 1 entry for {key!r} (LOCALES.en only — "
-        f"non-English blocks must drop the key so the English fallback "
-        f"is explicit, per #1804 re-gate 9/24 review); found {len(matches)}"
+    assert len(matches) >= 1, (
+        f"Expected at least the LOCALES.en entry for {key!r} so t() can "
+        f"fall back to it; found {len(matches)}"
     )
     body = _locale_block(I18N_JS, "en")
     assert body is not None, "en locale block missing"
