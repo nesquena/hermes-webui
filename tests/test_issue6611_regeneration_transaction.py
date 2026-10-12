@@ -1,5 +1,7 @@
 import copy
+import json
 import queue
+import subprocess
 import threading
 from types import SimpleNamespace
 from pathlib import Path
@@ -17,6 +19,7 @@ from api.session_ops import (
 )
 
 from tests._issue6611_fixture import load_issue6611_fixture
+from tests.js_source_extract import extract_function
 
 
 def _session():
@@ -30,6 +33,32 @@ def _session():
         context_messages=copy.deepcopy(rows),
         workspace="C:/workspace",
     )
+
+
+@pytest.fixture
+def isolated_stream_registry():
+    """Keep fake regeneration workers from leaking registered streams to neighbors."""
+    from api import config, routes
+
+    route_streams = routes.STREAMS
+    config_streams = config.STREAMS
+    route_before = dict(route_streams)
+    config_before = dict(config_streams)
+    isolated = {}
+    routes.STREAMS = isolated
+    config.STREAMS = isolated
+    try:
+        yield isolated
+    finally:
+        with routes.STREAMS_LOCK:
+            isolated.clear()
+        assert not isolated
+        routes.STREAMS = route_streams
+        config.STREAMS = config_streams
+        assert routes.STREAMS is route_streams
+        assert config.STREAMS is config_streams
+        assert route_streams == route_before
+        assert config_streams == config_before
 
 
 def test_plan_installs_rows_and_context_as_one_prepared_pair():
@@ -502,6 +531,227 @@ def test_locked_start_always_replans_after_browser_validation():
     assert "plan = plan_regeneration(" in body
     assert "expected_revision=turn.revision" in body
     assert "lock_held=True" in body
+
+
+@pytest.mark.parametrize("backend_is_gateway", (False, True))
+def test_regeneration_start_response_keeps_accepted_turn_identity_through_worker_completion(
+    monkeypatch, backend_is_gateway, isolated_stream_registry
+):
+    from api import routes, turn_journal
+    from api.helpers import public_session_projection
+    from api.process_event_utils import build_active_turn_token
+
+    session = _session()
+    session.session_id = f"regen-response-{backend_is_gateway}"
+    client_messages = copy.deepcopy(session.messages)
+    plan = plan_regeneration(session)
+    worker_finished = threading.Event()
+    projection_snapshot = {}
+
+    def finish_worker(*_args, **_kwargs):
+        projection_snapshot.update(
+            session_id=session.session_id,
+            active_stream_id=session.active_stream_id,
+            pending_started_at=session.pending_started_at,
+            messages=copy.deepcopy(session.messages),
+        )
+        session.active_stream_id = None
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
+        worker_finished.set()
+
+    monkeypatch.setattr(routes, "_run_gateway_chat_streaming", finish_worker)
+    monkeypatch.setattr(routes, "_run_agent_streaming", finish_worker)
+    monkeypatch.setattr(routes, "register_session_writeback_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "clear_session_writeback_owner_if_owned", lambda *_args: None)
+    monkeypatch.setattr(routes, "register_stream_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "unregister_stream_owner", lambda *_args: None)
+    monkeypatch.setattr(routes, "create_stream_channel", lambda: queue.Queue())
+    monkeypatch.setattr(routes, "compression_recovery_payload_for_session", lambda *_args: None)
+    monkeypatch.setattr(routes, "set_last_workspace", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(turn_journal, "append_turn_journal_event", lambda *_args, **_kwargs: {"turn_id": "regen-turn"})
+    monkeypatch.setattr(Session, "save", lambda *_args, **_kwargs: None)
+
+    import api.gateway_chat as gateway_chat
+
+    monkeypatch.setattr(gateway_chat, "_mark_gateway_run_starting", lambda *_args: None)
+    monkeypatch.setattr(gateway_chat, "_finish_gateway_run_starting", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(gateway_chat, "_clear_gateway_run_starting", lambda *_args: None)
+
+    real_thread = threading.Thread
+
+    class WorkerThread:
+        def __init__(self, *, target, daemon=True):
+            self.thread = real_thread(target=target, daemon=daemon)
+
+        def start(self):
+            self.thread.start()
+
+        def join(self, timeout=None):
+            self.thread.join(timeout=timeout)
+
+    monkeypatch.setattr(routes.threading, "Thread", WorkerThread)
+    real_event = threading.Event
+    controlled_events = []
+
+    class ControlledEvent:
+        def __init__(self):
+            self.event = real_event()
+            self.is_release_event = not controlled_events
+            controlled_events.append(self)
+
+        def wait(self, timeout=None):
+            return self.event.wait(timeout=timeout)
+
+        def set(self):
+            self.event.set()
+            if self.is_release_event:
+                assert worker_finished.wait(2)
+
+        def is_set(self):
+            return self.event.is_set()
+
+    monkeypatch.setattr(routes.threading, "Event", ControlledEvent)
+    result = routes._start_regeneration_stream_locked(
+        session,
+        turn=plan.turn,
+        workspace="C:/workspace",
+        model="model",
+        model_provider="provider",
+        normalized_model=False,
+        diag=None,
+        goal_related=False,
+        source="webui",
+        moa_config=None,
+        backend_is_gateway=backend_is_gateway,
+    )
+
+    assert result["stream_id"] in isolated_stream_registry
+    assert worker_finished.is_set()
+    assert session.active_stream_id is None
+    assert session.pending_started_at is None
+    token = build_active_turn_token(result["stream_id"], projection_snapshot["pending_started_at"])
+    assert result["pending_started_at"] == projection_snapshot["pending_started_at"]
+    assert result["active_turn_token"] == token
+    retained_user = session.messages[-1]
+    retained_context_user = session.context_messages[-1]
+    assert retained_user["_active_turn_token"] == token
+    assert retained_context_user["_active_turn_token"] == token
+
+    get_active_turn_token = build_active_turn_token(
+        projection_snapshot["active_stream_id"],
+        projection_snapshot["pending_started_at"],
+    )
+    assert get_active_turn_token == result["active_turn_token"]
+    public_session = public_session_projection(
+        {
+            "session_id": projection_snapshot["session_id"],
+            "active_stream_id": projection_snapshot["active_stream_id"],
+            "active_turn_token": get_active_turn_token,
+            "pending_started_at": projection_snapshot["pending_started_at"],
+            "messages": projection_snapshot["messages"],
+        }
+    )
+    assert public_session["active_turn_token"] == token
+    assert public_session["messages"][-1]["_active_turn_user"] is True
+    assert all("_active_turn_token" not in row for row in public_session["messages"])
+
+    ui_source = (Path(__file__).parents[1] / "static" / "ui.js").read_text(encoding="utf-8")
+    messages_source = (Path(__file__).parents[1] / "static" / "messages.js").read_text(encoding="utf-8")
+    sessions_source = (Path(__file__).parents[1] / "static" / "sessions.js").read_text(encoding="utf-8")
+    limits_start = ui_source.index("const INFLIGHT_STATE_DEFAULT_LIMITS = {")
+    limits_end = ui_source.index("\n};", limits_start) + 3
+    browser_storage = "\n".join(
+        [
+            ui_source[limits_start:limits_end],
+            *(
+                extract_function(ui_source, name)
+                for name in (
+                    "_boundedInflightInt", "_getInflightStateLimits", "_truncateInflightValue",
+                    "_compactInflightState", "_readInflightStateMap", "_isStorageQuotaError",
+                    "_writeInflightStateMap", "saveInflightState",
+                )
+            ),
+        ]
+    )
+    ownership_helpers = "\n".join(
+        extract_function(ui_source, name)
+        for name in (
+            "_captureSessionActiveTurnIdentity", "_acceptedStartMayUpdateSession",
+            "_activeTurnTokenMatches", "_pendingActiveTurnUserMessage",
+        )
+    )
+    transcript_helpers = "\n".join(
+        extract_function(sessions_source, name)
+        for name in (
+            "_messageComparableText", "_stripAttachedFilesMarker", "_stripForcedSkillEnvelope",
+            "_normalizeUserTranscriptText", "_sameTranscriptMessage", "_opaqueActiveTurnToken",
+        )
+    )
+    function_start = messages_source.index("async function startRegeneration(")
+    function_end = messages_source.index("\nconst LIVE_STREAMS=", function_start)
+    browser_function = messages_source[function_start:function_end]
+    script = r"""
+const assert=require('assert');
+const INFLIGHT_STATE_KEY='hermes-webui-inflight-state';
+const INFLIGHT_KEY='hermes-webui-inflight';
+const localStorage={values:Object.create(null),getItem(k){return this.values[k]||null;},setItem(k,v){this.values[k]=String(v);},removeItem(k){delete this.values[k];}};
+const result={attached:[],marked:[]};
+let S={session:{session_id:__SESSION_ID__,regeneration_revision:__REVISION__,active_stream_id:null,active_turn_token:'old-selected-turn'},messages:__CLIENT_MESSAGES__,activeStreamId:null,busy:false};
+const INFLIGHT={};
+function renderMessages(){}
+function setBusy(value){S.busy=!!value;}
+function ensureLiveWorklogShell(){}
+function appendThinking(){}
+function removeThinking(){}
+function setComposerStatus(){}
+function clearInflightState(){}
+function markInflight(sid,streamId){result.marked.push([sid,streamId]);}
+function showLiveRunStatus(){}
+function updateSendBtn(){}
+function renderSessionList(){}
+function applySessionTitleUpdate(){}
+function attachLiveStream(sid,streamId){result.attached.push([sid,streamId]);}
+__BROWSER_STORAGE__
+__OWNERSHIP_HELPERS__
+__TRANSCRIPT_HELPERS__
+__REGENERATION_FUNCTION__
+let resolveStart,notifyStart;
+const startCalled=new Promise(resolve=>notifyStart=resolve);
+async function api(){notifyStart();return await new Promise(resolve=>resolveStart=resolve);}
+(async()=>{
+  const task=startRegeneration(__SESSION_ID__,__REVISION__);
+  await startCalled;
+  S.session={...__PUBLIC_SESSION__,regeneration_revision:null};
+  S.messages=JSON.parse(JSON.stringify(__PUBLIC_SESSION__.messages));
+  resolveStart(__START_RESULT__);
+  await task;
+  const owner=INFLIGHT[__SESSION_ID__].messages.find(row=>row&&row.role==='user');
+  const persisted=JSON.parse(localStorage.getItem(INFLIGHT_STATE_KEY))[__SESSION_ID__];
+  assert.strictEqual(S.session.active_turn_token,__START_RESULT__.active_turn_token);
+  assert.strictEqual(INFLIGHT[__SESSION_ID__].activeTurnToken,__START_RESULT__.active_turn_token);
+  assert.strictEqual(owner._active_turn_token,__START_RESULT__.active_turn_token);
+  assert.strictEqual(persisted.activeTurnToken,__START_RESULT__.active_turn_token);
+  assert.strictEqual(persisted.messages.find(row=>row&&row.role==='user')._active_turn_token,__START_RESULT__.active_turn_token);
+  assert.deepStrictEqual(result.marked,[[__SESSION_ID__,__START_RESULT__.stream_id]]);
+  assert.deepStrictEqual(result.attached,[[__SESSION_ID__,__START_RESULT__.stream_id]]);
+})().catch(error=>{console.error(error.stack||error);process.exitCode=1;});
+"""
+    script = (
+        script.replace("__SESSION_ID__", json.dumps(session.session_id))
+        .replace("__REVISION__", json.dumps(plan.revision))
+        .replace("__CLIENT_MESSAGES__", json.dumps(client_messages))
+        .replace("__PUBLIC_SESSION__", json.dumps(public_session))
+        .replace("__START_RESULT__", json.dumps(result))
+        .replace("__BROWSER_STORAGE__", browser_storage)
+        .replace("__OWNERSHIP_HELPERS__", ownership_helpers)
+        .replace("__TRANSCRIPT_HELPERS__", transcript_helpers)
+        .replace("__REGENERATION_FUNCTION__", browser_function)
+    )
+    completed = subprocess.run(["node", "-e", script], text=True, capture_output=True)
+    assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
 def test_regeneration_preview_has_no_request_snapshot_or_outer_restore_owner():

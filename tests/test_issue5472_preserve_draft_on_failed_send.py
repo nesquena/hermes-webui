@@ -11,7 +11,7 @@ must retype.
 Fix: ``send()`` snapshots the ORIGINAL typed text + staged files BEFORE slash
 rewrites (/moa, bundles) mutate the payload and BEFORE the upload drains
 ``S.pendingFiles``. On a start-time throw,
-``_restoreComposerDraftAfterFailedSend(text, files, sid)`` restores that exact
+``_restoreComposerDraftAfterFailedSend(text, files, sid, clearPromise)`` restores that exact
 snapshot, re-stages the files, and re-persists the draft. It is session-aware
 (never pollutes a different session's visible composer) and never clobbers a new
 message the user began typing during the async window.
@@ -46,14 +46,15 @@ def _helper_body() -> str:
     return MESSAGES_JS[start:end]
 
 
-def test_helper_has_new_three_arg_signature_and_guards():
+def test_helper_has_load_aware_signature_and_guards():
     body = _helper_body()
     assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise)" in body
     # No-op when there is nothing to restore (no text AND no staged files).
     assert "if(!restore&&!files.length) return false;" in body
-    # Session-aware: never mutate a different session's visible composer.
-    assert "const visibleSid=(S.session&&S.session.session_id)||null;" in body
-    assert "const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);" in body
+    # Session-aware: a pending load owns the pane even while S.session still
+    # names the old session, so visible mutations use the shared load-aware gate.
+    assert "const belongsToVisible=typeof _isSessionCurrentPane==='function'" in body
+    assert "_isSessionCurrentPane(sid)" in body
     # Never clobber a message the user began typing during the async window.
     assert "if(inp && !String(inp.value||'').trim()){" in body
     # Restores text and re-stages files.
@@ -62,8 +63,9 @@ def test_helper_has_new_three_arg_signature_and_guards():
     # The deferred persist is stale-aware: re-reads the LIVE composer when the
     # failed session is still visible (Codex #5488 catch), rather than the
     # captured snapshot.
-    assert "const stillVisible=(S.session&&S.session.session_id)===sid;" in body
+    assert "const stillVisible=typeof _isSessionCurrentPane==='function'" in body
     assert "const liveText=inp?String(inp.value||''):restore;" in body
+    assert "_saveComposerDraftNow(sid, restore, files);" in body
 
 
 def test_send_captures_immutable_snapshot_before_rewrites_and_upload():
@@ -161,7 +163,9 @@ def test_restore_persist_chains_after_the_clear_promise():
 # Behavioral test — actually execute the helper in a JS sandbox
 # ---------------------------------------------------------------------------
 
-def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, sid="sid-1"):
+def _run_helper_in_node(
+    draft_text, files_snapshot, initial_input, visible_sid, sid="sid-1", loading_sid=None
+):
     """Execute _restoreComposerDraftAfterFailedSend in a node vm sandbox."""
     node = shutil.which("node")
     if not node:  # pragma: no cover
@@ -179,6 +183,11 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         };
         const $ = (id) => (id === 'msg' ? state.input : null);
         const S = {pendingFiles: state.pendingFiles, session: %(session)s};
+        const _loadingSessionId = %(loading_sid)s;
+        function _isSessionCurrentPane(sid){
+          return !!(sid && S.session && S.session.session_id === sid
+            && (!_loadingSessionId || _loadingSessionId === sid));
+        }
         function autoResize(){ state.input.resized = true; }
         function updateSendBtn(){ state.sendBtnUpdated = true; }
         function renderTray(){ state.trayRendered = true; }
@@ -204,6 +213,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         "draft_text": json.dumps(draft_text),
         "files": json.dumps(files_snapshot),
         "sid": json.dumps(sid),
+        "loading_sid": json.dumps(loading_sid),
     }
     proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
@@ -257,6 +267,26 @@ def test_does_not_pollute_a_different_visible_session():
     assert out["inputValue"] == ""
     assert out["pendingFiles"] == []
     assert out["saved"] == {"sid": "sid-1", "text": "failed on old session", "files": []}
+
+
+def test_pending_load_owns_the_new_pane_for_background_failure_recovery():
+    """A pending B load makes an installed A send background-owned at the boundary."""
+    files = [{"name": "a.txt"}]
+    out = _run_helper_in_node(
+        "failed while switching",
+        files,
+        "",
+        visible_sid="sid-1",
+        loading_sid="sid-2",
+    )
+    assert out["ret"] is False
+    assert out["inputValue"] == ""
+    assert out["pendingFiles"] == []
+    assert out["saved"] == {
+        "sid": "sid-1",
+        "text": "failed while switching",
+        "files": files,
+    }
 
 
 def test_noop_when_nothing_to_restore():

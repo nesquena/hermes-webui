@@ -37,6 +37,60 @@ def _function_body(src: str, name: str) -> str:
     return source[source.find("{") :]
 
 
+def _production_pending_helpers() -> str:
+    epsilon_start = UI_JS.find("const _PENDING_ACTIVE_TURN_TS_EPSILON=")
+    assert epsilon_start >= 0
+    epsilon_end = UI_JS.find("\n", epsilon_start)
+    return "\n".join(
+        [
+            UI_JS[epsilon_start:epsilon_end],
+            _function_source(UI_JS, "_timestampSeconds"),
+            _function_source(UI_JS, "_firstValidTimestampSeconds"),
+            _function_source(UI_JS, "_isTailActivityOwnedByCandidateTurn"),
+            _function_source(UI_JS, "_isCanonicalAssistantToolCallEnvelope"),
+            _function_source(UI_JS, "_pendingCurrentTailUserMessage"),
+            _function_source(UI_JS, "_messageTimestampSeconds"),
+            _function_source(UI_JS, "_activeTurnTokenMatches"),
+            _function_source(UI_JS, "_pendingActiveTurnUserMessage"),
+            _function_source(UI_JS, "msgContent"),
+            _function_source(UI_JS, "_isContextCompactionText"),
+            _function_source(UI_JS, "_isContextCompactionMessage"),
+            _function_source(UI_JS, "getPendingSessionMessage"),
+        ]
+    )
+
+
+def _merge_helpers() -> str:
+    return "\n".join(
+        [
+            _function_source(SESSIONS_JS, "_messageComparableText"),
+            _function_source(SESSIONS_JS, "_stripAttachedFilesMarker"),
+            _function_source(SESSIONS_JS, "_stripForcedSkillEnvelope"),
+            _function_source(SESSIONS_JS, "_normalizeUserTranscriptText"),
+            _function_source(SESSIONS_JS, "_sameTranscriptMessage"),
+            _function_source(SESSIONS_JS, "_opaqueActiveTurnToken"),
+            _function_source(SESSIONS_JS, "_currentTailUserMessage"),
+            _function_source(SESSIONS_JS, "_hasCurrentTailUserDuplicate"),
+            _production_pending_helpers(),
+            _function_source(SESSIONS_JS, "_mergePendingSessionMessage"),
+        ]
+    )
+
+
+def _reattach_helpers() -> str:
+    return "\n".join(
+        [
+            _merge_helpers(),
+            _function_source(SESSIONS_JS, "_currentTurnAssistantText"),
+            _function_source(SESSIONS_JS, "_compactTranscriptText"),
+            _function_source(SESSIONS_JS, "_dropCurrentTurnAssistantMessages"),
+            _function_source(SESSIONS_JS, "_ensureInflightLiveAssistantMessage"),
+            _function_source(SESSIONS_JS, "_prepareRunningLiveTail"),
+            _function_source(SESSIONS_JS, "_mergeInflightTailMessages"),
+        ]
+    )
+
+
 # ─── Shared helper contract ────────────────────────────────────────────────
 
 def test_merge_pending_session_message_is_a_global_helper():
@@ -131,34 +185,18 @@ def test_merge_helper_repairs_malformed_order_and_is_idempotent():
     """A reconnect can already contain [live assistant, pending user]. The
     canonical helper must move that exact user row before the live boundary,
     preserve its metadata/attachments, and remain ordered on repeated probes."""
-    helpers = "\n".join(
-        [
-            _function_source(SESSIONS_JS, "_messageComparableText"),
-            _function_source(SESSIONS_JS, "_stripAttachedFilesMarker"),
-            _function_source(SESSIONS_JS, "_stripForcedSkillEnvelope"),
-            _function_source(SESSIONS_JS, "_normalizeUserTranscriptText"),
-            _function_source(SESSIONS_JS, "_sameTranscriptMessage"),
-            _function_source(SESSIONS_JS, "_currentTailUserMessage"),
-            _function_source(SESSIONS_JS, "_hasCurrentTailUserDuplicate"),
-            _function_source(SESSIONS_JS, "_mergePendingSessionMessage"),
-        ]
-    )
+    helpers = _merge_helpers()
     script = f"""
 {helpers}
-function getPendingSessionMessage(session, messages){{
-  const text=String(session.pending_user_message||'').trim();
-  if(!text) return null;
-  return {{role:'user',content:text,_pending:true,_ts:session.pending_started_at}};
-}}
 const historical={{role:'user',content:'same prompt',_ts:1}};
 const settled={{role:'assistant',content:'old answer',_ts:2}};
-const live={{role:'assistant',content:'working',_live:true,_ts:4}};
+const live={{role:'assistant',content:'working',_live:true,_ts:4,_active_turn_token:'opaque:turn-3'}};
 const misplaced={{
   role:'user',content:'same prompt',_pending:true,_ts:3,
-  attachments:[{{path:'proof.txt'}}],_source:'resume'
+  attachments:[{{path:'proof.txt'}}],_source:'resume',_active_turn_token:'opaque:turn-3'
 }};
 const messages=[historical,settled,live,misplaced];
-const session={{pending_user_message:'same prompt',pending_started_at:3}};
+const session={{pending_user_message:'same prompt',pending_started_at:3,active_turn_token:'opaque:turn-3'}};
 const first=_mergePendingSessionMessage(session,messages);
 const afterFirst=messages.map(m=>({{role:m.role,content:m.content,live:!!m._live,ts:m._ts,attachments:m.attachments,source:m._source}}));
 const second=_mergePendingSessionMessage(session,messages);
@@ -166,7 +204,7 @@ process.stdout.write(JSON.stringify({{first,second,afterFirst,final:messages}}))
 """
     result = _run_node(script)
 
-    assert result["first"] is True
+    assert result["first"] is False
     assert result["second"] is False
     assert [row["role"] for row in result["afterFirst"]] == [
         "user",
@@ -174,6 +212,8 @@ process.stdout.write(JSON.stringify({{first,second,afterFirst,final:messages}}))
         "user",
         "assistant",
     ]
+    assert result["afterFirst"][2]["live"] is False
+    assert result["afterFirst"][3]["live"] is True
     repaired = result["afterFirst"][2]
     assert repaired["ts"] == 3
     assert repaired["attachments"] == [{"path": "proof.txt"}]
@@ -182,21 +222,400 @@ process.stdout.write(JSON.stringify({{first,second,afterFirst,final:messages}}))
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_merge_helper_fails_closed_without_exact_pending_owner():
+    """Unknown identity must materialize safely without adopting attachments."""
+    helpers = _merge_helpers()
+    script = f"""
+{helpers}
+function summarize(rows){{
+  return rows.map(row=>({{
+    id:row.id,
+    role:row.role,
+    content:row.content,
+    token:row._active_turn_token,
+    ts:row._ts,
+    live:!!row._live,
+    pending:!!row._pending,
+    attachments:row.attachments,
+  }}));
+}}
+function runCase(name, messages, session, tracked){{
+  const before=tracked.map(row=>({{id:row.id,attachments:row.attachments}}));
+  const pendingOwner=_pendingActiveTurnUserMessage(messages,session);
+  const merged=_mergePendingSessionMessage(session,messages);
+  const after=tracked.map(row=>({{id:row.id,attachments:row.attachments}}));
+  return {{name,merged,pendingOwner:pendingOwner&&pendingOwner.id,before,after,rows:summarize(messages)}};
+}}
+const missingLive={{role:'assistant',content:'working',_live:true,_ts:4,_active_turn_token:'opaque:missing'}};
+const missingOwner={{id:'missing-owner',role:'user',content:'same prompt',_ts:3,attachments:[{{path:'original-missing'}}]}};
+const missingMessages=[{{role:'user',content:'old',_ts:1}},missingLive,missingOwner];
+const missingSession={{pending_user_message:'same prompt',pending_started_at:3,active_turn_token:'opaque:missing',pending_attachments:[{{path:'pending'}}]}};
+
+const duplicateLive={{role:'assistant',content:'working',_live:true,_ts:4,_active_turn_token:'opaque:duplicate'}};
+const duplicateOne={{id:'duplicate-one',role:'user',content:'same prompt',_ts:3,_active_turn_token:'opaque:duplicate',attachments:[{{path:'original-one'}}]}};
+const duplicateTwo={{id:'duplicate-two',role:'user',content:'same prompt',_ts:3,_active_turn_token:'opaque:duplicate',attachments:[{{path:'original-two'}}]}};
+const duplicateMessages=[{{role:'user',content:'old',_ts:1}},duplicateLive,duplicateOne,duplicateTwo];
+const duplicateSession={{pending_user_message:'same prompt',pending_started_at:3,active_turn_token:'opaque:duplicate',pending_attachments:[{{path:'pending'}}]}};
+
+const newerLive={{role:'assistant',content:'working',_live:true,_ts:5}};
+const newerRealUser={{id:'newer-real-user',role:'user',content:'same prompt',_ts:4,attachments:[]}};
+const newerMessages=[newerLive,newerRealUser];
+const newerSession={{pending_user_message:'same prompt',pending_started_at:3,pending_attachments:[{{path:'pending'}}]}};
+
+const exact={{id:'exact',role:'user',content:'same prompt',_ts:3}};
+const exactSession={{pending_user_message:'same prompt',pending_started_at:3}};
+const exactOwner=_pendingActiveTurnUserMessage([exact],exactSession);
+const results=[
+  runCase('missing-token',missingMessages,missingSession,[missingOwner]),
+  runCase('duplicate-token',duplicateMessages,duplicateSession,[duplicateOne,duplicateTwo]),
+  runCase('newer-conflicting-user',newerMessages,newerSession,[newerRealUser]),
+];
+process.stdout.write(JSON.stringify({{results,exactOwner:exactOwner&&exactOwner.id}}));
+"""
+    result = _run_node(script)
+
+    assert result["exactOwner"] == "exact"
+    assert {case["name"] for case in result["results"]} == {
+        "missing-token",
+        "duplicate-token",
+        "newer-conflicting-user",
+    }
+    for case in result["results"]:
+        assert case["pendingOwner"] is None, case
+        assert case["before"] == case["after"], case
+        assert case["merged"] is True, case
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_public_projection_reattach_uses_only_the_authorized_active_user_marker():
+    """The real public projection strips row tokens but retains one active-user marker.
+
+    Reattach must use that marker only with the exact session turn token and a
+    unique, current owner. It must preserve same-text history and fail closed
+    for absent authority, mixed identities, or multiple marker owners.
+    """
+    from api.helpers import _public_message_projection
+
+    token = "stream-current:3.000000"
+    raw_messages = [
+        {
+            "id": "active-user",
+            "role": "user",
+            "content": "same prompt",
+            "_ts": 3,
+            "_active_turn_token": token,
+        },
+        {
+            "role": "assistant",
+            "content": "",
+            "_ts": 4,
+            "tool_calls": [
+                {"id": "call-1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "content": "result", "_ts": 4.1},
+    ]
+    public_messages = [
+        _public_message_projection(message, _enabled=False, _active_turn_token=token)
+        for message in raw_messages
+    ]
+    assert public_messages[0].get("_active_turn_user") is True
+    assert all("_active_turn_token" not in message for message in public_messages)
+    assert [message.get("_active_turn_user") for message in public_messages] == [True, None, None]
+
+    older_messages = [
+        _public_message_projection(
+            {
+                "role": "user",
+                "content": "same prompt",
+                "_ts": 1,
+                "_active_turn_token": "stream-older:1.000000",
+                "attachments": ["older-turn.txt"],
+            },
+            _enabled=False,
+            _active_turn_token=token,
+        ),
+        *public_messages,
+    ]
+    multiple_marker_messages = [
+        _public_message_projection(
+            {"role": "user", "content": "same prompt", "_ts": 2, "_active_turn_token": token},
+            _enabled=False,
+            _active_turn_token=token,
+        ),
+        *public_messages,
+    ]
+
+    script = r"""
+__REATTACH_HELPERS__
+const token = __TURN_TOKEN__;
+const wire = __PUBLIC_MESSAGES__;
+const olderWire = __OLDER_MESSAGES__;
+const multipleMarkerWire = __MULTIPLE_MARKERS__;
+
+function reattach(rows, {
+  sessionToken = token, candidateToken = token, candidateAttachments = ['new-turn.txt'],
+  includeLive = true, mixedActivity = false,
+} = {}) {
+  const base = JSON.parse(JSON.stringify(rows));
+  if (mixedActivity) base[2]._active_turn_token = 'stream-conflicting:9.000000';
+  const session = {
+    active_stream_id: 'stream-current', pending_started_at: 3,
+    pending_user_message: 'same prompt', pending_attachments: ['new-turn.txt'],
+  };
+  if (sessionToken !== null) session.active_turn_token = sessionToken;
+  const candidate = {
+    id: 'inflight-user', role: 'user', content: 'same prompt', _ts: 3,
+    _active_turn_token: candidateToken, attachments: candidateAttachments,
+  };
+  const inflight = {
+    activeTurnToken: token,
+    lastAssistantText: includeLive ? 'working' : '',
+    messages: [candidate],
+  };
+  const ensuredLive = _ensureInflightLiveAssistantMessage(inflight);
+  const activeTurnToken = session.active_turn_token;
+  const prepared = _prepareRunningLiveTail(base, inflight.messages, activeTurnToken, session);
+  const reconciled = prepared
+    ? _dropCurrentTurnAssistantMessages(base, activeTurnToken, session)
+    : base;
+  const merged = _mergeInflightTailMessages(reconciled, inflight.messages, activeTurnToken, session);
+  const pendingAdded = _mergePendingSessionMessage(session, merged);
+  const owner = _pendingActiveTurnUserMessage(merged, session);
+  return {
+    ensuredLive, prepared, pendingAdded,
+    owner: owner && owner.id || null,
+    markers: merged.filter(row => row && row._active_turn_user === true).length,
+    users: merged.filter(row => row && row.role === 'user').map(row => ({
+      id: row.id || null, content: row.content, marker: row._active_turn_user === true,
+      pending: row._pending === true, token: row._active_turn_token || null,
+      attachments: row.attachments || [],
+    })),
+    roles: merged.map(row => row && row.role),
+  };
+}
+
+const valid = reattach(wire);
+const noLive = reattach(wire, {includeLive: false});
+const older = reattach(olderWire);
+const missingAuthority = reattach(wire, {sessionToken: null});
+const conflictingCandidate = reattach(wire, {
+  candidateToken: 'stream-conflicting:9.000000', candidateAttachments: ['older-turn.txt'],
+});
+const mixed = reattach(wire, {mixedActivity: true});
+const multipleMarkers = reattach(multipleMarkerWire, {includeLive: false});
+const legacySession = {
+  active_stream_id: 'stream-current', pending_started_at: 3,
+  pending_user_message: 'same prompt', pending_attachments: ['new-turn.txt'],
+};
+const legacyMessages = JSON.parse(JSON.stringify(wire));
+const legacyPending = getPendingSessionMessage(legacySession, legacyMessages);
+const taggedActivity = JSON.parse(JSON.stringify(wire));
+taggedActivity[2]._active_turn_token = token;
+const taggedActivityOwner = _pendingActiveTurnUserMessage(taggedActivity, legacySession);
+const taggedActivityPending = getPendingSessionMessage(legacySession, taggedActivity);
+process.stdout.write(JSON.stringify({
+  valid, noLive, older, missingAuthority, conflictingCandidate, mixed, multipleMarkers,
+  legacy: {
+    pending: legacyPending, owner: legacyMessages[0], taggedActivityOwner,
+    taggedActivityPending, taggedActivityUser: taggedActivity[0],
+  },
+}));
+"""
+    script = (
+        script.replace("__REATTACH_HELPERS__", _reattach_helpers())
+        .replace("__TURN_TOKEN__", json.dumps(token))
+        .replace("__PUBLIC_MESSAGES__", json.dumps(public_messages))
+        .replace("__OLDER_MESSAGES__", json.dumps(older_messages))
+        .replace("__MULTIPLE_MARKERS__", json.dumps(multiple_marker_messages))
+    )
+    result = _run_node(script)
+
+    # Exact pinned repro: public user + tokenless assistant/tool activity and
+    # only the optimistic user row in INFLIGHT. This used to add a second row.
+    assert result["noLive"]["owner"] == "active-user", result["noLive"]
+    assert len(result["noLive"]["users"]) == 1, result["noLive"]
+    assert result["noLive"]["users"][0]["attachments"] == ["new-turn.txt"]
+
+    # Also exercise the live-tail duplicate path and its assistant rebuild.
+    assert result["valid"]["ensuredLive"] is True, result["valid"]
+    assert result["valid"]["prepared"] is True, result["valid"]
+    assert result["valid"]["owner"] == "active-user", result["valid"]
+    assert len(result["valid"]["users"]) == 1, result["valid"]
+    assert result["valid"]["users"][0]["marker"] is True
+    assert result["valid"]["users"][0]["attachments"] == ["new-turn.txt"]
+    assert result["valid"]["roles"][0] == "user"
+    assert result["valid"]["roles"].index("user") < result["valid"]["roles"].index("tool")
+
+    assert result["legacy"]["pending"] is None, result["legacy"]
+    assert result["legacy"]["owner"]["attachments"] == ["new-turn.txt"], result["legacy"]
+    assert result["legacy"]["taggedActivityOwner"] is None, result["legacy"]
+    assert result["legacy"]["taggedActivityPending"]["_pending"] is True, result["legacy"]
+    assert result["legacy"]["taggedActivityPending"]["attachments"] == ["new-turn.txt"], result["legacy"]
+    assert "attachments" not in result["legacy"]["taggedActivityUser"] or not result["legacy"]["taggedActivityUser"]["attachments"], result["legacy"]
+
+    assert len(result["older"]["users"]) == 2, result["older"]
+    assert result["older"]["users"][0]["attachments"] == ["older-turn.txt"]
+    assert result["older"]["users"][1]["marker"] is True
+    assert result["older"]["users"][1]["attachments"] == ["new-turn.txt"]
+
+    for name in ("missingAuthority", "conflictingCandidate", "mixed", "multipleMarkers"):
+        case = result[name]
+        assert case["owner"] is None, case
+        assert case["pendingAdded"] is True, case
+        assert all(not row["pending"] for row in case["users"] if row["marker"]), case
+        assert all(row["attachments"] != ["new-turn.txt"] for row in case["users"] if row["marker"]), case
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_tokenless_tagged_activity_does_not_adopt_legacy_timestamp_owner():
+    """A tagged activity boundary is not tokenless legacy history.
+
+    Every case exercises the production merge helper, including tagged live
+    activity with and without a matching session token.
+    """
+    helpers = _merge_helpers()
+    script = f"""
+{helpers}
+function summarizePending(row){{
+  return row&&{{
+    role:row.role,
+    content:row.content,
+    pending:!!row._pending,
+    attachments:row.attachments,
+  }};
+}}
+function runCase(name, boundary, merge, activeTurnToken, userTurnToken, olderAttachments, trailingRows){{
+  const older={{id:name+'-older',role:'user',content:'same prompt',_ts:3,
+    attachments:olderAttachments??[{{path:'older-'+name}}]}};
+  if(userTurnToken) older._active_turn_token=userTurnToken;
+  const messages=[older,boundary,...(trailingRows||[])];
+  const session={{pending_user_message:'same prompt',pending_started_at:3,
+    pending_attachments:[{{path:'pending-'+name}}]}};
+  if(activeTurnToken) session.active_turn_token=activeTurnToken;
+  const before=JSON.stringify(older.attachments);
+  const currentTailOwner=_pendingCurrentTailUserMessage(
+    messages,session.pending_started_at,undefined,
+    session.active_turn_token??session.activeTurnToken,
+  );
+  const pendingOwner=_pendingActiveTurnUserMessage(messages,session);
+  const pending=getPendingSessionMessage(session,messages);
+  const merged=merge?_mergePendingSessionMessage(session,messages):null;
+  return {{name,currentTailOwner:currentTailOwner&&currentTailOwner.id,
+    pendingOwner:pendingOwner&&pendingOwner.id,pending:summarizePending(pending),
+    merged,before,after:JSON.stringify(older.attachments),
+    pendingIndex:messages.findIndex(row=>row&&row._pending),
+    boundaryIndex:messages.indexOf(boundary),rows:messages.map(summarizePending)}};
+}}
+const cases=[
+  runCase('live',{{role:'assistant',content:'working',_live:true,_ts:4,
+    _active_turn_token:' tagged-live '}},true),
+  runCase('canonical-tool-call',{{role:'assistant',_ts:4,
+    tool_calls:[{{id:'call-1',function:{{name:'lookup'}}}}],
+    _active_turn_token:' tagged-call '}},true),
+  runCase('tool-result',{{role:'tool',content:'result',_ts:4,
+    _active_turn_token:' tagged-tool '}},true),
+  runCase('mismatched-live',{{role:'assistant',content:'working',_live:true,_ts:4,
+    _active_turn_token:' live-token '}},true,'session-token'),
+];
+const exactUser={{id:'exact-user',role:'user',content:'same prompt',_ts:3,
+  _active_turn_token:' exact-turn '}};
+const exactMessages=[exactUser,{{role:'assistant',content:'working',_live:true,_ts:4,
+  _active_turn_token:' exact-turn '}}];
+const exactSession={{pending_user_message:'same prompt',pending_started_at:3,
+  active_turn_token:' exact-turn '}};
+const legacyUser={{id:'legacy-user',role:'user',content:'same prompt',_ts:3}};
+const legacyMessages=[legacyUser,{{role:'assistant',content:'working',_live:true,_ts:4}}];
+const legacySession={{pending_user_message:'same prompt',pending_started_at:3}};
+const inverseCases=[
+  runCase('raw-distinct-live',{{role:'assistant',content:'working',_live:true,_ts:4,
+    _active_turn_token:'raw-live'}},true,' raw-live ',' raw-live ',[]),
+  runCase('raw-distinct-canonical-tool-call',{{role:'assistant',_ts:4,
+    tool_calls:[{{id:'call-1',function:{{name:'lookup'}}}}],
+    _active_turn_token:'raw-tool-call'}},true,' raw-tool-call ',' raw-tool-call ',[]),
+  runCase('raw-distinct-tool-result',{{role:'tool',content:'result',_ts:4,
+    _active_turn_token:'raw-tool-result'}},true,' raw-tool-result ',' raw-tool-result ',[]),
+  runCase('authoritative-live-missing',{{role:'assistant',content:'working',_live:true,_ts:4}},
+    true,' authoritative-missing ',' authoritative-missing ',[]),
+  runCase('authoritative-live-blank',{{role:'assistant',content:'working',_live:true,_ts:4,
+    _active_turn_token:'   '}},true,' authoritative-blank ',' authoritative-blank ',[]),
+];
+const mixedCases=[
+  runCase('mixed-tagged-live',{{role:'assistant',content:'working',_live:true,_ts:4}},true,
+    undefined,undefined,[],[{{role:'assistant',content:'later working',_live:true,_ts:5,
+      _active_turn_token:'mixed-live'}}]),
+  runCase('mixed-canonical-tool-call',{{role:'assistant',content:'working',_live:true,_ts:4}},true,
+    undefined,undefined,[],[{{role:'assistant',_ts:5,
+      tool_calls:[{{id:'call-2',function:{{name:'lookup'}}}}],
+      _active_turn_token:'mixed-tool-call'}}]),
+  runCase('mixed-tool-result',{{role:'assistant',content:'working',_live:true,_ts:4}},true,
+    undefined,undefined,[],[{{role:'tool',content:'result',_ts:5,
+      _active_turn_token:'mixed-tool-result'}}]),
+];
+process.stdout.write(JSON.stringify({{cases,
+  inverseCases,
+  mixedCases,
+  exactOwner:_pendingActiveTurnUserMessage(exactMessages,exactSession)?.id,
+  legacyOwner:_pendingActiveTurnUserMessage(legacyMessages,legacySession)?.id
+}}));
+"""
+    result = _run_node(script)
+
+    assert {case["name"] for case in result["cases"]} == {
+        "live",
+        "canonical-tool-call",
+        "tool-result",
+        "mismatched-live",
+    }
+    assert result["exactOwner"] == "exact-user"
+    assert result["legacyOwner"] == "legacy-user"
+    for case in result["cases"]:
+        assert case["pendingOwner"] is None, case
+        assert case["pending"] == {
+            "role": "user",
+            "content": "same prompt",
+            "pending": True,
+            "attachments": [{"path": f"pending-{case['name']}"}],
+        }, case
+        assert case["before"] == case["after"], case
+        assert case["merged"] is True, case
+        assert any(row == case["pending"] for row in case["rows"]), case
+        if "live" in case["name"]:
+            assert case["pendingIndex"] < case["boundaryIndex"], case
+    for case in result["mixedCases"]:
+        assert case["before"] == case["after"], case
+        assert case["currentTailOwner"] is None, case
+        assert case["pendingOwner"] is None, case
+        assert case["pending"] == {
+            "role": "user",
+            "content": "same prompt",
+            "pending": True,
+            "attachments": [{"path": f"pending-{case['name']}"}],
+        }, case
+        assert case["merged"] is True, case
+        assert any(row == case["pending"] for row in case["rows"]), case
+        assert case["pendingIndex"] < case["boundaryIndex"], case
+    for case in result["inverseCases"]:
+        assert case["before"] == case["after"], case
+        assert case["currentTailOwner"] is None, case
+        assert case["pendingOwner"] is None, case
+        assert case["pending"] == {
+            "role": "user",
+            "content": "same prompt",
+            "pending": True,
+            "attachments": [{"path": f"pending-{case['name']}"}],
+        }, case
+        assert case["merged"] is True, case
+        assert any(row == case["pending"] for row in case["rows"]), case
+        if "live" in case["name"]:
+            assert case["pendingIndex"] < case["boundaryIndex"], case
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_refresh_session_uses_canonical_helper_before_render():
     """The actual refresh path must project [user, live assistant] and render
     once when the canonical helper is available."""
-    helpers = "\n".join(
-        [
-            _function_source(SESSIONS_JS, "_messageComparableText"),
-            _function_source(SESSIONS_JS, "_stripAttachedFilesMarker"),
-            _function_source(SESSIONS_JS, "_stripForcedSkillEnvelope"),
-            _function_source(SESSIONS_JS, "_normalizeUserTranscriptText"),
-            _function_source(SESSIONS_JS, "_sameTranscriptMessage"),
-            _function_source(SESSIONS_JS, "_currentTailUserMessage"),
-            _function_source(SESSIONS_JS, "_hasCurrentTailUserDuplicate"),
-            _function_source(SESSIONS_JS, "_mergePendingSessionMessage"),
-        ]
-    )
+    helpers = _merge_helpers()
     refresh = "async " + _function_source(UI_JS, "refreshSession")
     script = f"""
 {helpers}
@@ -205,11 +624,6 @@ let status='';
 const S={{session:{{session_id:'sid-1'}},messages:[]}};
 const window={{_restartingForUpdate:false}};
 function dismissReconnect(){{}}
-function getPendingSessionMessage(session, messages){{
-  const text=String(session.pending_user_message||'').trim();
-  if(!text) return null;
-  return {{role:'user',content:text,_pending:true,_ts:session.pending_started_at}};
-}}
 async function api(){{return {{session:{{
   session_id:'sid-1',
   active_stream_id:'stream-1',

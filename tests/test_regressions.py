@@ -14,6 +14,31 @@ import urllib.request
 import urllib.parse
 REPO_ROOT = pathlib.Path(__file__).parent.parent.resolve()
 
+
+def _brace_bounded_block(src, start):
+    assert start >= 0, "block start not found"
+    brace = src.find("{", start)
+    assert brace != -1, "block opening brace not found"
+    depth = 0
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError("block did not close")
+
+
+def _load_session_phase2_inflight_block(src):
+    load_idx = src.find("async function loadSession(sid)")
+    assert load_idx >= 0, "loadSession() not found"
+    load_block = _brace_bounded_block(src, load_idx)
+    inflight_idx = load_block.rfind("if(INFLIGHT[sid]){")
+    assert inflight_idx >= 0, "Phase-2 INFLIGHT branch not found in loadSession"
+    return _brace_bounded_block(load_block, inflight_idx)
+
+
 from tests._pytest_port import BASE
 
 def get(path):
@@ -460,13 +485,8 @@ def test_loadSession_inflight_restores_live_tool_cards(cleanup_test_sessions):
     was still processing.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    # INFLIGHT branch must call appendLiveToolCard
-    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
-    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
-    # grab the wrong one. (rfind = the substantive restore branch.)
-    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
-    assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    # Scope the assertion to the complete, brace-bounded Phase-2 restore block.
+    inflight_block = _load_session_phase2_inflight_block(src)
     assert "appendLiveToolCard" in inflight_block,         "loadSession INFLIGHT branch must restore live tool cards via appendLiveToolCard"
     assert "clearLiveToolCards" in inflight_block,         "loadSession INFLIGHT branch must clear old live cards before restoring"
 
@@ -746,12 +766,7 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
     session switch.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
-    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
-    # grab the wrong one. (rfind = the substantive restore branch.)
-    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
-    assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    inflight_block = _load_session_phase2_inflight_block(src)
     busy_pos = inflight_block.find("S.busy=")
     # #3326 added an optional {preserveScroll} arg to the INFLIGHT-branch render
     # call, so match the call form rather than the bare `renderMessages();`.
@@ -764,17 +779,12 @@ def test_loadSession_inflight_sets_busy_before_renderMessages(cleanup_test_sessi
 
 def test_loadSession_inflight_merges_tail_with_persisted_transcript(cleanup_test_sessions):
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
-    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
-    # grab the wrong one. (rfind = the substantive restore branch.)
-    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
-    assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+1200]
+    inflight_block = _load_session_phase2_inflight_block(src)
 
     assert "await _ensureMessagesLoaded(sid" in inflight_block, (
         "returning to an active stream should load the persisted transcript before adding the live tail"
     )
-    assert "_mergeInflightTailMessages(S.messages,inflightMessages)" in inflight_block, (
+    assert "_mergeInflightTailMessages(S.messages,inflightMessages,activeTurnToken,S.session)" in inflight_block, (
         "INFLIGHT messages should be merged as a tail, not replace the full transcript"
     )
     assert "function _mergeInflightTailMessages" in src, (
@@ -850,9 +860,14 @@ def test_inflight_merge_dedupes_uploaded_user_message(cleanup_test_sessions):
     )
     pending_idx = src.find("function _mergePendingSessionMessage")
     assert pending_idx >= 0, "pending session merge helper not found"
-    pending_block = src[pending_idx:pending_idx+500]
-    assert "_hasCurrentTailUserDuplicate(currentTurnMessages,pendingMsg)" in pending_block, (
-        "pending-user merge should dedupe only against the current active-turn user row"
+    pending_end = src.find("\nfunction ", pending_idx + 1)
+    assert pending_end > pending_idx, "pending session merge helper end not found"
+    pending_block = src[pending_idx:pending_end]
+    assert "_hasCurrentTailUserDuplicate(pendingSourceMessages,pendingMsg,activeTurnToken,session)" in pending_block, (
+        "pending-user identity and duplicate checks must share the selected source"
+    )
+    assert "matchingUsers.length===1" in pending_block, (
+        "pending-user merge should adopt attachments only from one exact active-turn identity match"
     )
     assert "messages.some(" not in pending_block, (
         "pending-user merge must not scan historical user rows by normalized content"
@@ -868,12 +883,7 @@ def test_loadSession_inflight_sets_active_stream_before_replaying_live_tool_card
     counter drops the previously-seen tools after a focus change.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    # Anchor on the Phase-2 INFLIGHT restore branch (the later occurrence); #3899
-    # added an earlier if(INFLIGHT[sid]){ idle-reset block, so .find() would
-    # grab the wrong one. (rfind = the substantive restore branch.)
-    inflight_idx = src.rfind("if(INFLIGHT[sid]){")
-    assert inflight_idx >= 0, "INFLIGHT branch not found in loadSession"
-    inflight_block = src[inflight_idx:inflight_idx+4200]
+    inflight_block = _load_session_phase2_inflight_block(src)
     active_pos = inflight_block.find("S.activeStreamId=activeStreamId;")
     replay_pos = inflight_block.find("const replayPersistedLiveToolCards=(opts)=>{")
     attach_pos = inflight_block.find("attachLiveStream(sid, activeStreamId")

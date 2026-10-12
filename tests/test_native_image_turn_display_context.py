@@ -1033,11 +1033,15 @@ def test_clean_pending_get_payload_renders_submitted_prompt_and_attachment():
     root = Path(__file__).resolve().parents[1]
     ui_js = (root / "static" / "ui.js").read_text(encoding="utf-8")
     sessions_js = (root / "static" / "sessions.js").read_text(encoding="utf-8")
+    epsilon_start = ui_js.index("const _PENDING_ACTIVE_TURN_TS_EPSILON=")
+    epsilon_end = ui_js.index(";", epsilon_start) + 1
     helpers = "\n".join(
         [
+            ui_js[epsilon_start:epsilon_end],
             *[
                 _js_function_source(sessions_js, name)
                 for name in (
+                    "_opaqueActiveTurnToken",
                     "_messageComparableText",
                     "_stripAttachedFilesMarker",
                     "_stripForcedSkillEnvelope",
@@ -1060,10 +1064,14 @@ def test_clean_pending_get_payload_renders_submitted_prompt_and_attachment():
             ],
         ]
     )
+    active_turn_token = build_active_turn_token(
+        "pending-webui-stream", 1700000000.125
+    )
     payload = {
         "session_id": "pending-display-session",
         "active_stream_id": "pending-webui-stream",
         "pending_started_at": 1700000000.125,
+        "active_turn_token": active_turn_token,
         "pending_user_source": "webui",
         "pending_user_message": "Recall note: I authored this literal text.",
         "pending_attachments": [{"name": "literal-note.txt", "mime": "text/plain"}],
@@ -1078,7 +1086,12 @@ const session={json.dumps(payload)};
 const messages=session.messages;
 const inserted=_mergePendingSessionMessage(session,messages);
 const duplicate=_mergePendingSessionMessage(session,messages);
-process.stdout.write(JSON.stringify({{inserted,duplicate,messages}}));
+const legacySession={{...session}};
+delete legacySession.active_turn_token;
+const legacyMessages=[];
+const legacyInserted=_mergePendingSessionMessage(legacySession,legacyMessages);
+const legacyDuplicate=_mergePendingSessionMessage(legacySession,legacyMessages);
+process.stdout.write(JSON.stringify({{inserted,duplicate,messages,legacyInserted,legacyDuplicate,legacyMessages}}));
 """
     completed = subprocess.run(
         [shutil.which("node"), "-e", script],
@@ -1092,6 +1105,19 @@ process.stdout.write(JSON.stringify({{inserted,duplicate,messages}}));
     assert result["inserted"] is True
     assert result["duplicate"] is False
     assert result["messages"] == [
+        {
+            "role": "user",
+            "content": "Recall note: I authored this literal text.",
+            "attachments": [{"name": "literal-note.txt", "mime": "text/plain"}],
+            "_ts": 1700000000.125,
+            "_pending": True,
+            "_source": "webui",
+            "_active_turn_token": active_turn_token,
+        }
+    ]
+    assert result["legacyInserted"] is True
+    assert result["legacyDuplicate"] is False
+    assert result["legacyMessages"] == [
         {
             "role": "user",
             "content": "Recall note: I authored this literal text.",

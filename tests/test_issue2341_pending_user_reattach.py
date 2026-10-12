@@ -64,9 +64,18 @@ def test_pending_user_message_dedup_checks_current_message_array():
         "Pending-message dedup must inspect the current S.messages/INFLIGHT "
         "array, not only session.messages from the metadata response"
     )
-    assert "_pendingCurrentTailUserMessage(messages)" in helper, (
-        "Pending-message dedup must inspect only the current tail user row, "
-        "not a historical same-text row"
+    compact_helper = "".join(helper.split())
+    assert "_pendingCurrentTailUserMessage(messages,session?.pending_started_at,undefined,session&&(session.active_turn_token??session.activeTurnToken),);" in compact_helper, (
+        "Pending-message dedup must inspect only the current tail user row and "
+        "carry the server-issued opaque active-turn token"
+    )
+    tail_start = UI_JS.find("function _pendingCurrentTailUserMessage")
+    tail_end = UI_JS.find("// Precision-only epsilon", tail_start)
+    assert tail_start != -1 and tail_end > tail_start
+    tail_helper = "".join(UI_JS[tail_start:tail_end].split())
+    assert "msg._active_turn_token!==authoritativeToken" in tail_helper, (
+        "Pending tool activity carrying a token must match the exact "
+        "server-issued active-turn token"
     )
     assert "sameCurrentTurn" in helper and "return null;" in helper, (
         "Pending-message merge must still suppress duplicates when the current "

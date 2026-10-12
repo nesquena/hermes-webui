@@ -41,6 +41,52 @@ def _read(rel_path: str) -> str:
     return (REPO_ROOT / rel_path).read_text(encoding="utf-8")
 
 
+def _function_source(source: str, marker: str) -> str:
+    start = source.find(marker)
+    assert start >= 0, f"{marker!r} not found"
+    body_start = source.find("{", source.find(")", start))
+    assert body_start >= 0, f"{marker!r} has no body"
+    depth = 0
+    quote = None
+    escaped = False
+    line_comment = False
+    block_comment = False
+    i = body_start
+    while i < len(source):
+        ch = source[i]
+        nxt = source[i + 1] if i + 1 < len(source) else ""
+        if line_comment:
+            if ch == "\n":
+                line_comment = False
+        elif block_comment:
+            if ch == "*" and nxt == "/":
+                block_comment = False
+                i += 1
+        elif quote:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == quote:
+                quote = None
+        elif ch == "/" and nxt == "/":
+            line_comment = True
+            i += 1
+        elif ch == "/" and nxt == "*":
+            block_comment = True
+            i += 1
+        elif ch in "'\"`":
+            quote = ch
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start : i + 1]
+        i += 1
+    raise AssertionError(f"{marker!r} body is not balanced")
+
+
 # ---------------------------------------------------------------------------
 # Client-side: source-shape check that the fallback is wired in newSession().
 # ---------------------------------------------------------------------------
@@ -50,10 +96,7 @@ class TestClientFallbackSourceShape:
     """Static checks that the fallback chain lives inside newSession()."""
 
     def test_active_provider_fallback_present(self):
-        src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        assert idx != -1
-        body = src[idx:idx + 6000]
+        body = _function_source(_read("static/sessions.js"), "async function newSession(")
         assert "window._activeProvider" in body, (
             "newSession() must consult window._activeProvider when the dropdown "
             "did not yield a truthy model_provider (cold boot, empty "
@@ -61,9 +104,7 @@ class TestClientFallbackSourceShape:
         )
 
     def test_previous_session_fallback_present(self):
-        src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        body = src[idx:idx + 6000]
+        body = _function_source(_read("static/sessions.js"), "async function newSession(")
         assert "S.session&&S.session.model_provider" in body, (
             "newSession() must fall back to the previous session's "
             "model_provider when neither the dropdown nor window._activeProvider "
@@ -72,27 +113,25 @@ class TestClientFallbackSourceShape:
 
     def test_fallback_chain_order(self):
         """Fallback order: explicit > _activeProvider > prev-session > null."""
-        src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        body = src[idx:idx + 6000]
-        explicit = body.find("newModelState.model_provider")
+        body = _provider_assignment_in_new_session()
+        assignment = body[body.index("reqBody.model_provider=") :]
+        explicit = assignment.find("newModelState.model_provider")
+        fallback = assignment.find("_fallbackProvider")
         active = body.find("window._activeProvider")
         prev = body.find("S.session&&S.session.model_provider")
-        assert -1 < explicit < active < prev, (
-            f"Fallback chain order broken: explicit={explicit}, "
-            f"_activeProvider={active}, prev-session={prev}. "
+        assert -1 < explicit < fallback, (
+            f"Explicit provider must precede fallback: explicit={explicit}, "
+            f"fallback={fallback}. "
+        )
+        assert -1 < active < prev, (
+            f"Fallback chain order broken: _activeProvider={active}, prev-session={prev}. "
             "Explicit selection must beat _activeProvider which must beat "
             "the previous session's model_provider."
         )
 
     def test_issue_referenced_in_source(self):
         """Future readers should be able to trace this back to the issue."""
-        src = _read("static/sessions.js")
-        idx = src.find("async function newSession(flash, options={}){")
-        # Window covers the model-fallback region of newSession(); the function
-        # has grown over time (e.g. pre-session toolset staging #4490), so keep
-        # the window comfortably larger than the fallback block it guards.
-        body = src[idx:idx + 5000]
+        body = _function_source(_read("static/sessions.js"), "async function newSession(")
         assert "#2518" in body, (
             "newSession()'s fallback comment should reference #2518 so the "
             "follow-up provenance survives future refactors."
@@ -205,16 +244,10 @@ def _provider_assignment_in_new_session() -> str:
             || (_bareModel ? (window._activeProvider || (S.session && S.session.model_provider)) : null)
             || null;
 
-    Both lines live in the same 4000-char slice of newSession()'s
-    function body, so the helper can read them as a single contract
-    unit. Anchors on the ``=`` of the assignment (not a prose mention
-    in a comment) and on the guard declaration so future comments
-    referencing ``reqBody.model_provider`` cannot confuse it.
+    The helper balances the complete newSession() body first, then anchors on
+    the guard and assignment so comments or later code cannot confuse it.
     """
-    src = _read("static/sessions.js")
-    idx = src.find("async function newSession(flash, options={}){")
-    assert idx != -1, "newSession() must be defined in static/sessions.js"
-    body = src[idx : idx + 7000]
+    body = _function_source(_read("static/sessions.js"), "async function newSession(")
     guard_start = body.find("const _bareModel")
     assert guard_start != -1, (
         "newSession() must declare a 'const _bareModel' guard for the "

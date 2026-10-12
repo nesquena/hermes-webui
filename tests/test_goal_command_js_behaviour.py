@@ -21,6 +21,9 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 COMMANDS_JS_PATH = REPO_ROOT / "static" / "commands.js"
+MESSAGES_JS_PATH = REPO_ROOT / "static" / "messages.js"
+SESSIONS_JS_PATH = REPO_ROOT / "static" / "sessions.js"
+UI_JS_PATH = REPO_ROOT / "static" / "ui.js"
 
 NODE = shutil.which("node")
 
@@ -29,8 +32,11 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 _DRIVER_SRC = r"""
 const fs = require('fs');
-const src = fs.readFileSync(process.argv[2], 'utf8');
-const scenario = process.argv[3] || '';
+const commandsSrc = fs.readFileSync(process.argv[2], 'utf8');
+const messagesSrc = fs.readFileSync(process.argv[3], 'utf8');
+const sessionsSrc = fs.readFileSync(process.argv[4], 'utf8');
+const uiSrc = fs.readFileSync(process.argv[5], 'utf8');
+const scenario = process.argv[6] || '';
 
 // ---- mocked browser environment ----
 const _store = new Map();
@@ -40,6 +46,8 @@ global.sessionStorage = {
   removeItem: k => { _store.delete(k); },
 };
 global.window = {};
+// Match the initial pane-loading state owned by static/sessions.js.
+const _loadingSessionId = null;
 
 // Pending session-model marker helpers mirroring static/ui.js
 // (PENDING_SESSION_MODEL_PREFIX / _readPendingSessionModel / _clearPendingSessionModel).
@@ -110,24 +118,28 @@ async function api(url, opts) {
   return _nextResponse();
 }
 
-// ---- extract cmdGoal from the real file and evaluate it ----
-function extractFunc(name) {
+// ---- extract production helpers and cmdGoal from their real files ----
+function extractFunc(source, name) {
   // Preserve a leading `async` keyword — dropping it would make the
   // extracted `await` statements a SyntaxError.
   const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
-  const m = re.exec(src);
+  const m = re.exec(source);
   if (!m) throw new Error(name + ' not found');
   const start = m.index;
-  let i = src.indexOf('{', start);
+  let i = source.indexOf('{', start);
   let depth = 1; i++;
-  while (depth > 0 && i < src.length) {
-    if (src[i] === '{') depth++;
-    else if (src[i] === '}') depth--;
+  while (depth > 0 && i < source.length) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') depth--;
     i++;
   }
-  return src.slice(start, i);
+  return source.slice(start, i);
 }
-eval(extractFunc('cmdGoal'));
+eval(extractFunc(messagesSrc, '_isSessionCurrentPane'));
+eval(extractFunc(sessionsSrc, '_opaqueActiveTurnToken'));
+eval(extractFunc(uiSrc, '_captureSessionActiveTurnIdentity'));
+eval(extractFunc(uiSrc, '_acceptedStartMayUpdateSession'));
+eval(extractFunc(commandsSrc, 'cmdGoal'));
 
 // ---- scenario state ----
 const SID = 'sid-6705-behaviour';
@@ -152,7 +164,8 @@ const S = {
     // Pending pick matches the session model; server returns a real kickoff.
     rememberPending(SID, 'openai/gpt-5.4', 'openai');
     window._defaultModel = 'gpt-4o'; window._activeProvider = 'openai';
-    _nextResponse = () => ({ stream_id: 's1', pending_started_at: 1,
+    _nextResponse = () => ({ stream_id: 's1', session_id: SID, pending_started_at: 1,
+      active_turn_token: 'opaque-token-s1',
       effective_model: 'openai/gpt-5.4', effective_model_provider: 'openai' });
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
@@ -166,7 +179,8 @@ const S = {
     out.controlPayload = _apiCalls[0].body;
     out.markerAfterControl = readPending(SID);
     // Next real send must still carry the marker and consume it on kickoff.
-    _nextResponse = () => ({ stream_id: 's2', pending_started_at: 1 });
+    _nextResponse = () => ({ stream_id: 's2', session_id: SID, pending_started_at: 1,
+      active_turn_token: 'opaque-token-s2' });
     await cmdGoal('ship it');
     out.kickoffPayload = _apiCalls[1].body;
     out.markerAfterKickoff = readPending(SID);
@@ -176,7 +190,8 @@ const S = {
     window._defaultModel = 'gpt-4o'; window._activeProvider = 'openai';
     _nextResponse = () => {
       rememberPending(SID, 'openai/gpt-6', 'openai');
-      return { stream_id: 's3', pending_started_at: 1 };
+      return { stream_id: 's3', session_id: SID, pending_started_at: 1,
+        active_turn_token: 'opaque-token-s3' };
     };
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
@@ -185,7 +200,8 @@ const S = {
     // Untouched default session: no pending marker, no cross-provider pick.
     S.session.model = 'gpt-4o'; S.session.model_provider = 'openai';
     window._defaultModel = 'gpt-4o'; window._activeProvider = 'openai';
-    _nextResponse = () => ({ stream_id: 's4', pending_started_at: 1 });
+    _nextResponse = () => ({ stream_id: 's4', session_id: SID, pending_started_at: 1,
+      active_turn_token: 'opaque-token-s4' });
     await cmdGoal('ship it');
     out.payload = _apiCalls[0].body;
     out.markerAfter = readPending(SID);
@@ -211,7 +227,15 @@ def driver_path(tmp_path_factory):
 def _run_scenario(driver_path, scenario):
     """Run cmdGoal against the real commands.js with mocked browser state."""
     result = subprocess.run(
-        [NODE, driver_path, str(COMMANDS_JS_PATH), scenario],
+        [
+            NODE,
+            driver_path,
+            str(COMMANDS_JS_PATH),
+            str(MESSAGES_JS_PATH),
+            str(SESSIONS_JS_PATH),
+            str(UI_JS_PATH),
+            scenario,
+        ],
         capture_output=True,
         text=True,
         timeout=30,

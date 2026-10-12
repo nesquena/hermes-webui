@@ -473,14 +473,20 @@ def test_live_processed_anchor_timer_falls_back_after_real_started_at():
 
 def test_server_started_turn_also_creates_processed_anchor_before_stop_button_refresh():
     listener = _event_listener_body(MESSAGES_JS, "server_turn_started")
+    attach = _function_body(
+        MESSAGES_JS,
+        "_attachServerInitiatedStream",
+    )
 
-    pending_idx = listener.index("S.session.pending_started_at = d.pending_started_at")
-    ensure_idx = listener.index("if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();")
-    stop_idx = listener.index("if (typeof updateSendBtn === 'function') updateSendBtn();")
-    assert pending_idx < ensure_idx < stop_idx
-
-    assert "else if (!S.session.pending_started_at) S.session.pending_started_at = Date.now()/1000;" in listener
-    assert "if (typeof appendThinking === 'function') appendThinking();" in listener
+    pending_idx = listener.index("S.session.pending_started_at=d.pending_started_at")
+    attach_idx = listener.index("_attachServerInitiatedStream(sid,streamId,recovered,d.active_turn_token)")
+    ensure_idx = attach.index("if (typeof ensureLiveWorklogShell === 'function') ensureLiveWorklogShell();")
+    stop_idx = attach.index("if (typeof updateSendBtn === 'function') updateSendBtn();")
+    assert pending_idx < attach_idx
+    assert ensure_idx < stop_idx
+    assert "const applyTurnToken=()=>{" in attach
+    assert "S.session.active_turn_token=turnToken;" in attach
+    assert "if (typeof appendThinking === 'function') appendThinking();" in attach
 
 
 def test_server_started_turn_payload_carries_pending_started_at():
@@ -488,8 +494,10 @@ def test_server_started_turn_payload_carries_pending_started_at():
     assert "recover_session = get_session(sid, metadata_only=True)" in recovery
     assert "pending_started_at = getattr(recover_session, \"pending_started_at\", None)" in recovery
     assert '"pending_started_at": pending_started_at' in ROUTES_PY
+    assert '"active_turn_token": build_active_turn_token(' in ROUTES_PY
     assert '"pending_started_at": getattr(session, "pending_started_at", None)' not in ROUTES_PY
     assert '"pending_started_at": (resp or {}).get("pending_started_at")' in ROUTES_PY
+    assert '"active_turn_token": (resp or {}).get("active_turn_token")' in ROUTES_PY
 
 
 def test_live_processed_anchor_is_deduped_across_restore_paths():
