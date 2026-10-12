@@ -43,6 +43,9 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 PANELS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
+# #7679 finding 3 (re-gate 10-10): the harness evaluates the REAL t() sliced
+# out of static/i18n.js, so the file has to be available to the sandbox.
+I18N = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 
 NODE = shutil.which("node")
 pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -63,13 +66,32 @@ def _node_env() -> dict:
 
 
 def _run_node(script: str) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [NODE, "-e", script],
-        capture_output=True,
-        text=True,
-        check=False,
-        env=_node_env(),
-    )
+    # #7679 finding 3 (re-gate 10-10): the harness now inlines the whole
+    # static/i18n.js (the real t() is sliced from it), which is far past
+    # argv limits — so the program is written to a temp file and run from
+    # there, exactly like the round-2 harness.
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".js", delete=False, encoding="utf-8"
+    ) as tf:
+        tf.write(script)
+        tmp_path = tf.name
+    try:
+        return subprocess.run(
+            [NODE, tmp_path],
+            capture_output=True,
+            text=True,
+            check=False,
+            env=_node_env(),
+        )
+    finally:
+        import os
+
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
 
 def _extract(src: str, start_marker: str, end_marker: str) -> str:
@@ -78,6 +100,28 @@ def _extract(src: str, start_marker: str, end_marker: str) -> str:
     j = src.find(end_marker, i)
     assert j != -1, f"end marker not found: {end_marker!r}"
     return src[i:j]
+
+
+def _brace_block(src: str, header: str) -> str:
+    """Return the whole ``{ ... }`` block starting at ``header``.
+
+    Brace-matched rather than marker-bounded, so the slice never stops inside
+    a string/comment that happens to contain the end marker and never carries
+    the declarations that follow the block.
+    """
+    start = src.find(header)
+    assert start != -1, f"{header!r} not found"
+    i = src.index("{", start)
+    depth = 0
+    for idx in range(i, len(src)):
+        ch = src[idx]
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : idx + 1]
+    raise AssertionError(f"{header!r} did not close")
 
 
 # ── source-shape contracts (fast, no VM) ─────────────────────────────────────
@@ -214,14 +258,56 @@ global.__enEntries = {
   update_now: 'Update Now',
   update_updating: 'Updating\u2026',
 };
-function t(key, ...args) {
-  let text;
-  if (Object.prototype.hasOwnProperty.call(global.__enEntries, key)) text = global.__enEntries[key];
-  else if (args.length && args[0]) text = String(args[0]);
-  else return String(key);
-  let i = 0;
-  return String(text).replace(/\{(\w+)\}/g, (m) => (i < args.length ? String(args[i++]) : m));
+// #7679 finding 3 (re-gate 10-10): the REAL t(), sliced verbatim out of
+// static/i18n.js and re-pointed at this sandbox's locale binding. The copy
+// that used to live here diverged from the shipped contract in three ways the
+// reviewer pinned: the real runtime returns the missing KEY rather than using
+// argument 0 as fallback text, INVOKES function-valued entries with the
+// forwarded arguments, and substitutes NUMBERED placeholders ({0}, {1}) by
+// index rather than sequentially replacing {name} word placeholders.
+const __i18nSrc = global.__I18N_SRC__;
+const __enMatch = __i18nSrc.match(/^\s*en:\s*\{/m);
+let __depth = 0, __end = -1;
+for (let i = __i18nSrc.indexOf('{', __enMatch.index); i < __i18nSrc.length; i += 1) {
+  const ch = __i18nSrc[i];
+  if (ch === '{') __depth += 1;
+  else if (ch === '}') { __depth -= 1; if (__depth === 0) { __end = i + 1; break; } }
 }
+const __enBody = __i18nSrc.slice(__i18nSrc.indexOf('{', __enMatch.index) + 1, __end - 1);
+const __enEntries = {};
+for (const line of __enBody.split('\n')) {
+  const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(['"`])((?:\\.|(?!\2).)*)\2\s*,?\s*$/);
+  if (m) __enEntries[m[1]] = m[3].replace(/\\'/g, "'").replace(/\\"/g, '"');
+}
+const __fnEntries = {};
+for (const fnMatch of __enBody.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\(([^)]*)\)\s*=>/gm)) {
+  const arrowStart = __enBody.indexOf('=>', fnMatch.index);
+  let fnDepth = 0, fnEnd = -1;
+  for (let i = __enBody.indexOf('{', arrowStart); i < __enBody.length; i += 1) {
+    const ch = __enBody[i];
+    if (ch === '{') fnDepth += 1;
+    else if (ch === '}') { fnDepth -= 1; if (fnDepth === 0) { fnEnd = i + 1; break; } }
+  }
+  if (fnEnd > 0) {
+    try {
+      __fnEntries[fnMatch[1]] = new Function('return ' + __enBody.slice(fnMatch.index, fnEnd))();
+    } catch (e) { /* not an entry the scenarios exercise */ }
+  }
+}
+const LOCALES = { en: Object.assign(__enEntries, __fnEntries) };
+let _locale = LOCALES.en;
+const __tStart = __i18nSrc.indexOf('function t(key, ...args) {');
+let __tDepth = 0, __tEnd = -1;
+for (let i = __i18nSrc.indexOf('{', __tStart); i < __i18nSrc.length; i += 1) {
+  const ch = __i18nSrc[i];
+  if (ch === '{') __tDepth += 1;
+  else if (ch === '}') { __tDepth -= 1; if (__tDepth === 0) { __tEnd = i + 1; break; } }
+}
+const t = new Function(
+  'LOCALES',
+  '_localeRef',
+  __i18nSrc.slice(__tStart, __tEnd).replace(/\b_locale\b/g, '_localeRef.current') + '; return t;'
+)(LOCALES, { get current() { return _locale; } });
 global.__toasts = [];
 global.__posted = [];
 global.__state = {
@@ -265,8 +351,15 @@ def _build_vm(body: str) -> str:
     ui_part += _extract(UI, "function _formatManualUpdateInstruction(", "\nfunction _formatUpdateCheckError")
     ui_part += _extract(UI, "function _formatUpdateTargetStatus(", "\nfunction _formatUpdateDirtyStatus")
     ui_part += "\nfunction _i18nUpdateText(k,f){const v=t(k);return (v&&v!==k)?v:f;}\nfunction _renderUpdateWhatsNewLinks(){}\n"
+    # #7679 finding 1 (re-gate 10-10): the production-composed scenario clicks
+    # the preserved control, so forceUpdate itself must be in the sandbox — the
+    # reviewer's composition ends in a real POST, not a state assertion. Sliced
+    # by BRACES (not a blank-line marker): a marker cut the function short and
+    # took the following declarations with it, which broke the other scenarios.
+    ui_part += "\n" + _brace_block(UI, "async function forceUpdate(btn){")
     panels_part = _extract(PANELS, "async function checkUpdatesNow(", "\n// ── Auxiliary Models")
     return f"""
+global.__I18N_SRC__ = {json.dumps(I18N)};
 {_HARNESS_HEAD}
 {ui_part}
 {panels_part}
@@ -489,4 +582,128 @@ def test_the_dirty_only_banner_omits_available():
     assert "available" not in dirty_segment or "Local changes" not in dirty_segment, (
         f"'available' is attached to the dirty segment: {payload['mixed']!r} "
         "(#7679 finding 4)"
+    )
+
+
+# ── finding 1 (re-gate 10-10): the production-composed ownership schedule ────
+
+
+def test_the_rejected_check_preserves_a_successor_recovery_and_one_legitimate_post():
+    """The reviewer's full composition, through the real caller and click.
+
+    The prior coverage called ``_showUpdateBanner`` directly, which pins a
+    renderer unit contract but never exercises the caller/rejection/click
+    chain the finding is about. This scenario runs the production path:
+
+    1. a Check is pending (its health/confirm work is gated, as in the
+       round-2 harness, so the race can be interleaved);
+    2. while it is in flight, ``applyUpdates()`` publishes a NEWER Agent
+       conflict recovery and arms a live Agent/stable Force grant;
+    3. the pending Check is then REJECTED (a real API failure);
+    4. the successor control must stay visible, enabled and armed — a
+       disabled-aware click must produce exactly ONE legitimate
+       Agent/stable POST, and the obsolete pre-check control must not also
+       fire.
+
+    It is the discriminator for the round-4 fix: with the unconditional
+    pre-reconciler retire restored, the successor's grant is gone and the
+    click produces zero POSTs.
+    """
+    body = r"""
+(async () => {
+  const out = { posts: [], clicks: [] };
+  // A manual-update WebUI that is behind: the preservation branch keeps the
+  // Agent Force armed, so the successor below has a control to renew.
+  global.__nextApiResponse = {
+    webui: { behind: 3, manual_update: true, dirty: false, channel: 'stable' },
+    agent: { behind: 1, channel: 'stable', recovery: { force: true } },
+  };
+  global.__state.btnForceUpdate.style.display = 'inline-block';
+  global.__state.btnForceUpdate.disabled = false;
+  global.__state.btnForceUpdate.dataset.target = 'agent';
+  _showUpdateBanner(global.__nextApiResponse, null, 0);
+
+  // 1) A Check starts. Its fetch is made to fail AFTER the newer recovery
+  //    lands, which is modelled by failing it on the second call.
+  global.__nextApiResponse = null;
+  global.__nextApiError = 'boom';
+  global.__nextApiErrorBody = JSON.stringify({ error: 'check failed' });
+  const checkPromise = checkUpdatesNow();
+
+  // 2) While the Check is in flight, applyUpdates() publishes generation 1
+  //    with a live Agent/stable grant — the successor.
+  global.window._updateRecoveryGeneration = 1;
+  _grantForceUpdate('agent', 'stable');
+  global.__state.btnForceUpdate.style.display = 'inline-block';
+  global.__state.btnForceUpdate.disabled = false;
+  global.__state.btnForceUpdate.dataset.target = 'agent';
+
+  // 3) The pending Check is rejected; the catch reconciles by ownership.
+  // checkUpdatesNow re-raises after its catch has reconciled, so the scenario
+  // tolerates the rejection — what matters is the state the catch left.
+  try {
+    await checkPromise;
+  } catch (e) {
+    out.rejected = String(e && e.message || e);
+  }
+  await new Promise((r) => setTimeout(r, 0));
+
+  out.display = global.__state.btnForceUpdate.style.display;
+  out.disabled = global.__state.btnForceUpdate.disabled;
+  out.target = global.__state.btnForceUpdate.dataset.target;
+  out.grant = _forceUpdateGrant ? _forceUpdateGrant.target : null;
+  out.channel = _forceUpdateGrant ? _forceUpdateGrant.channel : null;
+
+  // 4) A display/disabled-aware click: only a button that is actually shown
+  //    and enabled is clicked, exactly as a user could. The check-failure
+  //    stub is cleared first so the POST itself is not rejected by the same
+  //    simulated outage — the scenario is about the OWNERSHIP of the click,
+  //    not about a failing network.
+  const btn = global.__state.btnForceUpdate;
+  global.__nextApiError = null;
+  global.__nextApiErrorBody = null;
+  if (btn.style.display === 'inline-block' && !btn.disabled) {
+    global.showConfirmDialog = async () => true;
+    try { await forceUpdate(btn); out.clicked = true; }
+    catch (e) { out.clickErr = String(e && e.message || e); }
+  } else {
+    out.clicked = false;
+  }
+  out.posts = global.__posted;
+  process.stdout.write(JSON.stringify(out));
+})().catch(e => { process.stdout.write('THREW:' + e.message); process.exitCode = 1; });
+"""
+    out = _run_node(_build_vm(body))
+    assert out.returncode == 0, out.stderr
+    payload = json.loads(out.stdout.strip().splitlines()[-1])
+    assert isinstance(payload, dict), payload
+    # The successor survives the rejection.
+    assert payload["display"] == "inline-block", (
+        f"the rejected Check hid the newer Agent recovery: {payload!r}"
+    )
+    assert payload["disabled"] is False, (
+        f"the rejected Check disabled the newer Agent recovery: {payload!r}"
+    )
+    assert payload["target"] == "agent", (
+        f"the rejected Check detargeted the newer Agent recovery: {payload!r}"
+    )
+    assert payload["grant"] == "agent" and payload["channel"] == "stable", (
+        f"the successor's grant was not renewed: {payload!r}"
+    )
+    # And exactly one legitimate Agent/stable POST happens.
+    assert payload["clicked"] is True, (
+        f"the preserved control was not clickable: {payload!r}"
+    )
+    assert len(payload["posts"]) == 1, (
+        f"expected exactly one legitimate POST, got {payload['posts']!r}"
+    )
+    post = payload["posts"][0]
+    assert post["url"].endswith("/api/updates/force"), (
+        f"the POST did not target the force endpoint: {post!r}"
+    )
+    assert post["body"].get("target") == "agent", (
+        f"the POST did not carry the Agent target: {post!r}"
+    )
+    assert post["body"].get("channel") == "stable", (
+        f"the POST did not carry the successor's channel: {post!r}"
     )

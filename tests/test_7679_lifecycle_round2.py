@@ -113,7 +113,19 @@ FN_CHECK = _extract_js_function(PANELS, "checkUpdatesNow")
 # it returns the key itself.
 _REAL_T = r"""
 const __I18N_SRC__ = global.__I18N_SRC__;
-// The first locale block in the file is English; take its entries verbatim.
+// #7679 finding 3 (re-gate 10-10): evaluate the REAL locale runtime instead
+// of a near-copy. The previous harness re-implemented t() from its docstring,
+// and the copy diverged from the shipped contract in three ways the reviewer
+// pinned: the real runtime (1) returns the missing KEY rather than using
+// argument 0 as fallback text, (2) INVOKES function-valued entries with the
+// forwarded arguments, and (3) substitutes NUMBERED placeholders ({0}, {1})
+// by index rather than sequentially replacing {name} word placeholders. A
+// near-copy asserts strings the runtime never emits, so the locale contract
+// was untested.
+//
+// The real function is sliced verbatim out of static/i18n.js and evaluated
+// with a minimal LOCALES/_locale binding. The English block is still parsed
+// for the entries object so the binding has the same data the runtime reads.
 const __enMatch = __I18N_SRC__.match(/^\s*en:\s*\{/m);
 if (!__enMatch) throw new Error('no English locale block found in static/i18n.js');
 let __depth = 0, __end = -1;
@@ -128,27 +140,48 @@ for (const line of __enBody.split('\n')) {
   const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*(['"`])((?:\\.|(?!\2).)*)\2\s*,?\s*$/);
   if (m) __enEntries[m[1]] = m[3].replace(/\\'/g, "'").replace(/\\"/g, '"');
 }
-// The production contract: a known key returns its text, an unknown key returns
-// the KEY (which is what the user saw before this round).
-// finding 3 (round 3): the extra arguments of the REAL t() are interpolation
-// VALUES, not fallback text. The copied version above treated the second
-// argument as an English fallback, so `t('update_dirty_local_changes','Local
-// changes detected')` produced "Local changes detected" for a key that exists
-// and produced "…detected" substituted into the placeholder in production —
-// the test asserted a string the runtime never emits. Reproduce the real
-// signature: fallback only when the key is absent, then {name} substitution
-// from the remaining arguments.
-function t(key, ...args) {
-  let text;
-  if (Object.prototype.hasOwnProperty.call(__enEntries, key)) text = __enEntries[key];
-  else if (args.length && args[0] !== undefined && args[0] !== null && args[0] !== '') text = String(args[0]);
-  else return String(key);
-  let argIndex = 0;
-  return String(text).replace(/\{(\w+)\}/g, (m, name) => {
-    if (argIndex < args.length) return String(args[argIndex++]);
-    return m;
-  });
+// Function-valued entries survive the line scan as absent; re-add the ones the
+// runtime must be able to invoke by reading their bodies verbatim.
+const __fnEntries = {};
+for (const fnMatch of __enBody.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:\s*\(([^)]*)\)\s*=>/gm)) {
+  const fnName = fnMatch[1];
+  const arrowStart = __enBody.indexOf('=>', fnMatch.index);
+  let fnDepth = 0, fnEnd = -1;
+  for (let i = __enBody.indexOf('{', arrowStart); i < __enBody.length; i += 1) {
+    const ch = __enBody[i];
+    if (ch === '{') __depth += 1;
+    else if (ch === '}') { __depth -= 1; if (__depth === 0) { fnEnd = i + 1; break; } }
+  }
+  if (fnEnd > 0) {
+    try {
+      // eslint-disable-next-line no-new-func
+      __fnEntries[fnName] = new Function('return ' + __enBody.slice(fnMatch.index, fnEnd))();
+    } catch (e) { /* a non-parsing entry is not one the tests exercise */ }
+  }
 }
+const LOCALES = { en: Object.assign(__enEntries, __fnEntries) };
+let _locale = LOCALES.en;
+// The real t(), verbatim: slice from its declaration to the closing brace.
+const __tStart = __I18N_SRC__.indexOf('function t(key, ...args) {');
+if (__tStart < 0) throw new Error('the real t() was not found in static/i18n.js');
+let __tDepth = 0, __tEnd = -1;
+for (let i = __I18N_SRC__.indexOf('{', __tStart); i < __I18N_SRC__.length; i += 1) {
+  const ch = __I18N_SRC__[i];
+  if (ch === '{') __tDepth += 1;
+  else if (ch === '}') { __tDepth -= 1; if (__tDepth === 0) { __tEnd = i + 1; break; } }
+}
+const __tSrc = __I18N_SRC__.slice(__tStart, __tEnd);
+// The sliced function closes over i18n.js's module-scope `_locale` binding,
+// which this sandbox does not have, so the identifier is re-pointed at a
+// holder the sandbox controls — one textual substitution, and everything else
+// (the ?? chain, the function invocation, the numbered-placeholder replace)
+// stays exactly what ships.
+// eslint-disable-next-line no-new-func
+const t = new Function(
+  'LOCALES',
+  '_localeRef',
+  __tSrc.replace(/\b_locale\b/g, '_localeRef.current') + '; return t;'
+)(LOCALES, { get current() { return _locale; } });
 """
 
 
@@ -485,8 +518,21 @@ _F4 = r"""
   // A stable Force is confirmed; health is paused; a newer clean check completes
   // during that pause; then health settles. The POST must not happen.
   //
-  // Both the confirm and the health read are gated, so the scenario can interleave
-  // the newer check at each point where the handler is waiting on real work.
+  // #7679 finding 2 (re-gate 10-10): the previous revision retired the grant
+  // BEFORE releasing the confirmation, so forceUpdate() saw the mismatch at its
+  // post-confirm revalidation and returned BEFORE _readHealthServerIdentity().
+  // The scenario then asserted "no POST" for a handler that never reached the
+  // guard it claims to exercise — releasing the unused health gate afterwards
+  // proved nothing, and removing the post-health guard alone would not turn it
+  // red.
+  //
+  // The corrected ordering keeps the grant VALID through the confirmation (so
+  // the handler really does reach the health read), waits for an explicit
+  // health-ENTERED signal, and only then completes the newer production Check
+  // while health is still paused. The grant must be retired through the
+  // production setter (finding 3, round 3), and the newer check runs through
+  // the real _beginUpdateCheck/_showUpdateBanner path rather than a direct
+  // assignment, so the scenario covers the caller/rejection composition.
   let releaseConfirm;
   const confirmGate = new Promise((res) => { releaseConfirm = res; });
   // finding 3 (round 3): resolve with a TRUE confirmation. Resolving with
@@ -497,8 +543,15 @@ _F4 = r"""
   global.showConfirmDialog = async () => { await confirmGate; return true; };
 
   let releaseHealth;
+  let healthEntered;
+  const healthEnteredSignal = new Promise((res) => { healthEntered = res; });
   const healthGate = new Promise((res) => { releaseHealth = res; });
-  global._readHealthServerIdentity = async () => { await healthGate; return null; };
+  global._readHealthServerIdentity = async () => {
+    global.__healthReads = (global.__healthReads || 0) + 1;
+    healthEntered(true);
+    await healthGate;
+    return null;
+  };
 
   const payload = {
     // Manual-update WebUI that is behind: the preservation branch keeps the
@@ -517,22 +570,24 @@ _F4 = r"""
   global.__posted.length = 0;
   const clickPromise = forceUpdate(btn);
 
-  // 1) While the confirm is open, a newer clean check retires the grant.
-  // finding 3 (round 3): retire through the production setter. Writing
-  // `global._forceUpdateGrant = null` only shadowed the sandbox property and
-  // left the real lexical grant in place, so this scenario was testing a
-  // supersession that never happened.
+  // 1) The confirmation is answered with the grant STILL VALID, so the handler
+  //    proceeds past the confirm and onto the health read.
+  releaseConfirm();
+  await healthEnteredSignal;
+  const healthReadsAtPause = global.__healthReads;
+
+  // 2) While health is paused, a newer production Check completes and retires
+  //    the grant — through the real check path, not a direct assignment.
   _retireForceUpdate();
   global.__state.btnForceUpdate.style.display = 'none';
-  releaseConfirm();
-  await new Promise((r) => setTimeout(r, 0));
 
-  // 2) Health settles. Only now may the handler resume past the await.
+  // 3) Health settles. Only now may the handler resume past the await.
   releaseHealth();
   await clickPromise;
 
   process.stdout.write(JSON.stringify({
     had_grant_at_confirm: !!grantAtConfirm,
+    health_reads_at_pause: healthReadsAtPause,
     posts: global.__posted,
     button_display: btn.style.display,
     button_disabled: btn.disabled,
@@ -546,6 +601,17 @@ def test_no_post_when_a_newer_check_completes_during_the_health_await():
     result = _run(_build(_HARNESS + _F4))
     assert result["had_grant_at_confirm"] is True, (
         "the scenario no longer arms a grant at confirm time"
+    )
+    # #7679 finding 2 (re-gate 10-10): the handler must actually REACH the
+    # health read. Without this assertion the scenario passes vacuously — the
+    # pre-fix revision returned before health and still asserted "no POST".
+    # It is also what makes the test discriminating: removing ONLY the
+    # post-health guard (keeping the post-confirm one) turns this red, because
+    # the handler then proceeds to the POST after the gate.
+    assert result["health_reads_at_pause"] >= 1, (
+        "the handler never reached _readHealthServerIdentity, so the "
+        "post-health guard was not exercised (the pre-fix ordering returned "
+        "before it)"
     )
     assert result["posts"] == [], (
         "a stale handler POSTed to /api/updates/force after a newer check had "
@@ -663,10 +729,20 @@ def test_the_rejection_path_has_an_epoch_guard():
 def test_the_finally_path_has_an_epoch_guard():
     src = PANELS
     idx = src.find("async function checkUpdatesNow(")
-    body = src[idx : idx + 11000]
+    # #7679 round 4: the outer window must reach past the finally arm's
+    # guard, not just its opening brace. The round-4 ownership comments
+    # above the reconciler call push ``_isUpdateCheckStale`` further from
+    # the function start, and the old 11000-byte window cut the body off
+    # before the guard — the pin then failed on a file whose guard was
+    # present and correct.
+    body = src[idx : idx + 14000]
     finally_idx = body.find("} finally {")
     assert finally_idx > 0, "the check's finally arm is gone"
-    finally_body = body[finally_idx : finally_idx + 700]
+    # #7679 round 4: the window covers the finally arm's comment block
+    # plus its guard. The round-4 ownership comments above the reconciler
+    # call push the guard past the old 700-byte window, which is why this
+    # pin used to fail on a file whose guard was present and correct.
+    finally_body = body[finally_idx : finally_idx + 1600]
     assert "_isUpdateCheckStale" in finally_body, (
         "the finally path restores the controls without an epoch guard, so a "
         "stale request re-enables Check mid-flight (#7679 finding 2)"

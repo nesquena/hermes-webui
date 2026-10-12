@@ -12065,10 +12065,27 @@ function _reconcileObsoleteUpdateControls(data, recoveryGenerationAtCheck){
   }
   // A preserved control must stay armed: retiring the grant above would have
   // left it a decoy, and a preserved lock without its target is inert too.
+  //
+  // #7679 finding 1 (round 4 / re-gate 10-10): the re-arm reads the grant the
+  // control ALREADY holds when the observation carries no authoritative
+  // recovery state (the rejected-check null payload). The old form required
+  // ``data.agent.recovery`` — which by definition does not exist on a null
+  // payload — so a preserved successor was never re-armed and stayed inert.
+  // The successor's own grant (target + channel, stamped by the applyUpdates
+  // observation that established it) is the authority to renew: this path only
+  // decides whether it survives, it does not re-derive it.
   if(keepForce&&typeof _grantForceUpdate==='function'){
     const recovery=(data&&data.agent&&data.agent.recovery)||null;
-    if(!mayRetire&&recovery&&(recovery.force===true||recovery.force===null||recovery.force===undefined)){
-      _grantForceUpdate('agent', data&&data.agent?data.agent.channel:null);
+    const agentState=(data&&data.agent)||null;
+    if(recovery){
+      if(recovery.force===true||recovery.force===null||recovery.force===undefined){
+        _grantForceUpdate('agent', agentState?agentState.channel:null);
+      }
+    }else if(_forceUpdateGrant&&_forceUpdateGrant.target==='agent'){
+      // No authoritative recovery state in this observation: renew the
+      // successor's own grant exactly as it was armed, so the preserved
+      // button keeps working for the recovery it was created for.
+      _grantForceUpdate('agent', _forceUpdateGrant.channel||null);
     }
   }
   return {keepForce:!!keepForce,keepLock:!!keepLock};

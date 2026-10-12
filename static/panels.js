@@ -12579,7 +12579,23 @@ async function checkUpdatesNow(channelOverride){
     // catch therefore reconciles with a null payload, which is exactly the
     // "no authoritative recovery state" case: it may retire the control the
     // failing check owned, and nothing else.
-    if(typeof _retireForceUpdate==='function') _retireForceUpdate();
+    //
+    // #7679 finding 1 (round 4 / re-gate 10-10): the unconditional
+    // ``_retireForceUpdate()`` that used to run HERE is gone. It ran BEFORE the
+    // reconciler, so it cleared the grant of every Agent control — including a
+    // validated successor grant a NEWER ``applyUpdates()`` published while this
+    // Check was pending. The reconciler's keepAgent branch then preserved the
+    // button's visibility but could not re-arm what had already been retired,
+    // and ``forceUpdate`` returned early on the null grant: a visible, enabled,
+    // inert button (the reviewer's "walked back by the newly unconditional
+    // retirement").
+    //
+    // The reconciler now decides ALONE which owner the rejected Check may
+    // clear: it retires the control the failing check owned, and it retains —
+    // and re-arms, with the successor's own target/channel — a recovery a newer
+    // observation established. Retiring before that decision is what destroyed
+    // the successor, so the retire call moved inside the reconciler's own
+    // not-keep branches.
     if(typeof _reconcileObsoleteUpdateControls==='function'){
       _reconcileObsoleteUpdateControls(null, _recoveryGenerationAtCheck);
     }else{
