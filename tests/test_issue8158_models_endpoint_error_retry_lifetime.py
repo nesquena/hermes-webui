@@ -432,6 +432,46 @@ def test_failed_reprobe_restamps_instead_of_retrying_on_every_read(monkeypatch, 
 # ── Isolation and fencing ────────────────────────────────────────────────────
 
 
+def test_unresolvable_provider_does_not_clear_its_diagnostic(monkeypatch, tmp_path):
+    """A provider that no longer resolves to a configured entry keeps its error.
+
+    "No entry to probe" is not evidence that the endpoint recovered, so it must
+    not be reported as an empty success — that would erase a real diagnostic on
+    the strength of a failed lookup.
+    """
+    _expire_retries(monkeypatch, 0.0)
+
+    with _ConfigState():
+        _configure_named_custom_provider(
+            tmp_path, monkeypatch, base_url="https://broken.example/v1"
+        )
+        # A diagnostic for a provider that is not in custom_providers at all.
+        expired = config._custom_endpoint_error("ghost")
+        expired["checked_at"] = time.time() - 3600
+        config._available_models_cache = {
+            "active_provider": "openai-codex",
+            "default_model": "gpt-5.5",
+            "configured_model_badges": {},
+            "groups": [
+                {"provider": "Ghost", "provider_id": "custom:ghost", "models": [],
+                 "models_endpoint_error": expired}
+            ],
+        }
+        config._available_models_cache_ts = time.monotonic()
+        config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
+        config._sync_models_cache_provenance()
+
+        assert config._reprobe_provider_endpoint("custom:ghost") is None, (
+            "an id with no configured entry must report 'nothing to probe'"
+        )
+        config.get_available_models()
+        assert _wait_for_reprobe_idle(5.0)
+        time.sleep(0.2)
+        assert _endpoint_error(config.get_available_models(), "custom:ghost") is not None, (
+            "a failed lookup must leave the diagnostic intact"
+        )
+
+
 def test_reprobe_scope_is_per_provider(monkeypatch, tmp_path):
     """Two errored providers are probed independently, not one shared probe."""
     probed: list[str] = []

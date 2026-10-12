@@ -9441,7 +9441,14 @@ def _models_endpoint_error_reprobe_worker(provider_id: str, scope: tuple[str, st
             with _cache_build_cv:
                 rebuild_seq = _models_rebuild_seq
                 build_fingerprint = _available_models_cache_source_fingerprint
-            models, error = _reprobe_provider_endpoint(provider_id)
+            outcome = _reprobe_provider_endpoint(provider_id)
+            if outcome is None:
+                # No such configured entry: there is nothing to probe and no
+                # evidence the endpoint recovered, so the diagnostic is left
+                # exactly as it is. Reporting this as an empty success would
+                # clear a real diagnostic on the strength of a failed lookup.
+                return
+            models, error = outcome
             with _cache_build_cv:
                 if _models_rebuild_superseded(rebuild_seq):
                     logger.debug(
@@ -9465,22 +9472,34 @@ def _models_endpoint_error_reprobe_worker(provider_id: str, scope: tuple[str, st
             _models_endpoint_reprobe_inflight.pop(scope, None)
 
 
-def _reprobe_provider_endpoint(provider_id: str) -> tuple[list[dict], dict | None]:
-    """Probe ``provider_id``'s own configured endpoint via the shared helpers."""
+def _reprobe_provider_endpoint(provider_id: str) -> tuple[list[dict], dict | None] | None:
+    """Probe ``provider_id``'s own configured endpoint via the shared helpers.
+
+    Returns ``None`` when the id does not resolve to a configured custom provider
+    — a distinct outcome from "probed and it answered with nothing", because only
+    the latter is evidence about the endpoint. Entry resolution goes through
+    ``_named_custom_provider_slug_for_provider()``, the existing chokepoint that
+    maps a provider id back to its configured entry, so this re-probe and the
+    catalog rebuild that produced the diagnostic agree on which entry an id
+    belongs to.
+    """
     slug = str(provider_id or "").strip().lower()
+    if not slug:
+        return None
+    if not _named_custom_provider_slug_for_provider(slug):
+        return None
     for entry in _custom_provider_entries():
         if _custom_provider_slug_from_name(entry.get("name") or "") != slug:
             continue
         base_url, api_key = _custom_provider_probe_credentials(entry, slug)
         if not base_url:
-            return [], None
+            # The entry exists but has no endpoint to probe: same "no evidence
+            # about the endpoint" case as an unmatched id.
+            return None
         return _probe_custom_endpoint_models_now(
             base_url, slug, api_key=api_key, trusted_base_urls=(base_url,)
         )
-    # The provider is no longer a configured custom provider. Its source axis
-    # would have moved, so the fingerprint fence above drops the result anyway;
-    # probing an unknown slug from a stale payload would only guess.
-    return [], None
+    return None
 
 
 def _republish_provider_group(provider_id: str, mutate) -> bool:
