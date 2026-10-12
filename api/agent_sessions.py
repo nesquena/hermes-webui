@@ -1051,18 +1051,32 @@ def read_importable_agent_session_rows(
                     if '_compressed_summary' in message_cols
                     else ""
                 )
-                # #7681 finding 3: the default compaction mode is in-place, so a
+                # #7681 finding 4: the default compaction mode is in-place, so a
                 # compacted session stays ONE segment and the client's
                 # `_sidebarUserTurnCountRenderOK` still renders its count. That
-                # count includes rows the agent has already compacted away (and
-                # rows removed by /undo), so it over-reports. Emit a flag saying
-                # "this session has inactive (compacted or rewound) user rows"
-                # and let the client null the DISPLAYED count for it.
+                # count includes rows the agent has already archived, so it
+                # over-reports. Emit a flag saying "this session has inactive
+                # user rows" and let the client null the DISPLAYED count for it.
+                #
+                # The flag keys on `active = 0`, NOT on `_compressed_summary`:
+                # the agent soft-archives a row with `active=0` for BOTH
+                # compaction (`agent/conversation_compression.py` in-place fold)
+                # and `/undo` (`hermes_cli/cli_session_mixin.py:undo_last`), and a
+                # rewound row is `active=0, _compressed_summary=0` — keying on the
+                # summary flag alone missed every rewind, which is the 2-vs-1 the
+                # review reproduced after `rewind_to_message`.
                 inactive_user_rows_expr = (
-                    "MAX(CASE WHEN COALESCE(m._compressed_summary, 0) <> 0"
+                    "MAX(CASE WHEN COALESCE(m.active, 1) = 0"
                     " AND LOWER(m.role) = 'user' THEN 1 ELSE 0 END)"
-                    if '_compressed_summary' in message_cols
-                    else "0"
+                    if 'active' in message_cols
+                    else (
+                        # No `active` column: fall back to the durable summary flag
+                        # so a compacted session is still flagged.
+                        "MAX(CASE WHEN COALESCE(m._compressed_summary, 0) <> 0"
+                        " AND LOWER(m.role) = 'user' THEN 1 ELSE 0 END)"
+                        if '_compressed_summary' in message_cols
+                        else "0"
+                    )
                 )
                 # #7681 finding 2: `display_kind` is the agent's own marker for
                 # scaffolding rows that carry role='user' but are not human

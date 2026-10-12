@@ -1829,3 +1829,130 @@ def test_live_ask_inside_a_summary_carrier_counts_as_a_user_turn(tmp_path):
         f"got {by_id['s1']['actual_user_message_count']} — the recovery nudge and the "
         "standalone summary must stay excluded (#7681 finding 3)"
     )
+
+
+# ── Finding 4 (re-gate 2026-10-08): inactive-row detection ──
+#
+# The flag keyed on `_compressed_summary`, so `/undo` (which soft-archives with
+# `active=0` and leaves the summary flag at 0) was invisible and the sidebar kept
+# rendering a count that included the rewound turns — 2 versus 1 after
+# `rewind_to_message`, 9 versus 7 after `archive_and_compact`.
+
+
+def _inactive_flag_db(path, *, active_values, summary_flags=None):
+    """A one-session state.db whose user rows carry the given active/summary pairs."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            title TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL,
+            active INTEGER NOT NULL DEFAULT 1,
+            _compressed_summary INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, model, started_at,"
+        " message_count, parent_session_id, ended_at, end_reason)"
+        " VALUES ('s1', 'cli', 'cli', 'S', 'm', 10.0, 4, NULL, NULL, NULL)"
+    )
+    summary_flags = summary_flags or [0] * len(active_values)
+    for i, (active, flag) in enumerate(zip(active_values, summary_flags, strict=True)):
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp, active,"
+            " _compressed_summary) VALUES (?,?,?,?,?,?,?)",
+            (f"m{i}", "s1", "user", f"turn {i}", 11.0 + i, active, flag),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_rewound_user_rows_flag_the_session(tmp_path):
+    """#7681 finding 4: `/undo` soft-archives with `active=0` and leaves
+    `_compressed_summary` at 0, so the old predicate never fired."""
+    db = tmp_path / "state.db"
+    # turn 0 was rewound away; turn 1 is still live.
+    _inactive_flag_db(db, active_values=[0, 1], summary_flags=[0, 0])
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import read_importable_agent_session_rows
+    finally:
+        sys.path.pop(0)
+
+    by_id = {row["id"]: row for row in read_importable_agent_session_rows(db)}
+    assert by_id["s1"].get("has_inactive_user_rows"), (
+        "a session with a rewound (active=0) user row must be flagged so the "
+        "client can suppress the inflated count"
+    )
+
+
+def test_compacted_user_rows_still_flag_the_session(tmp_path):
+    """Counterpart: an in-place compaction archives with active=0 too."""
+    db = tmp_path / "state.db"
+    _inactive_flag_db(db, active_values=[0, 1], summary_flags=[1, 0])
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import read_importable_agent_session_rows
+    finally:
+        sys.path.pop(0)
+
+    by_id = {row["id"]: row for row in read_importable_agent_session_rows(db)}
+    assert by_id["s1"].get("has_inactive_user_rows"), (
+        "a compacted session must still be flagged"
+    )
+
+
+def test_all_active_session_is_not_flagged(tmp_path):
+    """The flag must not fire for a healthy session, or every count is hidden."""
+    db = tmp_path / "state.db"
+    _inactive_flag_db(db, active_values=[1, 1, 1])
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import read_importable_agent_session_rows
+    finally:
+        sys.path.pop(0)
+
+    by_id = {row["id"]: row for row in read_importable_agent_session_rows(db)}
+    assert not by_id["s1"].get("has_inactive_user_rows"), (
+        "a session whose user rows are all active must not be flagged"
+    )
+
+
+def test_inactive_row_flag_survives_the_response_projection():
+    """#7681 finding 4: the flag was dropped by the model projection and the
+    response allowlist, so it never reached the client that is supposed to act
+    on it."""
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.route_session_list_cache import _SIDEBAR_SESSION_RESPONSE_FIELDS
+    finally:
+        sys.path.pop(0)
+
+    assert "has_inactive_user_rows" in _SIDEBAR_SESSION_RESPONSE_FIELDS, (
+        "the sidebar response allowlist drops has_inactive_user_rows, so the "
+        "client's render gate never sees it"
+    )
+    models_src = (REPO_ROOT / "api" / "models.py").read_text(encoding="utf-8")
+    assert "'has_inactive_user_rows': row.get('has_inactive_user_rows')," in models_src, (
+        "api/models.py's cli_sessions projection drops has_inactive_user_rows"
+    )
