@@ -3882,8 +3882,19 @@ function _messageReloadLimitForSession(sid){
   return _INITIAL_MSG_LIMIT;
 }
 
-function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId){
+function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, ownerOffset){
   const msgs=Array.isArray(messages)?messages:[];
+  // #7653 re-gate round 11 (finding 3, SILENT): the paging path prepends an
+  // OLDER page whose ``session.tool_calls`` summary carries owner indices in
+  // that page's OWN coordinates, while ``messages`` is the COMBINED array
+  // (older page + current transcript). Merging the two without re-basing
+  // compares indices from two different arrays as if they were one, so an
+  // older page's failure lands on a newer successful occurrence — the
+  // reviewer's "older-page prepend" contamination. ``ownerOffset`` is the
+  // number of rows the older page contributed ahead of the combined array;
+  // every owner index read from the summary is shifted by it. Absent (or 0)
+  // for every non-paging caller, which is the combined-array case already.
+  const _ownerOffset=(ownerOffset!=null&&ownerOffset!==''&&Number.isFinite(Number(ownerOffset)))?Number(ownerOffset):0;
   // #7358 round 9 (re-gate 10/01 finding 2): the persisted verdict map is
   // keyed on the call *occurrence*, never on the tid alone — llama.cpp reuses
   // one id and other providers reuse ``call_0`` every turn, so a tid-only
@@ -3917,12 +3928,20 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId){
       }
       // Reused id: scope the verdict to the owning assistant message index so
       // an earlier successful ``call_0`` is left alone.
+      // #7653 re-gate round 11: the index is re-based by ``_ownerOffset`` so a
+      // paged summary's owner names the row it owns in the COMBINED array.
       const _aRaw=tc.assistant_msg_idx;
-      const _aIdx=(_aRaw!=null&&_aRaw!==''&&Number.isFinite(Number(_aRaw)))?Number(_aRaw):null;
+      const _aIdx=(_aRaw!=null&&_aRaw!==''&&Number.isFinite(Number(_aRaw)))?Number(_aRaw)+_ownerOffset:null;
       if(_aIdx==null){
-        // No occurrence info for a reused id — cannot prove which row is the
-        // failed one; keep the flat best-effort entry.
-        _persistedIsErrorByTid[_tid]=true;
+        // #7653 re-gate round 11 (finding 3, SILENT): NO occurrence info for a
+        // reused id, so nothing proves which row is the failed one. Writing a
+        // flat ``true`` here repaints every LATER occurrence of that tid —
+        // including a successful reuse in a following turn — which is the
+        // reviewer's "unowned summaries" contamination (``[true,true]`` where
+        // the base preserves ``[true,false]``). Skip the entry instead: the
+        // render paths fail closed (a row without a matching verdict renders
+        // from its own data), and a genuinely unique id keeps the flat form
+        // above.
         continue;
       }
       const slot=_persistedIsErrorByTid[_tid];
@@ -4686,7 +4705,18 @@ async function _loadOlderMessages() {
       nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
     }
     S.messages = nextMessages;
-    _syncToolCallsForLoadedMessages(nextMessages, responseSession.tool_calls);
+    // #7653 re-gate round 11 (finding 3, SILENT): pass the older page's row
+    // count as the owner-coordinate offset. ``responseSession.tool_calls``
+    // describes the OLDER page in its own coordinates, while ``nextMessages``
+    // is the combined array, so the verdict map must be built with every
+    // owner index shifted by the page length — otherwise an older page's
+    // failure lands on a newer successful occurrence of the same reused id.
+    _syncToolCallsForLoadedMessages(
+      nextMessages,
+      responseSession.tool_calls,
+      sid,
+      olderMsgs.length,
+    );
     // #7882 (greptile round-4 P2): older rows prepended during an in-flight
     // send are server-known rows — advance the send's optimistic-count
     // baseline by exactly the prepended visible rows so the send's eventual
