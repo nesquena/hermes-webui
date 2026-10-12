@@ -7754,9 +7754,14 @@ def _stored_provider_can_legitimately_own_model(
 
         # Both identities: the slug table registers underscore names raw, and
         # ``_canonicalise_provider_id`` rewrites them (#7594 gate5 regression).
-        if _named_custom_provider_slug_for_provider(raw):
+        # Both lookups are scoped to the session's OWN profile config: the
+        # process-global ``cfg`` may belong to a different profile mid-request,
+        # and a named custom provider declared only there must not decide that
+        # this lane is legitimate (#7594 re-gate CORE). When no profile dict is
+        # available the helper keeps its global fallback.
+        if _named_custom_provider_slug_for_provider(raw, profile_config):
             return True
-        if provider != raw and _named_custom_provider_slug_for_provider(provider):
+        if provider != raw and _named_custom_provider_slug_for_provider(provider, profile_config):
             return True
     except Exception:
         return True

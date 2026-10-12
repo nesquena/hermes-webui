@@ -738,3 +738,73 @@ def test_chat_start_preserves_underscore_plugin_provider_and_saves(
     assert (captured["model_provider"], after, saved) == (
         "plugin_x", "plugin_x", ["plugin_x"],
     )
+
+
+# ---------------------------------------------------------------------------
+# #7594 re-gate CORE (2026-09-22): both named-custom keep-checks must read the
+# SESSION'S profile config, never the process-global ``cfg``. A multi-profile
+# instance (or a per-client profile cookie) can hold a global ``cfg`` that
+# belongs to a different profile, so the protection a session actually gets
+# must be decided by ``_read_profile_model_config``'s result alone.
+# ---------------------------------------------------------------------------
+
+
+def test_chat_start_profile_named_custom_survives_divergent_global_cfg(
+    monkeypatch, tmp_path, no_provider_credentials, no_plugin_providers
+):
+    """The session's profile declares ``my_local``; the global ``cfg`` does not.
+
+    The lane is legitimately keyless for THIS session, so chat start must keep
+    it and persist it as ``my_local`` rather than swapping in the catalog owner.
+    """
+    import api.config as config
+
+    profile = {
+        "model": {"provider": "nous"},
+        "custom_providers": [
+            {"name": "my_local", "base_url": "http://127.0.0.1:8080/v1"},
+        ],
+    }
+    monkeypatch.setattr(config, "cfg", {"model": {"provider": "nous"}, "custom_providers": []})
+    saved = _capture_provider_saves(monkeypatch)
+    captured, after, before = _run_chat_start_local_lane(
+        monkeypatch, tmp_path, session_id="issue-7594-profile-custom",
+        provider="my_local", profile_cfg=profile,
+    )
+
+    assert before == "my_local"
+    assert (captured["model_provider"], after, saved) == (
+        "my_local", "my_local", ["my_local"],
+    )
+
+
+def test_chat_start_global_cfg_custom_does_not_protect_other_profile(
+    monkeypatch, tmp_path, no_provider_credentials, no_plugin_providers
+):
+    """Converse: a named custom provider that exists ONLY in the global ``cfg``
+    must not shield a different profile's session — the profile declares no such
+    lane, so the stale provider is repaired and persisted to the catalog owner.
+    """
+    import api.config as config
+
+    profile = {"model": {"provider": "nous"}, "custom_providers": []}
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {"provider": "nous"},
+            "custom_providers": [
+                {"name": "my_local", "base_url": "http://127.0.0.1:8080/v1"},
+            ],
+        },
+    )
+    saved = _capture_provider_saves(monkeypatch)
+    captured, after, before = _run_chat_start_local_lane(
+        monkeypatch, tmp_path, session_id="issue-7594-global-custom",
+        provider="my_local", profile_cfg=profile,
+    )
+
+    assert before == "my_local"
+    assert (captured["model_provider"], after, saved) == (
+        "nous", "nous", ["nous"],
+    )
