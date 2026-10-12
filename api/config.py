@@ -6830,13 +6830,13 @@ def _validate_custom_endpoint_url(base: str, trusted_base_urls: tuple[object, ..
     import ipaddress
     import socket
 
-    ssrf_trusted_hosts: set[str] = set()
+    _ssrf_trusted_hosts: set[str] = set()
     for trusted in (base, *trusted_base_urls):
-        parsed_trusted = urlparse(
+        _cp_parsed = urlparse(
             str(trusted) if "://" in str(trusted) else f"http://{trusted}"
         )
-        if parsed_trusted.hostname:
-            ssrf_trusted_hosts.add(parsed_trusted.hostname.lower())
+        if _cp_parsed.hostname:
+            _ssrf_trusted_hosts.add(_cp_parsed.hostname.lower())
 
     endpoint_url = _models_endpoint_for_base_url(base)
     parsed_url = urlparse(endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}")
@@ -6852,7 +6852,7 @@ def _validate_custom_endpoint_url(base: str, trusted_base_urls: tuple[object, ..
                     is_known_local = any(
                         k in host_l
                         for k in ("ollama", "localhost", "127.0.0.1", "lmstudio", "lm-studio")
-                    ) or host_l in ssrf_trusted_hosts
+                    ) or host_l in _ssrf_trusted_hosts
                     if not is_known_local:
                         raise ValueError(f"SSRF: resolved hostname to private IP {addr[0]}")
         except socket.gaierror:
@@ -10592,7 +10592,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             probe_key: tuple[str, str] | None = None
             probe_timeout = CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
             try:
-                import ipaddress
                 import urllib.error
                 import urllib.request
                 import socket
