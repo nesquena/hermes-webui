@@ -23191,6 +23191,14 @@ def _handle_live_models(handler, parsed):
 
                         if ids:
                             logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
+                            # #8158: this provider's endpoint answered, so the
+                            # catalog's "unreachable" diagnostic for it is stale.
+                            # Clear it here — the live path is the one place that
+                            # both re-probes and knows the same provider succeeded.
+                            # The group itself is kept (#7521), so an errored
+                            # zero-model group survives with the diagnostic gone.
+                            from api.config import clear_models_endpoint_error_for_provider
+                            clear_models_endpoint_error_for_provider(provider)
                         else:
                             logger.debug("Custom provider returned no models from %s", _base_url)
 

@@ -6765,6 +6765,209 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
     return {"ok": True, "task": task, "provider": provider, "model": model}
 
 
+# ── Custom-endpoint probe diagnostics ────────────────────────────────────────
+# Shared by the catalog rebuild (which produces them) and the bounded re-probe
+# that expires them (#8158). They live at module scope so one implementation
+# shapes every diagnostic, instead of the retry path re-deriving the same
+# message/kind mapping and drifting from the rebuild.
+
+
+def _models_endpoint_for_base_url(base_url: str) -> str:
+    base = str(base_url or "").strip().rstrip("/")
+    if base.endswith("/v1"):
+        return base + "/models"
+    return base + "/v1/models"
+
+
+def _custom_endpoint_error(
+    provider: str,
+    exc: Exception | None = None,
+    *,
+    code: int | None = None,
+) -> dict:
+    """Shape one custom-endpoint probe failure for the picker group.
+
+    ``checked_at`` is a wall-clock stamp (not ``time.monotonic()``) because the
+    diagnostic is served from — and, on the first read after a restart, restored
+    from — the durable catalog: it has to stay comparable across processes. The
+    read path uses it to bound how long a transient failure may be reported
+    (#8158); a diagnostic the retry path refreshes carries a fresh stamp.
+    """
+    provider_label = str(provider or "custom").replace("custom:", "")
+    status_code = code if code is not None else getattr(exc, "code", None)
+    checked_at = time.time()
+    if status_code in (401, 403):
+        return {
+            "kind": "auth",
+            "code": int(status_code),
+            "message": f"Models endpoint returned {status_code} — check the API key for {provider_label}.",
+            "checked_at": checked_at,
+        }
+    if isinstance(status_code, int):
+        return {
+            "kind": "http",
+            "code": int(status_code),
+            "message": f"Models endpoint returned {status_code} for {provider_label}; see logs.",
+            "checked_at": checked_at,
+        }
+    return {
+        "kind": "network",
+        "code": None,
+        "message": f"Models endpoint unreachable for {provider_label}; verify base_url.",
+        "checked_at": checked_at,
+    }
+
+
+def _validate_custom_endpoint_url(base: str, trusted_base_urls: tuple[object, ...]) -> None:
+    """Refuse a custom-endpoint probe target that is not a plain HTTP(S) host.
+
+    The private-IP guard applies to targets that are NOT one of the user's own
+    configured custom bases (``trusted_base_urls``), and localhost-ish host names
+    stay allowed for the local-server providers. Raises ``ValueError`` — callers
+    turn that into a probe diagnostic. Shared by the catalog rebuild and the
+    bounded re-probe so both validate the same way (#8158).
+    """
+    import ipaddress
+    import socket
+
+    ssrf_trusted_hosts: set[str] = set()
+    for trusted in (base, *trusted_base_urls):
+        parsed_trusted = urlparse(
+            str(trusted) if "://" in str(trusted) else f"http://{trusted}"
+        )
+        if parsed_trusted.hostname:
+            ssrf_trusted_hosts.add(parsed_trusted.hostname.lower())
+
+    endpoint_url = _models_endpoint_for_base_url(base)
+    parsed_url = urlparse(endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}")
+    if parsed_url.scheme not in ("", "http", "https"):
+        raise ValueError(f"Invalid URL scheme: {parsed_url.scheme}")
+    if parsed_url.hostname:
+        try:
+            resolved_ips = socket.getaddrinfo(parsed_url.hostname, None)
+            for _, _, _, _, addr in resolved_ips:
+                addr_obj = ipaddress.ip_address(addr[0])
+                if addr_obj.is_private or addr_obj.is_loopback or addr_obj.is_link_local:
+                    host_l = (parsed_url.hostname or "").lower()
+                    is_known_local = any(
+                        k in host_l
+                        for k in ("ollama", "localhost", "127.0.0.1", "lmstudio", "lm-studio")
+                    ) or host_l in ssrf_trusted_hosts
+                    if not is_known_local:
+                        raise ValueError(f"SSRF: resolved hostname to private IP {addr[0]}")
+        except socket.gaierror:
+            pass
+
+
+def _extract_model_entries_from_payload(data: object, provider: str) -> list[dict]:
+    """Pull ``{id, label}`` entries out of an OpenAI-compatible /models payload."""
+
+    models_list = []
+    if isinstance(data, dict):
+        if "data" in data and isinstance(data["data"], list):
+            models_list = data["data"]
+        elif "models" in data and isinstance(data["models"], list):
+            models_list = data["models"]
+    models = []
+    seen = set()
+    for model in models_list:
+        if not isinstance(model, dict):
+            continue
+        model_id = (
+            model.get("id", "")
+            or model.get("name", "")
+            or model.get("model", "")
+        )
+        model_name = model.get("name", "") or model.get("model", "") or model_id
+        model_id = str(model_id or "").strip()
+        model_name = str(model_name or "").strip()
+        if not model_id or not model_name or model_id in seen:
+            continue
+        seen.add(model_id)
+        label = _format_ollama_label(model_id) if provider in ("ollama", "ollama-cloud") else model_name
+        models.append({"id": model_id, "label": label})
+    return models
+
+
+def _custom_provider_probe_credentials(entry: dict, slug: str) -> tuple[str, str]:
+    """Resolve ``(base_url, api_key)`` for one ``custom_providers`` entry.
+
+    Shared by the catalog rebuild that records the probe diagnostic and the
+    bounded re-probe that expires it (#8158): the retry must send the same
+    credential the rebuild would, or a ``key_env``-only provider would re-probe
+    unauthenticated and re-report a spurious 401 over a healthy endpoint.
+    """
+    base_url = str(entry.get("base_url") or "").strip()
+    api_key = str(entry.get("api_key") or "").strip()
+    if not api_key:
+        key_env = str(entry.get("key_env") or "").strip()
+        if key_env:
+            api_key = _thread_local_env_value(key_env).strip()
+    # Fallback: check credential pool for both api_key and base_url
+    if (not api_key or not base_url) and slug:
+        try:
+            from api.config import _has_explicit_pool_credentials
+            if _has_explicit_pool_credentials(slug):
+                from agent.credential_pool import load_pool
+                resolved = _resolve_provider_alias(slug)
+                pool = load_pool(resolved)
+                if pool:
+                    sel = pool.select()
+                    if sel:
+                        if not api_key:
+                            api_key = getattr(sel, "runtime_api_key", "") or ""
+                        if not base_url:
+                            base_url = str(getattr(sel, "base_url", "") or "").strip()
+        except ImportError:
+            pass
+    return base_url, api_key
+
+
+def _probe_custom_endpoint_models_now(
+    base_url: object,
+    provider: str,
+    *,
+    api_key: object = "",
+    trusted_base_urls: tuple[object, ...] = (),
+    timeout_seconds: float | None = None,
+) -> tuple[list[dict], dict | None]:
+    """One bounded ``GET <base_url>/v1/models``, outside a catalog rebuild.
+
+    This is the probe the bounded diagnostic re-probe runs (#8158): one request
+    on its own daemon thread, capped at ``CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS``
+    (the coalescing registry guarantees at most one in flight per provider, so
+    there is no in-rebuild memo or shared budget to share). It returns the same
+    ``(models, error)`` pair the rebuild records, so the refreshed diagnostic
+    carries the identical shape and kind mapping.
+    """
+    base = str(base_url or "").strip()
+    if not base:
+        return [], None
+    timeout = (
+        CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+        if timeout_seconds is None
+        else min(float(timeout_seconds), CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS)
+    )
+    try:
+        import urllib.error
+        import urllib.request
+
+        endpoint_url = _models_endpoint_for_base_url(base)
+        headers = {"User-Agent": "OpenAI/Python 1.0"}
+        key = str(api_key or "").strip()
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
+        _validate_custom_endpoint_url(base, trusted_base_urls)
+        req = urllib.request.Request(endpoint_url, method="GET", headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as response:  # nosec B310
+            data = json.loads(response.read().decode("utf-8"))
+        return _extract_model_entries_from_payload(data, provider), None
+    except urllib.error.HTTPError as exc:
+        return [], _custom_endpoint_error(provider, exc, code=getattr(exc, "code", None))
+    except Exception as exc:  # noqa: BLE001 — every failure becomes a diagnostic
+        return [], _custom_endpoint_error(provider, exc)
+
+
 # ── TTL cache for get_available_models() ─────────────────────────────────────
 _available_models_cache: dict | None = None
 _available_models_cache_ts: float = 0.0
@@ -6772,6 +6975,20 @@ _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
 _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
+# How long a *transient* custom-endpoint diagnostic may be served before the
+# catalog re-probes it (#8158). A reachability diagnostic describes the network
+# at the moment it was taken, and no source-fingerprint axis can observe that the
+# endpoint recovered, so it must not inherit the 24h catalog TTL: one 5s-cap miss
+# would otherwise read as a base_url configuration error for a whole day. Bounded
+# and short on purpose — the read path re-probes at most once per window (see
+# _schedule_models_endpoint_error_reprobe).
+_MODELS_ENDPOINT_ERROR_RETRY_SECONDS: float = 60.0
+# (profile, provider) pairs with a re-probe currently in flight. Coalescing key:
+# the catalog globals are process-wide, so two profiles exposing the same custom
+# provider slug must not share one probe, and one provider must not be probed
+# once per concurrent reader.
+_models_endpoint_reprobe_inflight: dict[tuple[str, str], float] = {}
+_models_endpoint_reprobe_lock = threading.Lock()
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
@@ -9069,6 +9286,7 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
         _sync_models_cache_provenance()
         return None
     if _is_valid_models_cache(_available_models_cache):
+        _schedule_expired_endpoint_error_reprobes(_available_models_cache)
         return _annotate_fast_tier_model_groups(copy.deepcopy(_available_models_cache))
     _available_models_cache = None
     _available_models_cache_ts = 0.0
@@ -9076,6 +9294,322 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     _available_models_cache_source_fingerprint = None
     _sync_models_cache_provenance()
     return None
+
+
+# ── Bounded retry lifetime for transient probe diagnostics (#8158) ───────────
+# A custom-endpoint diagnostic describes the network at the instant it was taken.
+# Nothing in ``_models_cache_source_fingerprint()`` can observe that an endpoint
+# recovered, so a diagnostic stored by one transient failure (a DNS blip, a probe
+# past the 5s cap, a throttled retry) would otherwise be served for the full 24h
+# catalog TTL, telling the user to re-check a byte-for-byte correct ``base_url``.
+# The healthy catalog keeps its 24h TTL; only the diagnostic gets this short one,
+# and the refresh is a single coalesced re-probe per (profile, provider) whose
+# result is published only under the existing generation/identity fences.
+#
+# The retry is deliberately NOT a synchronous probe on the read path: a warm read
+# must stay network-free and non-blocking (it serves a picker from memory, and a
+# hung endpoint would turn into a hung request). Reads therefore serve the
+# still-valid payload and hand the refresh to a daemon worker; the next read sees
+# the refreshed diagnostic or the recovered catalog.
+
+
+def _models_endpoint_error_retry_expired(error: object, now: float | None = None) -> bool:
+    """True when a probe diagnostic may no longer be served as current.
+
+    Fails CLOSED toward re-probing: a diagnostic with no stamp (a cache written
+    before this fix, or a hand-built payload), a non-numeric stamp, or one from
+    the future (a clock step) is treated as expired. The cost of an unnecessary
+    re-probe is one bounded request, coalesced per provider; the cost of trusting
+    an unverifiable stamp is the #8158 bug.
+    """
+    if not isinstance(error, dict):
+        return False
+    stamp = error.get("checked_at")
+    if isinstance(stamp, bool) or not isinstance(stamp, (int, float)):
+        return True
+    stamp = float(stamp)
+    if not math.isfinite(stamp):
+        return True
+    if now is None:
+        now = time.time()
+    # A future stamp is a clock step, not evidence the endpoint is still down.
+    if stamp > now:
+        return True
+    return (now - stamp) >= _MODELS_ENDPOINT_ERROR_RETRY_SECONDS
+
+
+def _cache_groups_with_expired_endpoint_error(cache: object) -> list[str]:
+    """Provider ids whose group carries an expired transient probe diagnostic."""
+    if not isinstance(cache, dict):
+        return []
+    expired: list[str] = []
+    for group in cache.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        error = group.get("models_endpoint_error")
+        if not error:
+            continue
+        if not _models_endpoint_error_retry_expired(error):
+            continue
+        provider_id = str(group.get("provider_id") or "").strip().lower()
+        if provider_id:
+            expired.append(provider_id)
+    return expired
+
+
+def _reprobe_scope_key(provider_id: str) -> tuple[str, str]:
+    """Coalescing identity for one re-probe: (profile, provider).
+
+    The catalog globals are process-wide, so two profiles exposing the same
+    custom-provider slug must not share a probe (its credential and endpoint come
+    from that profile's config), and one provider must not be probed once per
+    concurrent reader.
+    """
+    profile = ""
+    try:
+        from api.profiles import get_active_profile_name
+
+        profile = (get_active_profile_name() or "").strip()
+    except Exception:
+        profile = ""
+    return (profile, str(provider_id or "").strip().lower())
+
+
+def _schedule_expired_endpoint_error_reprobes(cache: object) -> None:
+    """Queue one coalesced re-probe per provider serving an expired diagnostic."""
+    for provider_id in _cache_groups_with_expired_endpoint_error(cache):
+        _schedule_models_endpoint_error_reprobe(provider_id)
+
+
+def _schedule_models_endpoint_error_reprobe(provider_id: str) -> None:
+    """Start (or coalesce onto) a background refresh of one provider's diagnostic.
+
+    Non-blocking by design: the caller holds the catalog lock on a read path, so
+    this only registers the scope and hands the work to a daemon thread. A second
+    reader that finds the same provider expired joins the in-flight probe instead
+    of issuing another one.
+    """
+    scope = _reprobe_scope_key(provider_id)
+    if not scope[1]:
+        return
+    with _models_endpoint_reprobe_lock:
+        if scope in _models_endpoint_reprobe_inflight:
+            return
+        _models_endpoint_reprobe_inflight[scope] = time.time()
+    try:
+        threading.Thread(
+            target=_models_endpoint_error_reprobe_worker,
+            args=(provider_id, scope),
+            name="models-endpoint-error-reprobe",
+            daemon=True,
+        ).start()
+    except Exception:
+        # A thread that could not start must not leave the scope registered, or
+        # the diagnostic would never be retried again.
+        with _models_endpoint_reprobe_lock:
+            _models_endpoint_reprobe_inflight.pop(scope, None)
+        logger.debug("models endpoint re-probe could not start", exc_info=True)
+
+
+def _models_endpoint_error_reprobe_worker(provider_id: str, scope: tuple[str, str]) -> None:
+    """Re-probe one expired diagnostic and publish under the catalog fences.
+
+    The fence is what keeps a slow probe from resurrecting stale state: the
+    generation captured when the probe was scheduled must still be the newest
+    allocated one, and the sources/profile it was read from must still be current,
+    or the result is dropped (#7481/#8158). A late result from a superseded
+    catalog generation is discarded, never merged into the catalog that replaced
+    it. Publishing is memory-only — the durable snapshot stays a catalog snapshot,
+    and a disk-borne diagnostic expires on its own stamp.
+    """
+    try:
+        from contextlib import nullcontext
+
+        # Bind the profile captured at scheduling time: the daemon inherits
+        # neither the request-profile TLS nor the profile environment, so a
+        # ``key_env`` credential would otherwise resolve against the wrong
+        # profile (#3957).
+        profile = scope[0]
+        try:
+            from api.profiles import profile_scope_for_detached_worker
+
+            worker_scope = (
+                profile_scope_for_detached_worker(profile, "models endpoint re-probe")
+                if profile
+                else nullcontext()
+            )
+        except Exception:
+            worker_scope = nullcontext()
+
+        with worker_scope:
+            with _cache_build_cv:
+                rebuild_seq = _models_rebuild_seq
+                build_fingerprint = _available_models_cache_source_fingerprint
+            models, error = _reprobe_provider_endpoint(provider_id)
+            with _cache_build_cv:
+                if _models_rebuild_superseded(rebuild_seq):
+                    logger.debug(
+                        "discarding models endpoint re-probe for %s: superseded "
+                        "generation %d (latest allocated %d)",
+                        provider_id, rebuild_seq, _models_rebuild_seq,
+                    )
+                    return
+                if not _models_build_identity_current(build_fingerprint, scope[0] or None):
+                    logger.debug(
+                        "discarding models endpoint re-probe for %s: sources or "
+                        "profile changed while it ran",
+                        provider_id,
+                    )
+                    return
+                _apply_endpoint_reprobe_result(provider_id, models, error)
+    except Exception:
+        logger.debug("models endpoint re-probe failed for %s", provider_id, exc_info=True)
+    finally:
+        with _models_endpoint_reprobe_lock:
+            _models_endpoint_reprobe_inflight.pop(scope, None)
+
+
+def _reprobe_provider_endpoint(provider_id: str) -> tuple[list[dict], dict | None]:
+    """Probe ``provider_id``'s own configured endpoint via the shared helpers."""
+    slug = str(provider_id or "").strip().lower()
+    for entry in _custom_provider_entries():
+        if _custom_provider_slug_from_name(entry.get("name") or "") != slug:
+            continue
+        base_url, api_key = _custom_provider_probe_credentials(entry, slug)
+        if not base_url:
+            return [], None
+        return _probe_custom_endpoint_models_now(
+            base_url, slug, api_key=api_key, trusted_base_urls=(base_url,)
+        )
+    # The provider is no longer a configured custom provider. Its source axis
+    # would have moved, so the fingerprint fence above drops the result anyway;
+    # probing an unknown slug from a stale payload would only guess.
+    return [], None
+
+
+def _republish_provider_group(provider_id: str, mutate) -> bool:
+    """Rebuild the published catalog with one group passed through *mutate*.
+
+    Publishes a NEW snapshot rather than mutating the cached dict in place: the
+    catalog snapshot doubles as the ``_models_cache_provenance`` identity (and as
+    the memo key in ``_endpoint_advertised_model_ids``), so an in-place edit would
+    leave that memo agreeing with a payload it no longer describes — the endpoint
+    would have recovered while the send path still resolved against the old
+    advertised-id set (#433/#5979). Copy-on-write keeps the published pair
+    consistent and lets the memo notice the change through its identity check.
+    ``_available_models_cache_ts`` is deliberately left alone: this refreshes a
+    diagnostic, it is not a new catalog.
+
+    ``mutate`` receives a copy of the group and returns the replacement, or
+    ``None`` to leave the group untouched. The caller must hold ``_cache_build_cv``.
+    """
+    global _available_models_cache
+    slug = str(provider_id or "").strip().lower()
+    if not slug:
+        return False
+    cache = _available_models_cache
+    if not isinstance(cache, dict):
+        return False
+    groups = cache.get("groups")
+    if not isinstance(groups, list):
+        return False
+    new_groups = []
+    changed = False
+    for group in groups:
+        if (
+            isinstance(group, dict)
+            and str(group.get("provider_id") or "").strip().lower() == slug
+        ):
+            replacement = mutate(dict(group))
+            if replacement is not None:
+                new_groups.append(replacement)
+                changed = True
+                continue
+        new_groups.append(group)
+    if not changed:
+        return False
+    updated = dict(cache)
+    updated["groups"] = new_groups
+    _available_models_cache = updated
+    _sync_models_cache_provenance()
+    return True
+
+
+def _apply_endpoint_reprobe_result(
+    provider_id: str, models: list[dict], error: dict | None
+) -> None:
+    """Merge one re-probe outcome into the published catalog group.
+
+    The group itself is retained either way — an errored zero-model group is
+    load-bearing for the auxiliary pickers (#7521) — so the retry only refreshes
+    its diagnostic, or clears it and restores the catalog the endpoint now
+    advertises when the group is empty. A group that already carries models keeps
+    them: those are the config-derived sticky entries the rebuild would produce
+    too, and the diagnostic was the only stale part.
+    """
+    active_provider = None
+    selected_model_id = None
+    cache = _available_models_cache
+    if isinstance(cache, dict):
+        active_provider = cache.get("active_provider")
+        selected_model_id = cache.get("default_model")
+
+    def _mutate(group: dict) -> dict:
+        if error:
+            if group.get("models_endpoint_error") == error:
+                return None
+            group["models_endpoint_error"] = error
+            return group
+        had_error = group.pop("models_endpoint_error", None) is not None
+        if group.get("models") or group.get("extra_models"):
+            return group if had_error else None
+        prefixed = _apply_provider_prefix(list(models or []), provider_id, active_provider)
+        visible_models, extra_models = _split_picker_overflow_models(
+            prefixed, selected_model_id=selected_model_id, provider_id=provider_id
+        )
+        if extra_models:
+            group["extra_models"] = extra_models
+        else:
+            group.pop("extra_models", None)
+        group["models"] = visible_models
+        if not visible_models and not extra_models and not had_error:
+            # Nothing changed: the endpoint advertises nothing and there was no
+            # diagnostic to clear, so leave the published snapshot alone.
+            return None
+        return group
+
+    with _cache_build_cv:
+        if _republish_provider_group(provider_id, _mutate):
+            logger.debug(
+                "models endpoint re-probe for %s applied (error=%s, models=%d)",
+                provider_id,
+                bool(error),
+                len(models or []),
+            )
+        elif error:
+            logger.debug("models endpoint re-probe for %s still failing", provider_id)
+
+
+def clear_models_endpoint_error_for_provider(provider_id: str) -> bool:
+    """Clear a cached probe diagnostic after a successful same-owner live probe.
+
+    ``/api/models/live`` already re-probes a custom provider and already succeeds
+    while the catalog still reports "unreachable" (that is the reporter's exact
+    situation: the CLI worked the whole time). The group's diagnostic is the stale
+    part, so a successful live probe for the same provider clears it (#8158).
+
+    Only the diagnostic is cleared — never the group, and never a still-failing
+    one: an empty group with ``models_endpoint_error`` is deliberately retained so
+    the picker can explain the failure (#7521). Returns True when a diagnostic was
+    actually removed.
+    """
+    def _mutate(group: dict) -> dict | None:
+        if group.pop("models_endpoint_error", None) is None:
+            return None
+        return group
+
+    with _cache_build_cv:
+        return _republish_provider_group(provider_id, _mutate)
 
 
 def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: str | None = None) -> None:
@@ -10020,65 +10554,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
             return ""
 
-        def _models_endpoint_for_base_url(base_url: str) -> str:
-            base = str(base_url or "").strip().rstrip("/")
-            if base.endswith("/v1"):
-                return base + "/models"
-            return base + "/v1/models"
-
-        def _extract_model_entries_from_payload(data: object, provider: str) -> list[dict]:
-            models_list = []
-            if isinstance(data, dict):
-                if "data" in data and isinstance(data["data"], list):
-                    models_list = data["data"]
-                elif "models" in data and isinstance(data["models"], list):
-                    models_list = data["models"]
-            models = []
-            seen = set()
-            for model in models_list:
-                if not isinstance(model, dict):
-                    continue
-                model_id = (
-                    model.get("id", "")
-                    or model.get("name", "")
-                    or model.get("model", "")
-                )
-                model_name = model.get("name", "") or model.get("model", "") or model_id
-                model_id = str(model_id or "").strip()
-                model_name = str(model_name or "").strip()
-                if not model_id or not model_name or model_id in seen:
-                    continue
-                seen.add(model_id)
-                label = _format_ollama_label(model_id) if provider in ("ollama", "ollama-cloud") else model_name
-                models.append({"id": model_id, "label": label})
-            return models
-
-        def _custom_endpoint_error(
-            provider: str,
-            exc: Exception | None = None,
-            *,
-            code: int | None = None,
-        ) -> dict:
-            provider_label = str(provider or "custom").replace("custom:", "")
-            status_code = code if code is not None else getattr(exc, "code", None)
-            if status_code in (401, 403):
-                return {
-                    "kind": "auth",
-                    "code": int(status_code),
-                    "message": f"Models endpoint returned {status_code} — check the API key for {provider_label}.",
-                }
-            if isinstance(status_code, int):
-                return {
-                    "kind": "http",
-                    "code": int(status_code),
-                    "message": f"Models endpoint returned {status_code} for {provider_label}; see logs.",
-                }
-            return {
-                "kind": "network",
-                "code": None,
-                "message": f"Models endpoint unreachable for {provider_label}; verify base_url.",
-            }
-
         # ── In-rebuild probe de-duplication (#7481 follow-up) ────────────────
         # One rebuild can consult the same endpoint more than once: step 4 probes
         # the active ``model.base_url``, and the LM Studio provider-group fallback
@@ -10135,32 +10610,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # User-configured custom provider endpoints are explicitly trusted,
                 # but keep the same private-IP guard for non-matching targets used by
                 # the legacy active model.base_url path.
-                _ssrf_trusted_hosts: set[str] = set()
-                for trusted in (base, *trusted_base_urls):
-                    _cp_parsed = urlparse(
-                        str(trusted) if "://" in str(trusted) else f"http://{trusted}"
-                    )
-                    if _cp_parsed.hostname:
-                        _ssrf_trusted_hosts.add(_cp_parsed.hostname.lower())
-
-                parsed_url = urlparse(endpoint_url if "://" in endpoint_url else f"http://{endpoint_url}")
-                if parsed_url.scheme not in ("", "http", "https"):
-                    raise ValueError(f"Invalid URL scheme: {parsed_url.scheme}")
-                if parsed_url.hostname:
-                    try:
-                        resolved_ips = socket.getaddrinfo(parsed_url.hostname, None)
-                        for _, _, _, _, addr in resolved_ips:
-                            addr_obj = ipaddress.ip_address(addr[0])
-                            if addr_obj.is_private or addr_obj.is_loopback or addr_obj.is_link_local:
-                                host_l = (parsed_url.hostname or "").lower()
-                                is_known_local = any(
-                                    k in host_l
-                                    for k in ("ollama", "localhost", "127.0.0.1", "lmstudio", "lm-studio")
-                                ) or host_l in _ssrf_trusted_hosts
-                                if not is_known_local:
-                                    raise ValueError(f"SSRF: resolved hostname to private IP {addr[0]}")
-                    except socket.gaierror:
-                        pass
+                _validate_custom_endpoint_url(base, trusted_base_urls)
 
                 probe_key = _custom_endpoint_probe_key(endpoint_url, headers)
                 memoized = _custom_endpoint_probe_memo.get(probe_key)
@@ -10368,29 +10818,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
-                _cp_base_url = str(_cp.get("base_url") or "").strip()
-                _cp_api_key = str(_cp.get("api_key") or "").strip()
-                if not _cp_api_key:
-                    _cp_key_env = str(_cp.get("key_env") or "").strip()
-                    if _cp_key_env:
-                        _cp_api_key = _thread_local_env_value(_cp_key_env).strip()
-                # Fallback: check credential pool for both api_key and base_url
-                if (not _cp_api_key or not _cp_base_url) and _slug:
-                    try:
-                        from api.config import _has_explicit_pool_credentials
-                        if _has_explicit_pool_credentials(_slug):
-                            from agent.credential_pool import load_pool
-                            _resolved = _resolve_provider_alias(_slug)
-                            _pool = load_pool(_resolved)
-                            if _pool:
-                                _entry = _pool.select()
-                                if _entry:
-                                    if not _cp_api_key:
-                                        _cp_api_key = getattr(_entry, "runtime_api_key", "") or ""
-                                    if not _cp_base_url:
-                                        _cp_base_url = str(getattr(_entry, "base_url", "") or "").strip()
-                    except ImportError:
-                        pass
+                # Resolve (base_url, api_key) exactly as the #8158 retry path
+                # does — one implementation, so a re-probed provider sends the
+                # same credential the rebuild did.
+                _cp_base_url, _cp_api_key = _custom_provider_probe_credentials(_cp, _slug)
 
                 if _slug and _cp_base_url:
                     # Check if user has configured models in config.yaml —
