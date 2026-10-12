@@ -639,6 +639,51 @@ def test_clearing_an_unaffected_other_provider_is_a_noop(monkeypatch, tmp_path):
         assert config._available_models_cache_ts > 0.0
 
 
+def test_disk_borne_diagnostic_is_retried_from_the_read_that_serves_it(monkeypatch, tmp_path):
+    """A diagnostic restored from the durable catalog is retried immediately.
+
+    After a restart the picker is served straight from ``models_cache.json``
+    without going through the memory read path, so the retry has to be scheduled
+    where that payload is published — otherwise the first read of every boot
+    re-serves the stale message.
+    """
+    probe = _Probe(healthy=False)
+    monkeypatch.setattr(urllib.request, "urlopen", probe)
+    _expire_retries(monkeypatch, 3600.0)
+
+    with _ConfigState():
+        _configure_named_custom_provider(
+            tmp_path, monkeypatch, base_url="https://broken.example/v1"
+        )
+        configured = config.get_available_models()
+        assert _endpoint_error(configured) is not None
+        disk_path = tmp_path / "models_cache.json"
+        assert disk_path.exists(), "the catalog must have reached the durable cache"
+
+        # Simulate a restart: process-global memory cache gone, disk cache intact.
+        config._available_models_cache = None
+        config._available_models_cache_ts = 0.0
+        config._available_models_cache_source_fingerprint = None
+        config._sync_models_cache_provenance()
+        # Age the durable diagnostic past its window (the stamp is what expires).
+        payload = json.loads(disk_path.read_text(encoding="utf-8"))
+        for group in payload["groups"]:
+            if group.get("models_endpoint_error"):
+                group["models_endpoint_error"]["checked_at"] = time.time() - 3600
+        disk_path.write_text(json.dumps(payload), encoding="utf-8")
+
+        probe.healthy = True
+        probes_before = _probe_count(probe)
+        started = time.monotonic()
+        first_read = config.get_available_models()
+        elapsed = time.monotonic() - started
+        assert _endpoint_error(first_read) is not None, "the durable payload is served as-is"
+        assert elapsed < 1.0, f"the read must not wait on the retry ({elapsed:.2f}s)"
+        assert _wait_for(
+            lambda: _probe_count(probe) > probes_before
+        ), "the read that served a durable diagnostic must start the retry"
+
+
 def test_missing_stamp_counts_as_expired(monkeypatch, tmp_path):
     """A pre-upgrade cache has no stamp, so its first read must re-probe.
 

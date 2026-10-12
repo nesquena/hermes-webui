@@ -9297,20 +9297,16 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
 
 
 # ── Bounded retry lifetime for transient probe diagnostics (#8158) ───────────
-# A custom-endpoint diagnostic describes the network at the instant it was taken.
-# Nothing in ``_models_cache_source_fingerprint()`` can observe that an endpoint
-# recovered, so a diagnostic stored by one transient failure (a DNS blip, a probe
-# past the 5s cap, a throttled retry) would otherwise be served for the full 24h
-# catalog TTL, telling the user to re-check a byte-for-byte correct ``base_url``.
-# The healthy catalog keeps its 24h TTL; only the diagnostic gets this short one,
-# and the refresh is a single coalesced re-probe per (profile, provider) whose
-# result is published only under the existing generation/identity fences.
+# A custom-endpoint diagnostic describes the network at the instant it was taken,
+# and nothing in ``_models_cache_source_fingerprint()`` can observe that an
+# endpoint recovered — so a diagnostic stored by one transient failure would
+# otherwise be served for the full 24h catalog TTL, telling the user to re-check a
+# byte-for-byte correct ``base_url``. The healthy catalog keeps its TTL; only the
+# diagnostic gets the short one below.
 #
-# The retry is deliberately NOT a synchronous probe on the read path: a warm read
-# must stay network-free and non-blocking (it serves a picker from memory, and a
-# hung endpoint would turn into a hung request). Reads therefore serve the
-# still-valid payload and hand the refresh to a daemon worker; the next read sees
-# the refreshed diagnostic or the recovered catalog.
+# The refresh is a daemon worker, never a synchronous probe on the read path: a
+# warm read serves a picker from memory, and the hung endpoint that produced the
+# diagnostic is exactly the case where waiting on it would stall the request.
 
 
 def _models_endpoint_error_retry_expired(error: object, now: float | None = None) -> bool:
@@ -11772,6 +11768,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _available_models_cache_ts = now
             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
             _sync_models_cache_provenance()
+            # A durable snapshot can carry a diagnostic from before the restart,
+            # which no source axis can invalidate. Serving it here must still start
+            # the bounded retry, or the first read after a boot would re-serve the
+            # stale message until the next request (#8158).
+            _schedule_expired_endpoint_error_reprobes(_available_models_cache)
             return copy.deepcopy(disk_groups)
 
         # ── prefer_cache: NEVER run the live provider rebuild ────────────────
@@ -12371,6 +12372,9 @@ def get_available_models_for_session_visit() -> dict:
                     _available_models_cache_ts = time.monotonic()
                     _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
                     _sync_models_cache_provenance()
+                    # Same as the cold disk hit: a durable diagnostic is retried
+                    # from the read that serves it, not only on a later one (#8158).
+                    _schedule_expired_endpoint_error_reprobes(_available_models_cache)
             if disk_cached is not None:
                 _mark("disk_cache_returned")
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")

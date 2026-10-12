@@ -57,6 +57,52 @@ same-provider bare-ID shortcut. This keeps a live-discovered Codex model routed
 to Codex even if another configured provider advertises the same ID. The
 separate OpenAI API catalog does not determine Codex subscription availability.
 
+## Probe diagnostics have their own, shorter lifetime
+
+`models_endpoint_error` is a *reachability diagnostic*, not catalog data: it
+describes one custom provider's `GET <base_url>/v1/models` at the instant it was
+taken. No source axis can observe that an endpoint recovered, so a diagnostic
+must not inherit the 24h catalog TTL — one probe failure (a DNS blip, an attempt
+past `CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS`, a throttled retry) would otherwise
+report "verify base_url" for a full day against a correct `base_url` (#8158).
+
+- **Stamped**: `_custom_endpoint_error()` writes a wall-clock `checked_at`
+  (wall clock, not `time.monotonic()`, because the diagnostic is persisted to and
+  restored from `models_cache.json` and must stay comparable across processes).
+- **Bounded**: `_MODELS_ENDPOINT_ERROR_RETRY_SECONDS` (60s) is the diagnostic's
+  own lifetime. `_models_endpoint_error_retry_expired()` fails **closed** toward
+  re-probing: a missing, non-numeric, non-finite, or future stamp counts as
+  expired, so a cache written before this field existed re-probes on its first
+  read rather than trusting an unverifiable stamp.
+- **Retried off the read path**: a warm read that serves an expired diagnostic
+  still returns the cached payload immediately — it never probes synchronously —
+  and schedules one re-probe. The scheduling call sits at each site that
+  publishes or serves a catalog (`_get_fresh_memory_models_cache` and the two
+  cold-path disk hits), including the boot path that serves straight from
+  `models_cache.json`.
+- **Coalesced per (profile, provider)**: `_models_endpoint_reprobe_inflight` is
+  keyed by profile *and* provider, because the catalog globals are process-wide
+  and a same-slug provider in another profile has different credentials and a
+  different endpoint. Concurrent readers join the in-flight probe.
+- **Fenced**: a re-probe result is published only when its generation is still the
+  newest allocated one (`_models_rebuild_seq`) and its sources/profile are
+  unchanged (`_models_build_identity_current`), so a late result from a
+  superseded catalog generation is discarded rather than merged into its
+  successor.
+- **Copy-on-write**: merging a result republishes a new snapshot instead of
+  editing the cached dict in place. The snapshot doubles as the
+  `_models_cache_provenance` identity and as `_endpoint_advertised_model_ids()`'s
+  memo key, so an in-place edit would leave that memo describing a payload it no
+  longer matches.
+- **Cleared by a healthy live probe**: a successful same-owner
+  `/api/models/live` probe clears the diagnostic in place
+  (`clear_models_endpoint_error_for_provider`). The group itself is never
+  dropped — an empty group carrying `models_endpoint_error` stays for the
+  auxiliary pickers (#7521).
+- **Diagnostics are not a fingerprint axis.** They are per-probe observations, so
+  expiring them must not be done by adding a source axis; the generation fence
+  above is what keeps a stale observation from being applied.
+
 ## Invariant: deny-lists are one-directional
 
 - Both volatile-key sets are deny-lists, never allow-lists. They may remove only
@@ -84,7 +130,13 @@ separate OpenAI API catalog does not determine Codex subscription availability.
 ## Version stamps (independent of the fingerprint)
 
 - `_schema_version` must equal `_MODELS_CACHE_SCHEMA_VERSION` (currently `3`).
-  Bump it when the cached payload shape changes incompatibly.
+  Bump it when the cached payload shape changes incompatibly. The `checked_at`
+  field added to probe diagnostics (#8158) is deliberately **not** a bump: it is
+  an additive key inside an existing payload that older and newer readers both
+  read as a dict, and the read path treats a missing stamp as expired, so a cache
+  written before the field existed re-probes instead of needing to be discarded.
+  Bumping would additionally throw away every warm catalog on upgrade, which the
+  healthy-catalog cache is meant to survive.
 - `_webui_version` must equal the running version, which forces a rebuild after
   every release so picker-shape fixes appear immediately instead of after the
   TTL expires. When the runtime version cannot be resolved (early boot), that
@@ -151,7 +203,11 @@ the degraded catalog behavior for both models and onboarding callers.
 4. Do not add a second, parallel cache-identity mechanism. The stat-based
    `_models_cache_file_fingerprint()` stays only as the conservative fallback for
    the axes above.
-5. This is a runtime contract: changes here update this document and are
+5. Diagnostics are not catalog data: expiring a probe diagnostic is not a new
+   source axis. Give the diagnostic its own bounded lifetime and fence any
+   refresh with the existing generation/identity checks; do not make warm reads
+   probe synchronously.
+6. This is a runtime contract: changes here update this document and are
    described in the PR body. Release-note wording belongs in the PR body, not in
    `CHANGELOG.md`, which release commits own.
 
@@ -167,6 +223,14 @@ snapshot survives it and is served without a live rebuild, each source-axis
 change or a delete/recreate forces a fresh rebuild, and a same-path config
 edit still deletes the snapshot.
 
+`tests/test_issue8158_models_endpoint_error_retry_lifetime.py` covers the
+diagnostic lifetime: the reporter's failure→recovery shape as a
+`reproduction`-marked test, an unexpired diagnostic that is *not* re-probed, a
+warm read that does not block on the retry, concurrent readers coalescing onto
+one probe, a failed retry re-stamping, per-provider and per-profile scope, the
+stale-generation fence, the durable (boot) path, and the live-probe clear
+keeping the zero-model group.
+
 ## References
 
-Issues/PRs: #2443, #7540, #7556, #7558. RCAs: `t_d127953d`, `t_16551f61`.
+Issues/PRs: #2443, #7540, #7556, #7558, #8158. RCAs: `t_d127953d`, `t_16551f61`.
