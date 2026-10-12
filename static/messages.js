@@ -978,11 +978,34 @@ async function toggleSavedPromptsPopup(){
       del.className='saved-prompt-delete';
       del.type='button';
       del.title=(typeof t==='function'&&t('saved_prompts_delete'))||'Delete';
+      del.setAttribute('aria-label',del.title);
       del.innerHTML='<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>';
+      // #7644: a single click on the 12px ✕ used to delete the prompt for good.
+      // First click only arms the button (3s window, red "confirm" state);
+      // a second click inside that window performs the delete. A failed delete
+      // keeps the row and surfaces an error toast instead of vanishing silently.
+      const restArmLabel=()=>{const lbl=(typeof t==='function'&&t('saved_prompts_delete'))||'Delete';del.title=lbl;del.setAttribute('aria-label',lbl);};
+      const armLabel=()=>{const lbl=(typeof t==='function'&&t('saved_prompts_confirm_delete'))||'Click again to delete';del.title=lbl;del.setAttribute('aria-label',lbl);};
+      let disarmTimer=null;
       del.onclick=async(e)=>{
         e.stopPropagation();
-        try{await api('/api/prompts',{method:'DELETE',body:JSON.stringify({id:p.id})});}catch(_e){}
+        if(!del.classList.contains('is-armed')){
+          del.classList.add('is-armed');
+          armLabel();
+          if(disarmTimer)clearTimeout(disarmTimer);
+          disarmTimer=setTimeout(()=>{del.classList.remove('is-armed');restArmLabel();},3000);
+          return;
+        }
+        if(disarmTimer)clearTimeout(disarmTimer);
+        del.classList.remove('is-armed');
+        try{await api('/api/prompts',{method:'DELETE',body:JSON.stringify({id:p.id})});}catch(_e){
+          restArmLabel();
+          if(typeof showToast==='function')showToast((_e&&_e.message)||((typeof t==='function'&&t('saved_prompts_delete_failed'))||'Failed to delete prompt'),2400,'error');
+          return;
+        }
+        restArmLabel();
         _savedPromptsCache=null;
+        if(typeof showToast==='function')showToast((typeof t==='function'&&t('saved_prompts_deleted'))||'Prompt deleted',1600);
         await toggleSavedPromptsPopup();
         await toggleSavedPromptsPopup();
       };
