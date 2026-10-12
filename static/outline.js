@@ -10,6 +10,7 @@ let _outlineSid = null;       // session id the panel was last built for
 let _panelOpen  = false;      // whether the panel is currently visible
 let _outlineResizeObserver = null;
 let _outlineWorkspaceObserver = null;
+let _sheetChrome = false;     // compact-only modal chrome (dialog + focus) applied
 
 // Returns the current session id, or null if no session is loaded.
 function _currentSid() {
@@ -19,10 +20,22 @@ function _currentSid() {
 // Narrow viewports get the SAME outline, rendered as a bottom sheet instead of
 // the desktop floating panel — the 320px-wide side panel has nowhere to sit on
 // a phone, so style.css re-shapes it into a bottom-anchored sheet at the same
-// 900px breakpoint. Two call sites need this answer: the visibility gate and
-// the "collapse the sheet after jumping" behavior, so it lives in a helper.
+// 900px breakpoint. Every form-dependent call site asks this helper: the
+// visibility gate, the backdrop, the modal chrome, and the "collapse the sheet
+// after jumping" behavior.
+let _outlineCompactMedia = null;
+let _outlineCompactMediaWired = false;
+
+function _outlineCompactQuery() {
+  if (_outlineCompactMedia) return _outlineCompactMedia;
+  if (!window.matchMedia) return null;
+  _outlineCompactMedia = window.matchMedia('(max-width:900px)');
+  return _outlineCompactMedia;
+}
+
 function _outlineIsCompact() {
-  return !!(window.matchMedia && window.matchMedia('(max-width:900px)').matches);
+  const mq = _outlineCompactQuery();
+  return !!(mq && mq.matches);
 }
 
 function _outlineAllowed() {
@@ -58,12 +71,100 @@ function _syncOutlineBackdrop() {
   document.body.appendChild(backdrop);
 }
 
+// ── Compact chrome: dialog semantics + focus lifecycle ───────────────────────
+// The backdrop blocks pointer access to the page, so the compact form is modal
+// in behavior even though the desktop panel is plain navigation. It therefore
+// gets the full modal contract: `role="dialog"` + `aria-modal`, focus moved
+// into the sheet on open, Tab contained, Escape to close, and focus handed back
+// to the outline toggle. Desktop (and any width that is not compact) keeps
+// `role="navigation"` and none of this — it stays non-modal.
+const _SHEET_FOCUSABLE =
+  'a[href], button, textarea, input, select, summary, [tabindex]:not([tabindex="-1"])';
+
+function _sheetFocusable() {
+  const wrapper = document.getElementById('outlinePanelWrapper');
+  if (!wrapper) return [];
+  const found = wrapper.querySelectorAll(_SHEET_FOCUSABLE);
+  return Array.prototype.filter.call(found, function(el) {
+    if (el.disabled || el.hidden || el.tabIndex < 0) return false;
+    const style = window.getComputedStyle ? window.getComputedStyle(el) : null;
+    return !style || (style.display !== 'none' && style.visibility !== 'hidden');
+  });
+}
+
+function _onSheetKeydown(ev) {
+  if (ev.key === 'Escape') {
+    ev.preventDefault();
+    closeOutlinePanel();
+    return;
+  }
+  if (ev.key !== 'Tab') return;
+  const els = _sheetFocusable();
+  if (!els.length) {
+    ev.preventDefault();
+    return;
+  }
+  const current = document.activeElement;
+  let idx = els.indexOf(current);
+  if (idx === -1) {
+    ev.preventDefault();
+    els[0].focus({ preventScroll: true });
+    return;
+  }
+  idx = (idx + (ev.shiftKey ? -1 : 1) + els.length) % els.length;
+  ev.preventDefault();
+  els[idx].focus({ preventScroll: true });
+}
+
+// Idempotent: the gate refreshes on every resize/rotation, and only the
+// transition into the compact form may touch focus or the key listener.
+function _applySheetChrome() {
+  if (_sheetChrome) return;
+  const wrapper = document.getElementById('outlinePanelWrapper');
+  if (!wrapper) return;
+  _sheetChrome = true;
+  wrapper.setAttribute('role', 'dialog');
+  wrapper.setAttribute('aria-modal', 'true');
+  document.addEventListener('keydown', _onSheetKeydown);
+  const closeBtn = wrapper.querySelector('.outline-close-btn');
+  const target = closeBtn || _sheetFocusable()[0];
+  if (target && target.focus) target.focus({ preventScroll: true });
+}
+
+function _removeSheetChrome(restoreFocus) {
+  if (!_sheetChrome) return;
+  _sheetChrome = false;
+  document.removeEventListener('keydown', _onSheetKeydown);
+  const wrapper = document.getElementById('outlinePanelWrapper');
+  if (!wrapper) return;
+  wrapper.removeAttribute('aria-modal');
+  wrapper.setAttribute('role', 'navigation');
+  // Only reclaim focus that is still inside the sheet: a close triggered by
+  // something else (panel switch, incoming prompt) must not steal it back.
+  if (restoreFocus !== false && wrapper.contains(document.activeElement)) {
+    const toggle = document.getElementById('outlineToggleBtn');
+    if (toggle && toggle.focus) toggle.focus({ preventScroll: true });
+  }
+}
+
+// The compact chrome follows both the open state and the current width, so it
+// is re-evaluated on every gate refresh (open, close, resize, rotation).
+function _syncSheetChrome(restoreFocus) {
+  if (_panelOpen && _outlineIsCompact()) _applySheetChrome();
+  else _removeSheetChrome(restoreFocus);
+}
+
 // Closes the panel and any compact-only chrome. Shared by the close button,
-// the backdrop tap, panel switches, and post-jump auto-collapse.
-function closeOutlinePanel() {
+// the backdrop tap, Escape, panel switches, and post-jump auto-collapse.
+// `options.yieldToPrompt` is used by the approval/clarification preemption path:
+// it tears the modal chrome down WITHOUT pulling focus back to the toggle,
+// because the incoming prompt takes focus next.
+function closeOutlinePanel(options) {
+  const yieldToPrompt = !!(options && options.yieldToPrompt);
   _panelOpen = false;
   const wrapper = document.getElementById('outlinePanelWrapper');
   if (wrapper) wrapper.hidden = true;
+  _syncSheetChrome(!yieldToPrompt);
   _syncOutlineBackdrop();
 }
 
@@ -85,8 +186,10 @@ function applyConversationOutlinePreference() {
     closeOutlinePanel();
   } else {
     // Width can change under an open panel (rotation, resize, sidebar toggle),
-    // so re-evaluate the compact-only backdrop on every gate refresh.
+    // so re-evaluate the compact-only chrome (backdrop + modal semantics) on
+    // every gate refresh.
     _syncOutlineBackdrop();
+    _syncSheetChrome();
   }
 }
 
@@ -189,6 +292,37 @@ function _collapseAfterJump() {
   if (_outlineIsCompact()) closeOutlinePanel();
 }
 
+// ── Incoming prompts preempt the sheet ───────────────────────────────────────
+// An approval or clarification is a time-sensitive safety surface rendered in
+// the composer — i.e. underneath the sheet's full-screen, pointer-blocking
+// backdrop. Rather than fight over z-index, the compact sheet yields the moment
+// either prompt opens. Both entry points are wrapped here (outline.js is loaded
+// after messages.js) so messages.js keeps owning prompt rendering while this
+// file keeps owning the sheet; nothing else in the prompt path changes.
+function _yieldSheetToPrompt(cardId) {
+  if (!_panelOpen || !_outlineIsCompact()) return;
+  const card = document.getElementById(cardId);
+  if (!card || card.hidden || !card.classList.contains('visible')) return;
+  closeOutlinePanel({ yieldToPrompt: true });
+}
+
+function _hookPromptPreemption() {
+  const hooks = [['showApprovalCard', 'approvalCard'], ['showClarifyCard', 'clarifyCard']];
+  for (let i = 0; i < hooks.length; i++) {
+    const name = hooks[i][0];
+    const cardId = hooks[i][1];
+    const original = window[name];
+    if (typeof original !== 'function' || original.__outlinePreemptionHook) continue;
+    const wrapped = function() {
+      const result = original.apply(this, arguments);
+      _yieldSheetToPrompt(cardId);
+      return result;
+    };
+    wrapped.__outlinePreemptionHook = true;
+    window[name] = wrapped;
+  }
+}
+
 // Builds the list of user messages from S.messages.
 // Returns [{rawIdx, label, excerpt}, …] for every user message with content.
 function _buildEntries() {
@@ -273,6 +407,7 @@ function toggleOutlinePanel() {
   _syncOutlinePosition();
   wrapper.hidden = false;
   _syncOutlineBackdrop();
+  _syncSheetChrome();
   const sid = _currentSid();
   const panel = document.getElementById('outlinePanel');
   if (panel) panel.innerHTML = '<p class="outline-empty">' + t('outline_loading') + '</p>';
@@ -320,9 +455,25 @@ window.closeOutlinePanel = closeOutlinePanel;
 // Expose public API.
 window.toggleOutlinePanel = toggleOutlinePanel;
 
+// Wrap the approval/clarification entry points now that both scripts have run,
+// and again on DOMContentLoaded in case this file was ever loaded earlier.
+_hookPromptPreemption();
+
 document.addEventListener('DOMContentLoaded', function() {
+  _hookPromptPreemption();
   applyConversationOutlinePreference();
   const root = document.documentElement;
+  // The breakpoint drives the gate directly, not only through window resize:
+  // environments that change the effective viewport without a resize event
+  // (devtools responsive mode, some orientation changes) would otherwise leave
+  // an open panel in the wrong form.
+  if (!_outlineCompactMediaWired) {
+    const compactMq = _outlineCompactQuery();
+    if (compactMq && typeof compactMq.addEventListener === 'function') {
+      compactMq.addEventListener('change', applyConversationOutlinePreference);
+      _outlineCompactMediaWired = true;
+    }
+  }
   const rightPanel = document.querySelector('.rightpanel');
   if (rightPanel && typeof ResizeObserver !== 'undefined' && !_outlineResizeObserver) {
     _outlineResizeObserver = new ResizeObserver(_syncOutlinePosition);
