@@ -216,6 +216,65 @@ def _message_search_text(message) -> str:
     ).lower().lstrip()
 
 
+def _is_context_summary_message(message) -> bool:
+    """True for summary handoff rows, by metadata or by content.
+
+    Mirrors the agent's ``ContextCompressor._is_context_summary_message``: the
+    durable flag, the merged prior-context delimiter, the legacy end marker, or
+    the legacy ``[CONTEXT SUMMARY]:`` prefix. #7681 finding 3 needs this split
+    because such a row can still carry a live ask, and classifying from the
+    carrier's presence alone is what under-counted them.
+    """
+    if not isinstance(message, dict):
+        return False
+    if message.get("_compressed_summary"):
+        return True
+    return _is_context_summary_content(message.get("content"))
+
+
+def _is_context_summary_content(content) -> bool:
+    """Content-side summary markers (str or list payload)."""
+    text = _content_text(content, part_types={"text", "input_text", "output_text"})
+    if not text:
+        return False
+    lowered = text.lower().lstrip()
+    return (
+        _MERGED_SUMMARY_DELIMITER.lower() in lowered
+        or _SUMMARY_END_MARKER.lower() in lowered
+        or lowered.startswith("[context summary")
+        or lowered.startswith("[context compaction")
+    )
+
+
+def _is_blank_user_turn(message) -> bool:
+    """True for an empty, non-summary ``role='user'`` echo.
+
+    Mirrors the agent's ``_is_blank_user_turn``: a blank echo is not a human
+    turn. List payloads count as blank only when every text part is blank.
+    """
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    if _is_context_summary_message(message):
+        return False
+    content = message.get("content")
+    if content is None:
+        return True
+    if isinstance(content, str):
+        return not content.strip()
+    if not isinstance(content, list):
+        return False
+
+    def _blank_part(part) -> bool:
+        if isinstance(part, str):
+            return not part.strip()
+        if isinstance(part, dict) and part.get("type") in {"text", "input_text"}:
+            return not str(part.get("text") or "").strip()
+        # Non-text parts (images, tool results) are real payload, not blank.
+        return False
+
+    return bool(content) and all(_blank_part(part) for part in content)
+
+
 def _is_internal_user_row(message) -> bool:
     """True when *message* is synthetic scaffolding despite ``role='user'``.
 
@@ -278,6 +337,19 @@ def is_user_originated_turn(message) -> bool:
     importable; otherwise the self-contained mirror below. Either path excludes
     every synthetic ``role='user'`` scaffolding shape so the WebUI turn counter
     agrees with the agent's lineage view.
+
+    #7681 finding 3: the agent's predicate is
+    ``split_user_originated_turn(message)[1] is not None``, which the WebUI must
+    mirror EXACTLY — including that a summary carrier with a live payload IS a
+    user turn. Order of the mirrors below follows the agent's own chain:
+
+      1. ``display_kind`` that is neither empty nor ``steer`` -> not a turn,
+         EXCEPT ``hidden``, which is the legacy compaction wrapper and can still
+         wrap a live ask (the agent keeps it).
+      2. a context-summary message -> unwrap it and keep the live payload;
+         ``None`` (standalone) -> not a turn.
+      3. a blank echo -> not a turn.
+      4. anything else -> a real human turn.
     """
     agent_verdict = _agent_user_originated_turn(message)
     if agent_verdict is not None:
@@ -297,6 +369,16 @@ def is_user_originated_turn(message) -> bool:
         if not _summary_carrier_has_live_user_ask(message):
             return False
         return True
+    # #7681 finding 3: a summary carrier is NOT automatically scaffolding. The
+    # agent unwraps it and keeps the live payload in front of the merged
+    # delimiter, so the mirror must classify from the UNWRAPPED payload, not from
+    # the carrier's mere presence. The old blanket rejection is what made the
+    # aggregate under-report carriers the agent counted.
+    if _is_context_summary_message(message):
+        return _summary_carrier_has_live_user_ask(message)
+    # Blank echoes are not human turns (the agent's `_is_blank_user_turn`).
+    if _is_blank_user_turn(message):
+        return False
     if _is_internal_user_row(message):
         return False
     if message.get("_compressed_summary"):

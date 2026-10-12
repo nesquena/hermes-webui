@@ -1,3 +1,23 @@
+def _mirror_predicate():
+    """A callable that runs the mirror predicate with the agent blocked.
+
+    The block has to survive the CALL, not just the setup: returning the bare
+    function would let the next ``_agent_*`` lookup import the agent again and
+    short-circuit the mirror, which is how the finding-5 tests passed with the
+    wire bug intact.
+    """
+    def _blocked_predicate(message):
+        # Re-enter the blocked context for the duration of the call.
+        sys.path.insert(0, str(REPO_ROOT))
+        try:
+            with _force_mirror_mode() as anchor_live:
+                return anchor_live.is_user_originated_turn(message)
+        finally:
+            sys.path.pop(0)
+
+    return _blocked_predicate
+
+
 """Review-round tests for #7681 (follow-up to #6519).
 
 The first round surfaced ``user_message_count`` in the sidebar meta row, but a
@@ -15,6 +35,7 @@ Each test is revert-sensitive: reverting the corresponding production change
 makes it fail.
 """
 
+import contextlib
 import json
 import os
 import re
@@ -1334,25 +1355,40 @@ _PRIOR_HEADER = "[PRIOR CONTEXT — for reference only; not a new message]"
 _END_MARKER = "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
 
 
+_DELIM = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+_PRIOR_HEADER = "[PRIOR CONTEXT — for reference only; not a new message]"
+_END_MARKER = "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
+
+
+@contextlib.contextmanager
 def _force_mirror_mode():
-    """Make the agent module unimportable so the fallback mirror actually runs.
+    """Context manager yielding the sidecar module with the agent unimportable.
 
     ``is_user_originated_turn`` delegates to ``agent.context_compressor`` whenever
     it imports cleanly, and the pytest environment puts ``~/.hermes/hermes-agent``
     on ``sys.path``. Without this the mirror never executes and a broken mirror
     passes every test — which is exactly how finding 5 shipped twice.
+
+    The block must STAY installed for the whole ``with`` body: ``importlib.reload``
+    re-arms the cached ``_AGENT_*_PREDICATE`` globals, so a block removed before
+    the call lets the next lookup import the agent again and short-circuit the
+    mirror.
     """
     import builtins
     import importlib
 
     from api import compression_anchor
 
+    # Re-import from disk so a module cached by an earlier test (or by conftest)
+    # cannot serve stale code to a RED control.
+    importlib.reload(compression_anchor)
+    for name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
+        del sys.modules[name]
+
     compression_anchor._AGENT_USER_PREDICATE = None
     compression_anchor._AGENT_USER_PREDICATE_ATTEMPTED = False
     compression_anchor._AGENT_SPLIT_PREDICATE = None
     compression_anchor._AGENT_SPLIT_PREDICATE_ATTEMPTED = False
-    for name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
-        del sys.modules[name]
 
     real_import = builtins.__import__
 
@@ -1366,20 +1402,30 @@ def _force_mirror_mode():
         assert compression_anchor._agent_split_user_originated_turn() is None, (
             "could not block the agent import — the mirror would stay untested"
         )
+        yield compression_anchor
     finally:
         builtins.__import__ = real_import
         importlib.invalidate_caches()
-    return compression_anchor
 
 
 def _mirror_predicate():
-    """The sidecar predicate running in fallback (agent-unavailable) mode."""
-    sys.path.insert(0, str(REPO_ROOT))
-    try:
-        anchor = _force_mirror_mode()
-        return anchor.is_user_originated_turn
-    finally:
-        sys.path.pop(0)
+    """A callable that runs the mirror predicate with the agent blocked.
+
+    The block has to survive the CALL, not just the setup: returning the bare
+    function would let the next ``_agent_*`` lookup import the agent again and
+    short-circuit the mirror, which is how the finding-5 tests passed with the
+    wire bug intact.
+    """
+
+    def _blocked_predicate(message):
+        sys.path.insert(0, str(REPO_ROOT))
+        try:
+            with _force_mirror_mode() as anchor:
+                return anchor.is_user_originated_turn(message)
+        finally:
+            sys.path.pop(0)
+
+    return _blocked_predicate
 
 
 def test_flagged_standalone_summary_is_not_a_user_turn():
@@ -1432,31 +1478,28 @@ def test_carrier_splitter_alone_uses_the_agent_delimiter_direction():
     directly and pins the direction the agent uses (`split(delim, 1)[0]`).
     """
     sys.path.insert(0, str(REPO_ROOT))
-    try:
-        _summary_carrier_has_live_user_ask = _force_mirror_mode()._summary_carrier_has_live_user_ask
-    finally:
-        sys.path.pop(0)
-
-    # Direction-discriminating shapes: `before` and `after` disagree, so reading
-    # the summary block AFTER the delimiter answers these backwards.
-    live_ask_then_empty_summary = {
-        "role": "user",
-        "content": f"{_PRIOR_HEADER}\n\nplease fix the login bug\n\n{_DELIM}\n\n",
-        "_compressed_summary": True,
-    }
-    empty_ask_then_summary = {
-        "role": "user",
-        "content": f"{_PRIOR_HEADER}\n\n{_DELIM}\n\n## Summary\nwe discussed X",
-        "_compressed_summary": True,
-    }
-    assert _summary_carrier_has_live_user_ask(live_ask_then_empty_summary) is True, (
-        "a live ask in front of the delimiter is a user turn even when nothing "
-        "follows it — reading `split(delim, 1)[1]` answers False here"
-    )
-    assert _summary_carrier_has_live_user_ask(empty_ask_then_summary) is False, (
-        "a summary block behind the delimiter is scaffolding even when it is "
-        "non-empty — reading `split(delim, 1)[1]` answers True here"
-    )
+    with _force_mirror_mode() as anchor:
+        split = anchor._summary_carrier_has_live_user_ask
+        # Direction-discriminating shapes: `before` and `after` disagree, so
+        # reading the summary block AFTER the delimiter answers these backwards.
+        live_ask_then_empty_summary = {
+            "role": "user",
+            "content": f"{_PRIOR_HEADER}\n\nplease fix the login bug\n\n{_DELIM}\n\n",
+            "_compressed_summary": True,
+        }
+        empty_ask_then_summary = {
+            "role": "user",
+            "content": f"{_PRIOR_HEADER}\n\n{_DELIM}\n\n## Summary\nwe discussed X",
+            "_compressed_summary": True,
+        }
+        assert split(live_ask_then_empty_summary) is True, (
+            "a live ask in front of the delimiter is a user turn even when "
+            "nothing follows it — reading `split(delim, 1)[1]` answers False here"
+        )
+        assert split(empty_ask_then_summary) is False, (
+            "a summary block behind the delimiter is scaffolding even when it is "
+            "non-empty — reading `split(delim, 1)[1]` answers True here"
+        )
 
 
 def test_splitter_handles_list_shaped_carriers():
@@ -1467,63 +1510,57 @@ def test_splitter_handles_list_shaped_carriers():
     parts and keeps everything before the delimiter part.
     """
     sys.path.insert(0, str(REPO_ROOT))
-    try:
-        _summary_carrier_has_live_user_ask = _force_mirror_mode()._summary_carrier_has_live_user_ask
-    finally:
-        sys.path.pop(0)
-
-    live_list = {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": f"{_PRIOR_HEADER}\n\nplease fix the login bug"},
-            {"type": "text", "text": f"{_DELIM}\n\n## Summary\nwe discussed X"},
-        ],
-        "_compressed_summary": True,
-    }
-    header_only_list = {
-        "role": "user",
-        "content": [
-            {"type": "text", "text": _PRIOR_HEADER},
-            {"type": "text", "text": f"{_DELIM}\n\n## Summary\nwe discussed X"},
-        ],
-        "_compressed_summary": True,
-    }
-    assert _summary_carrier_has_live_user_ask(live_list) is True, (
-        "a list-shaped carrier with a live ask before the delimiter must be "
-        "classified, not rejected for its payload shape"
-    )
-    assert _summary_carrier_has_live_user_ask(header_only_list) is False, (
-        "a list-shaped carrier whose pre-delimiter slice is only the header is "
-        "scaffolding"
-    )
+    with _force_mirror_mode() as anchor:
+        split = anchor._summary_carrier_has_live_user_ask
+        live_list = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"{_PRIOR_HEADER}\n\nplease fix the login bug"},
+                {"type": "text", "text": f"{_DELIM}\n\n## Summary\nwe discussed X"},
+            ],
+            "_compressed_summary": True,
+        }
+        header_only_list = {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": _PRIOR_HEADER},
+                {"type": "text", "text": f"{_DELIM}\n\n## Summary\nwe discussed X"},
+            ],
+            "_compressed_summary": True,
+        }
+        assert split(live_list) is True, (
+            "a list-shaped carrier with a live ask before the delimiter must be "
+            "classified, not rejected for its payload shape"
+        )
+        assert split(header_only_list) is False, (
+            "a list-shaped carrier whose pre-delimiter slice is only the header "
+            "is scaffolding"
+        )
 
 
 def test_prefix_match_alone_does_not_condemn_a_live_carrier():
     """#7681 finding 5: `_is_internal_user_row` matched the merged prior-context
     header and condemned the whole row, including a live ask in front of it."""
     sys.path.insert(0, str(REPO_ROOT))
-    try:
-        _is_internal_user_row = _force_mirror_mode()._is_internal_user_row
-    finally:
-        sys.path.pop(0)
-
-    live_carrier = {
-        "role": "user",
-        "content": f"{_PRIOR_HEADER}\n\nplease fix the login bug\n\n{_DELIM}\n\n## Summary\nx",
-        "_compressed_summary": True,
-    }
-    assert _is_internal_user_row(live_carrier) is False, (
-        "a row that carries a prior-context header AND a live ask is not "
-        "scaffolding — condemning it drops every embedded ask"
-    )
-    header_only = {
-        "role": "user",
-        "content": f"{_PRIOR_HEADER}\n\n{_DELIM}\n\n## Summary\nx",
-        "_compressed_summary": True,
-    }
-    assert _is_internal_user_row(header_only) is True, (
-        "a header-only prior-context carrier is still scaffolding"
-    )
+    with _force_mirror_mode() as anchor:
+        internal = anchor._is_internal_user_row
+        live_carrier = {
+            "role": "user",
+            "content": f"{_PRIOR_HEADER}\n\nplease fix the login bug\n\n{_DELIM}\n\n## Summary\nx",
+            "_compressed_summary": True,
+        }
+        assert internal(live_carrier) is False, (
+            "a row that carries a prior-context header AND a live ask is not "
+            "scaffolding — condemning it drops every embedded ask"
+        )
+        header_only = {
+            "role": "user",
+            "content": f"{_PRIOR_HEADER}\n\n{_DELIM}\n\n## Summary\nx",
+            "_compressed_summary": True,
+        }
+        assert internal(header_only) is True, (
+            "a header-only prior-context carrier is still scaffolding"
+        )
 
 
 def test_prior_context_header_alone_is_not_a_live_ask():
@@ -1601,6 +1638,61 @@ def test_list_content_carrier_is_classified_not_rejected():
     assert predicate(header_only_list) is False, (
         "a pre-delimiter slice that is only the reference-only header is scaffolding"
     )
+
+
+def test_summary_carrier_classification_reads_the_unwrapped_payload():
+    """#7681 finding 3b: a summary row is classified from its UNWRAPPED payload.
+
+    The mirror used to reject every summary row, so a carrier that still embeds a
+    live ask was invisible while the Agent counted it. Pins the branch directly so
+    the verdict cannot be reached through `_is_internal_user_row` instead.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    with _force_mirror_mode() as anchor:
+        _run = anchor.is_user_originated_turn
+        _is_summary = anchor._is_context_summary_message
+
+        live = {
+            "role": "user",
+            "content": "[PRIOR CONTEXT — for reference only; not a new message]"
+                       "\n\nplease also fix the login bug"
+                       "\n\n[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+                       "\n\n## Summary\nwe discussed X",
+            "_compressed_summary": True,
+        }
+        standalone = {
+            "role": "user",
+            "content": "[PRIOR CONTEXT — for reference only; not a new message]"
+                       "\n\n[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+                       "\n\n## Summary\nwe discussed X",
+            "_compressed_summary": True,
+        }
+        assert _is_summary(live) is True
+        assert _is_summary(standalone) is True
+        assert _run(live) is True, (
+            "a summary carrier with a live payload in front of the delimiter is "
+            "a user turn — the blanket rejection under-counted it"
+        )
+        assert _run(standalone) is False, (
+            "a standalone summary carrier is scaffolding"
+        )
+
+
+def test_blank_user_echo_is_not_a_user_turn():
+    """#7681 finding 3: the Agent's `_is_blank_user_turn` excludes blank echoes.
+
+    Without it an empty row persisted for alternation counts as a human turn and
+    the aggregate over-reports.
+    """
+    predicate = _mirror_predicate()
+    assert predicate({"role": "user", "content": "   "}) is False
+    assert predicate({"role": "user", "content": ""}) is False
+    assert predicate({"role": "user", "content": None}) is False
+    assert predicate({"role": "user", "content": [{"type": "text", "text": "  "}]}) is False
+    # A non-text part is not a BLANK echo (that is `_is_blank_user_turn`'s
+    # contract), but the mirror still cannot see any human text in it, so the
+    # turn count does not increase either.
+    assert predicate({"role": "user", "content": [{"type": "image_url", "image_url": {}}]}) is False
 
 
 # ── Finding 3 (re-gate 2026-10-08): recovery nudges and summary carriers ──
@@ -1955,4 +2047,71 @@ def test_inactive_row_flag_survives_the_response_projection():
     models_src = (REPO_ROOT / "api" / "models.py").read_text(encoding="utf-8")
     assert "'has_inactive_user_rows': row.get('has_inactive_user_rows')," in models_src, (
         "api/models.py's cli_sessions projection drops has_inactive_user_rows"
+    )
+
+
+def test_missing_content_column_emits_null_not_a_role_based_guess(tmp_path):
+    """#7681 finding 3: "emit NULL for unsupported shapes".
+
+    A ``messages`` table without a ``content`` column cannot run any of the
+    synthetic-content heuristics, so a role-based count would include the
+    continuation marker, the process-wakeup notice, the max-iterations request and
+    the recovery nudges. That is the over-report the finding is about, so the
+    aggregate must report UNKNOWN rather than a confident wrong number.
+    """
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            title TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            role TEXT,
+            timestamp REAL
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, model, started_at,"
+        " message_count, parent_session_id, ended_at, end_reason)"
+        " VALUES ('noc', 'cli', 'cli', 'No Content', 'm', 10.0, 4, NULL, NULL, NULL)"
+    )
+    for i, role in enumerate(["user", "assistant", "user", "user"]):
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, timestamp) VALUES (?,?,?,?)",
+            (f"m{i}", "noc", role, 11.0 + i),
+        )
+    conn.commit()
+    conn.close()
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import is_cli_session_row_visible, read_importable_agent_session_rows
+    finally:
+        sys.path.pop(0)
+
+    by_id = {row["id"]: row for row in read_importable_agent_session_rows(db)}
+    assert "noc" in by_id, f"row missing: {list(by_id)}"
+    assert by_id["noc"]["actual_user_message_count"] is None, (
+        "a schema without a content column cannot classify synthetic rows, so the "
+        f"user-turn count must be NULL, got {by_id['noc']['actual_user_message_count']!r}"
+    )
+    assert by_id["noc"]["user_message_count_unknown"], (
+        "the unknown marker must accompany the NULL count"
+    )
+    # And the row must not disappear from the sidebar because of it.
+    assert is_cli_session_row_visible(by_id["noc"]) is True, (
+        "an unknown count must not hide a real session"
     )

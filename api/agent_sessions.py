@@ -1106,13 +1106,16 @@ def read_importable_agent_session_rows(
                         " THEN 1 END)"
                     )
                 else:
-                    # No ``content`` column (minimal/legacy schema): the synthetic
-                    # content heuristics cannot run, so count role-bearing user
-                    # rows minus the durable compression flag only.
-                    user_message_count_expr = (
-                        "COUNT(CASE WHEN LOWER(m.role) = 'user'"
-                        f"{marker_guard} THEN 1 END)"
-                    )
+                    # No ``content`` column (minimal/legacy schema): every
+                    # synthetic-content heuristic is unavailable, so a role-based
+                    # count would silently include the continuation marker, the
+                    # process-wakeup notice, the max-iterations request and the
+                    # recovery nudges — exactly the over-report #7681 finding 3
+                    # is about. Emit NULL with the unknown marker instead of a
+                    # confident wrong number; the visibility gate surfaces the
+                    # row rather than hiding it (see is_cli_session_row_visible).
+                    user_message_count_expr = "NULL"
+                    user_message_count_unknown_expr = "1"
             else:
                 # No ``role`` column: roles are unavailable, so we cannot
                 # distinguish user turns from assistant/tool rows. Emit NULL
