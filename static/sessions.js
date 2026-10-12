@@ -5833,8 +5833,13 @@ function _renderBatchActionBar(){
     if(!preflight.owners.length){
       // #7826 round 5: this toast now fires ONLY for a row with no derivable
       // owner, never for a mixed-profile selection (which archives per row).
+      // #7826 re-gate: do NOT clear the selection here. An ineligible row
+      // (unknown owner, or an owner outside the active profile) used to drop the
+      // user out of selection mode with every selected id discarded, at both
+      // 1280px and 390px, so one foreign row silently unselected the owned row
+      // they wanted. Master retains the selection after a failure; the user can
+      // deselect the offending row and retry without rebuilding the selection.
       showToast(t('session_batch_archive_mixed_profiles'),3500);
-      exitSessionSelectMode();
       return;
     }
     const ok=await showConfirmDialog({
@@ -6682,12 +6687,32 @@ function _archiveBatchOwnerForRow(sid, sessionsById){
 // every row carries its own owner profile on its request, so mixed rows
 // simply archive row by row. `owner` remains populated for uniform
 // selections so older callers retain their simple fast-path signal.
+// #7826 re-gate: an owner that does not match the ACTIVE profile is NOT
+// eligible. The server ignores the client-supplied `profile` on this
+// endpoint and resolves the row against the active profile itself, so a
+// foreign row's request 409s — and the mid-batch stop-on-failure contract
+// then abandons every row after it. Which rows survive therefore depended
+// on selection order ([foreign, owned] skipped the owned row; [owned,
+// foreign] archived it) where master archives the owned row either way.
+// Root aliases count as a match, mirroring the server's _profiles_match.
 function _archiveBatchOwners(ids, sessionsById){
   const owners=[];
   let owner=null;
+  // The profile the server resolves a batch archive against: the ACTIVE profile,
+  // never the client-supplied claim (the server ignores that field on this
+  // endpoint). `_profileMatchesActiveProfile` encodes the root-alias rule
+  // (`eventName === 'default' && S.activeProfileIsDefault`), so comparing against
+  // `S.activeProfile` covers renamed-root ⇄ 'default' exactly as the server's
+  // _profiles_match does. Read inline: a helper of its own would be a new
+  // dependency for every driver that extracts this function in isolation.
+  const activeProfile=(S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
+    ?S.activeProfile.trim():'default';
   for(const sid of ids){
     const resolved=_archiveBatchOwnerForRow(sid,sessionsById);
     if(!resolved.owner) return {owner:null, owners:[], reason:resolved.reason};
+    if(!_archiveBatchOwnersMatch(resolved.owner, activeProfile)){
+      return {owner:null, owners:[], reason:'foreign-owner:'+resolved.owner};
+    }
     if(!owners.some(existing=>_archiveBatchOwnersMatch(existing,resolved.owner))) owners.push(resolved.owner);
     if(!owner) owner=resolved.owner;
   }
@@ -6695,14 +6720,18 @@ function _archiveBatchOwners(ids, sessionsById){
   return {owner,owners};
 }
 
-// Two owner names describe the same group when either direction matches the
-// active profile's alias set (renamed root ⇄ 'default'). Mirrors the server's
-// _profiles_match for the alias case that matters here.
+// Two owner names describe the same group when they name the same profile.
+// #7826 re-gate: this used to call _profileMatchesActiveProfile in BOTH
+// directions, which made 'work' match 'default' whenever the active profile was
+// the default: the reversed call sees eventName='default' and short-circuits on
+// the root-alias rule without ever comparing the other name. A foreign owner
+// therefore passed the batch preflight, its request 409d, and the stop-on-failure
+// contract abandoned every row after it. Match in ONE direction — owner against
+// the active profile — and treat the root alias explicitly.
 function _archiveBatchOwnersMatch(a,b){
   if(a===b) return true;
-  return typeof _profileMatchesActiveProfile==='function'
-    ?(_profileMatchesActiveProfile(a,b)||_profileMatchesActiveProfile(b,a))
-    :false;
+  if(typeof _profileMatchesActiveProfile!=='function') return false;
+  return _profileMatchesActiveProfile(a,b);
 }
 
 // #7826 root-cause rework: batch archive is profile-scoped PER ROW. Every

@@ -20573,6 +20573,24 @@ def handle_post(handler, parsed) -> bool:
                     "session_id": sid,
                     "profile": _arch_profile,
                 }, 409)
+            # #7826 re-gate CORE: the owner-only lookup cannot safely MATERIALIZE.
+            # It opens each profile's state.db read-only and never loads a sidecar,
+            # so it carries none of the metadata a write path needs — most visibly
+            # `read_only`. A Gateway row older than 25 newer CLI rows therefore
+            # detail-loads with `read_only: true`, but after a cache eviction this
+            # fallback matched it, materialized a sidecar with `read_only: false`
+            # and null source identity, and returned 200 where master returns 404
+            # without creating a file.
+            #
+            # The fallback exists to turn a foreign owner into a 409. A same-profile
+            # match may still be archived, but ONLY when the row is provably
+            # writable: the read-only Gateway/imported rows this lookup cannot
+            # describe safely stay on the 404 self-heal path instead of being
+            # materialized into a writable sidecar with null source identity.
+            #
+            # (This replaces the 400 that used to sit here: a read-only row reaching
+            # this fallback is exactly the shape that must not be materialized, and
+            # 404 keeps the browser's stale-URL self-heal firing.)
             # #7731: remember the resolved identity for the re-stamp after the
             # lock-held reload below. ``_archive_cli_meta`` is captured from the
             # ACTIVE profile only, so on the cross-profile path it is empty and
@@ -20580,7 +20598,7 @@ def handle_post(handler, parsed) -> bool:
             # plus null source fields) of a CLI-origin session.
             _archive_resolved_meta = cli_meta
             if cli_meta.get("read_only"):
-                return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
+                return bad(handler, "Session not found", 404)
             # Delegated subagent children (#5307) are view-only and owned by the
             # delegate runner — never materialize one into a writable WebUI
             # sidecar via the archive fallback (the 3rd of the shared
