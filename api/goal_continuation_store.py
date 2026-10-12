@@ -127,6 +127,12 @@ CONSUME_COMMIT_FAILED = "commit_failed"
 # named apart from #7855's ``PENDING_GOAL_CONTINUATION_RECORDS`` family to
 # keep the two PRs' symbols from colliding at merge.
 _CONTINUATION_HANDOFF_TOKENS: "dict[tuple[str, str], dict]" = {}
+# #7862 re-gate CORE: sessions whose durable handoff has already been CONVERTED
+# into a restored record. The in-memory token stays (``_receipt_attempt_is_live``
+# anchors a rollback receipt to it), but the durable copy must not: a handoff
+# still on disk is re-adopted by the next cold restore, resurrecting a
+# continuation the retry already spent.
+_ADOPTED_HANDOFF_SESSIONS: "set[str]" = set()
 _MAX_CONTINUATION_HANDOFFS = 64
 
 
@@ -423,6 +429,9 @@ def discard_goal_continuation_handoff(session_id: str, attempt_id: str = "") -> 
                 PENDING_GOAL_CONTINUATION_RECORDS,
                 context=f"handoff-discharge sid={sid}",
             ):
+                # The converted handoff is gone from memory for good, so the
+                # "withhold from disk" marker has nothing left to describe.
+                _ADOPTED_HANDOFF_SESSIONS.discard(sid)
                 return True
             # The snapshot write failed, so the durable state still describes an
             # interrupted start. Put the in-memory token back so this process
@@ -466,6 +475,9 @@ def _drop_continuation_handoffs_unlocked(sid: str) -> int:
     keys = [key for key in _CONTINUATION_HANDOFF_TOKENS if key[0] == sid]
     for key in keys:
         _CONTINUATION_HANDOFF_TOKENS.pop(key, None)
+    # The conversion marker only ever said "this session's handoff is already
+    # spent"; with no token left there is nothing to withhold from disk.
+    _ADOPTED_HANDOFF_SESSIONS.discard(sid)
     return len(keys)
 
 
@@ -527,8 +539,15 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> bool:
                         # swept on the first sweep after a restart — the exact
                         # regression this round closes.
                         and k != "_handoff_attempt_id"
+                        # #7862 re-gate CORE: this session's handoff has already
+                        # been CONVERTED into a restored record. Publishing it again
+                        # would let the next cold restore adopt it a second time.
+                        # The in-memory token stays — the receipt liveness anchor
+                        # needs it — only the durable copy is withheld.
+                        and not rec.get("_handoff_adopted_into_record")
                     }
                     for (sid, attempt), rec in _CONTINUATION_HANDOFF_TOKENS.items()
+                    if sid not in _ADOPTED_HANDOFF_SESSIONS
                 },
             },
             sort_keys=True,
@@ -1164,6 +1183,10 @@ def restore_goal_continuations() -> int:
         # evidence that the continuation was admitted. Re-arm it so the retry
         # can still consume it instead of running as an ordinary turn.
         adopted = 0
+        # #7862 re-gate CORE: the tokens converted into records during adoption,
+        # kept so a failed snapshot write can put them back. Empty when nothing
+        # was adopted, which is why it is initialised outside the loop.
+        adopted_tokens: dict[tuple[str, str], dict] = {}
         for (sid, attempt), record in disk_handoffs.items():
             if sid in PENDING_GOAL_CONTINUATION_RECORDS:
                 # The intent is already live as a record (a rollback restored
@@ -1207,11 +1230,67 @@ def restore_goal_continuations() -> int:
                     }
                 )
                 continue
-            _CONTINUATION_HANDOFF_TOKENS[(sid, attempt)] = dict(record)
             # The intent itself is gone from disk by construction (the consume
             # removed it), so restore the record for the matching retry: this
             # is what makes the handoff reconcilable rather than merely
             # informative.
+            #
+            # #7862 re-gate CORE: this adoption is a CONVERSION, not a copy. The
+            # handoff is the durable evidence that this attempt spent the intent;
+            # the restored record is the durable state that the intent is claimable
+            # again. Leaving the handoff behind made both true at once, and since
+            # a successful retry discharges only ITS OWN attempt's handoff, the
+            # next cold restore re-adopted the original one and resurrected a
+            # continuation that had already been spent.
+            #
+            # Popping the tokens BEFORE `_write_registry_unlocked` is what makes the
+            # swap atomic: that single `os.replace` writes the restored record and
+            # the emptied handoff table together, so a crash in between leaves the
+            # pre-adoption state (handoff still there, no record) — which is
+            # re-adoptable — rather than the double-spendable state. If the write
+            # fails we put the tokens back and do not report an adoption.
+            #
+            # Every token for this sid is collected, not just the current
+            # (sid, attempt): a retry may have minted its own handoff for a
+            # different attempt of the same session, and it is spent by exactly
+            # the same reasoning. (An earlier revision popped only the current key
+            # here and then collected the rest below — which silently dropped the
+            # token this iteration was adopting and left the write-failure path
+            # with nothing to restore.)
+            #
+            # A token recovered from DISK has no in-memory entry to collect, so the
+            # rebuilt dict must carry the liveness clock the disk record provides:
+            # dropping ``_handoff_minted_at`` would make the restored handoff read
+            # as abandoned and get its receipt swept on the next pass.
+            adopted_keys = [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]
+            adopted_tokens = {
+                k: dict(_CONTINUATION_HANDOFF_TOKENS[k]) for k in adopted_keys
+            }
+            adopted_tokens[(sid, attempt)] = dict(record)
+            for k in adopted_keys:
+                _CONTINUATION_HANDOFF_TOKENS.pop(k, None)
+            # #7862 re-gate CORE: the DURABLE handoff is consumed by this adoption,
+            # but the IN-MEMORY token must survive. Two different consumers need it:
+            #
+            # * ``_receipt_attempt_is_live`` anchors a rollback receipt to its
+            #   handoff's clock. Dropping the token makes a just-adopted attempt read
+            #   as abandoned, so the next sweep drops the receipt and the retry runs
+            #   as an ordinary turn — ``test_the_handoff_clock_survives_a_restart``
+            #   pins that, and it is the round-10 fix this branch already carries.
+            # * the record restored below is what the retry consumes.
+            #
+            # What must NOT survive is the durable copy: a handoff still on disk is
+            # re-adopted by the next cold restore, which resurrects a continuation
+            # the retry already spent. So the tokens are restored in memory and
+            # marked as converted, and ``_write_registry_unlocked`` omits marked
+            # sessions from the payload — one ``os.replace`` publishes the record
+            # and the emptied handoff table together, so a crash in between leaves
+            # the pre-adoption state (handoff, no record — re-adoptable) rather than
+            # the double-spendable state (both).
+            for key, value in adopted_tokens.items():
+                value["_handoff_adopted_into_record"] = True
+                _CONTINUATION_HANDOFF_TOKENS[key] = value
+            _ADOPTED_HANDOFF_SESSIONS.add(sid)
             PENDING_GOAL_CONTINUATION.add(sid)
             PENDING_GOAL_CONTINUATION_RECORDS[sid] = dict(record)
             adopted += 1
@@ -1223,10 +1302,30 @@ def restore_goal_continuations() -> int:
                 adopted,
             )
         if restored:
-            _write_registry_unlocked(
+            if _write_registry_unlocked(
                 PENDING_GOAL_CONTINUATION_RECORDS,
                 context=f"restore count={restored}",
+            ):
+                return restored
+            # The snapshot write failed, so the durable state still describes an
+            # interrupted start with NO live record. Undo the conversion in memory
+            # too: the tokens must go back to being ordinary handoffs (no marker,
+            # no session in the converted set), otherwise this process would
+            # withhold the crash-recovery evidence from every later snapshot and
+            # the adoption would be lost for good. The records stay in memory —
+            # dropping them would strand a continuation the UI still shows as
+            # active.
+            for key, value in adopted_tokens.items():
+                value.pop("_handoff_adopted_into_record", None)
+                _CONTINUATION_HANDOFF_TOKENS[key] = value
+            for converted_sid in {k[0] for k in adopted_tokens}:
+                _ADOPTED_HANDOFF_SESSIONS.discard(converted_sid)
+            logger.warning(
+                "Goal continuation registry: %d adoption(s) could not be made "
+                "durable; the handoff tokens stay claimable until reconciled",
+                adopted,
             )
+            return 0
         return restored
 
 
