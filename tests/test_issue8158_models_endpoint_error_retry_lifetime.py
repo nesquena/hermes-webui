@@ -229,6 +229,43 @@ def _age_cached_diagnostic(seconds: float, provider_id: str = _UNRESOLVABLE) -> 
     return False
 
 
+def _seed_expired_diagnostic_catalog(monkeypatch, tmp_path, *, base_url="https://broken.example/v1"):
+    """Publish a warm catalog whose named custom provider carries an expired error.
+
+    Seeds the state directly (expired stamp on a real rebuild's diagnostic) rather
+    than forcing the expiry window open and re-reading, so tests that need "an
+    expired diagnostic, nothing in flight" start from a known quiet state: no
+    probe is scheduled by this helper, and no rebuild is triggered by it.
+    """
+    _configure_named_custom_provider(tmp_path, monkeypatch, base_url=base_url)
+    # A cheap real rebuild would probe; go straight to the published shape instead.
+    error = config._custom_endpoint_error(_UNRESOLVABLE)
+    error["checked_at"] = time.time() - 3600
+    config._available_models_cache = {
+        "active_provider": "openai-codex",
+        "default_model": "gpt-5.5",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "Broken Proxy",
+                "provider_id": _UNRESOLVABLE,
+                "models": [],
+                "models_endpoint_error": error,
+            }
+        ],
+    }
+    config._available_models_cache_ts = time.monotonic()
+    config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
+    config._sync_models_cache_provenance()
+    # Verify by inspecting the published snapshot directly. Calling
+    # get_available_models() here would itself serve the expired diagnostic and
+    # therefore schedule the very probe these tests want to observe starting, so
+    # the helper must stay read-free to leave the registry quiet.
+    published = config._available_models_cache
+    assert isinstance(published, dict) and published["groups"][0]["models_endpoint_error"]
+    assert not _reprobe_inflight(), "seeding must not leave a probe in flight"
+
+
 # ── Reporter reproduction (script ``repro_stale_endpoint_error.py``) ──────────
 
 
@@ -339,19 +376,15 @@ def test_warm_read_serves_immediately_while_retry_probe_is_in_flight(monkeypatch
     read that waited on the re-probe would turn a cached picker payload into a
     request that stalls for the endpoint cap.
     """
-    probe = _Probe(healthy=True)
-    probe.gate = threading.Event()
+    probe = _Probe(healthy=False)
     monkeypatch.setattr(urllib.request, "urlopen", probe)
-    _expire_retries(monkeypatch, 0.0)
 
     with _ConfigState():
-        _configure_named_custom_provider(
-            tmp_path, monkeypatch, base_url="https://broken.example/v1"
-        )
-        # Seed the diagnostic directly: the healthy probe would not produce one.
-        probe.healthy = False
-        config.get_available_models()
+        _seed_expired_diagnostic_catalog(monkeypatch, tmp_path)
+        # Only now park the endpoint: the seeded snapshot must not be produced
+        # through a read that could block on the gate.
         probe.healthy = True
+        probe.gate = threading.Event()
 
         started = time.monotonic()
         served = config.get_available_models()
@@ -369,18 +402,17 @@ def test_concurrent_readers_coalesce_into_one_reprobe(monkeypatch, tmp_path):
     """N warm readers of one provider produce exactly one re-probe."""
     probe = _Probe(healthy=False)
     monkeypatch.setattr(urllib.request, "urlopen", probe)
-    _expire_retries(monkeypatch, 0.0)
 
     with _ConfigState():
-        _configure_named_custom_provider(
-            tmp_path, monkeypatch, base_url="https://broken.example/v1"
-        )
-        config.get_available_models()
-        assert _endpoint_error(config.get_available_models()) is not None
+        _seed_expired_diagnostic_catalog(monkeypatch, tmp_path)
 
-        # Park the probe so every reader observes the in-flight state.
+        # Park the endpoint so the single coalesced probe stays in flight and is
+        # countable. Starting from an idle registry with a parked gate makes the
+        # expected count exactly one new probe for all eight readers.
+        assert _wait_for_reprobe_idle(5.0), "no probe may be in flight before the readers"
         probe.gate = threading.Event()
         probes_before = _probe_count(probe)
+
         barrier = threading.Barrier(8)
 
         def _read():
@@ -392,8 +424,8 @@ def test_concurrent_readers_coalesce_into_one_reprobe(monkeypatch, tmp_path):
             reader.start()
         for reader in readers:
             reader.join(10.0)
-        assert probe.entered.wait(5.0)
-        assert _probe_count(probe) == probes_before + 1, (
+        assert probe.entered.wait(5.0), "the coalesced re-probe must start"
+        assert _probe_count(probe) - probes_before == 1, (
             "concurrent readers must coalesce onto one re-probe per provider; "
             f"observed {_probe_count(probe) - probes_before}"
         )
