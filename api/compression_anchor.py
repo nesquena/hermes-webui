@@ -202,6 +202,12 @@ def _is_internal_user_row(message) -> bool:
     Covers compaction/context-summary carriers, the continuation marker, the
     process‑wakeup notification, the max‑iterations request, the TODO
     re‑injection header, the merged prior-context header, and blank echoes.
+
+    #7681 finding 5: a row can carry one of these prefixes AND still embed a live
+    human ask (the merged prior-context carrier is exactly that shape). The agent
+    unwraps it and keeps the ask, so a prefix alone must not condemn the row —
+    otherwise every embedded ask is rejected and the sidecar under-counts. The
+    live-ask check runs first for summary carriers.
     """
     if not isinstance(message, dict):
         return True
@@ -209,6 +215,11 @@ def _is_internal_user_row(message) -> bool:
     if not text:
         return True  # blank echo — no human ask
     if any(text.startswith(prefix) for prefix in USER_TURN_INTERNAL_PREFIXES):
+        # A merged prior-context carrier is reference-only scaffolding in front of
+        # the delimiter and a live ask after it is not what these prefixes match;
+        # they match the HEADER. Ask the carrier splitter before condemning.
+        if _summary_carrier_has_live_user_ask(message):
+            return False
         return True
     if text in USER_TURN_INTERNAL_EXACT:
         return True
@@ -270,8 +281,12 @@ def is_user_originated_turn(message) -> bool:
         return False
     if message.get("_compressed_summary"):
         # A summary carrier whose display_kind is empty still carries its
-        # handoff, and the agent counts a live ask embedded in it.
-        return not _summary_carrier_has_live_user_ask(message)
+        # handoff, and the agent counts a live ask embedded in it. The verdict is
+        # the SAME direction as the agent's `user_originated_turn_view(...) is
+        # not None`: a carrier with a live payload IS a user turn. The previous
+        # `not` inverted it, so a flagged standalone summary counted as a turn
+        # while a real embedded ask was rejected (#7681 finding 5).
+        return _summary_carrier_has_live_user_ask(message)
     return True
 
 
@@ -279,9 +294,16 @@ def _summary_carrier_has_live_user_ask(message: dict) -> bool:
     """True when a compaction-summary row still embeds a live human ask.
 
     Mirrors the agent's ``_strip_context_summary_handoff_message``: a summary
-    carrier splits at the merged-prior-context delimiter (or the legacy end
-    marker), and whatever remains after the summary block is the live ask. A
-    standalone summary with nothing after it is pure scaffolding.
+    carrier is split at the merged-prior-context delimiter (or the legacy end
+    marker) and the LIVE payload is the part the agent keeps — which is what
+    comes BEFORE the delimiter once the reference-only prior context is stripped
+    off. A standalone summary with nothing left over is pure scaffolding.
+
+    Direction matters. The agent splits with ``content.split(delim, 1)[0]`` and
+    then drops the prior-context header; the previous mirror read
+    ``split(delim, 1)[1]``, i.e. the SUMMARY block itself, so a flagged standalone
+    summary read as a live ask and a real embedded ask read as scaffolding
+    (#7681 finding 5).
 
     Without this, a merged summary carrier is invisible to the sidecar counter
     while the agent still counts it (#7681 finding 2).
@@ -295,22 +317,69 @@ def _summary_carrier_has_live_user_ask(message: dict) -> bool:
         except Exception:
             pass
     content = message.get("content")
+    if isinstance(content, list):
+        # The agent walks the parts, keeps everything before the delimiter part,
+        # and stops at the part carrying it. Joining all parts first would fold
+        # the summary block back into the pre-delimiter slice and make every
+        # standalone carrier look live (#7681 finding 5).
+        before: list[str] = []
+        for item in content:
+            text = _part_text(item)
+            if _MERGED_SUMMARY_DELIMITER in text:
+                before.append(text.split(_MERGED_SUMMARY_DELIMITER, 1)[0])
+                break
+            before.append(text)
+        if not any(_MERGED_SUMMARY_DELIMITER in _part_text(item) for item in content):
+            # Legacy list form: the live ask follows the end marker in whichever
+            # part carries it.
+            joined = _join_parts(content)
+            if _SUMMARY_END_MARKER not in joined:
+                return False
+            return bool(joined.split(_SUMMARY_END_MARKER, 1)[1].strip())
+        return _live_payload_after_prior_context(_join_parts_text(before))
     if not isinstance(content, str):
         return False
     if _MERGED_SUMMARY_DELIMITER in content:
-        # Merged form: the delimiter separates the reference-only prior context
-        # from the summary block; anything after the SUMMARY is the live ask.
-        tail = content.split(_MERGED_SUMMARY_DELIMITER, 1)[1]
-        for marker in (_SUMMARY_END_MARKER,):
-            if marker in tail:
-                tail = tail.split(marker, 1)[1]
-                break
-        return bool(tail.strip())
+        # Merged form: the live payload sits BEFORE the delimiter, after the
+        # reference-only prior-context header is stripped.
+        return _live_payload_after_prior_context(content.split(_MERGED_SUMMARY_DELIMITER, 1)[0])
     if _SUMMARY_END_MARKER in content:
         # Legacy form: the live ask follows the end marker directly.
         tail = content.split(_SUMMARY_END_MARKER, 1)[1]
         return bool(tail.strip())
     return False
+
+
+def _live_payload_after_prior_context(before_delimiter: str) -> bool:
+    """True when the pre-delimiter slice still holds a live ask.
+
+    The agent strips the ``[END OF PRIOR CONTEXT ...]`` header off the slice in
+    front of the delimiter; what remains after that header is the live payload.
+    A slice that is only the header (or empty) is a standalone summary.
+    """
+    payload = before_delimiter
+    if _MERGED_PRIOR_CONTEXT_HEADER and payload.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
+        payload = payload[len(_MERGED_PRIOR_CONTEXT_HEADER):]
+    return bool(payload.strip())
+
+
+def _part_text(item) -> str:
+    """Text of one content part, tolerating the str / {text:...} shapes."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        text = item.get("text")
+        if isinstance(text, str):
+            return text
+    return ""
+
+
+def _join_parts(content: list) -> str:
+    return _join_parts_text([_part_text(item) for item in content])
+
+
+def _join_parts_text(parts: list[str]) -> str:
+    return "".join(part for part in parts if isinstance(part, str))
 
 
 # Shapes copied from agent/context_compressor.py so the mirror does not drift.
@@ -319,6 +388,7 @@ _SUMMARY_END_MARKER = (
     "not the summary above ---"
 )
 _MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+_MERGED_PRIOR_CONTEXT_HEADER = "[PRIOR CONTEXT — for reference only; not a new message]"
 
 
 def _agent_split_user_originated_turn():

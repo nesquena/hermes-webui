@@ -1319,3 +1319,285 @@ def test_known_zero_turn_count_acp_row_is_still_hidden(tmp_path):
     assert is_cli_session_row_visible(known_zero) is False, (
         "an ACP row with a KNOWN zero user-turn count must stay hidden"
     )
+
+
+# ── Finding 5 (re-gate 2026-10-08): the fallback classifier must mirror the agent ──
+#
+# api/compression_anchor.is_user_originated_turn() is the sidecar's mirror of the
+# agent's predicate. It is only consulted when the agent module is NOT importable
+# (the try/import path above), which is exactly the deployment where the two
+# counters must still agree — so the mirror is pinned against the agent's own
+# documented split direction rather than against itself.
+
+_DELIM = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+_PRIOR_HEADER = "[PRIOR CONTEXT — for reference only; not a new message]"
+_END_MARKER = "--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---"
+
+
+def _force_mirror_mode():
+    """Make the agent module unimportable so the fallback mirror actually runs.
+
+    ``is_user_originated_turn`` delegates to ``agent.context_compressor`` whenever
+    it imports cleanly, and the pytest environment puts ``~/.hermes/hermes-agent``
+    on ``sys.path``. Without this the mirror never executes and a broken mirror
+    passes every test — which is exactly how finding 5 shipped twice.
+    """
+    import builtins
+    import importlib
+
+    from api import compression_anchor
+
+    compression_anchor._AGENT_USER_PREDICATE = None
+    compression_anchor._AGENT_USER_PREDICATE_ATTEMPTED = False
+    compression_anchor._AGENT_SPLIT_PREDICATE = None
+    compression_anchor._AGENT_SPLIT_PREDICATE_ATTEMPTED = False
+    for name in [n for n in list(sys.modules) if n == "agent" or n.startswith("agent.")]:
+        del sys.modules[name]
+
+    real_import = builtins.__import__
+
+    def _blocked(name, *args, **kwargs):
+        if name == "agent" or name.startswith("agent."):
+            raise ImportError(f"{name} blocked: pinning the fallback mirror")
+        return real_import(name, *args, **kwargs)
+
+    builtins.__import__ = _blocked
+    try:
+        assert compression_anchor._agent_split_user_originated_turn() is None, (
+            "could not block the agent import — the mirror would stay untested"
+        )
+    finally:
+        builtins.__import__ = real_import
+        importlib.invalidate_caches()
+    return compression_anchor
+
+
+def _mirror_predicate():
+    """The sidecar predicate running in fallback (agent-unavailable) mode."""
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        anchor = _force_mirror_mode()
+        return anchor.is_user_originated_turn
+    finally:
+        sys.path.pop(0)
+
+
+def test_flagged_standalone_summary_is_not_a_user_turn():
+    """#7681 finding 5: a flagged summary with no live payload is scaffolding.
+
+    The classifier returned ``not _summary_carrier_has_live_user_ask(...)``, so a
+    standalone summary counted as a human turn — inflating every compacted
+    session's sidebar count. "Standalone" means the pre-delimiter slice is only
+    the reference-only header, exactly as in the agent's split.
+    """
+    predicate = _mirror_predicate()
+    row = {
+        "role": "user",
+        "content": f"{_PRIOR_HEADER}\n\n{_DELIM}\n\n## Summary\nwe discussed X",
+        "_compressed_summary": True,
+    }
+    assert predicate(row) is False, (
+        "a flagged standalone summary (nothing live in front of the delimiter) "
+        "must not count as a user turn"
+    )
+
+
+def test_embedded_live_ask_in_front_of_the_delimiter_is_a_user_turn():
+    """#7681 finding 5: the live payload sits BEFORE the merged delimiter.
+
+    The agent splits with ``content.split(delim, 1)[0]`` and then strips the
+    prior-context header; the mirror read ``split(delim, 1)[1]``, i.e. the summary
+    block itself, so a real embedded ask was rejected.
+    """
+    predicate = _mirror_predicate()
+    row = {
+        "role": "user",
+        "content": (
+            f"{_PRIOR_HEADER}\n\nreference only\n\nplease also fix the login bug"
+            f"\n\n{_DELIM}\n\n## Summary\nwe discussed X"
+        ),
+        "_compressed_summary": True,
+    }
+    assert predicate(row) is True, (
+        "a live ask sitting in front of the merged delimiter is a real user "
+        "turn and must be counted"
+    )
+
+
+def test_carrier_splitter_alone_uses_the_agent_delimiter_direction():
+    """#7681 finding 5: pin the splitter itself, not just the verdict.
+
+    The merged-form direction fix is masked when the row also clears
+    `_is_internal_user_row`'s live-ask bypass, so this test calls the splitter
+    directly and pins the direction the agent uses (`split(delim, 1)[0]`).
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        _summary_carrier_has_live_user_ask = _force_mirror_mode()._summary_carrier_has_live_user_ask
+    finally:
+        sys.path.pop(0)
+
+    # Direction-discriminating shapes: `before` and `after` disagree, so reading
+    # the summary block AFTER the delimiter answers these backwards.
+    live_ask_then_empty_summary = {
+        "role": "user",
+        "content": f"{_PRIOR_HEADER}\n\nplease fix the login bug\n\n{_DELIM}\n\n",
+        "_compressed_summary": True,
+    }
+    empty_ask_then_summary = {
+        "role": "user",
+        "content": f"{_PRIOR_HEADER}\n\n{_DELIM}\n\n## Summary\nwe discussed X",
+        "_compressed_summary": True,
+    }
+    assert _summary_carrier_has_live_user_ask(live_ask_then_empty_summary) is True, (
+        "a live ask in front of the delimiter is a user turn even when nothing "
+        "follows it — reading `split(delim, 1)[1]` answers False here"
+    )
+    assert _summary_carrier_has_live_user_ask(empty_ask_then_summary) is False, (
+        "a summary block behind the delimiter is scaffolding even when it is "
+        "non-empty — reading `split(delim, 1)[1]` answers True here"
+    )
+
+
+def test_splitter_handles_list_shaped_carriers():
+    """#7681 finding 5: the splitter must not reject a list payload outright.
+
+    `_summary_carrier_has_live_user_ask` returned False for every list content,
+    so a multimodal carrier never reached the live-ask check. The agent walks the
+    parts and keeps everything before the delimiter part.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        _summary_carrier_has_live_user_ask = _force_mirror_mode()._summary_carrier_has_live_user_ask
+    finally:
+        sys.path.pop(0)
+
+    live_list = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": f"{_PRIOR_HEADER}\n\nplease fix the login bug"},
+            {"type": "text", "text": f"{_DELIM}\n\n## Summary\nwe discussed X"},
+        ],
+        "_compressed_summary": True,
+    }
+    header_only_list = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": _PRIOR_HEADER},
+            {"type": "text", "text": f"{_DELIM}\n\n## Summary\nwe discussed X"},
+        ],
+        "_compressed_summary": True,
+    }
+    assert _summary_carrier_has_live_user_ask(live_list) is True, (
+        "a list-shaped carrier with a live ask before the delimiter must be "
+        "classified, not rejected for its payload shape"
+    )
+    assert _summary_carrier_has_live_user_ask(header_only_list) is False, (
+        "a list-shaped carrier whose pre-delimiter slice is only the header is "
+        "scaffolding"
+    )
+
+
+def test_prefix_match_alone_does_not_condemn_a_live_carrier():
+    """#7681 finding 5: `_is_internal_user_row` matched the merged prior-context
+    header and condemned the whole row, including a live ask in front of it."""
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        _is_internal_user_row = _force_mirror_mode()._is_internal_user_row
+    finally:
+        sys.path.pop(0)
+
+    live_carrier = {
+        "role": "user",
+        "content": f"{_PRIOR_HEADER}\n\nplease fix the login bug\n\n{_DELIM}\n\n## Summary\nx",
+        "_compressed_summary": True,
+    }
+    assert _is_internal_user_row(live_carrier) is False, (
+        "a row that carries a prior-context header AND a live ask is not "
+        "scaffolding — condemning it drops every embedded ask"
+    )
+    header_only = {
+        "role": "user",
+        "content": f"{_PRIOR_HEADER}\n\n{_DELIM}\n\n## Summary\nx",
+        "_compressed_summary": True,
+    }
+    assert _is_internal_user_row(header_only) is True, (
+        "a header-only prior-context carrier is still scaffolding"
+    )
+
+
+def test_prior_context_header_alone_is_not_a_live_ask():
+    """Counterpart: a slice that is only the reference-only header is scaffolding,
+    not a live payload — otherwise the header itself would count as a turn."""
+    predicate = _mirror_predicate()
+    row = {
+        "role": "user",
+        "content": f"{_PRIOR_HEADER}\n\n{_DELIM}\n\n## Summary\nwe discussed X",
+        "_compressed_summary": True,
+    }
+    assert predicate(row) is False, (
+        "the reference-only prior-context header must not be mistaken for a "
+        "live user ask"
+    )
+
+
+def test_legacy_end_marker_form_keeps_the_following_ask():
+    """Legacy form (no merged delimiter): the live ask follows the end marker."""
+    predicate = _mirror_predicate()
+    row = {
+        "role": "user",
+        "content": f"## Summary\nwe discussed X\n\n{_END_MARKER}\n\nnow do the thing",
+        "_compressed_summary": True,
+    }
+    assert predicate(row) is True, "the ask after the legacy end marker is a user turn"
+    standalone = {
+        "role": "user",
+        "content": f"## Summary\nwe discussed X\n\n{_END_MARKER}\n\n",
+        "_compressed_summary": True,
+    }
+    assert predicate(standalone) is False, "a standalone legacy summary is scaffolding"
+
+
+def test_list_content_carrier_is_classified_not_rejected():
+    """#7681 finding 5: the mirror returned False for every list payload, so a
+    multimodal carrier never reached the live-ask check at all."""
+    predicate = _mirror_predicate()
+    carrier = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": f"{_PRIOR_HEADER}\n\nreference\n\nnow fix the bug"},
+            {"type": "text", "text": f"{_DELIM}\n\n## Summary\nwe discussed X"},
+        ],
+        "_compressed_summary": True,
+    }
+    assert predicate(carrier) is True, (
+        "a list-shaped carrier with a live ask in front of the delimiter must "
+        "be classified, not rejected for its payload shape"
+    )
+    # The agent keeps the pre-delimiter blocks after stripping only the header,
+    # so a block of reference text still counts as the carrier's live payload —
+    # the mirror must not be stricter than the source of truth.
+    reference_only_list = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": f"{_PRIOR_HEADER}\n\nreference"},
+            {"type": "text", "text": f"{_DELIM}\n\n## Summary\nwe discussed X"},
+        ],
+        "_compressed_summary": True,
+    }
+    assert predicate(reference_only_list) is True, (
+        "the agent keeps pre-delimiter blocks after stripping the header, so a "
+        "reference block is still the carrier's live payload"
+    )
+    # A header-only pre-delimiter slice leaves nothing, which IS scaffolding.
+    header_only_list = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": _PRIOR_HEADER},
+            {"type": "text", "text": f"{_DELIM}\n\n## Summary\nwe discussed X"},
+        ],
+        "_compressed_summary": True,
+    }
+    assert predicate(header_only_list) is False, (
+        "a pre-delimiter slice that is only the reference-only header is scaffolding"
+    )
