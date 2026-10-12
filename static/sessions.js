@@ -9404,12 +9404,22 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
     // #7681 finding 4 (should fix): the +1 must be IDEMPOTENT per pending turn.
     // send() runs three update passes and the second one fires before the
     // stream id exists, so an unconditional +1 compounded 41 → 42 → 43 and the
-    // sidebar briefly showed a number two turns too high. Remember which
-    // session already received the optimistic bump and only apply it once.
+    // sidebar briefly showed a number two turns too high.
+    //
+    // The previous guard compared `_optimisticTurnBumpBase` against the CURRENT
+    // `serverUserTurns`, but that value is exactly what the previous pass had
+    // already overwritten with server+1 — the "baseline" drifted with every pass,
+    // so `alreadyBumped` never matched and the count still compounded 40 → 41 →
+    // 42 → 43. The baseline is therefore captured ONCE, at the first pass that
+    // needs a bump, and the bump is keyed on (sid, that immutable baseline).
     if(userTurns===serverUserTurns&&serverUserTurns>0&&optimisticUserTurns<serverUserTurns&&inFlight){
       const _bumpSid=(typeof _optimisticTurnBumpSid!=='undefined')?_optimisticTurnBumpSid:null;
       const _bumpBase=(typeof _optimisticTurnBumpBase!=='undefined')?_optimisticTurnBumpBase:null;
-      const alreadyBumped=_bumpSid===sid&&_bumpBase===serverUserTurns;
+      // `_bumpBase` is the count BEFORE any bump for this pending turn. A bump
+      // that is already applied shows up as `userTurns === _bumpBase + 1`, which
+      // is the idempotent case: the same pending turn must not bump twice.
+      const alreadyBumped=_bumpSid===sid&&Number.isFinite(_bumpBase)
+        &&userTurns===Number(_bumpBase)+1;
       if(!alreadyBumped){
         userTurns=serverUserTurns+1;
         _optimisticTurnBumpSid=sid;
