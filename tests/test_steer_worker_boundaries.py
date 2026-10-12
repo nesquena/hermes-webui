@@ -263,7 +263,10 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
             streaming._handle_chat_steer(handler, {"session_id": "original", "text": "guidance"})
             result = _captured_response(handler)
             if first == "steer":
-                assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
+                assert result["accepted"] is True
+                assert result["fallback"] is None
+                assert result["stream_id"] == "run"
+                assert result["durable"] is True
             else:
                 assert result == {"accepted": False, "fallback": "not_running", "stream_id": "run"}
                 assert scene.agent.pending == []
@@ -271,8 +274,8 @@ def test_final_drain_fences_steer(worker_scene, monkeypatch, registered, rotated
             release.set()
         worker.result(timeout=10)
     emitted = list(scene.events.queue)
-    assert not [payload for event, payload in emitted if event == "apperror"]
-    leftovers = [payload["text"] for event, payload in emitted if event == "pending_steer_leftover"]
+    assert not [item for item in emitted if item[0] == "apperror"]
+    leftovers = [item[1]["text"] for item in emitted if item[0] == "pending_steer_leftover"]
     assert leftovers == (["guidance"] if first == "steer" else [])
     assert scene.drained == (["guidance"] if first == "steer" else [""])
     assert scene.agent.pending == []

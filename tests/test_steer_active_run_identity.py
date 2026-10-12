@@ -43,7 +43,11 @@ def test_active_worker_accepts_after_compression_without_cache_mutation(scene, c
     elif cache == "different":
         config.SESSION_AGENT_CACHE["original"] = (other, "sig")
     before = dict(config.SESSION_AGENT_CACHE)
-    assert steer() == {"accepted": True, "fallback": None, "stream_id": "run"}
+    accepted = steer()
+    assert accepted["accepted"] is True
+    assert accepted["fallback"] is None
+    assert accepted["stream_id"] == "run"
+    assert accepted["durable"] is True
     agent.steer.assert_called_once_with("updated guidance")
     other.steer.assert_not_called()
     agent._session_db.close.assert_not_called()
@@ -162,7 +166,10 @@ def test_cache_only_steer_requires_positive_stream_and_run_ownership(scene, owne
     assert "run" in config.STREAMS
     result = steer()
     if ownership in ("both", "local-backend"):
-        assert result == {"accepted": True, "fallback": None, "stream_id": "run"}
+        assert result["accepted"] is True
+        assert result["fallback"] is None
+        assert result["stream_id"] == "run"
+        assert result["durable"] is True and result["published"] is True
         agent.steer.assert_called_once_with("updated guidance")
     elif ownership == "gateway-backend":
         assert result == {"accepted": False, "fallback": "gateway_steer_queued", "stream_id": "run"}

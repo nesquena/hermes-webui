@@ -223,6 +223,7 @@ when integrating with the live chat SSE relay.
 | `context_status` | Context window / usage status |
 | `goal` | Goal / plan card update |
 | `goal_continue` | Goal continuation signal |
+| `steer_delivered` | Durable user-authored mid-turn guidance accepted by the active run |
 | `pending_steer_leftover` | Leftover steer text after interrupt |
 | `state_saved` | Durable state write acknowledgment |
 | `todo_state` | Todo / checklist panel update |
