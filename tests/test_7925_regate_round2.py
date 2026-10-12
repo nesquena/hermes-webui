@@ -108,13 +108,16 @@ def test_the_stitch_block_requires_the_window_to_advance():
     # Find the reload-offset assignment and the condition that guards the stitch.
     idx = src.find("const _reloadOffset = Number(data.session._messages_offset)")
     assert idx > 0, "the reload-offset read is gone"
-    window = src[idx : idx + 1600]
-    assert "_reloadOffset > _previousReloadOffset" in window, (
+    # Locate the guard by its condition rather than by a fixed window: the block
+    # carries a long explanatory comment, and a byte window silently stops
+    # covering the condition when the comment grows.
+    guard_idx = src.find("_reloadOffset > _previousReloadOffset", idx)
+    assert guard_idx > 0, (
         "the stitch block is not gated on the window actually moving forward; "
         "a non-advancing refresh still falls through to the full-transcript "
         "download (#7925 MUST-FIX 1)"
     )
-    assert "_reloadOffset > 0 &&" not in window, (
+    assert "_reloadOffset > 0 &&" not in src[idx:guard_idx], (
         "the old ``_reloadOffset > 0`` condition is still present"
     )
 

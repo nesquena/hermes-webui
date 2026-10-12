@@ -9796,7 +9796,7 @@ def _transcript_prefix_proof(all_messages, prefix_length, _revision=None) -> str
     # never sees cannot change this digest, and rows the client projects
     # (client-side-only fields) are excluded by construction.
     hash_value = 0x811C9DC5
-    for payload, encoded_len in _sized:
+    for payload, _encoded_len in _sized:
         # Iterate UTF-16 CODE UNITS, not characters. The browser re-derives this
         # digest with String.prototype.charCodeAt, which yields one unit per
         # UTF-16 word: an astral character (emoji, CJK ext-B) is a surrogate

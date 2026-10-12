@@ -4050,7 +4050,21 @@ async function _ensureMessagesLoaded(sid, opts) {
   // dropped every such refresh into the full-transcript fallback, so a long
   // session downloaded its whole transcript on the first focus and then on every
   // later poll and focus. That is precisely what #7899 set out to remove.
+  //
+  // #7925 re-gate: stitch only from a PRISTINE origin (``_previousReloadOffset
+  // === 0``). Once the rendered transcript already starts at a nonzero origin the
+  // client-side prefix can no longer be proven to be the server's current prefix
+  // for that earlier range — the prefix proof covers the window the last response
+  // described, not the one before it — so the trust gate rejects the splice and
+  // the refresh degrades into a bare full fetch followed by ``msg_limit=all``
+  // reloads: a bounded refresh that silently becomes repeated full-transcript
+  // downloading (Chromium: 30 rows, then 2,003; master stays at 30).
+  //
+  // The fresh bounded response IS authoritative for the window it describes, so
+  // an advancing nonzero-origin window takes the plain replace below and needs no
+  // splice at all: nothing older than the new origin is being claimed.
   if (
+    _previousReloadOffset === 0 &&
     _reloadOffset > _previousReloadOffset &&
     Array.isArray(S.messages) &&
     S.messages.length > 0
