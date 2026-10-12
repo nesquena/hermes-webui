@@ -15899,18 +15899,41 @@ def _saved_prompts_path() -> "Path":
 
 def _load_saved_prompts() -> list:
     p = _saved_prompts_path()
-    if not p.exists():
-        return []
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    # #7644: a torn/corrupt primary must not present as "you have no prompts" —
+    # fall back to the previous known-good generation kept alongside it.
+    for candidate in (p, Path(str(p) + ".bak")):
+        if not candidate.exists():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, list):
+            return data
+    return []
 
 
 def _save_saved_prompts(prompts: list) -> None:
+    from api.paths import _atomic_write_text
+
     p = _saved_prompts_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
+    # #7644: rotate the current generation to saved_prompts.json.bak — a
+    # one-deep recovery copy for an accidental delete — before the replacement
+    # lands. Only a primary that still parses as a prompt list is rotated, so a
+    # torn file can never overwrite the one known-good backup, and the publish
+    # itself goes through the shared atomic writer instead of truncating the
+    # live file in place.
+    try:
+        known_good = isinstance(json.loads(p.read_text(encoding="utf-8")), list)
+    except (OSError, ValueError):
+        known_good = False
+    if known_good:
+        try:
+            os.replace(p, Path(str(p) + ".bak"))
+        except OSError:
+            pass
+    _atomic_write_text(p, json.dumps(prompts, ensure_ascii=False, indent=2))
 
 
 # In-process cache for the app-shell template. The `/`, `/index.html`, and
