@@ -313,6 +313,66 @@ def reclaim_goal_continuation_receipt(session_id: str, attempt_id: str = "") -> 
         return True
 
 
+def record_goal_continuation_stream(
+    session_id: str, attempt_id: str, stream_id: str
+) -> bool:
+    """Bind this admission's stream identity to its handoff; return durability.
+
+    #7862 re-gate CORE (Oct 10, "failed durable discharge is still ignored
+    after launch"): the reviewer's exact fix was to persist the admission
+    with its attempt/stream identity BEFORE worker execution, so recovery
+    can reconcile against that identity instead of restoring admitted turns
+    as pending intent.
+
+    The handoff token already IS the durable admission (the consume writes
+    it in the same snapshot that removes the record). What it lacked was the
+    stream the admitted attempt actually ran under. With the stream id on
+    the token, a launch whose discharge write failed is RECONCILABLE rather
+    than merely visible: the turn executed, and a cold restore can see that.
+
+    The write is the same atomic snapshot as every other mutation, so the
+    stream id is durable the moment this returns True. A False return means
+    it did not land — the caller treats the admission as unsettled.
+
+    Never raises into the chat path.
+    """
+    from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+
+    sid = str(session_id or "").strip()
+    stream = str(stream_id or "").strip()
+    if not sid or not stream:
+        return False
+    attempt = str(attempt_id or "").strip()
+    with _LOCK:
+        key = (sid, attempt) if attempt else None
+        if key is None:
+            session_keys = [k for k in _CONTINUATION_HANDOFF_TOKENS if k[0] == sid]
+            key = session_keys[0] if session_keys else None
+        if key is None or key not in _CONTINUATION_HANDOFF_TOKENS:
+            # No admission to bind: nothing consumed for this attempt (an
+            # ordinary turn, or the intent was never armed). Not an error.
+            return True
+        _CONTINUATION_HANDOFF_TOKENS[key]["_handoff_stream_id"] = stream
+        if _write_registry_unlocked(
+            PENDING_GOAL_CONTINUATION_RECORDS,
+            context=f"handoff-stream sid={sid} attempt={key[1]}",
+        ):
+            return True
+        # The identity did not land, so the admission stays unsettled. Drop
+        # the in-memory copy too: leaving it would let this process believe
+        # the reconciliation is possible while disk says otherwise, and the
+        # next snapshot would publish a stream id the failed write never
+        # committed.
+        _CONTINUATION_HANDOFF_TOKENS[key].pop("_handoff_stream_id", None)
+        logger.warning(
+            "Goal continuation admission for session %s (attempt %s) could not "
+            "record its stream identity; the settlement stays unreconciled",
+            sid,
+            key[1],
+        )
+        return False
+
+
 def _record_continuation_handoff_unlocked(sid: str, record: dict, attempt_id: str) -> None:
     """Store a durable handoff for one start attempt; callers hold ``_LOCK``.
 
@@ -649,6 +709,13 @@ def _load_file_raw() -> "tuple[dict[str, dict], dict[str, int], dict[tuple[str, 
                     # handoff with no clock reads as abandoned, which sweeps the
                     # receipt it is supposed to protect.
                     "_handoff_minted_at": float(rec.get("_handoff_minted_at") or 0.0),
+                    # #7862 re-gate CORE (Oct 10): the stream identity of an
+                    # admission that LAUNCHED. Same whitelist trap as the clock:
+                    # dropping it would make every restored admission look like
+                    # an interrupted start, and the adoption would resurrect a
+                    # continuation whose turn already ran — the exact
+                    # failed-discharge resurrection this round closes.
+                    "_handoff_stream_id": str(rec.get("_handoff_stream_id") or ""),
                 }
         out: dict[str, dict] = {}
         for sid, rec in raw_records.items():
@@ -1216,6 +1283,11 @@ def restore_goal_continuations() -> int:
         # evidence that the continuation was admitted. Re-arm it so the retry
         # can still consume it instead of running as an ordinary turn.
         adopted = 0
+        # #7862 re-gate CORE: handoffs the restore deliberately does NOT adopt
+        # (already launched, or retired while the process was down). Counted so
+        # the closing snapshot knows the drop must be committed, not just
+        # applied in memory.
+        dropped = 0
         # #7862 re-gate CORE: the tokens converted into records during adoption,
         # kept so a failed snapshot write can put them back. Empty when nothing
         # was adopted, which is why it is initialised outside the loop.
@@ -1227,8 +1299,40 @@ def restore_goal_continuations() -> int:
                 # it rather than leaving a second claimable copy behind
                 # (#7862 round 9).
                 _drop_continuation_handoffs_unlocked(sid)
+                dropped += 1
+                continue
+            # #7862 re-gate CORE (Oct 10, "failed durable discharge is still
+            # ignored after launch"): a handoff carrying a STREAM id is not
+            # evidence of an interrupted start — it is the durable admission
+            # of a start that LAUNCHED under that stream. The reviewer's probe:
+            # a launch succeeded, its discharge write failed, the process
+            # restarted, and the cold restore recovered 1 already-admitted
+            # continuation. Adopting it would restore an intent whose turn
+            # already executed, so the spent admission is dropped instead.
+            if record.get("_handoff_stream_id"):
+                logger.info(
+                    "Goal continuation registry: dropping the handoff for "
+                    "session %s (attempt %s) — its turn already launched "
+                    "under stream %s",
+                    sid,
+                    attempt,
+                    record.get("_handoff_stream_id"),
+                )
+                _drop_continuation_handoffs_unlocked(sid)
+                dropped += 1
+                _RETIRED_LOG.append(
+                    {
+                        "session_id": sid,
+                        "reason": "handoff_admission_already_launched",
+                        "at": time.time(),
+                    }
+                )
                 continue
             if (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS:
+                # This process already owns the admission (a rollback restored
+                # the record and re-armed the handoff, or an earlier pass did).
+                # The in-memory token is authoritative and nothing is dropped
+                # here, so this does NOT count towards the closing snapshot.
                 continue
             # #7862 round 9 (CORE, finding "a cleared goal comes back after
             # the next restart"): a handoff is only evidence of an interrupted
@@ -1255,6 +1359,7 @@ def restore_goal_continuations() -> int:
                     tombstone,
                 )
                 _drop_continuation_handoffs_unlocked(sid)
+                dropped += 1
                 _RETIRED_LOG.append(
                     {
                         "session_id": sid,
@@ -1334,10 +1439,22 @@ def restore_goal_continuations() -> int:
                 "from an interrupted start",
                 adopted,
             )
-        if restored:
+        # #7862 re-gate CORE (Oct 10): a REFUSED or already-launched handoff is
+        # dropped in memory during the loop above, but the drop only becomes
+        # real when the snapshot commits. Without this write the spent handoff
+        # stays on disk, and every later cold restore re-reads it — which for
+        # the already-launched case is exactly the reviewer's resurrection
+        # (cold restore recovers 1 already-admitted continuation).
+        if dropped:
+            logger.info(
+                "Goal continuation registry: dropped %d non-adoptable durable "
+                "continuation handoff(s) (already launched or retired)",
+                dropped,
+            )
+        if restored or dropped:
             if _write_registry_unlocked(
                 PENDING_GOAL_CONTINUATION_RECORDS,
-                context=f"restore count={restored}",
+                context=f"restore count={restored} dropped={dropped}",
             ):
                 return restored
             # The snapshot write failed, so the durable state still describes an

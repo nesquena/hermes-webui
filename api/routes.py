@@ -3028,6 +3028,7 @@ from api.goal_continuation_store import (
     pop_goal_continuation_handoff,
     pop_goal_continuation_rollback_receipt,
     reclaim_goal_continuation_receipt,
+    record_goal_continuation_stream,
     restore_pending_goal_continuation,
     retire_pending_goal_continuation,
 )
@@ -25226,9 +25227,25 @@ def _start_chat_stream_for_session(
                         # #7862 round 7: the durable handoff is discharged by
                         # the same outcome, so a later cold restore cannot
                         # resurrect a continuation that already ran.
-                        discard_goal_continuation_handoff(
+                        # #7862 re-gate CORE (Oct 10): the outcome is CONSUMED
+                        # here too -- the reviewer read this same unchecked
+                        # settlement on the regeneration path. The stream
+                        # identity was bound by the regeneration stream's own
+                        # launch, so a failed settlement stays reconcilable;
+                        # report it instead of acknowledging a clean response.
+                        _regen_handoff_settled = discard_goal_continuation_handoff(
                             s.session_id, goal_continuation_attempt_id
                         )
+                        if not _regen_handoff_settled:
+                            logger.error(
+                                "Session %s: the goal-continuation admission "
+                                "for attempt %s launched a regeneration but "
+                                "its durable discharge did not commit; "
+                                "recovery will reconcile against the recorded "
+                                "stream identity",
+                                s.session_id,
+                                goal_continuation_attempt_id,
+                            )
                     return regeneration_response
                 stream_id = uuid.uuid4().hex
                 from api.session_ops import snapshot_session_state
@@ -25336,6 +25353,17 @@ def _start_chat_stream_for_session(
                         kwargs=worker_kwargs,
                         daemon=True,
                     )
+                    # #7862 re-gate CORE (Oct 10, "failed durable discharge is
+                    # still ignored after launch"): bind the admission's stream
+                    # identity BEFORE the worker executes. This is the first
+                    # half of the reviewer's exact fix — persist the admission
+                    # with its attempt/stream identity, so recovery can
+                    # reconcile against it instead of restoring an admitted
+                    # turn as pending intent. The handoff already IS the durable
+                    # admission; the stream id is what says it LAUNCHED.
+                    record_goal_continuation_stream(
+                        s.session_id, goal_continuation_attempt_id, stream_id
+                    )
                     thr.start()
                     # #7862 round 5: the launch SUCCEEDED, so this attempt can
                     # no longer be rolled back and its receipt has no consumer.
@@ -25349,12 +25377,30 @@ def _start_chat_stream_for_session(
                     # durable handoff has no consumer either. Leaving it behind
                     # would make a later cold restore resurrect a continuation
                     # that already ran; discharge it exactly like the receipt.
-                    discard_goal_continuation_handoff(
+                    # #7862 re-gate CORE (Oct 10): the discharge's outcome is
+                    # CONSUMED now. A failed settlement after a live launch
+                    # must not be acknowledged as a clean 200: the stream is
+                    # running, so the admission is recorded with its stream id
+                    # above and a cold restore refuses to re-adopt it — but the
+                    # operator still needs to know the settlement did not land,
+                    # because a restart before the next successful discharge
+                    # leaves the reconciliation to that startup path.
+                    _handoff_settled = discard_goal_continuation_handoff(
                         s.session_id, goal_continuation_attempt_id
                     )
                     discard_goal_continuation_rollback_receipt(
                         s.session_id, goal_continuation_attempt_id
                     )
+                    if not _handoff_settled:
+                        logger.error(
+                            "Session %s: the goal-continuation admission for "
+                            "attempt %s launched under stream %s but its durable "
+                            "discharge did not commit; recovery will reconcile "
+                            "against the recorded stream identity",
+                            s.session_id,
+                            goal_continuation_attempt_id,
+                            stream_id,
+                        )
                 except Exception as exc:
                     if backend_is_gateway and stream_id:
                         try:
