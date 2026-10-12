@@ -797,16 +797,15 @@ def test_renderMessages_preserves_loading_placeholder_for_session_switch(cleanup
     fn_body = ui_src[fn_start:fn_start + 2400]
 
     compact = re.sub(r"\s+", "", fn_body)
-    assert (
-        "if(_loadingSessionId===sid&&msgCount===0&&inner)return;" in compact
-    ), (
-        "renderMessages() must return early when loadSession is active for"
-        " the current sid and S.messages is still empty."
+    guard = "if(_loadingSessionId===sid&&msgCount===0&&inner&&Number(S.session&&S.session.message_count)>0)return;"
+    assert guard in compact, (
+        "renderMessages() must retain the loading placeholder when loadSession"
+        " is active and the persisted session still has messages to fetch."
     )
 
     # Guard must live before render-window reset and message-filter pass.
     reset_pos = compact.find("if(sid!==_messageRenderWindowSid)_resetMessageRenderWindow(sid);")
-    guard_pos = compact.find("if(_loadingSessionId===sid&&msgCount===0&&inner)return;")
+    guard_pos = compact.find(guard)
     assert (
         0 <= guard_pos < reset_pos
     ), "Session-load empty-state guard must run before render-window/state resets."
