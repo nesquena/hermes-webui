@@ -156,6 +156,12 @@ def visible_messages_for_anchor(messages, *, auto_compression: bool = False):
 # Stripped, case‑insensitive content prefixes that mark a user‑role row as
 # internal scaffolding rather than a human ask. Kept lowercase; the classifier and
 # the SQL aggregate both compare against ``LOWER(LTRIM(content))``.
+#
+# #7681 finding 3: this table is the mirror of the agent's
+# ``_is_synthetic_compression_user_turn`` exclusion set. Every recovery nudge the
+# agent excludes must appear here or the SQL aggregate over-reports — the 23-shape
+# reproduction reported 7 against the agent's 6 because the length-continuation
+# and tool-call nudges were missing.
 USER_TURN_INTERNAL_PREFIXES = (
     "[context compaction",
     "[context summary",   # legacy "[CONTEXT SUMMARY]:"
@@ -163,9 +169,18 @@ USER_TURN_INTERNAL_PREFIXES = (
     "[your active task list was preserved across context compression]",
     "[prior context",     # merged "[PRIOR CONTEXT — ...] !" carrier header
     "[important: background process ",  # process wake‑up notification
+    # ── agent/conversation_loop.py recovery nudges (#7681 finding 3) ──
+    "[system: the previous response was cut off by a network error",
+    "[system: your previous response was truncated by the output length limit",
+    "[system: your previous tool call ",  # dropped-tools variant, tool names interpolated
+    "[system: your previous response contained only internal reasoning",
+    "[system: continue now. execute the required tool calls",
+    "[system: your previous message ended the turn with a fragment",
 )
 
 # Whole‑op internal markers (stripped, lowercased content equals one of these).
+# Mirrors the agent's exact-match set; a recovery nudge that is not one of these
+# still counts as a user turn.
 USER_TURN_INTERNAL_EXACT = (
     "continue from the compressed conversation context above. "
     "this marker exists because no human user turn was available.",
@@ -174,6 +189,11 @@ USER_TURN_INTERNAL_EXACT = (
     "you've reached the maximum number of tool-calling iterations allowed. "
     "please provide a final response summarizing what you've found and accomplished so far, "
     "without calling any more tools.",
+    # ── agent/conversation_loop.py recovery nudges (#7681 finding 3) ──
+    "your previous turn indicated a tool call but none was included. do not narrate a plan or "
+    "restate intent — issue the actual tool call now to continue the task.",
+    "you just executed tool calls but returned an empty response. please process the tool "
+    "results above and continue with the task.",
 )
 
 # ``display_kind`` values that still represent genuine human input. Everything
@@ -391,6 +411,50 @@ _MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]
 _MERGED_PRIOR_CONTEXT_HEADER = "[PRIOR CONTEXT — for reference only; not a new message]"
 
 
+def _flagged_carrier_has_live_payload_sql(content_expr: str) -> str:
+    """SQL predicate: does a flagged summary carrier still embed a live ask?
+
+    The SQL twin of ``_summary_carrier_has_live_user_ask`` above, so the state.db
+    aggregate and the sidecar classifier cannot disagree (#7681 finding 3).
+    ``content_expr`` must already be lowercased/LTRIM'd, so the literals below are
+    lowercased too — ``INSTR`` is case-sensitive and a lowered column compared
+    against a mixed-case needle silently never matches.
+
+    Merged form — the agent keeps ``content.split(delim, 1)[0]`` and then strips
+    the reference-only prior-context header:
+
+        ``TRIM(SUBSTR(c, header_len + 1), ' ' || char(9) || char(10) || char(13)) != ''``
+
+    Legacy form — the live ask follows the end marker, so anything non-blank
+    after it counts.
+    """
+    delim = _sql_literal(_MERGED_SUMMARY_DELIMITER.lower())
+    header = _sql_literal(_MERGED_PRIOR_CONTEXT_HEADER.lower())
+    end_marker = _sql_literal(_SUMMARY_END_MARKER.lower())
+    before = (
+        f"CASE WHEN INSTR({content_expr}, {delim}) > 0"
+        f" THEN SUBSTR({content_expr}, 1, INSTR({content_expr}, {delim}) - 1)"
+        f" ELSE {content_expr} END"
+    )
+    without_header = (
+        f"CASE WHEN SUBSTR({before}, 1, LENGTH({header})) = {header}"
+        f" THEN SUBSTR({before}, LENGTH({header}) + 1)"
+        f" ELSE {before} END"
+    )
+    merged_live = (
+        f"(INSTR({content_expr}, {delim}) > 0"
+        f" AND TRIM({without_header}, ' ' || char(9) || char(10) || char(13)) != '')"
+    )
+    legacy_live = (
+        f"(INSTR({content_expr}, {delim}) = 0"
+        f" AND INSTR({content_expr}, {end_marker}) > 0"
+        f" AND TRIM(SUBSTR({content_expr},"
+        f" INSTR({content_expr}, {end_marker}) + LENGTH({end_marker})),"
+        " ' ' || char(9) || char(10) || char(13)) != '')"
+    )
+    return f"({merged_live} OR {legacy_live})"
+
+
 def _agent_split_user_originated_turn():
     """The agent's splitter, or ``None`` when it is not importable."""
     global _AGENT_SPLIT_PREDICATE, _AGENT_SPLIT_PREDICATE_ATTEMPTED
@@ -413,10 +477,20 @@ def user_turn_sql_exclusions(content_expr: str) -> str:
     ``USER_TURN_INTERNAL_PREFIXES`` / ``USER_TURN_INTERNAL_EXACT`` data as the
     Python classifier so the sidecar producer and the state.db SQL aggregate
     can never classify a transcript differently.
+
+    #7681 finding 3 (second half): the prefix rules are the SQL twin of
+    ``_is_internal_user_row``, so they must carry the same escape the Python side
+    gained in finding 5 — a row that starts with a scaffolding prefix AND still
+    embeds a live ask (the merged prior-context carrier) is a user turn. Without
+    the escape the aggregate rejected every carrier while the agent counted it,
+    which is the 7-vs-6 disagreement.
     """
     conditions = []
     for prefix in USER_TURN_INTERNAL_PREFIXES:
-        conditions.append(f"INSTR({content_expr}, {_sql_literal(prefix)}) = 1")
+        conditions.append(
+            f"(INSTR({content_expr}, {_sql_literal(prefix)}) = 1"
+            f" AND NOT {_flagged_carrier_has_live_payload_sql(content_expr)})"
+        )
     for exact in USER_TURN_INTERNAL_EXACT:
         conditions.append(f"{content_expr} = {_sql_literal(exact)}")
     return " OR ".join(conditions)

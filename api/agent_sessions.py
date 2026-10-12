@@ -9,6 +9,7 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import quote, quote_from_bytes
 
 from api.compression_anchor import (
+    _flagged_carrier_has_live_payload_sql,
     is_user_originated_turn,
     user_turn_sql_exclusions,
 )
@@ -1020,8 +1021,33 @@ def read_importable_agent_session_rows(
                 # below is generated from the same content rules the sidecar
                 # producer classifies with (api/compression_anchor), so the two
                 # counters can never drift apart.
+                # #7681 finding 2: `display_kind` is the agent's own marker for
+                # scaffolding rows that carry role='user' but are not human
+                # input (async-delegation, hidden operational notices). The
+                # Python classifier rejects every non-empty value except
+                # 'steer'; the SQL must do the same or the two counters drift.
+                display_kind_guard = (
+                    " AND COALESCE(m.display_kind, '') IN ('', 'steer')"
+                    if 'display_kind' in message_cols
+                    else ""
+                )
+                content_expr = "LOWER(LTRIM(COALESCE(m.content, '')))"
+                # #7681 finding 3 (second half): a flagged summary carrier is not
+                # automatically scaffolding. The agent unwraps it and keeps the
+                # live ask that sits in front of the merged delimiter, so a
+                # carrier WITH a live payload IS a user turn. The blanket
+                # `_compressed_summary = 0` guard excluded every one of them,
+                # which is why the aggregate under-reported carriers while the
+                # agent counted them.
+                #
+                # `_flagged_carrier_has_live_payload_sql` mirrors the Python
+                # splitter (`api/compression_anchor._summary_carrier_has_live_user_ask`):
+                # take the slice before the merged delimiter, strip the
+                # reference-only prior-context header, and require something left.
+                # The legacy end-marker form keeps whatever follows the marker.
                 marker_guard = (
-                    " AND COALESCE(m._compressed_summary, 0) = 0"
+                    " AND (COALESCE(m._compressed_summary, 0) = 0"
+                    f" OR {_flagged_carrier_has_live_payload_sql(content_expr)})"
                     if '_compressed_summary' in message_cols
                     else ""
                 )
@@ -1049,7 +1075,6 @@ def read_importable_agent_session_rows(
                     else ""
                 )
                 if 'content' in message_cols:
-                    content_expr = "LOWER(LTRIM(COALESCE(m.content, '')))"
                     internal_exclusions = user_turn_sql_exclusions(content_expr)
                     # #7681 finding 2: SQLite's TRIM() strips SPACES only, so a
                     # whitespace-only row holding a tab or a newline used to

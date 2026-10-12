@@ -1601,3 +1601,231 @@ def test_list_content_carrier_is_classified_not_rejected():
     assert predicate(header_only_list) is False, (
         "a pre-delimiter slice that is only the reference-only header is scaffolding"
     )
+
+
+# ── Finding 3 (re-gate 2026-10-08): recovery nudges and summary carriers ──
+#
+# Two defects made the SQL aggregate disagree with the Agent's own count on the
+# 23-shape reproduction (7 reported vs 6 counted):
+#   a. recovery nudges were still counted as user turns;
+#   b. live asks embedded in summary carriers were still excluded.
+# Both are pinned here against the agent's classifier, not against webui itself.
+
+# Both agent checkouts can hold the authoritative literals: the PR clone and the
+# deployed copy under ~/.hermes. The guard below accepts a match in either.
+AGENT_SRC_CANDIDATES = (
+    Path("/home/xiaobao/hermes-agent/agent"),
+    Path("/home/xiaobao/.hermes/hermes-agent/agent"),
+)
+
+_RECOVERY_NUDGES = {
+    "length_continuation_network_stub": (
+        "[System: The previous response was cut off by a network error mid-stream — a transport "
+        "interruption, NOT a change in your capabilities. Your tools are still fully available; "
+        "call them as normal and ignore any earlier claim that you lack tool access. Continue the "
+        "task from where you left off. Do not restart or repeat prior text.]"
+    ),
+    "length_continuation_output_limit": (
+        "[System: Your previous response was truncated by the output length limit. Continue "
+        "exactly where you left off. Do not restart or repeat prior text. Finish the answer "
+        "directly.]"
+    ),
+    "length_continuation_dropped_tools": (
+        "[System: Your previous tool call (Read) was too large and the stream timed out before it "
+        "could be delivered. Do NOT retry the same tool call with the same large content. Instead, "
+        "break the content into multiple smaller tool calls (e.g. use multiple patch calls or write "
+        "smaller files). Each tool call's arguments must be under ~8K tokens to avoid stream "
+        "timeouts. The cut was a transport interruption, not a capability change — your tools "
+        "remain fully available.]"
+    ),
+    "codex_incomplete_nudge": (
+        "[System: Your previous response contained only internal reasoning and never produced a "
+        "visible answer or tool call. Do not keep thinking. Produce your final answer as plain text "
+        "now (or make the tool call you were planning).]"
+    ),
+    "codex_ack_continuation_nudge": (
+        "[System: Continue now. Execute the required tool calls and only send your final answer "
+        "after completing the task.]"
+    ),
+    "degenerate_final_nudge": (
+        "[System: Your previous message ended the turn with a fragment that is not a usable answer. "
+        "If the task is unfinished, continue it and then give the complete answer. If that fragment "
+        "WAS your complete answer, send it again exactly as before.]"
+    ),
+    "dropped_toolcall_nudge": (
+        "Your previous turn indicated a tool call but none was included. Do not narrate a plan or "
+        "restate intent — issue the actual tool call now to continue the task."
+    ),
+    "empty_tool_response_nudge": (
+        "You just executed tool calls but returned an empty response. Please process the tool "
+        "results above and continue with the task."
+    ),
+}
+
+
+def test_recovery_nudges_are_excluded_from_the_user_turn_count():
+    """#7681 finding 3a: the Agent excludes every recovery nudge; so must we.
+
+    The literals below are read from the agent source when it is available, so the
+    table cannot drift silently — a renamed nudge fails this test instead of
+    quietly inflating the sidebar count. Both the Python classifier AND the SQL
+    aggregate are pinned, because the review's 7-vs-6 came from the SQL side.
+    """
+    from api.compression_anchor import user_turn_sql_exclusions
+
+    predicate = _mirror_predicate()
+    for name, content in _RECOVERY_NUDGES.items():
+        assert predicate({"role": "user", "content": content}) is False, (
+            f"{name} is scaffolding in the Agent's classifier but counts as a user "
+            "turn here — the SQL aggregate over-reports"
+        )
+    # The counterpart: a real ask is still a user turn.
+    assert predicate({"role": "user", "content": "Please fix the login bug"}) is True
+
+    # The SQL twin must agree row for row, or the state.db aggregate and the
+    # sidecar counter drift apart — which is the defect this finding is about.
+    sql_excludes = user_turn_sql_exclusions(
+        "LOWER(LTRIM(COALESCE(m.content, '')))"
+    )
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE m (content TEXT)")
+    for name, content in _RECOVERY_NUDGES.items():
+        conn.execute("DELETE FROM m")
+        conn.execute("INSERT INTO m (content) VALUES (?)", (content,))
+        excluded = conn.execute(f"SELECT {sql_excludes} FROM m").fetchone()[0]
+        assert bool(excluded), (
+            f"{name}: the Python classifier excludes it but the SQL aggregate "
+            "still counts it — the two counters disagree (#7681 finding 3)"
+        )
+
+
+def test_recovery_nudge_literals_still_match_the_agent_source():
+    """Guard against the agent rewording a nudge we mirror by hand.
+
+    The literals in api/compression_anchor.py are hand-copied, so the only way to
+    notice the agent changed one is to compare against the agent's own constants.
+    They are read with ``ast`` rather than imported: the values are multi-line
+    concatenated string literals that never appear verbatim in the file text, and
+    importing agent.conversation_loop pulls third-party deps this environment may
+    not have.
+    """
+    import ast
+
+    agent_constants: dict[str, str] = {}
+    for base in AGENT_SRC_CANDIDATES:
+        loop_py = base / "conversation_loop.py"
+        if not loop_py.exists():
+            continue
+        tree = ast.parse(loop_py.read_text(encoding="utf-8"), filename=str(loop_py))
+        for node in tree.body:
+            if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Constant):
+                continue
+            if not isinstance(node.value.value, str):
+                continue
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    agent_constants[target.id] = node.value.value
+        break
+
+    if not agent_constants:
+        import pytest
+
+        pytest.skip("agent conversation_loop.py not available in this environment")
+
+    expected_sources = {
+        "length_continuation_network_stub": "_LENGTH_CONTINUATION_NETWORK_STUB",
+        "length_continuation_output_limit": "_LENGTH_CONTINUATION_OUTPUT_LIMIT",
+        "codex_incomplete_nudge": "_CODEX_INCOMPLETE_NUDGE",
+        "codex_ack_continuation_nudge": "_CODEX_ACK_CONTINUATION_NUDGE",
+        "degenerate_final_nudge": "_DEGENERATE_FINAL_NUDGE",
+        "dropped_toolcall_nudge": "_DROPPED_TOOLCALL_NUDGE_CONTENT",
+        "empty_tool_response_nudge": "_EMPTY_TOOL_RESPONSE_NUDGE",
+    }
+    found = 0
+    for name, attr in expected_sources.items():
+        if attr not in agent_constants:
+            continue
+        assert _RECOVERY_NUDGES[name] == agent_constants[attr], (
+            f"{name}: the literal mirrored in api/compression_anchor.py no longer "
+            f"equals the agent's {attr} — the exclusion is stale"
+        )
+        found += 1
+    assert found, "none of the agent's nudge constants were found — the guard is inert"
+
+
+def test_live_ask_inside_a_summary_carrier_counts_as_a_user_turn(tmp_path):
+    """#7681 finding 3b: the SQL blanket-excluded every `_compressed_summary` row.
+
+    The Agent unwraps the carrier and keeps the live ask in front of the merged
+    delimiter, so the aggregate must count it too.
+    """
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            title TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL,
+            _compressed_summary INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, model, started_at,"
+        " message_count, parent_session_id, ended_at, end_reason)"
+        " VALUES ('s1', 'cli', 'cli', 'S', 'm', 10.0, 4, NULL, NULL, NULL)"
+    )
+    rows = [
+        # plain user turn
+        ("m0", "user", "first real question", 0),
+        # a recovery nudge: must NOT count
+        ("m1", "user", "[System: Continue now. Execute the required tool calls and"
+                      " only send your final answer after completing the task.]", 0),
+        # a standalone summary carrier: must NOT count
+        ("m2", "user", "[PRIOR CONTEXT — for reference only; not a new message]"
+                       "\n\n[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+                       "\n\n## Summary\nwe discussed X", 1),
+        # a carrier WITH a live ask in front of the delimiter: MUST count
+        ("m3", "user", "[PRIOR CONTEXT — for reference only; not a new message]"
+                       "\n\nplease also fix the login bug"
+                       "\n\n[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+                       "\n\n## Summary\nwe discussed X", 1),
+    ]
+    for mid, role, content, flag in rows:
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp,"
+            " _compressed_summary) VALUES (?,?,?,?,?,?)",
+            (mid, "s1", role, content, 11.0, flag),
+        )
+    conn.commit()
+    conn.close()
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import read_importable_agent_session_rows
+    finally:
+        sys.path.pop(0)
+
+    by_id = {row["id"]: row for row in read_importable_agent_session_rows(db)}
+    assert "s1" in by_id, f"row missing: {list(by_id)}"
+    assert by_id["s1"]["actual_user_message_count"] == 2, (
+        f"expected 2 user turns (the plain ask + the carrier's embedded live ask), "
+        f"got {by_id['s1']['actual_user_message_count']} — the recovery nudge and the "
+        "standalone summary must stay excluded (#7681 finding 3)"
+    )
