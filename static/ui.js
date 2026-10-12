@@ -19769,12 +19769,20 @@ function renderMessages(options){
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
         const resultSnippet=resultsByTid[tid]||tc.snippet||tc.preview||persistedSnippetByTid[tid]||'';
         const argsSnap=_toolArgsSnapshot(args);
+        // #7653 re-gate round 11 (finding 4, SILENT): carry the occurrence
+        // identity through hydration. ``_partial_tool_calls`` rows are the
+        // mirror rows ``cancel_stream`` persisted, and a re-armed start
+        // contributes a SECOND row of the same tid — without the occurrence
+        // the rebuilt rows collapse to one key in the activity-scene dedup
+        // and the second occurrence never renders.
+        const occ=(tc.occurrence!==undefined&&tc.occurrence!==null&&tc.occurrence!=='')?tc.occurrence:null;
         derived.push(copyLiveToolMetadata({
           name,
           snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
           is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
           assistant_msg_idx:assistantToolAnchorIdx,
+          ...(occ===null?{}:{occurrence:occ}),
           args:argsSnap,
           done:true,
         }, name, tid));

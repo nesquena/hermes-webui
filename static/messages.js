@@ -3707,7 +3707,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(!row||typeof row!=='object') return '';
     if(row.role==='tool'){
       const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
-      return `tool:${row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||row.row_id||''}`;
+      const tid=row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||row.row_id||'';
+      // #7653 re-gate round 11 (finding 4, SILENT): a re-armed start is a
+      // SECOND occurrence of an id this stream already saw (``call_0`` emitted
+      // twice). Keying on the tid alone collapsed the two occurrences into one
+      // key, so the push loop below dropped the second row from the activity
+      // scene — Chromium showed only ``exit 3`` where the base keeps ``echo
+      // FIRST``. The paired start/completion events now carry the occurrence
+      // index (server: ``api/streaming.py`` ``on_tool_start``'s rearm branch),
+      // and a persisted row inherits it through ``_partial_tool_calls`` /
+      // ``s.tool_calls``, so the key includes it whenever either side names
+      // one. A row with no occurrence keeps the historical tid key, which is
+      // the pre-#7653 behaviour for a provider that never reuses an id.
+      const occ=row.occurrence!==undefined&&row.occurrence!==null&&row.occurrence!==''
+        ?row.occurrence
+        :(tool.occurrence!==undefined&&tool.occurrence!==null&&tool.occurrence!==''
+          ?tool.occurrence
+          :null);
+      return occ===null?`tool:${tid}`:`tool:${tid}#${occ}`;
     }
     if(row.role==='prose'||row.role==='thinking'){
       const identity=row.identity&&typeof row.identity==='object'?row.identity:{};

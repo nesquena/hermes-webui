@@ -10219,6 +10219,13 @@ def _emit_tool_complete_to_mirrors_and_sse(
     )
     record_live_tool_complete(tool_call_id, name, function_result)
     result_snippet = _tool_result_snippet(function_result)
+    # #7653 re-gate round 11 (finding 4, SILENT): the completion settles the
+    # occurrence the paired start opened. ``reversed`` already picks the
+    # newest unfinished row of the tid (which is the occurrence the re-arm
+    # appended), so its ``occurrence`` field is carried onto the event —
+    # without it a consumer keyed on tid alone pairs the completion with
+    # the FIRST occurrence and moves the wrong verdict onto it.
+    _settled_occurrence = None
     for live_tc in reversed(live_tool_calls_list):
         if live_tc.get('done'):
             continue
@@ -10226,6 +10233,7 @@ def _emit_tool_complete_to_mirrors_and_sse(
             live_tc['done'] = True
             live_tc['snippet'] = result_snippet
             live_tc['is_error'] = is_error
+            _settled_occurrence = live_tc.get('occurrence')
             break
     for shared_tc in reversed(shared_tool_calls_list):
         if shared_tc.get('done'):
@@ -10236,14 +10244,17 @@ def _emit_tool_complete_to_mirrors_and_sse(
             shared_tc['is_error'] = is_error
             break
     _checkpoint_activity_holder = []
-    put('tool_complete', {
+    _completion_payload = {
         'event_type': 'tool.completed',
         'name': name,
         'preview': result_snippet,
         'args': args_snapshot_fn(args),
         'tid': tool_call_id,
         'is_error': is_error,
-    })
+    }
+    if _settled_occurrence is not None:
+        _completion_payload['occurrence'] = _settled_occurrence
+    put('tool_complete', _completion_payload)
     return is_error
 
 
@@ -13824,10 +13835,29 @@ def _run_agent_streaming(
                         _live_tool_event_seen_ids[tool_call_id] = {
                             'awaiting_complete': True,
                         }
+                        # #7653 re-gate round 11 (finding 4, SILENT): carry the
+                        # OCCURRENCE identity, not just the tid. A re-armed start
+                        # is a second call of an id the stream already saw, and
+                        # every downstream consumer (mirror rows, the SSE event,
+                        # ``_partial_tool_calls`` persistence, hydration, the
+                        # activity-scene dedup key) identifies a call by tid
+                        # alone — so the second occurrence is either dropped as a
+                        # duplicate or has the first occurrence's verdict moved
+                        # onto it (Chromium: only ``exit 3`` survives in both
+                        # activity modes; the base keeps ``echo FIRST``). The
+                        # occurrence index is the count of rows this stream
+                        # already holds for the tid, so occurrence 1 is index 0,
+                        # the re-arm is index 1, and a provider that never reuses
+                        # an id always emits index 0.
+                        _occurrence_index = sum(
+                            1 for _row in _live_tool_calls
+                            if _row.get('tid') == tool_call_id
+                        )
                         _live_tool_calls.append({
                             'name': name,
                             'args': args if isinstance(args, dict) else {},
                             'tid': tool_call_id,
+                            'occurrence': _occurrence_index,
                         })
                         # #7358/#7653 (re-gate 10/06, reviewer Finding 3,
                         # SHOULD-FIX): the shared mirror row must carry
@@ -13848,6 +13878,7 @@ def _run_agent_streaming(
                                 'args': args if isinstance(args, dict) else {},
                                 'done': False,
                                 'tid': tool_call_id,
+                                'occurrence': _occurrence_index,
                             })
                         put('tool', {
                             'event_type': 'tool.started',
@@ -13855,6 +13886,7 @@ def _run_agent_streaming(
                             'preview': None,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
+                            'occurrence': _occurrence_index,
                         })
                     else:
                         _live_tool_event_start_ids.add(tool_call_id)
@@ -13862,10 +13894,15 @@ def _run_agent_streaming(
                             _live_tool_event_seen_ids[tool_call_id] = {
                                 'awaiting_complete': True,
                             }
+                        # #7653 re-gate round 11 (finding 4): the fresh branch
+                        # always emits occurrence 0, so a consumer can read the
+                        # occurrence id unconditionally — a missing field would
+                        # otherwise have to mean "unknown" rather than "first".
                         _live_tool_calls.append({
                             'name': name,
                             'args': args if isinstance(args, dict) else {},
                             'tid': tool_call_id,
+                            'occurrence': 0,
                         })
                         # Mirror to shared dict so cancel_stream() can persist it (#1361 §B)
                         # Lock-free GIL-atomic mirror — see STREAMS_LOCK contract in on_token.
@@ -13875,6 +13912,7 @@ def _run_agent_streaming(
                                 'args': args if isinstance(args, dict) else {},
                                 'done': False,
                                 'tid': tool_call_id,
+                                'occurrence': 0,
                             })
                         put('tool', {
                             'event_type': 'tool.started',
@@ -13882,6 +13920,7 @@ def _run_agent_streaming(
                             'preview': None,
                             'args': _tool_args_snapshot(args),
                             'tid': tool_call_id,
+                            'occurrence': 0,
                         })
                     _tool_stats = meter().get_stats(stream_id)
                     _tool_stats['session_id'] = session_id
