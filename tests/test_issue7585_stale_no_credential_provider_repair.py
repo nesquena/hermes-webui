@@ -844,3 +844,54 @@ def test_profile_scoped_top_level_api_key_blocks_repair(
     _patch_catalog(monkeypatch, _catalog(_group("nous", "deepseek/deepseek-v4.1-flash")))
 
     assert _repair(_session(provider="acme"), profile_config=profile_cfg) == "acme"
+
+
+def test_codex_oauth_token_in_profile_does_not_block_repair(
+    monkeypatch, no_provider_credentials, no_plugin_providers
+):
+    """A Codex OAuth JWT parked in ``providers.openai.api_key`` is not a usable
+    OpenAI credential — ``_provider_value_counts_as_api_key`` rejects it — so it
+    must not shield a stale ``openai`` lane from repair (Greptile P1 on #8179)."""
+    import base64
+    import json
+
+    def b64url(payload: bytes) -> str:
+        return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+    codex_token = ".".join((
+        b64url(b'{"alg":"none","typ":"JWT"}'),
+        b64url(json.dumps({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acct-codex"},
+        }).encode("utf-8")),
+        b64url(b"signature"),
+    ))
+    profile_cfg = {
+        "model": {"provider": "nous"},
+        "providers": {"openai": {"api_key": codex_token}},
+    }
+    _patch_catalog(monkeypatch, _catalog(_group("nous", "deepseek/deepseek-v4.1-flash")))
+
+    assert _repair(_session(provider="openai"), profile_config=profile_cfg) == "nous"
+
+
+def test_codex_oauth_token_in_top_level_model_key_does_not_block_repair(
+    monkeypatch, no_provider_credentials, no_plugin_providers
+):
+    """Same rejection for the top-level ``model: {provider: openai, api_key}`` shape."""
+    import base64
+    import json
+
+    def b64url(payload: bytes) -> str:
+        return base64.urlsafe_b64encode(payload).rstrip(b"=").decode("ascii")
+
+    codex_token = ".".join((
+        b64url(b'{"alg":"none","typ":"JWT"}'),
+        b64url(json.dumps({
+            "chatgpt_account_id": "acct-codex",
+        }).encode("utf-8")),
+        b64url(b"signature"),
+    ))
+    profile_cfg = {"model": {"provider": "openai", "api_key": codex_token}}
+    _patch_catalog(monkeypatch, _catalog(_group("nous", "deepseek/deepseek-v4.1-flash")))
+
+    assert _repair(_session(provider="openai"), profile_config=profile_cfg) == "nous"
