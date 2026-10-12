@@ -66,6 +66,12 @@ must not inherit the 24h catalog TTL — one probe failure (a DNS blip, an attem
 past `CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS`, a throttled retry) would otherwise
 report "verify base_url" for a full day against a correct `base_url` (#8158).
 
+The diagnostic's `checked_at` and the catalog's `_built_at` are independent
+stamps with different owners and lifetimes: `_built_at` ages the *catalog*
+(24h), while `checked_at` ages one provider's *reachability claim* (60s). A
+diagnostic is therefore never refreshed by, nor does it refresh, the catalog's
+freshness clock.
+
 - **Stamped**: `_custom_endpoint_error()` writes a wall-clock `checked_at`
   (wall clock, not `time.monotonic()`, because the diagnostic is persisted to and
   restored from `models_cache.json` and must stay comparable across processes).
