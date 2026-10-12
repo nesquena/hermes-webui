@@ -12184,6 +12184,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             global _available_models_cache_ts, _available_models_live_rebuild_ts
             global _available_models_cache_source_fingerprint
             deferred = False
+            # #7777 round-3 (rebase onto master #7481): the discard branches
+            # return False so the caller can serve the policy-honouring
+            # fallback instead of the stale result it built. Before the rebase
+            # the bounded path discarded via a bare ``return`` and the caller
+            # still returned the stale catalog — the very resurrection the
+            # discard exists to prevent, just moved from the cache to the
+            # response body.
             try:
                 with _cache_build_cv:
                     if _models_rebuild_superseded(rebuild_seq):
@@ -12221,7 +12228,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             "sources (rebuild #%d)",
                             rebuild_seq,
                         )
-                        return
+                        return False
                     published_at = time.monotonic()
                     _available_models_cache = result
                     _available_models_cache_ts = published_at
@@ -12238,7 +12245,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         (result, rebuild_seq, build_fingerprint, build_profile)
                     )
                     deferred = True
-                    return
+                    return True
                 try:
                     _save_models_cache_to_disk(
                         result,
@@ -12260,6 +12267,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # commit and then the release, in that order.
                 if not deferred:
                     _clear_build_in_progress(rebuild_seq)
+            return True
 
         def _claim_publish() -> bool:
             """Return True iff the caller won the right to publish."""
@@ -12362,15 +12370,24 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 raise box["error"]
             published = False
             if _claim_publish():
-                _publish_models_result(
+                published = _publish_models_result(
                     box["result"],
                     rebuild_seq=rebuild_seq,
                     build_fingerprint=rebuild_source_fingerprint,
                     build_profile=rebuild_profile,
                     # Foreground publisher: queue the durable commit for the
-                    # post-catalog-lock flush (#7481 review).
+                    # post-lock flush (#7481 review).
                     defer_durable=True,
                 )
+            if not published:
+                # #7777 round-3: the build was discarded (a picker-excludes
+                # save changed the policy mid-build, or the sources moved), so
+                # the result it produced is stale by construction. Serving it
+                # would hand the caller the excluded model behind a
+                # fresh-looking fingerprint — the resurrection the discard
+                # exists to prevent, just relocated from the cache to the
+                # response body. Serve the policy-honouring fallback instead.
+                return copy.deepcopy(_minimal_static_models_catalog())
             return copy.deepcopy(box["result"])
 
         # Budget elapsed. Mark it so the worker knows it owns out-of-band
@@ -12388,15 +12405,19 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 # An all-truncated pass has no picker options. Use the same
                 # stale/static fallback as a still-running first pass below.
             elif "result" in box and _claim_publish():
-                _publish_models_result(
+                _boundary_published = _publish_models_result(
                     box["result"],
                     rebuild_seq=rebuild_seq,
                     build_fingerprint=rebuild_source_fingerprint,
                     build_profile=rebuild_profile,
                     # Budget-boundary foreground winner: same deferred durable
-                    # commit as the within-budget path above (#7481 review).
+                    # commit as the within-budget path above.
                     defer_durable=True,
                 )
+                if not _boundary_published and "partial" not in box:
+                    # Same discard contract as the within-budget path: a
+                    # discarded build's result is stale, so serve the fallback.
+                    return copy.deepcopy(_minimal_static_models_catalog())
             if "partial" not in box:
                 return copy.deepcopy(box["result"])
 
