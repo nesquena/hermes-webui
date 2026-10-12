@@ -381,25 +381,15 @@ def is_cli_session_row_visible(row: dict) -> bool:
     }
     if "tui" in interactive_sources:
         return True
-    if "acp" in interactive_sources:
-        # Like TUI rows, user-driven ACP sessions stay visible even when
-        # ended/untitled. Unlike TUI, an ACP connection can record only
-        # assistant/tool/system rows (e.g. a replayed or aborted turn), so
-        # require at least one user turn before surfacing the row.
-        return _count_user_turns(row) > 0
 
-    if _has_cli_lineage(row):
-        return True
-
-    if not _looks_like_default_cli_title(row):
-        return True
-
-    # An UNKNOWN turn count must not be read as a known zero here. When the
-    # state.db schema has no `role` column on the messages table, #7681 finding 2
-    # keeps `actual_user_message_count` NULL ("unknown", not a confident wrong
-    # number), so such a row can never clear this untitled threshold. Hiding it
-    # would silently drop a real session from the sidebar because an old
-    # schema lacks a column — an unseen data loss. Surface it instead.
+    # #7681 finding 2: an UNKNOWN turn count must never be read as a known zero.
+    # When the state.db schema has no `role` column on the messages table the SQL
+    # branch keeps `actual_user_message_count` NULL ("unknown", not a confident
+    # wrong number), so `_count_user_turns` reports 0 and every threshold below
+    # this point rejects the row — including ACP's, which used to run before the
+    # unknown escape and so dropped legacy CLI/ACP sessions from the sidebar
+    # because an old schema lacked a column. That is an unseen data loss, so the
+    # escape has to be evaluated BEFORE any zero-count rejection.
     #
     # The escape keys on an EXPLICIT "count is unknown" marker set by the SQL
     # branches that could not determine roles (no `role` column, or no usable
@@ -413,8 +403,28 @@ def is_cli_session_row_visible(row: dict) -> bool:
     # that provably carries a single message cannot contain two user turns, so
     # surfacing it would wrongly let a legacy one-turn stub pass the interactivity
     # gate.
+    user_turn_count_unknown = bool(row.get("user_message_count_unknown"))
+
+    if "acp" in interactive_sources:
+        # Like TUI rows, user-driven ACP sessions stay visible even when
+        # ended/untitled. Unlike TUI, an ACP connection can record only
+        # assistant/tool/system rows (e.g. a replayed or aborted turn), so
+        # require at least one user turn before surfacing the row — unless the
+        # count is unknown, in which case requiring one would read a missing
+        # `role` column as a confident zero and drop a real session (#7681
+        # finding 2).
+        if user_turn_count_unknown:
+            return True
+        return _count_user_turns(row) > 0
+
+    if _has_cli_lineage(row):
+        return True
+
+    if not _looks_like_default_cli_title(row):
+        return True
+
     if (
-        row.get("user_message_count_unknown")
+        user_turn_count_unknown
         and not row.get("messages")
         and message_count >= CLI_MIN_UNTITLED_USER_MESSAGE_COUNT
     ):
@@ -663,14 +673,19 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
     for children in children_by_parent.values():
         children.sort(key=lambda row: row.get('started_at') or 0, reverse=True)
 
-    def compression_tip(row: dict) -> tuple[dict | None, int, str | None]:
-        """Return the freshest importable continuation descendant for ``row``.
+    def compression_tip(row: dict) -> tuple[dict | None, int, str | None, int | None]:
+        """Return ``(freshest importable segment, segment count, project id, lineage user turns)``.
 
         Compression parents can have multiple continuation-looking children when
         a stale segment is resumed after a newer compressed branch already
         exists. Picking the newest *direct* child can hide the branch whose
         deeper descendant has the actual latest activity. Walk all reachable
         continuation descendants and select by real message activity instead.
+
+        The walk visits every segment of the chain exactly once (``seen``), so it
+        is also the one place that can total the whole-lineage user-turn count
+        (#7681 finding 1). The tip's own ``actual_user_message_count`` is only its
+        slice, and the collapsed row must not display it as the chain total.
         """
         latest_importable = row if (row.get('actual_message_count') or 0) > 0 else None
         segment_count = 0
@@ -683,6 +698,11 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             if latest_importable
             else 0
         )
+        # Whole-lineage user turns. ``None`` until a segment reports a real
+        # number: a single unknown segment makes the chain total unknown rather
+        # than silently dropping that segment's turns from the sum.
+        lineage_user_turns: int | None = None
+        lineage_user_turns_unknown = False
         stack: list[tuple[dict, int]] = [(row, 1)]
         seen: set[str] = set()
 
@@ -706,6 +726,14 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
                 latest_project_id = current_project_id
                 project_depth = depth
                 project_score = current_score
+            # #7681 finding 1: total user turns across the chain, not just the
+            # tip. A segment whose count is NULL (no roles available) makes the
+            # whole total unknown, mirroring the SQL branch's NULL contract.
+            current_user_turns = current.get('actual_user_message_count')
+            if current_user_turns is None:
+                lineage_user_turns_unknown = True
+            elif not lineage_user_turns_unknown:
+                lineage_user_turns = (lineage_user_turns or 0) + _as_positive_int(current_user_turns)
             if (
                 (current.get('actual_message_count') or 0) > 0
                 and (current_score > best_score or (current_score == best_score and depth >= best_depth))
@@ -721,7 +749,7 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
                     continue
                 stack.append((child, depth + 1))
 
-        return latest_importable, max(segment_count, 1), latest_project_id
+        return latest_importable, max(segment_count, 1), latest_project_id, lineage_user_turns
 
     projected = []
     for row in rows:
@@ -732,7 +760,9 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         tip = row
         lineage_project_id = str(row.get('project_id') or '').strip() or None
         if row.get('end_reason') in {'compression', 'cli_close'}:
-            tip, segment_count, lineage_project_id = compression_tip(row)
+            tip, segment_count, lineage_project_id, lineage_user_turns = compression_tip(row)
+        else:
+            lineage_user_turns = row.get('actual_user_message_count')
         if not tip or (tip.get('actual_message_count') or 0) <= 0:
             continue
 
@@ -762,20 +792,23 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         ):
             if key in tip:
                 merged[key] = tip[key]
-        # #7681 finding 1: the collapsed lineage row must NOT inherit the chosen
+        # #7681 finding 1: the collapsed lineage row must NOT display the chosen
         # tip segment's `actual_user_message_count` — a compressed chain keeps
         # several segments and the tip slice alone is never the whole-lineage
         # user-turn total (the agent's own lineage count differs). A stale tip
         # count shown as the lineage total actively misleads, so null only the
         # DISPLAYED count and let the client omit the label for collapsed rows.
         #
-        # The count used for VISIBILITY is a separate field: nulling the display
-        # count must not make an ACP chain with real user turns vanish from the
-        # sidebar (`_acp_row_is_visible` runs `_count_user_turns(row) > 0`
-        # BEFORE the lineage check, and `_count_user_turns` falls back through
-        # `user_message_count` → `messages` → 0).
-        if merged.get('actual_user_message_count') is not None:
-            merged['lineage_user_message_count'] = merged['actual_user_message_count']
+        # The count used for VISIBILITY is a separate field, and it is the sum
+        # over EVERY continuation segment in the chain (from `compression_tip`),
+        # not the root's own slice. `_acp_row_is_visible` runs
+        # `_count_user_turns(row) > 0` BEFORE the lineage check, and
+        # `_count_user_turns` falls back through
+        # `lineage_user_message_count` → `user_message_count` → `messages` → 0,
+        # so a chain whose root segment holds no user turns used to vanish from
+        # the sidebar. `None` stays `None`: an unknown total must not be read as
+        # a confident zero either.
+        merged['lineage_user_message_count'] = lineage_user_turns
         merged['actual_user_message_count'] = None
         if lineage_project_id:
             merged['project_id'] = lineage_project_id

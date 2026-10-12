@@ -1061,3 +1061,261 @@ def test_legacy_single_message_untitled_cli_row_does_not_pass():
     # One message cannot contain the two user turns required by the untitled
     # CLI threshold, so an unknown count must still resolve to *hidden* here.
     assert ags.is_cli_session_row_visible(row) is False
+
+
+# ── Finding 1 (re-gate 2026-10-08): the collapsed row must total EVERY segment ──
+#
+# The eight-turn reproduction survived SQL projection: the loader drops
+# `lineage_user_message_count`, the route rechecks visibility at
+# api/routes.py:10882 and removes the row. These tests drive the real loader and
+# the real visibility gate instead of grepping source text (the round-3 pins were
+# string pins that passed with the wire bug intact).
+
+
+def _build_compressed_chain_db(path, *, acp: bool = False, root_roles: bool = True):
+    """A three-segment compressed ACP/CLI chain whose root holds NO user turns.
+
+    ``root``   : 2 assistant rows (the compacted prefix) -> 0 user turns
+    ``mid``    : 3 real user turns
+    ``tip``    : 5 real user turns
+
+    A chain that sums only the root reports 0 and vanishes; only the tip
+    reports 5; the correct whole-lineage total is 8.
+    """
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            title TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            role TEXT,
+            content TEXT,
+            timestamp REAL,
+            _compressed_summary INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+        """
+    )
+    source = "acp" if acp else "cli"
+    for sid, parent, started, ended, reason in [
+        ("root", None, 10.0, 20.0, "compression"),
+        ("mid", "root", 21.0, 30.0, "compression"),
+        ("tip", "mid", 31.0, None, None),
+    ]:
+        conn.execute(
+            "INSERT INTO sessions (id, source, session_source, title, model,"
+            " started_at, message_count, parent_session_id, ended_at, end_reason)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (sid, source, source, f"{sid} title", "m", started, 8, parent, ended, reason),
+        )
+    rows = []
+    # Root: assistant-only prefix, no human turns at all.
+    for i, (mid, role, content) in enumerate(
+        [("r0", "assistant", "hello"), ("r1", "assistant", "anything else?")]
+    ):
+        rows.append((mid, "root", role, content, 11.0 + i))
+    # Mid segment: three genuine user turns.
+    for i, (mid, content) in enumerate(
+        [("m0", "first real ask"), ("m1", "second ask"), ("m2", "third ask")]
+    ):
+        rows.append((mid, "mid", "user", content, 22.0 + i))
+    # Tip segment: five genuine user turns.
+    for i, (mid, content) in enumerate(
+        [("t0", "a"), ("t1", "b"), ("t2", "c"), ("t3", "d"), ("t4", "e")]
+    ):
+        rows.append((mid, "tip", "user", content, 32.0 + i))
+    for mid, sid, role, content, ts in rows:
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp,"
+            " _compressed_summary) VALUES (?,?,?,?,?,0)",
+            (mid, sid, role, content, ts),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_collapsed_lineage_totals_user_turns_across_every_segment(tmp_path):
+    """#7681 finding 1 CORE: the collapsed row's visibility count is the sum over
+    every continuation segment, not the root's own slice and not the tip's."""
+    db = tmp_path / "state.db"
+    _build_compressed_chain_db(db, acp=True)
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import (
+            _count_user_turns,
+            is_cli_session_row_visible,
+            read_importable_agent_session_rows,
+        )
+    finally:
+        sys.path.pop(0)
+
+    rows = read_importable_agent_session_rows(db)
+    collapsed = [r for r in rows if r.get("_lineage_root_id")]
+    assert len(collapsed) == 1, f"expected one collapsed lineage row, got {[r.get('id') for r in rows]}"
+    row = collapsed[0]
+
+    # The DISPLAYED count stays null for a collapsed row.
+    assert row.get("actual_user_message_count") is None, (
+        "a collapsed row must not display the tip segment's slice as the chain "
+        f"total (got {row.get('actual_user_message_count')!r})"
+    )
+    # ...but the visibility count is the whole-lineage total: 3 + 5 = 8.
+    assert row.get("lineage_user_message_count") == 8, (
+        f"expected the 3+5 user turns from the mid and tip segments, got "
+        f"{row.get('lineage_user_message_count')!r} — the root segment alone "
+        "holds none, so a root-only count drops this chain from the sidebar"
+    )
+    assert _count_user_turns(row) == 8
+
+    # The row the route rechecks must survive the visibility gate.
+    assert is_cli_session_row_visible(row) is True, (
+        "an ACP chain whose root segment holds no user turns must stay visible"
+    )
+
+
+def test_lineage_count_survives_the_http_row_projection(tmp_path):
+    """#7681 finding 1 CORE: the loader's internal count must reach the row the
+    route rechecks. models.py builds cli_sessions from the projected rows and
+    routes.py runs is_cli_session_row_visible() again at :10882, so a field the
+    HTTP row drops is a field the visibility recheck reads as 0."""
+    db = tmp_path / "state.db"
+    _build_compressed_chain_db(db, acp=True)
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import (
+            is_cli_session_row_visible,
+            read_importable_agent_session_rows,
+        )
+        from api.route_session_list_cache import _SIDEBAR_SESSION_RESPONSE_FIELDS
+    finally:
+        sys.path.pop(0)
+
+    row = next(r for r in read_importable_agent_session_rows(db) if r.get("_lineage_root_id"))
+
+    # The cache/serialization allowlist must carry the marker through.
+    assert "lineage_user_message_count" in _SIDEBAR_SESSION_RESPONSE_FIELDS, (
+        "the sidebar response allowlist drops lineage_user_message_count, so the "
+        "route's visibility recheck reads it as 0 and removes the chain"
+    )
+    # And the models.py cli_sessions projection must carry it too.
+    models_src = (REPO_ROOT / "api" / "models.py").read_text(encoding="utf-8")
+    assert "'lineage_user_message_count': row.get('lineage_user_message_count')," in models_src, (
+        "api/models.py's cli_sessions projection drops lineage_user_message_count"
+    )
+
+    # The row the route actually rechecks keeps the count.
+    http_row = {k: v for k, v in row.items()}
+    assert http_row.get("lineage_user_message_count") == 8
+    assert is_cli_session_row_visible(http_row) is True
+
+
+def test_legacy_acp_unknown_count_row_stays_visible(tmp_path):
+    """#7681 finding 2 CORE: a state.db with no `role` column returns the ACP row
+    on master and dropped it on this branch, because ACP's zero-count rejection
+    ran before the unknown escape and `_count_user_turns` reports 0 for NULL."""
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY,
+            source TEXT,
+            session_source TEXT,
+            title TEXT,
+            model TEXT,
+            started_at REAL NOT NULL,
+            message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT,
+            ended_at REAL,
+            end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY,
+            session_id TEXT,
+            content TEXT,
+            timestamp REAL
+        );
+        """
+    )
+    # Untitled default-looking ACP sessions, three messages each: the shape that
+    # must survive when roles are unavailable.
+    for sid in ("legacy_a", "legacy_b"):
+        conn.execute(
+            "INSERT INTO sessions (id, source, session_source, title, model,"
+            " started_at, message_count, parent_session_id, ended_at, end_reason)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (sid, "acp", "acp", None, "m", 10.0, 3, None, None, None),
+        )
+        for i in range(3):
+            conn.execute(
+                "INSERT INTO messages (id, session_id, content, timestamp)"
+                " VALUES (?,?,?,?)",
+                (f"{sid}_m{i}", sid, "no role column here", 11.0 + i),
+            )
+    conn.commit()
+    conn.close()
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import (
+            is_cli_session_row_visible,
+            read_importable_agent_session_rows,
+        )
+    finally:
+        sys.path.pop(0)
+
+    rows = read_importable_agent_session_rows(db)
+    by_id = {r["id"]: r for r in rows}
+    assert set(by_id) == {"legacy_a", "legacy_b"}, (
+        f"both legacy ACP sessions must survive the SQL projection, got {sorted(by_id)}"
+    )
+    for sid, row in by_id.items():
+        # The count is genuinely unknown, not a confident zero.
+        assert row.get("user_message_count_unknown"), (
+            f"{sid}: a state.db without a `role` column must emit the explicit "
+            "unknown marker rather than a derived count"
+        )
+        assert row.get("actual_user_message_count") is None, (
+            f"{sid}: the displayed user-turn count must stay NULL when unknown"
+        )
+        # ...and the row must still be visible.
+        assert is_cli_session_row_visible(row) is True, (
+            f"{sid}: an unknown count must not be read as a known zero and drop a "
+            "real legacy session from the sidebar"
+        )
+
+
+def test_known_zero_turn_count_acp_row_is_still_hidden(tmp_path):
+    """Counterpart: a KNOWN zero must keep hiding. The unknown escape must not
+    become a blanket pass for every ACP row."""
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import is_cli_session_row_visible
+    finally:
+        sys.path.pop(0)
+
+    known_zero = {
+        "id": "acp_zero",
+        "source": "acp",
+        "actual_message_count": 4,
+        "message_count": 4,
+        "actual_user_message_count": 0,
+        "user_message_count_unknown": False,
+    }
+    assert is_cli_session_row_visible(known_zero) is False, (
+        "an ACP row with a KNOWN zero user-turn count must stay hidden"
+    )

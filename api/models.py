@@ -10610,6 +10610,14 @@ def _load_cli_sessions_uncached(
             '_lineage_root_id': row.get('_lineage_root_id'),
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
+            # #7681 findings 1/2/4: internal markers the visibility recheck in
+            # api/routes.py reads back off the HTTP row. Without them a collapsed
+            # ACP chain with real user turns disappeared from the sidebar, a
+            # legacy unknown-count row was read as a confident zero, and the
+            # inactive-row flag could not reach the client at all.
+            'lineage_user_message_count': row.get('lineage_user_message_count'),
+            'user_message_count_unknown': row.get('user_message_count_unknown'),
+            'has_inactive_user_rows': row.get('has_inactive_user_rows'),
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
         })
 
