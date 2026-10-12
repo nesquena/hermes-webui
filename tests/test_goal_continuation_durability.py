@@ -507,7 +507,13 @@ class TestSourceShapes:
         m = re.search(
             r"consume_pending_goal_continuation\(\s*"
             r"s\.session_id,\s*msg,\s*goal_continuation_id\s*"
-            r",\s*goal_continuation_attempt_id\s*,?\s*\)",
+            r",\s*goal_continuation_attempt_id\s*,?"
+            # #7862 round 11: the explicit-continue admission forwards its
+            # two flags after the attempt id; the tail assertions below still
+            # pin the match-gated consume, so the extra kwargs cannot weaken
+            # this guard.
+            r"(?:\s*,\s*explicit_continue\s*=\s*\w+\s*,\s*goal_active\s*=\s*\w+)?"
+            r"\s*,?\s*\)",
             src,
         )
         assert m is not None

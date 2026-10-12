@@ -3020,9 +3020,11 @@ from api import config as api_config
 from api.goal_continuation_store import (
     CONSUME_COMMITTED,
     CONSUME_COMMIT_FAILED,
+    _CONTINUE_CONTROL,
     consume_pending_goal_continuation,
     discard_goal_continuation_handoff,
     discard_goal_continuation_rollback_receipt,
+    normalize_continuation_text,
     pop_goal_continuation_handoff,
     pop_goal_continuation_rollback_receipt,
     reclaim_goal_continuation_receipt,
@@ -25027,13 +25029,44 @@ def _start_chat_stream_for_session(
         # through the queued automatic continuation, so a `/use` skill
         # directive wrapping the queued text can no longer break the match
         # (round-3 core finding).
+        #
+        # #7862 round 11 (re-gate CORE): an explicit ``continue`` for a
+        # resumed goal is admitted on identity. ``/goal resume`` tells the
+        # user to "type continue", and that literal control is a new human
+        # turn the recorded prompt never matches, so without this admission
+        # the goal loop stopped after a resume. The store keeps the guard
+        # narrow (token required, literal control only, every durable
+        # outcome unchanged); this side only certifies that the session's
+        # goal really is active, which is what makes the control legitimate
+        # rather than a text-match bypass.
         if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+            _explicit_continue = False
+            _goal_is_active = False
+            if normalize_continuation_text(msg) == _CONTINUE_CONTROL:
+                try:
+                    from api.goals import goal_state_snapshot
+
+                    _goal_snapshot = goal_state_snapshot(s.session_id)
+                    _goal_is_active = bool(
+                        isinstance(_goal_snapshot, dict)
+                        and str(_goal_snapshot.get("status") or "") == "active"
+                    )
+                    _explicit_continue = _goal_is_active
+                except Exception:
+                    logger.debug(
+                        "Failed to read goal state for the continue admission "
+                        "(session %s)",
+                        s.session_id,
+                        exc_info=True,
+                    )
             try:
                 _consume_outcome = consume_pending_goal_continuation(
                     s.session_id,
                     msg,
                     goal_continuation_id,
                     goal_continuation_attempt_id,
+                    explicit_continue=_explicit_continue,
+                    goal_active=_goal_is_active,
                 )
                 if _consume_outcome == CONSUME_COMMITTED:
                     goal_related = True

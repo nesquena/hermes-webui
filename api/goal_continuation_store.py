@@ -841,6 +841,11 @@ _SILL_DIRECTIVE_RE = re.compile(
     re.DOTALL,
 )
 
+# #7862 round 11 (re-gate CORE): the literal control ``/goal resume`` tells
+# the user to type. Normalised once here so the admission compares against
+# the same canonical form ``normalize_continuation_text`` produces.
+_CONTINUE_CONTROL = "continue"
+
 
 def strip_known_skill_envelope(value: str) -> str:
     """Return ``value`` with a leading forced-skill directive envelope removed.
@@ -883,6 +888,8 @@ def consume_pending_goal_continuation(
     incoming_text: str = "",
     continuation_id: str = "",
     attempt_id: str = "",
+    explicit_continue: bool = False,
+    goal_active: bool = False,
 ) -> bool:
     """Consume this session's durable intent ONLY if the turn is the continuation.
 
@@ -911,6 +918,18 @@ def consume_pending_goal_continuation(
     claimed by exactly the attempt that created it (see round 5: a global FIFO
     let unrelated successful starts evict an in-flight receipt). A start that
     succeeds must call ``discard_goal_continuation_rollback_receipt``.
+
+    ``explicit_continue`` + ``goal_active`` are the round-11 admission for the
+    ``/goal resume`` flow: the resume message tells the user to "type
+    continue", and that literal control is a brand-new human turn whose text
+    is NOT the recorded prompt, so the text match alone stopped the goal loop
+    (the Oct 10 re-gate finding). When the caller certifies the session has an
+    active goal, this spends the intent on the literal control. It is NOT a
+    bypass of the admission contract: the request must still carry THIS
+    continuation's token (a tokenless or wrong-generation ``continue`` stays an
+    ordinary turn), the text must normalise to exactly ``continue`` (a
+    paraphrase or "Continue please!!" is not admitted), and every durable
+    outcome below is unchanged.
 
     If the turn is not the continuation this is a no-op and the intent stays
     pending; if the turn IS the continuation but the durable removal cannot be
@@ -945,11 +964,25 @@ def consume_pending_goal_continuation(
             # (already consumed or restarted) generation. Treat it like any
             # other non-matching turn.
             return CONSUME_NOT_MATCHING
-        # Identity narrows the candidate set to this exact continuation; the
-        # recorded prompt still has to be present (verbatim or wrapped by the
-        # known forced-skill envelope), so a replayed token carrying unrelated
-        # text is never swallowed.
-        if not _continuation_text_matches(record.get("prompt") or "", incoming_text):
+        # #7862 round 11 (re-gate CORE): an explicit ``continue`` for a
+        # resumed goal is admitted on identity, not on text. The resume
+        # message tells the user to "type continue", and that literal
+        # control is a new human turn the recorded prompt never matches, so
+        # the admission ran with ``goal_related=false`` and the goal loop
+        # stopped after the resume. The guard is deliberately narrow: the
+        # caller must certify an active goal, the text must normalise to
+        # exactly ``continue``, and the request must still carry this
+        # continuation's token (checked above, and a tokenless request falls
+        # through to the text comparison below rather than being admitted).
+        continue_admitted = bool(
+            explicit_continue
+            and goal_active
+            and request_id
+            and normalize_continuation_text(incoming_text) == _CONTINUE_CONTROL
+        )
+        if not continue_admitted and not _continuation_text_matches(
+            record.get("prompt") or "", incoming_text
+        ):
             return CONSUME_NOT_MATCHING
         _next_generation_unlocked()
         PENDING_GOAL_CONTINUATION.discard(sid)

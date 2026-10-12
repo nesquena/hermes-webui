@@ -336,7 +336,11 @@ class TestRegistryToSessionHandoffIsCrashReconcilable:
         consume_m = _first_match(
             scope,
             r"consume_pending_goal_continuation\(\s*s\.session_id,\s*msg,\s*"
-            r"goal_continuation_id\s*,\s*goal_continuation_attempt_id\s*,?\s*\)",
+            r"goal_continuation_id\s*,\s*goal_continuation_attempt_id\s*,?"
+            # #7862 round 11: the explicit-continue admission's two flags are
+            # optional in this pin; round 11's own module pins their wiring.
+            r"(?:\s*,\s*explicit_continue\s*=\s*\w+\s*,\s*goal_active\s*=\s*\w+)?"
+            r"\s*,?\s*\)",
         )
         assert consume_m is not None, "the match-gated consume call is gone"
         pending_m = _first_match(

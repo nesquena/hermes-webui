@@ -73,7 +73,11 @@ def test_routes_consumer_discards_atomically_on_read():
         r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?"
         r"consume_pending_goal_continuation\(\s*"
         r"s\.session_id,\s*msg,\s*goal_continuation_id\s*"
-        r",\s*goal_continuation_attempt_id\s*,?\s*\)",
+        r",\s*goal_continuation_attempt_id\s*,?"
+        # #7862 round 11: the explicit-continue admission's two flags are
+        # optional in this pin; round 11's own module pins their wiring.
+        r"(?:\s*,\s*explicit_continue\s*=\s*\w+\s*,\s*goal_active\s*=\s*\w+)?"
+        r"\s*,?\s*\)",
         src,
         re.DOTALL,
     )
@@ -82,12 +86,22 @@ def test_routes_consumer_discards_atomically_on_read():
         "consume_pending_goal_continuation (check + set goal_related + "
         "discard in the same block)"
     )
-    # The consume must be within ~10 lines of the check (atomic block).
+    # The check→consume seam must stay free of other marker mutations. The
+    # round-11 continue admission reads the session's goal state between the
+    # check and the consume (a local, lock-free read), so the seam is longer
+    # than it used to be; what must NOT appear is a second mutation of the
+    # marker set or a nested consume — that is what the line budget used to
+    # approximate.
     block = m.group(0)
-    line_count = block.count("\n")
-    assert line_count <= 10, (
-        f"PENDING_GOAL_CONTINUATION check + consume span {line_count} lines; "
-        "should be tight atomic block"
+    inner = block[: block.rfind("consume_pending_goal_continuation(")]
+    assert "PENDING_GOAL_CONTINUATION.discard" not in inner, (
+        "no other discard may sit between the marker check and the consume"
+    )
+    assert "PENDING_GOAL_CONTINUATION.add" not in inner, (
+        "no re-arm may sit between the marker check and the consume"
+    )
+    assert "consume_pending_goal_continuation(" not in inner, (
+        "the consume must be the first and only consumption in the block"
     )
     # The match-gated store is the ONLY place that discards for a chat start.
     assert "PENDING_GOAL_CONTINUATION.discard(s.session_id)" not in src
