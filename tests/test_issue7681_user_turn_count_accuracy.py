@@ -2115,3 +2115,131 @@ def test_missing_content_column_emits_null_not_a_role_based_guess(tmp_path):
     assert is_cli_session_row_visible(by_id["noc"]) is True, (
         "an unknown count must not hide a real session"
     )
+
+
+# ── Finding 4 (re-gate 2026-10-08): inactive-row detection ──
+#
+# The Agent soft-archives a row with ``active = 0`` for BOTH compaction and
+# ``/undo``; a rewound row is ``active=0, _compressed_summary=0``, so keying the
+# flag on the summary flag alone missed every rewind. Chromium showed 9 vs 7
+# after ``archive_and_compact`` and 2 vs 1 after ``rewind_to_message``.
+
+
+def test_inactive_user_rows_are_detected_including_rewinds(tmp_path):
+    """#7681 finding 4: the flag must key on ``active = 0``, which covers /undo.
+
+    Uses a REWIND-ONLY database (``active=0, _compressed_summary=0``): the old
+    summary-flag predicate sees nothing there, so this shape is what actually
+    discriminates the two predicates.
+    """
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT, session_source TEXT, title TEXT,
+            model TEXT, started_at REAL NOT NULL, message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT, ended_at REAL, end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+            timestamp REAL, _compressed_summary INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, model, started_at,"
+        " message_count, parent_session_id, ended_at, end_reason)"
+        " VALUES ('rw', 'cli', 'cli', 'S', 'm', 10.0, 3, NULL, NULL, NULL)"
+    )
+    # m1 is the /undo rewind: active=0 with NO summary flag.
+    for mid, role, content, flag, active in [
+        ("m0", "user", "first ask", 0, 1),
+        ("m1", "user", "rewound by /undo", 0, 0),
+        ("m2", "user", "third ask", 0, 1),
+    ]:
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp,"
+            " _compressed_summary, active) VALUES (?,?,?,?,?,?,?)",
+            (mid, "rw", role, content, 11.0, flag, active),
+        )
+    conn.commit()
+    conn.close()
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import read_importable_agent_session_rows
+    finally:
+        sys.path.pop(0)
+
+    by_id = {row["id"]: row for row in read_importable_agent_session_rows(db)}
+    assert "rw" in by_id, f"row missing: {list(by_id)}"
+    assert by_id["rw"]["has_inactive_user_rows"], (
+        "a session holding an archived (active=0) user row must carry the "
+        "inactive-row flag so the client can suppress the inflated count"
+    )
+
+
+def test_active_only_session_is_not_flagged(tmp_path):
+    """Counterpart: a session whose user rows are all active must NOT be flagged,
+    otherwise every count in the sidebar would be suppressed."""
+    db = tmp_path / "state.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT, session_source TEXT, title TEXT,
+            model TEXT, started_at REAL NOT NULL, message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT, ended_at REAL, end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+            timestamp REAL, _compressed_summary INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, model, started_at,"
+        " message_count, parent_session_id, ended_at, end_reason)"
+        " VALUES ('s2', 'cli', 'cli', 'S', 'm', 10.0, 2, NULL, NULL, NULL)"
+    )
+    for mid, content in [("n0", "first ask"), ("n1", "second ask")]:
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp,"
+            " _compressed_summary, active) VALUES (?,?,?,?,?,?,?)",
+            (mid, "s2", "user", content, 11.0, 0, 1),
+        )
+    conn.commit()
+    conn.close()
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import read_importable_agent_session_rows
+    finally:
+        sys.path.pop(0)
+
+    by_id = {row["id"]: row for row in read_importable_agent_session_rows(db)}
+    assert not by_id["s2"]["has_inactive_user_rows"], (
+        "a session with only active user rows must not be flagged"
+    )
+
+
+def test_inactive_row_flag_survives_the_http_row_projection():
+    """#7681 finding 4: the flag was dropped by the model projection and the
+    response allowlist, so the client never saw it."""
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.route_session_list_cache import _SIDEBAR_SESSION_RESPONSE_FIELDS
+    finally:
+        sys.path.pop(0)
+
+    assert "has_inactive_user_rows" in _SIDEBAR_SESSION_RESPONSE_FIELDS, (
+        "the sidebar response allowlist drops has_inactive_user_rows, so the "
+        "client cannot suppress the inflated count"
+    )
+    models_src = (REPO_ROOT / "api" / "models.py").read_text(encoding="utf-8")
+    assert "'has_inactive_user_rows': row.get('has_inactive_user_rows')," in models_src, (
+        "api/models.py's cli_sessions projection drops has_inactive_user_rows"
+    )
