@@ -808,3 +808,39 @@ def test_chat_start_global_cfg_custom_does_not_protect_other_profile(
     assert (captured["model_provider"], after, saved) == (
         "nous", "nous", ["nous"],
     )
+
+
+# ---------------------------------------------------------------------------
+# Greptile P1 on #8179: the "does the stored provider still have a working
+# credential?" gate must consider the SESSION'S profile config. The generic
+# helper reads the process-global config (which can belong to another profile,
+# and can be reloaded by a concurrent profile switch while it reads), so a key
+# that only exists in this profile would look absent and the repair would swap
+# out a working lane and persist it.
+# ---------------------------------------------------------------------------
+
+
+def test_profile_scoped_provider_api_key_blocks_repair(
+    monkeypatch, no_provider_credentials, no_plugin_providers
+):
+    """``providers.acme.api_key`` in the session's own profile config is a live
+    credential for that lane, so the stale-repair must not fire."""
+    profile_cfg = {
+        "model": {"provider": "nous"},
+        "providers": {"acme": {"api_key": "sk-live-123"}},
+    }
+    _patch_catalog(monkeypatch, _catalog(_group("nous", "deepseek/deepseek-v4.1-flash")))
+
+    assert _repair(_session(provider="acme"), profile_config=profile_cfg) == "acme"
+
+
+def test_profile_scoped_top_level_api_key_blocks_repair(
+    monkeypatch, no_provider_credentials, no_plugin_providers
+):
+    """Same for the FAQ shape ``model: {provider: acme, api_key: ...}`` — the
+    top-level key belongs to the provider it is configured under, exactly like
+    ``model.base_url``."""
+    profile_cfg = {"model": {"provider": "acme", "api_key": "sk-live-456"}}
+    _patch_catalog(monkeypatch, _catalog(_group("nous", "deepseek/deepseek-v4.1-flash")))
+
+    assert _repair(_session(provider="acme"), profile_config=profile_cfg) == "acme"
