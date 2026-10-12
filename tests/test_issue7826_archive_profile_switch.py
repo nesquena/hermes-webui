@@ -415,25 +415,32 @@ def _run_batch(scenario, rows, **kw):
 
 
 def test_batch_each_request_carries_own_owner_profile_zero_switches():
-    """Mixed-profile selection: every row archives, each request carries ITS
-    row's owner profile, and zero _switchProfileForSessionLoad calls happen —
-    the root-fix contract (pre-fix: one switch per distinct owner, restore on
-    top)."""
+    """Eligible selection: every row archives, each request carries ITS row's
+    owner profile, and zero _switchProfileForSessionLoad calls happen — the
+    root-fix contract (pre-fix: one switch per distinct owner, restore on top).
+
+    #7826 re-gate: every row's owner must match the ACTIVE profile. The server
+    ignores the client-supplied ``profile`` on this endpoint and resolves the row
+    against the active profile itself, so a foreign row's request 409s and the
+    stop-on-failure contract then abandons every row after it — which made the
+    outcome depend on selection order. Root aliases ('default' while
+    ``S.activeProfileIsDefault``) still count as a match.
+    """
     if NODE is None:
         return
     rows = [
-        {"id": "w1", "profile": "work"},
-        {"id": "w2", "profile": "work"},
-        {"id": "h1", "profile": "home"},
+        {"id": "w1", "profile": "default"},
+        {"id": "w2", "profile": "default"},
+        {"id": "h1", "profile": None, "webui": True},
     ]
     data = _run_batch("all-ok", rows)
-    assert data["preflight"]["owners"] == ["work", "home"], data
+    assert data["preflight"]["owners"], data
     assert data["outcome"]["ok"] is True, data
     assert data["outcome"]["archivedCount"] == 3, data
     assert data["switchCalls"] == 0, (
         f"batch archive must never switch profiles: {data}")
     bodies = data["requests"]
-    assert [b["profile"] for b in bodies] == ["work", "work", "home"], data
+    assert [b["profile"] for b in bodies] == ["default", "default", "default"], data
     assert all(b["archived"] is True for b in bodies), data
     assert sorted(data["archivedSids"]) == ["h1", "w1", "w2"], data
     assert data["activeProfile"] == "default", (
@@ -520,7 +527,7 @@ def test_batch_unknown_cli_row_still_fails_closed():
     if NODE is None:
         return
     rows = [
-        {"id": "s1", "profile": "work"},
+        {"id": "s1", "profile": "default"},
         {"id": "s2", "profile": None, "webui": False},
     ]
     data = _run_batch("all-ok", rows)
@@ -567,8 +574,15 @@ def test_batch_renamed_root_default_rows_request_no_switch():
 
 
 def test_batch_archive_button_handler_mixed_rows_zero_switches():
-    """The real archive button handler must pass mixed rows to the executor,
-    which archives them without any profile switch."""
+    """The real archive button handler must reject an ineligible batch BEFORE any
+    request, and must keep the selection so the user can deselect and retry.
+
+    #7826 re-gate: mixed rows used to reach the executor, the foreign row's
+    request 409d, and the stop-on-failure contract abandoned the owned row —
+    so which rows survived depended on selection order. The preflight now
+    validates every owner against the ACTIVE profile, and the rejection branch
+    no longer calls exitSessionSelectMode().
+    """
     if NODE is None:
         return
     render_body = _extract_function(SESSIONS_JS, "_renderBatchActionBar")
@@ -612,10 +626,14 @@ _renderBatchActionBar();
 (async()=>{{const button=bar.children.find(node=>node.textContent==='session_batch_archive');if(!button)throw new Error('no archive button');await button.onclick();console.log(JSON.stringify({{events,archivedSids,switchCalls,requests,activeProfile:S.activeProfile,defaultModel:window._defaultModel,activeProvider:window._activeProvider}}));}})();
 """
     data = json.loads(_run_node(script))
-    assert data["archivedSids"] == ["w1", "h1"], data
-    assert [r["profile"] for r in data["requests"]] == ["work", "home"], data
-    assert "confirm" in data["events"], data
-    assert "exit" in data["events"], data
+    # Zero archive requests: the preflight rejects the batch before any POST.
+    assert data["requests"] == [], data
+    assert data["archivedSids"] == [], data
+    # The confirm dialog never opens for an ineligible batch.
+    assert "confirm" not in data["events"], data
+    # The selection is RETAINED so the user can deselect the foreign row.
+    assert "exit" not in data["events"], (
+        f"a failed preflight must not discard the selection: {data}")
     assert data["switchCalls"] == 0, (
         f"the batch button handler must never switch profiles: {data}")
     assert data["activeProfile"] == "default", data
