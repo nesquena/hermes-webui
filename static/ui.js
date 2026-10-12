@@ -19645,9 +19645,30 @@ function renderMessages(options){
       // row and guess a verdict.
       const idRows=tid?liveMetadataByTid.get(tid):null;
       let idMatchEntry=null;
+      // #7653 re-gate round 11 (finding 2, SILENT): pair by OCCURRENCE, not
+      // by consumption order — the same crossing the messages.js consumer
+      // had. A settled row names its owning assistant index (top level, or
+      // on ``group``/``payload`` for a scene row), and a live row derived
+      // from the transcript carries the same field, so when both name one
+      // the pairing is exact and order stops mattering. A named index with
+      // no owning live row transfers nothing; an indexless mirror keeps the
+      // next-unused rule.
+      const _nextOwnerAIdx=(next&&next.assistant_msg_idx!=null&&next.assistant_msg_idx!=='')?next.assistant_msg_idx
+        :(next&&next.group&&next.group.assistant_msg_idx!=null&&next.group.assistant_msg_idx!=='')?next.group.assistant_msg_idx
+        :(next&&next.payload&&next.payload.assistant_msg_idx!=null&&next.payload.assistant_msg_idx!=='')?next.payload.assistant_msg_idx
+        :null;
+      const _nextOwnerIdx=(_nextOwnerAIdx!=null&&_nextOwnerAIdx!==''&&Number.isFinite(Number(_nextOwnerAIdx)))?Number(_nextOwnerAIdx):null;
       if(idRows&&idRows.length){
-        const nextRow=idRows.find(entry=>!usedLiveToolMetadata.has(entry.idx));
-        if(nextRow) idMatchEntry=nextRow;
+        if(_nextOwnerIdx!=null){
+          const owned=idRows.find(entry=>{
+            const v=entry&&entry.tc?entry.tc.assistant_msg_idx:undefined;
+            return (v!==undefined&&v!==null&&v!==''&&Number(v)===_nextOwnerIdx);
+          });
+          if(owned) idMatchEntry=owned;
+        }else{
+          const nextRow=idRows.find(entry=>!usedLiveToolMetadata.has(entry.idx));
+          if(nextRow) idMatchEntry=nextRow;
+        }
       }
       let matchEntry=idMatchEntry;
       if(!matchEntry){

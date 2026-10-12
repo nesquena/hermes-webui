@@ -4648,6 +4648,41 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       rows.push({tc,idx});
     });
     const used=new Set();
+    // #7653 re-gate round 11 (finding 2, SILENT): pair by OCCURRENCE, not by
+    // consumption order. The next-unused rule is order-dependent, so a
+    // persisted row whose order differs from the mirror's append order gets a
+    // neighbour's verdict — the reviewer's "a later failed call_0 repaints an
+    // older success" (``[true,true]`` where the base preserves
+    // ``[false,true]``). Two rules fix it, in order of strength:
+    //
+    // 1. OCCURRENCE-EXACT: when the settled row and a live row both name the
+    //    same owning ``assistant_msg_idx`` (the server writes it into every
+    //    ``s.tool_calls`` entry), pair on it. Order stops mattering.
+    // 2. TRAILING ALIGNMENT for an indexless pairing: when the settled rows
+    //    of a tid OUTNUMBER its live rows, the live rows belong to the
+    //    trailing occurrences (the turn that just settled), so skip that many
+    //    leading settled rows entirely — a skipped row takes NOTHING, not even
+    //    the name fallback, because consuming any row marks it used and
+    //    starves the occurrence that owns it.
+    //
+    // A named index with no owning live row transfers nothing rather than
+    // borrowing a neighbour's verdict.
+    const _ownerIdxOf=(row)=>{
+      const v=row&&row.assistant_msg_idx;
+      return (v===undefined||v===null||v===''||!Number.isFinite(Number(v)))?null:Number(v);
+    };
+    const _tidOf=(row)=>(row&&(row.tid||row.id||row.tool_call_id||row.tool_use_id||row.call_id))||'';
+    const _settledCountByTid=new Map();
+    (rawCalls||[]).forEach((raw)=>{
+      const t=_tidOf(raw);
+      if(t) _settledCountByTid.set(t,(_settledCountByTid.get(t)||0)+1);
+    });
+    const _skipLeadingByTid=new Map();
+    _settledCountByTid.forEach((count,t)=>{
+      const rows=byTid.get(t);
+      if(rows&&rows.length&&count>rows.length) _skipLeadingByTid.set(t,count-rows.length);
+    });
+    const _seenByTid=new Map();
     return (rawCalls||[]).map((raw,idx)=>{
       const next={...(raw||{}),done:true};
       const tid=next.tid||next.id||next.tool_call_id||next.tool_use_id||next.call_id||'';
@@ -4665,12 +4700,32 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // transfer instead of guessing.
       const idRows=tid?byTid.get(tid):null;
       let idMatchEntry=null;
-      if(idRows&&idRows.length){
-        const nextRow=idRows.find(entry=>!used.has(entry.idx));
-        if(nextRow) idMatchEntry=nextRow;
+      // #7653 re-gate round 11 (finding 2): the two rules from the block
+      // above. An indexless row inside the trailing-skip window takes
+      // NOTHING (not even the name fallback), so the occurrence that owns
+      // the live row can still claim it.
+      const _nextOwner=_ownerIdxOf(next);
+      const _seen=_seenByTid.get(tid)||0;
+      _seenByTid.set(tid,_seen+1);
+      const _skipLeading=(tid?_skipLeadingByTid.get(tid):0)||0;
+      const _skipThisRow=(_nextOwner==null)&&(_seen<_skipLeading);
+      if(!_skipThisRow){
+        if(idRows&&idRows.length){
+          if(_nextOwner!=null){
+            // Occurrence-exact: the live row owning the SAME assistant index.
+            const owned=idRows.find(entry=>{
+              const v=entry&&entry.tc?entry.tc.assistant_msg_idx:undefined;
+              return (v!==undefined&&v!==null&&v!==''&&Number(v)===_nextOwner);
+            });
+            if(owned) idMatchEntry=owned;
+          }else{
+            const nextRow=idRows.find(entry=>!used.has(entry.idx));
+            if(nextRow) idMatchEntry=nextRow;
+          }
+        }
       }
       let matchEntry=idMatchEntry;
-      if(!matchEntry){
+      if(!matchEntry&&!_skipThisRow){
         const name=next.name||((next.function||{}).name)||'';
         const matchIdx=liveCalls.findIndex((tc,i)=>tc&&!used.has(i)&&(!name||tc.name===name));
         if(matchIdx>=0) matchEntry={tc:liveCalls[matchIdx],idx:matchIdx};
