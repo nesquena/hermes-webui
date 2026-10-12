@@ -42,6 +42,7 @@ COMPRESSION_ANCHOR = (REPO_ROOT / "api" / "compression_anchor.py").read_text(
     encoding="utf-8"
 )
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+MESSAGES_JS = (REPO_ROOT / "static" / "messages.js").read_text(encoding="utf-8")
 
 
 # ── finding 1: an ACP chain with real turns stays visible ───────────────────
@@ -316,10 +317,27 @@ def test_the_optimistic_bump_is_idempotent() -> None:
 
 
 def test_the_bump_marker_is_cleared_when_no_turn_is_in_flight() -> None:
-    """The next send must be able to bump again."""
-    start = SESSIONS_JS.find("const optimisticUserTurns=")
-    body = SESSIONS_JS[start : start + 2500]
-    assert "_optimisticTurnBumpSid=null" in body, (
-        "the bump marker is never cleared, so a later send in the same session "
-        "can never advance the count again"
+    """The next send must be able to bump again.
+
+    The clear lives in ``send()``'s ``finally`` — which is in ``messages.js``, not
+    next to the bump in ``sessions.js``. Asserting it inside the bump's own 2500-
+    char window pinned the marker to the wrong file and never checked the real
+    clear, which is why the compounding survived a round of "fixes".
+    """
+    send_start = MESSAGES_JS.find("async function send(")
+    assert send_start >= 0, "send() not found in static/messages.js"
+    finally_idx = MESSAGES_JS.find("}finally{", send_start)
+    assert finally_idx > send_start, "send() has no finally block"
+    finally_body = MESSAGES_JS[finally_idx : finally_idx + 600]
+    assert "_optimisticTurnBumpSid=null" in finally_body, (
+        "the bump marker is not cleared in send()'s finally, so a later send in "
+        "the same session can never advance the count again"
+    )
+    assert "_optimisticTurnBumpBase=null" in finally_body, (
+        "the baseline must be cleared alongside the marker"
+    )
+    # And the clear must be keyed to the in-flight flag going away, not to some
+    # other condition that can leave the marker latched.
+    assert "_sendInProgress=false;" in finally_body, (
+        "send()'s finally must reset _sendInProgress so the next send can bump"
     )
