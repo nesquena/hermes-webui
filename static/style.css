@@ -5181,6 +5181,58 @@ main.main > #mainPlugin{display:none;}
 .settings-action-btn:disabled,.settings-action-btn.disabled{opacity:.45;cursor:not-allowed;}
 .settings-action-btn:disabled:hover,.settings-action-btn.disabled:hover{background:var(--sidebar);border-color:var(--border);color:var(--text);}
 
+  /* #7827 review: four dark skins regressed on HOVER, because their hover
+     background is NOT `--accent-hover` (the fill `--bg` was contrasted against)
+     but a skin-local surface:
+       geist-contrast  --hover-bg  #111111  (its --bg is #000000 -> 1.11:1)
+       hepburn         #c6246a      (its .send-btn:hover pins its own fill)
+       ares            --accent-hover #CC3333
+       slate           --accent-hover #64748B
+     Each needs its own hover foreground. The fills below are the ones those
+     skins actually paint, so the ratios are measured against the real hover
+     background rather than assumed:
+       geist-contrast  --text #ededed on #111111  -> 16.13:1
+       hepburn         #fff    on #c6246a         ->  5.44:1 (its own pinned rule)
+       ares            #fff    on #CC3333         ->  5.14:1
+       slate           #fff    on #64748B         ->  4.76:1
+     Scoped per skin on purpose: the generic `color:var(--bg)` above stays
+     correct for every other dark palette (mono 7.37:1, catppuccin 10.34:1,
+     sienna 6.73:1, graphite 16.32:1), so this must not widen into a blanket
+     override. Stop/Interrupt/Steer keep their own chrome and are excluded. */
+  :root.dark[data-skin="geist-contrast"] .settings-btn:hover,
+  :root.dark[data-skin="geist-contrast"] .sm-btn[onclick^="saveSettings"]:hover{color:var(--text);}
+  :root.dark[data-skin="hepburn"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="hepburn"] .send-btn:not(:disabled):hover{color:#fff;}
+  /* Hepburn's --accent (#f278ad) and --accent-hover (#f5a0c5) are LIGHT fills, so
+     the composer/toolset controls that keep the accent background on hover need
+     the dark foreground the generic rule already gives them — restoring #fff
+     there drops them to 1.60:1 / 2.60:1. */
+  :root.dark[data-skin="hepburn"] .settings-btn:hover,
+  :root.dark[data-skin="hepburn"] .sm-btn[onclick^="saveSettings"]:hover,
+  :root.dark[data-skin="hepburn"] .msg-edit-send:hover,
+  :root.dark[data-skin="hepburn"] .toolsets-apply-btn:hover{color:var(--bg);}
+  /* Ares's dark --accent (#FF4444) / --accent-hover (#CC3333) are MID fills:
+     white clears 5.14:1 on the hover fill and 3.41:1 on the accent fill, while
+     var(--bg) (#000000) gives 4.09:1 / 6.30:1. White is the review's requested
+     value and clears AA on both, so use it for the whole family. */
+  :root.dark[data-skin="ares"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="ares"] .send-btn:not(:disabled):hover,
+  :root.dark[data-skin="ares"] .settings-btn:hover,
+  :root.dark[data-skin="ares"] .sm-btn[onclick^="saveSettings"]:hover,
+  :root.dark[data-skin="ares"] .toolsets-apply-btn:hover,
+  :root.dark[data-skin="ares"] .msg-edit-send:hover{color:#fff;}
+  /* Slate's dark --accent-hover (#64748B) is a MID fill: white gives 4.76:1,
+     which is what the review measured as correct. But slate's --accent
+     (#94A3B8) is much lighter, and the composer/toolset controls keep the
+     ACCENT background on hover (they have no hover rule of their own), where
+     white drops to 2.56:1 — so those two keep the generic dark foreground. */
+  :root.dark[data-skin="slate"] button.send-btn:not(:disabled):hover,
+  :root.dark[data-skin="slate"] .send-btn:not(:disabled):hover,
+  :root.dark[data-skin="slate"] .settings-btn:hover,
+  :root.dark[data-skin="slate"] .sm-btn[onclick^="saveSettings"]:hover{color:#fff;}
+  :root.dark[data-skin="slate"] .toolsets-apply-btn:hover,
+  :root.dark[data-skin="slate"] .msg-edit-send:hover{color:var(--bg);}
+
 /* Primary save buttons (Appearance / Preferences "Save Settings"). */
 #mainSettings .settings-btn,
 #mainSettings .sm-btn[onclick^="saveSettings"]{background:var(--accent);color:#fff;border:1px solid var(--accent);border-radius:8px;padding:9px 16px;cursor:pointer;font-weight:600;font-size:13px;transition:background .15s,border-color .15s,opacity .15s;}
