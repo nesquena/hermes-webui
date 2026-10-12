@@ -8496,7 +8496,9 @@ def _stored_provider_has_live_credential(
     reads (Greptile P1 on #8179) — a key that exists only in this profile would
     then look absent and the repair would swap out a working lane and persist it.
     Env-var and credential-pool keys stay covered by the generic helper, and any
-    exception preserves the lane.
+    exception preserves the lane. Profile values are validated with
+    ``_provider_value_counts_as_api_key`` so a Codex OAuth JWT parked in an
+    ``api_key`` slot is never mistaken for a usable OpenAI credential.
     """
     try:
         if isinstance(profile_config, dict) and stored_provider:
@@ -8510,14 +8512,18 @@ def _stored_provider_has_live_credential(
                         continue
                     if _canonicalise_provider_id(key) != stored_canon:
                         continue
-                    if str(entry.get("api_key") or "").strip():
+                    if _provider_value_counts_as_api_key(
+                        stored_provider, entry.get("api_key")
+                    ):
                         return True
             model_cfg = profile_config.get("model")
             if (
                 isinstance(model_cfg, dict)
                 and stored_canon
                 and _canonicalise_provider_id(model_cfg.get("provider")) == stored_canon
-                and str(model_cfg.get("api_key") or "").strip()
+                and _provider_value_counts_as_api_key(
+                    stored_provider, model_cfg.get("api_key")
+                )
             ):
                 return True
     except Exception:
@@ -13454,6 +13460,7 @@ from api.run_journal import (
 from api.todo_state import attach_todo_state
 from api.providers import (
     _SELF_HOSTED_PROVIDER_IDS,
+    _provider_value_counts_as_api_key,
     get_providers,
     get_provider_quota,
     get_provider_cost_history,
