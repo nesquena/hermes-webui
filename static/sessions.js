@@ -1439,7 +1439,11 @@ function _hasOwnedOpenLiveStream(sid) {
   const live = typeof LIVE_STREAMS === 'object' && LIVE_STREAMS ? LIVE_STREAMS[sid] : null;
   // readyState 1 is EventSource.OPEN. A cached stream ID or busy flag alone
   // is not ownership and must never disable recovery for a stuck indicator.
-  return Boolean(live && live.streamId === S.activeStreamId && live.source && live.source.readyState === 1);
+  // done may close its transport while the bounded visual fade still owns
+  // semantic settlement. Idle metadata must not purge that pending finish.
+  return Boolean(live && live.streamId === S.activeStreamId && live.source &&
+    (live.source.readyState === 1 ||
+      (typeof live.hasPendingFinish === 'function' && live.hasPendingFinish())));
 }
 
 function _rememberSessionListSource(s, sid = null, allowScopeFallback = true) {

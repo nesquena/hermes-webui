@@ -50,6 +50,9 @@ def _event_listener_body(src, event_name):
     marker = f"source.addEventListener('{event_name}',e=>{{"
     start = src.find(marker)
     if start == -1:
+        marker = f"source.addEventListener('{event_name}',_withDeferredAnchorScenePaint(e=>{{"
+        start = src.find(marker)
+    if start == -1:
         marker = f"es.addEventListener('{event_name}', e => {{"
         start = src.find(marker)
     assert start != -1, f"{event_name} listener not found"
@@ -249,6 +252,7 @@ function _activityStatusNode(){{ throw new Error('status branch should not execu
 function _anchorSceneToolRowLogicalKey(){{ return ''; }}
 function _anchorSceneMergeToolRows(_prev, row){{ return row; }}
 eval(extractFunc('_anchorSceneIsSettledSuccessfulCompression'));
+eval(extractFunc('_anchorSceneSourceRows'));
 eval(extractFunc('_anchorSceneRowsForRendering'));
 eval(extractFunc('_autoCompressionPreviewText'));
 eval(extractFunc('_autoCompressionWorklogNode'));
@@ -303,11 +307,11 @@ def test_process_prose_is_an_anchor_scene_row_not_a_dom_mirror():
     schedule = _function_body(MESSAGES_JS, "_scheduleRender")
     flush = _function_body(MESSAGES_JS, "_flushPendingSegmentRender")
 
-    assert "_upsertAnchorProcessProse(displayText,{sealed:force})" in flush
+    assert "_upsertAnchorProcessProse(" not in flush
     assert "function _upsertAnchorProcessProse" in MESSAGES_JS
     assert "source_event_type:sourceEventType" in _function_body(MESSAGES_JS, "_applyToAnchor")
     assert "let anchorProcessText=displayText" in schedule
-    assert "_upsertAnchorProcessProse(anchorProcessText)" in schedule
+    assert "_upsertAnchorProcessProse(" not in schedule
     assert "function _replaceAnchorActivityEventByLocalId" in MESSAGES_JS
     assert "events[i]=next" in MESSAGES_JS
     assert "_renderAnchorLiveScene();" in _function_body(MESSAGES_JS, "_upsertAnchorProcessProse")
@@ -582,6 +586,7 @@ const src = fs.readFileSync({json.dumps(str(ROOT / "static" / "ui.js"))}, 'utf8'
 function _anchorSceneToolRowLogicalKey(){{ return ''; }}
 function _anchorSceneMergeToolRows(a,b){{ return b; }}
 function _anchorSceneIsSettledSuccessfulCompression(){{ return false; }}
+eval(extractFunc('_anchorSceneSourceRows'));
 eval(extractFunc('_anchorSceneRowsForRendering'));
 const scene = {{
   activity_rows: [
@@ -669,7 +674,8 @@ def test_anchor_tool_result_text_stays_out_of_header_preview():
 
 
 def test_scene_renderer_allows_prose_tool_prose_tool_interleaving():
-    render = _function_body(UI_JS, "_renderAnchorSceneRowsIntoWorklog")
+    assert "_anchorSceneWorklogAppendRow(" in _function_body(UI_JS, "_renderAnchorSceneRowsIntoWorklog")
+    render = _function_body(UI_JS, "_anchorSceneWorklogAppendRow")
 
     assert "currentTools=null;" in render
     assert render.index("if(row.role==='tool')") < render.index("}else{")

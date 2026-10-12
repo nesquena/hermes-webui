@@ -183,6 +183,8 @@ def test_restore_settled_session_projects_through_production_path(browser):
               window._closeSource = () => {};
               window._isSessionCurrentPane = sid => !!S.session && S.session.session_id === sid;
               window._streamFinalized = false;
+              window._anchorPaintGeneration = 1;
+              window._anchorPaintDisposed = false;
               window._persistTimer = null;
               window._cancelThrottledSnapshotTimer = () => {};
               window._clearAnchorProseIncrementalNode = () => {};

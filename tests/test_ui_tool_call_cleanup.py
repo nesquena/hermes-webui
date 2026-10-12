@@ -662,7 +662,7 @@ class TestToolCallGroupingStatic:
         assert "data-live-activity-current" in timer_fn, (
             "Elapsed timers should clear once an Activity group is no longer current."
         )
-        tool_start_segment = MESSAGES_JS.split("source.addEventListener('tool',e=>{", 1)[1].split("source.addEventListener('tool_complete'", 1)[0]
+        tool_start_segment = MESSAGES_JS.split("source.addEventListener('tool',_withDeferredAnchorScenePaint(e=>{", 1)[1].split("source.addEventListener('tool_complete'", 1)[0]
         assert "_resetAssistantSegment();" in tool_start_segment, (
             "Tool starts should reset the next assistant text segment without closing the current Activity burst."
         )

@@ -49,6 +49,7 @@ const LOCALES = {
     image_pasted: 'Image pasted: ',
     text_pasted: 'Pasted text attached as ',
     // messages.js
+    activity_scene_too_large_to_save: 'Activity details are too large to save. The response remains available.',
     edit_message: 'Edit message',
     regenerate: 'Regenerate response',
     copy: 'Copy',
@@ -1847,6 +1848,7 @@ const LOCALES = {
   },
 
   it: {
+    activity_scene_too_large_to_save: "I dettagli delle attività sono troppo grandi per essere salvati. La risposta rimane disponibile.",
     offline_title: 'Connessione persa',
     offline_browser_detail: 'Il browser segnala che questo dispositivo è offline.',
     offline_network_detail: 'Hermes non è raggiungibile da questo browser al momento.',
@@ -3672,6 +3674,7 @@ const LOCALES = {
   },
 
   ja: {
+    activity_scene_too_large_to_save: "アクティビティの詳細は大きすぎるため保存できません。応答は引き続き利用できます。",
     offline_title: '接続が切断されました',
     offline_browser_detail: 'ブラウザはこのデバイスがオフラインだと報告しています。',
     offline_network_detail: '現在、このブラウザからHermesに到達できません。',
@@ -5502,6 +5505,7 @@ const LOCALES = {
   },
 
   ru: {
+    activity_scene_too_large_to_save: "Данные о действиях слишком велики для сохранения. Ответ остаётся доступным.",
     offline_title: 'Соединение потеряно',
     offline_browser_detail: 'Браузер сообщает, что это устройство офлайн.',
     offline_network_detail: 'Hermes сейчас недоступен из этого браузера.',
@@ -7306,6 +7310,7 @@ const LOCALES = {
   },
 
   es: {
+    activity_scene_too_large_to_save: "Los detalles de la actividad son demasiado grandes para guardarlos. La respuesta sigue disponible.",
     offline_title: 'Conexión perdida',
     offline_browser_detail: 'Tu navegador indica que este dispositivo está sin conexión.',
     offline_network_detail: 'Hermes no está disponible desde este navegador ahora mismo.',
@@ -9077,6 +9082,7 @@ const LOCALES = {
   },
 
   de: {
+    activity_scene_too_large_to_save: "Die Aktivitätsdetails sind zu groß zum Speichern. Die Antwort bleibt verfügbar.",
     offline_title: 'Verbindung verloren',
     offline_browser_detail: 'Dein Browser meldet, dass dieses Gerät offline ist.',
     offline_network_detail: 'Hermes ist von diesem Browser aus gerade nicht erreichbar.',
@@ -10842,6 +10848,7 @@ const LOCALES = {
   },
 
   zh: {
+    activity_scene_too_large_to_save: "活动详情过大，无法保存。回复仍然可用。",
     offline_title: '连接已断开',
     offline_browser_detail: '浏览器报告此设备当前离线。',
     offline_network_detail: '此浏览器当前无法连接到 Hermes。',
@@ -12601,6 +12608,7 @@ const LOCALES = {
 
   // Traditional Chinese (zh-Hant)
   'zh-Hant': {
+    activity_scene_too_large_to_save: "活動詳情過大，無法儲存。回覆仍然可用。",
 
     offline_title: '連線中斷',
     offline_browser_detail: '瀏覽器回報此裝置目前離線。',
@@ -14429,6 +14437,7 @@ const LOCALES = {
   },
 
   pt: {
+    activity_scene_too_large_to_save: "Os detalhes da atividade são grandes demais para serem salvos. A resposta continua disponível.",
     offline_title: 'Conexão perdida',
     offline_browser_detail: 'O navegador informa que este dispositivo está offline.',
     offline_network_detail: 'O Hermes está inacessível neste navegador agora.',
@@ -16072,6 +16081,7 @@ const LOCALES = {
     settings_tts_voice_default_system: 'Default system voice',
   },
   ko: {
+    activity_scene_too_large_to_save: "활동 세부 정보가 너무 커서 저장할 수 없습니다. 응답은 계속 확인할 수 있습니다.",
     offline_title: '연결이 끊겼습니다',
     offline_browser_detail: '브라우저가 이 장치가 오프라인이라고 보고합니다.',
     offline_network_detail: '현재 이 브라우저에서 Hermes에 연결할 수 없습니다.',
@@ -17887,6 +17897,7 @@ const LOCALES = {
   },
 
   fr: {
+    activity_scene_too_large_to_save: "Les détails de l’activité sont trop volumineux pour être enregistrés. La réponse reste disponible.",
     offline_title: 'Connexion perdue',
     offline_browser_detail: 'Votre navigateur signale que cet appareil est hors ligne.',
     offline_network_detail: 'Hermes est actuellement inaccessible depuis ce navigateur.',
@@ -19685,6 +19696,7 @@ const LOCALES = {
   },
 
   cs: {
+    activity_scene_too_large_to_save: "Podrobnosti aktivity jsou příliš velké pro uložení. Odpověď zůstává dostupná.",
     _label: 'Čeština',
     sessions_source_webui: 'Relace WebUI ({0})',
     sessions_source_cli: 'Relace CLI ({0})',
@@ -21469,6 +21481,7 @@ const LOCALES = {
     settings_tts_voice_default_system: 'Default system voice',
   },
   tr: {
+    activity_scene_too_large_to_save: "Etkinlik ayrıntıları kaydedilemeyecek kadar büyük. Yanıt kullanılabilir durumda kalır.",
 
 
 
@@ -23289,6 +23302,7 @@ const LOCALES = {
     settings_tts_voice_default_system: 'Default system voice',
   },
   pl: {
+    activity_scene_too_large_to_save: "Szczegóły aktywności są zbyt duże, aby je zapisać. Odpowiedź pozostaje dostępna.",
     offline_title: 'Połączenie utracone',
     offline_browser_detail: 'Twoja przeglądarka zgłasza, że to urządzenie jest offline.',
     offline_network_detail: 'Hermes jest obecnie nieosiągalny z tej przeglądarki.',
@@ -25109,6 +25123,7 @@ const LOCALES = {
     settings_tts_voice_default_system: 'Default system voice',
   },
   vi: {
+    activity_scene_too_large_to_save: "Chi tiết hoạt động quá lớn nên không thể lưu. Phản hồi vẫn có sẵn.",
     offline_title: 'Mất kết nối',
     offline_browser_detail: 'Trình duyệt báo rằng thiết bị này đang ngoại tuyến.',
     offline_network_detail: 'Không thể kết nối tới Hermes từ trình duyệt lúc này.',

@@ -492,6 +492,11 @@ def test_run_journal_cursor_tracks_every_long_task_timeline_event():
     ]
 
     for event_name in timeline_events:
+        if event_name == "cancel":
+            assert "'cancel'" not in cursor_loop, "cancel must not register a competing auxiliary terminal listener"
+            assert "type==='cancel'" in MESSAGES_SRC
+            assert "_rememberRunJournalCursor(event);" in MESSAGES_SRC
+            continue
         assert f"'{event_name}'" in cursor_loop, (
             f"{event_name} must advance the replay cursor to avoid duplicate timeline replay"
         )

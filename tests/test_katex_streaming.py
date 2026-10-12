@@ -28,14 +28,17 @@ def _extract_function(src: str, name: str) -> str:
 
 
 def test_streaming_katex_scheduler_marks_live_pass_as_streaming():
-    """The live 150ms KaTeX debounce must identify streaming passes.
+    """The shared live owner must identify streaming KaTeX passes.
 
     Without the explicit streaming flag, renderKatexBlocks() cannot distinguish a
     live parser-owned <equation-block> that is still being filled from a settled
     DOM node, so it may mark partial math as data-rendered permanently.
     """
     fn = _extract_function(MESSAGES_JS, "_scheduleStreamingKatex")
-    assert "renderKatexBlocks(assistantBody,{streaming:true})" in fn
+    assert "_pendingKatexPaint=true" in fn
+    assert "_renderAnchorLiveScene()" in fn
+    owner = _extract_function(MESSAGES_JS, "_renderAnchorLiveScene")
+    assert "renderKatexBlocks(assistantBody,{streaming:true})" in owner
 
 
 def test_render_katex_blocks_skips_pending_streaming_equation_before_rendered_flag():

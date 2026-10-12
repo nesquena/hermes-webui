@@ -82,8 +82,25 @@ const MESSAGE_HELPERS = [
 ];
 for (const h of MESSAGE_HELPERS) {
   const body = extractFunction(messagesSrc, h);
-  const factory = new Function(`${body}; return ${h};`);
-  globalThis[h] = factory();
+  if (h === '_restoreSettledSession') {
+    // Production owns these variables in attachLiveStream, not window.
+    // Keep them lexical here too, with a controllable generation transition
+    // during the awaited session fetch (dispose then replacement wire-up).
+    const factory = new Function(`
+      let _anchorPaintGeneration=0, _anchorPaintDisposed=false;
+      ${body}
+      return {
+        restore: ${h},
+        replace: () => { _anchorPaintGeneration++; _anchorPaintDisposed=false; },
+        dispose: () => { _anchorPaintGeneration++; _anchorPaintDisposed=true; }
+      };
+    `);
+    globalThis.restoreOwner = factory();
+    globalThis[h] = restoreOwner.restore;
+  } else {
+    const factory = new Function(`${body}; return ${h};`);
+    globalThis[h] = factory();
+  }
 }
 
 // ---- compress result applier from commands.js ----
@@ -200,7 +217,10 @@ function runtimeStubs() {
     globalThis.S.messages = state.messages || [];
     globalThis.streamId = 'stream-7628';
     globalThis.S.activeStreamId = 'stream-7628';
-    globalThis.api = async () => scenario.apiPayload || { session: null };
+    globalThis.api = async () => {
+      if (scenario.ownerTransition) restoreOwner[scenario.ownerTransition]();
+      return scenario.apiPayload || { session: null };
+    };
     const status = await globalThis._restoreSettledSession({}, { status: true, preserveVisibleOnShorterTerminalSnapshot: true });
     const msgs = Array.isArray(globalThis.S.messages) ? globalThis.S.messages : [];
     console.log(JSON.stringify({
@@ -281,6 +301,22 @@ def test_compress_success_restores_paging_state(driver_path):
     assert outcome["messagesTruncated"] is False, "compress success must clear _messagesTruncated"
     assert outcome["oldestIdx"] == 0, f"compress success must reset _oldestIdx to 0, got {outcome['oldestIdx']}"
     assert outcome["messageCountAfter"] == 100
+
+
+@pytest.mark.parametrize("transition", ["replace", "dispose"])
+def test_settle_rejects_generation_change_during_fetch(driver_path, transition):
+    current = [{"role": "assistant", "content": "replacement owner", "_id": 42}]
+    outcome = _run_scenario(driver_path, {
+        "action": "settle_repeated_turns",
+        "ownerTransition": transition,
+        "state": {"messageCount": 1, "messages": current},
+        "apiPayload": {"session": {"session_id": "s1", "messages": [
+            {"role": "assistant", "content": "stale fetched transcript"}
+        ]}},
+    })
+    assert outcome["status"] == "stale"
+    assert outcome["messages"] == current
+    assert outcome["calls"] == []
 
 
 def test_settle_bounded_preserves_no_drop_no_dup(driver_path):
