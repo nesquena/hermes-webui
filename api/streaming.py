@@ -10693,8 +10693,26 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                             # guess rather than paint the wrong card.
                             _rank = -1
                         if _rank >= 0:
-                            _offset = max(_n_owners - _n_rows, 0)
-                            _row_idx = _rank - _offset
+                            # #7653 re-gate round 11 (finding 1, SILENT): the
+                            # reviewer's exact fix. The previous CLAMPED offset
+                            # (``max(_n_owners - _n_rows, 0)``) only handled the
+                            # short-mirror case; when live rows OUTNUMBER the
+                            # surviving owners the clamp is zero and the k-th
+                            # owner still consumed the k-th row from the FRONT,
+                            # so a leading row no owner asked for shifted every
+                            # pairing (the reviewer's ``[true,false]`` mirror
+                            # settling ``[(2, true)]``). Align from the END in
+                            # both directions instead: the trailing rows belong
+                            # to the current turn and pair with the trailing
+                            # owners, and a surplus leading row is left
+                            # unpaired rather than attributed to an occurrence
+                            # that never asked for it. The unscoped branch
+                            # (no owners at all) keeps taking the first row.
+                            _row_idx = (
+                                _rank + (_n_rows - len(_owners))
+                                if _owners
+                                else _rank
+                            )
                     live_tc = (
                         _occ_rows[_row_idx]
                         if 0 <= _row_idx < _n_rows
