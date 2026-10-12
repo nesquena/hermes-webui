@@ -35,6 +35,7 @@ Covered shapes:
 
 import io
 import json
+import socket
 import threading
 import time
 import urllib.error
@@ -61,15 +62,24 @@ class _FakeResponse(io.BytesIO):
 class _ConfigState:
     """Isolate the catalog cache globals for one test (see test_issue2540)."""
 
+    def __init__(self, join_reprobes):
+        self.join_reprobes = join_reprobes
+
     def __enter__(self):
         self.old_cfg = config.cfg
+        self.old_path = config._cfg_path
         self.old_mtime = config._cfg_mtime
         self.old_cache = config._available_models_cache
         self.old_cache_ts = config._available_models_cache_ts
         self.old_cache_fp = config._available_models_cache_source_fingerprint
         self.old_live_budget = config._LIVE_REBUILD_BUDGET_SECONDS
         self.old_provenance = config._models_cache_provenance
-        config._cfg_mtime = 0.0
+        # Every seeded snapshot must match disk identity without loading over cfg.
+        config._cfg_path = config._get_config_path()
+        try:
+            config._cfg_mtime = config._cfg_path.stat().st_mtime
+        except OSError:
+            config._cfg_mtime = 0.0
         config._available_models_cache = None
         config._available_models_cache_ts = 0.0
         config._available_models_cache_source_fingerprint = None
@@ -77,13 +87,13 @@ class _ConfigState:
         # Synchronous rebuild path: keeps stages A/C deterministic instead of
         # racing the bounded out-of-band worker.
         config._LIVE_REBUILD_BUDGET_SECONDS = 0.0
-        _reset_reprobe_registry()
+        assert not _reprobe_inflight(), "a previous test left a re-probe registered"
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        _wait_for_reprobe_idle(5.0)
-        _reset_reprobe_registry()
+        self.join_reprobes()
         config.cfg = self.old_cfg
+        config._cfg_path = self.old_path
         config._cfg_mtime = self.old_mtime
         config._available_models_cache = self.old_cache
         config._available_models_cache_ts = self.old_cache_ts
@@ -93,26 +103,9 @@ class _ConfigState:
         return False
 
 
-def _reset_reprobe_registry() -> None:
-    registry = getattr(config, "_models_endpoint_reprobe_inflight", None)
-    if isinstance(registry, dict):
-        registry.clear()
-    elif isinstance(registry, set):
-        registry.clear()
-
-
 def _reprobe_inflight() -> object:
-    return getattr(config, "_models_endpoint_reprobe_inflight", {})
-
-
-def _wait_for_reprobe_idle(timeout: float = 5.0) -> bool:
-    """Wait until no re-probe worker is registered as in flight."""
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if not _reprobe_inflight():
-            return True
-        time.sleep(0.01)
-    return not _reprobe_inflight()
+    with config._models_endpoint_reprobe_lock:
+        return dict(config._models_endpoint_reprobe_inflight)
 
 
 def _wait_for(predicate, timeout: float = 5.0) -> bool:
@@ -122,6 +115,99 @@ def _wait_for(predicate, timeout: float = 5.0) -> bool:
             return True
         time.sleep(0.01)
     return bool(predicate())
+
+
+def _wait_for_reprobe_idle(timeout: float = 5.0) -> bool:
+    """True once no re-probe worker is registered as in flight.
+
+    This observes the registry; it does NOT clean it up. A test-owned worker that
+    never finishes must fail loudly in the fixture teardown, not be papered over
+    by clearing state here.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _reprobe_inflight():
+            return True
+        time.sleep(0.01)
+    return not _reprobe_inflight()
+
+
+def _sync_config_version() -> None:
+    """Stamp the loaded-config identity so a seeded snapshot matches production.
+
+    Production discards a warm catalog whose ``config.yaml`` mtime differs from
+    the one the running config was loaded with. ``_ConfigState`` clears
+    ``_cfg_mtime``, so any test that seeds a catalog into the cache directly must
+    re-stamp both the path and the mtime afterwards — otherwise the first read
+    sees a "changed" config, invalidates the seeded snapshot, and cold-rebuilds
+    over the state the test just set up. Every manual seeding helper goes
+    through here so the invariant has exactly one home.
+    """
+    config_path = config._get_config_path()
+    config._cfg_path = config_path
+    try:
+        config._cfg_mtime = config_path.stat().st_mtime
+    except OSError:
+        config._cfg_mtime = 0.0
+
+
+def _publish_test_catalog(cache: dict) -> None:
+    """Publish a hand-built catalog the way a real rebuild would.
+
+    Shared by every test that seeds a snapshot directly, so the config-version
+    stamp, the source fingerprint, and the provenance pair always move together.
+    """
+    _sync_config_version()
+    config._available_models_cache = cache
+    config._available_models_cache_ts = time.monotonic()
+    config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
+    config._sync_models_cache_provenance()
+
+
+@pytest.fixture(autouse=True)
+def config_exists(request, monkeypatch, tmp_path):
+    config_path = tmp_path / "config.yaml"
+    if getattr(request, "param", False):
+        config_path.write_text("model:\n  provider: openai-codex\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+
+
+@pytest.fixture(autouse=True)
+def _reprobe_threads(monkeypatch):
+    """Keep fake network and test state installed until owned workers finish."""
+    monkeypatch.setattr(urllib.request, "urlopen", _Probe(healthy=False))
+    monkeypatch.setattr(
+        socket, "getaddrinfo",
+        lambda host, port, *args, **kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("203.0.113.10", port or 0))
+        ],
+    )
+    workers = []
+    lock = threading.Lock()
+    real_start = threading.Thread.start
+
+    def _start(thread, *args, **kwargs):
+        if thread.name != "models-endpoint-error-reprobe":
+            return real_start(thread, *args, **kwargs)
+        with lock:
+            result = real_start(thread, *args, **kwargs)
+            workers.append(thread)
+        return result
+
+    def _join(timeout=5.0):
+        deadline = time.monotonic() + timeout
+        with lock:
+            owned = tuple(workers)
+        for worker in owned:
+            worker.join(max(0.0, deadline - time.monotonic()))
+        assert not any(worker.is_alive() for worker in owned), "a test-owned re-probe did not finish"
+        assert not _reprobe_inflight(), "finished re-probes must remove their registry entries"
+
+    monkeypatch.setattr(threading.Thread, "start", _start)
+    try:
+        yield _join
+    finally:
+        _join()
 
 
 def _configure_named_custom_provider(tmp_path, monkeypatch, *, base_url: str) -> None:
@@ -241,7 +327,7 @@ def _seed_expired_diagnostic_catalog(monkeypatch, tmp_path, *, base_url="https:/
     # A cheap real rebuild would probe; go straight to the published shape instead.
     error = config._custom_endpoint_error(_UNRESOLVABLE)
     error["checked_at"] = time.time() - 3600
-    config._available_models_cache = {
+    _publish_test_catalog({
         "active_provider": "openai-codex",
         "default_model": "gpt-5.5",
         "configured_model_badges": {},
@@ -253,10 +339,7 @@ def _seed_expired_diagnostic_catalog(monkeypatch, tmp_path, *, base_url="https:/
                 "models_endpoint_error": error,
             }
         ],
-    }
-    config._available_models_cache_ts = time.monotonic()
-    config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
-    config._sync_models_cache_provenance()
+    })
     # Verify by inspecting the published snapshot directly. Calling
     # get_available_models() here would itself serve the expired diagnostic and
     # therefore schedule the very probe these tests want to observe starting, so
@@ -270,7 +353,7 @@ def _seed_expired_diagnostic_catalog(monkeypatch, tmp_path, *, base_url="https:/
 
 
 @pytest.mark.reproduction
-def test_issue8158_transient_probe_failure_then_recovery_on_warm_read(monkeypatch, tmp_path):
+def test_issue8158_transient_probe_failure_then_recovery_on_warm_read(monkeypatch, tmp_path, _reprobe_threads):
     """A/B/C: one transient probe failure must not be served for 24h.
 
     Stage A stores the diagnostic from an unresolvable host. Stage B restores the
@@ -283,7 +366,7 @@ def test_issue8158_transient_probe_failure_then_recovery_on_warm_read(monkeypatc
     monkeypatch.setattr(urllib.request, "urlopen", probe)
     _expire_retries(monkeypatch, 0.0)
 
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         # ── Stage A: unresolvable host, in memory only ────────────────────────
         _configure_named_custom_provider(
             tmp_path, monkeypatch, base_url="https://broken.example/v1"
@@ -341,7 +424,7 @@ def test_issue8158_error_lifetime_is_short_and_bounded():
 # ── The diagnostic must not be re-probed on every warm read ──────────────────
 
 
-def test_unexpired_diagnostic_is_served_without_reprobing(monkeypatch, tmp_path):
+def test_unexpired_diagnostic_is_served_without_reprobing(monkeypatch, tmp_path, _reprobe_threads):
     """A fresh diagnostic is still current — warm reads must not probe for it.
 
     The pickup notes are explicit that the healthy catalog keeps its cache and
@@ -352,7 +435,7 @@ def test_unexpired_diagnostic_is_served_without_reprobing(monkeypatch, tmp_path)
     monkeypatch.setattr(urllib.request, "urlopen", probe)
     _expire_retries(monkeypatch, 3600.0)
 
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _configure_named_custom_provider(
             tmp_path, monkeypatch, base_url="https://broken.example/v1"
         )
@@ -369,17 +452,25 @@ def test_unexpired_diagnostic_is_served_without_reprobing(monkeypatch, tmp_path)
         assert not _reprobe_inflight(), "no re-probe may be scheduled while unexpired"
 
 
-def test_warm_read_serves_immediately_while_retry_probe_is_in_flight(monkeypatch, tmp_path):
+@pytest.mark.parametrize("config_exists", [False, True], ids=["missing-config", "existing-config"])
+def test_warm_read_serves_immediately_while_retry_probe_is_in_flight(
+    monkeypatch, tmp_path, config_exists, _reprobe_threads
+):
     """The retry must not block the read path it was scheduled from.
 
     A hung endpoint is exactly the case that produced the diagnostic, so a warm
     read that waited on the re-probe would turn a cached picker payload into a
     request that stalls for the endpoint cap.
     """
+    config_path = tmp_path / "config.yaml"
+    if config_exists:
+        config_path.write_text("model:\n  provider: openai-codex\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(config, "_cfg_path", config_path)
     probe = _Probe(healthy=False)
     monkeypatch.setattr(urllib.request, "urlopen", probe)
 
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _seed_expired_diagnostic_catalog(monkeypatch, tmp_path)
         # Only now park the endpoint: the seeded snapshot must not be produced
         # through a read that could block on the gate.
@@ -398,12 +489,12 @@ def test_warm_read_serves_immediately_while_retry_probe_is_in_flight(monkeypatch
         assert _wait_for(lambda: _endpoint_error(config.get_available_models()) is None)
 
 
-def test_concurrent_readers_coalesce_into_one_reprobe(monkeypatch, tmp_path):
+def test_concurrent_readers_coalesce_into_one_reprobe(monkeypatch, tmp_path, _reprobe_threads):
     """N warm readers of one provider produce exactly one re-probe."""
     probe = _Probe(healthy=False)
     monkeypatch.setattr(urllib.request, "urlopen", probe)
 
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _seed_expired_diagnostic_catalog(monkeypatch, tmp_path)
 
         # Park the endpoint so the single coalesced probe stays in flight and is
@@ -433,7 +524,7 @@ def test_concurrent_readers_coalesce_into_one_reprobe(monkeypatch, tmp_path):
         _wait_for_reprobe_idle(5.0)
 
 
-def test_failed_reprobe_restamps_instead_of_retrying_on_every_read(monkeypatch, tmp_path):
+def test_failed_reprobe_restamps_instead_of_retrying_on_every_read(monkeypatch, tmp_path, _reprobe_threads):
     """A still-unreachable endpoint is retried once per lifetime, not per read."""
     probe = _Probe(healthy=False)
     monkeypatch.setattr(urllib.request, "urlopen", probe)
@@ -441,7 +532,7 @@ def test_failed_reprobe_restamps_instead_of_retrying_on_every_read(monkeypatch, 
     # failed retry restores a current diagnostic, so reads stop retrying.
     _expire_retries(monkeypatch, 60.0)
 
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _configure_named_custom_provider(
             tmp_path, monkeypatch, base_url="https://broken.example/v1"
         )
@@ -464,7 +555,7 @@ def test_failed_reprobe_restamps_instead_of_retrying_on_every_read(monkeypatch, 
 # ── Isolation and fencing ────────────────────────────────────────────────────
 
 
-def test_unresolvable_provider_does_not_clear_its_diagnostic(monkeypatch, tmp_path):
+def test_unresolvable_provider_does_not_clear_its_diagnostic(monkeypatch, tmp_path, _reprobe_threads):
     """A provider that no longer resolves to a configured entry keeps its error.
 
     "No entry to probe" is not evidence that the endpoint recovered, so it must
@@ -473,14 +564,14 @@ def test_unresolvable_provider_does_not_clear_its_diagnostic(monkeypatch, tmp_pa
     """
     _expire_retries(monkeypatch, 0.0)
 
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _configure_named_custom_provider(
             tmp_path, monkeypatch, base_url="https://broken.example/v1"
         )
         # A diagnostic for a provider that is not in custom_providers at all.
         expired = config._custom_endpoint_error("ghost")
         expired["checked_at"] = time.time() - 3600
-        config._available_models_cache = {
+        _publish_test_catalog({
             "active_provider": "openai-codex",
             "default_model": "gpt-5.5",
             "configured_model_badges": {},
@@ -488,36 +579,32 @@ def test_unresolvable_provider_does_not_clear_its_diagnostic(monkeypatch, tmp_pa
                 {"provider": "Ghost", "provider_id": "custom:ghost", "models": [],
                  "models_endpoint_error": expired}
             ],
-        }
-        config._available_models_cache_ts = time.monotonic()
-        config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
-        config._sync_models_cache_provenance()
+        })
 
-        assert config._reprobe_provider_endpoint("custom:ghost") is None, (
+        assert config._resolve_endpoint_probe_request("custom:ghost") is None, (
             "an id with no configured entry must report 'nothing to probe'"
         )
         config.get_available_models()
         assert _wait_for_reprobe_idle(5.0)
-        time.sleep(0.2)
         assert _endpoint_error(config.get_available_models(), "custom:ghost") is not None, (
             "a failed lookup must leave the diagnostic intact"
         )
 
 
-def test_reprobe_scope_is_per_provider(monkeypatch, tmp_path):
+def test_reprobe_scope_is_per_provider(monkeypatch, tmp_path, _reprobe_threads):
     """Two errored providers are probed independently, not one shared probe."""
     probed: list[str] = []
     lock = threading.Lock()
 
-    def _fake_reprobe(provider_id: str):
+    def _fake_reprobe(request):
         with lock:
-            probed.append(provider_id)
-        return [{"id": f"{provider_id}-model", "label": f"{provider_id}-model"}], None
+            probed.append(request.provider_id)
+        return [{"id": f"{request.provider_id}-model", "label": "m"}], None
 
     monkeypatch.setattr(config, "_reprobe_provider_endpoint", _fake_reprobe)
     _expire_retries(monkeypatch, 0.0)
 
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         monkeypatch.setattr(
             config, "_models_cache_path", tmp_path / "models_cache.json"
         )
@@ -535,21 +622,17 @@ def test_reprobe_scope_is_per_provider(monkeypatch, tmp_path):
         # not depend on the probe order of one rebuild.
         expired = config._custom_endpoint_error("x")
         expired["checked_at"] = time.time() - 3600
-        groups = [
-            {"provider": "Alpha", "provider_id": "custom:alpha", "models": [],
-             "models_endpoint_error": dict(expired)},
-            {"provider": "Beta", "provider_id": "custom:beta", "models": [],
-             "models_endpoint_error": dict(expired)},
-        ]
-        config._available_models_cache = {
+        _publish_test_catalog({
             "active_provider": "openai-codex",
             "default_model": "gpt-5.5",
             "configured_model_badges": {},
-            "groups": groups,
-        }
-        config._available_models_cache_ts = time.monotonic()
-        config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
-        config._sync_models_cache_provenance()
+            "groups": [
+                {"provider": "Alpha", "provider_id": "custom:alpha", "models": [],
+                 "models_endpoint_error": dict(expired)},
+                {"provider": "Beta", "provider_id": "custom:beta", "models": [],
+                 "models_endpoint_error": dict(expired)},
+            ],
+        })
 
         config.get_available_models()
         assert _wait_for(lambda: len(probed) >= 2), f"both providers must be retried; got {probed}"
@@ -580,7 +663,7 @@ def test_reprobe_coalescing_key_includes_the_profile(monkeypatch):
     )
 
 
-def test_late_result_from_superseded_generation_is_discarded(monkeypatch, tmp_path):
+def test_late_result_from_superseded_generation_is_discarded(monkeypatch, tmp_path, _reprobe_threads):
     """A probe that finishes after the catalog was rebuilt must not be applied.
 
     The reporter's stage C (the manual per-provider refresh) allocates a new
@@ -601,7 +684,7 @@ def test_late_result_from_superseded_generation_is_discarded(monkeypatch, tmp_pa
     monkeypatch.setattr(config, "_reprobe_provider_endpoint", _slow_reprobe)
     _expire_retries(monkeypatch, 0.0)
 
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _configure_named_custom_provider(
             tmp_path, monkeypatch, base_url="https://broken.example/v1"
         )
@@ -639,41 +722,67 @@ def test_late_result_from_superseded_generation_is_discarded(monkeypatch, tmp_pa
 def _seed_expired_diagnostic(*, with_models=False, stamp_age=3600.0) -> None:
     expired = config._custom_endpoint_error("broken-proxy")
     expired["checked_at"] = time.time() - stamp_age
-    groups = [
-        {
-            "provider": "Broken Proxy",
-            "provider_id": _UNRESOLVABLE,
-            "models": ([{"id": "@custom:broken-proxy:sticky", "label": "sticky"}] if with_models else []),
-            "models_endpoint_error": expired,
-        },
-        {"provider": "Other", "provider_id": "custom:other", "models": []},
-    ]
-    config._available_models_cache = {
+    _publish_test_catalog({
         "active_provider": "openai-codex",
         "default_model": "gpt-5.5",
         "configured_model_badges": {},
-        "groups": groups,
-    }
-    config._available_models_cache_ts = time.monotonic()
-    config._available_models_cache_source_fingerprint = config._models_cache_source_fingerprint()
-    config._sync_models_cache_provenance()
+        "groups": [
+            {
+                "provider": "Broken Proxy",
+                "provider_id": _UNRESOLVABLE,
+                "models": ([{"id": "@custom:broken-proxy:sticky", "label": "sticky"}] if with_models else []),
+                "models_endpoint_error": expired,
+            },
+            {"provider": "Other", "provider_id": "custom:other", "models": []},
+        ],
+    })
 
 
-def test_live_probe_success_clears_the_cached_diagnostic(monkeypatch, tmp_path):
+def _run_live_probe(monkeypatch, provider_id: str, *, body=None, raises=None):
+    """Drive the real ``/api/models/live`` handler for one custom provider.
+
+    Going through the handler (rather than calling the clear helper) is the point:
+    it is the handler that captures the probe identity before the request and
+    decides what counts as success evidence, so a helper-only test would stay green
+    even if the handler wiring were removed.
+    """
+    import api.routes as routes
+    from tests.test_issue3718_live_models_custom_probe import _install_provider_model_ids
+
+    routes._clear_live_models_cache()
+    monkeypatch.setattr(
+        routes, "j", lambda _handler, payload, **_kw: payload
+    )
+    _install_provider_model_ids(monkeypatch, lambda _provider: [])
+
+    def _urlopen(_req, **_kwargs):
+        if raises is not None:
+            raise raises
+        return _FakeResponse(json.dumps(body).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+    return routes._handle_live_models(
+        object(), urlparse(f"/api/models/live?provider={provider_id}")
+    )
+
+
+def test_live_probe_success_clears_the_cached_diagnostic(monkeypatch, tmp_path, _reprobe_threads):
     """A successful /api/models/live probe clears the same provider's diagnostic.
 
     This is the reporter's exact situation: ``/api/models/live`` already
     succeeded while the catalog kept reporting "unreachable", because the live
     path never touched the group's cached diagnostic.
     """
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _configure_named_custom_provider(
             tmp_path, monkeypatch, base_url="https://broken.example/v1"
         )
         _seed_expired_diagnostic(with_models=True)
         assert _endpoint_error(config.get_available_models()) is not None
 
-        assert config.clear_models_endpoint_error_for_provider("custom:broken-proxy") is True
+        _run_live_probe(
+            monkeypatch, _UNRESOLVABLE, body={"data": [{"id": "broken-proxy-model"}]}
+        )
         assert _endpoint_error(config.get_available_models()) is None
 
         # The zero-model error group itself is the #7521 contract: keep it.
@@ -681,37 +790,62 @@ def test_live_probe_success_clears_the_cached_diagnostic(monkeypatch, tmp_path):
         assert group is not None, "clearing the diagnostic must not drop the group"
 
 
-def test_clearing_keeps_the_zero_model_error_group(monkeypatch, tmp_path):
+def test_clearing_keeps_the_zero_model_error_group(monkeypatch, tmp_path, _reprobe_threads):
     """Clearing must not silently drop an empty provider group (#7521)."""
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _configure_named_custom_provider(
             tmp_path, monkeypatch, base_url="https://broken.example/v1"
         )
         _seed_expired_diagnostic(with_models=False)
         assert _groups_by_provider(config.get_available_models())[_UNRESOLVABLE]["models"] == []
 
-        assert config.clear_models_endpoint_error_for_provider(_UNRESOLVABLE) is True
+        # A well-formed but empty answer: the endpoint replied, so it is not
+        # unreachable — yet the group has no models to show.
+        _run_live_probe(monkeypatch, _UNRESOLVABLE, body={"data": []})
         served = config.get_available_models()
         assert _UNRESOLVABLE in _groups_by_provider(served), (
             "the intentionally-retained zero-model error group must survive the clear"
         )
 
 
-def test_clearing_an_unaffected_other_provider_is_a_noop(monkeypatch, tmp_path):
+def test_failed_live_probe_keeps_the_diagnostic(monkeypatch, tmp_path, _reprobe_threads):
+    """A transport failure is not recovery evidence — the diagnostic stays."""
+    with _ConfigState(_reprobe_threads):
+        _configure_named_custom_provider(
+            tmp_path, monkeypatch, base_url="https://broken.example/v1"
+        )
+        _seed_expired_diagnostic(with_models=True)
+        before = _endpoint_error(config.get_available_models())
+
+        _run_live_probe(
+            monkeypatch, _UNRESOLVABLE, raises=urllib.error.URLError("still down")
+        )
+        after = _endpoint_error(config.get_available_models())
+        assert after is not None, "a failed live probe must not clear the diagnostic"
+        # The stamp may legitimately advance: the expired diagnostic also has a
+        # background re-probe in flight, and a failed re-probe re-stamps. What
+        # must not change is that the diagnostic still describes the failure.
+        assert (after["kind"], after["code"], after["message"]) == (
+            before["kind"], before["code"], before["message"]
+        )
+
+
+def test_clearing_an_unaffected_other_provider_is_a_noop(monkeypatch, tmp_path, _reprobe_threads):
     """The clear is scoped: a sibling provider's diagnostic is untouched."""
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _configure_named_custom_provider(
             tmp_path, monkeypatch, base_url="https://broken.example/v1"
         )
         _seed_expired_diagnostic(with_models=True)
 
-        assert config.clear_models_endpoint_error_for_provider("custom:unrelated") is False
+        identity = config.capture_live_probe_identity()
+        assert config.clear_models_endpoint_error_for_provider("custom:unrelated", identity) is False
         assert _endpoint_error(config.get_available_models()) is not None
         # And the failed lookup must not have rewritten the snapshot.
         assert config._available_models_cache_ts > 0.0
 
 
-def test_disk_borne_diagnostic_is_retried_from_the_read_that_serves_it(monkeypatch, tmp_path):
+def test_disk_borne_diagnostic_is_retried_from_the_read_that_serves_it(monkeypatch, tmp_path, _reprobe_threads):
     """A diagnostic restored from the durable catalog is retried immediately.
 
     After a restart the picker is served straight from ``models_cache.json``
@@ -723,7 +857,7 @@ def test_disk_borne_diagnostic_is_retried_from_the_read_that_serves_it(monkeypat
     monkeypatch.setattr(urllib.request, "urlopen", probe)
     _expire_retries(monkeypatch, 3600.0)
 
-    with _ConfigState():
+    with _ConfigState(_reprobe_threads):
         _configure_named_custom_provider(
             tmp_path, monkeypatch, base_url="https://broken.example/v1"
         )
@@ -756,7 +890,7 @@ def test_disk_borne_diagnostic_is_retried_from_the_read_that_serves_it(monkeypat
         ), "the read that served a durable diagnostic must start the retry"
 
 
-def test_missing_stamp_counts_as_expired(monkeypatch, tmp_path):
+def test_missing_stamp_counts_as_expired(monkeypatch, tmp_path, _reprobe_threads):
     """A pre-upgrade cache has no stamp, so its first read must re-probe.
 
     The declared default for the open schema question: a diagnostic written

@@ -28,7 +28,7 @@ import urllib.request
 import uuid
 import weakref
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
@@ -6903,6 +6903,13 @@ def _custom_provider_probe_credentials(entry: dict, slug: str) -> tuple[str, str
         key_env = str(entry.get("key_env") or "").strip()
         if key_env:
             api_key = _thread_local_env_value(key_env).strip()
+    # ``hermes config set`` and hand-edited configs can persist the ``${VAR}``
+    # indirection literal. Config load normally expands it, but a consumer that
+    # reads the entry without that pass (the #8158 retry resolves from an already
+    # loaded shared cfg) must still send a real credential rather than the
+    # unexpanded placeholder. Mirrors ``_custom_provider_api_key`` in routes.
+    if api_key.startswith("${") and api_key.endswith("}") and len(api_key) > 3:
+        api_key = _thread_local_env_value(api_key[2:-1]).strip()
     # Fallback: check credential pool for both api_key and base_url
     if (not api_key or not base_url) and slug:
         try:
@@ -9264,8 +9271,14 @@ class _DeferredCatalogPublication:
         return False
 
 
-def _get_fresh_memory_models_cache(now: float) -> dict | None:
-    """Return a valid fresh in-memory /api/models cache, or clear stale shapes."""
+def _get_fresh_memory_models_cache(now: float, *, allow_reprobe: bool = True) -> dict | None:
+    """Return a valid fresh in-memory /api/models cache, or clear stale shapes.
+
+    ``allow_reprobe=False`` serves the same payload without scheduling a
+    diagnostic re-probe. Cache-only callers (``prefer_cache=True``) must use it:
+    their contract is to answer from cache and never start provider I/O, so an
+    expired diagnostic is left for a normal read to refresh.
+    """
     global _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
     if _available_models_cache is None:
@@ -9286,7 +9299,8 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
         _sync_models_cache_provenance()
         return None
     if _is_valid_models_cache(_available_models_cache):
-        _schedule_expired_endpoint_error_reprobes(_available_models_cache)
+        if allow_reprobe:
+            _schedule_expired_endpoint_error_reprobes(_available_models_cache)
         return _annotate_fast_tier_model_groups(copy.deepcopy(_available_models_cache))
     _available_models_cache = None
     _available_models_cache_ts = 0.0
@@ -9377,16 +9391,105 @@ def _schedule_expired_endpoint_error_reprobes(cache: object) -> None:
         _schedule_models_endpoint_error_reprobe(provider_id)
 
 
+class _EndpointProbeRequest(NamedTuple):
+    """Everything one re-probe needs, resolved on the *scheduling* thread.
+
+    The retry must not re-read the process-shared ``cfg`` from its worker: the
+    worker inherits neither the request-profile TLS nor the profile environment,
+    and by the time it runs another request may have loaded a different profile's
+    config into the shared cache — so a late lookup can pair profile A's secret
+    with profile B's URL (#8158 review). Resolving here, where the caller's TLS is
+    valid, and then probing exactly these values keeps endpoint, credential and
+    source identity from one single owner.
+
+    ``fingerprint`` is the published catalog's source fingerprint (the snapshot
+    this retry intends to modify); ``rebuild_seq`` is the generation captured
+    before the worker starts. Both are re-validated at publication.
+    """
+
+    provider_id: str
+    base_url: str
+    api_key: str
+    profile: str
+    fingerprint: object
+    rebuild_seq: int
+
+
+def _resolve_endpoint_probe_request(provider_id: str) -> _EndpointProbeRequest | None:
+    """Resolve one provider's probe request, or ``None`` when it is not configured.
+
+    ``None`` means "there is nothing to probe here" — a distinct outcome from
+    "probed and it answered with nothing", because only the latter is evidence
+    about the endpoint. Entry resolution goes through
+    ``_named_custom_provider_slug_for_provider()``, the existing chokepoint that
+    maps a provider id back to its configured entry, so this re-probe and the
+    catalog rebuild that produced the diagnostic agree on which entry an id
+    belongs to. Credentials resolve through the shared
+    ``_custom_provider_probe_credentials()`` so a ``key_env`` provider is probed
+    with the same credential the rebuild used.
+
+    Resolution runs inside the active profile's environment scope, because that
+    is what a ``key_env`` / ``${VAR}`` credential is read from. Doing it here, on
+    the calling request thread, is the whole point: the worker may run after
+    another profile has loaded its config, and it must not resolve anything.
+    """
+    slug = str(provider_id or "").strip().lower()
+    if not slug:
+        return None
+    try:
+        from contextlib import nullcontext
+
+        from api.profiles import profile_env_for_active_request
+
+        env_scope = profile_env_for_active_request("models endpoint re-probe resolve")
+    except Exception:
+        env_scope = nullcontext()
+
+    with env_scope:
+        if not _named_custom_provider_slug_for_provider(slug):
+            return None
+        for entry in _custom_provider_entries():
+            if _custom_provider_slug_from_name(entry.get("name") or "") != slug:
+                continue
+            base_url, api_key = _custom_provider_probe_credentials(entry, slug)
+            if not base_url:
+                # The entry exists but has no endpoint to probe: same "no evidence
+                # about the endpoint" case as an unmatched id.
+                return None
+            try:
+                from api.profiles import get_active_profile_name
+
+                profile = (get_active_profile_name() or "").strip()
+            except Exception:
+                profile = ""
+            return _EndpointProbeRequest(
+                provider_id=slug,
+                base_url=base_url,
+                api_key=api_key,
+                profile=profile,
+                fingerprint=_available_models_cache_source_fingerprint,
+                rebuild_seq=_models_rebuild_seq,
+            )
+    return None
+
+
 def _schedule_models_endpoint_error_reprobe(provider_id: str) -> None:
     """Start (or coalesce onto) a background refresh of one provider's diagnostic.
 
     Non-blocking by design: the caller holds the catalog lock on a read path, so
-    this only registers the scope and hands the work to a daemon thread. A second
-    reader that finds the same provider expired joins the in-flight probe instead
-    of issuing another one.
+    this only resolves the request, registers the scope and hands the work to a
+    daemon thread. A second reader that finds the same provider expired joins the
+    in-flight probe instead of issuing another one.
+
+    Resolution happens HERE, on the calling thread, and the resolved request is
+    what the worker uses; an unconfigured provider schedules nothing at all (the
+    diagnostic is left untouched rather than cleared on a failed lookup).
     """
     scope = _reprobe_scope_key(provider_id)
     if not scope[1]:
+        return
+    request = _resolve_endpoint_probe_request(provider_id)
+    if request is None:
         return
     with _models_endpoint_reprobe_lock:
         if scope in _models_endpoint_reprobe_inflight:
@@ -9395,7 +9498,7 @@ def _schedule_models_endpoint_error_reprobe(provider_id: str) -> None:
     try:
         threading.Thread(
             target=_models_endpoint_error_reprobe_worker,
-            args=(provider_id, scope),
+            args=(request,),
             name="models-endpoint-error-reprobe",
             daemon=True,
         ).start()
@@ -9407,25 +9510,66 @@ def _schedule_models_endpoint_error_reprobe(provider_id: str) -> None:
         logger.debug("models endpoint re-probe could not start", exc_info=True)
 
 
-def _models_endpoint_error_reprobe_worker(provider_id: str, scope: tuple[str, str]) -> None:
+def _endpoint_reprobe_target_is_current(request: "_EndpointProbeRequest | _LiveProbeIdentity") -> bool:
+    """True when a probe result may still be applied to the published catalog.
+
+    One predicate for both writers of a diagnostic (the background re-probe and
+    the live-probe clear), so neither can drift into a weaker check than the
+    other. Three questions, because they fail differently:
+
+    * Was a newer generation allocated? (``_models_rebuild_superseded``) —
+      catches an invalidation or a newer rebuild.
+    * Is the published catalog still the one this probe was scheduled for?
+      Comparing fingerprints catches the case where another profile republished
+      the process-global cache without advancing the generation
+      (``warm_models_catalog_provenance_if_cold``). The worker's own TLS is still
+      its own profile, so a worker-identity check alone cannot see that the
+      *target* changed owner.
+    * Are the runtime sources and active profile still the captured ones?
+      (``_models_build_identity_current``)
+
+    The caller must hold ``_cache_build_cv``. Fails CLOSED: any identity that
+    cannot be read is not treated as a match.
+    """
+    if _models_rebuild_superseded(request.rebuild_seq):
+        return False
+    if _available_models_cache_source_fingerprint != request.fingerprint:
+        return False
+    profile = getattr(request, "profile", "") or ""
+    if profile:
+        return _models_build_identity_current(request.fingerprint, profile)
+    return True
+
+
+def _models_endpoint_error_reprobe_worker(request: _EndpointProbeRequest) -> None:
     """Re-probe one expired diagnostic and publish under the catalog fences.
 
-    The fence is what keeps a slow probe from resurrecting stale state: the
-    generation captured when the probe was scheduled must still be the newest
-    allocated one, and the sources/profile it was read from must still be current,
-    or the result is dropped (#7481/#8158). A late result from a superseded
-    catalog generation is discarded, never merged into the catalog that replaced
-    it. Publishing is memory-only — the durable snapshot stays a catalog snapshot,
-    and a disk-borne diagnostic expires on its own stamp.
+    The fences keep a slow probe from resurrecting stale state, and there are
+    three of them because they answer three different questions (#7481/#8158):
+
+    * ``_models_rebuild_superseded`` — is this still the newest *allocated*
+      generation? Catches an invalidation or a newer rebuild.
+    * published-fingerprint match — does the snapshot currently in the cache still
+      belong to the sources this probe was scheduled for? This is the check that
+      matters when another profile republishes the process-global cache without
+      advancing the generation (``warm_models_catalog_provenance_if_cold``): the
+      worker's own TLS is still its own profile, so the identity check alone
+      cannot see that the *target* changed owner.
+    * ``_models_build_identity_current`` — are the runtime sources and the active
+      profile still the ones captured?
+
+    A result that fails any of these is discarded. Publishing is memory-only — the
+    durable snapshot stays a catalog snapshot, and a disk-borne diagnostic expires
+    on its own stamp.
     """
+    profile = request.profile
+    scope = (profile, request.provider_id)
     try:
         from contextlib import nullcontext
 
-        # Bind the profile captured at scheduling time: the daemon inherits
-        # neither the request-profile TLS nor the profile environment, so a
-        # ``key_env`` credential would otherwise resolve against the wrong
-        # profile (#3957).
-        profile = scope[0]
+        # Bind the profile captured at scheduling time so any credential or config
+        # helper reached from here still resolves against the owning profile
+        # (#3957). The probe itself uses only the resolved request fields.
         try:
             from api.profiles import profile_scope_for_detached_worker
 
@@ -9438,68 +9582,52 @@ def _models_endpoint_error_reprobe_worker(provider_id: str, scope: tuple[str, st
             worker_scope = nullcontext()
 
         with worker_scope:
-            with _cache_build_cv:
-                rebuild_seq = _models_rebuild_seq
-                build_fingerprint = _available_models_cache_source_fingerprint
-            outcome = _reprobe_provider_endpoint(provider_id)
-            if outcome is None:
-                # No such configured entry: there is nothing to probe and no
-                # evidence the endpoint recovered, so the diagnostic is left
-                # exactly as it is. Reporting this as an empty success would
-                # clear a real diagnostic on the strength of a failed lookup.
+            # Fence BEFORE spending the request, then again before publishing.
+            # A generation that advanced (or a catalog that changed owner) while
+            # this worker was starting means its result could never be applied,
+            # so probing would be pure cost against an endpoint the user may no
+            # longer have configured.
+            if not _endpoint_reprobe_target_is_current(request):
+                logger.debug(
+                    "skipping models endpoint re-probe for %s: target catalog "
+                    "already superseded before the probe started",
+                    request.provider_id,
+                )
                 return
-            models, error = outcome
+            models, error = _reprobe_provider_endpoint(request)
             with _cache_build_cv:
-                if _models_rebuild_superseded(rebuild_seq):
+                if not _endpoint_reprobe_target_is_current(request):
                     logger.debug(
-                        "discarding models endpoint re-probe for %s: superseded "
-                        "generation %d (latest allocated %d)",
-                        provider_id, rebuild_seq, _models_rebuild_seq,
+                        "discarding models endpoint re-probe for %s: target catalog "
+                        "was superseded or changed owner while it ran",
+                        request.provider_id,
                     )
                     return
-                if not _models_build_identity_current(build_fingerprint, scope[0] or None):
-                    logger.debug(
-                        "discarding models endpoint re-probe for %s: sources or "
-                        "profile changed while it ran",
-                        provider_id,
-                    )
-                    return
-                _apply_endpoint_reprobe_result(provider_id, models, error)
+                _apply_endpoint_reprobe_result(request.provider_id, models, error)
     except Exception:
-        logger.debug("models endpoint re-probe failed for %s", provider_id, exc_info=True)
+        logger.debug(
+            "models endpoint re-probe failed for %s", request.provider_id, exc_info=True
+        )
     finally:
         with _models_endpoint_reprobe_lock:
             _models_endpoint_reprobe_inflight.pop(scope, None)
 
 
-def _reprobe_provider_endpoint(provider_id: str) -> tuple[list[dict], dict | None] | None:
-    """Probe ``provider_id``'s own configured endpoint via the shared helpers.
+def _reprobe_provider_endpoint(
+    request: _EndpointProbeRequest,
+) -> tuple[list[dict], dict | None]:
+    """Probe exactly the endpoint this request was resolved for.
 
-    Returns ``None`` when the id does not resolve to a configured custom provider
-    — a distinct outcome from "probed and it answered with nothing", because only
-    the latter is evidence about the endpoint. Entry resolution goes through
-    ``_named_custom_provider_slug_for_provider()``, the existing chokepoint that
-    maps a provider id back to its configured entry, so this re-probe and the
-    catalog rebuild that produced the diagnostic agree on which entry an id
-    belongs to.
+    Deliberately reads nothing from the shared config: the endpoint, credential
+    and trusted-host set all come from the request snapshot taken on the owning
+    profile's thread (#8158 review).
     """
-    slug = str(provider_id or "").strip().lower()
-    if not slug:
-        return None
-    if not _named_custom_provider_slug_for_provider(slug):
-        return None
-    for entry in _custom_provider_entries():
-        if _custom_provider_slug_from_name(entry.get("name") or "") != slug:
-            continue
-        base_url, api_key = _custom_provider_probe_credentials(entry, slug)
-        if not base_url:
-            # The entry exists but has no endpoint to probe: same "no evidence
-            # about the endpoint" case as an unmatched id.
-            return None
-        return _probe_custom_endpoint_models_now(
-            base_url, slug, api_key=api_key, trusted_base_urls=(base_url,)
-        )
-    return None
+    return _probe_custom_endpoint_models_now(
+        request.base_url,
+        request.provider_id,
+        api_key=request.api_key,
+        trusted_base_urls=(request.base_url,),
+    )
 
 
 def _republish_provider_group(provider_id: str, mutate) -> bool:
@@ -9605,7 +9733,39 @@ def _apply_endpoint_reprobe_result(
             logger.debug("models endpoint re-probe for %s still failing", provider_id)
 
 
-def clear_models_endpoint_error_for_provider(provider_id: str) -> bool:
+class _LiveProbeIdentity(NamedTuple):
+    """Identity captured on the request thread before a live probe is issued."""
+
+    profile: str
+    fingerprint: object
+    rebuild_seq: int
+
+
+def capture_live_probe_identity() -> _LiveProbeIdentity:
+    """Capture the identity a live probe's success may be credited to.
+
+    Call this BEFORE issuing the live network request. A request can outlive the
+    catalog generation it started in — the config may be edited, the cache
+    invalidated and a new diagnostic published while the HTTP call is in flight —
+    so the success must be attributed to the state it actually observed, not to
+    whatever happens to be published when the response lands (#8158 review).
+    """
+    try:
+        from api.profiles import get_active_profile_name
+
+        profile = (get_active_profile_name() or "").strip()
+    except Exception:
+        profile = ""
+    return _LiveProbeIdentity(
+        profile=profile,
+        fingerprint=_available_models_cache_source_fingerprint,
+        rebuild_seq=_models_rebuild_seq,
+    )
+
+
+def clear_models_endpoint_error_for_provider(
+    provider_id: str, identity: _LiveProbeIdentity
+) -> bool:
     """Clear a cached probe diagnostic after a successful same-owner live probe.
 
     ``/api/models/live`` already re-probes a custom provider and already succeeds
@@ -9615,8 +9775,15 @@ def clear_models_endpoint_error_for_provider(provider_id: str) -> bool:
 
     Only the diagnostic is cleared — never the group, and never a still-failing
     one: an empty group with ``models_endpoint_error`` is deliberately retained so
-    the picker can explain the failure (#7521). Returns True when a diagnostic was
-    actually removed.
+    the picker can explain the failure (#7521).
+
+    ``identity`` is REQUIRED and is the capture taken before the live request was
+    issued. A successful response is evidence about the endpoint that request
+    reached, so it may only be credited to the catalog generation it started in:
+    if the generation advanced, or the published catalog changed owner, while the
+    request was in flight, the clear is refused. Making the argument mandatory is
+    deliberate — an unfenced clear would let a late response erase a newer, still
+    valid diagnostic. Returns True when a diagnostic was actually removed.
     """
     def _mutate(group: dict) -> dict | None:
         if group.pop("models_endpoint_error", None) is None:
@@ -9624,6 +9791,13 @@ def clear_models_endpoint_error_for_provider(provider_id: str) -> bool:
         return group
 
     with _cache_build_cv:
+        if not _endpoint_reprobe_target_is_current(identity):
+            logger.debug(
+                "not clearing models endpoint error for %s: the catalog moved on "
+                "while the live probe ran",
+                provider_id,
+            )
+            return False
         return _republish_provider_group(provider_id, _mutate)
 
 
@@ -11710,7 +11884,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 lambda: not _cache_build_in_progress,
                 timeout=wait_timeout
             )
-            cached = _get_fresh_memory_models_cache(time.monotonic())
+            cached = _get_fresh_memory_models_cache(
+                time.monotonic(), allow_reprobe=not prefer_cache
+            )
             if (
                 cached is not None
                 and (
@@ -11740,7 +11916,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
         # Serve from memory cache if fresh
         now = time.monotonic()
-        cached = _get_fresh_memory_models_cache(now)
+        cached = _get_fresh_memory_models_cache(now, allow_reprobe=not prefer_cache)
         if cached is not None:
             if not force_refresh:
                 return cached
@@ -11769,7 +11945,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     lambda: not _cache_build_in_progress,
                     timeout=remaining_budget,
                 )
-                cached = _get_fresh_memory_models_cache(time.monotonic())
+                cached = _get_fresh_memory_models_cache(
+                    time.monotonic(), allow_reprobe=not prefer_cache
+                )
                 if (
                     cached is not None
                     and _available_models_live_rebuild_ts >= force_refresh_started_at
@@ -11789,8 +11967,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # A durable snapshot can carry a diagnostic from before the restart,
             # which no source axis can invalidate. Serving it here must still start
             # the bounded retry, or the first read after a boot would re-serve the
-            # stale message until the next request (#8158).
-            _schedule_expired_endpoint_error_reprobes(_available_models_cache)
+            # stale message until the next request (#8158). Cache-only callers are
+            # exempt: their contract is to answer without starting provider I/O.
+            if not prefer_cache:
+                _schedule_expired_endpoint_error_reprobes(_available_models_cache)
             return copy.deepcopy(disk_groups)
 
         # ── prefer_cache: NEVER run the live provider rebuild ────────────────

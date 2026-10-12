@@ -23177,30 +23177,53 @@ def _handle_live_models(handler, parsed):
                             _models_url,
                             headers={"Authorization": f"Bearer {_api_key}"},
                         )
-                        
+
+                        # #8158: capture the identity this request is being made
+                        # under, BEFORE the network call. The response may land
+                        # after a config edit, an invalidation and a new
+                        # diagnostic — and it is evidence about the endpoint it
+                        # actually reached, not about whatever is published later.
+                        from api.config import (
+                            capture_live_probe_identity,
+                            clear_models_endpoint_error_for_provider,
+                        )
+                        _probe_identity = capture_live_probe_identity()
+
                         with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
                             _body = json.loads(_resp.read())
-                        
+
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
+                        # A well-formed answer is success evidence even when it
+                        # lists nothing: the endpoint answered, so it is not
+                        # unreachable. An absent/malformed ``data`` key is NOT —
+                        # that is a response we could not read, not an endpoint
+                        # telling us it has no models.
+                        _payload_ok = False
                         if isinstance(_body, dict):
-                            _data = _body.get("data", [])
+                            _data = _body.get("data")
                             if isinstance(_data, list):
+                                _payload_ok = all(isinstance(m, dict) for m in _data)
                                 ids = [m.get("id", "") for m in _data if m.get("id")]
                         elif isinstance(_body, list):
+                            _payload_ok = all(isinstance(m, (dict, str)) for m in _body)
                             ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
 
                         if ids:
                             logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
+                        elif _payload_ok:
+                            logger.debug("Custom provider returned no models from %s", _base_url)
+
+                        if _payload_ok:
                             # #8158: this provider's endpoint answered, so the
-                            # catalog's "unreachable" diagnostic for it is stale.
+                            # catalog's reachability diagnostic for it is stale.
                             # Clear it here — the live path is the one place that
                             # both re-probes and knows the same provider succeeded.
                             # The group itself is kept (#7521), so an errored
                             # zero-model group survives with the diagnostic gone.
-                            from api.config import clear_models_endpoint_error_for_provider
-                            clear_models_endpoint_error_for_provider(provider)
-                        else:
-                            logger.debug("Custom provider returned no models from %s", _base_url)
+                            # The captured identity fences the clear: a response
+                            # that observed a superseded config must not erase a
+                            # newer diagnostic.
+                            clear_models_endpoint_error_for_provider(provider, _probe_identity)
 
                     except Exception as _fetch_err:
                         logger.debug("Live fetch from custom provider failed: %s", _fetch_err)

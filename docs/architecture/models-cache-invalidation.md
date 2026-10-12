@@ -84,21 +84,47 @@ report "verify base_url" for a full day against a correct `base_url` (#8158).
   keyed by profile *and* provider, because the catalog globals are process-wide
   and a same-slug provider in another profile has different credentials and a
   different endpoint. Concurrent readers join the in-flight probe.
-- **Fenced**: a re-probe result is published only when its generation is still the
-  newest allocated one (`_models_rebuild_seq`) and its sources/profile are
-  unchanged (`_models_build_identity_current`), so a late result from a
-  superseded catalog generation is discarded rather than merged into its
-  successor.
+- **Cache-only reads never re-probe.** `_get_fresh_memory_models_cache()` takes
+  `allow_reprobe`, and `get_available_models(prefer_cache=True)` passes `False` on
+  both its memory and its disk path. The `prefer_cache` contract is to answer
+  without starting provider I/O (the wakeup-turn path depends on it), so an
+  expired diagnostic is left for a normal read to refresh.
+- **Resolved on the owning thread, never re-read by the worker.** A re-probe's
+  request — endpoint URL, credential, profile — is resolved in
+  `_resolve_endpoint_probe_request()` on the calling request thread, inside that
+  profile's environment scope, and the worker replays exactly those values
+  (`_EndpointProbeRequest`). The worker must not consult the process-shared `cfg`:
+  the catalog globals are process-wide, so another profile's request can load its
+  config after scheduling, and a late lookup would pair one profile's secret with
+  another profile's URL. Resolution consumes `${VAR}` indirection and `key_env`
+  the same way the rebuild does.
+- **Fenced**: a re-probe result is published only when all three still hold —
+  its generation is still the newest allocated one (`_models_rebuild_seq`), the
+  *published catalog's* fingerprint is still the one the probe was scheduled for,
+  and the runtime sources/profile are unchanged
+  (`_models_build_identity_current`). The published-fingerprint check is what
+  catches a catalog whose owner changed without a new generation
+  (`warm_models_catalog_provenance_if_cold()` republishing another profile's
+  snapshot); a worker-identity check alone cannot see that. The same predicate
+  (`_endpoint_reprobe_target_is_current`) fences the live-probe clear, so neither
+  writer can drift into a weaker check than the other, and the check runs both
+  before the request is spent and again before publishing.
 - **Copy-on-write**: merging a result republishes a new snapshot instead of
   editing the cached dict in place. The snapshot doubles as the
   `_models_cache_provenance` identity and as `_endpoint_advertised_model_ids()`'s
   memo key, so an in-place edit would leave that memo describing a payload it no
   longer matches.
-- **Cleared by a healthy live probe**: a successful same-owner
-  `/api/models/live` probe clears the diagnostic in place
-  (`clear_models_endpoint_error_for_provider`). The group itself is never
-  dropped — an empty group carrying `models_endpoint_error` stays for the
-  auxiliary pickers (#7521).
+- **Cleared by a healthy live probe**: `/api/models/live` captures an identity
+  (`capture_live_probe_identity()`) *before* issuing its request and passes it to
+  `clear_models_endpoint_error_for_provider(provider_id, identity)`; the identity
+  argument is required, and a clear that cannot confirm the generation, the
+  published owner and the profile is refused. A response that observed a
+  superseded config must not erase a newer, still-valid diagnostic. Success means
+  the request completed and the payload was well formed — a valid
+  `{"data": []}` is an answer from a reachable endpoint, while a transport error,
+  a malformed payload, or a cache hit is not. Clearing republishes the group
+  without the diagnostic; the group itself is never dropped, so an empty group
+  carrying `models_endpoint_error` stays for the auxiliary pickers (#7521).
 - **Diagnostics are not a fingerprint axis.** They are per-probe observations, so
   expiring them must not be done by adding a source axis; the generation fence
   above is what keeps a stale observation from being applied.
@@ -207,7 +233,13 @@ the degraded catalog behavior for both models and onboarding callers.
    source axis. Give the diagnostic its own bounded lifetime and fence any
    refresh with the existing generation/identity checks; do not make warm reads
    probe synchronously.
-6. This is a runtime contract: changes here update this document and are
+6. Scope every probe to one owner. Resolve a probe's endpoint and credential on
+   the thread that owns the profile (never from the process-shared `cfg` inside a
+   detached worker), and let a result modify only a catalog that still carries the
+   owner and generation it was produced for. A diagnostic writer must pass
+   `_endpoint_reprobe_target_is_current()`; cache-only callers pass
+   `allow_reprobe=False`.
+7. This is a runtime contract: changes here update this document and are
    described in the PR body. Release-note wording belongs in the PR body, not in
    `CHANGELOG.md`, which release commits own.
 
@@ -229,7 +261,18 @@ diagnostic lifetime: the reporter's failure→recovery shape as a
 warm read that does not block on the retry, concurrent readers coalescing onto
 one probe, a failed retry re-stamping, per-provider and per-profile scope, the
 stale-generation fence, the durable (boot) path, and the live-probe clear
-keeping the zero-model group.
+keeping the zero-model group. Its seeding helpers stamp the seeded catalog with
+the loaded config version, so a manually published snapshot is not discarded as
+stale by the first read.
+
+`tests/test_issue8158_models_endpoint_probe_ownership.py` covers the ownership
+boundaries: a retry keeps its own profile's endpoint and credential after another
+profile loads its config, a retry cannot write into another profile's disk
+snapshot, a retry captures its generation before the worker starts, the real
+`/api/models/live` handler clears only on well-formed answers (empty included)
+and never on a transport error, malformed payload or cache hit, a late live
+success cannot clear a newer diagnostic, and a `prefer_cache` read starts no
+retry on either the memory or the disk path.
 
 ## References
 
