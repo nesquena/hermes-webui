@@ -1695,6 +1695,26 @@ def test_blank_user_echo_is_not_a_user_turn():
     assert predicate({"role": "user", "content": [{"type": "image_url", "image_url": {}}]}) is False
 
 
+def test_blank_user_turn_predicate_itself_excludes_empty_payloads():
+    """#7681 finding 3: pin `_is_blank_user_turn` directly.
+
+    The verdict-level test cannot discriminate this branch: an empty row is also
+    caught by `_is_internal_user_row`'s "no text" guard, so removing the
+    blank-echo branch leaves the verdict unchanged. Pin the predicate itself so
+    the branch is not dead code that only looks covered.
+    """
+    sys.path.insert(0, str(REPO_ROOT))
+    with _force_mirror_mode() as anchor:
+        blank = anchor._is_blank_user_turn
+        assert blank({"role": "user", "content": "   "}) is True
+        assert blank({"role": "user", "content": ""}) is True
+        assert blank({"role": "user", "content": None}) is True
+        assert blank({"role": "user", "content": [{"type": "text", "text": "  "}]}) is True
+        assert blank({"role": "user", "content": "a real ask"}) is False
+        # A non-text part is real payload, not a blank echo.
+        assert blank({"role": "user", "content": [{"type": "image_url", "image_url": {}}]}) is False
+
+
 # ── Finding 3 (re-gate 2026-10-08): recovery nudges and summary carriers ──
 #
 # Two defects made the SQL aggregate disagree with the Agent's own count on the
