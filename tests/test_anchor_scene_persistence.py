@@ -164,6 +164,217 @@ def test_anchor_scene_persistence_round_trip_outside_provider_messages(tmp_path,
     assert hydrated[1]["_anchor_activity_scene"]["activity_rows"][0]["tool_call_id"] == "call-1"
 
 
+def _post_anchor_scene(tmp_path, monkeypatch, scene, session_id="anchorpersist-degrade"):
+    """Drive POST /api/session/anchor-scene against a tmp session dir; returns
+    (captured_payload, sidecar_json_dict)."""
+    import json as _json
+    from collections import OrderedDict as _OrderedDict
+    from types import SimpleNamespace as _SimpleNamespace
+
+    from api import models, routes
+    from api.models import Session
+
+    session_dir = tmp_path / session_id
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", _OrderedDict())
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(routes, "SESSIONS", models.SESSIONS)
+
+    session = Session(
+        session_id=session_id,
+        title="Anchor degrade",
+        messages=[
+            {"role": "user", "content": "question"},
+            {"role": "assistant", "content": scene.get("final_answer") or "final answer", "timestamp": 10.0},
+        ],
+    )
+    session.save(skip_index=True)
+
+    request_body = {
+        "session_id": session_id,
+        "stream_id": "stream-1",
+        "message_index": 1,
+        "scene": scene,
+    }
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda handler: request_body)
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda handler, payload, status=200, extra_headers=None: captured.update(
+            payload=payload, status=status
+        ) or True,
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda handler, message, status=400, extra_headers=None: captured.update(
+            payload={"error": message}, status=status
+        ) or True,
+    )
+    assert (
+        routes.handle_post(
+            _SimpleNamespace(command="POST"),
+            _SimpleNamespace(path="/api/session/anchor-scene"),
+        )
+        is True
+    )
+    raw = _json.loads((session_dir / f"{session_id}.json").read_text(encoding="utf-8"))
+    return captured, raw, routes, models
+
+
+def _thinking_row(text, **extra):
+    row = {
+        "row_id": f"thinking-{extra.get('n', 0)}",
+        "role": "thinking",
+        "kind": "reasoning",
+        "status": "completed",
+        "text": text,
+        "thinking": {
+            "text": text,
+            "preview": text[:80],
+            "dedupe_key": f"thinking:{text[:80]}",
+        },
+        "payload": {"assistant_msg_idx": 1, "text": text},
+    }
+    return row
+
+
+def test_anchor_scene_persistence_degrades_oversized_thinking_row(tmp_path, monkeypatch):
+    """#7969: a settled scene over the 256 KB cap must persist in degraded form
+    instead of being rejected whole — a long reasoning row carries its text
+    ~4x (text + thinking.text + payload.text), so dedupe alone recovers the
+    usual over-cap case."""
+    blob = "r" * 90_000
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "final_answer": "final answer",
+        "activity_rows": [_thinking_row(blob)],
+    }
+    captured, raw, routes, models = _post_anchor_scene(tmp_path, monkeypatch, scene)
+    assert captured["status"] == 200, captured["payload"]
+    assert captured["payload"]["ok"] is True
+    assert captured["payload"]["truncated"]["deduped_fields"] >= 2
+
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    persisted_row = record["scene"]["activity_rows"][0]
+    assert record["scene"]["truncated"]["deduped_fields"] >= 2
+    # The single authoritative text copy survives; the byte-for-byte fallbacks
+    # are gone.
+    assert persisted_row["text"] == blob
+    assert "thinking" not in persisted_row
+    assert persisted_row["payload"]["assistant_msg_idx"] == 1
+    assert "text" not in persisted_row["payload"]
+
+    from api.models import Session
+
+    loaded = Session.load("anchorpersist-degrade")
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        loaded.messages, loaded.anchor_activity_scenes, message_offset=0
+    )
+    hydrated_rows = hydrated[1]["_anchor_activity_scene"]["activity_rows"]
+    assert hydrated_rows[0]["role"] == "thinking"
+    assert hydrated_rows[0]["text"] == blob
+
+
+def test_anchor_scene_persistence_drops_outcome_arrays_first(tmp_path, monkeypatch):
+    """The degrade order starts with the recoverable outcome arrays: a scene
+    barely over the cap loses side_effects/artifacts and keeps every row."""
+    rows = [
+        _thinking_row("x" * 200_000, n=1),
+        {"row_id": "tool-1", "role": "tool", "kind": "tool_completed",
+         "tool_call_id": "call-1",
+         "tool": {"id": "call-1", "name": "terminal", "args": {"command": "ls"}}},
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "final_answer": "final answer",
+        "activity_rows": rows,
+        "side_effects": [{"kind": "wrote_file", "path": "a" * 70_000}],
+        "artifacts": [{"path": "b" * 20_000}],
+    }
+    captured, raw, routes, _ = _post_anchor_scene(tmp_path, monkeypatch, scene)
+    assert captured["status"] == 200, captured["payload"]
+    truncated = captured["payload"]["truncated"]
+    assert truncated["dropped_outcomes"] == ["side_effects", "artifacts"]
+
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    out = record["scene"]
+    assert out["side_effects"] == [] and out["artifacts"] == []
+    assert len(out["activity_rows"]) == 2
+
+
+def test_anchor_scene_persistence_trims_rows_when_still_over(tmp_path, monkeypatch):
+    """After dedupe and clamping, a scene that still exceeds the cap drops
+    rows by expendability and records dropped_rows instead of 400ing."""
+    # 600 rows of ~500 B each (~366 KB total): below the field-clamp floor and
+    # carrying no redundant copies, so only row trimming can fit the cap.
+    rows = [
+        {
+            "row_id": f"prose-{i}",
+            "role": "prose",
+            "kind": "process_prose",
+            "status": "completed",
+            "text": f"row-{i}: " + "n" * 480,
+        }
+        for i in range(600)
+    ]
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "final_answer": "the real final answer, kept in the message",
+        "activity_rows": rows,
+    }
+    captured, raw, routes, models = _post_anchor_scene(tmp_path, monkeypatch, scene)
+    assert captured["status"] == 200, captured["payload"]
+    truncated = captured["payload"]["truncated"]
+    assert truncated["dropped_rows"] > 0
+
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    out = record["scene"]
+    assert 0 < len(out["activity_rows"]) < 600
+    # The whole scene now sits under the persisted cap.
+    import json as _json
+    assert (
+        len(_json.dumps(out, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8"))
+        <= routes._ANCHOR_ACTIVITY_SCENE_MAX_BYTES
+    )
+
+    from api.models import Session
+
+    loaded = Session.load("anchorpersist-degrade")
+    hydrated = routes._hydrate_anchor_activity_scenes(
+        loaded.messages, loaded.anchor_activity_scenes, message_offset=0
+    )
+    assert len(hydrated[1]["_anchor_activity_scene"]["activity_rows"]) == len(
+        out["activity_rows"]
+    )
+
+
+def test_anchor_scene_persistence_under_cap_scene_not_marked(tmp_path, monkeypatch):
+    """Dedupe is a degrade-only path: a scene already under the cap round-trips
+    untouched, with no truncated marker."""
+    scene = {
+        "version": "activity_scene_v1",
+        "mode": "compact_worklog",
+        "final_answer": "final answer",
+        "activity_rows": [_thinking_row("short reasoning")],
+        "side_effects": [{"kind": "wrote_file", "path": "/tmp/x"}],
+    }
+    captured, raw, routes, _ = _post_anchor_scene(tmp_path, monkeypatch, scene)
+    assert captured["status"] == 200, captured["payload"]
+    assert "truncated" not in captured["payload"]
+    record = next(iter(raw["anchor_activity_scenes"].values()))
+    assert "truncated" not in record["scene"]
+    assert record["scene"]["activity_rows"][0]["thinking"]["text"] == "short reasoning"
+    assert record["scene"]["side_effects"] == [{"kind": "wrote_file", "path": "/tmp/x"}]
+
+
 def test_anchor_scene_persistence_rejects_cross_profile_write(tmp_path, monkeypatch):
     """#4411 security: /api/session/anchor-scene must not persist a scene onto a
     session that isn't visible to the active request profile. _get_or_materialize_session
