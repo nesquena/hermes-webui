@@ -8485,7 +8485,43 @@ def _catalog_evidence_is_incomplete(catalog: dict, groups: list[dict]) -> bool:
     return False
 
 
-def _stored_provider_has_live_credential(stored_provider: str) -> bool:
+def _stored_provider_has_live_credential(
+    stored_provider: str, profile_config: dict | None = None
+) -> bool:
+    """Return True when the stored provider still has a usable credential.
+
+    The session's OWN profile config is checked first: the generic helper reads
+    the process-global config, which on a multi-profile instance can belong to a
+    different profile and can be rebound by a concurrent profile reload while it
+    reads (Greptile P1 on #8179) — a key that exists only in this profile would
+    then look absent and the repair would swap out a working lane and persist it.
+    Env-var and credential-pool keys stay covered by the generic helper, and any
+    exception preserves the lane.
+    """
+    try:
+        if isinstance(profile_config, dict) and stored_provider:
+            from api.config import _canonicalise_provider_id
+
+            stored_canon = _canonicalise_provider_id(stored_provider)
+            providers_cfg = profile_config.get("providers")
+            if isinstance(providers_cfg, dict) and stored_canon:
+                for key, entry in providers_cfg.items():
+                    if not isinstance(entry, dict):
+                        continue
+                    if _canonicalise_provider_id(key) != stored_canon:
+                        continue
+                    if str(entry.get("api_key") or "").strip():
+                        return True
+            model_cfg = profile_config.get("model")
+            if (
+                isinstance(model_cfg, dict)
+                and stored_canon
+                and _canonicalise_provider_id(model_cfg.get("provider")) == stored_canon
+                and str(model_cfg.get("api_key") or "").strip()
+            ):
+                return True
+    except Exception:
+        return True
     try:
         return bool(provider_has_usable_credential(stored_provider))
     except Exception:
@@ -8576,7 +8612,7 @@ def _repair_foreign_session_model_provider(
             return resolved_provider
         if _catalog_evidence_is_incomplete(catalog, groups):
             return resolved_provider
-        if _stored_provider_has_live_credential(stored_provider):
+        if _stored_provider_has_live_credential(stored_provider, profile_config):
             return resolved_provider
     owners = [
         group
