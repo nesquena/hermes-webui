@@ -2658,10 +2658,16 @@ $('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
 function _applySessionContextMetadataUpdate(data){
   if(!S.session||!data||!data.session)return;
+  if(data.session.session_id!=null&&data.session.session_id!==S.session.session_id)return;
   S.session.context_length=data.session.context_length||0;
   S.session.threshold_tokens=data.session.threshold_tokens||0;
   S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
   S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
+  if(S.lastUsage&&typeof S.lastUsage==='object'){
+    if(Number(S.session.context_length)>0) S.lastUsage.context_length=S.session.context_length;
+    S.lastUsage.threshold_tokens=S.session.threshold_tokens||0;
+    if(S.session.last_prompt_tokens!=null) S.lastUsage.last_prompt_tokens=S.session.last_prompt_tokens;
+  }
   if(typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
@@ -2715,8 +2721,9 @@ $('modelSelect').onchange=async()=>{
   if(typeof showToast==='function'){
     showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
   }
+  const sessionId=S.session.session_id;
   const data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
-    session_id:S.session.session_id,
+    session_id:sessionId,
     workspace:S.session.workspace,
     model:modelState.model,
     model_provider:modelState.model_provider||null,
@@ -2726,6 +2733,9 @@ $('modelSelect').onchange=async()=>{
   // flow loses the explicit-pick signal before /api/chat/start runs and the server
   // re-reverts a cross-family pick (the #3737 bug, Codex catch). send() clears it
   // after reading a matching pending pick. (#3739/#3737)
+  // The request belongs to the captured session, even for legacy no-ID responses.
+  if(!S.session||S.session.session_id!==sessionId)return;
+  if(data&&data.session&&data.session.session_id!=null&&data.session.session_id!==sessionId)return;
   _applySessionContextMetadataUpdate(data);
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
