@@ -1028,6 +1028,55 @@ def test_required_custom_refresh_probes_without_unresolved_credentials(monkeypat
     assert routes._get_cached_live_models(key) == result
 
 
+def test_named_custom_refresh_uses_its_identity_owned_provider_record(monkeypatch):
+    import urllib.request
+    import api.config as config
+    import api.routes as routes
+
+    _prepare(monkeypatch, routes)
+    _install_provider_model_ids(monkeypatch, lambda *args, **kwargs: [])
+    cfg = {
+        "model": {
+            "provider": "custom:active",
+            "base_url": "https://active.example/v1",
+            "api_key": "active-key",
+        },
+        "providers": {
+            "custom:requested": {
+                "base_url": "https://requested.example/v1",
+                "api_key": "requested-key",
+            },
+        },
+    }
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"data":[{"id":"requested-model"}]}'
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    routes._invalidate_live_models_for_provider("custom:requested")
+    result = routes._handle_live_models(
+        object(), urlparse("/api/models/live?provider=custom:requested")
+    )
+
+    assert len(requests) == 1
+    assert requests[0].full_url == "https://requested.example/v1/models"
+    assert requests[0].get_header("Authorization") == "Bearer requested-key"
+    assert [model["id"] for model in result["models"]] == ["requested-model"]
+
+
 def test_cache_hit_invalidated_before_response_cannot_publish(monkeypatch):
     import api.routes as routes
 

@@ -23116,10 +23116,26 @@ def _handle_live_models(handler, parsed):
 
         if not ids:
             custom_provider_entry = None
+            custom_provider_bundle = None
+            if provider.startswith("custom:"):
+                try:
+                    from api.config import resolve_custom_provider_bundle
+
+                    custom_provider_bundle = resolve_custom_provider_bundle(provider)
+                    if isinstance(custom_provider_bundle, dict):
+                        custom_provider_entry = custom_provider_bundle.get("record")
+                except Exception as _custom_bundle_err:
+                    logger.debug(
+                        "Custom provider selection failed for %s: %s",
+                        provider,
+                        _custom_bundle_err,
+                    )
 
             def _custom_provider_entries_for_request():
                 if not (provider == "custom" or provider.startswith("custom:")):
                     return []
+                if provider.startswith("custom:"):
+                    return [custom_provider_entry] if isinstance(custom_provider_entry, dict) else []
                 try:
                     from api.config import _custom_provider_slug_from_name
                     _cp_entries = cfg.get("custom_providers", [])
@@ -23274,13 +23290,20 @@ def _handle_live_models(handler, parsed):
             # fallback, not a replacement.  The live endpoint should return ALL
             # models the key has access to, not just what's listed in config.yaml.
             if provider == "custom" or provider.startswith("custom:"):
-                from api.config import _resolve_custom_record_credential
+                _record_owned = provider == "custom" or isinstance(custom_provider_entry, dict)
+                if provider.startswith("custom:"):
+                    _bundle = custom_provider_bundle or {}
+                    _record = custom_provider_entry or {}
+                    _base_url = _bundle.get("base_url") if _record_owned else None
+                    _api_key = _bundle.get("api_key") if _record_owned else None
+                else:
+                    from api.config import _resolve_custom_record_credential
 
-                _record = custom_provider_entry or cfg.get("model", {})
-                _base_url = _record.get("base_url")
-                _api_key, _ = _resolve_custom_record_credential(_record, _base_url, provider)
+                    _record = custom_provider_entry or cfg.get("model", {})
+                    _base_url = _record.get("base_url")
+                    _api_key, _ = _resolve_custom_record_credential(_record, _base_url, provider)
                 # Fallback: try credential pool for base_url + api_key
-                if not _base_url or not _api_key:
+                if _record_owned and (not _base_url or not _api_key):
                     try:
                         from api.config import _has_explicit_pool_credentials
 
