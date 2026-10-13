@@ -3781,7 +3781,7 @@ const LOCALES = {
     // messages.js
     edit_message: 'メッセージを編集',
     edit_fork_title: '以前のメッセージを編集',
-    edit_fork_message: (n) => `You edited an earlier prompt. ${n} message(s) come after it. Forking keeps the original conversation intact.`,
+    edit_fork_message: (n) => `以前のプロンプトを編集しました。その後に${n}件のメッセージがあります。分岐して元の会話を保持します。`,
     edit_fork_confirm: 'ここから分岐',
     regenerate: '応答を再生成',
     copy: 'コピー',

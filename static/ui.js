@@ -21312,6 +21312,7 @@ function _lastUserMessageIndex(){
 let _submitEditInFlight = false;
 async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy || _submitEditInFlight) return;
+  if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
   _submitEditInFlight = true;
   try {
     const initialSid = S.session.session_id;
@@ -21329,6 +21330,7 @@ async function submitEdit(msgIdx, newText) {
       await _ensureAllMessagesLoaded();
     }
     if(!S.session || S.session.session_id !== initialSid) return;
+    if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
     const lastUserIdx=_lastUserMessageIndex();
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
@@ -21343,6 +21345,7 @@ async function submitEdit(msgIdx, newText) {
       });
       if(!ok) return;
       if(!S.session || S.session.session_id !== initialSid) return;
+      if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
       try{
         const data=await api('/api/session/branch',{method:'POST',body:JSON.stringify({
           session_id:initialSid,
@@ -21350,10 +21353,12 @@ async function submitEdit(msgIdx, newText) {
           draft_text:editedText,
         })});
         if(!S.session || S.session.session_id !== initialSid) return;
+        if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
         if(!data||!data.session_id) throw new Error('branch returned no session');
         const childSid=data.session_id;
         await loadSession(childSid);
         if(!S.session || S.session.session_id !== childSid) return;
+        if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
         $('msg').value=editedText;
         if(typeof autoResize==='function') autoResize();
         const childProfile=S.session.profile||sourceProfile;
@@ -21365,11 +21370,19 @@ async function submitEdit(msgIdx, newText) {
         }
         if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
         if(!S.session || S.session.session_id !== childSid) return;
-        if(typeof renderSessionList==='function') await renderSessionList();
+        if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
+        const sessionListRefresh=typeof renderSessionList==='function' ? renderSessionList() : null;
         if(!S.session || S.session.session_id!==childSid){ showToast(t('branch_forked'),3000); return; }
         _reArmRecoveryPick(childSid,_recoveryPick);
         showToast(t('branch_forked'),3000);
-        await send();
+        const sendPromise=send({textOverride:editedText,preserveComposerDraft:true,literalSlash:true});
+        if(sessionListRefresh) await sessionListRefresh;
+        await sendPromise;
+        if(
+          ($('msg').value||'').trim()||(S.pendingFiles&&S.pendingFiles.length)
+          && S.session&&S.session.session_id===childSid
+          && typeof _saveComposerDraftNow==='function'
+        ) await _saveComposerDraftNow(childSid,$('msg').value||'',S.pendingFiles);
       }catch(e){ setStatus(t('branch_failed')+(e&&e.message||e)); }
       return;
     }
@@ -21382,6 +21395,7 @@ async function submitEdit(msgIdx, newText) {
       // let this recovery apply session A's intent (truncate/re-arm/send) to the
       // newly-visible session.
       if(!S.session || S.session.session_id !== initialSid) return;
+      if(typeof _sendInProgress!=='undefined'&&_sendInProgress) return;
       S.messages = S.messages.slice(0, absoluteKeepCount);
       renderMessages();
       $('msg').value = editedText;

@@ -1296,7 +1296,7 @@ function applySessionTitleUpdate(sid, titleText, options={}){
 // BEFORE slash rewrites (/moa, bundles) mutate the payload and BEFORE
 // uploadPendingFiles() drains S.pendingFiles — so we restore what the user
 // actually typed, not the transformed send payload.
-async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPromise){
+async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPromise,preserveComposerDraft=false){
   let payload;
   try{ payload=JSON.parse(error&&error.body||'{}'); }catch(_){ return false; }
   const target=payload&&payload.continuation_session_id;
@@ -1313,7 +1313,11 @@ async function _recoverCompressedSend(error,sid,draftText,filesSnapshot,clearPro
     if(!S.session||S.session.session_id===sid) return false;
     // loadSession can lose its navigation race to another tab selection. Never
     // place the rejected message into that unrelated session's composer.
-    _restoreComposerDraftAfterFailedSend(draftText,filesSnapshot,target,clearPromise);
+    if(!preserveComposerDraft||(
+      !String($('msg').value||'').trim()
+      &&!(S.pendingFiles&&S.pendingFiles.length)
+      &&!_pendingSelections.length
+    )) _restoreComposerDraftAfterFailedSend(draftText,filesSnapshot,target,clearPromise);
     if(S.session.session_id!==target) return true;
     setComposerStatus('Session resumed. Your message is preserved; send it when ready.');
     showToast('Session resumed after compression. Your draft is preserved.',4000);
@@ -1407,15 +1411,19 @@ async function send(){
   _sendInProgress = true;
   try{
   const options=arguments[0]||{};
+  const preserveComposerDraft=!!options.preserveComposerDraft;
   const literalSlash=!!(options&&options.literalSlash);
-  let text=$('msg').value.trim();
-  if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  let text=preserveComposerDraft?String(options.textOverride||'').trim():$('msg').value.trim();
+  const sendFiles=()=>preserveComposerDraft?[]:(S.pendingFiles||[]);
+  if(!text&&!sendFiles().length&&(!preserveComposerDraft&&!_pendingSelections.length)){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
-  _flushSelectionBlocksToComposer();
-  text=$('msg').value.trim();
-  if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
-  if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
+  if(!preserveComposerDraft){
+    _flushSelectionBlocksToComposer();
+    text=$('msg').value.trim();
+  }
+  if(!text&&!sendFiles().length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,sendFiles())){
     if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
     _sendInProgress=false;_sendInProgressSid=null;
     return;
@@ -1428,7 +1436,15 @@ async function send(){
   // staged files back so the user can re-send without retyping. Captured as an
   // immutable snapshot so later reassignments to `text` don't leak into it.
   const _failedSendDraftText=text;
-  const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];
+  const _failedSendFilesSnapshot=[...sendFiles()];
+  const _restoreFailedDraft=()=>{
+    if(preserveComposerDraft&&(
+      String($('msg').value||'').trim()
+      ||(S.pendingFiles&&S.pendingFiles.length)
+      ||_pendingSelections.length
+    )) return;
+    _restoreComposerDraftAfterFailedSend(_failedSendDraftText,_failedSendFilesSnapshot,S.session&&S.session.session_id,_composerDraftClearPromise);
+  };
 
   // Dismiss handoff hint when user sends a message (resets seen_at).
   if(S.session&&S.session.session_id&&typeof _dismissHandoffHint==='function'){
@@ -1439,7 +1455,7 @@ async function send(){
   _clearStaleBusyStateBeforeSend({compressionRunning});
   // If busy or a manual compression is still running, handle based on default_message_mode
   if(S.busy||compressionRunning){
-    if(text||S.pendingFiles.length){
+    if(text||sendFiles().length){
       if(!S.session){await newSession();}
       // Busy-control slash commands must be intercepted HERE, before the
       // defaultMessageMode routing block, so the user can always type /steer, /interrupt,
@@ -1461,7 +1477,13 @@ async function send(){
           }
         }
       }
-    const defaultMessageMode=window._defaultMessageMode||'steer';
+      const defaultMessageMode=window._defaultMessageMode||'steer';
+      if(preserveComposerDraft){
+        const _modelState=_chatPayloadModelState();
+        queueSessionMessage(S.session.session_id,{text,files:[...sendFiles()],model:_modelState.model,model_provider:_modelState.model_provider,profile:S.activeProfile||'default'});
+        updateQueueBadge(S.session.session_id);
+        showToast(`Queued: "${text.slice(0,40)}${text.length>40?'…':''}"`,2000);
+      } else
       if(defaultMessageMode==='steer'&&S.activeStreamId&&typeof _trySteer==='function'){
         // Real steer: clear the input first so the user gets immediate
         // feedback, then ship the steer payload via /api/chat/steer.
@@ -1512,7 +1534,7 @@ async function send(){
   // their assistant response synchronously.  If we pushed AFTER, S.messages
   // would be [assistant, user] and the chat would show the response above
   // the user's own input — reverse chronological order (#840 ordering bug).
-  if(text.startsWith('/')&&!S.pendingFiles.length&&!literalSlash){
+  if(text.startsWith('/')&&!sendFiles().length&&!literalSlash){
     const _parsedCmd=parseCommand(text);
     const _cmd=_parsedCmd?COMMANDS.find(c=>c.name===_parsedCmd.name):null;
     if(_cmd){
@@ -1661,8 +1683,10 @@ async function send(){
   // _submittedDraftTextForClear is the sole authority for the send-time draft
   // signature from here down; no code path below re-reads $('msg').value on the
   // happy path.
-  const _submittedDraftTextForClear=$('msg').value||'';
-  $('msg').value='';autoResize();
+  const _submittedDraftTextForClear=preserveComposerDraft?text:($('msg').value||'');
+  if(preserveComposerDraft){
+    if(($('msg').value||'')===text){ $('msg').value='';autoResize(); }
+  }else{ $('msg').value='';autoResize(); }
 
   // #5912 gate CORE fix: snapshot the pending files that belong to THIS send
   // BEFORE the await, and upload exactly that snapshot. Otherwise a re-entrant /
@@ -1670,10 +1694,12 @@ async function send(){
   // S.pendingFiles and later re-uploads the first send's attachment. Detach the
   // snapshot from S.pendingFiles now so files staged AFTER this point belong to
   // the next send only.
-  const _submittedFiles=[...(S.pendingFiles||[])];
+  const _submittedFiles=[...sendFiles()];
   const _submittedDraftFilesForClear=[..._submittedFiles];
-  S.pendingFiles=[];
-  if(typeof renderTray==='function')renderTray();
+  if(!preserveComposerDraft){
+    S.pendingFiles=[];
+    if(typeof renderTray==='function')renderTray();
+  }
 
   // #5912 gate SILENT fix: clear the PERSISTED draft here — alongside the
   // textarea clear, BEFORE any await — so a new draft typed during the upload
@@ -1875,7 +1901,7 @@ async function send(){
       if(typeof renderSessionList==='function') void renderSessionList();
       return;
     }
-    if(await _recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise)) return;
+    if(await _recoverCompressedSend(e,activeSid,_failedSendDraftText,_failedSendFilesSnapshot,_composerDraftClearPromise,preserveComposerDraft)) return;
     const conflictActiveStream=/session already has an active stream/i.test(errMsg);
     if(conflictActiveStream){
       delete INFLIGHT[activeSid];
@@ -1908,7 +1934,7 @@ async function send(){
     // composer text + attachments (cleared at send time) would otherwise be
     // lost. Put back the ORIGINAL captured draft (not the mutated /moa/bundle
     // payload) and re-stage files so the user can re-send without retyping.
-    _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
+    _restoreFailedDraft();
     if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
     // Reconcile with server truth after immediately clearing the optimistic spinner.
     if(typeof renderSessionList==='function') void renderSessionList();

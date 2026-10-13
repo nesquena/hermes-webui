@@ -100,8 +100,7 @@ def test_messaging_merge_preserves_longer_sidecar_order_when_timestamps_collapse
 
 
 def test_branch_handler_uses_merged_messaging_messages_for_keep_count():
-    branch_idx = ROUTES_PY.index('parsed.path == "/api/session/branch":')
-    block = ROUTES_PY[branch_idx : branch_idx + 2600]
+    block = _branch_handler_block()
 
     assert "_merged_session_messages_for_display(source, cli_messages)" in block
     assert "get_cli_session_messages(source.session_id)" in block
@@ -109,11 +108,17 @@ def test_branch_handler_uses_merged_messaging_messages_for_keep_count():
 
 
 def test_branch_handler_best_effort_saves_source_before_fork_slice():
-    branch_idx = ROUTES_PY.index('parsed.path == "/api/session/branch":')
-    block = ROUTES_PY[branch_idx : branch_idx + 2600]
+    block = _branch_handler_block()
 
     assert "source.save()" in block
     assert block.index("source.save()") < block.index("source_messages =")
+
+
+def _branch_handler_block():
+    start = ROUTES_PY.index('parsed.path == "/api/session/branch":')
+    end = ROUTES_PY.find("\n    if parsed.path == ", start)
+    assert end != -1
+    return ROUTES_PY[start:end]
 
 
 def test_fork_from_message_snapshots_session_id_across_async_load():
