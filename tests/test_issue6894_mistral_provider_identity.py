@@ -258,7 +258,8 @@ def test_mistral_alias_and_single_entry_provider_config(monkeypatch):
     ) == {}
 
 
-def test_mistral_config_adapters_keep_the_original_entry(monkeypatch, tmp_path):
+@pytest.mark.parametrize("provider_key", ["mistralai", "MistralAI", "MISTRAL"])
+def test_mistral_config_adapters_keep_the_original_entry(monkeypatch, tmp_path, provider_key):
     _install_hermes_modules(monkeypatch)
     legacy = {
         "api_key": "legacy-mistral-key",
@@ -266,7 +267,7 @@ def test_mistral_config_adapters_keep_the_original_entry(monkeypatch, tmp_path):
         "models": {"mistral-configured-model": {"context_length": 32768}},
     }
     cfg = _anthropic_config()
-    cfg["providers"]["mistralai"] = legacy
+    cfg["providers"][provider_key] = legacy
     cfg["providers"]["snake_case_provider"] = {
         "api_key": "raw-key",
         "models": {"raw-model": {"context_length": 4096}},
@@ -280,6 +281,7 @@ def test_mistral_config_adapters_keep_the_original_entry(monkeypatch, tmp_path):
     mistral_cards = [provider for provider in cards if provider["display_name"] == "Mistral"]
     assert len(mistral_cards) == 1
     assert mistral_cards[0]["id"] == "mistral"
+    assert mistral_cards[0]["has_key"] is True
     assert "mistral-configured-model" in {model["id"] for model in mistral_cards[0]["models"]}
     assert any(provider["id"] == "snake_case_provider" for provider in cards)
 
@@ -381,6 +383,8 @@ def test_mistral_key_routes_clear_both_legacy_entries(monkeypatch, tmp_path):
         "model": {"provider": "mistralai", "default": "mistral-small-latest", "api_key": "active-key"},
         "providers": {
             "mistralai": {"api_key": "legacy-key"},
+            "MistralAI": {"api_key": "mixed-case-legacy-key"},
+            "MISTRAL": {"api_key": "mixed-case-canonical-key"},
             "mistral": {"api_key": "canonical-key"},
             "google": {"api_key": "google-key"},
         },
@@ -408,16 +412,19 @@ def test_mistral_key_routes_clear_both_legacy_entries(monkeypatch, tmp_path):
     saved_cfg = config._load_yaml_config_file(config_path)
     assert "api_key" not in saved_cfg["providers"]["mistralai"]
     assert "api_key" not in saved_cfg["providers"]["mistral"]
+    assert "api_key" not in saved_cfg["providers"]["MistralAI"]
+    assert "api_key" not in saved_cfg["providers"]["MISTRAL"]
     assert "api_key" not in saved_cfg["model"]
     assert saved_cfg["providers"]["google"]["api_key"] == "google-key"
 
 
-def test_mistral_live_lookup_uses_legacy_config_key(monkeypatch, tmp_path):
+@pytest.mark.parametrize("provider_key", ["mistralai", "MistralAI", "MISTRAL"])
+def test_mistral_live_lookup_uses_legacy_config_key(monkeypatch, tmp_path, provider_key):
     import urllib.request
 
     _install_hermes_modules(monkeypatch)
     cfg = _anthropic_config()
-    cfg["providers"]["mistralai"] = {"api_key": "legacy-mistral-key"}
+    cfg["providers"][provider_key] = {"api_key": "legacy-mistral-key"}
     _configure_profile(monkeypatch, tmp_path, cfg)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
     monkeypatch.setattr(routes, "_get_cached_live_models", lambda _key: None)

@@ -2800,9 +2800,13 @@ def _get_provider_cfg(provider_id, *, config_obj: dict | None = None) -> dict:
         return {}
     if provider_id in providers_cfg:
         provider_cfg = providers_cfg[provider_id]
-    elif provider_id in {"mistral", "mistralai"}:
-        other_id = "mistralai" if provider_id == "mistral" else "mistral"
-        provider_cfg = providers_cfg.get(other_id, {})
+    elif str(provider_id).strip().lower() in {"mistral", "mistralai"}:
+        normalized_id = str(provider_id).strip().lower()
+        other_id = "mistralai" if normalized_id == "mistral" else "mistral"
+        provider_cfg = next(
+            (value for alias in (normalized_id, other_id) for key, value in providers_cfg.items() if str(key).strip().lower() == alias),
+            {},
+        )
     else:
         provider_cfg = {}
     return provider_cfg if isinstance(provider_cfg, dict) else {}

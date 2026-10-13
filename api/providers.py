@@ -3054,7 +3054,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             providers_cfg = cfg.get("providers") or {}
             if isinstance(providers_cfg, dict):
                 provider_ids = (
-                    ("mistral", "mistralai")
+                    tuple(key for key in providers_cfg if _provider_id_for_mistral_alias(key) == "mistral")
                     if provider_id == "mistral"
                     else (provider_id,)
                 )
