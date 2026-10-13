@@ -1,8 +1,9 @@
+from tests.i18n_locale_loader import locale_source_text
 """
 Tests for CSS tooltip changes (issue #1775).
 
 Verifies that custom data-tooltip / has-tooltip markup is applied correctly
-across index.html, style.css, and i18n.js — replacing native title="" attributes
+across index.html, style.css, and split locale bundles — replacing native title="" attributes
 with a faster, CSS-driven tooltip system.
 
 Run:
@@ -19,7 +20,7 @@ import unittest
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 INDEX_HTML = os.path.join(BASE_DIR, "static", "index.html")
 STYLE_CSS = os.path.join(BASE_DIR, "static", "style.css")
-I18N_JS = os.path.join(BASE_DIR, "static", "i18n.js")
+I18N_SOURCE = locale_source_text()
 
 
 def _read(path):
@@ -261,14 +262,14 @@ class TestStyleCSSTooltipClasses(unittest.TestCase):
 
 
 # ===========================================================================
-# 3. i18n.js — data-tooltip sync
+# 3. split locale bundles — data-tooltip sync
 # ===========================================================================
 class TestI18NTooltipSync(unittest.TestCase):
-    """Parse static/i18n.js and verify data-tooltip sync in data-i18n-title handler."""
+    """Parse static/split locale bundles and verify data-tooltip sync in data-i18n-title handler."""
 
     @classmethod
     def setUpClass(cls):
-        cls.js = _read(I18N_JS)
+        cls.js = I18N_SOURCE
 
     def test_data_tooltip_synced_in_i18n_title_handler(self):
         """The data-i18n-title handler must also sync data-tooltip attribute."""
@@ -281,7 +282,7 @@ class TestI18NTooltipSync(unittest.TestCase):
         )
         self.assertIsNotNone(
             block_match,
-            "Could not find data-i18n-title forEach handler in i18n.js",
+            "Could not find data-i18n-title forEach handler in split locale bundles",
         )
         block = block_match.group(1)
         # Must reference setAttribute('data-tooltip', ...) or data-tooltip sync
@@ -309,7 +310,7 @@ class TestI18NTooltipSync(unittest.TestCase):
         )
 
     def test_native_title_cleared_when_custom_tooltip_present(self):
-        """When the element has a custom data-tooltip, i18n.js must NOT also
+        """When the element has a custom data-tooltip, split locale bundles must NOT also
         set el.title (otherwise the slow ~1.5s native browser tooltip co-fires
         alongside the fast custom CSS tooltip — exactly the bug #1775 reports).
         It must explicitly removeAttribute('title') so any stale runtime

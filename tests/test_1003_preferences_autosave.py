@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression checks for Issue #1003 Phase 2: Preferences settings autosave (PR #1369).
 
 Mirrors the structure of test_1003_appearance_autosave.py to verify the
@@ -15,7 +16,7 @@ from pathlib import Path
 
 PANELS_JS = (Path(__file__).parent.parent / "static" / "panels.js").read_text(encoding="utf-8")
 INDEX_HTML = (Path(__file__).parent.parent / "static" / "index.html").read_text(encoding="utf-8")
-I18N_JS = (Path(__file__).parent.parent / "static" / "i18n.js").read_text(encoding="utf-8")
+I18N_SOURCE = locale_source_text()
 
 
 def _function_block(src: str, name: str) -> str:
@@ -86,8 +87,9 @@ def test_preference_fields_use_schedule_autosave_not_mark_dirty():
         # We use a context window around the dom_id to find the listener.
         idx = panel.find(f"$('{dom_id}')")
         assert idx != -1, f"{dom_id} not loaded in loadSettingsPanel"
-        # Window of next ~600 chars covers the .addEventListener call
-        window = panel[idx:idx + 600]
+        # Bound the field's setup block so async locale settlement stays in scope.
+        end = panel.find("    const showUsageCb", idx) if dom_id == "settingsLanguage" else -1
+        window = panel[idx:end if end != -1 else idx + 600]
         assert "addEventListener" in window, f"{dom_id} has no addEventListener"
         assert "_schedulePreferencesAutosave" in window, \
             f"{dom_id} listener should call _schedulePreferencesAutosave (Phase 2 #1003)"

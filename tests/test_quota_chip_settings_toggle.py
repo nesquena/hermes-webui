@@ -1,3 +1,4 @@
+from tests.i18n_locale_loader import locale_source_text
 """Regression test for #show-quota-chip-toggle — Settings toggle to opt into the ambient quota chip.
 
 Quota chip default state is now OFF (per Nathan's directive 2026-05-16, immediately
@@ -10,7 +11,7 @@ INDEX = REPO_ROOT / "static" / "index.html"
 PANELS = REPO_ROOT / "static" / "panels.js"
 UI_JS = REPO_ROOT / "static" / "ui.js"
 BOOT = REPO_ROOT / "static" / "boot.js"
-I18N = REPO_ROOT / "static" / "i18n.js"
+I18N = locale_source_text()
 CONFIG = REPO_ROOT / "api" / "config.py"
 
 
@@ -87,6 +88,6 @@ def test_quota_chip_panels_round_trip():
 
 
 def test_quota_chip_localized_in_all_locales():
-    js = I18N.read_text(encoding="utf-8")
+    js = I18N
     assert js.count("settings_label_quota_chip:") == 15, "12 locales expected"
     assert js.count("settings_desc_quota_chip:") == 15, "12 locales expected"

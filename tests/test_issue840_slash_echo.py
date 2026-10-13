@@ -1,11 +1,16 @@
 """Tests for slash command echo (#840) — user message shown in chat after /skills, /help, etc."""
 import os
+from tests.js_source_extract import extract_command_entry
 
 _SRC = os.path.join(os.path.dirname(__file__), "..")
 
 
 def _read(name):
     return open(os.path.join(_SRC, name), encoding="utf-8").read()
+
+
+def _command(name):
+    return extract_command_entry(_read("static/commands.js"), name)
 
 
 class TestExecuteCommandReturnValue:
@@ -27,82 +32,48 @@ class TestExecuteCommandReturnValue:
         )
 
     def test_no_echo_flag_on_clear(self):
-        src = _read("static/commands.js")
-        # Find the clear command entry
-        idx = src.find("name:'clear'")
-        assert idx >= 0
-        entry = src[idx:idx + 100]
+        entry = _command("clear")
         assert "noEcho:true" in entry, "/clear must have noEcho:true"
 
     def test_no_echo_flag_on_new(self):
-        src = _read("static/commands.js")
-        idx = src.find("name:'new'")
-        assert idx >= 0
-        entry = src[idx:idx + 80]
+        entry = _command("new")
         assert "noEcho:true" in entry, "/new must have noEcho:true"
 
     def test_no_echo_flag_on_stop(self):
-        src = _read("static/commands.js")
-        idx = src.find("name:'stop'")
-        assert idx >= 0
-        entry = src[idx:idx + 80]
+        entry = _command("stop")
         assert "noEcho:true" in entry, "/stop must have noEcho:true"
 
     def test_no_echo_flag_on_retry(self):
-        src = _read("static/commands.js")
-        idx = src.find("name:'retry'")
-        assert idx >= 0
-        entry = src[idx:idx + 80]
+        entry = _command("retry")
         assert "noEcho:true" in entry, "/retry must have noEcho:true"
 
     def test_no_echo_flag_on_undo(self):
-        src = _read("static/commands.js")
-        idx = src.find("name:'undo'")
-        assert idx >= 0
-        entry = src[idx:idx + 80]
+        entry = _command("undo")
         assert "noEcho:true" in entry, "/undo must have noEcho:true"
 
     def test_no_echo_flag_on_voice(self):
-        src = _read("static/commands.js")
-        idx = src.find("name:'voice'")
-        assert idx >= 0
-        entry = src[idx:idx + 80]
+        entry = _command("voice")
         assert "noEcho:true" in entry, "/voice must have noEcho:true"
 
     def test_no_echo_flag_on_theme(self):
-        src = _read("static/commands.js")
-        idx = src.find("name:'theme'")
-        assert idx >= 0
-        entry = src[idx:idx + 80]
+        entry = _command("theme")
         assert "noEcho:true" in entry, "/theme must have noEcho:true"
 
     def test_no_echo_flag_on_model(self):
-        src = _read("static/commands.js")
-        idx = src.find("name:'model'")
-        assert idx >= 0
-        entry = src[idx:idx + 130]
+        entry = _command("model")
         assert "noEcho:true" in entry, "/model must have noEcho:true"
 
     def test_skills_has_no_noecho(self):
         """Commands that produce chat responses must NOT have noEcho."""
-        src = _read("static/commands.js")
-        idx = src.find("name:'skills'")
-        assert idx >= 0
-        entry = src[idx:idx + 100]
+        entry = _command("skills")
         assert "noEcho" not in entry, "/skills must echo — no noEcho flag"
 
     def test_help_has_no_noecho(self):
-        src = _read("static/commands.js")
-        idx = src.find("name:'help'")
-        assert idx >= 0
-        entry = src[idx:idx + 80]
+        entry = _command("help")
         assert "noEcho" not in entry, "/help must echo — no noEcho flag"
 
     def test_status_has_no_noecho(self):
-        src = _read("static/commands.js")
-        idx = src.find("name:'status'")
-        assert idx >= 0
-        entry = src[idx:idx + 80]
+        entry = _command("status")
         assert "noEcho" not in entry, "/status must echo — no noEcho flag"
 
 
@@ -164,20 +135,12 @@ class TestSendSlashIntercept:
 
 def test_compress_has_no_echo_flag():
     """compress is action-only — it resets S.messages internally; echo would flicker."""
-    src = _read("static/commands.js")
-    import re
-    m = re.search(r"\{name:'compress'[^}]+\}", src)
-    assert m, "compress entry not found in COMMANDS"
-    assert 'noEcho:true' in m.group(), f"compress missing noEcho:true: {m.group()}"
+    assert 'noEcho:true' in _command("compress")
 
 
 def test_compact_has_no_echo_flag():
     """compact is an alias for compress — same noEcho requirement."""
-    src = _read("static/commands.js")
-    import re
-    m = re.search(r"\{name:'compact'[^}]+\}", src)
-    assert m, "compact entry not found in COMMANDS"
-    assert 'noEcho:true' in m.group(), f"compact missing noEcho:true: {m.group()}"
+    assert 'noEcho:true' in _command("compact")
 
 
 def test_title_with_args_pushes_confirmation_message():

@@ -18,7 +18,7 @@ INDEX_HTML = (STATIC / "index.html").read_text(encoding="utf-8")
 UI_JS = (STATIC / "ui.js").read_text(encoding="utf-8")
 SUPPORT_SCRIPTS = [
     (STATIC / name).read_text(encoding="utf-8")
-    for name in ("i18n.js", "icons.js", "assistant_turn_anchors.js")
+    for name in ("i18n-core.js", "icons.js", "assistant_turn_anchors.js")
 ]
 HARNESS_HTML = re.sub(r"<script\b[^>]*>.*?</script>", "", INDEX_HTML, flags=re.I | re.S)
 HARNESS_HTML = re.sub(r"<link\b[^>]*>", "", HARNESS_HTML, flags=re.I)

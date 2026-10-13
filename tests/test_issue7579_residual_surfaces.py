@@ -8,9 +8,9 @@ owned by the open #7698 / #8001 lanes; these two surfaces were not.
 
 import re
 from pathlib import Path
+from tests.i18n_locale_loader import locale_block
 
 ROOT = Path(__file__).resolve().parent.parent
-I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 PANELS_JS = (ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 
@@ -29,16 +29,8 @@ RU_VALUE_FIX_KEYS = (
 )
 
 
-def _extract_locale_block(src: str, locale_key: str) -> str:
-    match = re.search(rf"\n  {re.escape(locale_key)}: \{{\n", src)
-    assert match, f"{locale_key} locale block not found"
-    start = match.end() - 1
-    end = src.index("\n  },", start)
-    return src[start:end]
-
-
-EN_BLOCK = _extract_locale_block(I18N_JS, "en")
-RU_BLOCK = _extract_locale_block(I18N_JS, "ru")
+EN_BLOCK = locale_block("en")
+RU_BLOCK = locale_block("ru")
 
 
 def _value(block: str, key: str) -> str | None:

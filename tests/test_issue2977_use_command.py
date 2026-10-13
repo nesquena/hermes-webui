@@ -1,4 +1,5 @@
 from pathlib import Path
+from tests.js_source_extract import extract_command_entry
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,18 +41,13 @@ def test_forced_skill_directive_set_in_cmdUse():
 
 def test_use_entry_has_noEcho():
     src = read("static/commands.js")
-    # Extract the /use entry line and check noEcho:true is present
-    idx = src.index("{name:'use',")
-    line_end = src.index("}", idx)
-    entry = src[idx:line_end + 1]
+    entry = extract_command_entry(src, "use")
     assert "noEcho:true" in entry, "/use entry must have noEcho:true"
 
 
 def test_use_entry_has_subArgs_skills():
     src = read("static/commands.js")
-    idx = src.index("{name:'use',")
-    line_end = src.index("}", idx)
-    entry = src[idx:line_end + 1]
+    entry = extract_command_entry(src, "use")
     assert "subArgs:'skills'" in entry, "/use entry must have subArgs:'skills' for autocomplete"
 
 
