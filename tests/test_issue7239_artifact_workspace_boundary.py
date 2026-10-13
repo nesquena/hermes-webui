@@ -440,3 +440,39 @@ const inferred=_artifactCandidatesFromText('```diff\n+++ README\n+text\n```');
         {"list": "/api/list?session_id=s&path=."}, {"open": "README"},
     ]
     assert result["inferred"] == []
+
+
+@pytest.mark.parametrize("filename", [" report.md", "report.md ", " report.md "])
+def test_artifact_preview_route_reads_exact_filename_whitespace(filename, monkeypatch, tmp_path):
+    import os
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+
+    import api.routes as routes
+
+    start = WORKSPACE_JS.index("function _escapeGrantStore(")
+    end = WORKSPACE_JS.index("async function authorizeWorkspaceEscapeNavigation(", start)
+    script = _common_js("_classifyArtifactPath") + WORKSPACE_JS[start:end] + r'''
+const S={session:{session_id:'s',workspace:'/workspace'}};
+const classified=_classifyArtifactPath(JSON.parse(process.argv[1]),S.session.workspace);
+process.stdout.write(JSON.stringify(_workspaceRouteForPath(classified.openPath,'read')));
+'''
+    url = _node_json(script, filename)
+    workspace = tmp_path
+    if os.name == "nt":
+        workspace = Path("\\\\?\\" + str(tmp_path.resolve()))
+    exact = workspace / filename
+    (workspace / "report.md").write_text("unpadded file", encoding="utf-8")
+    exact.write_text("exact artifact", encoding="utf-8")
+    result = {}
+    monkeypatch.setattr(routes, "get_session_for_file_ops", lambda _sid: SimpleNamespace(workspace=str(workspace)))
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200: result.update(payload=payload, status=status) or True)
+    monkeypatch.setattr(routes, "bad", lambda _handler, message, status=400: result.update(error=message, status=status) or True)
+    try:
+        routes._handle_file_read(object(), urlparse(url))
+        assert result == {
+            "status": 200,
+            "payload": {"path": filename, "content": "exact artifact", "size": 14, "lines": 1},
+        }
+    finally:
+        exact.unlink()
