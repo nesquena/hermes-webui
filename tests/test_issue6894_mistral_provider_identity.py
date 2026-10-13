@@ -665,6 +665,25 @@ def test_mistral_prefix_stays_intact_for_openrouter_and_custom_proxy(monkeypatch
     assert config.resolve_model_provider(config.model_with_provider_context(model, "mistral"))[0] == model
 
 
+def test_native_mistral_strips_legacy_model_namespace(monkeypatch, tmp_path):
+    _install_hermes_modules(monkeypatch)
+    _configure_profile(
+        monkeypatch,
+        tmp_path,
+        {
+            "model": {"provider": "mistral", "default": "mistralai/mistral-small-latest"},
+            "providers": {"mistral": {"api_key": "synthetic-mistral-key"}},
+        },
+    )
+
+    model, provider, _ = config.resolve_model_provider("mistralai/mistral-small-latest")
+
+    assert model == "mistral-small-latest"
+    assert provider == "mistral"
+    assert config._is_first_party_model("mistralai", model)
+    assert config._provider_model_catalog_key("mistralai") == "mistral"
+
+
 def test_legacy_mistral_onboarding_setup_writes_native_provider(monkeypatch, tmp_path):
     _install_hermes_modules(monkeypatch)
     config_path, _, home = _configure_profile(monkeypatch, tmp_path, {
