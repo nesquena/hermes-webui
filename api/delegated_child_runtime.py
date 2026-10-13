@@ -124,14 +124,14 @@ def _load_terminal() -> dict[tuple[str, str], dict[str, Any]]:
                 dirty = True
     dirty = _prune_terminal_records(_TERMINAL) or dirty
     if dirty:
-        _persist_terminal()
+        _persist_terminal_best_effort()
     return _TERMINAL
 
 
 def _prune_cached_terminal_records() -> dict[tuple[str, str], dict[str, Any]]:
     records = _load_terminal()
     if _prune_terminal_records(records):
-        _persist_terminal()
+        _persist_terminal_best_effort()
     return records
 
 
@@ -159,6 +159,13 @@ def _persist_terminal() -> None:
         except OSError:
             pass
         raise
+
+
+def _persist_terminal_best_effort() -> None:
+    try:
+        _persist_terminal()
+    except OSError:
+        pass
 
 
 def record_subagent_event(
@@ -265,7 +272,7 @@ def forget_runtime_owner(owner_session_id: Any, *, profile: Any | None = None) -
             changed = _LIVE.pop(key, None) is not None or changed
             changed = terminal_records.pop(key, None) is not None or changed
         if changed:
-            _persist_terminal()
+            _persist_terminal_best_effort()
         return changed
 
 

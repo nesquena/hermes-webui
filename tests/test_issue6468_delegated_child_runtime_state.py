@@ -26,9 +26,23 @@ def _build_streaming_on_tool():
         for node in ast.walk(module)
         if isinstance(node, ast.FunctionDef) and node.name == "on_tool"
     )
-    snippet = textwrap.dedent("\n".join(lines[on_tool.lineno - 1:on_tool.end_lineno]))
-    sentinel = "if event_type in ('reasoning.available', '_thinking'):"
-    snippet = snippet[:snippet.index(sentinel)]
+    reasoning_branch = next(
+        node
+        for node in ast.walk(on_tool)
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Compare)
+        and isinstance(node.test.left, ast.Name)
+        and node.test.left.id == "event_type"
+        and len(node.test.ops) == 1
+        and isinstance(node.test.ops[0], ast.In)
+        and len(node.test.comparators) == 1
+        and isinstance(node.test.comparators[0], (ast.Tuple, ast.List, ast.Set))
+        and {item.value for item in node.test.comparators[0].elts if isinstance(item, ast.Constant)}
+        == {"reasoning.available", "_thinking"}
+    )
+    snippet = textwrap.dedent(
+        "\n".join(lines[on_tool.lineno - 1:reasoning_branch.lineno - 1])
+    )
     builder = (
         "def _build_on_tool(_flush_reasoning_buffer, record_subagent_event, "
         "publish_session_list_changed, s):\n"
@@ -386,6 +400,30 @@ def test_cached_terminal_records_expire_without_reset(monkeypatch, tmp_path):
     assert store["records"] == {}
 
 
+def test_child_runtime_keeps_pruned_state_when_store_cleanup_fails(monkeypatch, tmp_path):
+    _isolated_runtime(monkeypatch, tmp_path)
+    monkeypatch.setattr(runtime.time, "time", lambda: 2000.0)
+    runtime._TERMINAL = {
+        ("profile-cache", "child-expired"): {
+            "runtime_state": "completed",
+            "runtime_reason": "ok",
+            "updated_at": 1000.0,
+            "owner_session_id": "parent-cache",
+        }
+    }
+
+    def fail_write():
+        raise OSError("state directory is unwritable")
+
+    monkeypatch.setattr(runtime, "_persist_terminal", fail_write)
+
+    assert runtime.child_runtime("profile-cache", "child-expired") == {
+        "runtime_state": "unknown",
+        "runtime_reason": "",
+    }
+    assert runtime._TERMINAL == {}
+
+
 def test_forget_runtime_owner_prunes_live_and_persisted_records(monkeypatch, tmp_path):
     _isolated_runtime(monkeypatch, tmp_path)
 
@@ -608,7 +646,9 @@ const renderChild = new Function(
     assert metrics["rowType"] == "button"
     assert metrics["rowTitle"] == "Open child session"
     assert metrics["rowChildren"] == [
-        "Delegated child",
+        "session-child-session-label",
         "session-child-runtime session-child-runtime-running",
     ]
+    style = Path("static/style.css").read_text(encoding="utf-8")
+    assert ".session-child-session-label{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}" in style
     assert metrics["openCalls"] == ["child-5"]
