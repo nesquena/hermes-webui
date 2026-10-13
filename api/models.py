@@ -2298,6 +2298,9 @@ class Session:
             return None
         data['messages'], _ = _collapse_adjacent_duplicate_partials(data.get('messages'))
         session = cls(**data)
+        session._loaded_sidecar_signature = (
+            pre_read_sig[1:] if pre_read_sig is not None else None
+        )
         if 'anchor_scene_index' not in data:
             try:
                 _legacy_sidecar_facts_put(

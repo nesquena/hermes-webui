@@ -12093,7 +12093,11 @@ def _foreign_display_coordinate_sidecar_identity(session) -> tuple:
             break
         seen.add(sid)
         path = Path(current.path)
-        identities.append((str(path), _foreign_display_coordinate_sidecar_stat(path)))
+        if hasattr(current, "_loaded_sidecar_signature"):
+            signature = current._loaded_sidecar_signature
+        else:
+            signature = _foreign_display_coordinate_sidecar_stat(path)
+        identities.append((str(path), signature))
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
         if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
             break

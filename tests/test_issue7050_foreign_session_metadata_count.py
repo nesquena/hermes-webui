@@ -627,10 +627,13 @@ def test_foreign_metadata_read_preserves_a_concurrent_sidecar_append(monkeypatch
         return text
 
     monkeypatch.setattr(Path, "read_text", append_after_snapshot)
-    assert routes._foreign_display_coordinate_summary(sid) is not None
+    first = routes._foreign_display_coordinate_summary(sid)
+    assert first is not None
     persisted = json.loads(real_read_text(sidecar_path, encoding="utf-8"))
     assert appended in persisted["messages"]
     assert not backup_path.exists()
+    updated = routes._foreign_display_coordinate_summary(sid)
+    assert updated["message_count"] == first["message_count"] + 1
 
 
 def test_foreign_metadata_merge_preserves_cancelled_cli_owner(monkeypatch, tmp_path):
