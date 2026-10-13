@@ -210,12 +210,25 @@ def test_repeated_absolute_separators_keep_display_and_open_paths_distinct():
     windows = _classify([r"D:\Proj\\report.md"], r"D:\Proj")[0]
 
     assert posix["kind"] == "workspace-contained"
-    assert posix["displayPath"] == "/report.md"
+    assert posix["displayPath"] == "report.md"
     assert posix["openPath"] == "report.md"
     assert posix["dedupeKey"] == "report.md"
     assert windows["kind"] == "workspace-contained"
+    assert windows["displayPath"] == "report.md"
     assert windows["openPath"] == "report.md"
     assert windows["dedupeKey"] == "report.md"
+
+
+def test_workspace_artifact_display_uses_normalized_workspace_boundary():
+    path_with_duplicate_separator = _classify(["/workspace//proj/report.md"], "/workspace/proj")[0]
+    workspace_with_duplicate_separator = _classify(
+        ["/workspace/proj/reports/output.md"], "/workspace//proj"
+    )[0]
+
+    assert path_with_duplicate_separator["displayPath"] == "report.md"
+    assert path_with_duplicate_separator["openPath"] == "report.md"
+    assert workspace_with_duplicate_separator["displayPath"] == "reports/output.md"
+    assert workspace_with_duplicate_separator["openPath"] == "reports/output.md"
 
 
 def test_windows_relative_and_canonical_boundary_matrix():
