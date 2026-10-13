@@ -431,7 +431,7 @@ def test_webui_metadata_control_stays_on_cheap_summary(monkeypatch, tmp_path):
     assert payload["message_count"] == 1
 
 
-def test_messaging_metadata_control_stays_on_messaging_path(monkeypatch, tmp_path):
+def test_messaging_metadata_uses_readonly_summary_path(monkeypatch, tmp_path):
     import api.routes as routes
 
     sid = "messaging_metadata_control_7050"
@@ -442,10 +442,23 @@ def test_messaging_metadata_control_stays_on_messaging_path(monkeypatch, tmp_pat
     session.raw_source = "slack"
     session.save(touch_updated_at=False)
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda _sid: {"source_tag": "slack", "session_source": "messaging"})
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: sidecar)
-    monkeypatch.setattr(routes, "_foreign_display_coordinate_summary", lambda *args, **kwargs: pytest.fail("messaging path used foreign summary"))
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda *_args, **_kwargs: pytest.fail("metadata request loaded CLI transcript"))
+    real_get_session = routes.get_session
+    get_session_modes = []
+
+    def metadata_only_get_session(session_id, metadata_only=False):
+        get_session_modes.append(metadata_only)
+        if not metadata_only:
+            pytest.fail("metadata request loaded a full session")
+        return real_get_session(session_id, metadata_only=metadata_only)
+
+    monkeypatch.setattr(routes, "get_session", metadata_only_get_session)
+    sidecar_path = Path(session.path)
+    before = sidecar_path.read_bytes()
     payload = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
     assert payload["message_count"] == 1
+    assert get_session_modes == [True]
+    assert sidecar_path.read_bytes() == before
 
 
 @pytest.mark.parametrize("snapshot_parent", [False, True])
@@ -477,7 +490,7 @@ def test_read_only_messaging_counts_match_transcript(monkeypatch, tmp_path, snap
         "_lookup_cli_session_metadata",
         lambda _sid: {"source_tag": "slack", "session_source": "messaging", "is_cli_session": True},
     )
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: sidecar if cli_has_messages else [])
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: sidecar if cli_has_messages else [])
 
     handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=30")
     routes.handle_get(handler, urlparse(handler.path))
@@ -625,11 +638,20 @@ def test_foreign_metadata_merge_preserves_cancelled_cli_owner(monkeypatch, tmp_p
 
     sid = "foreign_cancelled_owner_7050"
     partial_text = "retained partial answer"
-    sidecar_messages = [
+    anchor_messages = [
+        {"role": "user", "content": "previous question", "timestamp": 900.0},
+        {"role": "assistant", "content": "previous answer", "timestamp": 901.0},
+    ]
+    gap_messages = [
+        {"role": "user", "content": "imported question", "timestamp": 950.0},
+        {"role": "assistant", "content": "imported answer", "timestamp": 951.0},
+    ]
+    interrupted_messages = [
         {"role": "user", "content": "cancel this turn", "timestamp": 1000.0},
-        {"role": "assistant", "content": partial_text, "timestamp": 1001.0, "_partial": True},
+        {"role": "assistant", "content": partial_text, "timestamp": 1001.0, "_recovered_from_cancel_journal": True},
         {"role": "assistant", "content": "Task cancelled: stopped", "timestamp": 1002.0, "_error": True},
     ]
+    sidecar_messages = anchor_messages + interrupted_messages
     session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
     session.is_cli_session = True
     session.source_tag = "tui"
@@ -644,7 +666,7 @@ def test_foreign_metadata_merge_preserves_cancelled_cli_owner(monkeypatch, tmp_p
     _make_state_db(
         tmp_path / "state.db",
         sid,
-        sidecar_messages + [
+        anchor_messages + gap_messages + interrupted_messages + [
             {"role": "assistant", "content": "raw replay after cancellation", "timestamp": 1003.0},
         ],
     )
@@ -656,7 +678,7 @@ def test_foreign_metadata_merge_preserves_cancelled_cli_owner(monkeypatch, tmp_p
         lambda session_id, **kwargs: calls.append(kwargs.copy()) or real_reader(session_id, **kwargs),
     )
 
-    summary = routes._foreign_display_coordinate_summary(sid)
-
-    assert summary["message_count"] == len(sidecar_messages)
+    metadata = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    full = _session_payload(routes, f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    assert metadata["message_count"] == full["message_count"] == len(sidecar_messages) + len(gap_messages)
     assert calls[0]["include_row_identity"] is True

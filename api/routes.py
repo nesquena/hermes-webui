@@ -10771,7 +10771,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
 _LINEAGE_PARENT_SESSION_UNSET = object()
 
 
-def _webui_lineage_parent_session_for_display(session):
+def _webui_lineage_parent_session_for_display(session, *, read_only=False):
     """Load the immediate parent only for display-eligible continuations."""
     parent_id = str(getattr(session, "parent_session_id", "") or "").strip()
     if not parent_id:
@@ -10786,6 +10786,8 @@ def _webui_lineage_parent_session_for_display(session):
     if source == "fork" or relationship == "child_session":
         return None
     try:
+        if read_only:
+            return Session.load_readonly(parent_id)
         return get_session(parent_id, metadata_only=False)
     except Exception:
         return None
@@ -10832,14 +10834,17 @@ def _merged_webui_lineage_messages_for_display(
     return merged_messages
 
 
-def _display_coordinate_messages(session, state_db_messages) -> list:
+def _display_coordinate_messages(session, state_db_messages, *, metadata_readonly=False) -> list:
     """Return the reconciled message list shared by display-coordinate paths."""
     state_db_messages = _suppress_native_image_display_mirrors(
         session,
         state_db_messages,
     )
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
-    lineage_parent = _webui_lineage_parent_session_for_display(session)
+    lineage_parent = None if _is_messaging_session_record(session) else _webui_lineage_parent_session_for_display(
+        session,
+        read_only=metadata_readonly,
+    )
     projection_sidecar_messages = _merged_webui_lineage_messages_for_display(
         session,
         sidecar_messages,
@@ -10850,6 +10855,8 @@ def _display_coordinate_messages(session, state_db_messages) -> list:
         state_db_messages,
         truncation_watermark=getattr(session, "truncation_watermark", None),
         truncation_boundary=getattr(session, "truncation_boundary", None),
+        incoming_provenance="state_db",
+        cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
     )
     merged = _merged_webui_lineage_messages_for_display(
         session,
@@ -10907,7 +10914,10 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
             return None
         sidecars = _foreign_display_coordinate_sidecar_identity(session)
         backstop = _state_db_backstop_limit_for_display(session, None)
+        is_messaging_session = _is_messaging_session_record(session)
         reader_kwargs = {"profile": profile}
+        if is_messaging_session:
+            reader_kwargs["stitch_continuations"] = True
         if backstop is not None:
             reader_kwargs["limit"] = backstop
         owner_messages = getattr(session, "messages", None) or []
@@ -10916,7 +10926,11 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
         state_db_messages = get_state_db_session_messages(sid, **reader_kwargs)
         if not state_db_messages and _numeric_count(state_summary.get("message_count")):
             return None
-        summary = _message_summary(_display_coordinate_messages(session, state_db_messages))
+        summary = _message_summary(_display_coordinate_messages(
+            session,
+            state_db_messages,
+            metadata_readonly=True,
+        ))
         with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
             _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE[cache_key] = {
                 "summary": dict(summary), "sidecars": sidecars, "created_at": now,
@@ -14300,7 +14314,8 @@ def _handle_session_get(handler, parsed) -> bool:
             getattr(s, "messages", None) or [], include_live_partial=True
         ) else None)
         if is_messaging_session:
-            cli_messages = get_cli_session_messages(sid)
+            if load_messages:
+                cli_messages = get_cli_session_messages(sid, profile=_session_profile)
         elif load_messages:
             if msg_limit is not None:
                 (
@@ -14371,18 +14386,15 @@ def _handle_session_get(handler, parsed) -> bool:
                         sid,
                         **_state_db_reader_kwargs,
                     )
-        elif not is_messaging_session:
-            if is_cli_session and not _session_source_is_webui(foreign_source):
+        if not load_messages:
+            if (is_cli_session or is_messaging_session) and not _session_source_is_webui(foreign_source):
                 metadata_summary = _foreign_display_coordinate_summary(
                     sid,
                     profile=_session_profile,
                 )
             if metadata_summary is None:
-                # Metadata-only callers still need the same append-only
-                # reconciliation contract as full loads so stale/replayed
-                # state.db rows do not make sidebar polling think the
-                # transcript is always newer. Helper threads profile= to
-                # honor #2827's TLS-vs-thread fix.
+                # Keep sidebar polling on the summary path so it cannot repair
+                # a messaging sidecar while calculating transcript counts.
                 metadata_summary = _metadata_only_message_summary(sid, profile=_session_profile)
         _t2 = _time.monotonic()
         if _diag: _diag.stage("t2_after_state_db_load")
@@ -14464,15 +14476,11 @@ def _handle_session_get(handler, parsed) -> bool:
                         sidecar_messages, _all_msgs, lineage_owners,
                     ))
         else:
-            if is_messaging_session:
-                messaging_session = get_session(sid, metadata_only=False)
-                _all_msgs = _merged_session_messages_for_display(messaging_session, cli_messages)
-            else:
-                if metadata_summary is None:
-                    metadata_summary = _message_summary(getattr(s, "messages", []) or [])
-                _summary_message_count = metadata_summary["message_count"]
-                _summary_last_message_at = metadata_summary["last_message_at"]
-                _all_msgs = []
+            if metadata_summary is None:
+                metadata_summary = _message_summary(getattr(s, "messages", []) or [])
+            _summary_message_count = metadata_summary["message_count"]
+            _summary_last_message_at = metadata_summary["last_message_at"]
+            _all_msgs = []
         if not load_messages:
             if metadata_summary is None:
                 metadata_summary = _message_summary(_all_msgs)
