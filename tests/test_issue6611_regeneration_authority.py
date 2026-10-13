@@ -455,6 +455,67 @@ def test_terminal_payload_embeds_the_rows_it_hashes(monkeypatch):
     )
 
 
+def test_real_terminal_payload_rebases_tool_owner_after_state_db_insert(monkeypatch, tmp_path):
+    from api import models
+
+    sidecar_rows = []
+    for index in range(32):
+        role = "user" if index % 2 == 0 else "assistant"
+        row = {
+            "role": role,
+            "content": f"sidecar-{index}",
+            "timestamp": 100.0 + index,
+        }
+        if role == "user":
+            row["_source"] = "webui"
+        sidecar_rows.append(row)
+
+    owner_row = sidecar_rows[5]
+    assert owner_row["role"] == "assistant"
+    tool_calls = [{"id": "retained-owner", "assistant_msg_idx": 5}]
+    inserted_row = {
+        "role": "user",
+        "content": "state-only earlier user",
+        "timestamp": 102.5,
+    }
+    db = _make_state_db(tmp_path, [*sidecar_rows, inserted_row])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    session = Session(
+        session_id="s1",
+        messages=sidecar_rows,
+        context_messages=sidecar_rows,
+        tool_calls=[dict(card) for card in tool_calls],
+    )
+
+    full_payload = _session_payload_with_full_messages(session)
+    canonical_rows = full_payload["messages"]
+    inserted_index = next(
+        index for index, row in enumerate(canonical_rows)
+        if row.get("content") == "state-only earlier user"
+    )
+    owner_index = next(
+        index for index, row in enumerate(canonical_rows)
+        if row is owner_row
+    )
+    assert inserted_index == 3
+    assert owner_index == 6
+    assert inserted_index < owner_index
+    assert canonical_rows[owner_index] is owner_row
+    assert full_payload["regeneration_revision"]
+
+    payload = _redacted_terminal_session_payload(session)
+    assert payload["regeneration_revision"] == full_payload["regeneration_revision"]
+    assert payload["message_count"] == 33
+    assert payload["_messages_offset"] == 3
+    assert payload["_messages_offset"] + len(payload["messages"]) == payload["message_count"]
+    assert owner_index >= payload["_messages_offset"]
+    relative_owner_index = owner_index - payload["_messages_offset"]
+    assert payload["tool_calls"] == [
+        {"id": "retained-owner", "assistant_msg_idx": relative_owner_index}
+    ]
+    assert session.tool_calls == tool_calls
+
+
 def test_recovered_display_context_pair_survives_local_and_gateway_apply(monkeypatch):
     """#6611: the recovered display/context pair survives apply on BOTH paths.
 
