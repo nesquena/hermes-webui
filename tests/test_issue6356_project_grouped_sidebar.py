@@ -131,6 +131,16 @@ class Element {
     this.children.push(child);
     return child;
   }
+  getBoundingClientRect() {
+    const top = 0;
+    const height = this.clientHeight || 0;
+    return {top, bottom: top + height, height};
+  }
+  remove() {
+    if (!this.parentNode) return;
+    const index = this.parentNode.children.indexOf(this);
+    if (index >= 0) this.parentNode.children.splice(index, 1);
+  }
   append(...children) { children.forEach(child => this.appendChild(child)); }
   insertBefore(child, reference) {
     child.parentNode = this;
