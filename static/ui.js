@@ -4328,6 +4328,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
   try{
     const url=new URL('api/models/live',document.baseURI||location.href);
     url.searchParams.set('provider',provider);
+    if(required) url.searchParams.set('require_refresh','1');
     const _liveRes=await fetch(url.href,{credentials:'include'});
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;
     if(_redirectIfUnauth(_liveRes)) return;

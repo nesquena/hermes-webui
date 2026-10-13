@@ -23042,9 +23042,11 @@ def _handle_live_models(handler, parsed):
 
     Query params:
         provider  (optional) — provider ID; defaults to active profile provider
+        require_refresh=1 (optional) — require fresh provider discovery
     """
     qs = parse_qs(parsed.query)
     provider = (qs.get("provider", [""])[0] or "").lower().strip()
+    require_fresh_discovery = qs.get("require_refresh", [""])[0] == "1"
 
     try:
         from api.config import get_config as _gc
@@ -23065,8 +23067,8 @@ def _handle_live_models(handler, parsed):
         cache_key = _live_models_cache_key(provider)
         expected_generation = _live_models_generation(cache_key)
         with _LIVE_MODELS_CACHE_LOCK:
-            refresh_required = cache_key in _LIVE_MODELS_REFRESH_REQUIRED
-        cached = _get_cached_live_models(cache_key)
+            refresh_required = require_fresh_discovery or cache_key in _LIVE_MODELS_REFRESH_REQUIRED
+        cached = None if require_fresh_discovery else _get_cached_live_models(cache_key)
         if cached is not None:
             if _live_models_generation(cache_key) != expected_generation:
                 return j(handler, {"provider": provider, "models": [], "error": "stale_generation"})

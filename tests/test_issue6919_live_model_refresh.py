@@ -976,6 +976,32 @@ globalThis.eval({json.dumps(bundle)});
     }
 
 
+def test_required_live_model_fetch_sends_server_refresh_requirement():
+    source = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    bundle = (
+        "globalThis._liveModelCache={}; globalThis._liveModelCacheGen={}; "
+        "globalThis._liveModelFetchPending=new Set(); globalThis._modelDropdownRequestSeq=0; "
+        "globalThis.S={activeProfile:'default'}; "
+        "globalThis.document={baseURI:'http://localhost/'}; globalThis._redirectIfUnauth=()=>false; "
+        "globalThis.syncModelChip=()=>{}; "
+        + _extract_js_function(source, "function _liveModelCacheKey(")
+        + "\n"
+        + _extract_js_function(source, "async function _fetchLiveModels(")
+        + "\nglobalThis.runFetch=_fetchLiveModels;"
+    )
+    script = f"""
+const urls=[];
+globalThis.fetch=async url=>{{urls.push(url); return {{ok:true,json:async()=>({{models:[{{id:'live-model'}}]}})}};}};
+globalThis._addLiveModelsToSelect=()=>0;
+globalThis.eval({json.dumps(bundle)});
+(async()=>{{
+  await globalThis.runFetch('provider',null,null,{{required:true}});
+  console.log(JSON.stringify(urls.map(url=>Object.fromEntries(new URL(url).searchParams))));
+}})().catch(error=>{{process.stderr.write(String(error.stack||error));process.exit(1);}});
+"""
+    assert _run_node(script) == [{"provider": "provider", "require_refresh": "1"}]
+
+
 @pytest.mark.parametrize("failure", ["empty", "exception"])
 def test_required_refresh_rejects_agent_static_fallback(monkeypatch, failure):
     import api.routes as routes
@@ -1005,6 +1031,15 @@ def test_required_refresh_rejects_agent_static_fallback(monkeypatch, failure):
     assert routes._get_cached_live_models(key) is None
     assert mixed_calls == ["provider"]
     assert len(live_calls) == 1
+
+    explicitly_required = routes._handle_live_models(
+        object(), urlparse("/api/models/live?provider=provider&require_refresh=1")
+    )
+    assert explicitly_required == {"error": "live_models_unavailable", "models": []}
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert routes._get_cached_live_models(key) is None
+    assert len(live_calls) == 2
+
     profile.fetch_models = lambda **kwargs: ["static-model"]
     fresh = routes._handle_live_models(object(), parsed)
     assert [model["id"] for model in fresh["models"]] == ["static-model"]
