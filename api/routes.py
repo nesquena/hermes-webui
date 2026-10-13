@@ -23068,6 +23068,8 @@ def _handle_live_models(handler, parsed):
             refresh_required = cache_key in _LIVE_MODELS_REFRESH_REQUIRED
         cached = _get_cached_live_models(cache_key)
         if cached is not None:
+            if _live_models_generation(cache_key) != expected_generation:
+                return j(handler, {"provider": provider, "models": [], "error": "stale_generation"})
             return j(handler, cached)
 
         def _finish(payload: dict):
@@ -23272,17 +23274,19 @@ def _handle_live_models(handler, parsed):
             # fallback, not a replacement.  The live endpoint should return ALL
             # models the key has access to, not just what's listed in config.yaml.
             if provider == "custom" or provider.startswith("custom:"):
-                from api.config import _resolve_custom_record_credential
+                from api.config import _custom_record_declares_credential, _resolve_custom_record_credential
 
                 _record = custom_provider_entry or cfg.get("model", {})
                 _base_url = _record.get("base_url")
                 _api_key, _pool_runtime = _resolve_custom_record_credential(_record, _base_url, provider)
+                _pool_declared = bool(_pool_runtime)
                 # Fallback: try credential pool for base_url + api_key
                 if not _base_url or not _api_key:
                     try:
                         from api.config import _has_explicit_pool_credentials
 
-                        if _has_explicit_pool_credentials(provider):
+                        _pool_declared = _has_explicit_pool_credentials(provider)
+                        if _pool_declared:
                             from agent.credential_pool import load_pool as _lpool
                             _resolved = _resolve_provider_alias(provider)
                             _lm_pool = _lpool(_resolved)
@@ -23311,6 +23315,8 @@ def _handle_live_models(handler, parsed):
                         
                         _api_key = _api_key() if callable(_api_key) else _api_key
                         _api_key = str(_api_key or "").strip()
+                        if refresh_required and not _api_key and (_pool_declared or _custom_record_declares_credential(_record, _base_url, _pool_runtime)):
+                            return _finish({"error": "custom_credentials_unavailable", "models": []})
                         _headers = {}
                         if _api_key:
                             _headers["Authorization"] = f"Bearer {_api_key}"

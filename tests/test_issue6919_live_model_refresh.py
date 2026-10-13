@@ -974,3 +974,94 @@ def test_required_refresh_rejects_agent_static_fallback(monkeypatch, failure):
     assert [model["id"] for model in fresh["models"]] == ["static-model"]
     assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
     assert routes._get_cached_live_models(key) == fresh
+
+
+@pytest.mark.parametrize("provider", ["custom", "custom:relay"])
+@pytest.mark.parametrize("credential", [
+    {"api_key": "${UNSET_DISCOVERY_KEY}"},
+    {"key_env": "UNSET_DISCOVERY_KEY"},
+    {"key_cmd": "unavailable-command"},
+    {"credential_pool": []},
+])
+def test_required_custom_refresh_refuses_unresolved_credentials(monkeypatch, provider, credential):
+    import urllib.request
+    import api.config as config
+    import api.routes as routes
+
+    _prepare(monkeypatch, routes)
+    _install_provider_model_ids(monkeypatch, lambda *args, **kwargs: [])
+    record = {"base_url": "https://relay.example/v1", **credential}
+    cfg = {"model": {"provider": "custom", **record}} if provider == "custom" else {
+        "model": {"provider": "openai"}, "custom_providers": [{"name": provider, **record}],
+    }
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda _: "")
+    monkeypatch.setattr(config, "_custom_record_pool_runtime", lambda *args: None)
+    monkeypatch.setattr(config, "_host_gated_env_key", lambda _: None)
+    monkeypatch.setattr(config, "_custom_record_key_cmd_provider", lambda *args: None)
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _: False)
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"data":[{"id":"anonymous-model"}]}'
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    routes._invalidate_live_models_for_provider(provider)
+    parsed = urlparse(f"/api/models/live?provider={provider}")
+    result = routes._handle_live_models(object(), parsed)
+    assert result == {"error": "custom_credentials_unavailable", "models": []}
+    assert requests == []
+    key = routes._live_models_cache_key(provider)
+    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert routes._get_cached_live_models(key) is None
+    record = cfg["model"] if provider == "custom" else cfg["custom_providers"][0]
+    name = record.get("name")
+    record.clear()
+    if name:
+        record["name"] = name
+    record["base_url"] = "https://relay.example/v1"
+    recovered = routes._handle_live_models(object(), parsed)
+    assert [model["id"] for model in recovered["models"]] == ["anonymous-model"]
+    assert len(requests) == 1
+    assert requests[0].get_header("Authorization") is None
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+
+
+def test_cache_hit_invalidated_before_response_cannot_publish(monkeypatch):
+    import api.routes as routes
+
+    _prepare(monkeypatch, routes)
+    _install_provider_model_ids(monkeypatch, lambda *args, **kwargs: ["fresh-model"])
+    key = routes._live_models_cache_key("provider")
+    routes._set_cached_live_models(key, {"models": [{"id": "cached-old-model"}]})
+    original_get = routes._get_cached_live_models
+    reads = []
+
+    def get_then_invalidate(cache_key):
+        cached = original_get(cache_key)
+        reads.append(cached)
+        if len(reads) == 1:
+            routes._invalidate_live_models_for_provider("provider")
+        return cached
+
+    monkeypatch.setattr(routes, "_get_cached_live_models", get_then_invalidate)
+    parsed = urlparse("/api/models/live?provider=provider")
+    result = routes._handle_live_models(object(), parsed)
+    assert result == {"provider": "provider", "models": [], "error": "stale_generation"}
+    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert original_get(key) is None
+    fresh = routes._handle_live_models(object(), parsed)
+    assert [model["id"] for model in fresh["models"]] == ["fresh-model"]
+    assert original_get(key) == fresh
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
