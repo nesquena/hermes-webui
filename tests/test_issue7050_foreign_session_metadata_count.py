@@ -2,7 +2,6 @@ import json
 import sqlite3
 import subprocess
 import textwrap
-import json
 from urllib.parse import urlparse
 from pathlib import Path
 
