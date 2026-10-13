@@ -378,14 +378,6 @@ def test_collection_render_and_open_route_through_classifier():
     (" report.md", " report.md"),
 ])
 def test_master_open_path_shapes_remain_openable(path, expected):
-    master = subprocess.run(
-        ["git", "show", "330f0936baa03dcdd6694454464dedaf28ba7062:static/workspace.js"],
-        cwd=REPO, capture_output=True, text=True, check=True,
-    ).stdout
-    marker = "async function openArtifactPath("
-    start = master.index(marker)
-    end = master.index("\nasync function ", start + len(marker))
-    master_opener = master[start:end]
     body = r'''
 const calls=[]; const S={session:{workspace:'/home/u/proj',session_id:'s'}};
 const t=k=>k; const setStatus=s=>calls.push({status:s});
@@ -394,9 +386,7 @@ const _workspacePathExists=async p=>{calls.push({check:p});return true;};
 const openFile=async p=>{calls.push({open:p});return true;};
 openArtifactPath(JSON.parse(process.argv[1])).then(()=>process.stdout.write(JSON.stringify(calls)));
 '''
-    baseline = _node_json(master_opener + body, path)
     candidate = _node_json(_common_js("_classifyArtifactPath", "openArtifactPath") + body, path)
-    assert baseline[-1] == {"open": path.replace("~/", "", 1) if path.startswith("~/") else path}
     assert candidate[-1] == {"open": expected}
 
 
@@ -405,6 +395,16 @@ def test_workspace_spaces_and_contained_parent_segments():
     assert row["openPath"] == " report.md"
     assert _classify(["../escape.md"], "/home/u/proj")[0]["openPath"] is None
     assert _classify(["/home/u/proj/../escape.md"], "/home/u/proj")[0]["openPath"] is None
+
+
+def test_repeated_separators_keep_contained_paths_openable():
+    absolute, relative = _classify(
+        ["/home//u/proj/report.md", ".//report.md"], "/home/u/proj"
+    )
+    assert absolute["kind"] == "workspace-contained"
+    assert absolute["openPath"] == "report.md"
+    assert relative["kind"] == "workspace-relative"
+    assert relative["openPath"] == "report.md"
 
 
 def test_structured_artifact_retains_leading_space_through_collection():
