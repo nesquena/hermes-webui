@@ -376,6 +376,7 @@ before the session's named-profile Gateway ownership is known.
 - **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
+- **Artifacts** -- files changed in the session and Skills Used, with a separate skill count and per-skill use counts
 - **Todos** -- live task list from the current session
 - **Spaces** -- add, rename, remove workspaces; quick-switch from topbar
 

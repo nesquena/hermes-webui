@@ -25,6 +25,8 @@ def _extract_function(source, name, *, async_function=False):
     marker = ("async function " if async_function else "function ") + name + "("
     start = source.index(marker)
     brace = source.index("{", start)
+    if name == "_refreshSessionSkillUsageForOwner":
+        start = source.rindex("const _sessionSkillUsageRefreshes", 0, start)
     depth = 0
     for index in range(brace, len(source)):
         if source[index] == "{":
@@ -256,6 +258,7 @@ def test_skills_used_disclosure_renders_counts_at_supported_widths():
     assert "zeta &lt;script&gt;" in html
     assert "<script>" not in html
     assert "Uses: 2" in html and "Uses: 4" in html
+    assert '<span class="workspace-artifact-skill-count">2</span>' in html
 
     try:
         from playwright.sync_api import sync_playwright
@@ -275,7 +278,7 @@ def test_skills_used_disclosure_renders_counts_at_supported_widths():
         </style>
         <div id="workspaceArtifacts"></div><span id="workspaceArtifactsCount"></span>
         <script>
-          const S={{session:{{session_id:'owner',workspace:'',skill_provenance:{{'zeta <script>':2,alpha:4}}}},messages:[],toolCalls:[]}};
+          const S={{session:{{session_id:'owner',workspace:'',skill_provenance:{{'zeta <script>':2,'alpha-with-a-long-skill-name-that-must-wrap':4}}}},messages:[],toolCalls:[]}};
           const $=id=>document.getElementById(id);
           const collectSessionArtifacts=()=>[];
           const t=key=>key==='insights_skill_usage_skills_used'?'Skills Used':'Uses';
@@ -294,7 +297,12 @@ def test_skills_used_disclosure_renders_counts_at_supported_widths():
             for width in (1024, 480):
                 page.set_viewport_size({"width": width, "height": 320})
                 assert page.locator(".workspace-artifact-skill-row").count() == 2
-                assert page.locator(".workspace-artifact-skill-name").first.inner_text() == "alpha"
+                assert page.locator(".workspace-artifact-skill-name").first.inner_text() == "alpha-with-a-long-skill-name-that-must-wrap"
+                uses = page.locator(".workspace-artifact-skill-uses").first
+                assert uses.evaluate("element => getComputedStyle(element).whiteSpace") == "nowrap"
+                summary = page.locator(".workspace-artifact-skills>summary")
+                if width < 640:
+                    assert summary.bounding_box()["height"] >= 44
                 disclosure = page.locator("details.workspace-artifact-skills")
                 disclosure.locator("summary").click()
                 assert disclosure.evaluate("element => !element.open")
@@ -431,3 +439,36 @@ def test_active_stream_conflict_keeps_resolved_use_payload():
 
 def test_real_page_layout_probe_is_available_for_reality_gate():
     pytest.importorskip("playwright.sync_api")
+
+
+@pytest.mark.parametrize("replace_session", [False, True])
+def test_skill_detail_refresh_rejects_reversed_and_replaced_same_session_responses(replace_session):
+    workspace = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    refresh = _extract_function(workspace, "_refreshSessionSkillUsageForOwner", async_function=True)
+    output = _run_node("\n".join([
+        "const S={session:{session_id:'A',skill_provenance:{review:1}}};",
+        "const _isSessionCurrentPane=id=>id==='A'; let rendered=0; const pending=[];",
+        "const renderSessionArtifacts=()=>{rendered+=1;};",
+        "const api=()=>new Promise(resolve=>pending.push(resolve));",
+        refresh,
+        "(async()=>{const old=_refreshSessionSkillUsageForOwner('A');",
+        "S.session={session_id:'A',skill_provenance:{review:8}};" if replace_session else "",
+        "const fresh=_refreshSessionSkillUsageForOwner('A'); pending[1]({session:{skill_provenance:{review:8}}}); await fresh;",
+        "pending[0]({session:{skill_provenance:{review:2}}}); await old; console.log(JSON.stringify({count:S.session.skill_provenance.review,rendered}));})();",
+    ]))
+    assert json.loads(output) == {"count": 8, "rendered": 1}
+
+
+def test_stream_done_replacement_retires_pending_skill_detail():
+    workspace = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
+    refresh = _extract_function(workspace, "_refreshSessionSkillUsageForOwner", async_function=True)
+    output = _run_node("\n".join([
+        "const S={session:{session_id:'A',skill_provenance:{review:1}}};",
+        "const _isSessionCurrentPane=id=>id==='A'; let rendered=0; let settle;",
+        "const renderSessionArtifacts=()=>{rendered+=1;};",
+        "const api=()=>new Promise(resolve=>{settle=resolve;});",
+        refresh,
+        "(async()=>{const old=_refreshSessionSkillUsageForOwner('A'); S.session={session_id:'A',skill_provenance:{review:8}};",
+        "settle({session:{skill_provenance:{review:1}}}); await old; console.log(JSON.stringify({count:S.session.skill_provenance.review,rendered}));})();",
+    ]))
+    assert json.loads(output) == {"count": 8, "rendered": 0}

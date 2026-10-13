@@ -592,12 +592,17 @@ function collectSessionArtifacts(){
   return items.slice(0, 50);
 }
 
+const _sessionSkillUsageRefreshes = new WeakMap();
+
 async function _refreshSessionSkillUsageForOwner(sessionId){
   const ownerId=String(sessionId||'').trim();
-  if(!ownerId) return;
+  const ownerSession=S.session;
+  if(!ownerId||!ownerSession||ownerSession.session_id!==ownerId) return;
+  const generation=(_sessionSkillUsageRefreshes.get(ownerSession)||0)+1;
+  _sessionSkillUsageRefreshes.set(ownerSession,generation);
   try{
     const data=await api(`/api/session?session_id=${encodeURIComponent(ownerId)}&messages=0&resolve_model=0`);
-    if(!S.session||S.session.session_id!==ownerId) return;
+    if(S.session!==ownerSession||_sessionSkillUsageRefreshes.get(ownerSession)!==generation) return;
     if(typeof _isSessionCurrentPane==='function'&&!_isSessionCurrentPane(ownerId)) return;
     const usage=data&&data.session&&data.session.skill_provenance;
     if(!usage||typeof usage!=='object'||Array.isArray(usage)) return;
@@ -653,7 +658,7 @@ function renderSessionArtifacts(){
     return `<button type="button" class="workspace-artifact-item" title="${esc(path)}" data-artifact-path="${esc(item.path)}" onclick="openArtifactPath(this.dataset.artifactPath)"><div class="workspace-artifact-filename">${esc(parts.name)}</div>${directory}<div class="workspace-artifact-meta"${sourceAttrs}>${source}</div></button>`;
   }).join('');
   const skillMarkup = skills.length
-    ? `<details class="workspace-artifact-skills" data-session-id="${esc(ownerId)}"${skillsOpen?' open':''}><summary>${esc(t('insights_skill_usage_skills_used') || 'Skills Used')}</summary><div class="workspace-artifact-skill-list">${skills.map(skill => `<div class="workspace-artifact-skill-row"><span class="workspace-artifact-skill-name">${esc(skill.name)}</span><span class="workspace-artifact-skill-uses">${esc(t('insights_skill_usage_col_uses') || 'Uses')}: ${skill.count}</span></div>`).join('')}</div></details>`
+    ? `<details class="workspace-artifact-skills" data-session-id="${esc(ownerId)}"${skillsOpen?' open':''}><summary>${esc(t('insights_skill_usage_skills_used') || 'Skills Used')}<span class="workspace-artifact-skill-count">${skills.length}</span></summary><div class="workspace-artifact-skill-list">${skills.map(skill => `<div class="workspace-artifact-skill-row"><span class="workspace-artifact-skill-name">${esc(skill.name)}</span><span class="workspace-artifact-skill-uses">${esc(t('insights_skill_usage_col_uses') || 'Uses')}: ${skill.count}</span></div>`).join('')}</div></details>`
     : '';
   root.innerHTML = fileMarkup + skillMarkup;
 }
