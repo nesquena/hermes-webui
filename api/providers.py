@@ -1320,16 +1320,19 @@ def _provider_has_key(provider_id: str) -> bool:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
         active_provider = model_cfg.get("provider")
-        if active_provider and str(active_provider).strip().lower() == provider_id.lower():
+        if active_provider and _canonicalise_provider_id(active_provider) == _canonicalise_provider_id(provider_id):
             if _provider_value_counts_as_api_key(provider_id, model_cfg.get("api_key")):
                 return True
     # Check providers.<id>.api_key
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider_id, {})
-        if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
-            if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
-                return True
+        canonical_id = _canonicalise_provider_id(provider_id)
+        for raw_provider_id, provider_cfg in providers_cfg.items():
+            if _canonicalise_provider_id(raw_provider_id) != canonical_id:
+                continue
+            if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
+                if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
+                    return True
     # Check custom_providers
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):

@@ -224,6 +224,20 @@ def test_gateway_payload_contract_is_canonical_and_credential_free():
     assert config.provider_is_keyless("opencode-free") is True
 
 
+def test_provider_key_status_reads_alias_config_keys(monkeypatch):
+    import api.providers as providers
+
+    monkeypatch.setattr(providers, "provider_is_keyless", lambda _provider: False)
+    monkeypatch.setattr(providers, "_provider_env_var_for", lambda _provider: None)
+    monkeypatch.setattr(providers, "get_config", lambda: {
+        "model": {},
+        "providers": {"z-ai": {"api_key": "configured-key"}},
+    })
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _provider: False)
+
+    assert providers._provider_has_key("zai") is True
+
+
 def test_opencode_free_preserves_namespaced_model_routing():
     original = copy.deepcopy(config.cfg)
     try:
@@ -423,6 +437,7 @@ def test_onboarding_switch_scrubs_paid_model_credentials(monkeypatch, tmp_path):
     monkeypatch.setattr(onboarding, "reload_config", lambda: None)
     monkeypatch.setattr(onboarding, "invalidate_models_cache", lambda: None)
     monkeypatch.setattr(onboarding, "verify_hermes_imports", lambda: (True, [], []))
+    monkeypatch.setattr(onboarding, "_agent_supports_provider", lambda _provider: True)
 
     result = onboarding.apply_onboarding_setup({
         "provider": "OPENCODE_FREE",
@@ -534,6 +549,7 @@ def test_status_and_onboarding_catalog_declare_keyless_without_credentials(monke
     monkeypatch.setattr(onboarding, "_provider_api_key_present", lambda *args: False)
     monkeypatch.setattr(onboarding, "verify_hermes_imports", lambda: (True, [], []))
     monkeypatch.setattr(onboarding, "_HERMES_FOUND", True)
+    monkeypatch.setattr(onboarding, "_agent_supports_provider", lambda _provider: True)
     status = onboarding._status_from_runtime(
         {"model": {"provider": "opencode_free", "default": "x-preview-f-free"}},
         True,
@@ -563,6 +579,44 @@ def test_status_and_onboarding_catalog_declare_keyless_without_credentials(monke
     catalog = onboarding._build_setup_catalog({"model": {}})
     setup = next(row for row in catalog["providers"] if row["id"] == "opencode-free")
     assert setup["is_keyless"] is True
+
+
+def test_onboarding_blocks_free_provider_when_agent_lacks_support(monkeypatch, tmp_path):
+    import api.onboarding as onboarding
+
+    monkeypatch.setattr(onboarding, "_get_active_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(onboarding, "_agent_supports_provider", lambda _provider: False)
+    monkeypatch.setattr(onboarding, "_HERMES_FOUND", True)
+    status = onboarding._status_from_runtime(
+        {"model": {"provider": "opencode-free", "default": "x-preview-f-free"}},
+        True,
+    )
+    assert status["provider_ready"] is False
+    assert status["chat_ready"] is False
+    assert status["provider_note_key"] == "onboarding_notice_provider_agent_upgrade_required"
+
+    monkeypatch.setenv("HERMES_WEBUI_SKIP_ONBOARDING", "0")
+    with pytest.raises(ValueError, match="newer Hermes Agent"):
+        onboarding.apply_onboarding_setup({
+            "provider": "opencode-free",
+            "model": "x-preview-f-free",
+            "confirm_overwrite": True,
+        })
+
+
+def test_agent_free_provider_support_comes_from_overlay_registry(monkeypatch):
+    import api.onboarding as onboarding
+
+    agent = types.ModuleType("hermes_cli")
+    agent.__path__ = []
+    providers = types.ModuleType("hermes_cli.providers")
+    providers.HERMES_OVERLAYS = {}
+    monkeypatch.setitem(sys.modules, "hermes_cli", agent)
+    monkeypatch.setitem(sys.modules, "hermes_cli.providers", providers)
+
+    assert onboarding._agent_supports_provider("opencode-free") is False
+    providers.HERMES_OVERLAYS["opencode-free"] = object()
+    assert onboarding._agent_supports_provider("opencode-free") is True
 
 
 def test_settings_provider_card_renders_keyless_row_without_credential_controls(tmp_path):
