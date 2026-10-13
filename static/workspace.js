@@ -178,7 +178,7 @@ function _escapeGrantStore(){
 }
 
 function _normalizeWorkspaceRelPath(path){
-  let raw = String(path || '').trim().replace(/\\/g, '/');
+  let raw = String(path || '').replace(/\\/g, '/');
   if(!raw || raw === '.') return '.';
   if(raw.startsWith('/')) return '';
   const parts = [];
