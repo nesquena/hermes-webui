@@ -554,6 +554,8 @@ const renderChild = new Function(
   'childLabelFor',
   '_delegatedChildRuntimeBadge',
   'openChildSession',
+  '_wireSessionNewTabListeners',
+  '_consumeSessionNewTabClick',
   renderSnippet + '; return childList.children[0];'
 );
 (async () => {{
@@ -567,6 +569,8 @@ const renderChild = new Function(
     async(rowChild) => {{
       openCalls.push(rowChild.session_id);
     }},
+    () => {{}},
+    () => false,
   );
   await row.onclick({{ stopPropagation() {{}} }});
   const badge = row.children[1];
