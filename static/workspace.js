@@ -497,7 +497,7 @@ function _classifyArtifactPath(path, workspace){
     const relative = segments.join('/') || '.';
     return {
       kind:'workspace-relative',
-      displayPath:relative,
+      displayPath:normalized,
       dedupeKey:workspaceIsWindows ? relative.toLowerCase() : relative,
       openPath:relative,
     };
@@ -523,8 +523,8 @@ function _classifyArtifactPath(path, workspace){
     if(fold(pathParts.segments[i]) !== fold(workspaceParts.segments[i])) return blocked('outside');
   }
   const suffix = pathParts.segments.slice(workspaceParts.segments.length).join('/');
-  const displaySuffix = suffix;
-  const containedDisplayPath = displaySuffix || suffix || '.';
+  const displaySuffix = suffix + (suffix && normalized.endsWith('/') ? '/' : '');
+  const containedDisplayPath = displaySuffix || '.';
   const openPath = suffix.split('/').filter(Boolean).join('/') || '.';
   return {kind:'workspace-contained', displayPath:containedDisplayPath, dedupeKey:pathIsWindows ? openPath.toLowerCase() : openPath, openPath};
 }
