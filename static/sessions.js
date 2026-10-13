@@ -9319,7 +9319,6 @@ function renderSessionListFromCache(){
       if(typeof console!=='undefined'&&console.warn) console.warn('hermes: date-group collapse state could not be persisted', e);
     }
   };
-  const groupedMode=!!window._sidebarGroupByProject;
   const groups=_buildSessionSidebarGroups(orderedSessions,groupedMode,_allProjects,now);
   const flatSessionRows=[];
   for(const g of groups){
@@ -10810,6 +10809,14 @@ function _showProjectPicker(session, anchorEl){
     }catch(e){showToast('Unassign failed: '+(e.message||e));}
   };
   picker.appendChild(none);
+  // Keep projects visible when either side uses the root profile alias.
+  const sessionProfile = session ? (session.profile || undefined) : undefined;
+  const _profileHidesProject = (projProfile) => {
+    if(!sessionProfile || !projProfile) return false;
+    if(projProfile === sessionProfile) return false;
+    if(projProfile === 'default' || sessionProfile === 'default') return false;
+    return true;
+  };
   for(const p of _allProjects){
     if (_profileHidesProject(p.profile)) continue;
     const item=_projectPickerItem('',session.project_id===p.project_id);

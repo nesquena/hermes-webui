@@ -242,6 +242,7 @@ function _partitionSidebarSessionRows(rows) {
     cliReferenceRaw: [],
     webuiSessionsRaw: rows,
     cliSessionsRaw: [],
+    projectIdFor: s => s.project_id || null,
   };
 }
 function _scopedSidebarReferenceRows() { return []; }
@@ -327,7 +328,14 @@ process.stdout.write(JSON.stringify({
     script = script.replace("__WINDOW__", _extract_js_function(SESSIONS_JS, "_sessionVirtualWindow"))
     script = script.replace("__BIND__", _extract_js_function(SESSIONS_JS, "_bindGroupedProjectDropTarget"))
     script = script.replace("__ELIGIBILITY__", _extract_js_function(SESSIONS_JS, "_projectMoveEligibility"))
-    script = script.replace("__RENDER__", _active_row_helper() + "\n" + _extract_js_function(SESSIONS_JS, "renderSessionListFromCache"))
+    script = script.replace(
+        "__RENDER__",
+        _active_row_helper()
+        + "\nfunction _wireSessionNewTabListeners() {}\nfunction _consumeSessionNewTabClick() { return false; }\n"
+        + _extract_js_function(SESSIONS_JS, "_sidebarHasUnprojectedRows")
+        + "\n"
+        + _extract_js_function(SESSIONS_JS, "renderSessionListFromCache"),
+    )
     observed = _run_node_json(script)
     assert observed == {
         "visible": ["beta"],
@@ -426,6 +434,7 @@ function _partitionSidebarSessionRows(rows) {
     cliReferenceRaw: [],
     webuiSessionsRaw: rows,
     cliSessionsRaw: [],
+    projectIdFor: s => s.project_id || null,
   };
 }
 function _scopedSidebarReferenceRows() { return []; }
@@ -594,7 +603,14 @@ try {
     fixture = fixture.replace("__ENTRIES__", _extract_js_function(SESSIONS_JS, "_buildSidebarRenderEntries"))
     fixture = fixture.replace("__WINDOW__", _extract_js_function(SESSIONS_JS, "_sessionVirtualWindow"))
     fixture = fixture.replace("__STYLE__", json.dumps((ROOT / "static" / "style.css").read_text(encoding="utf-8")))
-    fixture = fixture.replace("__RENDER__", _active_row_helper() + "\n" + _extract_js_function(SESSIONS_JS, "renderSessionListFromCache"))
+    fixture = fixture.replace(
+        "__RENDER__",
+        _active_row_helper()
+        + "\nfunction _wireSessionNewTabListeners() {}\nfunction _consumeSessionNewTabClick() { return false; }\n"
+        + _extract_js_function(SESSIONS_JS, "_sidebarHasUnprojectedRows")
+        + "\n"
+        + _extract_js_function(SESSIONS_JS, "renderSessionListFromCache"),
+    )
     fixture = fixture.replace("__BIND__", _extract_js_function(SESSIONS_JS, "_bindGroupedProjectDropTarget"))
     fixture = fixture.replace("__ELIGIBILITY__", _extract_js_function(SESSIONS_JS, "_projectMoveEligibility"))
     fixture = fixture.replace("__SCHEDULE__", _extract_js_function(SESSIONS_JS, "_scheduleSessionVirtualizedRender"))
@@ -825,10 +841,10 @@ process.stdout.write(JSON.stringify(_buildSessionSidebarGroups(rows,false,projec
     assert _run_node_json(script) == ["Today"]
 
 
-def test_picker_still_lists_unproven_default_named_projects():
+def test_picker_keeps_projects_visible_for_default_profile_aliases():
     picker = _extract_js_function(SESSIONS_JS, "_showProjectPicker")
-    assert re.search(r"reason\s*===\s*'profile-mismatch'", picker)
-    assert "profile-unproven" not in picker
+    assert "if (_profileHidesProject(p.profile)) continue;" in picker
+    assert "projProfile === 'default' || sessionProfile === 'default'" in picker
 
 
 def test_no_new_route_or_persistence_surface():
