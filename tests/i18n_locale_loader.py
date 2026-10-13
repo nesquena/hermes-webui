@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from functools import lru_cache
 from pathlib import Path
 
 
@@ -12,6 +13,7 @@ CORE_PATH = REPO / "static" / "i18n-core.js"
 LOCALE_DIR = REPO / "static" / "locales"
 
 
+@lru_cache(maxsize=1)
 def locale_manifest() -> dict[str, dict[str, str]]:
     source = CORE_PATH.read_text(encoding="utf-8")
     match = re.search(
@@ -23,6 +25,7 @@ def locale_manifest() -> dict[str, dict[str, str]]:
     return json.loads(match.group(1))
 
 
+@lru_cache(maxsize=1)
 def locale_sources() -> dict[str, str]:
     sources = {"en": CORE_PATH.read_text(encoding="utf-8")}
     for path in sorted(LOCALE_DIR.glob("*.js")):
@@ -30,6 +33,7 @@ def locale_sources() -> dict[str, str]:
     return sources
 
 
+@lru_cache(maxsize=1)
 def locale_source_text() -> str:
     """Return the split source corpus for tests that inspect translation text."""
     core = locale_sources()["en"]
@@ -71,6 +75,7 @@ def locale_codes() -> list[str]:
     return list(locale_manifest())
 
 
+@lru_cache(maxsize=15)
 def locale_block(locale: str) -> str:
     source = locale_sources()[locale]
     match = re.search(

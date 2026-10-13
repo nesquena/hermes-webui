@@ -24,6 +24,7 @@ break the chip.
 from __future__ import annotations
 
 import pathlib
+from tests.i18n_locale_loader import locale_string_value
 
 JS = pathlib.Path(__file__).parent.parent / "static" / "sessions.js"
 CSS = pathlib.Path(__file__).parent.parent / "static" / "style.css"
@@ -99,8 +100,7 @@ def test_unassigned_chip_label_and_handler():
     assert "noneChip.textContent=t('project_chip_unassigned');" in js, (
         "The Unassigned chip must display the localized project_chip_unassigned label"
     )
-    i18n = (JS.parent / "i18n.js").read_text(encoding="utf-8")
-    assert "project_chip_unassigned: 'Unassigned'," in i18n, (
+    assert locale_string_value("en", "project_chip_unassigned") == "Unassigned", (
         "The en locale must keep 'Unassigned' as the project_chip_unassigned value"
     )
     assert "_setActiveProjectFilter(NO_PROJECT_FILTER)" in js, (
