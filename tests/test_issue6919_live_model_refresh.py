@@ -983,7 +983,7 @@ def test_required_refresh_rejects_agent_static_fallback(monkeypatch, failure):
     {"key_cmd": "unavailable-command"},
     {"credential_pool": []},
 ])
-def test_required_custom_refresh_refuses_unresolved_credentials(monkeypatch, provider, credential):
+def test_required_custom_refresh_probes_without_unresolved_credentials(monkeypatch, provider, credential):
     import urllib.request
     import api.config as config
     import api.routes as routes
@@ -1020,22 +1020,12 @@ def test_required_custom_refresh_refuses_unresolved_credentials(monkeypatch, pro
     routes._invalidate_live_models_for_provider(provider)
     parsed = urlparse(f"/api/models/live?provider={provider}")
     result = routes._handle_live_models(object(), parsed)
-    assert result == {"error": "custom_credentials_unavailable", "models": []}
-    assert requests == []
-    key = routes._live_models_cache_key(provider)
-    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
-    assert routes._get_cached_live_models(key) is None
-    record = cfg["model"] if provider == "custom" else cfg["custom_providers"][0]
-    name = record.get("name")
-    record.clear()
-    if name:
-        record["name"] = name
-    record["base_url"] = "https://relay.example/v1"
-    recovered = routes._handle_live_models(object(), parsed)
-    assert [model["id"] for model in recovered["models"]] == ["anonymous-model"]
+    assert [model["id"] for model in result["models"]] == ["anonymous-model"]
     assert len(requests) == 1
     assert requests[0].get_header("Authorization") is None
+    key = routes._live_models_cache_key(provider)
     assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert routes._get_cached_live_models(key) == result
 
 
 def test_cache_hit_invalidated_before_response_cannot_publish(monkeypatch):
