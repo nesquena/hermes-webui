@@ -279,7 +279,7 @@ def test_stale_failed_refresh_keeps_newer_generation_required(monkeypatch):
             "empty",
             "https://relay.example/v1/models",
             None,
-            ["upstream-model", "configured-only"],
+            ["upstream-model"],
         ),
         (
             "custom:relay",
@@ -297,7 +297,7 @@ def test_stale_failed_refresh_keeps_newer_generation_required(monkeypatch):
             "exception",
             "https://relay.example/v1/models",
             None,
-            ["upstream-model", "configured-only"],
+            ["upstream-model"],
         ),
         (
             "custom:relay",
@@ -315,7 +315,7 @@ def test_stale_failed_refresh_keeps_newer_generation_required(monkeypatch):
             "exception",
             "https://relay.example/v1/models",
             "Bearer relay-key",
-            ["upstream-model", "configured-only"],
+            ["upstream-model"],
         ),
     ],
 )
@@ -802,3 +802,81 @@ globalThis.eval({json.dumps(bundle)});
         ["provider-alias", "profile-b"],
         ["provider", "profile-b"],
     ]
+
+
+@pytest.mark.parametrize("provider,record,env,expected_auth", [
+    ("custom", {"api_key": "${DISCOVERY_TEST_KEY}"}, {}, None),
+    ("custom", {"api_key": "${DISCOVERY_TEST_KEY}"}, {"DISCOVERY_TEST_KEY": "resolved-key"}, "Bearer resolved-key"),
+    ("custom", {"key_env": "DISCOVERY_TEST_KEY"}, {"DISCOVERY_TEST_KEY": "hint-key"}, "Bearer hint-key"),
+    ("custom:relay-prod", {}, {"CUSTOM_RELAY_PROD_API_KEY": "conventional-key"}, "Bearer conventional-key"),
+    ("custom:relay-prod", {}, {"CUSTOM:RELAY-PROD_API_KEY": "legacy-key"}, "Bearer legacy-key"),
+    ("custom:relay-prod", {"api_key": "literal-key"}, {}, "Bearer literal-key"),
+    ("custom", {}, {"POOL": "pool-key"}, "Bearer pool-key"),
+    ("custom:relay-prod", {}, {"POOL": "pool-key"}, "Bearer pool-key"),
+])
+def test_custom_discovery_resolves_credentials(monkeypatch, provider, record, env, expected_auth):
+    import urllib.request
+    import api.config as config
+    import api.routes as routes
+
+    _prepare(monkeypatch, routes)
+    _install_provider_model_ids(monkeypatch, lambda *args, **kwargs: [])
+    record = {"base_url": "https://relay.example/v1", **record}
+    cfg = {"model": {"provider": "custom", **record}} if provider == "custom" else {
+        "model": {"provider": "openai"}, "custom_providers": [{"name": provider, **record}],
+    }
+    monkeypatch.setattr(config, "get_config", lambda: cfg)
+    monkeypatch.setattr(config, "_thread_local_env_value", lambda name: env.get(name, ""))
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", lambda _: "POOL" in env)
+    pool = types.ModuleType("agent.credential_pool")
+    pool.load_pool = lambda _: types.SimpleNamespace(select=lambda: types.SimpleNamespace(runtime_api_key=env.get("POOL", "")))
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", pool)
+    requests = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def read(self):
+            return b'{"data":[{"id":"live-model"}]}'
+
+    def urlopen(request, timeout):
+        requests.append(request)
+        return Response()
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    result = routes._handle_live_models(object(), urlparse(f"/api/models/live?provider={provider}"))
+    assert len(requests) == 1
+    assert requests[0].full_url == "https://relay.example/v1/models"
+    assert requests[0].get_header("Authorization") == expected_auth
+    assert [model["id"] for model in result["models"]] == ["live-model"]
+
+
+def test_successful_lookup_invalidated_by_another_request_cannot_publish(monkeypatch):
+    import api.routes as routes
+
+    _prepare(monkeypatch, routes)
+    calls = []
+
+    def lookup(provider, **kwargs):
+        calls.append(provider)
+        if len(calls) == 1:
+            routes._invalidate_live_models_for_provider(provider)
+            return ["stale-model"]
+        return ["fresh-model"]
+
+    _install_provider_model_ids(monkeypatch, lookup)
+    parsed = urlparse("/api/models/live?provider=openai")
+    key = routes._live_models_cache_key("openai")
+    result = routes._handle_live_models(object(), parsed)
+    assert result["models"] == []
+    assert result["error"] == "stale_generation"
+    assert routes._get_cached_live_models(key) is None
+    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    fresh = routes._handle_live_models(object(), parsed)
+    assert [model["id"] for model in fresh["models"]] == ["fresh-model"]
+    assert routes._get_cached_live_models(key) == fresh
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED

@@ -23073,7 +23073,8 @@ def _handle_live_models(handler, parsed):
         def _finish(payload: dict):
             if payload.get("error"):
                 return j(handler, payload)
-            _set_cached_live_models(cache_key, payload, expected_generation)
+            if not _set_cached_live_models(cache_key, payload, expected_generation):
+                return j(handler, {"provider": provider, "models": [], "error": "stale_generation"})
             return j(handler, payload)
 
         # Delegate to the agent's live-fetch + fallback resolver.
@@ -23150,17 +23151,6 @@ def _handle_live_models(handler, parsed):
                         elif isinstance(_item, dict):
                             _append(_item.get("id") or _item.get("model") or _item.get("name"))
                 return _ids
-
-            def _custom_provider_api_key(_cp):
-                _raw = _cp.get("api_key")
-                if _raw is not None:
-                    _key = str(_raw).strip()
-                    if _key.startswith("${") and _key.endswith("}") and len(_key) > 3:
-                        _key = os.getenv(_key[2:-1], "").strip()
-                    if _key:
-                        return _key
-                _env = str(_cp.get("key_env") or "").strip()
-                return os.getenv(_env, "").strip() if _env else ""
 
             def _custom_provider_models_discover_is_false(_cp):
                 """True when ``discover_models`` is an explicit ``false`` opt-out.
@@ -23275,17 +23265,13 @@ def _handle_live_models(handler, parsed):
             # fallback, not a replacement.  The live endpoint should return ALL
             # models the key has access to, not just what's listed in config.yaml.
             if provider == "custom" or provider.startswith("custom:"):
-                _base_url = None
-                _api_key = None
-                if custom_provider_entry:
-                    _base_url = custom_provider_entry.get("base_url")
-                    _api_key = _custom_provider_api_key(custom_provider_entry)
-                else:
-                    _model_cfg = cfg.get("model", {})
-                    _base_url = _model_cfg.get("base_url")
-                    _api_key = _model_cfg.get("api_key")
+                from api.config import _resolve_custom_record_key
+
+                _record = custom_provider_entry or cfg.get("model", {})
+                _base_url = _record.get("base_url")
+                _api_key = _resolve_custom_record_key(_record.get("api_key"), _record.get("key_env"), provider)
                 # Fallback: try credential pool for base_url + api_key
-                if (not _base_url or not _api_key) and provider.startswith("custom:"):
+                if not _base_url or not _api_key:
                     try:
                         from api.config import _has_explicit_pool_credentials
 
@@ -23297,7 +23283,7 @@ def _handle_live_models(handler, parsed):
                                 _lm_entry = _lm_pool.select()
                                 if _lm_entry:
                                     if not _api_key:
-                                        _api_key = getattr(_lm_entry, "runtime_api_key", "") or ""
+                                        _api_key = str(getattr(_lm_entry, "runtime_api_key", "") or "").strip()
                                     if not _base_url:
                                         _base_url = str(getattr(_lm_entry, "base_url", "") or "").strip()
                     except ImportError:
