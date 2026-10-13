@@ -29,7 +29,53 @@ def test_non_empty_draft_save_clears_submit_restore_suppression():
     assert "_clearComposerDraftRestoreSuppression(sid);" in save_body
     now_body = _block(SESSIONS_JS, "function _saveComposerDraftNow(sid, text, files", "// Restore composer draft")
     assert "_clearComposerDraftRestoreSuppression(sid);" in now_body
-    assert "payload.preserve_long_text = true" in now_body
+    assert "normalizedText.length > 50_000" in now_body
+    assert "opts.preserveLongText === true" in now_body
+
+
+def test_immediate_draft_save_preserves_long_text_only_when_needed():
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        import pytest
+        pytest.skip("node not available")
+
+    save_fn = _block(
+        SESSIONS_JS,
+        "function _saveComposerDraftNow(sid, text, files",
+        "// Restore composer draft",
+    )
+    harness = f"""
+globalThis._draftSaveTimer=null;
+globalThis.S={{session:null}};
+globalThis._composerDraftKnownPayloadSessions=new Set();
+globalThis._composerDraftFilesForPersist=files=>files||[];
+globalThis._composerDraftHasPayload=text=>!!text;
+globalThis._clearComposerDraftRestoreSuppression=()=>{{}};
+globalThis._sessionComposerDraftHasPayload=()=>false;
+globalThis._rememberComposerDraftPayloadState=()=>{{}};
+const payloads=[];
+globalThis.api=async (_url,options)=>payloads.push(JSON.parse(options.body));
+{save_fn}
+(async()=>{{
+  await _saveComposerDraftNow('long','x'.repeat(50001),[]);
+  await _saveComposerDraftNow('short','x'.repeat(50000),[]);
+  process.stdout.write(JSON.stringify(payloads.map(payload=>({{
+    session_id:payload.session_id,
+    preserve_long_text:payload.preserve_long_text===true,
+    length:payload.text.length
+  }}))));
+}})().catch(error=>{{process.stderr.write(String(error.stack||error));process.exit(1);}});
+"""
+    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    assert json.loads(proc.stdout) == [
+        {"session_id": "long", "preserve_long_text": True, "length": 50001},
+        {"session_id": "short", "preserve_long_text": False, "length": 50000},
+    ]
 
 
 def test_restore_skips_suppressed_non_empty_server_draft_only():

@@ -278,7 +278,9 @@ function _saveComposerDraftNow(sid, text, files, opts={}) {
     return Promise.resolve();
   }
   const payload = { session_id: sid, text: normalizedText, files: normalizedFiles };
-  if (opts && opts.preserveLongText === true) payload.preserve_long_text = true;
+  if (normalizedText.length > 50_000 || (opts && opts.preserveLongText === true)) {
+    payload.preserve_long_text = true;
+  }
   return api('/api/session/draft', {
     method: 'POST',
     body: JSON.stringify(payload),
