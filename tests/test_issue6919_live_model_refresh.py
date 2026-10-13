@@ -41,6 +41,14 @@ def _install_provider_model_ids(monkeypatch, fn):
     models.provider_model_ids = fn
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
     monkeypatch.setitem(sys.modules, "hermes_cli.models", models)
+    providers = types.ModuleType("providers")
+    providers.get_provider_profile = lambda provider: types.SimpleNamespace(
+        auth_type="api_key", fetch_models=lambda **kwargs: fn(provider, force_refresh=True),
+    )
+    runtime = types.ModuleType("hermes_cli.runtime_provider")
+    runtime.resolve_runtime_provider = lambda **kwargs: {}
+    monkeypatch.setitem(sys.modules, "providers", providers)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", runtime)
 
 
 def _prepare(monkeypatch, routes, profile="default"):
@@ -134,7 +142,7 @@ def test_refresh_evicts_only_canonical_profile_provider_key(monkeypatch):
     import api.profiles as profiles
 
     active = ["default"]
-    _install_provider_model_ids(monkeypatch, lambda provider: [f"{provider}/{active[0]}"])
+    _install_provider_model_ids(monkeypatch, lambda provider, *, force_refresh=False: [f"{provider}/{active[0]}"])
     _prepare(monkeypatch, routes)
     monkeypatch.setattr(profiles, "get_active_profile_name", lambda: active[0])
     parsed = urlparse("/api/models/live?provider=provider")
@@ -183,7 +191,7 @@ def test_forced_empty_lookup_stays_uncached_after_failure(monkeypatch):
     key = routes._live_models_cache_key("provider")
     assert result["models"] == []
     assert result["error"] == "live_models_unavailable"
-    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
     assert routes._get_cached_live_models(key) is None
 
 
@@ -205,7 +213,8 @@ def test_failed_refresh_does_not_poison_ordinary_lookup(monkeypatch):
     key = routes._live_models_cache_key("provider")
     assert result["models"] == []
     assert result["error"] == "live_models_unavailable"
-    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    routes._clear_live_models_cache()
     recovered = routes._handle_live_models(object(), urlparse("/api/models/live?provider=provider"))
     assert recovered["models"] == [
         {"id": "provider/static-after-failure", "label": "Static After Failure"}
@@ -481,7 +490,7 @@ def test_forced_custom_lookup_does_not_use_configured_static_model(monkeypatch):
     )
     key = routes._live_models_cache_key("custom:relay")
     assert result == {"error": "live_models_unavailable", "models": []}
-    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
     assert routes._get_cached_live_models(key) is None
 
 
@@ -929,3 +938,39 @@ globalThis.eval({json.dumps(bundle)});
     assert _run_node(script) == {
         "oldResult": None, "appliedAfterOld": 0, "applied": [["current-profile-model"]], "pending": 0,
     }
+
+
+@pytest.mark.parametrize("failure", ["empty", "exception"])
+def test_required_refresh_rejects_agent_static_fallback(monkeypatch, failure):
+    import api.routes as routes
+
+    mixed_calls = []
+    _prepare(monkeypatch, routes)
+    _install_provider_model_ids(monkeypatch, lambda provider, **kwargs: mixed_calls.append(provider) or ["static-model"])
+    providers = sys.modules["providers"]
+    live_calls = []
+
+    def fetch_live(**kwargs):
+        live_calls.append(kwargs)
+        if failure == "exception":
+            raise OSError("provider down")
+        return None
+
+    profile = types.SimpleNamespace(auth_type="api_key", fetch_models=fetch_live)
+    monkeypatch.setattr(providers, "get_provider_profile", lambda _: profile)
+    parsed = urlparse("/api/models/live?provider=provider")
+    ordinary = routes._handle_live_models(object(), parsed)
+    assert [model["id"] for model in ordinary["models"]] == ["static-model"]
+    routes._invalidate_live_models_for_provider("provider")
+    key = routes._live_models_cache_key("provider")
+    failed = routes._handle_live_models(object(), parsed)
+    assert failed == {"error": "live_models_unavailable", "models": []}
+    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert routes._get_cached_live_models(key) is None
+    assert mixed_calls == ["provider"]
+    assert len(live_calls) == 1
+    profile.fetch_models = lambda **kwargs: ["static-model"]
+    fresh = routes._handle_live_models(object(), parsed)
+    assert [model["id"] for model in fresh["models"]] == ["static-model"]
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert routes._get_cached_live_models(key) == fresh

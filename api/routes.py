@@ -23088,21 +23088,28 @@ def _handle_live_models(handler, parsed):
             _agent_dir = _os.path.normpath(_agent_dir)
             if _agent_dir not in _sys.path:
                 _sys.path.insert(0, _agent_dir)
-            from hermes_cli.models import provider_model_ids as _pmi
             if refresh_required:
-                import inspect as _inspect
-                try:
-                    _params = _inspect.signature(_pmi).parameters
-                    _supports_force = "force_refresh" in _params or any(
-                        p.kind is _inspect.Parameter.VAR_KEYWORD for p in _params.values()
-                    )
-                except (TypeError, ValueError):
-                    _supports_force = False
-                ids = _pmi(provider, force_refresh=True) if _supports_force else _pmi(provider)
+                # The mixed catalog API can return static rows even with force_refresh.
+                from providers import get_provider_profile
+
+                ids = []
+                _profile = get_provider_profile(provider)
+                if _profile and provider != "custom" and not provider.startswith("custom:"):
+                    if _profile.auth_type == "external_process":
+                        ids = _profile.fetch_models() or []
+                    else:
+                        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+                        _runtime = resolve_runtime_provider(requested=provider)
+                        _key = _runtime.get("api_key")
+                        _key = _key() if callable(_key) else _key
+                        ids = _profile.fetch_models(api_key=_key, base_url=_runtime.get("base_url")) or []
             else:
+                from hermes_cli.models import provider_model_ids as _pmi
+
                 ids = _pmi(provider)
         except Exception as _import_err:
-            logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
+            logger.debug("Model discovery failed for %s: %s", provider, _import_err)
             ids = []
 
         if not ids:
@@ -23409,9 +23416,6 @@ def _handle_live_models(handler, parsed):
         # Static fallback — only reached when live fetch also failed.
         if not ids:
             if refresh_required:
-                with _LIVE_MODELS_CACHE_LOCK:
-                    if _LIVE_MODELS_CACHE_GENERATION.get(cache_key, 0) == expected_generation:
-                        _LIVE_MODELS_REFRESH_REQUIRED.discard(cache_key)
                 return _finish({"error": "live_models_unavailable", "models": []})
             from api.config import _PROVIDER_MODELS as _pm
             ids = [m["id"] for m in _pm.get(provider, [])]
