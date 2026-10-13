@@ -1107,6 +1107,10 @@ def test_dedupe_hit_resolves_retry_marker_instead_of_burning_attempts(hermes_hom
 
     resolved = _retry_journal_recovery_in_place(session)
 
+    assert sum(
+        isinstance(r, dict) and r.get("content") == "partial answer"
+        for r in session.messages
+    ) == 1, "the already-saved answer must not be duplicated by the lazy retry"
     assert resolved is True, (
         "a dedupe-only pass must count as resolved recovery "
         "(output_accounted_for) — returning False burns another retry"

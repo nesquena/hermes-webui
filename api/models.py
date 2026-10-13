@@ -4065,6 +4065,12 @@ def _recover_journaled_output_and_terminal_error(
     dedupe_min_index: int | None = None,
     dedupe_max_index: int | None = None,
     authorize_core_rows: bool = False,
+    # #7167 re-gate (2026-10-12): the no-cancel-hook lazy retry replays a
+    # journal whose answer is ALREADY SAVED as an ordinary session row. The
+    # projection does not carry that row's provenance, so the ownership gate
+    # rejects it and the lazy in-place retry appends a duplicate. Opt in to
+    # authorizing already-saved turn rows on that path only.
+    authorize_saved_turn_rows: bool = False,
 ) -> tuple[bool, bool, bool]:
     """Recover readable activity first, then append its authoritative terminal error.
 
@@ -4097,6 +4103,7 @@ def _recover_journaled_output_and_terminal_error(
         append_context=append_context,
         display_only=not append_context,
         authorize_core_rows=authorize_core_rows,
+        authorize_saved_turn_rows=authorize_saved_turn_rows,
     )
     terminal_error_recovered = _materialize_unsaved_gateway_terminal_error(
         session,
@@ -4165,6 +4172,11 @@ def _append_journaled_partial_output(
     # row is authorized for reuse even though it is not a recovery artifact;
     # only the completed-stream branch opts in.
     authorize_completed_turn_rows: bool = False,
+    # #7167 re-gate (2026-10-12): authorize an already-SAVED ordinary turn row
+    # as the journal's output when the caller has proven the retry owns it
+    # (no-cancel-hook lazy retry). The projection drops the row's provenance,
+    # so the gate would otherwise reject it and duplicate the answer.
+    authorize_saved_turn_rows: bool = False,
 ) -> tuple[bool, bool]:
     """Recover already-emitted visible output from a dead stream journal.
 
@@ -4489,6 +4501,7 @@ def _append_journaled_partial_output(
                 _cand = session.messages[candidate_idx]
                 _authorized = (
                     _is_own_stream_recovery_artifact(_cand, stream_id)
+                    or authorize_saved_turn_rows
                     or (
                         authorize_core_rows
                         and _cand.get('_from_core_transcript') is True
@@ -5727,11 +5740,15 @@ def _retry_journal_recovery_in_place(
                 interrupted_snapshot = snapshot_cancel_projection() if context_owner is not None else None
                 # The single replay for this arm: windowed by the owner/marker
                 # pair, with append_context decided by the successor proof
-                # taken just above. ``output_accounted_for`` is deliberately
-                # dropped on the floor here — the fail-closed verdict block
-                # below accepts only a FRESH append or a real terminal error,
-                # so an "already represented" hit cannot consume this marker.
-                recovered_output, terminal_error_recovered, _ = (
+                # taken just above. #7167 re-gate (2026-10-12):
+                # ``output_accounted_for`` is now KEPT — the lazy retry proves
+                # the journal's answer is already saved as an ordinary row, and
+                # a dedupe hit must consume this marker (the closing verdict
+                # block accepts ``recovered_output or terminal_error_recovered
+                # or output_accounted_for``). ``authorize_saved_turn_rows=True``
+                # lets that saved row pass the ownership gate so the answer is
+                # not appended a second time.
+                recovered_output, terminal_error_recovered, output_accounted_for = (
                     _recover_journaled_output_and_terminal_error(
                         session,
                         stream_id,
@@ -5739,6 +5756,7 @@ def _retry_journal_recovery_in_place(
                         append_context=not has_successor,
                         dedupe_min_index=owner_index + 1 if owner_index is not None else idx,
                         dedupe_max_index=idx,
+                        authorize_saved_turn_rows=True,
                     )
                 )
 
