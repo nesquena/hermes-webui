@@ -1349,18 +1349,17 @@ def _get_anthropic_fallback_env_vars() -> tuple[str, ...]:
 
 
 def _resolve_provider_alias(name: str) -> str:
-    """Return the canonical provider slug for *name*.
+    """Resolve provider aliases while keeping Mistral in the WebUI namespace."""
+    if str(name or "").strip().lower() in {"mistral", "mistralai"}:
+        return "mistral"
+    return _resolve_agent_provider_alias(name)
 
-    Applies the WebUI's local alias table first, then merges any
-    additional aliases the agent provides (when hermes_cli is on
-    sys.path). Lookup is case-insensitive and whitespace-trimmed.
-    Unknown names pass through unchanged.
-    """
+
+def _resolve_agent_provider_alias(name: str) -> str:
+    """Resolve provider aliases in the Agent vocabulary before the local fallback."""
     if not name:
         return name
     raw = str(name).strip().lower()
-    if raw in {"mistral", "mistralai"}:
-        return "mistral"
     # Prefer the agent's table when available so new aliases added there
     # work automatically; otherwise fall through to our local copy.
     try:
@@ -7807,7 +7806,7 @@ def _pool_entry_payloads(provider_id: str) -> list[dict[str, Any]]:
     because that can materialize server-default credentials into a named
     profile's auth store. In that mode, read raw auth.json payloads only.
     """
-    _pid = _resolve_provider_alias(provider_id)
+    _pid = _resolve_agent_provider_alias(provider_id)
     if bool(getattr(_thread_ctx, "block_process_env_fallback", False)):
         try:
             from hermes_cli.auth import read_credential_pool as _read_credential_pool
@@ -9148,7 +9147,7 @@ def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: s
             else:
                 tag = _credential_pool_profile_tag()
                 _CREDENTIAL_POOL_CACHE.pop((tag, provider_id), None)
-                _CREDENTIAL_POOL_CACHE.pop((tag, _resolve_provider_alias(provider_id)), None)
+                _CREDENTIAL_POOL_CACHE.pop((tag, _resolve_agent_provider_alias(provider_id)), None)
             _cache_build_in_progress = False
             _cache_build_cv.notify_all()
             if delete_disk:
@@ -9192,7 +9191,7 @@ def invalidate_credential_pool_cache(provider_id: str):
     with _available_models_cache_lock:
         _cp_tag = _credential_pool_profile_tag()
         _CREDENTIAL_POOL_CACHE.pop((_cp_tag, provider_id), None)
-        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, _resolve_provider_alias(provider_id)), None)
+        _CREDENTIAL_POOL_CACHE.pop((_cp_tag, _resolve_agent_provider_alias(provider_id)), None)
     try:
         # api.providers imports from api.config; keep this lazy to avoid
         # import-cycle/module-initialization issues.

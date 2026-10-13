@@ -643,3 +643,40 @@ def test_configured_google_and_gemini_cards_remain_distinct(monkeypatch, tmp_pat
     assert cards["google"]["has_key"] is True
     assert cards["gemini"]["has_key"] is True
     assert cards["google"]["id"] != cards["gemini"]["id"]
+
+
+@pytest.mark.parametrize("readonly", [False, True])
+def test_mistral_key_status_and_retrieval_use_agent_pool_alias(monkeypatch, tmp_path, readonly):
+    _install_hermes_modules(monkeypatch)
+    has_pool_credentials = config._has_explicit_pool_credentials
+    _, auth_path, _ = _configure_profile(monkeypatch, tmp_path, _anthropic_config())
+    monkeypatch.setattr(config, "_has_explicit_pool_credentials", has_pool_credentials)
+    config._thread_ctx.block_process_env_fallback = readonly
+    payload = {"source": "manual", "runtime_api_key": "synthetic-pool-key"}
+    auth_path.write_text(json.dumps({"credential_pool": {"mistralai": [payload]}}), encoding="utf-8")
+    reads = []
+
+    def read_pool(provider):
+        reads.append(provider)
+        return json.loads(auth_path.read_text(encoding="utf-8"))["credential_pool"].get(provider, [])
+
+    sys.modules["hermes_cli.auth"].read_credential_pool = read_pool
+    agent = types.ModuleType("agent")
+    agent.__path__ = []
+    pool_module = types.ModuleType("agent.credential_pool")
+    pool_module.load_pool = lambda provider: SimpleNamespace(entries=lambda: [SimpleNamespace(**entry) for entry in read_pool(provider)])
+    monkeypatch.setitem(sys.modules, "agent", agent)
+    monkeypatch.setitem(sys.modules, "agent.credential_pool", pool_module)
+
+    assert config._resolve_provider_alias("mistral") == "mistral"
+    assert config._has_explicit_pool_credentials("mistral") is True
+    assert providers._provider_has_key("mistral") is True
+    assert providers._get_provider_api_key("mistral") == "synthetic-pool-key"
+    assert providers._get_provider_api_key("mistralai") == "synthetic-pool-key"
+    assert reads and set(reads) == {"mistralai"}
+    if not readonly:
+        assert (str(auth_path), "mistralai") in config._CREDENTIAL_POOL_CACHE
+        for invalidate in (config.invalidate_credential_pool_cache, config.invalidate_provider_models_cache):
+            invalidate("mistral")
+            assert (str(auth_path), "mistralai") not in config._CREDENTIAL_POOL_CACHE
+            assert providers._get_provider_api_key("mistral") == "synthetic-pool-key"
