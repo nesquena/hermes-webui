@@ -445,3 +445,36 @@ def test_messaging_metadata_control_stays_on_messaging_path(monkeypatch, tmp_pat
     monkeypatch.setattr(routes, "_foreign_display_coordinate_summary", lambda *args, **kwargs: pytest.fail("messaging path used foreign summary"))
     payload = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
     assert payload["message_count"] == 1
+
+
+def test_read_only_messaging_paged_load_with_empty_cli_uses_sidecar(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    parent_id = "messaging_empty_cli_parent_7050"
+    sid = "messaging_empty_cli_child_7050"
+    parent_messages = [{"role": "user", "content": "parent only", "timestamp": 900.0}]
+    sidecar = [
+        {"role": "user", "content": "saved user", "timestamp": 1000.0},
+        {"role": "assistant", "content": "saved answer", "timestamp": 1001.0},
+    ]
+    _install_test_session(monkeypatch, tmp_path, parent_id, parent_messages)
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar)
+    session.parent_session_id = parent_id
+    session.is_cli_session = True
+    session.read_only = True
+    session.session_source = "messaging"
+    session.source_tag = "slack"
+    session.raw_source = "slack"
+    session.save(touch_updated_at=False)
+    monkeypatch.setattr(
+        routes,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {"source_tag": "slack", "session_source": "messaging", "is_cli_session": True},
+    )
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: [])
+
+    handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=30")
+    routes.handle_get(handler, urlparse(handler.path))
+
+    assert handler.status == 200
+    assert handler.response_json["session"]["messages"] == sidecar
