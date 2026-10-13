@@ -71,18 +71,21 @@ def test_use_and_bundle_resolution_send_owning_session_id():
                 "const renderSessionList=async()=>{};",
                 "const renderMessages=()=>{};",
                 "const showToast=()=>{};",
+                "const refreshed=[]; const _refreshSessionSkillUsageForOwner=async sid=>{refreshed.push(sid);};",
                 "const api=async (url,options={})=>{calls.push({url,body:options.body?JSON.parse(options.body):null}); if(url==='/api/skills') return {skills:[{name:'server-skill'}]}; if(url.startsWith('/api/skills/content')) return {content:'body'}; return {message:'resolved'};};",
                 cmd_use,
                 bundle,
-                "(async()=>{await cmdUse('server-skill'); S.session=null; await resolveBundleCommand('/bundle request'); console.log(JSON.stringify(calls));})();",
+                "(async()=>{await cmdUse('server-skill'); S.session=null; await resolveBundleCommand('/bundle request'); console.log(JSON.stringify({calls,refreshed}));})();",
             ]
         )
     )
-    calls = json.loads(output)
+    result = json.loads(output)
+    calls = result["calls"]
     content_call = next(call for call in calls if call["url"].startswith("/api/skills/content?"))
     assert "session_id=created-owner" in content_call["url"]
     bundle_call = next(call for call in calls if call["body"] and call["body"].get("command"))
     assert bundle_call["body"] == {"command": "/bundle request", "session_id": "created-owner"}
+    assert result["refreshed"] == ["created-owner"]
 
 
 def test_empty_use_returns_before_installing_pending_directive():

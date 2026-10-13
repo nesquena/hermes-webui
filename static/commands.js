@@ -1321,6 +1321,9 @@ async function cmdUse(args){
     const detail = await api(`/api/skills/content?name=${encodeURIComponent(match.name)}${pending.sessionId?`&session_id=${encodeURIComponent(pending.sessionId)}`:''}`);
     const skillContent = detail&&typeof detail.content==='string' ? detail.content.trim() : '';
     if(!skillContent) throw new Error(`Skill \`${match.name}\` has no readable content.`);
+    if(pending.sessionId&&typeof _refreshSessionSkillUsageForOwner==='function'){
+      void _refreshSessionSkillUsageForOwner(pending.sessionId);
+    }
     const directive = `[USER OVERRIDE] You MUST follow the skill '${match.name}' content provided below before responding to the next message.`;
     resolve({name:match.name,directive,content:skillContent});
     if(isCurrentSession()){

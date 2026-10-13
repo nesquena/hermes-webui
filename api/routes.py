@@ -17738,6 +17738,11 @@ def handle_post(handler, parsed) -> bool:
         # the freshly aligned context copy; the source session and
         # forked_messages ownership remain untouched.
         _reconcile_api_content_sidecars(forked_context, forked_messages)
+        fork_skill_provenance = {}
+        if keep_count is None or (keep_count > 0 and keep_count >= len(source_messages)):
+            fork_skill_provenance = copy.deepcopy(
+                getattr(source, "skill_provenance", None) or {}
+            )
         branch = Session(
             workspace=source.workspace,
             model=source.model,
@@ -17758,7 +17763,7 @@ def handle_post(handler, parsed) -> bool:
             # Context engine — inherit state so branch's context engine starts correctly
             context_engine=getattr(source, "context_engine", None),
             context_engine_state=copy.deepcopy(getattr(source, "context_engine_state", None) or {}),
-            skill_provenance=copy.deepcopy(getattr(source, "skill_provenance", None) or {}),
+            skill_provenance=fork_skill_provenance,
             parent_session_id=source.session_id,
             session_source="fork",
         )
