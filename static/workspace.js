@@ -479,9 +479,8 @@ function _classifyArtifactPath(path, workspace){
   const normalizeSegments = segments => {
     const result = [];
     for(const segment of segments){
-      if(segment === '.') continue;
+      if(segment === '.' || segment === '') continue;
       if(segment === '..'){
-        while(result.length && result[result.length - 1] === '') result.pop();
         if(!result.length) return null;
         result.pop();
       }else result.push(segment);
@@ -508,24 +507,24 @@ function _classifyArtifactPath(path, workspace){
   if(!(workspaceIsWindows || ws.startsWith('/'))) return blocked('outside');
   const split = value => {
     const match = value.match(/^([A-Za-z]:)?\/(.*)$/);
+    const rawSegments = (match ? match[2] : value).split('/');
     return {
       drive:match&&match[1] ? match[1].toLowerCase() : '',
-      segments:normalizeSegments((match ? match[2] : value).split('/')),
+      rawSegments,
+      segments:normalizeSegments(rawSegments),
     };
   };
   const pathParts = split(normalized);
   const workspaceParts = split(ws);
   if(!pathParts.segments || !workspaceParts.segments) return blocked('outside');
-  while(workspaceParts.segments.length && workspaceParts.segments[workspaceParts.segments.length - 1] === ''){
-    workspaceParts.segments.pop();
-  }
   const fold = value => pathIsWindows ? value.toLowerCase() : value;
   if(fold(pathParts.drive) !== fold(workspaceParts.drive) || pathParts.segments.length < workspaceParts.segments.length) return blocked('outside');
   for(let i=0;i<workspaceParts.segments.length;i++){
     if(fold(pathParts.segments[i]) !== fold(workspaceParts.segments[i])) return blocked('outside');
   }
   const suffix = pathParts.segments.slice(workspaceParts.segments.length).join('/');
-  const containedDisplayPath = suffix || '.';
+  const displaySuffix = pathParts.rawSegments.slice(workspaceParts.rawSegments.length).join('/');
+  const containedDisplayPath = displaySuffix || suffix || '.';
   const openPath = suffix.split('/').filter(Boolean).join('/') || '.';
   return {kind:'workspace-contained', displayPath:containedDisplayPath, dedupeKey:pathIsWindows ? openPath.toLowerCase() : openPath, openPath};
 }
