@@ -608,7 +608,7 @@ try {
     const productionWindow=_sessionVirtualWindow;
     _sessionVirtualWindow=(opts)=>({...productionWindow(opts),virtualized:false,start:0,end:opts.total,topPad:0,bottomPad:0});
     renderSessionListFromCache();
-    list.scrollTop=Math.floor((list.scrollHeight-list.clientHeight)*(WRAPPED_PROJECT_BAR?0.05:0.25));
+    list.scrollTop=Math.floor((list.scrollHeight-list.clientHeight)*(WRAPPED_PROJECT_BAR?0.15:0.25));
     const requiredIds=visibleIds();
     _sessionVirtualWindow=productionWindow;
     renderSessionListFromCache();
