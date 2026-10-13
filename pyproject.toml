@@ -32,7 +32,7 @@ hermes-webui = "bootstrap:main"
 [tool.setuptools]
 include-package-data = true
 packages = ["api", "static"]
-py-modules = ["bootstrap", "server", "mcp_server"]
+py-modules = ["bootstrap", "server", "mcp_server", "managed_agent_startup", "network_isolation"]
 
 [tool.setuptools.package-data]
 static = ["**/*"]
