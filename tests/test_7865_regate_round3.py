@@ -384,7 +384,10 @@ global._applyWorkspaceTodosTabVisibility = () => {};
 global.applyEmptyStateSuggestionPreference = () => {};
 global.applyEmptyStatePanelPreference = () => {};
 global.applyConversationOutlinePreference = () => {};
-global._enqueueSettingsPost = async (url, body) => { posts.push({ url, body }); return true; };
+global._enqueueSettingsPost = async (opts) => {
+  posts.push({ url: '/api/settings', body: JSON.parse(opts.body) });
+  return true;
+};
 global._settingsDirty = false;
 global._settingsThemeOnOpen = 'dark';
 global._settingsSkinOnOpen = 'default';
@@ -410,6 +413,13 @@ function catalogSelect(value, provider) {
 for (const name of ['_providerFromModelValue', '_getOptionProviderId', '_modelStateForSelect', '_captureModelDropdownSelection']) {
   eval(extractFunction(uiSrc, name));
 }
+global._settingsLocalePostInFlight = null;
+eval(extractAsyncFunction(panelsSrc, '_settleSettingsLocale'));
+eval(extractFunction(panelsSrc, '_reconcileSettingsLocaleSelector'));
+eval(extractFunction(panelsSrc, '_settingsLocaleCommitIsCurrent'));
+eval(extractFunction(panelsSrc, '_settingsLocaleSettlementIsCurrent'));
+eval(extractFunction(panelsSrc, '_postSettingsAtLocaleCommit'));
+eval(extractAsyncFunction(panelsSrc, '_commitSettingsLocale'));
 eval(extractFunction(panelsSrc, '_applySavedSettingsUi'));
 eval(extractAsyncFunction(panelsSrc, '_autosavePreferencesSettings'));
 

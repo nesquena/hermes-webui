@@ -161,6 +161,13 @@ const uiSrc = fs.readFileSync(process.argv[2], 'utf8');
 for (const name of ['_providerFromModelValue', '_getOptionProviderId', '_modelStateForSelect', '_captureModelDropdownSelection']) {
   eval(extractFunction(uiSrc, name));
 }
+global._settingsLocalePostInFlight = null;
+eval(extractAsyncFunction(panelsSrc, '_settleSettingsLocale'));
+eval(extractFunction(panelsSrc, '_reconcileSettingsLocaleSelector'));
+eval(extractFunction(panelsSrc, '_settingsLocaleCommitIsCurrent'));
+eval(extractFunction(panelsSrc, '_settingsLocaleSettlementIsCurrent'));
+eval(extractFunction(panelsSrc, '_postSettingsAtLocaleCommit'));
+eval(extractAsyncFunction(panelsSrc, '_commitSettingsLocale'));
 eval(extractAsyncFunction(panelsSrc, 'saveSettings'));
 eval(extractFunction(panelsSrc, '_applySavedSettingsUi'));
 eval(extractAsyncFunction(panelsSrc, '_autosavePreferencesSettings'));
@@ -357,6 +364,13 @@ const uiSrc = fs.readFileSync(process.argv[2], 'utf8');
 for (const name of ['_providerFromModelValue', '_getOptionProviderId', '_modelStateForSelect', '_captureModelDropdownSelection']) {
   eval(extractFunction(uiSrc, name));
 }
+global._settingsLocalePostInFlight = null;
+eval(extractAsyncFunction(panelsSrc, '_settleSettingsLocale'));
+eval(extractFunction(panelsSrc, '_reconcileSettingsLocaleSelector'));
+eval(extractFunction(panelsSrc, '_settingsLocaleCommitIsCurrent'));
+eval(extractFunction(panelsSrc, '_settingsLocaleSettlementIsCurrent'));
+eval(extractFunction(panelsSrc, '_postSettingsAtLocaleCommit'));
+eval(extractAsyncFunction(panelsSrc, '_commitSettingsLocale'));
 eval(extractAsyncFunction(panelsSrc, '_autosavePreferencesSettings'));
 
 const _store = new Map();
