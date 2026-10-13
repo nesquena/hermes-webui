@@ -15,7 +15,7 @@ _webui_root = os.path.dirname(os.path.abspath(__file__))
 if _webui_root not in sys.path:
     sys.path.insert(0, _webui_root)
 
-from api.network_isolation import install_test_network_block
+from network_isolation import install_test_network_block
 
 
 install_test_network_block()
