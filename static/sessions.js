@@ -10463,7 +10463,6 @@ function renderSessionListFromCache(){
       if(typeof console!=='undefined'&&console.warn) console.warn('hermes: date-group collapse state could not be persisted', e);
     }
   };
-  const groupedMode=!!window._sidebarGroupByProject;
   const groups=_buildSessionSidebarGroups(orderedSessions,groupedMode,_allProjects,now);
   const flatSessionRows=[];
   for(const g of groups){
