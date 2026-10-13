@@ -360,7 +360,7 @@ process.stdout.write(JSON.stringify({
 def test_grouped_production_height_matrix_uses_actual_list_geometry():
     playwright_factory = _require_playwright()
     fixture = """
-document.body.innerHTML = '<input id="sessionSearch" value=""><div class="session-list" id="sessionList" style="flex:none;box-sizing:border-box;height:320px;overflow:auto;width:320px;"></div><div id="batchActionBar"></div>';
+document.body.innerHTML = '<input id="sessionSearch" value=""><div class="session-list" id="sessionList" style="flex:none;box-sizing:border-box;height:__LIST_HEIGHT__px;overflow:auto;width:320px;"></div><div id="batchActionBar"></div>';
 const style = document.createElement('style');
 style.textContent = __STYLE__;
 document.head.appendChild(style);
@@ -503,6 +503,7 @@ function _resyncSessionVirtualWindowAfterRender() { groupedResyncCalls += 1; }
 function _renderOneSession(session) {
   const row = document.createElement('div');
   row.className = 'session-item' + (session.session_id === activeSid ? ' active' : '');
+  row.style.cssText = 'height:52px;min-height:52px;box-sizing:border-box;flex:0 0 52px;margin:0;';
   row.dataset.sid = session.session_id;
   const text = document.createElement('div');
   text.className = 'session-text';
@@ -602,6 +603,20 @@ try {
   document.querySelector('#sessionSearch').value = 'session';
   renderSessionListFromCache();
   window.groupedGeometry.searchRefreshScrollStable = list.scrollTop === stableBefore && fullyVisible(stableSid);
+  if(TOTAL>80){
+    activeSid=null;
+    const productionWindow=_sessionVirtualWindow;
+    _sessionVirtualWindow=(opts)=>({...productionWindow(opts),virtualized:false,start:0,end:opts.total,topPad:0,bottomPad:0});
+    renderSessionListFromCache();
+    list.scrollTop=Math.floor((list.scrollHeight-list.clientHeight)*(WRAPPED_PROJECT_BAR?0.05:0.25));
+    const requiredIds=visibleIds();
+    _sessionVirtualWindow=productionWindow;
+    renderSessionListFromCache();
+    const materializedIds=[...list.querySelectorAll('.session-item')].map(row=>row.dataset.sid);
+    window.groupedGeometry.requiredIds=requiredIds;
+    window.groupedGeometry.materializedIds=materializedIds;
+    window.groupedGeometry.requiredIdsMissing=requiredIds.filter(id=>!materializedIds.includes(id));
+  }
 } catch (error) {
   window.groupedGeometry.error = String(error);
 }
@@ -624,13 +639,14 @@ try {
     with playwright_factory() as playwright:
         browser = playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-dev-shm-usage"])
         observed_by_total = {}
-        for total in (10, 79, 80, 81):
+        for total in (10, 79, 80, 81, 200):
             observed_by_total[total] = {}
             for source_tabs in (False, True):
                 for wrapped in (False, True):
                     page = browser.new_page(viewport={"width":500, "height":500})
                     page.set_content("<!doctype html><html><body></body></html>")
-                    page.add_script_tag(content=fixture.replace("__TOTAL__", str(total)).replace("__SHOW_SOURCE_TABS__", str(source_tabs).lower()).replace("__WRAPPED_PROJECT_BAR__", str(wrapped).lower()))
+                    height = 900 if total > 80 else 320
+                    page.add_script_tag(content=fixture.replace("__TOTAL__", str(total)).replace("__LIST_HEIGHT__", str(height)).replace("__SHOW_SOURCE_TABS__", str(source_tabs).lower()).replace("__WRAPPED_PROJECT_BAR__", str(wrapped).lower()))
                     observed_by_total[total][(source_tabs, wrapped)] = page.evaluate("window.groupedGeometry")
                     page.close()
         browser.close()
@@ -650,6 +666,9 @@ try {
                 assert abs(observed["aboveGeometry"]["top"] - observed["aboveGeometry"]["listTop"]) <= 0.5, (total, case, observed["aboveGeometry"])
             assert observed["visibleScrollStable"], (total, case, observed)
             assert observed["searchRefreshScrollStable"], (total, case, observed)
+            if total > 80:
+                assert observed["requiredIds"], (total, case, observed)
+                assert observed["requiredIdsMissing"] == [], (total, case, observed["requiredIdsMissing"], observed["materializedIds"])
             assert observed["sourceTabsHeight"] > 0 if case[0] else observed["sourceTabsHeight"] == 0
             if case[1]:
                 assert observed["projectBarHeight"] > 40
