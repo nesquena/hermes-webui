@@ -10,6 +10,7 @@
   const ACTIVITY_EVENT_KINDS=Object.freeze([
     'process_prose',
     'reasoning',
+    'moa_reference',
     'tool_started',
     'tool_updated',
     'tool_completed',
@@ -81,6 +82,8 @@
     token:Object.freeze({classification:'activity',kind:'process_prose',source:'sse'}),
     interim_assistant:Object.freeze({classification:'activity',kind:'process_prose',source:'sse'}),
     reasoning:Object.freeze({classification:'activity',kind:'reasoning',source:'sse'}),
+    'moa.reference':Object.freeze({classification:'activity',kind:'moa_reference',source:'sse'}),
+    moa_reference:Object.freeze({classification:'activity',kind:'moa_reference',source:'sse'}),
     tool:Object.freeze({classification:'activity',kind:'tool_started',source:'sse'}),
     tool_complete:Object.freeze({classification:'activity',kind:'tool_completed',source:'sse'}),
     tool_update:Object.freeze({classification:'activity',kind:'tool_updated',source:'future_sse'}),
@@ -303,6 +306,7 @@
         :explicit;
     }
     if(sourceType==='interim_assistant') return 'completed'; // interim prose is a complete semantic boundary, unlike token deltas.
+    if(kind==='moa_reference') return 'completed';
     if(kind==='tool_started') return 'running';
     if(kind==='tool_completed') return _own(payload,'is_error')?'error':'completed';
     if(kind==='terminal_status'){
@@ -320,6 +324,12 @@
       _firstOwn(payload,['local_id','id','tid','tool_call_id','tool_use_id','call_id'])
     );
     if(explicit) return explicit;
+    if(sourceType==='moa.reference'||sourceType==='moa_reference'){
+      const index=_firstOwn(payload,['index','moa_index']);
+      if(index!==undefined&&index!==null&&index!=='') return 'moa-ref:'+String(index);
+      const label=_cleanString(_firstOwn(payload,['label','name']));
+      if(label) return 'moa-ref:'+label;
+    }
     const sessionId=_cleanString(_own(context,'session_id'))||'session';
     const turnId=_cleanString(_own(context,'turn_id'))||'turn';
     const ctxSeq=_own(context,'seq');
@@ -955,6 +965,7 @@
   function _activityRowRole(kind){
     if(kind==='process_prose') return 'prose';
     if(kind==='reasoning') return 'thinking';
+    if(kind==='moa_reference') return 'moa_reference';
     if(_isToolActivityKind(kind)) return 'tool';
     if(kind==='lifecycle_status') return 'lifecycle';
     if(kind==='control_boundary') return 'control';
@@ -966,6 +977,7 @@
     if(mode==='transparent_stream') return 'chronological_activity';
     if(kind==='process_prose') return 'main_prose';
     if(kind==='reasoning') return 'collapsed_thinking';
+    if(kind==='moa_reference') return 'moa_reference_card';
     if(_isToolActivityKind(kind)) return 'tool_row';
     if(kind==='lifecycle_status') return 'quiet_lifecycle_row';
     if(kind==='control_boundary') return 'control_boundary_row';
