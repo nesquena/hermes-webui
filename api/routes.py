@@ -25759,8 +25759,9 @@ def _start_chat_stream_for_session(
                     # reconcile against it instead of restoring an admitted
                     # turn as pending intent. The handoff already IS the durable
                     # admission; the stream id is what says it LAUNCHED.
+                    goal_continuation_attempt_id = _current_goal_continuation_attempt_id()
                     record_goal_continuation_stream(
-                        s.session_id, _current_goal_continuation_attempt_id(), stream_id
+                        s.session_id, goal_continuation_attempt_id, stream_id
                     )
                     thr.start()
                     # #7862 round 5: the launch SUCCEEDED, so this attempt can
@@ -25784,10 +25785,10 @@ def _start_chat_stream_for_session(
                     # because a restart before the next successful discharge
                     # leaves the reconciliation to that startup path.
                     _handoff_settled = discard_goal_continuation_handoff(
-                        s.session_id, _current_goal_continuation_attempt_id()
+                        s.session_id, goal_continuation_attempt_id
                     )
                     discard_goal_continuation_rollback_receipt(
-                        s.session_id, _current_goal_continuation_attempt_id()
+                        s.session_id, goal_continuation_attempt_id
                     )
                     if not _handoff_settled:
                         logger.error(
