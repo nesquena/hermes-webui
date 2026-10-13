@@ -274,9 +274,7 @@ _MESSAGING_SESSION_METADATA_LOCK = threading.Lock()
 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE: dict[tuple, dict] = {}
 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK = threading.RLock()
 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_MAX_ENTRIES = 128
-_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL = 60.0
-_FOREIGN_DISPLAY_COORDINATE_DB_MONITORS: OrderedDict[str, dict] = OrderedDict()
-_FOREIGN_DISPLAY_COORDINATE_DB_MONITOR_MAX_ENTRIES = 16
+_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL = 5.0
 _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
 _CSP_REPORT_LOGGER = logging.getLogger("csp_report")
 _CSP_REPORT_RATE_LIMIT: dict[str, list[float]] = {}
@@ -12016,8 +12014,8 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
     """Return a cached display summary, checking lineage stats before parsing."""
     try:
         state_summary = get_state_db_session_summary(sid, profile=profile)
-        db_revision = _foreign_display_coordinate_state_db_revision(profile)
-        cache_ttl = _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL if db_revision is not None else 5.0
+        db_revision = _state_db_session_signature(sid, profile)
+        cache_ttl = None if db_revision is not None else _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL
         cache_key = (
             _foreign_display_coordinate_cache_scope(profile),
             _foreign_display_coordinate_state_db_identity(profile),
@@ -12031,7 +12029,7 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
             cached = _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.get(cache_key)
         if (
             cached is not None
-            and now - cached["created_at"] < cache_ttl
+            and (cache_ttl is None or now - cached["created_at"] < cache_ttl)
             and all(
                 _foreign_display_coordinate_sidecar_stat(Path(path)) == signature
                 for path, signature in cached["sidecars"]
@@ -12052,7 +12050,12 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
         owner_messages = getattr(session, "messages", None) or []
         if _cancelled_journal_turn_owner(owner_messages, include_live_partial=True):
             reader_kwargs["include_row_identity"] = True
-        state_db_messages = get_state_db_session_messages(sid, **reader_kwargs)
+        state_db_messages, stable_revision = _load_state_db_messages_with_stable_signature(
+            sid,
+            profile,
+            reader_kwargs,
+        )
+        cacheable = db_revision is None or stable_revision == db_revision
         if not state_db_messages and _numeric_count(state_summary.get("message_count")):
             return None
         summary = _message_summary(_display_coordinate_messages(
@@ -12060,14 +12063,15 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
             state_db_messages,
             metadata_readonly=True,
         ))
-        with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
-            _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE[cache_key] = {
-                "summary": dict(summary), "sidecars": sidecars, "created_at": now,
-            }
-            while len(_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE) > _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_MAX_ENTRIES:
-                _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.pop(
-                    next(iter(_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE))
-                )
+        if cacheable:
+            with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
+                _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE[cache_key] = {
+                    "summary": dict(summary), "sidecars": sidecars, "created_at": now,
+                }
+                while len(_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE) > _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_MAX_ENTRIES:
+                    _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.pop(
+                        next(iter(_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE))
+                    )
         return summary
     except Exception:
         logger.debug("Foreign display-coordinate summary failed for %s", sid, exc_info=True)
@@ -12120,23 +12124,7 @@ def _foreign_display_coordinate_cache_scope(profile) -> str:
 
 
 def _foreign_display_coordinate_state_db_identity(profile):
-    """Return the cheap commit-aware identity for the selected state.db."""
-    try:
-        from api.models import _get_profile_home, _sqlite_file_stat_cache_key
-
-        if isinstance(profile, str) and profile.strip():
-            db_path = _get_profile_home(profile) / "state.db"
-            if not db_path.exists():
-                db_path = _active_state_db_path()
-        else:
-            db_path = _active_state_db_path()
-        return _sqlite_file_stat_cache_key(db_path)
-    except Exception:
-        return None
-
-
-def _foreign_display_coordinate_state_db_revision(profile):
-    """Track commits through a persistent read handle, including in-place row edits."""
+    """Return a stable identity for the selected state.db file."""
     try:
         from api.models import _get_profile_home
 
@@ -12146,40 +12134,15 @@ def _foreign_display_coordinate_state_db_revision(profile):
                 db_path = _active_state_db_path()
         else:
             db_path = _active_state_db_path()
-        if not db_path.exists():
-            return None
-        key = str(db_path.resolve())
         stat_result = db_path.stat()
-        identity = (stat_result.st_dev, stat_result.st_ino, stat_result.st_size, stat_result.st_mtime_ns, stat_result.st_ctime_ns)
-        with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
-            monitor = _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS.get(key)
-            if monitor is None or monitor["identity"] != identity:
-                if monitor is not None:
-                    monitor["connection"].close()
-                # The cache lock serializes this shared connection across request threads.
-                connection = open_state_db_readonly(db_path, check_same_thread=False)
-                monitor = {"identity": identity, "connection": connection}
-                _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS[key] = monitor
-            _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS.move_to_end(key)
-            revision = int(monitor["connection"].execute("PRAGMA data_version").fetchone()[0])
-            while len(_FOREIGN_DISPLAY_COORDINATE_DB_MONITORS) > _FOREIGN_DISPLAY_COORDINATE_DB_MONITOR_MAX_ENTRIES:
-                _, expired = _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS.popitem(last=False)
-                expired["connection"].close()
-            return (identity, revision)
+        return (str(db_path.absolute()), stat_result.st_dev, stat_result.st_ino)
     except Exception:
-        logger.debug("Unable to track foreign summary state.db revision", exc_info=True)
         return None
 
 
 def _clear_foreign_display_coordinate_summary_cache() -> None:
     with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
         _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.clear()
-        while _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS:
-            _, monitor = _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS.popitem(last=False)
-            try:
-                monitor["connection"].close()
-            except Exception:
-                pass
 
 
 def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict:
