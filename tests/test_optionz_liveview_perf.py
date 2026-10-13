@@ -30,6 +30,8 @@ import socket
 import threading
 from pathlib import Path
 
+import pytest
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -606,45 +608,259 @@ def _make_meta_session(sid, count, updated_at=123.0):
     return s
 
 
-def test_persisted_message_count_uses_metadata_only(monkeypatch):
-    """The companion lookup must return the persisted count via a metadata-only
-    load (never parsing the full transcript) and None when unknown."""
+@pytest.fixture
+def _sse_count_store(tmp_path, monkeypatch):
+    """A real, isolated sidecar store: ``Session.save()`` writes here."""
+    from collections import OrderedDict
+
+    import api.models as models
+
+    sdir = tmp_path / "sessions"
+    sdir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(models, "SESSION_DIR", sdir)
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+    return sdir
+
+
+def _save_real_session(store, sid, n):
+    import api.models as models
+
+    msgs = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"m{i}"}
+        for i in range(n)
+    ]
+    s = models.Session(
+        session_id=sid, title="T", workspace=str(store.parent), model="glm",
+        messages=msgs,
+    )
+    s.save()
+    return s
+
+
+def test_persisted_message_count_reads_the_current_sidecar_not_the_cache(
+    _sse_count_store, monkeypatch
+):
+    """#7672: the SSE companion count must come from the CURRENT on-disk sidecar.
+
+    ``get_session(..., metadata_only=True)`` may legally return an older cached
+    count after a gateway-backed turn rewrites the sidecar.  Comparing that
+    stale value with the frontend's fresh ``/api/session`` count creates an
+    endless ``session-updated`` reload loop.
+    """
     from api import background_process as bp
     import api.models as models
 
     sid = "sess-persisted-count"
-
-    # Normal: metadata stub carries _metadata_message_count.
-    monkeypatch.setattr(models, "get_session", lambda _sid, metadata_only=False: _make_meta_session(_sid, 7), raising=True)
+    _save_real_session(_sse_count_store, sid, 7)
+    # A stale generic session cache must not participate in this comparison.
+    monkeypatch.setattr(
+        models,
+        "get_session",
+        lambda _sid, metadata_only=False: _make_meta_session(_sid, 99),
+        raising=True,
+    )
     assert bp.persisted_message_count_for_session(sid) == 7
 
-    # Unknown count (legacy sidecar, no persisted count, empty messages) → None
-    # so the caller treats it as "cannot tell", never a spurious trigger.
-    monkeypatch.setattr(models, "get_session", lambda _sid, metadata_only=False: _make_meta_session(_sid, None), raising=True)
-    assert bp.persisted_message_count_for_session(sid) is None
-
-    # Lookup failure (e.g. corrupt sidecar) is swallowed → None, never raises.
-    def _boom(_sid, metadata_only=False):
-        raise RuntimeError("decode error")
-    monkeypatch.setattr(models, "get_session", _boom, raising=True)
-    assert bp.persisted_message_count_for_session(sid) is None
+    # A rewrite to a SHORTER transcript (the reported 19 -> 2 shape) is read
+    # immediately, with no cache to invalidate.
+    _save_real_session(_sse_count_store, sid, 2)
+    assert bp.persisted_message_count_for_session(sid) == 2
 
 
-def test_persisted_message_count_requests_metadata_only(monkeypatch):
-    """Guard the perf contract: the lookup MUST pass metadata_only=True so it
-    never parses a 400KB+ transcript on every per-session SSE (re)connect."""
+def test_persisted_message_count_unknown_is_none_never_a_trigger(_sse_count_store):
+    """Missing / unmarked / corrupt / unsafe all mean "cannot tell" (None)."""
+    import json
+
+    from api import background_process as bp
+
+    # Missing sidecar.
+    assert bp.persisted_message_count_for_session("sess-missing") is None
+    # Unsafe id never reaches the filesystem.
+    assert bp.persisted_message_count_for_session("../escape") is None
+    # Legacy/foreign writer: a count without the writer marker is not trusted,
+    # because an unvouched count can be stale against its rows -- the exact
+    # shape that drives the reload loop.
+    (_sse_count_store / "sess-legacy.json").write_text(json.dumps({
+        "session_id": "sess-legacy", "title": "T", "created_at": 1.0,
+        "updated_at": 1.0, "message_count": 5, "messages": [],
+    }), encoding="utf-8")
+    assert bp.persisted_message_count_for_session("sess-legacy") is None
+    # Corrupt sidecar.
+    (_sse_count_store / "sess-corrupt.json").write_text("{not json", encoding="utf-8")
+    assert bp.persisted_message_count_for_session("sess-corrupt") is None
+
+
+def test_persisted_message_count_never_parses_the_transcript(
+    _sse_count_store, monkeypatch
+):
+    """Review of #7673: this runs on EVERY per-session SSE (re)connect, so it
+    must stay a bounded, count-only prefix read.
+
+    ``Session.load_metadata_only()`` falls back to a full ``Session.load()``
+    when the metadata prefix exceeds its 1 MiB budget (measured ~0.9 s per
+    subscribe on a 29.8 MiB sidecar).  Neither a large transcript nor an
+    oversized metadata prefix may ever trigger a full load or full read here.
+    """
+    import json
+    import pathlib
+
     from api import background_process as bp
     import api.models as models
 
-    seen = {}
+    def _no_full_load(*_a, **_k):
+        raise AssertionError("SSE count lookup must never full-load a session")
 
-    def _spy(_sid, metadata_only=False):
-        seen["metadata_only"] = metadata_only
-        return _make_meta_session(_sid, 3)
+    monkeypatch.setattr(models.Session, "load", classmethod(_no_full_load))
+    monkeypatch.setattr(models.Session, "load_metadata_only", classmethod(_no_full_load))
+    full_reads = {"n": 0}
+    real_read_text = pathlib.Path.read_text
 
-    monkeypatch.setattr(models, "get_session", _spy, raising=True)
-    assert bp.persisted_message_count_for_session("sess-spy") == 3
-    assert seen.get("metadata_only") is True
+    def _counting_read_text(self, *a, **k):
+        if str(self).startswith(str(_sse_count_store)):
+            full_reads["n"] += 1
+        return real_read_text(self, *a, **k)
+
+    monkeypatch.setattr(type(pathlib.Path()), "read_text", _counting_read_text)
+
+    # 1) A large, healthy transcript (well past the 1 MiB prefix budget) still
+    #    answers from the prefix.
+    big = "x" * 4096
+    sid = "sess-big"
+    marker = models._MESSAGE_COUNT_MARKER
+    with open(_sse_count_store / f"{sid}.json", "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "session_id": sid, "title": "T", "created_at": 1.0, "updated_at": 1.0,
+            "message_count": 1200, "_mc_v": marker,
+        })[:-1])
+        fh.write(', "messages": [')
+        fh.write(", ".join(
+            json.dumps({"role": "user", "content": big}) for _ in range(1200)
+        ))
+        fh.write("]}")
+    assert (_sse_count_store / f"{sid}.json").stat().st_size > 4 * 1024 * 1024
+    assert bp.persisted_message_count_for_session(sid) == 1200
+
+    # 2) Metadata alone overflowing the prefix budget -> None (fail closed),
+    #    never the full-load escape hatch.
+    sid2 = "sess-huge-meta"
+    with open(_sse_count_store / f"{sid2}.json", "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "session_id": sid2, "title": "T", "created_at": 1.0, "updated_at": 1.0,
+            "pad": "y" * (2 * 1024 * 1024), "message_count": 3, "_mc_v": marker,
+            "messages": [],
+        }))
+    assert bp.persisted_message_count_for_session(sid2) is None
+    assert full_reads["n"] == 0
+
+
+def test_persisted_message_count_sees_a_recovery_restored_sidecar(
+    _sse_count_store, monkeypatch
+):
+    """#7673 gate (Codex SILENT): a crash-recovery restore rewrites a sidecar
+    the browser has not seen. The restored payload's count is derived from its
+    own rows, so it must be vouched (``_mc_v``) and readable by the bounded
+    prefix reader; otherwise the SSE catch-up stays silent for that session."""
+    import json
+
+    from api import background_process as bp
+    import api.models as models
+    from api.session_recovery import repair_safe_session_recovery
+
+    sid = "sess-restored"
+    rows = [{"role": "user" if i % 2 == 0 else "assistant", "content": str(i)} for i in range(4)]
+    bak = _sse_count_store / f"{sid}.json.bak"
+    bak.write_text(json.dumps({
+        "session_id": sid, "title": "T", "created_at": 1.0, "updated_at": 1.0,
+        "messages": rows,
+    }), encoding="utf-8")
+    index = _sse_count_store / "_index.json"
+    index.write_text("[]", encoding="utf-8")
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index)
+
+    assert bp.persisted_message_count_for_session(sid) is None  # nothing live yet
+    result = repair_safe_session_recovery(_sse_count_store)
+    assert result["repaired"] == 1
+    assert bp.persisted_message_count_for_session(sid) == 4
+
+
+def test_recovery_payload_marks_its_count_before_messages():
+    """Both recovery writers (restore and state.db materialization) go through
+    one helper: the exact row count plus the writer marker sit immediately
+    before ``messages``, so the bounded prefix reader can see them."""
+    import api.models as models
+    from api.session_recovery import _with_marked_message_count
+
+    payload = {"session_id": "s", "title": "T", "message_count": 99,
+               "messages": [{"role": "user", "content": "a"}] * 3, "tool_calls": []}
+    marked = _with_marked_message_count(payload)
+    keys = list(marked)
+    assert keys.index("message_count") + 1 == keys.index("_mc_v")
+    assert keys.index("_mc_v") + 1 == keys.index("messages")
+    assert marked["message_count"] == 3
+    assert marked["_mc_v"] == models._MESSAGE_COUNT_MARKER
+    assert payload["message_count"] == 99  # caller's dict is not mutated
+
+    # Legacy layout: scenes before messages -> the count must precede the scenes,
+    # because the bounded prefix reader stops at whichever key comes first.
+    legacy = {"session_id": "s", "title": "T", "created_at": 1.0, "updated_at": 1.0,
+              "anchor_activity_scenes": {"0": {"rows": ["x" * 70000]}},
+              "messages": [{"role": "user", "content": "a"}] * 2}
+    marked = _with_marked_message_count(legacy)
+    keys = list(marked)
+    assert keys.index("_mc_v") + 1 == keys.index("anchor_activity_scenes")
+    import json as _json
+    import pathlib as _pathlib
+    import tempfile as _tempfile
+    with _tempfile.TemporaryDirectory() as d:
+        f = _pathlib.Path(d) / "s.json"
+        f.write_text(_json.dumps(marked), encoding="utf-8")
+        assert models._prefix_message_count(f) == 2
+
+
+def test_persisted_message_count_scans_each_file_version_once(
+    _sse_count_store, monkeypatch
+):
+    """#7673 gate (Codex SILENT): a legacy sidecar whose metadata overflows the
+    64 KiB first stage costs a bounded 1 MiB scan; reconnect storms must not pay
+    it again for the same file version, but a rewrite must be re-read."""
+    from api import background_process as bp
+    import api.models as models
+
+    monkeypatch.setattr(bp, "_PERSISTED_COUNT_MEMO", type(bp._PERSISTED_COUNT_MEMO)())
+    calls = {"n": 0}
+    real = models._prefix_message_count
+
+    def counting(path):
+        calls["n"] += 1
+        return real(path)
+
+    monkeypatch.setattr(models, "_prefix_message_count", counting)
+    import os
+    import time
+
+    def _age(path, seconds=10.0):
+        past = time.time() - seconds
+        os.utime(path, (past, past))
+
+    sid = "sess-memo"
+    path = _sse_count_store / f"{sid}.json"
+    _save_real_session(_sse_count_store, sid, 3)
+    calls["n"] = 0  # save()'s own shrink check also reads the prefix
+    # A version written moments ago is never memoized (its mtime may not have
+    # settled: a same-tick same-size rewrite must not be served stale).
+    for _ in range(3):
+        assert bp.persisted_message_count_for_session(sid) == 3
+    assert calls["n"] == 3
+    _age(path)
+    calls["n"] = 0
+    for _ in range(5):
+        assert bp.persisted_message_count_for_session(sid) == 3
+    assert calls["n"] == 1
+    _save_real_session(_sse_count_store, sid, 5)
+    _age(path)
+    calls["n"] = 0
+    assert bp.persisted_message_count_for_session(sid) == 5
+    assert calls["n"] == 1
 
 
 def test_session_sse_handler_wires_finished_during_gap_self_heal():

@@ -2128,7 +2128,7 @@ def test_anchor_scene_settlement_does_not_reclassify_transcript_owned_tool_row()
         "payload": {"tid": "call-1", "status": "running", "done": False},
     }
 
-    assert routes._anchor_scene_settle_live_running_row(row, has_settled_thinking=False) is row
+    assert routes._anchor_scene_settle_live_running_row(row, drop_live_thinking=False) is row
     assert row["tool"]["done"] is False
     assert row["payload"]["done"] is False
 

@@ -377,9 +377,23 @@ def finish_registration(payload: dict[str, Any], handler) -> dict[str, Any]:
     if len(rest) < 18:
         raise PasskeyError("Malformed credential data")
     cred_len = int.from_bytes(rest[16:18], "big")
+    if cred_len == 0 or len(rest) < 18 + cred_len:
+        raise PasskeyError("Malformed credential data")
     credential_id = rest[18:18 + cred_len]
-    cose_bytes = rest[18 + cred_len:]
-    cose_key = _cbor_loads(cose_bytes)
+    # The COSE key is followed by a separate CBOR extension map when ED is set.
+    parser = _Cbor(rest[18 + cred_len:])
+    cose_key = parser.item()
+    if not isinstance(cose_key, dict):
+        raise PasskeyError("Malformed credential public key")
+    if parsed["flags"] & 0x80:
+        try:
+            extensions = parser.item()
+        except (TypeError, ValueError, UnicodeDecodeError, RecursionError) as exc:
+            raise PasskeyError("Malformed authenticator extensions") from exc
+        if not isinstance(extensions, dict):
+            raise PasskeyError("Malformed authenticator extensions")
+    if parser.pos != len(parser.data):
+        raise PasskeyError("Trailing CBOR data")
     public_key = _public_key_from_cose(cose_key)
     pem = public_key.public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo).decode("ascii")
     cred_id = _b64u(credential_id)

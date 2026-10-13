@@ -456,7 +456,13 @@ def test_replayed_long_task_events_enter_the_same_live_timeline_handlers():
         MESSAGES_SRC.index("function _updateLiveThinkingCard") :
         MESSAGES_SRC.index("// Split a content string", MESSAGES_SRC.index("function _updateLiveThinkingCard"))
     ]
-    assert "_updateLiveThinkingCard(" in wire_block, "reasoning replay should use the live Thinking card path"
+    # #8171: replayed reasoning is coalesced like live reasoning. The shared
+    # listener schedules _flushPendingReasoningRender(), which owns the live
+    # Thinking card fallback.
+    assert "_reasoningRenderPending=true;" in wire_block, "reasoning replay should schedule the live coalesced render"
+    flush_start = MESSAGES_SRC.index("function _flushPendingReasoningRender(){")
+    flush_block = MESSAGES_SRC[flush_start : MESSAGES_SRC.index("// Split a content string", flush_start)]
+    assert "_updateLiveThinkingCard(" in flush_block, "reasoning replay should use the live Thinking card path"
     assert "updateThinking(text, opts)" in thinking_helper and "appendThinking(text, opts)" in thinking_helper, (
         "the shared Thinking helper should still route replay/live reasoning into the Worklog Thinking card path"
     )

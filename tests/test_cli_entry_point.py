@@ -52,7 +52,9 @@ def _installed_entry_point():
     selected = importlib.metadata.entry_points().select(
         group="console_scripts", name=EXPECTED_SCRIPT
     )
-    return selected[0] if selected else None
+    # EntryPoints.__getitem__ selects by name on Python 3.10+, so index via an
+    # iterator instead of [0] (which raises KeyError(0)).
+    return next(iter(selected), None)
 
 
 def test_installed_entry_point_wiring():

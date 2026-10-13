@@ -31,6 +31,8 @@ services:
 ```
 
 > **Note:** updating between `:experimental` builds requires `docker compose pull` followed by `docker compose up -d` — the floating tag is updated only when a new `exp-v*` release is pushed. Experimental builds are not pushed on every commit to the default branch.
+>
+> When update checks are enabled, a Docker-installed WebUI compares its baked release tag with the selected stable or experimental channel. Settings shows the number of newer channel releases and the matching `docker pull` command even though the image does not contain `.git` history.
 
 > **Note (v0.14+):** If you use `docker-compose.three-container.yml`, both
 > `hermes-agent` and `hermes-dashboard` initialise from the same image and write

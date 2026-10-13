@@ -29,30 +29,61 @@ def _read_routes():
     return Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
 
 
-def test_streaming_finally_does_not_discard_pending_goal_continuation():
-    """REGRESSION GUARD (stage-326): the streaming worker's `finally` block
-    must NOT contain `PENDING_GOAL_CONTINUATION.discard(session_id)`.
+def test_stream_teardown_preserves_pending_goal_continuation(tmp_path, monkeypatch):
+    """REGRESSION GUARD (stage-326): no stream teardown path may discard
+    ``PENDING_GOAL_CONTINUATION``.
 
-    Doing so races against the frontend's SSE-receive → POST /chat/start
-    round-trip and erases the marker before it can be consumed.
+    Behavior-level (#7302 re-gate): the marker is consumed atomically by the
+    routes.py consumer, so discarding it in stream teardown races against the
+    frontend's SSE-receive -> POST /chat/start round trip and erases the marker
+    before it can be read. Exercised through the real worker exit path
+    (cancellation before admission -> ``q is None``) and through the canonical
+    release helper, which is the single teardown entry point.
     """
-    src = _read_streaming()
+    import threading
 
-    # Find the cleanup block — STREAM_GOAL_RELATED.pop is a stable anchor.
-    pop_idx = src.find("STREAM_GOAL_RELATED.pop(stream_id")
-    assert pop_idx != -1, "STREAM_GOAL_RELATED cleanup not found — test needs update"
+    from api import config
+    import api.streaming as streaming
 
-    # Look at the next ~600 chars (the immediate cleanup block).
-    block = src[pop_idx:pop_idx + 600]
+    session_id = "sess_326_pending_survives"
+    stream_id = "stream-326-pending"
+    config.register_stream_owner(stream_id, session_id)
+    config.CANCEL_FLAGS[stream_id] = threading.Event()
+    config.STREAM_GOAL_RELATED[stream_id] = True
+    config.PENDING_GOAL_CONTINUATION.add(session_id)
+    config.STREAMS.pop(stream_id, None)
+    try:
+        streaming._run_agent_streaming(
+            session_id, "hello", "test-model", None, stream_id
+        )
+        assert session_id in config.PENDING_GOAL_CONTINUATION, (
+            "REGRESSION: the stream teardown discarded "
+            "PENDING_GOAL_CONTINUATION. This races against the consumer in "
+            "routes.py and breaks the goal-continuation chain; the discard must "
+            "live ONLY in routes.py's `_start_chat_stream_for_session` "
+            "consumer path."
+        )
+        assert stream_id not in config.STREAM_GOAL_RELATED, (
+            "the stream-owned rows must still be released on that same path"
+        )
+    finally:
+        config.PENDING_GOAL_CONTINUATION.discard(session_id)
 
-    # The discard must NOT appear in this cleanup block.
-    assert "PENDING_GOAL_CONTINUATION.discard" not in block, (
-        "REGRESSION: streaming.py's stream-cleanup block discards "
-        "PENDING_GOAL_CONTINUATION. This races against the consumer in "
-        "routes.py and breaks the goal-continuation chain. The discard "
-        "must live ONLY in routes.py's `_start_chat_stream_for_session` "
-        "consumer path."
-    )
+    # The canonical release helper is equally scoped: stream-owned rows only.
+    config.register_stream_owner(stream_id, session_id)
+    config.STREAM_GOAL_RELATED[stream_id] = True
+    config.PENDING_GOAL_CONTINUATION.add(session_id)
+    try:
+        config.release_stream_owned_registries(stream_id, session_id=session_id)
+        assert stream_id not in config.STREAM_GOAL_RELATED, (
+            "release_stream_owned_registries must release the stream's rows"
+        )
+        assert session_id in config.PENDING_GOAL_CONTINUATION, (
+            "release_stream_owned_registries must not touch the session's "
+            "PENDING_GOAL_CONTINUATION marker"
+        )
+    finally:
+        config.PENDING_GOAL_CONTINUATION.discard(session_id)
 
 
 def test_routes_consumer_discards_atomically_on_read():
@@ -90,20 +121,42 @@ def test_pending_goal_continuation_is_a_set():
     )
 
 
-def test_stream_goal_related_pop_keyed_by_stream_id():
-    """STREAM_GOAL_RELATED.pop in the cleanup must be keyed by stream_id
-    (the ending stream's id), not session_id — a different stream's flag
-    must not be erased."""
-    src = _read_streaming()
-    # Search for the cleanup line.
-    m = re.search(r"STREAM_GOAL_RELATED\.pop\(([^,)]+)", src)
-    assert m is not None, "STREAM_GOAL_RELATED.pop not found in streaming.py"
-    key = m.group(1).strip()
-    assert key == "stream_id", (
-        f"STREAM_GOAL_RELATED.pop must be keyed by stream_id, got {key!r}. "
-        "Using session_id would erase a different stream's flag if two "
-        "streams overlap on the same session."
-    )
+def test_stream_goal_related_release_is_keyed_by_stream_id():
+    """Releasing the ending stream must not erase another stream's goal flag.
+
+    Behavior-level (#7302 re-gate): the teardown is keyed by the ending
+    ``stream_id``. A session can have overlapping streams over its lifetime, so
+    a session-keyed release would drop the classification of a stream that is
+    still live (and, on the pre-start path, one that is about to be admitted).
+    """
+    from api import config
+
+    session_id = "sess_326_keyed_by_stream"
+    ending_stream = "stream-326-ending"
+    other_stream = "stream-326-other"
+    config.register_stream_owner(ending_stream, session_id)
+    config.register_stream_owner(other_stream, session_id)
+    config.STREAM_GOAL_RELATED[ending_stream] = True
+    config.STREAM_GOAL_RELATED[other_stream] = True
+
+    try:
+        config.release_stream_owned_registries(ending_stream, session_id=session_id)
+
+        assert ending_stream not in config.STREAM_GOAL_RELATED, (
+            "the ending stream's classification must be released"
+        )
+        assert config.STREAM_GOAL_RELATED.get(other_stream) is True, (
+            "releasing one stream must leave the other stream's goal classification "
+            "on the same session intact"
+        )
+        assert other_stream in config.STREAM_SESSION_OWNERS, (
+            "releasing one stream must not unregister another stream's owner"
+        )
+    finally:
+        # Greptile on #8108: release both streams so no shared registry entry leaks.
+        for sid in (ending_stream, other_stream):
+            config.release_stream_owned_registries(sid, session_id=session_id)
+            config.STREAM_GOAL_RELATED.pop(sid, None)
 
 
 def test_goal_continue_set_marker_before_emitting_event():
