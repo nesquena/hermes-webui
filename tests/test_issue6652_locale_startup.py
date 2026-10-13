@@ -66,6 +66,48 @@ Promise.resolve(started).then(result=>{{
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_late_script_callbacks_do_not_reject_a_locale_retry():
+    core_path = ROOT / "static" / "i18n-core.js"
+    french_path = ROOT / "static" / "locales" / "fr.js"
+    script = f"""
+const fs=require('fs');
+const vm=require('vm');
+const timers=new Map();
+const scripts=[];
+let nextTimer=1;
+const ctx={{
+  URL,
+  setTimeout(fn){{const id=nextTimer++;timers.set(id,fn);return id;}},
+  clearTimeout(id){{timers.delete(id);}},
+  localStorage:{{getItem:()=> 'fr',setItem(){{}}}},
+  document:{{
+    baseURI:'https://example.test/',currentScript:null,
+    documentElement:{{lang:''}},querySelectorAll:()=>[],
+    createElement:()=>({{async:false}}),
+    head:{{appendChild(script){{scripts.push(script);}}}},
+  }},
+}};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync({json.dumps(str(core_path))},'utf8'),ctx);
+const expired=vm.runInContext("ensureLocale('fr').catch(()=> 'expired')",ctx);
+const oldScript=scripts[0];
+[...timers.values()][0]();
+expired.then(async()=>{{
+  const retry=vm.runInContext("ensureLocale('fr').then(()=> 'loaded',()=> 'rejected')",ctx);
+  oldScript.onload();
+  oldScript.onerror();
+  await Promise.resolve();
+  const stillPending=vm.runInContext("Boolean(_LOCALE_LOAD_PROMISES.fr)",ctx);
+  vm.runInContext(fs.readFileSync({json.dumps(str(french_path))},'utf8'),ctx);
+  scripts[1].onload();
+  process.stdout.write(JSON.stringify({{stillPending,result:await retry}}));
+}});
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {"stillPending": True, "result": "loaded"}
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_slash_command_descriptions_follow_the_active_locale():
     commands_path = ROOT / "static" / "commands.js"
     source = commands_path.read_text(encoding="utf-8")

@@ -257,21 +257,17 @@ function ensureLocale(lang) {
   script.src = _localeAssetUrl(resolved);
   script.async = true;
   script.onload = () => {
+    if (_LOCALE_LOAD_PROMISES[resolved] !== pending) return;
     if (LOCALES[resolved]) return;
-    const pending = _LOCALE_LOAD_PROMISES[resolved];
     delete _LOCALE_LOAD_PROMISES[resolved];
-    if (pending) {
-      if (pending.timeout !== null && typeof clearTimeout === 'function') clearTimeout(pending.timeout);
-      pending.reject(new Error(`Locale bundle did not register: ${resolved}`));
-    }
+    if (pending.timeout !== null && typeof clearTimeout === 'function') clearTimeout(pending.timeout);
+    pending.reject(new Error(`Locale bundle did not register: ${resolved}`));
   };
   script.onerror = () => {
-    const pending = _LOCALE_LOAD_PROMISES[resolved];
+    if (_LOCALE_LOAD_PROMISES[resolved] !== pending) return;
     delete _LOCALE_LOAD_PROMISES[resolved];
-    if (pending) {
-      if (pending.timeout !== null && typeof clearTimeout === 'function') clearTimeout(pending.timeout);
-      pending.reject(new Error(`Locale bundle unavailable: ${resolved}`));
-    }
+    if (pending.timeout !== null && typeof clearTimeout === 'function') clearTimeout(pending.timeout);
+    pending.reject(new Error(`Locale bundle unavailable: ${resolved}`));
   };
   (document.head || document.documentElement).appendChild(script);
   return promise;
