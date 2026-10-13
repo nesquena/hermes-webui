@@ -273,6 +273,7 @@ _MESSAGING_SESSION_METADATA_LOCK = threading.Lock()
 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE: dict[tuple, dict] = {}
 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK = threading.RLock()
 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_MAX_ENTRIES = 128
+_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL = 5.0  # Bound missed state.db rewrite invalidations.
 _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
 _CSP_REPORT_LOGGER = logging.getLogger("csp_report")
 _CSP_REPORT_RATE_LIMIT: dict[str, list[float]] = {}
@@ -10874,31 +10875,32 @@ def _message_summary(messages) -> dict:
 
 
 def _foreign_display_coordinate_summary(sid: str, profile=None):
-    """Return the display-coordinate summary for a foreign metadata poll.
-
-    Foreign ``messages=0`` responses use the same merged count and timestamp
-    as message loads. This costs one sidecar load plus one state.db read,
-    capped at the existing 50,000-row backstop when no boundary prefix is
-    needed; failures return ``None`` so the caller keeps the legacy summary.
-    """
+    """Return a cached display summary, checking lineage stats before parsing."""
     try:
-        # Bypass the Session LRU so the cache key and merged rows observe an
-        # atomic sidecar replacement even when its count stays unchanged.
-        session = Session.load(sid)
-        if not session:
-            return None
         state_summary = get_state_db_session_summary(sid, profile=profile)
         cache_key = (
             _foreign_display_coordinate_cache_scope(profile),
             _foreign_display_coordinate_state_db_identity(profile),
-            _foreign_display_coordinate_sidecar_identity(session),
+            sid,
             _numeric_count(state_summary.get("message_count")),
             float(state_summary.get("last_message_at") or 0.0),
         )
+        now = time.monotonic()
         with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
             cached = _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.get(cache_key)
-            if cached is not None:
-                return dict(cached)
+        if (
+            cached is not None
+            and now - cached["created_at"] < _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL
+            and all(
+                _foreign_display_coordinate_sidecar_stat(Path(path)) == signature
+                for path, signature in cached["sidecars"]
+            )
+        ):
+            return dict(cached["summary"])
+        session = Session.load(sid)
+        if not session:
+            return None
+        sidecars = _foreign_display_coordinate_sidecar_identity(session)
         backstop = _state_db_backstop_limit_for_display(session, None)
         reader_kwargs = {"profile": profile}
         if backstop is not None:
@@ -10908,7 +10910,9 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
             return None
         summary = _message_summary(_display_coordinate_messages(session, state_db_messages))
         with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
-            _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE[cache_key] = dict(summary)
+            _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE[cache_key] = {
+                "summary": dict(summary), "sidecars": sidecars, "created_at": now,
+            }
             while len(_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE) > _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_MAX_ENTRIES:
                 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.pop(
                     next(iter(_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE))
@@ -10919,8 +10923,16 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
         return None
 
 
+def _foreign_display_coordinate_sidecar_stat(path: Path):
+    try:
+        stat_result = path.stat()
+        return (stat_result.st_mtime_ns, stat_result.st_size, stat_result.st_ctime_ns)
+    except OSError:
+        return None
+
+
 def _foreign_display_coordinate_sidecar_identity(session) -> tuple:
-    """Return stat identities for the session's sidecar lineage."""
+    """Remember lineage paths so cache hits can stat them without parsing JSON."""
     identities = []
     current = session
     seen = set()
@@ -10929,25 +10941,15 @@ def _foreign_display_coordinate_sidecar_identity(session) -> tuple:
         if not sid or sid in seen:
             break
         seen.add(sid)
-        path = Path(getattr(current, "path", SESSION_DIR / f"{sid}.json"))
-        try:
-            stat_result = path.stat()
-            identities.append(
-                (
-                    sid,
-                    int(getattr(stat_result, "st_mtime_ns", 0)),
-                    int(stat_result.st_size),
-                    int(getattr(stat_result, "st_ctime_ns", 0)),
-                )
-            )
-        except OSError:
-            identities.append((sid, None))
+        path = Path(current.path)
+        identities.append((str(path), _foreign_display_coordinate_sidecar_stat(path)))
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
-        if not parent_id or parent_id in seen:
+        if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
             break
         current = Session.load(parent_id)
         if not current:
-            identities.append((parent_id, None))
+            parent_path = path.parent / f"{parent_id}.json"
+            identities.append((str(parent_path), None))
             break
     return tuple(identities)
 
@@ -14347,7 +14349,7 @@ def _handle_session_get(handler, parsed) -> bool:
         _t3 = _time.monotonic()
         if _diag: _diag.stage("t3_after_model_resolve")
         if load_messages:
-            if is_messaging_session and cli_messages:
+            if is_messaging_session:
                 # Recovery/aggregate sidecars can intentionally contain a
                 # longer visible conversation than the single state.db
                 # segment for this messaging session id. Prefer the longer
@@ -14412,8 +14414,9 @@ def _handle_session_get(handler, parsed) -> bool:
                         sidecar_messages, _all_msgs, lineage_owners,
                     ))
         else:
-            if is_messaging_session and cli_messages:
-                _all_msgs = _merged_session_messages_for_display(s, cli_messages)
+            if is_messaging_session:
+                messaging_session = get_session(sid, metadata_only=False)
+                _all_msgs = _merged_session_messages_for_display(messaging_session, cli_messages)
             else:
                 if metadata_summary is None:
                     metadata_summary = _message_summary(getattr(s, "messages", []) or [])
