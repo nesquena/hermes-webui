@@ -1231,6 +1231,38 @@ def _append_recovered_pending_turn(session, *, timestamp: int | float | None = N
     return recovered
 
 
+def _backfill_pending_metadata_onto_reused_row(session, matched_row) -> None:
+    """Copy the pending turn's attachments/source onto a REUSED user row.
+
+    #7167 re-gate (2026-10-13): both repair branches can prove the pending
+    prompt is already in the transcript (matched on text + timestamp) and
+    therefore reuse the existing row instead of materializing a new one. That
+    row may have been written by a path that carried no ``attachments`` /
+    ``_source`` (state.db reconciliation, cancel-journal recovery). The pending
+    state is cleared right after, so the pending copy was the ONLY copy of that
+    metadata and it was lost for good — the turn's uploads and its origin
+    (cli / wakeup / …) silently disappeared from the transcript, and the loss
+    survives a cold reload.
+
+    Copy the metadata onto the matched row BEFORE the pending cleanup runs, and
+    only where it is actually missing, so an already-populated row keeps its own
+    values and the dedupe behaviour is unchanged.
+    """
+    if not isinstance(matched_row, dict):
+        return
+    if not getattr(session, 'pending_user_message', None):
+        return
+    pending_attachments = getattr(session, 'pending_attachments', None)
+    if pending_attachments and not matched_row.get('attachments'):
+        matched_row['attachments'] = list(pending_attachments)
+    if not matched_row.get('_source'):
+        stamp_message_source(
+            matched_row,
+            getattr(session, 'pending_user_source', None),
+            active_turn_token=_pending_active_turn_token(session),
+        )
+
+
 def _is_streaming_session(active_stream_id, active_stream_ids):
     return bool(active_stream_id and active_stream_id in active_stream_ids)
 
@@ -6100,6 +6132,11 @@ def _apply_core_sync_or_error_marker(
             _latest_user,
             session.pending_started_at,
         )
+        # #7167 re-gate: the matched row is REUSED, not re-materialized, so the
+        # pending turn's attachments/source must be copied onto it before the
+        # pending cleanup below drops the only other copy. Gated on the
+        # ownership proof so a save-failure rollback still leaves memory
+        # byte-identical (test_cancel_recovery_properties rollback cases).
         _tail_message = session.messages[-1] if session.messages else None
         _tail_user_already_checkpointed = _message_matches_pending_checkpoint(
             _tail_message,
@@ -6111,6 +6148,13 @@ def _apply_core_sync_or_error_marker(
             _tail_message,
             session.pending_user_message,
         )
+        # #7167 re-gate: the matched row is REUSED, not re-materialized, so the
+        # pending turn's attachments/source must be copied onto it before the
+        # pending cleanup below drops the only other copy. Gated on the
+        # ownership proof so a save-failure rollback still leaves memory
+        # byte-identical (test_cancel_recovery_properties rollback cases).
+        if _already_checkpointed or _tail_user_already_checkpointed:
+            _backfill_pending_metadata_onto_reused_row(session, _latest_user)
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
             if not _already_checkpointed:
@@ -6326,6 +6370,12 @@ def _apply_core_sync_or_error_marker(
                 _last_user,
                 session.pending_started_at,
             )
+            # #7167 re-gate: same backfill as the first branch — this path also
+            # reuses the matched row instead of materializing a new one. Gated
+            # on the ownership proof (and on a pending turn existing) so a
+            # save-failure rollback leaves memory byte-identical.
+            if _pending_text and _tail_user_already_checkpointed:
+                _backfill_pending_metadata_onto_reused_row(session, _last_user)
             if (
                 _pending_text
                 and not _tail_user_already_checkpointed
