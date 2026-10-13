@@ -890,3 +890,46 @@ def test_git_branch_icon_exists():
     src = _read('static/icons.js')
     assert "'git-branch'" in src, \
         "git-branch icon should be defined in LI_PATHS"
+
+
+@pytest.mark.parametrize("draft_text", [None, "edited prompt", "x" * 50001], ids=["none", "short", "long"])
+def test_branch_route_persists_child_draft_without_changing_parent(monkeypatch, tmp_path, draft_text):
+    import api.models as models
+
+    source = routes.Session(session_id="source-draft", workspace=".", messages=[], composer_draft={"text": "parent draft", "files": []})
+    body = {"session_id": source.session_id, "keep_count": 0}
+    if draft_text is not None:
+        body["draft_text"] = draft_text
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(routes, "get_session", lambda *_a, **_k: source)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda _s: False)
+    monkeypatch.setattr(routes, "_is_messaging_session_record", lambda _s: False)
+    monkeypatch.setattr(routes, "_webui_sidecar_lineage_messages_for_display", lambda _s: [])
+    monkeypatch.setattr(routes, "get_state_db_session_messages", lambda *_a, **_k: [])
+    monkeypatch.setattr(routes, "_merged_webui_lineage_messages_for_display", lambda _s, messages: messages)
+    monkeypatch.setattr(routes, "_evict_sessions_over_cap", lambda: None)
+    monkeypatch.setattr(routes, "publish_session_list_changed", lambda *_a, **_k: None)
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "_write_session_index", lambda **_k: None)
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(_FakeHandler(), urlparse("/api/session/branch"))
+    assert "bad" not in cap
+    child_sid = cap["ok"]["session_id"]
+    try:
+        persisted = json.loads((tmp_path / (child_sid + ".json")).read_text(encoding="utf-8"))
+        assert persisted["composer_draft"] == ({"text": draft_text, "files": []} if draft_text is not None else {})
+        assert persisted["parent_session_id"] == source.session_id
+        assert source.composer_draft["text"] == "parent draft"
+    finally:
+        routes.SESSIONS.pop(child_sid, None)
+
+
+@pytest.mark.parametrize("draft_text", [{"text": "invalid"}], ids=["invalid-type"])
+def test_branch_route_rejects_invalid_draft_before_creation(monkeypatch, draft_text):
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "source-draft", "draft_text": draft_text})
+    monkeypatch.setattr(routes, "_load_branch_source_or_refuse", lambda *_a: (_ for _ in ()).throw(AssertionError("loaded source before draft validation")))
+    cap = _capture_route(monkeypatch)
+    routes.handle_post(_FakeHandler(), urlparse("/api/session/branch"))
+    assert cap["bad"][1] == 400

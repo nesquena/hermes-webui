@@ -427,7 +427,7 @@ def test_compression_recovery_ui_wires_card_action_and_send_intercept():
     assert "Compression recovery did not return a session." in ui
     assert "const sid=String(recovery.source_session_id||sessionId||'')" in ui
     assert "function shouldInterceptCompressionRecoveryContinuation" in ui
-    assert "shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)" in messages
+    assert "shouldInterceptCompressionRecoveryContinuation(text,sendFiles())" in messages
     assert "_compressionRecovery:recovery||undefined" in messages
 
 

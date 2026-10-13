@@ -32,8 +32,8 @@ def isolated_state_dir(tmp_path, monkeypatch):
     yield tmp_path
 
 
-def test_draft_text_clamped_to_50kb(isolated_state_dir):
-    """Posting a >50KB text field should be silently truncated to 50_000 chars."""
+def test_ordinary_draft_text_clamped_to_50kb(isolated_state_dir):
+    """Ordinary autosave stays small; failed-send recovery may preserve full text."""
     # Read the routes.py source and assert the clamp logic is present.
     src = Path(__file__).parents[1].joinpath("api", "routes.py").read_text(encoding="utf-8")
 
@@ -43,8 +43,8 @@ def test_draft_text_clamped_to_50kb(isolated_state_dir):
     )
 
     # And the truncation must be applied.
-    assert "text = text[:_MAX_DRAFT_TEXT]" in src, (
-        "routes.py must truncate over-large draft text to _MAX_DRAFT_TEXT"
+    assert "and not preserve_long_text" in src, (
+        "routes.py must clamp ordinary drafts while preserving full failed-send drafts"
     )
 
 
@@ -66,6 +66,47 @@ def test_draft_text_type_coerced_to_string():
     assert 'if text is not None and not isinstance(text, str):' in src, (
         "routes.py must coerce non-string text to empty string before persist"
     )
+
+
+@pytest.mark.parametrize(
+    "preserve_long_text,expected_length",
+    [(False, 50_000), (True, 50_001)],
+    ids=["autosave-clamp", "failed-send-preserve"],
+)
+def test_draft_route_clamps_autosaves_but_keeps_failed_send_text(
+    monkeypatch, isolated_state_dir, preserve_long_text, expected_length
+):
+    from contextlib import nullcontext
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+
+    import api.routes as routes
+
+    text = "x" * 50_001
+    session = SimpleNamespace(composer_draft={})
+    saved = []
+    session.save = lambda **_kwargs: saved.append(dict(session.composer_draft))
+    body = {
+        "session_id": "draft-long-text",
+        "text": text,
+        "files": [],
+        "preserve_long_text": preserve_long_text,
+    }
+    captured = {}
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: nullcontext())
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: captured.update(payload) or True)
+    monkeypatch.setattr(routes, "bad", lambda _handler, message, status=400: pytest.fail(message))
+
+    assert routes.handle_post(
+        SimpleNamespace(command="POST", headers={}), urlparse("/api/session/draft")
+    ) is True
+    assert session.composer_draft["text"] == text[:expected_length]
+    assert saved[-1]["text"] == text[:expected_length]
 
 
 def test_draft_files_type_coerced_to_list():

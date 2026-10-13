@@ -218,7 +218,7 @@ const _saveComposerDraftNow=(...args)=>calls.push(args);
 const files=[{name:'drawing.png',path:'/uploads/drawing.png'}];
 _restoreComposerDraftAfterFailedSend('retained',files,'continuation',Promise.resolve());
 await Promise.resolve();
-assert.deepEqual(calls,[['continuation','retained',files]]);
+assert.deepEqual(calls,[['continuation','retained',files,{preserveLongText:true}]]);
 })().catch(e=>{console.error(e);process.exit(1)});
 '''
     subprocess.run(['node','-e',helper+script], check=True, timeout=15)

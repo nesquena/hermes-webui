@@ -1819,16 +1819,18 @@ EXPECT:
   - Textarea dismissed, original restored
 FAIL: Escape does nothing.
 
-### T32.5: Send Edit Truncates and Regenerates
+### T32.5: Send edit preserves earlier history
 STEPS:
   1. Click edit on a user message that has a response after it
   2. Change the text
   3. Click "Send edit" (or press Enter)
 EXPECT:
-  - All messages after the edited message are removed
+  - Editing an older prompt creates a child session and preserves the source history
+  - Editing the latest visible prompt removes that prompt and its following response
+  - If the child fails to load, reopening it restores the edited draft; the source composer stays unchanged
   - The edited text is sent as a new user message
   - Hermes streams a fresh response
-FAIL: Old messages remain, double messages, crash.
+FAIL: Source history lost, edited draft lost, double messages, crash.
 
 ---
 
