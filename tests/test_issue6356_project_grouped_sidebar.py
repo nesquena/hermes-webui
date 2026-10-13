@@ -156,6 +156,7 @@ class Element {
 const elements = new Map();
 const sessionSearch = new Element('input');
 const sessionList = new Element('div');
+sessionList.clientHeight = 32;
 const batchActionBar = new Element('div');
 sessionSearch.value = '';
 elements.set('sessionSearch', sessionSearch);
@@ -189,6 +190,7 @@ let _allProjects = [
 let _allSessions = [
   {session_id: 'alpha', project_id: 'p1', ts: 1},
   {session_id: 'beta', project_id: 'p2', ts: 2},
+  {session_id: 'beta2', project_id: 'p2', ts: 3},
 ];
 let _sessionListSkeletonActive = false;
 let _renamingSid = null;
@@ -303,6 +305,9 @@ selectAllSessions();
 const initialVisible = [..._sessionVisibleSidebarIds];
 const initialTotal = sessionList.dataset.sessionVirtualTotal;
 const groupedHeaders = sessionList.children.filter(wrapper => wrapper.className.startsWith('session-date-group')).map(wrapper => wrapper.children[0].children[1].textContent);
+const betaHeader = sessionList.children.find(wrapper => wrapper.className.startsWith('session-date-group') && wrapper.children[0].children[1].textContent === 'Beta').children[0];
+betaHeader.onclick();
+const betaCollapseSaved = JSON.parse(localState.get('hermes-date-groups-collapsed'))['project:p2'] === true;
 window._sidebarGroupByProject = false;
 localState.set('hermes-date-groups-collapsed', '{}');
 renderSessionListFromCache();
@@ -316,6 +321,7 @@ process.stdout.write(JSON.stringify({
   visible: initialVisible,
   selected: Array.from(_selectedSessions),
   total: initialTotal,
+  betaCollapseSaved,
   groupedHeaders,
   flatHeaders,
   coarseChildren,
@@ -338,10 +344,11 @@ process.stdout.write(JSON.stringify({
     )
     observed = _run_node_json(script)
     assert observed == {
-        "visible": ["beta"],
-        "selected": ["beta"],
-        "total": "4",
-        "groupedHeaders": ["Alpha", "Beta", "Unassigned"],
+        "visible": ["beta", "beta2"],
+        "selected": ["beta", "beta2"],
+        "total": "5",
+        "betaCollapseSaved": True,
+        "groupedHeaders": ["Alpha", "Beta"],
         "flatHeaders": ["Today"],
         "coarseChildren": [
             "session-swipe-affordance session-swipe-affordance-right",

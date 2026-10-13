@@ -9533,10 +9533,14 @@ function _scheduleSessionVirtualizedRender(){
     const liveList=_sessionVirtualScrollList;
     const liveTotal=Number(liveList&&liveList.dataset&&liveList.dataset.sessionVirtualTotal||0);
     if(liveList&&liveTotal>SESSION_VIRTUAL_THRESHOLD_ROWS){
+      const scrollTop=Number(liveList.scrollTop)||0;
+      const contentTop=window._sidebarGroupByProject
+        ? Number(liveList._sessionVirtualContentTop)||0
+        : 0;
       const nextWindow=_sessionVirtualWindow({
         total:liveTotal,
-        scrollTop:liveList.scrollTop||0,
-        viewportHeight:liveList.clientHeight||520,
+        scrollTop:Math.max(0,scrollTop-contentTop),
+        viewportHeight:Math.max(SESSION_VIRTUAL_ROW_HEIGHT,(liveList.clientHeight||520)-Math.max(0,contentTop-scrollTop)),
         itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
         buffer:SESSION_VIRTUAL_BUFFER_ROWS,
         threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
@@ -10480,11 +10484,21 @@ function renderSessionListFromCache(){
       group.entries.push({entry,index});
     });
   }
+  const listScrollHeight=Number(list.scrollHeight)||0;
+  const listPaddingBottom=typeof window.getComputedStyle==='function'
+    ? parseFloat(window.getComputedStyle(list).paddingBottom)||0
+    : 0;
+  const groupedContentTop=groupedMode?Math.max(0,listScrollHeight-listPaddingBottom):0;
+  list._sessionVirtualContentTop=groupedContentTop;
+  const groupedScrollTop=Math.max(0,listScrollTopBeforeRender-groupedContentTop);
+  const groupedViewportHeight=Math.max(
+    SESSION_VIRTUAL_ROW_HEIGHT,
+    (list.clientHeight||520)-Math.max(0,groupedContentTop-listScrollTopBeforeRender),
+  );
   const groupedOffsets=groupedMode?[0]:null;
   if(groupedMode) for(const entry of groupedEntries) groupedOffsets.push(groupedOffsets[groupedOffsets.length-1]+entry.height);
   if(groupedMode) list._sessionVirtualOffsets=groupedOffsets;
-  _sessionVisibleSidebarIds=(groupedMode?groupedEntries:flatSessionRows)
-    .filter((entry,index)=>!groupedMode||index>=0)
+  _sessionVisibleSidebarIds=flatSessionRows
     .map(row=>row.session&&row.session.session_id).filter(Boolean);
   for(const row of flatSessionRows){
     const s=row.session;
@@ -10507,8 +10521,8 @@ function renderSessionListFromCache(){
   );
   const virtualWindowBeforeActiveAnchor=_sessionVirtualWindow({
     total:groupedMode?groupedEntries.length:flatSessionRows.length,
-    scrollTop:listScrollTopBeforeRender,
-    viewportHeight:list.clientHeight||520,
+    scrollTop:groupedMode?groupedScrollTop:listScrollTopBeforeRender,
+    viewportHeight:groupedMode?groupedViewportHeight:list.clientHeight||520,
     itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
     buffer:SESSION_VIRTUAL_BUFFER_ROWS,
     threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
@@ -10523,8 +10537,8 @@ function renderSessionListFromCache(){
     ? _sessionVirtualWindow({
       total:groupedEntries.length,
       offsets:groupedOffsets,
-      scrollTop:listScrollTopBeforeRender,
-      viewportHeight:list.clientHeight||520,
+      scrollTop:groupedScrollTop,
+      viewportHeight:groupedViewportHeight,
       itemHeight:SESSION_VIRTUAL_ROW_HEIGHT,
       buffer:SESSION_VIRTUAL_BUFFER_ROWS,
       threshold:SESSION_VIRTUAL_THRESHOLD_ROWS,
@@ -10552,11 +10566,6 @@ function renderSessionListFromCache(){
   list.dataset.sessionVirtualFilter=q;
   list.dataset.sessionVirtualStart=String(virtualWindow.start);
   list.dataset.sessionVirtualEnd=String(virtualWindow.end);
-  if(groupedMode){
-    _sessionVisibleSidebarIds=groupedEntries.slice(virtualWindow.start,virtualWindow.end)
-      .filter(entry=>entry.kind==='row'&&entry.session&&entry.session.session_id)
-      .map(entry=>entry.session.session_id);
-  }
   // Flat mode keeps its existing date-group rendering and row-only virtualizer.
   let globalSessionRowIndex=0;
   if(!groupedMode) for(const g of groups){
@@ -10630,7 +10639,7 @@ function renderSessionListFromCache(){
       }else hdr.append(caret,label);
       const body=document.createElement('div');body.className='session-date-body';
       if(collapsed){body.style.display='none';caret.classList.add('collapsed');}
-      hdr.onclick=()=>{_groupCollapsed[groupKey]=!_groupCollapsed[groupKey];_saveCollapsed();renderSessionListFromCache();};
+      hdr.onclick=()=>{_pending.add(groupKey);_groupCollapsed[groupKey]=!_groupCollapsed[groupKey];_saveCollapsed();renderSessionListFromCache();};
       const renderStart=Math.max(virtualWindow.start,groupStart);const renderEnd=Math.min(virtualWindow.end,groupEnd);
       if(groupStart>=renderStart&&groupStart<renderEnd) wrapper.appendChild(hdr);
       if(!collapsed){
