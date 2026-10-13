@@ -104,7 +104,7 @@ def test_posix_containment_matrix():
         "~/shared/file.md", "../secret.md", "./relative.md", "report.md",
     ], "/workspace")
     assert [row["kind"] for row in rows] == [
-        "workspace-contained", "outside", "outside", "unsupported", "unsupported",
+        "workspace-contained", "outside", "outside", "workspace-relative", "unsupported",
         "workspace-relative", "workspace-relative",
     ]
     assert rows[0]["openPath"] == "report.md"
@@ -225,7 +225,7 @@ def test_windows_relative_and_canonical_boundary_matrix():
     ], r"D:\Proj")
     assert [row["kind"] for row in rows] == [
         "workspace-relative", "workspace-relative", "workspace-contained",
-        "workspace-contained", "unsupported", "outside",
+        "workspace-contained", "workspace-contained", "outside",
     ]
     assert rows[0]["openPath"] == "report.md"
     assert rows[1]["dedupeKey"] == "report.md"
@@ -369,3 +369,52 @@ def test_collection_render_and_open_route_through_classifier():
     opener = _extract_fn("openArtifactPath")
     assert opener.index("_classifyArtifactPath") < opener.index("switchWorkspacePanelTab")
     assert "_workspacePathExists(rel)" in opener
+
+
+@pytest.mark.parametrize("path, expected", [
+    ("sub/../report.md", "report.md"),
+    ("~/report.md", "report.md"),
+    ("~draft.md", "~draft.md"),
+    (" report.md", " report.md"),
+])
+def test_master_open_path_shapes_remain_openable(path, expected):
+    master = subprocess.run(
+        ["git", "show", "330f0936baa03dcdd6694454464dedaf28ba7062:static/workspace.js"],
+        cwd=REPO, capture_output=True, text=True, check=True,
+    ).stdout
+    marker = "async function openArtifactPath("
+    start = master.index(marker)
+    end = master.index("\nasync function ", start + len(marker))
+    master_opener = master[start:end]
+    body = r'''
+const calls=[]; const S={session:{workspace:'/home/u/proj',session_id:'s'}};
+const t=k=>k; const setStatus=s=>calls.push({status:s});
+const switchWorkspacePanelTab=()=>{};
+const _workspacePathExists=async p=>{calls.push({check:p});return true;};
+const openFile=async p=>{calls.push({open:p});return true;};
+openArtifactPath(JSON.parse(process.argv[1])).then(()=>process.stdout.write(JSON.stringify(calls)));
+'''
+    baseline = _node_json(master_opener + body, path)
+    candidate = _node_json(_common_js("_classifyArtifactPath", "openArtifactPath") + body, path)
+    assert baseline[-1] == {"open": path.replace("~/", "", 1) if path.startswith("~/") else path}
+    assert candidate[-1] == {"open": expected}
+
+
+def test_workspace_spaces_and_contained_parent_segments():
+    row = _classify(["/home/u/proj /sub/../ report.md"], "/home/u/proj ")[0]
+    assert row["openPath"] == " report.md"
+    assert _classify(["../escape.md"], "/home/u/proj")[0]["openPath"] is None
+    assert _classify(["/home/u/proj/../escape.md"], "/home/u/proj")[0]["openPath"] is None
+
+
+def test_structured_artifact_retains_leading_space_through_collection():
+    script = _common_js(
+        "_sanitizeArtifactPath", "_classifyArtifactPath", "_classifyArtifactCandidate",
+        "_artifactCandidatesFromText", "_artifactCandidatesFromToolCall", "collectSessionArtifacts",
+    ) + r'''
+const S={session:{workspace:'/home/u/proj'},messages:[],toolCalls:[{name:'write_file',args:{path:' report.md'}}]};
+process.stdout.write(JSON.stringify(collectSessionArtifacts()));
+'''
+    row = _node_json(script)[0]
+    assert row["path"] == " report.md"
+    assert row["classification"]["openPath"] == " report.md"

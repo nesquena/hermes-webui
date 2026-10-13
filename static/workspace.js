@@ -452,44 +452,50 @@ function _normalizeArtifactPath(path){
   return path;
 }
 
-function _sanitizeArtifactPath(path){
+function _sanitizeArtifactPath(path, explicit=false){
   if(!path) return '';
-  path = String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
-  if(!path || path.length > 240 || path.includes('://') || path.includes('\0')) return '';
+  path = explicit ? String(path) : String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
+  if(!path.trim() || path.length > 240 || path.includes('://') || path.includes('\0')) return '';
   if(ARTIFACT_IGNORE_RE.test(path) || !/[./]/.test(path)) return '';
   return path;
 }
 
 function _normalizeExplicitArtifactPath(path){
   if(path === null || path === undefined) return '';
-  const raw = String(path).trim();
-  if(!raw || raw.includes('://') || raw.includes('\0')) return '';
-  if(raw.startsWith('~')) return '';
+  const raw = String(path);
+  if(!raw.trim() || raw.includes('://') || raw.includes('\0')) return '';
   return raw.replace(/\\/g,'/');
 }
 
 function _classifyArtifactPath(path, workspace){
-  const input = String(path || '').trim().replace(/\\/g,'/');
-  if(input.split('/').includes('..')){
-    const displayPath = _normalizeExplicitArtifactPath(path);
-    return {kind:'unsupported', displayPath, dedupeKey:displayPath, openPath:null};
-  }
   const raw = _normalizeExplicitArtifactPath(path);
   const displayPath = raw;
   const blocked = kind => ({kind, displayPath, dedupeKey:displayPath, openPath:null});
   if(!raw) return blocked('unsupported');
-  const normalized = raw.replace(/\\/g,'/');
-  let ws = typeof workspace === 'string' ? workspace.trim().replace(/\\/g,'/') : '';
+  const normalized = raw.replace(/^~\//,'');
+  let ws = typeof workspace === 'string' && workspace.trim() ? workspace.replace(/\\/g,'/') : '';
   const workspaceRoot = ws === '/' || /^[A-Za-z]:\/$/.test(ws);
   if(!workspaceRoot) ws = ws.replace(/\/+$/,'');
-  if(normalized.split('/').includes('..')) return blocked('unsupported');
+  const normalizeSegments = segments => {
+    const result = [];
+    for(const segment of segments){
+      if(segment === '.') continue;
+      if(segment === '..'){
+        while(result.length && result[result.length - 1] === '') result.pop();
+        if(!result.length) return null;
+        result.pop();
+      }else result.push(segment);
+    }
+    return result;
+  };
   if(/^\/\//.test(normalized) || /^[A-Za-z]:[^/]/.test(normalized)) return blocked('unsupported');
   const pathIsWindows = /^[A-Za-z]:\//.test(normalized);
   const workspaceIsWindows = /^[A-Za-z]:\//.test(ws);
   const absolute = pathIsWindows || normalized.startsWith('/');
   if(!absolute){
-    const relative = normalized.split('/').filter(segment => segment !== '.').join('/');
-    if(!relative) return blocked('unsupported');
+    const segments = normalizeSegments(normalized.split('/'));
+    if(!segments) return blocked('unsupported');
+    const relative = segments.join('/') || '.';
     return {
       kind:'workspace-relative',
       displayPath:relative,
@@ -504,11 +510,12 @@ function _classifyArtifactPath(path, workspace){
     const match = value.match(/^([A-Za-z]:)?\/(.*)$/);
     return {
       drive:match&&match[1] ? match[1].toLowerCase() : '',
-      segments:(match ? match[2] : value).split('/').filter(segment => segment !== '.'),
+      segments:normalizeSegments((match ? match[2] : value).split('/')),
     };
   };
   const pathParts = split(normalized);
   const workspaceParts = split(ws);
+  if(!pathParts.segments || !workspaceParts.segments) return blocked('outside');
   while(workspaceParts.segments.length && workspaceParts.segments[workspaceParts.segments.length - 1] === ''){
     workspaceParts.segments.pop();
   }
@@ -556,7 +563,7 @@ function _artifactCandidatesFromToolCall(tc){
   const result = tc.result || tc.output || tc.snippet || '';
   const out = [];
   const add = (path, source=name || 'tool') => {
-    path = (typeof _sanitizeArtifactPath === 'function' ? _sanitizeArtifactPath : _normalizeArtifactPath)(path);
+    path = (typeof _sanitizeArtifactPath === 'function' ? _sanitizeArtifactPath : _normalizeArtifactPath)(path, true);
     if(path) out.push({path, kind:source});
   };
   if(ARTIFACT_MUTATION_TOOLS.has(name) && args && typeof args === 'object'){
@@ -612,7 +619,7 @@ function collectSessionArtifacts(){
   const items = [];
   const seen = new Set();
   const push = (path, source) => {
-    path = (typeof _sanitizeArtifactPath === 'function' ? _sanitizeArtifactPath : _normalizeArtifactPath)(path);
+    path = (typeof _sanitizeArtifactPath === 'function' ? _sanitizeArtifactPath : _normalizeArtifactPath)(path, true);
     if(!path) return;
     const classification = typeof _classifyArtifactCandidate === 'function'
       ? _classifyArtifactCandidate(path, S.session && S.session.workspace)
@@ -691,6 +698,10 @@ function renderSessionArtifacts(){
     const classification = item.classification || _classifyArtifactCandidate(item.path, ws);
     const path = classification.displayPath || item.path;
     const parts = splitArtifactDisplayPath(path);
+    if(/^[A-Za-z]:[\\/]/.test(item.path)){
+      parts.head = parts.head.replace(/\//g,'\\');
+      parts.tail = parts.tail.replace(/\//g,'\\');
+    }
     const directory = (parts.head || parts.tail)
       ? `<div class="workspace-artifact-directory"><span class="workspace-artifact-directory-head">${esc(parts.head)}</span><span class="workspace-artifact-directory-tail">${esc(parts.tail)}</span></div>`
       : '';
