@@ -108,6 +108,7 @@ def test_duplicate_creates_independent_session():
     # corrected deepcopy form added May 2 2026).
     assert 'messages=session.messages' in endpoint_code or \
            'messages=copy.deepcopy(session.messages)' in endpoint_code or \
+           'messages=copy.deepcopy(copy_messages)' in endpoint_code or \
            'messages=copied_session.messages' in endpoint_code, \
         "Messages should be copied to duplicate"
 
@@ -156,7 +157,8 @@ def test_duplicate_session_copies_messages_logic():
     # plain assignment (insufficient — see test_duplicate_runtime_messages_independence)
     # or the proper deepcopy form (the May 2 2026 fix).
     assert 'messages=session.messages' in endpoint_code or \
-           'messages=copy.deepcopy(session.messages)' in endpoint_code, \
+           'messages=copy.deepcopy(session.messages)' in endpoint_code or \
+           'messages=copy.deepcopy(copy_messages)' in endpoint_code, \
         f"Messages should be copied from original. Got: {endpoint_code}"
 
 
@@ -236,7 +238,8 @@ def test_duplicate_session_copies_all_session_properties():
 
     # `messages` accepts either the plain assignment or the deepcopy form (May 2 2026 fix).
     assert 'messages=session.messages' in construction_block or \
-           'messages=copy.deepcopy(session.messages)' in construction_block, \
+           'messages=copy.deepcopy(session.messages)' in construction_block or \
+           'messages=copy.deepcopy(copy_messages)' in construction_block, \
         f"messages must be copied (plain or deepcopy form). Got: {construction_block[:300]}"
 
 
@@ -258,8 +261,10 @@ def test_duplicate_uses_deepcopy_for_messages():
     assert duplicate_start != -1, "Duplicate endpoint not found"
     lines = content[duplicate_start:].split('\n')
     endpoint_code = '\n'.join(lines[:100])
-    assert 'copy.deepcopy(session.messages)' in endpoint_code, \
-        "duplicate must use copy.deepcopy(session.messages) — plain assignment shares list refs"
+    assert ('copy.deepcopy(session.messages)' in endpoint_code or
+            ('copy_messages = session.messages' in endpoint_code and
+             'messages=copy.deepcopy(copy_messages)' in endpoint_code)), \
+        "duplicate must deep-copy its source messages — plain assignment shares list refs"
     assert 'copy.deepcopy(session.tool_calls)' in endpoint_code, \
         "duplicate must use copy.deepcopy(session.tool_calls) — plain assignment shares list refs"
 
@@ -276,8 +281,9 @@ def test_duplicate_explicitly_persists_to_disk():
         content = f.read()
     duplicate_start = content.find('if parsed.path == "/api/session/duplicate":')
     assert duplicate_start != -1, "Duplicate endpoint not found"
-    lines = content[duplicate_start:].split('\n')
-    endpoint_code = '\n'.join(lines[:100])
+    # Inspect the complete handler: guards/rebasing may grow without moving
+    # persistence into a different route. Do not borrow a later route's save.
+    endpoint_code = content[duplicate_start:].split('\n    if parsed.path', 1)[0]
     assert 'copied_session.save()' in endpoint_code, \
         "duplicate must call .save() explicitly — without it the copy vanishes on refresh"
 

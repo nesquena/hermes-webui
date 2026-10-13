@@ -22,13 +22,27 @@ def test_messages_inner_mobile_has_containment():
     css_file = Path(__file__).resolve().parent.parent / "static" / "style.css"
     content = css_file.read_text()
 
-    # Find the @media(max-width:640px) block and then .messages-inner within a reasonable window
+    # Find the @media(max-width:640px) block and then .messages-inner within it.
+    # The window is derived from the block's own brace-balanced extent rather
+    # than a hardcoded lookahead: a fixed window silently stops matching
+    # whenever unrelated rules (e.g. the #7866 drawer rules added above the
+    # transcript rules) push .messages-inner past it.
     media_match = re.search(r'@media\(max-width:640px\)\{', content)
     assert media_match, "@media(max-width:640px) block not found"
 
-    # Extract content after the media query opening brace
+    # Brace-match forward from the opening brace to find the block's real end.
     media_start = media_match.start()
-    remaining_content = content[media_start:media_start + 5000]  # Look ahead 5000 chars
+    depth = 0
+    media_end = len(content)
+    for i, ch in enumerate(content[media_start:], media_start):
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                media_end = i
+                break
+    remaining_content = content[media_start:media_end]
 
     # Find .messages-inner rule within this section
     messages_inner_match = re.search(r'\.messages-inner\{([^}]*)\}', remaining_content)

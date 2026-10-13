@@ -34,11 +34,11 @@ def test_approval_and_clarify_fallback_polls_do_not_overlap():
     assert "let _approvalFallbackPollInFlight = false" in src
     assert "if (_approvalFallbackPollInFlight) return" in src
     assert "_approvalFallbackPollInFlight = true" in src
-    assert "finally { _approvalFallbackPollInFlight = false; }" in src
+    assert "finally { if (_approvalPollTimer === pollTimer) _approvalFallbackPollInFlight = false; }" in src
     assert "_approvalFallbackPollInFlight = false;\n  _approvalPollingSessionId = null;" in src
 
     assert "let _clarifyFallbackPollInFlight = false" in src
     assert "if (_clarifyFallbackPollInFlight) return" in src
     assert "_clarifyFallbackPollInFlight = true" in src
-    assert "finally {\n      _clarifyFallbackPollInFlight = false;\n    }" in src
+    assert "finally {\n      if (_clarifyFallbackTimer === pollTimer) _clarifyFallbackPollInFlight = false;\n    }" in src
     assert "_clarifyFallbackPollInFlight = false;\n  _clarifyPollingSessionId = null;" in src

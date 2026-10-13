@@ -28,10 +28,24 @@ Fix verified by these tests:
 """
 import pathlib
 
+from tests.js_source_extract import extract_function
+
 REPO = pathlib.Path(__file__).parent.parent
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 I18N_JS = (REPO / "static" / "i18n.js").read_text(encoding="utf-8")
+
+
+def _sync_workspace_panel_state_body() -> str:
+    """Return the whole `syncWorkspacePanelState()` body.
+
+    These tests used a fixed `BOOT_JS[idx:idx + 800]` window, which silently
+    stopped reaching the no-session force-close branch once comments above it
+    pushed the branch past offset 800 — the production branch was still there,
+    so the window was measuring prose length, not behaviour. Extract by brace
+    matching instead so the assertion follows the function, not a byte budget.
+    """
+    return extract_function(BOOT_JS, "syncWorkspacePanelState")
 
 
 def _html_tag_by_id(element_id: str) -> str:
@@ -51,8 +65,7 @@ class TestSyncStateNoSession:
     def test_preview_mode_without_session_force_closes(self):
         """A 'preview' panel needs file content from a session — close it
         when there's no session."""
-        idx = BOOT_JS.find("function syncWorkspacePanelState()")
-        body = BOOT_JS[idx:idx + 800]
+        body = _sync_workspace_panel_state_body()
         assert "_workspacePanelMode==='preview'" in body, (
             "syncWorkspacePanelState must check _workspacePanelMode==='preview' "
             "before force-closing on no-session boot"
@@ -65,8 +78,7 @@ class TestSyncStateNoSession:
         """For 'browse' mode without a session, syncWorkspacePanelUI() should
         run so the panel renders its 'no workspace' or default-workspace state
         rather than being force-closed."""
-        idx = BOOT_JS.find("function syncWorkspacePanelState()")
-        body = BOOT_JS[idx:idx + 800]
+        body = _sync_workspace_panel_state_body()
         # The else branch (browse / closed mode without session) calls UI sync
         assert "syncWorkspacePanelUI()" in body, (
             "syncWorkspacePanelState must call syncWorkspacePanelUI() in the "

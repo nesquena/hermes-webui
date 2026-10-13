@@ -954,8 +954,9 @@ def test_continuation_classification_timestamp_tolerance_and_guards():
             model_config=json.dumps({'_delegate_from': 'some-other-session'}),
         ),
     )
-    # Unparsable model_config degrades to no markers (no crash, no match).
-    assert _is_continuation_session(
+    # Unparsable model_config is untrusted lineage identity: it fails closed
+    # as a boundary (no crash), even inside the tolerance window.
+    assert not _is_continuation_session(
         make_parent(),
         make_child(started_at=999.95, model_config='not-json'),
     )
@@ -978,6 +979,58 @@ def test_continuation_classification_timestamp_tolerance_and_guards():
     # Missing/unparsable boundary timestamps degrade to False (no crash).
     assert not _is_continuation_session(make_parent(ended_at='not-a-number'), make_child())
     assert not _is_continuation_session(make_parent(), make_child(started_at='not-a-number'))
+
+
+@pytest.mark.parametrize("parent_source", ["tool", ""])
+def test_tool_child_is_not_stitched_into_parent_lineage(_isolate, parent_source):
+    """A marker-less tool child stays independent even with a matching/empty source."""
+    from api.agent_sessions import (
+        read_importable_agent_session_rows,
+        read_session_lineage_metadata,
+        read_session_lineage_report,
+    )
+
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    parent_id, child_id = "tool_boundary_parent", "tool_boundary_child"
+    try:
+        _insert_state_row(
+            conn, parent_id, source=parent_source, title="Parent conversation",
+            started_at=t0, ended_at=t0 + 5, end_reason="compression",
+        )
+        _insert_state_row(
+            conn, child_id, source="tool", title="Tool conversation",
+            parent=parent_id, started_at=t0 + 4.5,
+        )
+        _insert_state_message(
+            conn, parent_id, role="user", content="parent request", timestamp=t0 + 1,
+        )
+        _insert_state_message(
+            conn, child_id, role="user", content="tool request", timestamp=t0 + 6,
+        )
+
+        projected = read_importable_agent_session_rows(
+            _isolate, limit=None, exclude_sources=None,
+        )
+        rows = {row["id"]: row for row in projected}
+        assert set(rows) == {parent_id, child_id}
+        assert rows[child_id]["relationship_type"] == "child_session"
+        assert "_lineage_root_id" not in rows[child_id]
+        assert "_lineage_tip_id" not in rows[parent_id]
+
+        metadata = read_session_lineage_metadata(_isolate, {parent_id, child_id})
+        assert metadata[child_id]["relationship_type"] == "child_session"
+        assert "_lineage_root_id" not in metadata[child_id]
+        assert read_session_lineage_report(_isolate, parent_id)["total_segments"] == 1
+        assert read_session_lineage_report(_isolate, child_id)["total_segments"] == 1
+
+        messages = models.get_state_db_session_messages(
+            child_id, stitch_continuations=True,
+        )
+        assert [message["content"] for message in messages] == ["tool request"]
+    finally:
+        conn.close()
 
 
 def test_state_db_stitch_keeps_branched_child_out_of_parent_transcript(_isolate):
@@ -1146,5 +1199,199 @@ def test_state_db_stitch_old_schema_without_identity_columns_still_stitches(_iso
         contents = [m["content"] for m in msgs]
         assert "old child turn" in contents
         assert "parent turn" in contents
+    finally:
+        conn.close()
+
+
+def test_branch_markers_report_fail_closed_unknown_state():
+    """Untrusted model_config lineage evidence is 'unknown', never 'no markers'."""
+    from api.agent_sessions import _branch_markers
+
+    assert _branch_markers(None) == ('none', {})
+    assert _branch_markers({'model_config': None}) == ('none', {})
+    assert _branch_markers({'model_config': ''}) == ('none', {})
+    assert _branch_markers({'model_config': '   '}) == ('none', {})
+    assert _branch_markers({'model_config': json.dumps({'model': 'x'})}) == ('none', {})
+    assert _branch_markers({'model_config': json.dumps({'_reset_from': None})}) == ('none', {})
+    assert _branch_markers(
+        {'model_config': json.dumps({'_reset_from': 'p', '_delegate_from': 'a'})}
+    ) == ('markers', {'_reset_from': 'p', '_delegate_from': 'a'})
+    assert _branch_markers({'model_config': {'_branched_from': ' p '}}) == (
+        'markers',
+        {'_branched_from': 'p'},
+    )
+
+    for raw in ('{not-json', '[]', '"a string"', '17', 'null', '{"a":'):
+        assert _branch_markers({'model_config': raw}) == ('unknown', {}), raw
+    assert _branch_markers({'model_config': ['_delegate_from']}) == ('unknown', {})
+    for hostile in (
+        {'_delegate_from': 123},
+        {'_delegate_from': ['p']},
+        {'_delegate_from': {'id': 'p'}},
+        {'_branched_from': True},
+        {'_branched_from': '   '},
+        {'_reset_from': ''},
+        # A usable first marker never hides a malformed second one.
+        {'_delegate_from': 'ancestor', '_branched_from': 123},
+    ):
+        assert _branch_markers({'model_config': json.dumps(hostile)}) == ('unknown', {}), hostile
+
+    # A valid but pathologically deep payload overflows the decoder with
+    # RecursionError (not ValueError); it must degrade to 'unknown', not crash.
+    depth = 12_000
+    deep_payload = '[' * depth + ']' * depth
+    with pytest.raises(RecursionError):
+        json.loads(deep_payload)
+    assert _branch_markers({'model_config': deep_payload}) == ('unknown', {})
+
+
+def test_untrusted_model_config_markers_fail_closed_inside_tolerance():
+    """Master tolerance/predicate shape, but unknown identity is a boundary."""
+    from api.agent_sessions import _is_continuation_session
+
+    parent = {'id': 'fc_parent', 'source': 'webui', 'ended_at': 200.0, 'end_reason': 'compression'}
+    child = {'id': 'fc_child', 'source': 'webui', 'started_at': 199.7, 'parent_session_id': 'fc_parent'}
+
+    # Containment: marker-free and null-marker children still continue.
+    assert _is_continuation_session(parent, child)
+    assert _is_continuation_session(
+        parent, {**child, 'model_config': json.dumps({'_delegate_from': None})}
+    )
+    # Master's shape is kept: a marker naming another session (inherited from
+    # the rotated agent's model_config) does not split a real continuation.
+    assert _is_continuation_session(
+        parent, {**child, 'model_config': json.dumps({'_delegate_from': 'somewhere_else'})}
+    )
+
+    for raw in (
+        '{not-json',
+        '[]',
+        json.dumps({'_delegate_from': 123}),
+        json.dumps({'_branched_from': ''}),
+        json.dumps({'_reset_from': ['fc_parent']}),
+        json.dumps({'_delegate_from': 'somewhere_else', '_branched_from': 123}),
+        '[' * 12_000 + ']' * 12_000,
+    ):
+        assert not _is_continuation_session(parent, {**child, 'model_config': raw}), raw[:40]
+
+    # Legacy rows without ended_at keep continuing, unless identity is untrusted.
+    legacy_parent = {**parent, 'ended_at': None}
+    assert _is_continuation_session(legacy_parent, child)
+    assert not _is_continuation_session(legacy_parent, {**child, 'model_config': '{not-json'})
+
+
+def test_reset_from_marker_naming_parent_is_a_boundary():
+    """Hermes Agent binds ``_reset_from`` like ``_branched_from``/``_delegate_from``.
+
+    ``gateway/session_recovery.py`` stamps ``model_config._reset_from`` on a
+    reset child and ``_NON_CONTINUATION_CHILD_FILTER_SQL`` rejects it as a
+    compression continuation. The WebUI predicate must agree inside the
+    tolerance window and on legacy rows without ``ended_at``.
+    """
+    from api.agent_sessions import _is_continuation_session
+
+    for end_reason in ('compression', 'cli_close'):
+        parent = {'id': 'reset_parent', 'source': 'telegram', 'ended_at': 300.0, 'end_reason': end_reason}
+        child = {'id': 'reset_child', 'source': 'telegram', 'started_at': 299.5, 'parent_session_id': 'reset_parent'}
+        assert _is_continuation_session(parent, child), end_reason
+        assert not _is_continuation_session(
+            parent, {**child, 'model_config': json.dumps({'_reset_from': 'reset_parent'})}
+        ), end_reason
+        assert not _is_continuation_session(
+            parent, {**child, 'model_config': {'max_iterations': 40, '_reset_from': 'reset_parent'}}
+        ), end_reason
+        assert not _is_continuation_session(
+            {**parent, 'ended_at': None},
+            {**child, 'model_config': json.dumps({'_reset_from': 'reset_parent'})},
+        ), end_reason
+        # A direct reset marker is not masked by an inherited delegate marker.
+        assert not _is_continuation_session(
+            parent,
+            {
+                **child,
+                'model_config': json.dumps(
+                    {'_delegate_from': 'ancestor', '_reset_from': 'reset_parent'}
+                ),
+            },
+        ), end_reason
+        # An inherited reset marker naming an ancestor does not split the lineage.
+        assert _is_continuation_session(
+            parent, {**child, 'model_config': json.dumps({'_reset_from': 'ancestor'})}
+        ), end_reason
+
+
+def test_reset_child_inside_tolerance_stays_independent_across_readers(_isolate):
+    """Sidebar listing, lineage metadata/report and transcript stitcher agree.
+
+    A resumed parent closed by compression within the tolerance window of its
+    reset child's creation must not absorb that reset conversation.
+    """
+    from api.agent_sessions import (
+        read_importable_agent_session_rows,
+        read_session_lineage_metadata,
+        read_session_lineage_report,
+    )
+
+    conn = _ensure_state_db(_isolate)
+    _ensure_messages_table(conn)
+    t0 = time.time() - 100
+    parent_id = 'reset_reader_parent'
+    child_id = 'reset_reader_child'
+    try:
+        _insert_state_row(
+            conn,
+            parent_id,
+            title='Reset parent conversation',
+            started_at=t0,
+            ended_at=t0 + 5,
+            end_reason='compression',
+        )
+        _insert_state_message(conn, parent_id, role='user', content='parent turn', timestamp=t0 + 1)
+        _insert_state_row(
+            conn,
+            child_id,
+            title='Reset child conversation',
+            parent=parent_id,
+            started_at=t0 + 5 - 0.5,
+            model_config=json.dumps({'_reset_from': parent_id}),
+        )
+        _insert_state_message(conn, child_id, role='user', content='reset turn', timestamp=t0 + 6)
+
+        projected = {
+            row['id']: row
+            for row in read_importable_agent_session_rows(
+                _isolate, limit=None, exclude_sources=None
+            )
+        }
+        assert {parent_id, child_id} <= set(projected)
+        assert projected[child_id]['title'] == 'Reset child conversation'
+        assert projected[child_id]['relationship_type'] == 'child_session'
+        assert '_lineage_root_id' not in projected[child_id]
+        assert '_compression_segment_count' not in projected[parent_id]
+        assert 'model_config' not in projected[child_id]
+
+        metadata = read_session_lineage_metadata(_isolate, {parent_id, child_id})
+        assert metadata[child_id]['relationship_type'] == 'child_session'
+        assert '_lineage_root_id' not in metadata[child_id]
+
+        report = read_session_lineage_report(_isolate, child_id)
+        assert report['tip_session_id'] == child_id
+        assert report['total_segments'] == 1
+
+        stitched = models.get_state_db_session_messages(child_id, stitch_continuations=True)
+        assert [m['content'] for m in stitched] == ['reset turn']
+
+        # Control: the same row without the reset marker is a continuation.
+        conn.execute('UPDATE sessions SET model_config = NULL WHERE id = ?', (child_id,))
+        conn.commit()
+        stitched = models.get_state_db_session_messages(child_id, stitch_continuations=True)
+        assert [m['content'] for m in stitched] == ['parent turn', 'reset turn']
+        projected_ids = {
+            row['id']
+            for row in read_importable_agent_session_rows(
+                _isolate, limit=None, exclude_sources=None
+            )
+        }
+        assert parent_id not in projected_ids and child_id in projected_ids
     finally:
         conn.close()

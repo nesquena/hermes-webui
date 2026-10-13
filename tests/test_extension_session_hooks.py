@@ -351,7 +351,7 @@ def test_no_early_closemobilesidebar_before_sidebar_open():
     )
 
     # Child-session open handler must not contain closeMobileSidebar() at all.
-    child_block = _extract_block(SESSIONS_JS, "const openChildSession=async(childSession)=>{")
+    child_block = _extract_block(SESSIONS_JS, "const openChildSession=async(childSession, openOpts={})=>{")
     assert "closeMobileSidebar()" not in child_block, (
         "openChildSession handler must not contain closeMobileSidebar()"
     )

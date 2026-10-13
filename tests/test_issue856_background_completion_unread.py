@@ -1,12 +1,21 @@
 """Regression checks for #856 background completion unread markers."""
 
 import json
+import shutil
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 
 REPO = Path(__file__).resolve().parent.parent
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
+NODE = shutil.which("node")
+
+sys.path.insert(0, str(REPO / "tests"))
+import _unread_store_helpers as unread_store_helpers  # noqa: E402
 
 
 def _done_block() -> str:
@@ -40,25 +49,81 @@ def _function_body(block: str) -> str:
     raise AssertionError("function closing brace not found")
 
 
+def _extract_sessions_function(name: str) -> str:
+    start = SESSIONS_JS.index(f"function {name}(")
+    brace = SESSIONS_JS.index("{", start)
+    depth = 0
+    for i in range(brace, len(SESSIONS_JS)):
+        if SESSIONS_JS[i] == "{":
+            depth += 1
+        elif SESSIONS_JS[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return SESSIONS_JS[start:i + 1]
+    raise AssertionError(f"could not brace-match {name}")
+
+
+def _run_unread_behavior(body: str) -> dict:
+    functions = "\n".join(
+        _extract_sessions_function(name)
+        for name in (
+            "_getSessionViewedCounts",
+            "_saveSessionViewedCounts",
+            "_setSessionViewedCount",
+            "_getSessionCompletionUnread",
+            "_saveSessionCompletionUnread",
+            "_clearSessionCompletionUnread",
+            "_hasSessionCompletionUnread",
+            "_hasUnreadForSession",
+        )
+    )
+    script = f"""
+const store = {{}};
+const localStorage = {{
+  getItem: (key) => Object.prototype.hasOwnProperty.call(store, key) ? store[key] : null,
+  setItem: (key, value) => {{ store[key] = String(value); }},
+  removeItem: (key) => {{ delete store[key]; }},
+  key: (index) => Object.keys(store)[index] ?? null,
+  get length() {{ return Object.keys(store).length; }},
+}};
+const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
+const SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread';
+let _sessionViewedCounts = null;
+let _sessionCompletionUnread = null;
+let _allSessions = [{{session_id: 'X'}}];
+const _sessionListSnapshotById = new Map();
+const S = {{session: null}};
+{unread_store_helpers.BLOCK}
+{functions}
+{body}
+"""
+    result = subprocess.run(
+        [NODE, "-e", script], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, f"node harness failed:\n{result.stderr}"
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_background_completion_unread_uses_explicit_marker_not_message_delta():
     """A background completion must stay unread even when message_count has no delta."""
-    assert "SESSION_COMPLETION_UNREAD_KEY = 'hermes-session-completion-unread'" in SESSIONS_JS
-    assert "function _markSessionCompletionUnread(" in SESSIONS_JS
-    assert "function _clearSessionCompletionUnread(" in SESSIONS_JS
-    assert "function _hasSessionCompletionUnread(" in SESSIONS_JS
-
-    has_unread_idx = SESSIONS_JS.find("function _hasUnreadForSession(s)")
-    assert has_unread_idx != -1, "_hasUnreadForSession not found"
-    has_unread_block = SESSIONS_JS[has_unread_idx:SESSIONS_JS.find("async function newSession", has_unread_idx)]
-
-    marker_idx = has_unread_block.find("_hasSessionCompletionUnread(s.session_id)")
-    count_idx = has_unread_block.find("s.message_count > Number")
-    assert marker_idx != -1, "_hasUnreadForSession must check explicit completion unread marker"
-    assert count_idx != -1, "_hasUnreadForSession must keep the existing message_count fallback"
-    assert marker_idx < count_idx, (
-        "explicit completion unread marker must be checked before message_count delta, "
-        "because completed streams can have viewed_count == message_count"
-    )
+    out = _run_unread_behavior("""
+store[SESSION_VIEWED_COUNTS_KEY] = JSON.stringify({
+  X: {message_count: 3, transcript_generation: 0},
+});
+store[SESSION_COMPLETION_UNREAD_KEY] = JSON.stringify({
+  X: {message_count: 3, completed_at: 1000, unread_order: 1000},
+});
+const beforeClear = _hasUnreadForSession({
+  session_id: 'X', message_count: 3, transcript_generation: 0,
+});
+_clearSessionCompletionUnread('X');
+const afterClear = _hasUnreadForSession({
+  session_id: 'X', message_count: 3, transcript_generation: 0,
+});
+console.log(JSON.stringify({beforeClear, afterClear}));
+""")
+    assert out == {"beforeClear": True, "afterClear": False}
 
 
 def test_background_done_sets_marker_when_session_not_actively_viewed():
@@ -550,17 +615,54 @@ def test_completion_unread_clears_only_when_session_is_opened():
     assert "_setSessionViewedCount(sid, messageCount);" in ack_body
 
 
-def test_historical_sessions_are_not_marked_unread_on_list_render():
-    """The explicit unread marker must be event-driven, not initialized by _hasUnreadForSession."""
-    has_unread_idx = SESSIONS_JS.find("function _hasUnreadForSession(s)")
-    assert has_unread_idx != -1
-    has_unread_block = SESSIONS_JS[
-        has_unread_idx:SESSIONS_JS.find("function _isSessionActivelyViewedForList", has_unread_idx)
-    ]
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_historical_sessions_are_not_marked_unread_on_first_list_render():
+    """First observation establishes a read baseline instead of inventing unread."""
+    out = _run_unread_behavior("""
+const session = {
+  session_id: 'X', message_count: 5, transcript_generation: 3,
+  transcript_generation_baseline: 0,
+};
+const first = _hasUnreadForSession(session);
+// A first render that fabricates a completion-unread marker while still
+// returning false would surface as unread on the next render (in-memory
+// cache) or after a reload (persisted store), so inspect both before the
+// second call.
+const cachedMarker = Boolean(
+  _sessionCompletionUnread &&
+  Object.prototype.hasOwnProperty.call(_sessionCompletionUnread, 'X')
+);
+const persistedMarker = Object.prototype.hasOwnProperty.call(
+  JSON.parse(store[SESSION_COMPLETION_UNREAD_KEY] || '{}'), 'X'
+);
+const second = _hasUnreadForSession(session);
+const viewed = JSON.parse(store[SESSION_VIEWED_COUNTS_KEY]).X;
+console.log(JSON.stringify({first, second, cachedMarker, persistedMarker, viewed}));
+""")
+    assert out == {
+        "first": False,
+        "second": False,
+        "cachedMarker": False,
+        "persistedMarker": False,
+        "viewed": {"message_count": 5, "transcript_generation": 3},
+    }
 
-    assert "_markSessionCompletionUnread" not in has_unread_block, (
-        "rendering old historical sessions must not create completion-unread markers"
-    )
-    assert "_setSessionViewedCount(s.session_id, Number(s.message_count || 0));" in has_unread_block, (
-        "missing viewed-count baseline should still initialize as read for historical sessions"
-    )
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_new_transcript_generation_keeps_post_shrink_messages_unread():
+    """A coalesced shrink and growth acknowledges only the retained baseline."""
+    out = _run_unread_behavior("""
+store[SESSION_VIEWED_COUNTS_KEY] = JSON.stringify({
+  X: {message_count: 10, transcript_generation: 0},
+});
+const unread = _hasUnreadForSession({
+  session_id: 'X', message_count: 3, transcript_generation: 1,
+  transcript_generation_baseline: 2,
+});
+const viewed = JSON.parse(store[SESSION_VIEWED_COUNTS_KEY]).X;
+console.log(JSON.stringify({unread, viewed}));
+""")
+    assert out == {
+        "unread": True,
+        "viewed": {"message_count": 2, "transcript_generation": 1},
+    }

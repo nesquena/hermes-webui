@@ -190,6 +190,26 @@ def _release_bounded_local(delegation_id: str) -> None:
         _LEGACY_ASYNC_DELIVERY_IDS.pop(delegation_id, None)
 
 
+def restore_durable_process_completions(process_registry: Any) -> None:
+    """Rehydrate the Agent's durable completion ledger before a WebUI drain.
+
+    Current Hermes Agent builds restore durable async-delegation completions on
+    first consume (``ProcessRegistry.restore_completions()``) instead of on
+    import. WebUI reads ``completion_queue`` directly rather than through
+    ``drain_notifications()``, so it must cross that boundary itself or a
+    completion that survived a restart stays in the ledger undelivered. The
+    Agent method is once-per-process and replays in the launch profile scope;
+    older builds without it keep their import-time restore.
+    """
+    restore = getattr(process_registry, "restore_completions", None)
+    if not callable(restore):
+        return
+    try:
+        restore()
+    except Exception:
+        logger.warning("Failed to restore durable process completions", exc_info=True)
+
+
 def _arm_async_delegation_restore_sweep(completion_queue: Any, delay: float) -> bool:
     """Arm one process-wide durable restore sweep at the earliest deadline.
 

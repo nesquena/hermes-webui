@@ -99,7 +99,7 @@ def test_js_recycle_flag_lifecycle():
     """_scheduleMessageVirtualizedRender sets _msgNodeRecycleEnabled=true
     before the compensate call and clears it in finally."""
     fn_match = re.search(
-        r'function _scheduleMessageVirtualizedRender\(force\)\{(.+?)^(?=function )',
+        r'function _scheduleMessageVirtualizedRender\(force(?:, request)?\)\{(.+?)^(?=function )',
         JS, re.DOTALL | re.MULTILINE
     )
     assert fn_match, "_scheduleMessageVirtualizedRender not found"
@@ -1101,7 +1101,7 @@ class TestScrollbarDragRenderDuringDrag:
         """_scheduleMessageVirtualizedRender must have a _scrollbarDragActive
         branch that runs a full render with scroll compensation."""
         fn_match = re.search(
-            r'function _scheduleMessageVirtualizedRender\(force\)\{(.+?)^(?=function )',
+            r'function _scheduleMessageVirtualizedRender\(force(?:, request)?\)\{(.+?)^(?=function )',
             JS, re.DOTALL | re.MULTILINE
         )
         assert fn_match, "_scheduleMessageVirtualizedRender not found"
