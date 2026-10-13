@@ -77,13 +77,22 @@ def install_fake_start_session_turn(monkeypatch, *, status: int = 200):
 
     holder = {"calls": [], "event": threading.Event()}
 
-    def _fake(session_id, message, *, source="process_wakeup", process_id="", **extra):
+    def _fake(
+        session_id,
+        message,
+        *,
+        source="process_wakeup",
+        process_id="",
+        wakeup_meta=None,
+        **extra,
+    ):
         holder["calls"].append(
             {
                 "session_id": session_id,
                 "message": message,
                 "source": source,
                 "process_id": process_id,
+                "wakeup_meta": wakeup_meta,
             }
         )
         holder["event"].set()

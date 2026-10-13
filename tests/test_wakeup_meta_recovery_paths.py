@@ -172,3 +172,35 @@ def test_cancel_stream_recovery_webui_turn_unmarked():
     )
     assert "_source" not in recovered
     assert "_wakeup_meta" not in recovered
+
+
+def test_cancel_stream_recovery_stamps_turn_owned_async_delegation_outcome():
+    """#7361: the async-delegation outcome is owned by the pending turn, not
+    derivable from the body, and the cancel recovery stamps it from there."""
+    from api.process_event_utils import pending_wakeup_meta_record
+
+    stream_id = "stream-meta"
+    failed = {"type": "async_delegation", "task_id": "deleg_1", "status": "error"}
+    s = Session(
+        session_id="cancel-meta-3",
+        title="t",
+        messages=[{"role": "assistant", "content": "prior report"}],
+    )
+    s.pending_user_message = "[ASYNC DELEGATION COMPLETE — deleg_1]\nbody"
+    s.pending_user_source = "process_wakeup"
+    s.pending_attachments = []
+    s.pending_started_at = 1788025846.5
+    s.pending_wakeup_meta = pending_wakeup_meta_record(failed, s.pending_started_at)
+    s.active_stream_id = stream_id
+    s.save()
+    models.SESSIONS[s.session_id] = s
+    _wire_cancel_state(s.session_id, stream_id)
+
+    assert cancel_stream(stream_id) is True
+
+    recovered = next(
+        m for m in reversed(models.SESSIONS[s.session_id].messages)
+        if isinstance(m, dict) and m.get("role") == "user"
+    )
+    assert recovered["_source"] == "process_wakeup"
+    assert recovered["_wakeup_meta"] == failed

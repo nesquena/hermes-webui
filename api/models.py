@@ -47,7 +47,11 @@ from api.agent_sessions import (
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
 )
-from api.process_event_utils import stamp_message_source
+from api.process_event_utils import (
+    live_pending_wakeup_meta_record,
+    pending_turn_wakeup_meta,
+    stamp_message_source,
+)
 
 logger = logging.getLogger(__name__)
 # Size of the interactive sidebar recency window. Also bounds how many
@@ -1005,7 +1009,12 @@ def _append_recovered_pending_turn(session, *, timestamp: int | float | None = N
         '_recovered': True,
     }
     pending_source = getattr(session, 'pending_user_source', None)
-    stamp_message_source(recovered, pending_source, active_turn_token=_pending_active_turn_token(session))
+    stamp_message_source(
+        recovered,
+        pending_source,
+        active_turn_token=_pending_active_turn_token(session),
+        wakeup_meta=pending_turn_wakeup_meta(session),
+    )
     if session.pending_attachments:
         recovered['attachments'] = list(session.pending_attachments)
     session.messages.append(recovered)
@@ -1475,6 +1484,7 @@ class Session:
                  pending_attachments=None,
                  pending_started_at=None,
                  pending_user_source: str=None,
+                 pending_wakeup_meta=None,
                  context_messages=None,
                  compression_anchor_visible_idx=None,
                  compression_anchor_message_key=None,
@@ -1567,6 +1577,11 @@ class Session:
         self.pending_attachments = pending_attachments or []
         self.pending_started_at = pending_started_at
         self.pending_user_source = pending_user_source
+        # Turn-owned process-wakeup outcome (#7361): see
+        # api.process_event_utils.pending_turn_wakeup_meta.
+        self.pending_wakeup_meta = (
+            pending_wakeup_meta if isinstance(pending_wakeup_meta, dict) else None
+        )
         self._webui_pending_user_timestamp_identity = (
             _validated_webui_pending_user_timestamp_identity(
                 self, kwargs.get('_webui_pending_user_timestamp_identity')
@@ -1695,6 +1710,7 @@ class Session:
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
             'pending_user_message', 'pending_attachments', 'pending_started_at', 'pending_user_source',
+            'pending_wakeup_meta',
             '_webui_pending_user_timestamp_identity',
             'compression_anchor_visible_idx', 'compression_anchor_message_key',
             'compression_anchor_summary', 'pre_compression_snapshot',
@@ -1727,6 +1743,9 @@ class Session:
                 self.session_id,
             )
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        # Persist the wakeup outcome only while the pending turn that owns it
+        # is live, so a record outlived by its turn never lingers on disk.
+        meta['pending_wakeup_meta'] = live_pending_wakeup_meta_record(self)
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -4817,7 +4836,12 @@ def _apply_core_sync_or_error_marker(
                 '_recovered': True,
             }
             pending_source = getattr(session, 'pending_user_source', None)
-            stamp_message_source(recovered, pending_source, active_turn_token=_pending_active_turn_token(session))
+            stamp_message_source(
+                recovered,
+                pending_source,
+                active_turn_token=_pending_active_turn_token(session),
+                wakeup_meta=pending_turn_wakeup_meta(session),
+            )
             if session.pending_attachments:
                 recovered['attachments'] = list(session.pending_attachments)
             _append_recovered_turn_to_context(session, recovered)
@@ -5307,7 +5331,11 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
                 'content': pending_text,
                 'timestamp': pending_timestamp,
             }
-            stamp_message_source(pending_row, pending_source)
+            stamp_message_source(
+                pending_row,
+                pending_source,
+                wakeup_meta=pending_turn_wakeup_meta(locked),
+            )
             if str(pending_source or '').strip().lower() == 'fork':
                 pending_row['_fork_child_turn'] = locked.session_id
             if pending_attachments:

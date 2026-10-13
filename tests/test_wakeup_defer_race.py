@@ -501,7 +501,15 @@ def test_paused_process_wakeup_409_does_not_requeue(monkeypatch):
     sid = "sess-paused-409"
     holder = {"calls": [], "event": threading.Event(), "requeued": []}
 
-    def _paused_start_session_turn(session_id, message, *, source="process_wakeup", process_id="", **extra):
+    def _paused_start_session_turn(
+        session_id,
+        message,
+        *,
+        source="process_wakeup",
+        process_id="",
+        wakeup_meta=None,
+        **extra,
+    ):
         holder["calls"].append(
             {"session_id": session_id, "message": message, "source": source}
         )

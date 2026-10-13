@@ -2341,6 +2341,7 @@
   @media(max-width:700px){.process-wakeup-notice{margin-left:0;}}
   /* #6345: collapsed summary-card variant for parseable wakeups. */
   .process-wakeup-notice.process-wakeup-fail{border-left-color:var(--error,#f85149);}
+  .process-wakeup-notice.process-wakeup-partial{border-left-color:var(--warning,#d29922);}
   .process-wakeup-card{margin:0;}
   /* Wrap rather than clip when the row can't fit one line: keeps the label,
      chip, and timestamp inside the card at narrow widths (#6350 review finding 3). */
@@ -2351,10 +2352,19 @@
   .process-wakeup-summary .process-wakeup-label{margin-bottom:0;flex:0 0 auto;}
   .process-wakeup-summary .msg-time{margin-left:auto;flex:0 0 auto;}
   .process-wakeup-cmd{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:var(--font-mono);font-size:11.5px;color:var(--text);background:transparent;padding:0;}
+  /* Delegation headline (#7362): the goal / "N tasks" is prose, not a command, so it drops the mono face but keeps the slot's truncation. */
+  .process-wakeup-headline{font-family:inherit;font-size:12px;}
   .process-wakeup-chip{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:999px;font-size:10.5px;font-weight:600;border:1px solid var(--border);color:var(--muted);flex:0 0 auto;white-space:nowrap;}
   .process-wakeup-chip svg{width:11px;height:11px;flex:0 0 auto;}
   .process-wakeup-chip.ok{color:var(--success,#3fb950);border-color:currentColor;}
   .process-wakeup-chip.fail{color:var(--error,#f85149);border-color:currentColor;}
+  /* Async-delegation batches also settle partially (some tasks failed, or a
+     subagent hit its iteration cap) and with no provable outcome at all. */
+  .process-wakeup-chip.partial{color:var(--warning,#d29922);border-color:currentColor;}
+  /* Light themes: the raw warning token is ~2.4:1 on the card at 10.5px; mix toward --text so the partial chip
+     clears 4.5:1 on every light skin. Dark is applied via the .dark class only, so dark is untouched. */
+  :root:not(.dark) .process-wakeup-chip.partial{color:color-mix(in srgb,var(--warning,#d29922) 60%,var(--text));}
+  .process-wakeup-chip.neutral{color:var(--muted,#8b949e);border-color:var(--border,#30363d);}
   /* Watch chip must shrink so a long pattern truncates instead of pushing the
      row past the card edge on narrow viewports (#6350 review finding 3). */
   .process-wakeup-chip.watch{flex:0 1 auto;min-width:0;}
@@ -2366,6 +2376,14 @@
   .process-wakeup-detail pre.process-wakeup-text{max-height:320px;overflow:auto;}
   /* Guarantee a >=44px disclosure touch target under the mobile breakpoint (#6350 review finding 3). */
   @media(max-width:700px){.process-wakeup-card>summary{min-height:44px;}}
+  /* Async-delegation cards (#7362): below the mobile breakpoint the status chip stays on row 1 with the label and
+     the delegation headline + time move to row 2, so every status (and the long es/ru labels) gets the same two-row
+     layout instead of flipping on the chip width. Matches the terminal card, whose time is also on row 2 at
+     390px. Scoped to the delegation variant so the terminal card gated in #6350 is untouched. */
+  @media(max-width:700px){
+    .process-wakeup-notice.process-wakeup-delegation .process-wakeup-summary .process-wakeup-cmd{order:3;flex:1 1 60%;}
+    .process-wakeup-notice.process-wakeup-delegation .process-wakeup-summary .msg-time{order:4;}
+  }
   /* Keep original theme background — prevent prism-tomorrow from overriding --code-bg */
   .msg-body pre[class*="language-"],.msg-body pre code[class*="language-"]{background:var(--code-bg) !important;}
   /* Fix #1463: Prism YAML grammar collapses newlines inside token spans — force pre */

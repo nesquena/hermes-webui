@@ -52,6 +52,7 @@ from typing import Any, Optional
 
 from api.process_event_utils import (
     ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    async_delegation_outcome_meta,
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
@@ -1496,6 +1497,7 @@ def _start_async_delegation_wakeup_turn(
     evt: dict,
     claim,
     process_registry,
+    wakeup_meta: dict | None = None,
 ) -> None:
     """Start one autonomous delegation turn and ACK only after acceptance."""
 
@@ -1507,6 +1509,7 @@ def _start_async_delegation_wakeup_turn(
                 session_id,
                 wakeup_prompt,
                 source="process_wakeup",
+                wakeup_meta=wakeup_meta,
             )
             raw_status = (resp or {}).get("_status")
             if raw_status is None:
@@ -1688,6 +1691,17 @@ def _process_async_delegation_event(
             )
             return
 
+        # The outcome chip reads the event, never the body (#7361): the
+        # accepted turn owns and persists this, and every path that
+        # materializes the turn stamps it onto the wakeup row. Display-only,
+        # so a derivation failure leaves the row to the client parse rather
+        # than costing the delivery.
+        try:
+            wakeup_meta = async_delegation_outcome_meta(evt)
+        except Exception:
+            wakeup_meta = None
+            logger.debug("async delegation outcome derivation failed", exc_info=True)
+
         try:
             _start_async_delegation_wakeup_turn(
                 session_id,
@@ -1696,6 +1710,7 @@ def _process_async_delegation_event(
                 evt=evt,
                 claim=claim,
                 process_registry=process_registry,
+                wakeup_meta=wakeup_meta,
             )
         except Exception:
             # A post-format dispatch failure against a resolved target is transient

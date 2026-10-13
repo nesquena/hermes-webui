@@ -61,7 +61,9 @@ def completion_delivery_id(evt: Any) -> str:
 # watch_match). Those shapes are pinned by
 # tests/test_background_process_wakeup_format.py; the other event kinds
 # (watch_overflow/watch_disabled free-text, async_delegation agent-side
-# formatter) intentionally return None so the UI keeps its raw fallback.
+# formatter) intentionally return None so the UI keeps its raw fallback. The
+# async_delegation outcome comes from the event, not the body: see
+# ``async_delegation_outcome_meta`` below.
 _WAKEUP_COMPLETION_RE = re.compile(
     r"\A\[IMPORTANT: Background process (?P<sid>[^\n]*?) completed "
     r"\(exit_code=(?P<exit_code>[^)\n]*)\)\.\n"
@@ -118,20 +120,143 @@ def wakeup_display_meta(text: Any) -> dict | None:
     return None
 
 
-def attach_wakeup_display_meta(msg: Any, source: Any) -> None:
+# ── async-delegation outcome metadata (#7361) ──────────────────────────────
+# The async ``delegate_task`` envelope is rendered by the Agent-side formatter
+# and carries caller-/subagent-controlled goal, context and result text with no
+# delimiter around it, so a ``Role:/Status:/--- RESULT ---`` frame forged in
+# any of those is indistinguishable from the formatter's own by reading the
+# body. The authoritative outcome is the completion event itself: the delivery
+# path derives it here and hands it to ``start_session_turn``, which records it
+# on the accepted turn's pending state (``Session.pending_wakeup_meta``, bound
+# to that turn's ``pending_started_at``) and persists it with the rest of the
+# pending fields before the delivery is acknowledged. Every path that
+# materializes the pending turn — result settlement, eager checkpoint,
+# state.db adoption, cancel and restart recovery — passes it to the stamp
+# choke point below, which copies it onto the row as ``_wakeup_meta``.
+# Mirrors the Agent formatter's ``_DONE`` (tools/process_registry_notifications.py).
+_ASYNC_DELEGATION_DONE = ("completed", "success")
+
+
+def _async_delegation_truncated(entry: dict) -> bool:
+    return bool(entry.get("truncated") or entry.get("exit_reason") == "max_iterations")
+
+
+def async_delegation_outcome_meta(evt: Any) -> dict | None:
+    """Structured display outcome for one async-delegation completion event.
+
+    Classifies exactly what the Agent formatter prints for the same event:
+    a single task's ``Status:`` line (a truncated success is ``partial``), or a
+    batch unit's per-task ✓/✗/⚠ markers aggregated over the unit, or the
+    whole-batch ``--- ERROR ---`` crash. Returns None for shapes the client
+    card does not render (the mid-batch task-failure notice) or cannot be
+    classified, leaving the row to the client parse.
+    """
+    if not isinstance(evt, dict) or evt.get("type") != "async_delegation":
+        return None
+    if evt.get("task_failure_notice"):
+        return None
+    delegation_id = str(evt.get("delegation_id") or "unknown")
+    meta: dict[str, Any] = {"type": "async_delegation", "task_id": delegation_id}
+    results = evt.get("results")
+    if evt.get("is_batch") or isinstance(results, list):
+        results = results or []
+        if not all(isinstance(r, dict) for r in results):
+            return None
+        goals = evt.get("goals") or []
+        unit = len(results) or (len(goals) if isinstance(goals, (list, tuple)) else 0)
+        meta["task_count"] = unit or None
+        meta["ok_count"] = None
+        if evt.get("error") and not results:
+            meta["status"] = "error"
+            return meta
+        if not results:
+            meta["status"] = "complete"
+            return meta
+        ok = err = 0
+        for r in results:
+            if _async_delegation_truncated(r):
+                continue
+            if r.get("status", "?") in _ASYNC_DELEGATION_DONE:
+                ok += 1
+            else:
+                err += 1
+        total = len(results)
+        meta["status"] = "error" if err == total else ("completed" if ok == total else "partial")
+        meta["ok_count"] = ok
+        return meta
+    status = evt.get("status") or "completed"
+    if status in _ASYNC_DELEGATION_DONE:
+        meta["status"] = "partial" if _async_delegation_truncated(evt) else "completed"
+    else:
+        meta["status"] = "error"
+    return meta
+
+
+def pending_wakeup_meta_record(meta: Any, started_at: Any) -> dict | None:
+    """Bind an outcome *meta* to the pending turn that starts at *started_at*."""
+    if not isinstance(meta, dict) or not meta:
+        return None
+    if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
+        return None
+    return {"pending_started_at": started_at, "meta": dict(meta)}
+
+
+def pending_turn_wakeup_meta(session: Any) -> dict | None:
+    """Return a copy of the outcome owned by *session*'s current pending turn.
+
+    Only a live ``process_wakeup`` pending turn whose ``pending_started_at``
+    matches the record's binding owns it; a record left behind by an earlier
+    turn (pending fields are cleared at many settlement sites) never stamps a
+    later one.
+    """
+    record = getattr(session, "pending_wakeup_meta", None)
+    if not isinstance(record, dict):
+        return None
+    if getattr(session, "pending_user_source", None) != "process_wakeup":
+        return None
+    if not getattr(session, "pending_user_message", None):
+        return None
+    started_at = getattr(session, "pending_started_at", None)
+    bound = record.get("pending_started_at")
+    if (
+        isinstance(started_at, bool)
+        or not isinstance(started_at, (int, float))
+        or isinstance(bound, bool)
+        or not isinstance(bound, (int, float))
+        or float(bound) != float(started_at)
+    ):
+        return None
+    meta = record.get("meta")
+    return dict(meta) if isinstance(meta, dict) and meta else None
+
+
+def live_pending_wakeup_meta_record(session: Any) -> dict | None:
+    """The persisted form of ``pending_wakeup_meta``: dropped once its turn is gone."""
+    meta = pending_turn_wakeup_meta(session)
+    if meta is None:
+        return None
+    return pending_wakeup_meta_record(meta, getattr(session, "pending_started_at", None))
+
+
+def attach_wakeup_display_meta(msg: Any, source: Any, wakeup_meta: Any = None) -> None:
     """Stamp ``_wakeup_meta`` on a process-wakeup user message, best-effort.
 
     Companion to the ``_source`` stamp: display-only (``_wakeup_meta`` is not
     in ``_API_SAFE_MSG_KEYS``, so it never reaches a provider) and never
     raises — an unparseable body simply leaves the message unstamped and the
-    UI falls back to parsing/raw rendering.
+    UI falls back to parsing/raw rendering. *wakeup_meta* is the turn-owned
+    outcome (``pending_turn_wakeup_meta``); it wins over the body parse.
     """
     if source != "process_wakeup" or not isinstance(msg, dict):
         return
     if msg.get("_wakeup_meta"):
         return
     try:
-        meta = wakeup_display_meta(msg.get("content"))
+        meta = (
+            dict(wakeup_meta)
+            if isinstance(wakeup_meta, dict) and wakeup_meta
+            else wakeup_display_meta(msg.get("content"))
+        )
     except Exception:
         logger.debug("wakeup display-meta derivation failed", exc_info=True)
         return
@@ -157,6 +282,7 @@ def stamp_message_source(
     source: Any,
     *,
     active_turn_token: Any = None,
+    wakeup_meta: Any = None,
 ) -> None:
     """Stamp ``_source`` and any display metadata on a materialized user turn.
 
@@ -172,7 +298,7 @@ def stamp_message_source(
     if not isinstance(msg, dict) or not source or source == "webui":
         return
     msg["_source"] = source
-    attach_wakeup_display_meta(msg, source)
+    attach_wakeup_display_meta(msg, source, wakeup_meta)
 
 
 def _claim_bounded_local(delegation_id: str) -> bool:

@@ -107,6 +107,7 @@ from api.process_event_utils import (
     completion_delivery_id,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
+    pending_turn_wakeup_meta,
     restore_durable_process_completions,
     schedule_async_delegation_claim_retry,
     stamp_message_source,
@@ -2284,6 +2285,10 @@ def _active_turn_authority(session, stream_id, msg_text):
         'text': pending_text if pending_text is not None else msg_text,
         'timestamp': getattr(session, 'pending_started_at', None),
         'source': getattr(session, 'pending_user_source', None) or 'webui',
+        # Turn-owned process-wakeup outcome (#7361), captured with the rest of
+        # the pending turn so settlement stamps it even after the pending
+        # fields are cleared.
+        'wakeup_meta': pending_turn_wakeup_meta(session),
         'attachments': copy.deepcopy(getattr(session, 'pending_attachments', None) or []),
         'checkpoint': checkpoint,
         'current_turn_user_idx': None,
@@ -2367,13 +2372,37 @@ def _active_turn_has_checkpoint(messages, identity):
 
 
 def _mark_active_turn_checkpoint(message, identity):
+    """Adopt an existing row as this turn's user turn, provenance included.
+
+    The row being marked here is the one the Agent returned for the current
+    turn, so in ``deferred`` session-save mode (the default) it is the ONLY
+    copy that reaches the transcript — ``_materialize_active_turn_user`` never
+    runs for it. Stamping just ``_active_turn_token`` therefore silently
+    dropped the turn's ``_source`` (and the ``_wakeup_meta`` / fork-child
+    provenance that rides with it): a ``process_wakeup`` delivery persisted as
+    an unmarked user turn, and the frontend — which gates the collapsed
+    process-wakeup card on ``_source`` — rendered it as a raw user bubble.
+    Route through the same stamp choke point the materialize branch uses so
+    both ways of settling the boundary produce the same provenance. ``webui``
+    turns are unchanged: ``stamp_message_source`` leaves the default source
+    unwritten.
+    """
     if (
         isinstance(message, dict)
         and message.get('role') == 'user'
         and isinstance(identity, dict)
         and identity.get('token')
     ):
-        message['_active_turn_token'] = identity['token']
+        stamp_message_source(
+            message,
+            identity.get('source') or 'webui',
+            active_turn_token=identity['token'],
+            wakeup_meta=identity.get('wakeup_meta'),
+        )
+        if str(identity.get('source') or '').strip().lower() == 'fork':
+            child_session_id = identity.get('session_id')
+            if child_session_id:
+                message['_fork_child_turn'] = child_session_id
     return message
 
 
@@ -2565,6 +2594,7 @@ def _materialize_active_turn_user(identity, msg_text, source):
             message,
             identity.get('source') or source or 'webui',
             active_turn_token=identity.get('token'),
+            wakeup_meta=identity.get('wakeup_meta'),
         )
         if str(identity.get('source') or source or '').strip().lower() == 'fork':
             child_session_id = identity.get('session_id')
@@ -2607,6 +2637,7 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             existing_checkpoint,
             _settle_source,
             active_turn_token=identity.get('token'),
+            wakeup_meta=identity.get('wakeup_meta'),
         )
         if str(_settle_source).strip().lower() == 'fork':
             child_session_id = identity.get('session_id')
@@ -9700,7 +9731,15 @@ def _merge_display_messages_after_agent_result(
             display_msg['content'] = (
                 active_turn_display_text if is_active_image_row else msg_text
             )
-            stamp_message_source(display_msg, source)
+            stamp_message_source(
+                display_msg,
+                source,
+                wakeup_meta=(
+                    _active_turn_identity.get('wakeup_meta')
+                    if isinstance(_active_turn_identity, dict)
+                    else None
+                ),
+            )
         merged.append(copy.deepcopy(display_msg))
         if key is not None:
             seen.add(key)
@@ -10505,7 +10544,11 @@ def _materialize_pending_user_turn_before_error(
     }
     if str(pending_source or '').strip().lower() == 'fork':
         recovered['_fork_child_turn'] = session.session_id
-    stamp_message_source(recovered, pending_source)
+    stamp_message_source(
+        recovered,
+        pending_source,
+        wakeup_meta=pending_turn_wakeup_meta(session),
+    )
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -11072,7 +11115,8 @@ def _preserve_legacy_agent_row_identity(callable_obj, identity):
                     and start <= index < start + len(rows)
                     and _active_turn_user_text_matches(messages[index], owner.get('text'))):
                 stamp_message_source(messages[index], owner.get('source') or 'webui',
-                                     active_turn_token=owner['token'])
+                                     active_turn_token=owner['token'],
+                                     wakeup_meta=owner.get('wakeup_meta'))
                 row_timestamp, row_clock_valid = _message_exact_timestamp_details(messages[index])
                 owner_timestamp, owner_clock_valid = _message_exact_timestamp_details(
                     {'timestamp': owner.get('timestamp')})
@@ -16790,6 +16834,7 @@ def cancel_stream(stream_id: str) -> bool:
                                 _user_turn,
                                 _pending_source,
                                 active_turn_token=_cancel_turn_token,
+                                wakeup_meta=pending_turn_wakeup_meta(_cs),
                             )
                             if _pending_atts:
                                 _user_turn['attachments'] = _pending_atts
@@ -16808,6 +16853,7 @@ def cancel_stream(stream_id: str) -> bool:
                                     _cancel_owner,
                                     _pending_source,
                                     active_turn_token=_cancel_turn_token,
+                                    wakeup_meta=pending_turn_wakeup_meta(_cs),
                                 )
 
                             if _partial_msg is None:
@@ -16870,6 +16916,7 @@ def cancel_stream(stream_id: str) -> bool:
                                                 _tail,
                                                 _pending_source,
                                                 active_turn_token=_cancel_turn_token,
+                                                wakeup_meta=pending_turn_wakeup_meta(_cs),
                                             )
                                             _tail['_recovered'] = True
                                         elif not _strict_matches:

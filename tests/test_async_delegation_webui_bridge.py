@@ -201,6 +201,7 @@ def test_background_wakeup_claims_and_completes_without_registry_growth(monkeypa
         evt,
         claim,
         process_registry,
+        wakeup_meta=None,
     ):
         started.append((session_id, prompt, delegation_id))
         bp._record_async_delegation_accepted(
@@ -1259,7 +1260,9 @@ def test_origin_ui_session_id_overrides_index_and_still_acks(monkeypatch):
     cfg.PROCESS_SESSION_INDEX["webui-session-1"] = "session-B"
     started: list[tuple[str, str, str]] = []
 
-    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry):
+    def _accept(
+        session_id, prompt, *, delegation_id, evt, claim, process_registry, wakeup_meta=None
+    ):
         started.append((session_id, prompt, delegation_id))
         bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
 
@@ -1289,7 +1292,9 @@ def test_origin_only_completion_without_session_key_routes_and_acks(monkeypatch)
     delivery = _install_fake_durable_delivery_api(monkeypatch)
     started: list[str] = []
 
-    def _accept(session_id, prompt, *, delegation_id, evt, claim, process_registry):
+    def _accept(
+        session_id, prompt, *, delegation_id, evt, claim, process_registry, wakeup_meta=None
+    ):
         started.append(session_id)
         bp._record_async_delegation_accepted(evt, session_id=session_id, claim=claim)
 
