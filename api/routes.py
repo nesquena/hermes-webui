@@ -17583,7 +17583,7 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/session/branch":
         # Fork a conversation from any message point (#465).
-        # Accepts: {session_id, keep_count?, title?}
+        # Accepts: {session_id, keep_count?, title?, draft_text?}
         #   keep_count: number of messages to copy (0=empty, undefined=full history)
         #   title: custom title (defaults to "<original title> (fork)")
         try:
@@ -17595,6 +17595,11 @@ def handle_post(handler, parsed) -> bool:
         # (Opus pre-release follow-up.)
         if not isinstance(body["session_id"], str):
             return bad(handler, "session_id must be a string")
+        draft_text = body.get("draft_text")
+        if draft_text is not None and not isinstance(draft_text, str):
+            return bad(handler, "draft_text must be a string")
+        if isinstance(draft_text, str) and len(draft_text) > 50_000:
+            return bad(handler, "draft_text must be at most 50000 characters")
         source = _load_branch_source_or_refuse(handler, body["session_id"])
         if source is None:
             return True
@@ -17723,6 +17728,7 @@ def handle_post(handler, parsed) -> bool:
             # Context engine — inherit state so branch's context engine starts correctly
             context_engine=getattr(source, "context_engine", None),
             context_engine_state=copy.deepcopy(getattr(source, "context_engine_state", None) or {}),
+            composer_draft={"text": draft_text, "files": []} if draft_text is not None else None,
             parent_session_id=source.session_id,
             session_source="fork",
         )

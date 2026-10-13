@@ -11,7 +11,7 @@ ROUTES = ROOT / "api/routes.py"
 
 def _function_source(source, signature):
     start = source.index(signature)
-    brace = source.index("{", start)
+    brace = source.index("{", start + len(signature))
     depth = 0
     quote = None
     escaped = False
@@ -46,7 +46,13 @@ def _function_source(source, signature):
 
 def _run_node(scenario):
     source = UI.read_text(encoding="utf-8")
+    sessions_source = (ROOT / "static/sessions.js").read_text(encoding="utf-8")
     script = f"""
+{_function_source(sessions_source, "function _composerDraftHasPayload")}
+{_function_source(sessions_source, "function _restoreComposerDraft(draft, targetSid, opts={})")}
+let _loadingSessionId = null;
+const _isComposerDraftRestoreSuppressed = () => false;
+const _clearComposerDraftRestoreSuppression = () => {{}};
 {_function_source(source, "function msgContent")}
 {_function_source(source, "function _isRecoveryControlMessageText")}
 {_function_source(source, "function _isRecoveryControlMessage(m)")}
@@ -60,6 +66,7 @@ let _submitEditInFlight = false;
 {_function_source(source, "async function submitEdit")}
 const scenario = {json.dumps(scenario)};
 const calls = [];
+const childDrafts = {{}};
 let confirmResult = scenario.confirm !== false;
 let activeSid = 'source';
 const S = {{session: {{session_id: 'source', profile:'default', model:'m', model_provider:'p', workspace:'/w', read_only:!!scenario.readOnly}}, messages: scenario.messages.map(m => ({{content:"visible", ...m}})), busy:false, activeProfile:'default'}};
@@ -69,18 +76,18 @@ const _isBranchableReadOnlySession = (session) => !!session.read_only && !!scena
 const _reArmRecoveryPick = (...args) => calls.push(['rearm', ...args]);
 const _ensureAllMessagesLoaded = async () => {{ if(scenario.resetOldest) _oldestIdx = 0; }};
 const showConfirmDialog = async () => {{ calls.push(['confirm']); return confirmResult; }};
-const api = async (url, options) => {{ calls.push([url, JSON.parse(options.body)]); if(url.includes('/branch')) {{ if(scenario.branchFailure) throw new Error('branch unavailable'); if(scenario.switchAfterBranch) S.session={{session_id:'other'}}; return {{session_id:'child'}}; }} return {{}}; }};
-const loadSession = async (sid) => {{ calls.push(['load', sid]); if(scenario.loadFailure) {{ await Promise.resolve(); if(scenario.switchDuringLoad) {{ S.session={{session_id:'other'}}; composer.value='newer draft'; }} if(scenario.loadFailure==='throw') throw new Error('load unavailable'); setStatus('load failed'); return; }} S.session = scenario.contractMismatch ? {{session_id:sid, profile:'other', model:'m', model_provider:'p', workspace:'/w'}} : {{session_id:sid, profile:'default', model:'m', model_provider:'p', workspace:'/w'}}; if(scenario.modelDrift) S.session.model='normalized-model'; activeSid=sid; }};
+const api = async (url, options) => {{ calls.push([url, JSON.parse(options.body)]); if(url.includes('/branch')) {{ childDrafts.child={{text:JSON.parse(options.body).draft_text||'',files:[]}}; if(scenario.branchFailure) throw new Error('branch unavailable'); if(scenario.switchAfterBranch) S.session={{session_id:'other'}}; return {{session_id:'child'}}; }} return {{}}; }};
+const loadSession = async (sid) => {{ calls.push(['load', sid]); if(scenario.loadFailure) {{ await Promise.resolve(); if(scenario.switchDuringLoad) {{ S.session={{session_id:'other'}}; composer.value='newer draft'; }} if(scenario.loadFailure==='throw') throw new Error('load unavailable'); setStatus('load failed'); return; }} S.session = scenario.contractMismatch ? {{session_id:sid, profile:'other', model:'m', model_provider:'p', workspace:'/w'}} : {{session_id:sid, profile:'default', model:'m', model_provider:'p', workspace:'/w'}}; if(scenario.modelDrift) S.session.model='normalized-model'; activeSid=sid; if(scenario.recovered) _restoreComposerDraft(childDrafts[sid],sid); }};
 const renderSessionList = async () => calls.push(['render-list']);
 const renderMessages = () => calls.push(['render']);
-const send = async () => calls.push(['send', S.session.session_id]);
+const send = async () => {{ if(composer.value.trim()) calls.push(['send', S.session.session_id]); }};
 const showToast = (...args) => calls.push(['toast', ...args]);
 const setStatus = (...args) => calls.push(['status', ...args]);
 const autoResize = () => calls.push(['resize']);
 const t = (key, value) => key + (value === undefined ? '' : ':' + value);
 const composer = {{value:''}};
 const $ = () => composer;
-(async () => {{ if(scenario.concurrent) await Promise.all([submitEdit(scenario.index, 'edited'), submitEdit(scenario.index, 'edited')]); else await submitEdit(scenario.index, 'edited'); console.log(JSON.stringify({{calls, session:S.session.session_id, draft:composer.value}})); }})();
+(async () => {{ if(scenario.concurrent) await Promise.all([submitEdit(scenario.index, 'edited'), submitEdit(scenario.index, 'edited')]); else await submitEdit(scenario.index, 'edited'); if(scenario.manualSend) await send(); if(scenario.recoverChild) {{ scenario.loadFailure=null; scenario.recovered=true; await loadSession('child'); await send(); }} console.log(JSON.stringify({{calls, session:S.session.session_id, draft:composer.value, childDrafts}})); }})();
 """
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -104,7 +111,7 @@ def test_older_edit_forks_without_truncating_and_sends_once():
         "toast",
         "send",
     ]
-    assert result["calls"][1][1] == {"session_id": "source", "keep_count": 0}
+    assert result["calls"][1][1] == {"session_id": "source", "keep_count": 0, "draft_text": "edited"}
     assert result["session"] == "child"
 
 
@@ -224,12 +231,13 @@ def test_concurrent_older_edit_creates_one_child_and_sends_once():
     assert [call for call in result["calls"] if call[0] == "send"] == [["send", "child"]]
 
 
-def test_failed_child_load_preserves_edit_on_source_without_sending():
+def test_failed_child_load_keeps_edit_owned_by_child_without_parent_submission():
     for failure in ("return", "throw"):
-        result = _run_node({"index": 0, "loadFailure": failure, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]})
+        result = _run_node({"index": 0, "loadFailure": failure, "manualSend": True, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]})
         assert result["session"] == "source"
-        assert result["draft"] == "edited"
-        assert [call[0] for call in result["calls"]].count("resize") == 1
+        assert result["draft"] == ""
+        assert result["childDrafts"]["child"]["text"] == "edited"
+        assert "resize" not in [call[0] for call in result["calls"]]
         assert "send" not in [call[0] for call in result["calls"]]
 
 
@@ -240,3 +248,11 @@ def test_failed_child_load_preserves_newer_sessions_composer():
         assert result["draft"] == "newer draft"
         assert "resize" not in [call[0] for call in result["calls"]]
         assert "send" not in [call[0] for call in result["calls"]]
+
+
+def test_failed_child_load_can_recover_edited_draft_and_send_to_child():
+    for failure in ("return", "throw"):
+        result = _run_node({"index": 0, "loadFailure": failure, "manualSend": True, "recoverChild": True, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]})
+        assert result["session"] == "child"
+        assert result["draft"] == "edited"
+        assert [call for call in result["calls"] if call[0] == "send"] == [["send", "child"]]
