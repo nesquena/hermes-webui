@@ -5,6 +5,10 @@ from __future__ import annotations
 import json
 import sys
 
+from api.network_isolation import install_test_network_block
+
+install_test_network_block()
+
 from api.provider_status import _fetch_once
 
 

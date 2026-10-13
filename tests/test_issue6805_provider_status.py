@@ -3,6 +3,7 @@
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import json
+import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import subprocess
@@ -489,6 +490,7 @@ def test_server_entrypoint_uses_standalone_provider_status_worker(tmp_path):
         result = subprocess.run(
             [sys.executable, str(entrypoint), f"http://127.0.0.1:{server.server_port}/status"],
             cwd=tmp_path,
+            env={**os.environ, "HERMES_WEBUI_TEST_NETWORK_BLOCK": "1"},
             capture_output=True,
             text=True,
             timeout=15,
@@ -504,6 +506,27 @@ def test_server_entrypoint_uses_standalone_provider_status_worker(tmp_path):
     assert rows["openai"]["status"] == "operational"
     assert ttl == status.DEFAULT_SUCCESS_TTL
     assert freshness_deadline is not None
+
+
+def test_provider_status_worker_blocks_external_network_in_test_mode(tmp_path):
+    repo_root = Path(status.__file__).resolve().parent.parent
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.path.insert(0, sys.argv[1]); "
+            "import api.provider_status_worker, socket; "
+            "socket.create_connection(('provider-status-external', 443))",
+            str(repo_root),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "HERMES_WEBUI_TEST_NETWORK_BLOCK": "1"},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode != 0
+    assert "hermes test network isolation" in result.stderr
 
 
 def test_slow_drip_body_hits_wall_clock_deadline_and_releases_waiters(monkeypatch):
