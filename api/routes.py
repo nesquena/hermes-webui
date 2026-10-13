@@ -11009,7 +11009,8 @@ def _foreign_display_coordinate_state_db_revision(profile):
             if monitor is None or monitor["identity"] != identity:
                 if monitor is not None:
                     monitor["connection"].close()
-                connection = open_state_db_readonly(db_path)
+                # The cache lock serializes this shared connection across request threads.
+                connection = open_state_db_readonly(db_path, check_same_thread=False)
                 monitor = {"identity": identity, "connection": connection}
                 _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS[key] = monitor
             _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS.move_to_end(key)
