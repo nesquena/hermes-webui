@@ -148,7 +148,7 @@ const S={session:{workspace:''},toolCalls:[
   {name:'write_file',args:{path:'reports/output.md'}}
 ],messages:[]};
 process.stdout.write(JSON.stringify(collectSessionArtifacts().map(item=>item.path)));'''
-    assert _node_json(script) == ["reports/output.md"]
+    assert _node_json(script) == ["README", "reports/output.md"]
 
 
 def test_explicit_safety_rejects_unsafe_path_forms_and_keeps_long_names():
@@ -418,3 +418,25 @@ process.stdout.write(JSON.stringify(collectSessionArtifacts()));
     row = _node_json(script)[0]
     assert row["path"] == " report.md"
     assert row["classification"]["openPath"] == " report.md"
+
+
+def test_explicit_extensionless_tool_artifact_is_collected_and_opens():
+    script = _common_js(
+        "_sanitizeArtifactPath", "_classifyArtifactPath", "_classifyArtifactCandidate",
+        "_artifactCandidatesFromText", "_artifactCandidatesFromToolCall", "collectSessionArtifacts",
+        "_workspacePathExists", "openArtifactPath",
+    ) + r'''
+const S={session:{workspace:'/workspace',session_id:'s'},messages:[],toolCalls:[{name:'write_file',args:{path:'README'}}]};
+const calls=[];const switchWorkspacePanelTab=()=>{};const t=k=>k;const setStatus=s=>calls.push({status:s});
+const api=async url=>{calls.push({list:url});return {entries:[{name:'README',path:'README'}]};};
+const openFile=async path=>{calls.push({open:path});return true;};
+const artifacts=collectSessionArtifacts();
+const inferred=_artifactCandidatesFromText('```diff\n+++ README\n+text\n```');
+(async()=>{if(artifacts[0]) await openArtifactPath(artifacts[0].path);process.stdout.write(JSON.stringify({artifacts,calls,inferred}));})();
+'''
+    result = _node_json(script)
+    assert [row["path"] for row in result["artifacts"]] == ["README"]
+    assert result["calls"] == [
+        {"list": "/api/list?session_id=s&path=."}, {"open": "README"},
+    ]
+    assert result["inferred"] == []
