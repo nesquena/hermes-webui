@@ -476,3 +476,23 @@ process.stdout.write(JSON.stringify(_workspaceRouteForPath(classified.openPath,'
         }
     finally:
         exact.unlink()
+
+
+def test_long_explicit_tool_artifact_is_collected_and_rendered_while_mined_path_is_filtered():
+    path = "reports/" + "a" * 235 + ".md"
+    script = _common_js(
+        "_sanitizeArtifactPath", "_classifyArtifactPath", "_classifyArtifactCandidate",
+        "_artifactCandidatesFromText", "_artifactCandidatesFromToolCall", "collectSessionArtifacts",
+        "renderSessionArtifacts",
+    ) + r'''
+const path=JSON.parse(process.argv[1]);
+const S={session:{workspace:'/workspace',session_id:'s'},messages:[],toolCalls:[{name:'write_file',args:{path}}]};
+const root={innerHTML:''};const $=id=>id==='workspaceArtifacts'?root:null;const t=k=>k;const esc=s=>String(s);
+const artifacts=collectSessionArtifacts();renderSessionArtifacts();
+const inferred=_artifactCandidatesFromText('```diff\n+++ '+path+'\n+text\n```');
+process.stdout.write(JSON.stringify({artifacts,html:root.innerHTML,inferred}));
+'''
+    result = _node_json(script, path)
+    assert [row["path"] for row in result["artifacts"]] == [path]
+    assert f'data-artifact-path="{path}"' in result["html"]
+    assert result["inferred"] == []
