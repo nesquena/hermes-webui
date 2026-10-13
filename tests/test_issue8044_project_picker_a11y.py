@@ -22,7 +22,8 @@ import pytest
 REPO = Path(__file__).resolve().parents[1]
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
-I18N_JS = REPO / "static" / "i18n.js"
+I18N_CORE = REPO / "static" / "i18n-core.js"
+LOCALE_DIR = REPO / "static" / "locales"
 
 LOCALE_CODES = [
     "en", "it", "ja", "ru", "es", "de", "zh", "zh-Hant", "pt", "ko", "fr", "cs", "tr", "pl", "vi",
@@ -417,23 +418,32 @@ def test_the_two_labels_go_through_t():
 def picker_labels():
     script = r"""
 const fs = require('fs');
+const path = require('path');
 const vm = require('vm');
 const context = {
   localStorage: {getItem(){ return null; }, setItem(){}},
-  document: {documentElement: {}, addEventListener(){}, querySelectorAll(){ return []; }},
+  document: {documentElement: {}, baseURI: 'http://localhost/', addEventListener(){}, querySelectorAll(){ return []; }},
   navigator: {language: 'en', languages: ['en']},
+  location: {href: 'http://localhost/'},
+  URL,
   console,
 };
 context.window = context;
 vm.createContext(context);
-vm.runInContext(fs.readFileSync(process.argv[1], 'utf8') + '\n;this.__locales = LOCALES;', context);
+vm.runInContext(fs.readFileSync(process.argv[1], 'utf8') + '\n;this.__localeCodes = Object.keys(LOCALE_REGISTRY); this.__setLocale = setLocale; this.__t = t;', context);
+for (const code of context.__localeCodes) {
+  if (code === 'en') continue;
+  vm.runInContext(fs.readFileSync(path.join(process.argv[2], code + '.js'), 'utf8'), context);
+}
 const out = {};
-for (const [code, table] of Object.entries(context.__locales))
-  out[code] = [table.project_picker_none, table.project_picker_new];
+for (const code of context.__localeCodes) {
+  context.__setLocale(code);
+  out[code] = [context.__t('project_picker_none'), context.__t('project_picker_new')];
+}
 console.log(JSON.stringify(out));
 """
     result = subprocess.run(
-        ["node", "-e", script, str(I18N_JS)], check=True, capture_output=True, text=True
+        ["node", "-e", script, str(I18N_CORE), str(LOCALE_DIR)], check=True, capture_output=True, text=True
     )
     return json.loads(result.stdout)
 

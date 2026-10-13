@@ -16,6 +16,7 @@ from types import SimpleNamespace
 REPO = Path(__file__).resolve().parents[1]
 PANELS_JS = (REPO / "static" / "panels.js").read_text(encoding="utf-8")
 I18N_SOURCE = locale_source_text()
+NODE = shutil.which("node")
 
 
 class _JSONHandler:
@@ -221,10 +222,10 @@ def test_cron_form_has_badge_toggle_and_i18n_keys():
     assert "badge_notifications" in detail_body
     assert "const badgeNotifications" in save_body
     assert "badge_notifications: badgeNotifications" in save_body
-    assert "cron_badge_notifications_label" in I18N_JS
-    assert "cron_badge_notifications_hint" in I18N_JS
-    assert "cron_badge_notifications_enabled" in I18N_JS
-    assert "cron_badge_notifications_disabled" in I18N_JS
+    assert "cron_badge_notifications_label" in I18N_SOURCE
+    assert "cron_badge_notifications_hint" in I18N_SOURCE
+    assert "cron_badge_notifications_enabled" in I18N_SOURCE
+    assert "cron_badge_notifications_disabled" in I18N_SOURCE
 
 
 # ---------------------------------------------------------------------------
