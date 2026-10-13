@@ -498,10 +498,10 @@ class BottomRightTooltipVariantTests(unittest.TestCase):
         previously overflowed (with `--bottom`, half clips past the panel).
         Must now use `--bottom-right`, NOT `--bottom`."""
         match = re.search(
-            r'<button[^>]*\bid="btnNewChat"[^>]*>',
+            r'<a[^>]*\bid="btnNewChat"[^>]*>',
             self.html,
         )
-        self.assertIsNotNone(match, "Could not find #btnNewChat button")
+        self.assertIsNotNone(match, "Could not find #btnNewChat link")
         attrs = match.group(0)
         self.assertIn(
             "has-tooltip--bottom-right",
