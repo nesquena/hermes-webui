@@ -12058,11 +12058,16 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
         cacheable = db_revision is None or stable_revision == db_revision
         if not state_db_messages and _numeric_count(state_summary.get("message_count")):
             return None
-        summary = _message_summary(_display_coordinate_messages(
-            session,
-            state_db_messages,
-            metadata_readonly=True,
-        ))
+        display_messages = (
+            _merged_session_messages_for_display(session, state_db_messages)
+            if is_messaging_session
+            else _display_coordinate_messages(
+                session,
+                state_db_messages,
+                metadata_readonly=True,
+            )
+        )
+        summary = _message_summary(display_messages)
         if cacheable:
             with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
                 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE[cache_key] = {

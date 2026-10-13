@@ -505,6 +505,49 @@ def test_read_only_messaging_counts_match_transcript(monkeypatch, tmp_path, snap
     assert metadata["message_count"] == paged["message_count"] == full["message_count"] == len(expected)
 
 
+def test_messaging_metadata_keeps_parent_assistant_turns_from_stitched_state_db(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    routes._clear_foreign_display_coordinate_summary_cache()
+    sid = "messaging_compression_child_7050"
+    parent_turn = [
+        {"role": "user", "content": "parent question", "timestamp": 900.0},
+        {"role": "assistant", "content": "parent answer", "timestamp": 901.0},
+    ]
+    child_turn = [
+        {"role": "user", "content": "child question", "timestamp": 1000.0},
+        {"role": "assistant", "content": "child answer", "timestamp": 1001.0},
+    ]
+    session = _install_test_session(monkeypatch, tmp_path, sid, child_turn)
+    session.is_cli_session = True
+    session.read_only = True
+    session.session_source = "messaging"
+    session.source_tag = "slack"
+    session.raw_source = "slack"
+    session.save(touch_updated_at=False)
+    state_db_messages = parent_turn + child_turn
+    _make_state_db(tmp_path / "state.db", sid, state_db_messages)
+    monkeypatch.setattr(
+        routes,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {"source_tag": "slack", "session_source": "messaging", "is_cli_session": True},
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_cli_session_messages",
+        lambda _sid, profile=None, **_kwargs: state_db_messages,
+    )
+
+    metadata = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    models.SESSIONS.clear()
+    full = _session_payload(routes, f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+
+    assert full["messages"] == state_db_messages
+    assert metadata["message_count"] == full["message_count"] == 4
+    assert metadata["last_message_at"] == full["last_message_at"] == 1001.0
+
+
 def test_foreign_summary_cache_hit_avoids_lineage_parsing(monkeypatch, tmp_path):
     import api.models as models
     import api.routes as routes
