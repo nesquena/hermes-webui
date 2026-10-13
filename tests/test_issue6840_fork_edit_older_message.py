@@ -85,7 +85,7 @@ const _ensureAllMessagesLoaded = async () => {{ ensureCount++; if(scenario.reset
 const showConfirmDialog = async () => {{ calls.push(['confirm']); if(scenario.sendDuring==='confirm') startParentSend(); return confirmResult; }};
 const api = async (url, options) => {{ calls.push([url, JSON.parse(options.body)]); if(url.includes('/branch')) {{ childDrafts.child={{text:JSON.parse(options.body).draft_text||'',files:[]}}; if(scenario.branchFailure) throw new Error('branch unavailable'); if(scenario.switchAfterBranch) S.session={{session_id:'other'}}; if(scenario.sendDuring==='branch') startParentSend(); return {{session_id:'child'}}; }} if(scenario.sendDuring==='truncate') startParentSend(); return {{}}; }};
 const loadSession = async (sid) => {{ calls.push(['load', sid]); if(scenario.loadFailure) {{ await Promise.resolve(); if(scenario.switchDuringLoad) {{ S.session={{session_id:'other'}}; composer.value='newer draft'; }} if(scenario.loadFailure==='throw') throw new Error('load unavailable'); setStatus('load failed'); return; }} S.session = scenario.contractMismatch ? {{session_id:sid, profile:'other', model:'m', model_provider:'p', workspace:'/w'}} : {{session_id:sid, profile:'default', model:'m', model_provider:'p', workspace:'/w'}}; if(scenario.sendDuring==='load') startParentSend(); if(scenario.modelDrift) S.session.model='normalized-model'; activeSid=sid; if(scenario.recovered) _restoreComposerDraft(childDrafts[sid],sid); }};
-const renderSessionList = async () => {{ calls.push(['render-list']); if(scenario.typeDuringListRefresh) {{ await new Promise(resolve=>setTimeout(resolve,0)); composer.value='unconfirmed'; }} }};
+const renderSessionList = async () => {{ calls.push(['render-list']); if(scenario.typeDuringListRefresh||scenario.switchDuringListRefresh) {{ await new Promise(resolve=>setTimeout(resolve,0)); composer.value='unconfirmed'; if(scenario.switchDuringListRefresh) S.session={{session_id:'other'}}; }} }};
 const renderMessages = () => calls.push(['render']);
 const send = async (options={{}}) => {{ const preserve=!!options.preserveComposerDraft; const text=preserve?String(options.textOverride||'').trim():composer.value.trim(); const files=preserve?[]:S.pendingFiles.map(file=>file.name); const selections=preserve?[]:_pendingSelections.map(selection=>selection.name); if(text) {{ calls.push(['send', S.session.session_id, text]); submissions.push({{text,files,selections}}); }} if(preserve) {{ if(composer.value===text) composer.value=''; }} else {{ composer.value=''; S.pendingFiles=[]; _pendingSelections=[]; }} }};
 const showToast = (...args) => calls.push(['toast', ...args]);
@@ -194,6 +194,14 @@ def test_new_draft_during_child_history_load_does_not_replace_edit_send():
     assert result["pendingFiles"] == ["draft.txt"]
     assert result["pendingSelections"] == ["Excerpt"]
     assert result["savedDraft"] == {"sid": "child", "text": "newer draft", "files": ["draft.txt"]}
+
+
+def test_switch_during_child_list_refresh_does_not_save_other_draft_to_fork():
+    result = _run_node(
+        {"index": 0, "switchDuringListRefresh": True, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]}
+    )
+    assert result["session"] == "other"
+    assert result["savedDraft"] is None
 
 
 def test_branch_failure_reports_error_without_sending():

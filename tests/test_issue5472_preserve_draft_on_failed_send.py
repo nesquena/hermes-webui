@@ -71,7 +71,7 @@ def test_send_captures_immutable_snapshot_before_rewrites_and_upload():
     # busy branch / slash-command rewrites and BEFORE uploadPendingFiles().
     snap_idx = MESSAGES_JS.find("const _failedSendDraftText=text;")
     files_idx = MESSAGES_JS.find(
-        "const _failedSendFilesSnapshot=Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];"
+        "const _failedSendFilesSnapshot=[...sendFiles()];"
     )
     moa_idx = MESSAGES_JS.find("text=_moaArgs;")
     upload_idx = MESSAGES_JS.find("uploaded=await uploadPendingFiles(")
@@ -86,10 +86,16 @@ def test_error_branch_restores_original_snapshot_not_mutated_payload():
     start = MESSAGES_JS.find("S.messages.push({role:'assistant',content:`**Error:** ${errMsg}`});")
     assert start != -1, "the /api/chat/start error branch must still push an Error turn"
     window = MESSAGES_JS[start:start + 1100]
+    assert "_restoreFailedDraft();" in window, (
+        "the send-error path must restore the ORIGINAL captured snapshot (not `text`)"
+    )
+
+
+def test_send_failure_restores_draft_to_the_captured_session():
     assert (
-        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
-        in window
-    ), "the send-error path must restore the ORIGINAL captured snapshot (not `text`)"
+        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText,_failedSendFilesSnapshot,activeSid,_composerDraftClearPromise);"
+        in MESSAGES_JS
+    ), "a session switch during the failed request must not move its draft to the newly selected session"
 
 
 def test_send_still_clears_composer_on_the_happy_path():
@@ -108,11 +114,11 @@ def test_send_still_clears_composer_on_the_happy_path():
     # BEFORE `uploadPendingFiles()` / the forced-skill-directive await — so a
     # re-entrant/interrupt-mode send during the async window can't re-read the
     # still-populated DOM and double-submit. Verify that ordering here.
-    capture = "const _submittedDraftTextForClear=$('msg').value||'';"
+    capture = "const _submittedDraftTextForClear=preserveComposerDraft?text:($('msg').value||'');"
     assert capture in MESSAGES_JS, "send() must still capture the send-time draft text"
     capture_idx = MESSAGES_JS.index(capture)
     # The textarea wipe sits immediately after the capture (same 120-char window).
-    window_after_capture = MESSAGES_JS[capture_idx : capture_idx + 120]
+    window_after_capture = MESSAGES_JS[capture_idx : capture_idx + 220]
     assert "$('msg').value='';autoResize();" in window_after_capture, (
         "the composer textarea wipe must sit immediately after the capture"
     )
@@ -151,8 +157,8 @@ def test_restore_persist_chains_after_the_clear_promise():
     # And send() must pass the captured clear promise into the restore call.
     assert "let _composerDraftClearPromise=null;" in MESSAGES_JS
     call = (
-        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText, "
-        "_failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);"
+        "_restoreComposerDraftAfterFailedSend(_failedSendDraftText,"
+        "_failedSendFilesSnapshot,activeSid,_composerDraftClearPromise);"
     )
     assert call in MESSAGES_JS, "send() must pass the clear promise into the restore helper"
 

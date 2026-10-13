@@ -1443,7 +1443,7 @@ async function send(){
       ||(S.pendingFiles&&S.pendingFiles.length)
       ||_pendingSelections.length
     )) return;
-    _restoreComposerDraftAfterFailedSend(_failedSendDraftText,_failedSendFilesSnapshot,S.session&&S.session.session_id,_composerDraftClearPromise);
+    _restoreComposerDraftAfterFailedSend(_failedSendDraftText,_failedSendFilesSnapshot,activeSid,_composerDraftClearPromise);
   };
 
   // Dismiss handoff hint when user sends a message (resets seen_at).

@@ -21379,7 +21379,7 @@ async function submitEdit(msgIdx, newText) {
         if(sessionListRefresh) await sessionListRefresh;
         await sendPromise;
         if(
-          ($('msg').value||'').trim()||(S.pendingFiles&&S.pendingFiles.length)
+          (($('msg').value||'').trim()||(S.pendingFiles&&S.pendingFiles.length))
           && S.session&&S.session.session_id===childSid
           && typeof _saveComposerDraftNow==='function'
         ) await _saveComposerDraftNow(childSid,$('msg').value||'',S.pendingFiles);
