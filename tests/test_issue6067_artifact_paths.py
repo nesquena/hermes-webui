@@ -304,7 +304,7 @@ def test_display_only_rows_are_metadata_without_open_attributes():
       const collectSessionArtifacts=()=>[
         {{path:'/workspace/report.md',source:'inside'}},
         {{path:'/workspace-other/report.md',source:'outside'}},
-        {{path:'~/shared/file.md',source:'unsupported'}},
+        {{path:'//server/share/file.md',source:'unsupported'}},
         {{path:'../secret.md',source:'unsupported'}}];
       {renderer}
       renderSessionArtifacts();
