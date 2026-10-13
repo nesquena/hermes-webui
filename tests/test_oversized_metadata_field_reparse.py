@@ -221,14 +221,14 @@ def test_modern_oversized_sidecar_not_reparsed_on_every_read(session_store, monk
     )
 
     calls = {"n": 0}
-    real_load = M.Session.load.__func__
+    real_load_readonly = M.Session.load_readonly.__func__
 
-    def _counting_load(cls, sid, *a, **k):
+    def _counting_load_readonly(cls, sid, *a, **k):
         if sid == "mod3":
             calls["n"] += 1
-        return real_load(cls, sid, *a, **k)
+        return real_load_readonly(cls, sid, *a, **k)
 
-    monkeypatch.setattr(M.Session, "load", classmethod(_counting_load))
+    monkeypatch.setattr(M.Session, "load_readonly", classmethod(_counting_load_readonly))
 
     stubs = [M.Session.load_metadata_only("mod3") for _ in range(3)]
     for stub in stubs:

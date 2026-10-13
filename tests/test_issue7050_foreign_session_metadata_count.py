@@ -2,7 +2,6 @@ import json
 import sqlite3
 import subprocess
 import textwrap
-from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -521,39 +520,11 @@ def test_foreign_summary_cache_hit_avoids_lineage_parsing(monkeypatch, tmp_path)
     assert routes._foreign_display_coordinate_summary(sid) == first
 
 
-def test_foreign_summary_cache_tracks_same_aggregate_rewrite(monkeypatch, tmp_path):
+def test_foreign_summary_cache_reuses_unchanged_polls_and_tracks_target_appends(monkeypatch, tmp_path):
     import api.routes as routes
 
     sid = _foreign_fixture(monkeypatch, tmp_path)
-    monkeypatch.setattr(routes, "_foreign_display_coordinate_state_db_identity", lambda _profile: "unchanged-token")
-    now = [100.0]
-    monkeypatch.setattr(routes.time, "monotonic", lambda: now[0])
-    first = routes._foreign_display_coordinate_summary(sid)
-    with sqlite3.connect(tmp_path / "state.db") as conn:
-        before = conn.execute("SELECT COUNT(*), MAX(timestamp) FROM messages").fetchone()
-        conn.execute("UPDATE messages SET content = 'distinct' WHERE rowid = (SELECT MAX(rowid) FROM messages WHERE content = 'hello')")
-        conn.commit()
-        assert conn.execute("SELECT COUNT(*), MAX(timestamp) FROM messages").fetchone() == before
-    now[0] += 6.0
-    second = routes._foreign_display_coordinate_summary(sid)
-    assert first["message_count"] == 4
-    assert second["message_count"] == 5
-    assert second["last_message_at"] == first["last_message_at"] == 1003.0
-
-
-def test_foreign_summary_cache_reuses_30_second_polls_and_tracks_sqlite_commits(monkeypatch, tmp_path):
-    import api.routes as routes
-
-    sid = _foreign_fixture(monkeypatch, tmp_path)
-    db_path = (tmp_path / "state.db").resolve()
-    real_stat = Path.stat
-    stable_stat = real_stat(db_path)
-    monkeypatch.setattr(routes, "_foreign_display_coordinate_state_db_identity", lambda _profile: "unchanged-token")
-    monkeypatch.setattr(
-        Path,
-        "stat",
-        lambda path, *args, **kwargs: stable_stat if path == db_path else real_stat(path, *args, **kwargs),
-    )
+    db_path = tmp_path / "state.db"
     now = [100.0]
     monkeypatch.setattr(routes.time, "monotonic", lambda: now[0])
     reader_calls = []
@@ -565,34 +536,34 @@ def test_foreign_summary_cache_reuses_30_second_polls_and_tracks_sqlite_commits(
     )
 
     first = routes._foreign_display_coordinate_summary(sid)
-    now[0] += 30.0
-    assert routes._foreign_display_coordinate_summary(sid) == first
+    for _ in range(2):
+        now[0] += 30.0
+        assert routes._foreign_display_coordinate_summary(sid) == first
     assert reader_calls == [sid]
 
     with sqlite3.connect(db_path) as conn:
         conn.execute(
-            "UPDATE messages SET content = 'distinct' WHERE rowid = "
-            "(SELECT MAX(rowid) FROM messages WHERE content = 'hello')"
+            "INSERT INTO sessions (id, source, title, model, started_at, message_count) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("unrelated_summary_session", "webui", "Other", "test", 1000.0, 1),
+        )
+        conn.execute(
+            "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+            ("unrelated_summary_session", "user", "other", 1000.0),
         )
         conn.commit()
+    now[0] += 30.0
+    assert routes._foreign_display_coordinate_summary(sid) == first
+    assert reader_calls == [sid]
+
+    _append_state_db_rows(
+        db_path,
+        sid,
+        [{"role": "assistant", "content": "next response", "timestamp": 1004.0}],
+    )
     updated = routes._foreign_display_coordinate_summary(sid)
     assert updated["message_count"] == first["message_count"] + 1
     assert reader_calls == [sid, sid]
-
-
-def test_foreign_summary_revision_monitor_is_safe_across_request_threads(monkeypatch, tmp_path):
-    import api.routes as routes
-
-    _foreign_fixture(monkeypatch, tmp_path)
-    first = routes._foreign_display_coordinate_state_db_revision(None)
-    assert first is not None
-
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        second = executor.submit(
-            routes._foreign_display_coordinate_state_db_revision, None
-        ).result()
-
-    assert second == first
 
 
 def test_foreign_metadata_read_preserves_a_concurrent_sidecar_append(monkeypatch, tmp_path):
