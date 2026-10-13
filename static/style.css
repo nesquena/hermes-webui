@@ -2100,7 +2100,7 @@
      exists" (#1775). Our custom tooltip appears at ~150ms hover, dismisses
      instantly, and renders above all sidebar/panel stacking contexts. */
   /* Usage: add data-tooltip="Label" and class="has-tooltip". For i18n, pair
-     with data-i18n-title; static/i18n.js will sync the localized value into
+      with data-i18n-title; the i18n core will sync the localized value into
      data-tooltip and clear any stale native title attribute. */
   /* Design choice: no arrow/caret. At 11px text size and 5px arrow size the
      triangle reads as visual noise rather than a connector — VS Code, Slack,
