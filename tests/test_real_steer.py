@@ -870,7 +870,7 @@ class TestFrontendWiring:
         idx = self.msgs.find("if(S.busy||compressionRunning)")
         assert idx >= 0
         block = self.msgs[idx:idx + 500]
-        assert "if(text||S.pendingFiles.length)" in block, (
+        assert "if(text||sendFiles().length)" in block, (
             "busy send must route file-only composer submissions through queue/interrupt/steer"
         )
         assert "_trySteer uploads with clearPending=false" in self.msgs

@@ -17181,6 +17181,7 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
+        preserve_long_text = body.get("preserve_long_text") is True
         # Stage-326 hardening (per Opus advisor): size + type validation on
         # the draft inputs. Without this, a misbehaving or malicious client
         # can persist multi-MB strings into the session JSON on every keystroke
@@ -17189,7 +17190,7 @@ def handle_post(handler, parsed) -> bool:
         _MAX_DRAFT_FILES = 50  # max number of attached file references
         if text is not None and not isinstance(text, str):
             text = ""
-        if isinstance(text, str) and len(text) > _MAX_DRAFT_TEXT:
+        if isinstance(text, str) and len(text) > _MAX_DRAFT_TEXT and not preserve_long_text:
             text = text[:_MAX_DRAFT_TEXT]
         if files is not None and not isinstance(files, list):
             files = []

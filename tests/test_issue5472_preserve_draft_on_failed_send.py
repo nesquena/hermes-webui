@@ -181,6 +181,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
           pendingFiles: [],
           trayRendered: false,
           saved: null,
+          saveOptions: null,
           sendBtnUpdated: false,
         };
         const $ = (id) => (id === 'msg' ? state.input : null);
@@ -188,7 +189,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         function autoResize(){ state.input.resized = true; }
         function updateSendBtn(){ state.sendBtnUpdated = true; }
         function renderTray(){ state.trayRendered = true; }
-        function _saveComposerDraftNow(sid, text, files){ state.saved = {sid, text, files}; }
+        function _saveComposerDraftNow(sid, text, files, options){ state.saved = {sid, text, files}; state.saveOptions = options || null; }
 
         %(helper)s
 
@@ -201,6 +202,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
           trayRendered: state.trayRendered,
           pendingFiles: S.pendingFiles,
           saved: state.saved,
+          saveOptions: state.saveOptions,
         }));
         """
     ) % {
@@ -211,7 +213,7 @@ def _run_helper_in_node(draft_text, files_snapshot, initial_input, visible_sid, 
         "files": json.dumps(files_snapshot),
         "sid": json.dumps(sid),
     }
-    proc = subprocess.run([node, "-e", harness], capture_output=True, text=True, timeout=30)
+    proc = subprocess.run([node, "-"], input=harness, capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, f"node harness failed: {proc.stderr}"
     return json.loads(proc.stdout.strip())
 
@@ -223,6 +225,15 @@ def test_restores_typed_text_into_empty_composer():
     assert out["resized"] is True and out["sendBtnUpdated"] is True
     # Draft persisted for reload (text only — File objects aren't serializable).
     assert out["saved"] == {"sid": "sid-1", "text": "my long message", "files": []}
+    assert out["saveOptions"] == {"preserveLongText": True}
+
+
+def test_long_failed_prompt_is_persisted_without_truncation():
+    text = "x" * 50001
+    out = _run_helper_in_node(text, [], "", visible_sid="sid-1")
+    assert out["inputValue"] == text
+    assert out["saved"]["text"] == text
+    assert out["saveOptions"] == {"preserveLongText": True}
 
 
 def test_restores_original_text_not_mutated_moa_payload():

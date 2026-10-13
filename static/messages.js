@@ -1368,11 +1368,11 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
         if(stillVisible){
           const inp=$('msg');
           const liveText=inp?String(inp.value||''):restore;
-          _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[]);
+          _saveComposerDraftNow(sid, liveText, S.pendingFiles?[...S.pendingFiles]:[], {preserveLongText:true});
         } else if(!restoredVisible){
           // Background failure (sid was never the visible session): no live
           // composer to read, so persist the captured snapshot — it's the only copy.
-          _saveComposerDraftNow(sid, restore, files);
+          _saveComposerDraftNow(sid, restore, files, {preserveLongText:true});
         }
         // else: restored the visible composer, then the user switched away — the
         // session-switch save path already saved sid's composer; skip stale write.
