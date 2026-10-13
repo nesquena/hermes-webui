@@ -1648,6 +1648,16 @@ def _canonicalise_provider_id(name: object) -> str:
     return raw
 
 
+def _pool_catalog_provider_id(provider: object) -> str:
+    """Adapt Agent credential-pool aliases to WebUI catalog IDs."""
+    resolved = _resolve_provider_alias(str(provider or "").strip().lower())
+    if resolved == "xai":
+        return "x-ai"
+    if resolved.startswith("custom:"):
+        return resolved
+    return _canonicalise_provider_id(resolved)
+
+
 def _normalize_base_url_for_match(value: object) -> str:
     url = str(value or "").strip().rstrip("/")
     if not url:
@@ -7480,7 +7490,7 @@ def _static_models_catalog_without_live_probes() -> dict:
                         )
                         for _entry in _entries
                     ):
-                        detected_providers.add(_resolve_provider_alias(str(_pid)))
+                        detected_providers.add(_pool_catalog_provider_id(_pid))
         except Exception:
             logger.debug("Failed to inspect auth-store credential pool", exc_info=True)
 
@@ -9741,7 +9751,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
 
                     for _pid in list(_pool.keys()):
                         try:
-                            _canonical_pid = _resolve_provider_alias(str(_pid))
+                            _canonical_pid = _pool_catalog_provider_id(_pid)
                             # Check credential pool cache first (profile-scoped key
                             # so a pool loaded under another profile can't leak in).
                             _ck = (_credential_pool_profile_tag(), _pid)
@@ -9786,7 +9796,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                             for _entry in _entries
                         )
                         if _has_explicit_cred:
-                            _canonical_pid = _resolve_provider_alias(str(_pid))
+                            _canonical_pid = _pool_catalog_provider_id(_pid)
                             if _is_known_model_provider(_canonical_pid):
                                 detected_providers.add(_canonical_pid)
         except Exception:
@@ -11208,7 +11218,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _pool = auth_store.get("credential_pool", {}) if isinstance(auth_store, dict) else {}
             if isinstance(_pool, dict):
                 for _pid in _pool:
-                    _providers_with_keys.add(_resolve_provider_alias(str(_pid)))
+                    _providers_with_keys.add(_pool_catalog_provider_id(_pid))
         except Exception:
             pass
         try:
@@ -11216,7 +11226,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             if isinstance(_cfg_providers, dict):
                 for _pk, _pv in _cfg_providers.items():
                     if isinstance(_pv, dict) and (_pv.get("api_key") or _pv.get("key_env")):
-                        _providers_with_keys.add(_resolve_provider_alias(str(_pk)))
+                        _providers_with_keys.add(_canonicalise_provider_id(_pk))
         except Exception:
             pass
 

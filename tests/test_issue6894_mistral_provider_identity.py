@@ -619,3 +619,20 @@ def test_legacy_mistral_onboarding_setup_writes_native_provider(monkeypatch, tmp
     assert saved_cfg["model"]["provider"] == "mistral"
     assert saved_cfg["model"]["default"] == "mistral-large-latest"
     assert "MISTRAL_API_KEY=synthetic-mistral-key" in (home / ".env").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("provider, expected", [("google", "gemini"), ("mistralai", "mistral"), ("xai", "x-ai"), ("x-ai", "x-ai"), ("custom:my_proxy", "custom:my_proxy")])
+def test_pool_alias_adapter_maps_agent_ids_to_catalog(monkeypatch, provider, expected):
+    _install_hermes_modules(monkeypatch)
+    assert config._pool_catalog_provider_id(provider) == expected
+
+
+def test_configured_google_and_gemini_cards_remain_distinct(monkeypatch, tmp_path):
+    _install_hermes_modules(monkeypatch)
+    cfg = _anthropic_config()
+    cfg["providers"].update({"google": {"api_key": "google-key"}, "gemini": {"api_key": "gemini-key"}})
+    _configure_profile(monkeypatch, tmp_path, cfg)
+    cards = {card["id"]: card for card in providers.get_providers()["providers"]}
+    assert cards["google"]["has_key"] is True
+    assert cards["gemini"]["has_key"] is True
+    assert cards["google"]["id"] != cards["gemini"]["id"]

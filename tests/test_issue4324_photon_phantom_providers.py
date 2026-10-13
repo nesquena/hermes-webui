@@ -26,6 +26,8 @@ import json
 import sys
 import types
 
+import pytest
+
 import api.config as config
 import api.profiles as profiles
 
@@ -266,7 +268,9 @@ def test_real_provider_still_detected_importerror_path(monkeypatch, tmp_path):
     )
 
 
-def test_aliased_pool_key_still_detected_alongside_photon(monkeypatch, tmp_path):
+@pytest.mark.parametrize("with_load_pool", [False, True])
+@pytest.mark.parametrize("pool_key, display", [("google", "Gemini"), ("xai", "xAI")])
+def test_aliased_pool_key_still_detected_alongside_photon(monkeypatch, tmp_path, with_load_pool, pool_key, display):
     """#4247 intent (aliased pool keys) is preserved end-to-end.
 
     A pool key of ``google`` resolves to canonical ``gemini`` (in
@@ -275,16 +279,16 @@ def test_aliased_pool_key_still_detected_alongside_photon(monkeypatch, tmp_path)
     real pool key through detection rather than asserting on the helper alone.
     """
     extra = {
-        "google": [
+        pool_key: [
             {"id": "gp1", "label": "explicit-gemini", "source": "manual",
              "auth_type": "api_key", "base_url": "https://generativelanguage.googleapis.com"}
         ]
     }
     result = _call_get_available_models(
-        monkeypatch, tmp_path, _photon_auth_payload(extra), with_load_pool=True,
+        monkeypatch, tmp_path, _photon_auth_payload(extra), with_load_pool=with_load_pool,
     )
     names = _group_names(result)
-    assert "Gemini" in names, f"Aliased google→gemini pool key must surface as Gemini; got {names}"
+    assert display in names, f"Aliased {pool_key} pool key must surface as {display}; got {names}"
     assert not any("photon" in n.lower() for n in names), (
         f"Photon keys must still be filtered out; got {names}"
     )
