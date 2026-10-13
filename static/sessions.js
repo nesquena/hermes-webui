@@ -9779,7 +9779,10 @@ function renderSessionListFromCache(){
         const row=document.createElement('button');
         row.type='button';
         row.className='session-child-session'+(activeSidForSidebar&&child.session_id===activeSidForSidebar?' active':'');
-        row.appendChild(document.createTextNode(childLabelFor(child)));
+        const label=document.createElement('span');
+        label.className='session-child-session-label';
+        label.textContent=childLabelFor(child);
+        row.appendChild(label);
         const runtimeBadge=_delegatedChildRuntimeBadge(child);
         if(runtimeBadge) row.appendChild(runtimeBadge);
         row.title='Open child session';
