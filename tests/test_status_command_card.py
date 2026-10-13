@@ -232,7 +232,7 @@ console.log(JSON.stringify({{
 
 def test_status_command_is_registered_with_help_text():
     assert "{name:'status'" in COMMANDS_JS
-    assert "desc:t('cmd_status')" in COMMANDS_JS
+    assert "get desc(){return t('cmd_status');}" in COMMANDS_JS
     assert "fn:cmdStatus" in COMMANDS_JS
     assert "cmd_status:'Show session info'" in I18N_SOURCE
 

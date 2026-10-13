@@ -81,6 +81,7 @@ const LOCALE_REGISTRY = Object.freeze({
 const LOCALE_METADATA = LOCALE_REGISTRY;
 const LOCALES = Object.create(null);
 const _LOCALE_LOAD_PROMISES = Object.create(null);
+const LOCALE_LOAD_TIMEOUT_MS = 3000;
 let _activeLocale = 'en';
 let _activationGeneration = 0;
 
@@ -190,6 +191,7 @@ function registerLocale(code, bundle) {
   LOCALES[code] = bundle;
   const pending = _LOCALE_LOAD_PROMISES[code];
   if (pending) {
+    if (pending.timeout !== null && typeof clearTimeout === 'function') clearTimeout(pending.timeout);
     delete _LOCALE_LOAD_PROMISES[code];
     pending.resolve(code);
   }
@@ -242,7 +244,15 @@ function ensureLocale(lang) {
     resolvePending = resolvePromise;
     rejectPending = rejectPromise;
   });
-  _LOCALE_LOAD_PROMISES[resolved] = { promise, resolve: resolvePending, reject: rejectPending };
+  const pending = { promise, resolve: resolvePending, reject: rejectPending, timeout: null };
+  _LOCALE_LOAD_PROMISES[resolved] = pending;
+  if (typeof setTimeout === 'function') {
+    pending.timeout = setTimeout(() => {
+      if (_LOCALE_LOAD_PROMISES[resolved] !== pending) return;
+      delete _LOCALE_LOAD_PROMISES[resolved];
+      pending.reject(new Error(`Locale bundle timed out: ${resolved}`));
+    }, LOCALE_LOAD_TIMEOUT_MS);
+  }
   const script = document.createElement('script');
   script.src = _localeAssetUrl(resolved);
   script.async = true;
@@ -250,12 +260,18 @@ function ensureLocale(lang) {
     if (LOCALES[resolved]) return;
     const pending = _LOCALE_LOAD_PROMISES[resolved];
     delete _LOCALE_LOAD_PROMISES[resolved];
-    if (pending) pending.reject(new Error(`Locale bundle did not register: ${resolved}`));
+    if (pending) {
+      if (pending.timeout !== null && typeof clearTimeout === 'function') clearTimeout(pending.timeout);
+      pending.reject(new Error(`Locale bundle did not register: ${resolved}`));
+    }
   };
   script.onerror = () => {
     const pending = _LOCALE_LOAD_PROMISES[resolved];
     delete _LOCALE_LOAD_PROMISES[resolved];
-    if (pending) pending.reject(new Error(`Locale bundle unavailable: ${resolved}`));
+    if (pending) {
+      if (pending.timeout !== null && typeof clearTimeout === 'function') clearTimeout(pending.timeout);
+      pending.reject(new Error(`Locale bundle unavailable: ${resolved}`));
+    }
   };
   (document.head || document.documentElement).appendChild(script);
   return promise;
