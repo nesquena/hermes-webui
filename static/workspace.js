@@ -456,7 +456,7 @@ function _sanitizeArtifactPath(path, explicit=false){
   if(!path) return '';
   path = explicit ? String(path) : String(path).trim().replace(/[\`"'<>),.;:]+$/g,'').replace(/^[\`"'(<]+/g,'');
   if(!path.trim() || path.length > 240 || path.includes('://') || path.includes('\0')) return '';
-  if(ARTIFACT_IGNORE_RE.test(path) || !/[./]/.test(path)) return '';
+  if(ARTIFACT_IGNORE_RE.test(path) || (!explicit && !/[./]/.test(path))) return '';
   return path;
 }
 
