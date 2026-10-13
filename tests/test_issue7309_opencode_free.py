@@ -351,6 +351,7 @@ def test_minimal_and_stale_fallbacks_scrub_invalid_free_defaults(monkeypatch, tm
         cache_path = tmp_path / "models.json"
         cache_path.write_text(json.dumps({
             "_schema_version": config._MODELS_CACHE_SCHEMA_VERSION,
+            "_source_fingerprint": config._models_cache_source_fingerprint(),
             "active_provider": "opencode-free",
             "default_model": "arbitrary-free-model",
             "configured_model_badges": {},
