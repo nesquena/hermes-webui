@@ -9340,11 +9340,16 @@ function renderSessionListFromCache(){
       group.entries.push({entry,index});
     });
   }
-  const listScrollHeight=Number(list.scrollHeight)||0;
-  const listPaddingBottom=typeof window.getComputedStyle==='function'
-    ? parseFloat(window.getComputedStyle(list).paddingBottom)||0
-    : 0;
-  const groupedContentTop=groupedMode?Math.max(0,listScrollHeight-listPaddingBottom):0;
+  let groupedContentTop=0;
+  if(groupedMode){
+    const marker=document.createElement('div');
+    marker.style.cssText='height:0;margin:0;padding:0;border:0;flex:0 0 auto;';
+    list.appendChild(marker);
+    const markerRect=marker.getBoundingClientRect();
+    const listRect=list.getBoundingClientRect();
+    groupedContentTop=Math.max(0,markerRect.top-listRect.top+(Number(list.scrollTop)||0));
+    marker.remove();
+  }
   list._sessionVirtualContentTop=groupedContentTop;
   const groupedScrollTop=Math.max(0,listScrollTopBeforeRender-groupedContentTop);
   const groupedViewportHeight=Math.max(

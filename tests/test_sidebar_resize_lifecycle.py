@@ -72,7 +72,7 @@ def _extract_group_loop() -> str:
     from its start marker to the virtualization anchor restore that follows
     it in production."""
     start_marker = "let globalSessionRowIndex=0;"
-    end_marker = "if(virtualAnchorScrollTop!==null){"
+    end_marker = "if(groupedMode){\n    list.scrollTop=listScrollTopBeforeRender;"
     start = SESSIONS_JS.index(start_marker)
     end = SESSIONS_JS.index(end_marker, start)
     return SESSIONS_JS[start:end]
@@ -138,6 +138,7 @@ window.__renderGroups = (labels, rowsPerGroup) => {
 window.__buildGroups = () => {
   const list = document.getElementById('sessionList');
   list.innerHTML = '';
+  const groupedMode = false;
   const groups = window.__groups || [];
   const virtualWindow = {virtualized:false, start:0, end:1000000, itemHeight:24};
   const _renderOneSession = (s, isPinned) => {
