@@ -124,15 +124,10 @@ def test_load_existing_session_clears_staged_toolsets():
 
 
 def test_workspace_and_profile_switches_clear_pending_toolsets():
-    for marker in (
-        "function promptWorkspacePath",
-        "function switchToWorkspace",
-        "function switchToProfile",
-    ):
-        body = _function_body(PANELS_JS, marker)
-        assert "S._pendingSessionToolsets=null" in body.replace(" ", "")
-
-    assert "S._pendingSessionToolsets=null" in UI_JS.replace(" ", "")
+    profile_body = _function_body(PANELS_JS, "function switchToProfile")
+    assert "S._pendingSessionToolsets=null" in profile_body.replace(" ", "")
+    helper_body = _function_body(SESSIONS_JS, "function _ensureBlankPageSession")
+    assert "S._pendingSessionToolsets=null" in helper_body.replace(" ", "")
 
 
 def test_context_switch_auto_sessions_do_not_forward_staged_toolsets():
@@ -150,7 +145,9 @@ def test_context_switch_auto_sessions_do_not_forward_staged_toolsets():
     ):
         body = _function_body(src, marker)
         assert "enabled_toolsets" not in body
-        assert "S._pendingSessionToolsets=null" in body.replace(" ", "")
+        assert "_ensureBlankPageSession" in body
+    helper_body = _function_body(SESSIONS_JS, "function _ensureBlankPageSession")
+    assert "S._pendingSessionToolsets=null" in helper_body.replace(" ", "")
 
 
 def test_backend_new_session_accepts_enabled_toolsets():

@@ -179,10 +179,13 @@ def test_voice_mode_speakresponse_guards_against_session_switch():
         "session id at send-time"
     )
 
-    # _voiceModeSend captures current session_id at thinking transition.
+    # _voiceModeSend captures current session_id at thinking transition. The
+    # body is bounded by the next nested helper so the assertions do not depend
+    # on a fixed character budget.
     send_idx = src.find("function _voiceModeSend(")
     assert send_idx != -1
-    send_body = src[send_idx : send_idx + 1200]
+    send_end = src.index("\n\n  function _speakResponse(", send_idx)
+    send_body = src[send_idx:send_end]
     assert "_voiceModeThinkingSid=" in send_body, (
         "_voiceModeSend must capture the current session_id at thinking-time"
     )
