@@ -596,6 +596,53 @@ def test_mistral_default_switch_and_session_identity(monkeypatch, tmp_path):
     assert routes._clean_session_model_provider("@custom:my_proxy:vendor/model") == "custom:my_proxy"
 
 
+@pytest.mark.parametrize(
+    "config_provider,session_provider,prefix",
+    [
+        ("mistral", "mistral", "mistralai"),
+        ("mistralai", "mistral", "mistral"),
+        ("mistral", "mistralai", "mistralai"),
+        ("mistralai", "mistralai", "mistral"),
+    ],
+)
+def test_mistral_provider_context_strips_redundant_alias_prefix(
+    monkeypatch, tmp_path, config_provider, session_provider, prefix
+):
+    _install_hermes_modules(monkeypatch)
+    _configure_profile(
+        monkeypatch,
+        tmp_path,
+        {
+            "model": {"provider": config_provider, "default": "mistral-small-latest"},
+            "providers": {},
+        },
+    )
+
+    contextual_model = config.model_with_provider_context(
+        f"{prefix}/mistral-small-latest", session_provider
+    )
+    resolved_model, resolved_provider, _ = config.resolve_model_provider(contextual_model)
+
+    assert resolved_model == "mistral-small-latest"
+    assert resolved_provider == "mistral"
+
+
+def test_mistral_prefix_stays_intact_for_openrouter_and_custom_proxy(monkeypatch, tmp_path):
+    _install_hermes_modules(monkeypatch)
+    _configure_profile(
+        monkeypatch,
+        tmp_path,
+        {
+            "model": {"provider": "custom", "base_url": "https://proxy.example/v1"},
+            "providers": {},
+        },
+    )
+
+    model = "mistralai/mistral-small-latest"
+    assert config.resolve_model_provider(f"@openrouter:{model}")[0] == model
+    assert config.resolve_model_provider(config.model_with_provider_context(model, "mistral"))[0] == model
+
+
 def test_legacy_mistral_onboarding_setup_writes_native_provider(monkeypatch, tmp_path):
     _install_hermes_modules(monkeypatch)
     config_path, _, home = _configure_profile(monkeypatch, tmp_path, {

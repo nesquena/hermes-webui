@@ -2632,6 +2632,8 @@ def _is_first_party_model(provider_id: str, model_id: str) -> bool:
     unknown provider or empty model so callers preserve the id.
     """
     provider = str(provider_id or "").strip().lower()
+    if provider == "mistralai":
+        provider = "mistral"
     model = str(model_id or "").strip()
     if not provider or not model:
         return False
@@ -2642,6 +2644,16 @@ def _is_first_party_model(provider_id: str, model_id: str) -> bool:
         isinstance(entry, dict) and entry.get("id") == model
         for entry in catalog
     )
+
+
+def _provider_model_catalog_key(provider_id: str) -> str | None:
+    """Return the static catalog key for a provider namespace or legacy alias."""
+    provider = str(provider_id or "").strip().lower()
+    if provider in _PROVIDER_MODELS:
+        return provider
+    if provider == "mistralai" and "mistral" in _PROVIDER_MODELS:
+        return "mistral"
+    return None
 
 
 def _base_url_points_at_local_server(base_url: str) -> bool:
@@ -2745,7 +2757,7 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
         if not _custom_slug_rest_looks_like_host_port(_slug_rest):
             provider_hint, extra = provider_hint.rsplit(":", 1)
             bare_model = f"{extra}:{bare_model}"
-    elif (provider_hint not in _PROVIDER_MODELS
+    elif (_provider_model_catalog_key(provider_hint) is None
             and provider_hint not in _PROVIDER_DISPLAY
             and not provider_hint.startswith("custom:")):
         provider_hint, bare_model = inner.split(":", 1)
@@ -3228,7 +3240,10 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             return _finalize(model_id, config_provider, config_base_url)
         # If prefix matches config provider exactly, strip it and use that provider directly.
         # e.g. config=anthropic, model=anthropic/claude-... → bare name to anthropic API
-        if config_provider and prefix == config_provider:
+        if config_provider and (
+            prefix == config_provider
+            or {prefix.lower(), config_provider.lower()} <= {"mistral", "mistralai"}
+        ):
             return _finalize(bare, config_provider, config_base_url)
         # The OpenAI Codex provider uses a real base_url, but its default
         # ChatGPT endpoint cannot serve OpenRouter-style provider/model IDs.
@@ -3240,7 +3255,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             config_provider == "openai-codex"
             and str(config_base_url or "").strip().rstrip("/")
             == "https://chatgpt.com/backend-api/codex"
-            and prefix in _PROVIDER_MODELS
+            and _provider_model_catalog_key(prefix) is not None
             and prefix != config_provider
         ):
             return model_id, "openrouter", None
@@ -3328,7 +3343,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     # leftover the relay rejects; strip it (#433). Keep the
                     # ``prefix in _PROVIDER_MODELS`` belt so an adversarial catalog
                     # advertising a bare id can't strip an unknown-vendor prefix.
-                    if bare in _advertised and prefix in _PROVIDER_MODELS:
+                    if bare in _advertised and _provider_model_catalog_key(prefix) is not None:
                         return _finalize(bare, config_provider, config_base_url)
                     # Advertised but neither exact shape matched → intrinsic /
                     # unknown prefix the proxy routes on; preserve it whole.
@@ -3359,13 +3374,13 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 #     (exactly how #5979 regressed).
                 if explicitly_picked:
                     return _finalize(model_id, config_provider, config_base_url)
-                if prefix in _PROVIDER_MODELS and _is_first_party_model(prefix, bare):
+                if _provider_model_catalog_key(prefix) is not None and _is_first_party_model(prefix, bare):
                     return _finalize(bare, config_provider, config_base_url)
                 return _finalize(model_id, config_provider, config_base_url)
             # Non-custom first-party provider pointed at an OpenAI-compatible
             # proxy (e.g. provider=openai + base_url=litellm): the bare id is
             # what it expects — "openai/gpt-5.4" → "gpt-5.4" (#433).
-            if prefix in _PROVIDER_MODELS:
+            if _provider_model_catalog_key(prefix) is not None:
                 return _finalize(bare, config_provider, config_base_url)
             # Intrinsic / unknown prefix — pass the full model_id through unchanged.
             return _finalize(model_id, config_provider, config_base_url)
@@ -4918,6 +4933,16 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     if isinstance(model_cfg, dict):
         config_provider = str(model_cfg.get("provider") or "").strip().lower()
 
+    if (
+        _resolve_provider_alias(provider) == "mistral"
+        and _resolve_provider_alias(config_provider or "") == "mistral"
+        and "/" in model
+    ):
+        prefix, bare_model = model.split("/", 1)
+        if prefix.lower() in {"mistral", "mistralai"}:
+            model = bare_model
+            provider = "mistral"
+
     # ACP subprocess providers always need the explicit hint — their slash IDs
     # are not OpenRouter paths and must not inherit config_provider routing.
     if provider in _ACP_SUBPROCESS_PROVIDERS:
@@ -4989,7 +5014,7 @@ def model_with_provider_context(model_id: str, model_provider: str | None = None
     # the bare ID only for unknown/ambiguous provider slugs (negative
     # control) so custom/proxy base_url routing stays in charge.
     if "/" in model:
-        if provider in _PROVIDER_MODELS or provider in _PROVIDER_DISPLAY:
+        if _provider_model_catalog_key(provider) is not None or provider in _PROVIDER_DISPLAY:
             return f"@{provider}:{model}"
         # A named custom provider is only routable when the slug resolves to a
         # real, unique custom_providers[] entry. `custom:missing` (stale
@@ -7464,6 +7489,17 @@ def _static_models_catalog_without_live_probes() -> dict:
         custom_group_models: list[dict] = []
         canonical_to_raw_provider_key: dict[str, str] = {}
         providers_cfg = _get_providers_cfg()
+        if isinstance(providers_cfg, dict):
+            for provider_key in providers_cfg:
+                canonical = _canonicalise_provider_id(provider_key)
+                if not canonical:
+                    continue
+                raw_key = canonical_to_raw_provider_key.get(canonical)
+                if raw_key is None or (
+                    canonical == "mistral"
+                    and str(provider_key).strip().lower() == "mistral"
+                ):
+                    canonical_to_raw_provider_key[canonical] = provider_key
 
         def _append_model_id(provider_id: str | None, model_id: object) -> None:
             pid = _canonicalise_provider_id(provider_id)
@@ -7510,7 +7546,11 @@ def _static_models_catalog_without_live_probes() -> dict:
                 is_provider_config = isinstance(provider_cfg, dict)
                 if not (is_known_provider or is_provider_config):
                     continue
-                canonical_to_raw_provider_key.setdefault(canonical, provider_key)
+                if (
+                    canonical == "mistral"
+                    and provider_key != canonical_to_raw_provider_key.get(canonical)
+                ):
+                    continue
                 if isinstance(provider_cfg, dict):
                     has_local_signal = any(
                         str(provider_cfg.get(key) or "").strip()
@@ -10033,7 +10073,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if not (_admit_as_known or _has_provider_route or _has_models_only_active_route):
                     continue
 
-                _canonical_to_raw_provider_key.setdefault(_canonical, _pid_key)
+                _existing_raw_key = _canonical_to_raw_provider_key.get(_canonical)
+                if _existing_raw_key is None or (
+                    _canonical == "mistral" and str(_pid_key).strip().lower() == "mistral"
+                ):
+                    _canonical_to_raw_provider_key[_canonical] = _pid_key
                 detected_providers.add(_canonical)
 
         def _configured_provider_for_base_url(base_url: object) -> str:
