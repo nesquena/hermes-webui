@@ -21351,10 +21351,15 @@ async function submitEdit(msgIdx, newText) {
         if(!S.session || S.session.session_id !== initialSid) return;
         if(!data||!data.session_id) throw new Error('branch returned no session');
         const childSid=data.session_id;
-        await loadSession(childSid);
+        try{
+          await loadSession(childSid);
+        }finally{
+          if(S.session&&(S.session.session_id===initialSid||S.session.session_id===childSid)){
+            $('msg').value=editedText;
+            if(typeof autoResize==='function') autoResize();
+          }
+        }
         if(!S.session || S.session.session_id !== childSid) return;
-        $('msg').value=editedText;
-        if(typeof autoResize==='function') autoResize();
         const childProfile=S.session.profile||sourceProfile;
         const childProvider=S.session.model_provider||sourceProvider;
         const childWorkspace=S.session.workspace||sourceWorkspace;

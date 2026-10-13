@@ -70,7 +70,7 @@ const _reArmRecoveryPick = (...args) => calls.push(['rearm', ...args]);
 const _ensureAllMessagesLoaded = async () => {{ if(scenario.resetOldest) _oldestIdx = 0; }};
 const showConfirmDialog = async () => {{ calls.push(['confirm']); return confirmResult; }};
 const api = async (url, options) => {{ calls.push([url, JSON.parse(options.body)]); if(url.includes('/branch')) {{ if(scenario.branchFailure) throw new Error('branch unavailable'); if(scenario.switchAfterBranch) S.session={{session_id:'other'}}; return {{session_id:'child'}}; }} return {{}}; }};
-const loadSession = async (sid) => {{ calls.push(['load', sid]); S.session = scenario.contractMismatch ? {{session_id:sid, profile:'other', model:'m', model_provider:'p', workspace:'/w'}} : {{session_id:sid, profile:'default', model:'m', model_provider:'p', workspace:'/w'}}; if(scenario.modelDrift) S.session.model='normalized-model'; activeSid=sid; }};
+const loadSession = async (sid) => {{ calls.push(['load', sid]); if(scenario.loadFailure) {{ await Promise.resolve(); if(scenario.switchDuringLoad) {{ S.session={{session_id:'other'}}; composer.value='newer draft'; }} if(scenario.loadFailure==='throw') throw new Error('load unavailable'); setStatus('load failed'); return; }} S.session = scenario.contractMismatch ? {{session_id:sid, profile:'other', model:'m', model_provider:'p', workspace:'/w'}} : {{session_id:sid, profile:'default', model:'m', model_provider:'p', workspace:'/w'}}; if(scenario.modelDrift) S.session.model='normalized-model'; activeSid=sid; }};
 const renderSessionList = async () => calls.push(['render-list']);
 const renderMessages = () => calls.push(['render']);
 const send = async () => calls.push(['send', S.session.session_id]);
@@ -222,3 +222,21 @@ def test_concurrent_older_edit_creates_one_child_and_sends_once():
     result = _run_node({"index": 0, "concurrent": True, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]})
     assert [call[0] for call in result["calls"]].count("/api/session/branch") == 1
     assert [call for call in result["calls"] if call[0] == "send"] == [["send", "child"]]
+
+
+def test_failed_child_load_preserves_edit_on_source_without_sending():
+    for failure in ("return", "throw"):
+        result = _run_node({"index": 0, "loadFailure": failure, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]})
+        assert result["session"] == "source"
+        assert result["draft"] == "edited"
+        assert [call[0] for call in result["calls"]].count("resize") == 1
+        assert "send" not in [call[0] for call in result["calls"]]
+
+
+def test_failed_child_load_preserves_newer_sessions_composer():
+    for failure in ("return", "throw"):
+        result = _run_node({"index": 0, "loadFailure": failure, "switchDuringLoad": True, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]})
+        assert result["session"] == "other"
+        assert result["draft"] == "newer draft"
+        assert "resize" not in [call[0] for call in result["calls"]]
+        assert "send" not in [call[0] for call in result["calls"]]
