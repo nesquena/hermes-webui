@@ -258,6 +258,17 @@ def test_foreign_boundary_summary_cache_skips_unchanged_uncapped_read(monkeypatc
     import api.routes as routes
 
     sid = _foreign_fixture(monkeypatch, tmp_path, truncation_boundary=1001.0)
+    clock = {"now": 100.0}
+    real_time = routes.time
+
+    class _VirtualClock:
+        def __getattr__(self, name):
+            return getattr(real_time, name)
+
+        def monotonic(self):
+            return clock["now"]
+
+    monkeypatch.setattr(routes, "time", _VirtualClock())
     summary_calls = []
     reader_calls = []
     real_summary = routes.get_state_db_session_summary
@@ -280,11 +291,16 @@ def test_foreign_boundary_summary_cache_skips_unchanged_uncapped_read(monkeypatc
     )
 
     first = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    clock["now"] = 130.0
     second = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    clock["now"] = 160.0
+    third = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
 
     assert first["message_count"] == second["message_count"]
     assert first["last_message_at"] == second["last_message_at"]
-    assert len(summary_calls) == 2
+    assert first["message_count"] == third["message_count"]
+    assert first["last_message_at"] == third["last_message_at"]
+    assert len(summary_calls) == 3
     assert len(reader_calls) == 1
     assert "limit" not in reader_calls[0][1]
 
