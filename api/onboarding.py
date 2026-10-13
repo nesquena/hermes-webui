@@ -236,6 +236,17 @@ _SUPPORTED_PROVIDER_SETUPS = {
     },
 }
 
+
+def _agent_supports_provider(provider: str) -> bool:
+    if provider != "opencode-free":
+        return True
+    try:
+        from hermes_cli.providers import HERMES_OVERLAYS
+
+        return HERMES_OVERLAYS.get(provider) is not None
+    except (ImportError, AttributeError):
+        return False
+
 _PROVIDER_CATEGORIES = [
     {"id": "easy_start", "label": "Easy start", "order": 0},
     {"id": "self_hosted", "label": "Open / self-hosted", "order": 1},
@@ -741,8 +752,9 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
 
     provider_configured = bool(provider and model)
     provider_ready = False
+    provider_supported = _agent_supports_provider(provider) if provider else True
 
-    if provider_configured:
+    if provider_configured and provider_supported:
         meta = _SUPPORTED_PROVIDER_SETUPS.get(provider, {})
         if provider == "opencode-free":
             provider_ready = (
@@ -805,7 +817,10 @@ def _status_from_runtime(cfg: dict, imports_ok: bool) -> dict:
         note = f"Hermes is minimally configured and ready to chat via {provider_name}."
     elif provider_configured:
         state = "provider_incomplete"
-        if provider == "custom" and not base_url:
+        if provider == "opencode-free" and not provider_supported:
+            note_key = "onboarding_notice_provider_agent_upgrade_required"
+            note = "OpenCode Free requires a newer Hermes Agent. Upgrade Hermes Agent before using this provider."
+        elif provider == "custom" and not base_url:
             note_key = "onboarding_notice_custom_base_url_required"
             note = (
                 "Hermes has a saved provider/model selection, but the custom "
@@ -1034,6 +1049,8 @@ def apply_onboarding_setup(body: dict) -> dict:
         and _strip_opencode_free_provider_prefix(model) not in _OPENCODE_FREE_MODEL_IDS
     ):
         raise ValueError("opencode-free only supports its six curated free models")
+    if not _agent_supports_provider(provider):
+        raise ValueError("OpenCode Free requires a newer Hermes Agent. Upgrade Hermes Agent and try again.")
 
     provider_meta = _SUPPORTED_PROVIDER_SETUPS[provider]
     if provider_meta.get("requires_base_url"):
