@@ -24,7 +24,6 @@ These tests pin:
    msg_limit is ALWAYS present, even when the reload window exceeds the
    server ceiling.
 """
-import os
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
