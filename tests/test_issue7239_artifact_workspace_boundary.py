@@ -231,6 +231,13 @@ def test_workspace_artifact_display_uses_normalized_workspace_boundary():
     assert workspace_with_duplicate_separator["openPath"] == "reports/output.md"
 
 
+def test_workspace_directory_display_keeps_its_trailing_slash():
+    row = _classify(["/workspace//reports/"], "/workspace")[0]
+
+    assert row["displayPath"] == "reports/"
+    assert row["openPath"] == "reports"
+
+
 def test_windows_relative_and_canonical_boundary_matrix():
     rows = _classify([
         "./report.md", "Report.md", "d:/proj/report.md",
