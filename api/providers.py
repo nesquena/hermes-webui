@@ -36,12 +36,9 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _coerce_provider_cost_budget,
-    _canonical_provider_config,
-    _canonical_provider_config_keys,
-    _canonicalise_provider_id,
-    _configured_model_options,
     _configured_model_ids,
     _custom_provider_slug_from_name,
+    _get_provider_cfg,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
@@ -49,6 +46,7 @@ from api.config import (
     _read_visible_codex_cache_model_ids,
     _save_yaml_config_file,
     _thread_local_env_value,
+    _resolve_provider_alias,
     get_config,
     invalidate_models_cache,
     reload_config,
@@ -63,9 +61,15 @@ from api.plugin_providers import (
 logger = logging.getLogger(__name__)
 
 
+def _provider_id_for_mistral_alias(provider_id: object) -> str:
+    provider = str(provider_id or "")
+    normalized = provider.strip().lower()
+    return _resolve_provider_alias(normalized) if normalized in {"mistral", "mistralai"} else provider
+
+
 def _provider_env_var_for(provider_id: str) -> str | None:
     """Resolve the API-key env var for a provider (static table + plugin profiles)."""
-    return effective_provider_env_var(_canonicalise_provider_id(provider_id), _PROVIDER_ENV_VAR)
+    return effective_provider_env_var(_provider_id_for_mistral_alias(provider_id), _PROVIDER_ENV_VAR)
 
 
 def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
@@ -1152,12 +1156,12 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
     cfg = get_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        active_provider = _canonicalise_provider_id(model_cfg.get("provider"))
+        active_provider = str(model_cfg.get("provider") or "").strip().lower()
         if active_provider == provider_id:
             values.append(model_cfg.get("api_key"))
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = _canonical_provider_config(cfg, provider_id)
+        provider_cfg = providers_cfg.get(provider_id, {})
         if isinstance(provider_cfg, dict):
             values.append(provider_cfg.get("api_key"))
     custom_providers = cfg.get("custom_providers", [])
@@ -1280,7 +1284,7 @@ def _provider_has_key(provider_id: str) -> bool:
     4. ``config.yaml → providers.<id>.api_key``
     5. ``config.yaml → custom_providers[].api_key`` (for custom providers)
     """
-    provider_id = _canonicalise_provider_id(provider_id)
+    provider_id = _provider_id_for_mistral_alias(provider_id)
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -1320,13 +1324,20 @@ def _provider_has_key(provider_id: str) -> bool:
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict) and str(model_cfg.get("api_key") or "").strip():
         active_provider = model_cfg.get("provider")
-        if active_provider and _canonicalise_provider_id(active_provider) == provider_id:
+        active_provider = _provider_id_for_mistral_alias(
+            str(active_provider or "").strip().lower()
+        )
+        if active_provider and active_provider == provider_id.lower():
             if _provider_value_counts_as_api_key(provider_id, model_cfg.get("api_key")):
                 return True
     # Check providers.<id>.api_key
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = _canonical_provider_config(cfg, provider_id)
+        provider_cfg = (
+            _get_provider_cfg(provider_id, config_obj=cfg)
+            if provider_id == "mistral"
+            else providers_cfg.get(provider_id, {})
+        )
         if isinstance(provider_cfg, dict) and str(provider_cfg.get("api_key") or "").strip():
             if _provider_value_counts_as_api_key(provider_id, provider_cfg.get("api_key")):
                 return True
@@ -1343,7 +1354,7 @@ def _provider_has_key(provider_id: str) -> bool:
 
 def _get_provider_api_key(provider_id: str) -> str | None:
     """Return a configured provider API key without exposing it to callers."""
-    provider_id = _canonicalise_provider_id(provider_id)
+    provider_id = _provider_id_for_mistral_alias((provider_id or "").strip().lower())
     env_var = _provider_env_var_for(provider_id)
     if env_var:
         env_path = _get_hermes_home() / ".env"
@@ -1365,14 +1376,20 @@ def _get_provider_api_key(provider_id: str) -> str | None:
     cfg = get_config()
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        active_provider = _canonicalise_provider_id(model_cfg.get("provider"))
+        active_provider = _provider_id_for_mistral_alias(
+            str(model_cfg.get("provider") or "").strip().lower()
+        )
         model_key = str(model_cfg.get("api_key") or "").strip()
         if model_key and active_provider == provider_id and _provider_value_counts_as_api_key(provider_id, model_key):
             return model_key
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = _canonical_provider_config(cfg, provider_id)
+        provider_cfg = (
+            _get_provider_cfg(provider_id, config_obj=cfg)
+            if provider_id == "mistral"
+            else providers_cfg.get(provider_id, {})
+        )
         if isinstance(provider_cfg, dict):
             provider_key = str(provider_cfg.get("api_key") or "").strip()
             if _provider_value_counts_as_api_key(provider_id, provider_key):
@@ -2564,11 +2581,8 @@ def get_providers() -> dict[str, Any]:
     - ``models``: list of known model IDs for this provider
     """
     # Collect all known provider IDs from multiple sources
-    known_ids = {
-        _canonicalise_provider_id(pid)
-        for pid in (set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys()))
-    }
-    known_ids.update(_canonicalise_provider_id(pid) for pid in plugin_model_provider_ids())
+    known_ids = set(_PROVIDER_DISPLAY.keys()) | set(_PROVIDER_MODELS.keys())
+    known_ids.update(plugin_model_provider_ids())
 
     # Also detect providers from config.yaml providers section
     cfg = get_config()
@@ -2580,12 +2594,16 @@ def get_providers() -> dict[str, Any]:
     providers = []
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        known_ids.update(_canonicalise_provider_id(pid) for pid in providers_cfg.keys())
+        for provider_id in providers_cfg:
+            if _provider_id_for_mistral_alias(provider_id) == "mistral":
+                known_ids.add("mistral")
+            else:
+                known_ids.add(provider_id)
 
     # Add OAuth providers even if not in _PROVIDER_DISPLAY
     known_ids.update(_OAUTH_PROVIDERS)
 
-    for pid in sorted(pid for pid in known_ids if pid):
+    for pid in sorted(known_ids):
         display_name = effective_provider_display_name(pid, _PROVIDER_DISPLAY)
         is_oauth = _provider_is_oauth(pid)
         has_key = _provider_has_key(pid)
@@ -2783,9 +2801,17 @@ def get_providers() -> dict[str, Any]:
                 )
         # Also include models from config.yaml providers section
         if isinstance(providers_cfg, dict):
-            provider_cfg = _canonical_provider_config(cfg, pid)
+            provider_cfg = (
+                _get_provider_cfg(pid, config_obj=cfg)
+                if pid == "mistral"
+                else providers_cfg.get(pid, {})
+            )
             if isinstance(provider_cfg, dict) and "models" in provider_cfg:
-                models.extend(_configured_model_options(provider_cfg["models"]))
+                cfg_models = provider_cfg["models"]
+                if isinstance(cfg_models, dict):
+                    models = models + [{"id": k, "label": k} for k in cfg_models.keys()]
+                elif isinstance(cfg_models, list):
+                    models = models + [{"id": k, "label": k} for k in cfg_models]
                 # Recompute models_total when config.yaml contributes additional
                 # entries on top of the live/static catalog. For non-Nous
                 # providers models_total still equals len(models); for Nous
@@ -2881,7 +2907,9 @@ def get_providers() -> dict[str, Any]:
     active_provider = None
     model_cfg = cfg.get("model", {})
     if isinstance(model_cfg, dict):
-        active_provider = _canonicalise_provider_id(model_cfg.get("provider"))
+        active_provider = model_cfg.get("provider")
+        if str(active_provider or "").strip().lower() in {"mistral", "mistralai"}:
+            active_provider = _provider_id_for_mistral_alias(active_provider)
 
     # Sort providers: active first, then custom:*, then has_key, then rest.
     def _provider_sort_key(p):
@@ -2910,7 +2938,7 @@ def set_provider_key(provider_id: str, api_key: str | None) -> dict[str, Any]:
 
     Returns a status dict with the operation result.
     """
-    provider_id = _canonicalise_provider_id(provider_id)
+    provider_id = _provider_id_for_mistral_alias((provider_id or "").strip().lower())
 
     if not provider_id:
         return {"ok": False, "error": "Provider ID is required."}
@@ -2994,8 +3022,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
     Writes back to config.yaml only if something was actually removed.
     Uses ``_cfg_lock`` to prevent TOCTOU races.
     """
-    provider_id = _canonicalise_provider_id(provider_id)
-
+    provider_id = _provider_id_for_mistral_alias(provider_id)
     from api.config import _cfg_lock
 
     try:
@@ -3026,7 +3053,12 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             # 1. Clean providers.<id>.api_key
             providers_cfg = cfg.get("providers") or {}
             if isinstance(providers_cfg, dict):
-                for raw_provider_id in _canonical_provider_config_keys(cfg, provider_id):
+                provider_ids = (
+                    ("mistral", "mistralai")
+                    if provider_id == "mistral"
+                    else (provider_id,)
+                )
+                for raw_provider_id in provider_ids:
                     provider_cfg = providers_cfg.get(raw_provider_id, {})
                     if isinstance(provider_cfg, dict) and provider_cfg.get("api_key"):
                         del provider_cfg["api_key"]
@@ -3036,7 +3068,9 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             model_cfg = cfg.get("model", {})
             if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
                 active_provider = model_cfg.get("provider")
-                if active_provider and _canonicalise_provider_id(active_provider) == provider_id:
+                active_provider = str(active_provider or "").strip().lower()
+                active_provider = _provider_id_for_mistral_alias(active_provider)
+                if active_provider and active_provider == provider_id.lower():
                     del model_cfg["api_key"]
                     changed = True
 

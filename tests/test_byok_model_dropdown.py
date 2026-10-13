@@ -91,12 +91,12 @@ class TestActiveProviderNormalization:
     def test_x_dot_ai_normalized_to_xai(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, "x.ai", monkeypatch)
         ap = result.get("active_provider", "")
-        assert ap in ("x-ai", ""), f"active_provider should be 'x-ai', got {ap!r}"
+        assert ap in ("xai", ""), f"active_provider should be 'xai', got {ap!r}"
 
     def test_google_normalized_to_gemini(self, tmp_path, monkeypatch):
         result = self._run(tmp_path, "google", monkeypatch)
         ap = result.get("active_provider", "")
-        assert ap in ("google", ""), f"active_provider should be 'google', got {ap!r}"
+        assert ap in ("gemini", ""), f"active_provider should be 'gemini', got {ap!r}"
 
     def test_normalization_code_present(self):
         """Source-level check: config.py must call _PROVIDER_ALIASES for active_provider."""
@@ -142,11 +142,11 @@ class TestLiveModelsProviderNormalization:
             src,
         )
         pmi_call_match = re.search(
-            r"ids\s*=\s*_pmi\(agent_provider\)",
+            r"ids\s*=\s*_pmi\(provider\)",
             src,
         )
         assert alias_match, "_resolve_provider_alias call not found in routes.py"
-        assert pmi_call_match, "ids = _pmi(agent_provider) call not found"
+        assert pmi_call_match, "ids = _pmi(provider) call not found"
         assert alias_match.start() < pmi_call_match.start(), (
             "alias normalization must occur before ids = _pmi(provider)"
         )
@@ -210,7 +210,13 @@ class TestLiveModelsCustomProviderFallback:
 
         r._clear_live_models_cache()
         monkeypatch.setattr(c, "get_config", lambda: cfg)
-        monkeypatch.setattr(c, "_resolve_provider_alias", lambda p: p)
+
+        def _resolve_test_alias(provider):
+            if str(provider or "").strip().lower() in {"mistral", "mistralai"}:
+                return "mistral"
+            return provider
+
+        monkeypatch.setattr(c, "_resolve_provider_alias", _resolve_test_alias)
         monkeypatch.setattr(r, "j", lambda _handler, payload, **_kw: payload)
         TestLiveModelsCustomProviderFallback._install_provider_model_ids(monkeypatch, lambda _p: [])
 

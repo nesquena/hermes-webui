@@ -7330,7 +7330,9 @@ def _clean_session_model_provider(value: str | None) -> str | None:
     if provider.startswith("@"):
         parsed = _parse_provider_qualified_model_id(provider)
         provider = parsed[1].strip() if parsed else provider[1:]
-    return ("mistral" if provider == "mistralai" else provider) or None
+    if provider == "mistralai":
+        provider = "mistral"
+    return provider or None
 
 
 def _split_provider_qualified_model(model: str) -> tuple[str, str | None]:
@@ -7590,14 +7592,11 @@ def _context_length_config_api_key_for_provider(
 
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        from api.config import _canonical_provider_config
-
         for provider_key, provider_cfg in providers_cfg.items():
             if not isinstance(provider_cfg, dict):
                 continue
             if not _providers_match_for_context(provider_key, provider):
                 continue
-            provider_cfg = _canonical_provider_config(cfg, provider_key)
             api_key = _resolve_key(provider_cfg.get("api_key"), provider_cfg.get("key_env"))
             if api_key:
                 return api_key
@@ -7686,28 +7685,17 @@ def _context_length_lookup_inputs_for_model(
     provider_context_length = None
     providers_cfg = (cfg.get("providers") or {}) if isinstance(cfg, dict) else {}
     if isinstance(providers_cfg, dict):
-        from api.config import _canonical_provider_config
-
         for provider_key, provider_cfg in providers_cfg.items():
             if not isinstance(provider_cfg, dict):
                 continue
             if not _providers_match_for_context(provider_key, effective_provider):
                 continue
-            provider_cfg = _canonical_provider_config(cfg, provider_key)
-            context_model_configs = _canonical_provider_config(
-                cfg,
-                provider_key,
-                include_context_models=True,
-            )
             if not effective_base_url:
                 effective_base_url = str(provider_cfg.get("base_url") or "").strip()
-            for models_cfg in context_model_configs:
-                provider_context_length = _models_config_context_length(
-                    models_cfg,
-                    bare_model or model_for_lookup,
-                )
-                if provider_context_length is not None:
-                    break
+            provider_context_length = _models_config_context_length(
+                provider_cfg.get("models"),
+                bare_model or model_for_lookup,
+            )
             break
 
     custom_context_length = None
@@ -23028,9 +23016,8 @@ def _handle_live_models(handler, parsed):
         # without normalization, provider_model_ids() misses the alias and returns [].
         # Uses the WebUI-owned table (api/config._resolve_provider_alias) which
         # works even when hermes_cli is not on sys.path.
-        from api.config import _canonicalise_provider_id, _resolve_provider_alias
-        provider = _canonicalise_provider_id(provider)
-        agent_provider = _resolve_provider_alias(provider)
+        from api.config import _resolve_provider_alias
+        provider = _resolve_provider_alias(provider)
 
         cache_key = _live_models_cache_key(provider)
         cached = _get_cached_live_models(cache_key)
@@ -23053,7 +23040,7 @@ def _handle_live_models(handler, parsed):
             if _agent_dir not in _sys.path:
                 _sys.path.insert(0, _agent_dir)
             from hermes_cli.models import provider_model_ids as _pmi
-            ids = _pmi(agent_provider)
+            ids = _pmi(provider)
         except Exception as _import_err:
             logger.debug("provider_model_ids import failed for %s: %s", provider, _import_err)
             ids = []
@@ -23340,12 +23327,17 @@ def _handle_live_models(handler, parsed):
         #  (b) the frontend shows the static list immediately and enriches in
         #      the background via _fetchLiveModels(), so the user never waits.
         if not ids:
-            _ep = _OPENAI_COMPAT_ENDPOINTS.get(agent_provider) or _OPENAI_COMPAT_ENDPOINTS.get(provider)
+            _ep = _OPENAI_COMPAT_ENDPOINTS.get(provider)
             if _ep:
                 try:
                     import urllib.request
-                    from api.config import _canonical_provider_config
-                    _prov = _canonical_provider_config(cfg, provider)
+                    from api.config import _get_provider_cfg
+
+                    _providers_cfg = cfg.get("providers") or {}
+                    if provider in {"mistral", "mistralai"}:
+                        _prov = _get_provider_cfg(provider, config_obj=cfg)
+                    else:
+                        _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
                     # Only use a provider-scoped key.  A top-level model.api_key
                     # is safe here only when it belongs to the requested provider;
                     # otherwise /api/models/live?provider=<other> could forward
@@ -23354,7 +23346,9 @@ def _handle_live_models(handler, parsed):
                     if not _key:
                         _model_cfg = cfg.get("model", {})
                         if isinstance(_model_cfg, dict):
-                            _active_provider = _canonicalise_provider_id(_model_cfg.get("provider"))
+                            _active_provider = _resolve_provider_alias(
+                                (_model_cfg.get("provider") or "").strip().lower()
+                            )
                             if _active_provider == provider:
                                 _key = _model_cfg.get("api_key")
                     if _key:
