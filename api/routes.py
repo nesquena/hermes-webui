@@ -23074,6 +23074,9 @@ def _handle_live_models(handler, parsed):
 
         def _finish(payload: dict):
             if payload.get("error"):
+                with _LIVE_MODELS_CACHE_LOCK:
+                    if _LIVE_MODELS_CACHE_GENERATION.get(cache_key, 0) == expected_generation:
+                        _LIVE_MODELS_REFRESH_REQUIRED.discard(cache_key)
                 return j(handler, payload)
             if not _set_cached_live_models(cache_key, payload, expected_generation):
                 return j(handler, {"provider": provider, "models": [], "error": "stale_generation"})

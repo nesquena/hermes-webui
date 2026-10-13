@@ -191,7 +191,7 @@ def test_forced_empty_lookup_stays_uncached_after_failure(monkeypatch):
     key = routes._live_models_cache_key("provider")
     assert result["models"] == []
     assert result["error"] == "live_models_unavailable"
-    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
     assert routes._get_cached_live_models(key) is None
 
 
@@ -213,13 +213,49 @@ def test_failed_refresh_does_not_poison_ordinary_lookup(monkeypatch):
     key = routes._live_models_cache_key("provider")
     assert result["models"] == []
     assert result["error"] == "live_models_unavailable"
-    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
-    routes._clear_live_models_cache()
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
     recovered = routes._handle_live_models(object(), urlparse("/api/models/live?provider=provider"))
     assert recovered["models"] == [
         {"id": "provider/static-after-failure", "label": "Static After Failure"}
     ]
     assert force_flags == [True, False]
+
+
+def test_failed_refresh_recovers_through_nonlisting_provider_catalog(monkeypatch):
+    import api.routes as routes
+    import api.config as config
+    import api.profiles as profiles
+
+    routes._clear_live_models_cache()
+    calls = []
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+    monkeypatch.setattr(config, "get_config", lambda: {"model": {"provider": "lmstudio"}})
+    monkeypatch.setattr(config, "_resolve_provider_alias", lambda provider: provider)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "default")
+    profile = types.SimpleNamespace(
+        auth_type="api_key",
+        supports_model_listing=False,
+        fetch_models=lambda **_kwargs: None,
+    )
+    def provider_model_ids(provider, *, force_refresh=False):
+        calls.append((provider, force_refresh))
+        return ["lmstudio/catalog-model"]
+
+    _install_provider_model_ids(monkeypatch, provider_model_ids)
+    sys.modules["providers"].get_provider_profile = lambda _provider: profile
+    key = routes._live_models_cache_key("lmstudio")
+    routes._invalidate_live_models_for_provider("lmstudio")
+    parsed = urlparse("/api/models/live?provider=lmstudio")
+
+    failed = routes._handle_live_models(object(), parsed)
+    assert failed["error"] == "live_models_unavailable"
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+
+    recovered = routes._handle_live_models(object(), parsed)
+    assert recovered["models"] == [
+        {"id": "lmstudio/catalog-model", "label": "Catalog Model"}
+    ]
+    assert calls == [("lmstudio", False)]
 
 
 def test_stale_failed_refresh_keeps_newer_generation_required(monkeypatch):
@@ -490,7 +526,7 @@ def test_forced_custom_lookup_does_not_use_configured_static_model(monkeypatch):
     )
     key = routes._live_models_cache_key("custom:relay")
     assert result == {"error": "live_models_unavailable", "models": []}
-    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
     assert routes._get_cached_live_models(key) is None
 
 
@@ -965,7 +1001,7 @@ def test_required_refresh_rejects_agent_static_fallback(monkeypatch, failure):
     key = routes._live_models_cache_key("provider")
     failed = routes._handle_live_models(object(), parsed)
     assert failed == {"error": "live_models_unavailable", "models": []}
-    assert key in routes._LIVE_MODELS_REFRESH_REQUIRED
+    assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
     assert routes._get_cached_live_models(key) is None
     assert mixed_calls == ["provider"]
     assert len(live_calls) == 1
