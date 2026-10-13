@@ -273,7 +273,9 @@ _MESSAGING_SESSION_METADATA_LOCK = threading.Lock()
 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE: dict[tuple, dict] = {}
 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK = threading.RLock()
 _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_MAX_ENTRIES = 128
-_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL = 5.0  # Bound missed state.db rewrite invalidations.
+_FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL = 60.0
+_FOREIGN_DISPLAY_COORDINATE_DB_MONITORS: OrderedDict[str, dict] = OrderedDict()
+_FOREIGN_DISPLAY_COORDINATE_DB_MONITOR_MAX_ENTRIES = 16
 _STALE_MESSAGING_END_REASONS = {"session_reset", "session_switch"}
 _CSP_REPORT_LOGGER = logging.getLogger("csp_report")
 _CSP_REPORT_RATE_LIMIT: dict[str, list[float]] = {}
@@ -10128,7 +10130,7 @@ def _display_merge_requires_lineage_provenance(session) -> bool:
     if not is_safe_session_id(parent_id):
         return True
     try:
-        parent = Session.load(parent_id)
+        parent = Session.load_readonly(parent_id)
     except Exception:
         return True
     if parent is None:
@@ -10648,7 +10650,7 @@ def _webui_sidecar_lineage_messages_for_display(session, *, max_hops: int = 20, 
             break
         parent_path = SESSION_DIR / f"{parent_id}.json"
         parent_sig_before = _sidecar_stat_signature(parent_path)
-        parent = Session.load(parent_id)
+        parent = Session.load_readonly(parent_id)
         if not parent:
             parent_signatures_complete = False
             break
@@ -10878,9 +10880,12 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
     """Return a cached display summary, checking lineage stats before parsing."""
     try:
         state_summary = get_state_db_session_summary(sid, profile=profile)
+        db_revision = _foreign_display_coordinate_state_db_revision(profile)
+        cache_ttl = _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL if db_revision is not None else 5.0
         cache_key = (
             _foreign_display_coordinate_cache_scope(profile),
             _foreign_display_coordinate_state_db_identity(profile),
+            db_revision,
             sid,
             _numeric_count(state_summary.get("message_count")),
             float(state_summary.get("last_message_at") or 0.0),
@@ -10890,14 +10895,14 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
             cached = _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.get(cache_key)
         if (
             cached is not None
-            and now - cached["created_at"] < _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_TTL
+            and now - cached["created_at"] < cache_ttl
             and all(
                 _foreign_display_coordinate_sidecar_stat(Path(path)) == signature
                 for path, signature in cached["sidecars"]
             )
         ):
             return dict(cached["summary"])
-        session = Session.load(sid)
+        session = Session.load_readonly(sid)
         if not session:
             return None
         sidecars = _foreign_display_coordinate_sidecar_identity(session)
@@ -10905,6 +10910,9 @@ def _foreign_display_coordinate_summary(sid: str, profile=None):
         reader_kwargs = {"profile": profile}
         if backstop is not None:
             reader_kwargs["limit"] = backstop
+        owner_messages = getattr(session, "messages", None) or []
+        if _cancelled_journal_turn_owner(owner_messages, include_live_partial=True):
+            reader_kwargs["include_row_identity"] = True
         state_db_messages = get_state_db_session_messages(sid, **reader_kwargs)
         if not state_db_messages and _numeric_count(state_summary.get("message_count")):
             return None
@@ -10946,7 +10954,7 @@ def _foreign_display_coordinate_sidecar_identity(session) -> tuple:
         parent_id = str(getattr(current, "parent_session_id", "") or "").strip()
         if not parent_id or parent_id in seen or not is_safe_session_id(parent_id):
             break
-        current = Session.load(parent_id)
+        current = Session.load_readonly(parent_id)
         if not current:
             parent_path = path.parent / f"{parent_id}.json"
             identities.append((str(parent_path), None))
@@ -10980,9 +10988,50 @@ def _foreign_display_coordinate_state_db_identity(profile):
         return None
 
 
+def _foreign_display_coordinate_state_db_revision(profile):
+    """Track commits through a persistent read handle, including in-place row edits."""
+    try:
+        from api.models import _get_profile_home
+
+        if isinstance(profile, str) and profile.strip():
+            db_path = _get_profile_home(profile) / "state.db"
+            if not db_path.exists():
+                db_path = _active_state_db_path()
+        else:
+            db_path = _active_state_db_path()
+        if not db_path.exists():
+            return None
+        key = str(db_path.resolve())
+        stat_result = db_path.stat()
+        identity = (stat_result.st_dev, stat_result.st_ino, stat_result.st_size, stat_result.st_mtime_ns, stat_result.st_ctime_ns)
+        with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
+            monitor = _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS.get(key)
+            if monitor is None or monitor["identity"] != identity:
+                if monitor is not None:
+                    monitor["connection"].close()
+                connection = open_state_db_readonly(db_path)
+                monitor = {"identity": identity, "connection": connection}
+                _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS[key] = monitor
+            _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS.move_to_end(key)
+            revision = int(monitor["connection"].execute("PRAGMA data_version").fetchone()[0])
+            while len(_FOREIGN_DISPLAY_COORDINATE_DB_MONITORS) > _FOREIGN_DISPLAY_COORDINATE_DB_MONITOR_MAX_ENTRIES:
+                _, expired = _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS.popitem(last=False)
+                expired["connection"].close()
+            return (identity, revision)
+    except Exception:
+        logger.debug("Unable to track foreign summary state.db revision", exc_info=True)
+        return None
+
+
 def _clear_foreign_display_coordinate_summary_cache() -> None:
     with _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE_LOCK:
         _FOREIGN_DISPLAY_COORDINATE_SUMMARY_CACHE.clear()
+        while _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS:
+            _, monitor = _FOREIGN_DISPLAY_COORDINATE_DB_MONITORS.popitem(last=False)
+            try:
+                monitor["connection"].close()
+            except Exception:
+                pass
 
 
 def _metadata_only_message_summary(sid: str, profile: str | None = None) -> dict:
@@ -11077,7 +11126,7 @@ def _session_requires_cli_metadata_lookup(session) -> bool:
 def _is_messaging_session_id(sid: str) -> bool:
     """Detect messaging-backed sessions from WebUI metadata or Agent rows."""
     try:
-        session = Session.load(sid)
+        session = Session.load_metadata_only(sid)
         if _is_messaging_session_record(session):
             return True
     except Exception:

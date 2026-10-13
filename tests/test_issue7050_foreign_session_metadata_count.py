@@ -2,6 +2,7 @@ import json
 import sqlite3
 import subprocess
 import textwrap
+import json
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -507,7 +508,7 @@ def test_foreign_summary_cache_hit_avoids_lineage_parsing(monkeypatch, tmp_path)
     assert routes._foreign_display_coordinate_summary(sid) == first
 
 
-def test_foreign_summary_cache_expires_same_aggregate_rewrite(monkeypatch, tmp_path):
+def test_foreign_summary_cache_tracks_same_aggregate_rewrite(monkeypatch, tmp_path):
     import api.routes as routes
 
     sid = _foreign_fixture(monkeypatch, tmp_path)
@@ -525,3 +526,122 @@ def test_foreign_summary_cache_expires_same_aggregate_rewrite(monkeypatch, tmp_p
     assert first["message_count"] == 4
     assert second["message_count"] == 5
     assert second["last_message_at"] == first["last_message_at"] == 1003.0
+
+
+def test_foreign_summary_cache_reuses_30_second_polls_and_tracks_sqlite_commits(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path)
+    db_path = (tmp_path / "state.db").resolve()
+    real_stat = Path.stat
+    stable_stat = real_stat(db_path)
+    monkeypatch.setattr(routes, "_foreign_display_coordinate_state_db_identity", lambda _profile: "unchanged-token")
+    monkeypatch.setattr(
+        Path,
+        "stat",
+        lambda path, *args, **kwargs: stable_stat if path.resolve() == db_path else real_stat(path, *args, **kwargs),
+    )
+    now = [100.0]
+    monkeypatch.setattr(routes.time, "monotonic", lambda: now[0])
+    reader_calls = []
+    real_reader = routes.get_state_db_session_messages
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda session_id, **kwargs: reader_calls.append(session_id) or real_reader(session_id, **kwargs),
+    )
+
+    first = routes._foreign_display_coordinate_summary(sid)
+    now[0] += 30.0
+    assert routes._foreign_display_coordinate_summary(sid) == first
+    assert reader_calls == [sid]
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE messages SET content = 'distinct' WHERE rowid = "
+            "(SELECT MAX(rowid) FROM messages WHERE content = 'hello')"
+        )
+        conn.commit()
+    updated = routes._foreign_display_coordinate_summary(sid)
+    assert updated["message_count"] == first["message_count"] + 1
+    assert reader_calls == [sid, sid]
+
+
+def test_foreign_metadata_read_preserves_a_concurrent_sidecar_append(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path)
+    sidecar_path = models.SESSION_DIR / f"{sid}.json"
+    data = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    duplicate_partial = {
+        "role": "assistant",
+        "content": "partial answer",
+        "timestamp": 1004.0,
+        "_partial": True,
+    }
+    data["messages"].extend([duplicate_partial, dict(duplicate_partial)])
+    sidecar_path.write_text(json.dumps(data), encoding="utf-8")
+    backup_path = sidecar_path.with_suffix(".json.bak")
+    backup_path.unlink(missing_ok=True)
+    appended = {"role": "assistant", "content": "saved during poll", "timestamp": 1005.0}
+    real_read_text = Path.read_text
+    injected = False
+
+    def append_after_snapshot(path, *args, **kwargs):
+        nonlocal injected
+        text = real_read_text(path, *args, **kwargs)
+        if path == sidecar_path and not injected:
+            injected = True
+            current = json.loads(text)
+            current["messages"].append(appended)
+            path.write_text(json.dumps(current), encoding="utf-8")
+        return text
+
+    monkeypatch.setattr(Path, "read_text", append_after_snapshot)
+    assert routes._foreign_display_coordinate_summary(sid) is not None
+    persisted = json.loads(real_read_text(sidecar_path, encoding="utf-8"))
+    assert appended in persisted["messages"]
+    assert not backup_path.exists()
+
+
+def test_foreign_metadata_merge_preserves_cancelled_cli_owner(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = "foreign_cancelled_owner_7050"
+    partial_text = "retained partial answer"
+    sidecar_messages = [
+        {"role": "user", "content": "cancel this turn", "timestamp": 1000.0},
+        {"role": "assistant", "content": partial_text, "timestamp": 1001.0, "_partial": True},
+        {"role": "assistant", "content": "Task cancelled: stopped", "timestamp": 1002.0, "_error": True},
+    ]
+    session = _install_test_session(monkeypatch, tmp_path, sid, sidecar_messages)
+    session.is_cli_session = True
+    session.source_tag = "tui"
+    session.raw_source = "tui"
+    session.session_source = "tui"
+    session.save(touch_updated_at=False)
+    monkeypatch.setattr(
+        routes,
+        "_lookup_cli_session_metadata",
+        lambda _sid: {"source_tag": "tui", "raw_source": "tui", "session_source": "tui", "is_cli_session": True},
+    )
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        sidecar_messages + [
+            {"role": "assistant", "content": "raw replay after cancellation", "timestamp": 1003.0},
+        ],
+    )
+    calls = []
+    real_reader = routes.get_state_db_session_messages
+    monkeypatch.setattr(
+        routes,
+        "get_state_db_session_messages",
+        lambda session_id, **kwargs: calls.append(kwargs.copy()) or real_reader(session_id, **kwargs),
+    )
+
+    summary = routes._foreign_display_coordinate_summary(sid)
+
+    assert summary["message_count"] == len(sidecar_messages)
+    assert calls[0]["include_row_identity"] is True
