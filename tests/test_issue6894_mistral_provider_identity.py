@@ -258,6 +258,28 @@ def test_mistral_alias_and_single_entry_provider_config(monkeypatch):
     ) == {}
 
 
+def test_legacy_first_provider_order_keeps_native_models_in_picker(monkeypatch, tmp_path):
+    _install_hermes_modules(monkeypatch)
+    cfg = {
+        "model": {"provider": "mistral", "default": "mistral-large-latest"},
+        "providers": {
+            "mistralai": {"api_key": "legacy-key", "models": {"legacy-model": {}}},
+            "mistral": {"api_key": "native-key", "models": {"native-model": {}, "native-2": {}}},
+        },
+    }
+    _configure_profile(monkeypatch, tmp_path, cfg)
+
+    catalog = config.get_available_models(force_refresh=True)
+    groups = [group for group in catalog["groups"] if group.get("provider_id") == "mistral"]
+    assert len(groups) == 1
+    model_ids = {
+        str(model.get("id") or "").removeprefix("@mistral:")
+        for model in groups[0]["models"]
+    }
+    assert {"native-model", "native-2"} <= model_ids
+    assert "legacy-model" not in model_ids
+
+
 @pytest.mark.parametrize("provider_key", ["mistralai", "MistralAI", "MISTRAL"])
 def test_mistral_config_adapters_keep_the_original_entry(monkeypatch, tmp_path, provider_key):
     _install_hermes_modules(monkeypatch)
