@@ -503,6 +503,8 @@ global._restoreMessageScrollSnapshotSameFrame=()=>{};
 global.scrollIfPinned=()=>{};
 global._moveLiveRunStatusToTurnEnd=()=>{};
 global._messageUserUnpinned=false;
+global._oldestIdx=0;
+global._messagesTruncated=false;
 global._syncTransparentEventControls=()=>{};
 global._syncToolCallGroupSummary=()=>{};
 global._captureWorklogDetailDisclosureState=()=>null;
@@ -630,6 +632,7 @@ const attachStart=messagesSrc.indexOf('function attachLiveStream(');
 const attachEnd=messagesSrc.indexOf('\nfunction transcript(){',attachStart);
 if(attachStart<0||attachEnd<0) throw new Error('attachLiveStream source boundary not found');
 eval(extractFunc(messagesSrc,'_dispatchExtensionTurnLifecycle'));
+eval(extractFunc(messagesSrc,'_applyEmbeddedTerminalSession'));
 eval(extractFunc(messagesSrc,'closeLiveStream'));
 eval(messagesSrc.slice(attachStart,attachEnd));
 attachLiveStream('sid-1','stream-1');
@@ -666,7 +669,7 @@ if(deferredFrames){
     }
   }
   function finalSession(reasoning=''){
-    return {session_id:'sid-1',messages:[{role:'user',content:'question'},{role:'assistant',content:'Final answer',reasoning}],active_stream_id:null};
+    return {session_id:'sid-1',messages:[{role:'user',content:'question'},{role:'assistant',content:'Final answer',reasoning}],active_stream_id:null,message_count:2,_messages_offset:0,_messages_truncated:false};
   }
   const lifecycle=process.env.ISSUE5720_LIFECYCLE_CASE;
   if(lifecycle){
