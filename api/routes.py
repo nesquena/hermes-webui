@@ -25396,11 +25396,18 @@ def _start_chat_stream_for_session(
     consumed_bg_task_completion = False
     # #7862 round 5: identify THIS start attempt so its rollback receipt is
     # claimed (and discarded) by exactly this call, never by a neighbouring
-    # attempt for the same session.
-    goal_continuation_attempt_id = uuid.uuid4().hex
+    # attempt for the same session. Generated lazily on first use so an
+    # ordinary turn never consumes the stream-id uuid budget.
+    goal_continuation_attempt_id: str | None = None
+
+    def _current_goal_continuation_attempt_id() -> str:
+        nonlocal goal_continuation_attempt_id
+        if goal_continuation_attempt_id is None:
+            goal_continuation_attempt_id = uuid.uuid4().hex
+        return goal_continuation_attempt_id
 
     def consume_continuation_markers() -> None:
-        nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
+        nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion, goal_continuation_attempt_id
         # #1932 / #7862: consume a pending goal continuation, but ONLY when
         # this turn actually IS the recorded continuation. The marker used
         # to be spent by session id alone, which was safe only while it
@@ -25446,6 +25453,7 @@ def _start_chat_stream_for_session(
                         s.session_id,
                         exc_info=True,
                     )
+            goal_continuation_attempt_id = _current_goal_continuation_attempt_id()
             try:
                 _consume_outcome = consume_pending_goal_continuation(
                     s.session_id,
@@ -25466,7 +25474,7 @@ def _start_chat_stream_for_session(
                     # registration callback or provider handshake can outlive
                     # the TTL while the attempt is still running.
                     reclaim_goal_continuation_receipt(
-                        s.session_id, goal_continuation_attempt_id
+                        s.session_id, _current_goal_continuation_attempt_id()
                     )
                 elif _consume_outcome == CONSUME_COMMIT_FAILED:
                     # #7862 round 8 (CORE): the turn IS the continuation, but the
@@ -25480,7 +25488,7 @@ def _start_chat_stream_for_session(
                         "continuation was matched but could not be durably "
                         "removed (attempt %s)",
                         s.session_id,
-                        goal_continuation_attempt_id,
+                        _current_goal_continuation_attempt_id(),
                     )
                     raise _GoalContinuationCommitFailed(session_id=s.session_id)
             except _GoalContinuationCommitFailed:
@@ -25506,7 +25514,7 @@ def _start_chat_stream_for_session(
         # newer intent armed in the meantime is never clobbered.
         if consumed_goal_continuation:
             receipt = pop_goal_continuation_rollback_receipt(
-                s.session_id, goal_continuation_attempt_id
+                s.session_id, _current_goal_continuation_attempt_id()
             )
             # #7862 round 10 (finding 3): fall back to the durable handoff when
             # the receipt is gone. The handoff is written in the same snapshot
@@ -25518,14 +25526,14 @@ def _start_chat_stream_for_session(
             # continuation.
             if receipt is None:
                 receipt = pop_goal_continuation_handoff(
-                    s.session_id, goal_continuation_attempt_id
+                    s.session_id, _current_goal_continuation_attempt_id()
                 )
                 if receipt is not None:
                     logger.info(
                         "Session %s: goal-continuation rollback fell back to the "
                         "durable handoff for attempt %s",
                         s.session_id,
-                        goal_continuation_attempt_id,
+                        _current_goal_continuation_attempt_id(),
                     )
             if receipt is not None:
                 restore_pending_goal_continuation(s.session_id, receipt)
@@ -25542,7 +25550,7 @@ def _start_chat_stream_for_session(
                 logger.warning(
                     "Session %s: goal-continuation rollback found no receipt for attempt %s after a store-backed consume",
                     s.session_id,
-                    goal_continuation_attempt_id,
+                    _current_goal_continuation_attempt_id(),
                     exc_info=True,
                 )
         if consumed_bg_task_completion:
@@ -25608,7 +25616,7 @@ def _start_chat_stream_for_session(
                         # attempt's receipt has no consumer -- same discard as
                         # the worker-thread start path.
                         discard_goal_continuation_rollback_receipt(
-                            s.session_id, goal_continuation_attempt_id
+                            s.session_id, _current_goal_continuation_attempt_id()
                         )
                         # #7862 round 7: the durable handoff is discharged by
                         # the same outcome, so a later cold restore cannot
@@ -25620,7 +25628,7 @@ def _start_chat_stream_for_session(
                         # launch, so a failed settlement stays reconcilable;
                         # report it instead of acknowledging a clean response.
                         _regen_handoff_settled = discard_goal_continuation_handoff(
-                            s.session_id, goal_continuation_attempt_id
+                            s.session_id, _current_goal_continuation_attempt_id()
                         )
                         if not _regen_handoff_settled:
                             logger.error(
@@ -25630,7 +25638,7 @@ def _start_chat_stream_for_session(
                                 "recovery will reconcile against the recorded "
                                 "stream identity",
                                 s.session_id,
-                                goal_continuation_attempt_id,
+                                _current_goal_continuation_attempt_id(),
                             )
                     return regeneration_response
                 stream_id = uuid.uuid4().hex
@@ -25752,7 +25760,7 @@ def _start_chat_stream_for_session(
                     # turn as pending intent. The handoff already IS the durable
                     # admission; the stream id is what says it LAUNCHED.
                     record_goal_continuation_stream(
-                        s.session_id, goal_continuation_attempt_id, stream_id
+                        s.session_id, _current_goal_continuation_attempt_id(), stream_id
                     )
                     thr.start()
                     # #7862 round 5: the launch SUCCEEDED, so this attempt can
@@ -25776,10 +25784,10 @@ def _start_chat_stream_for_session(
                     # because a restart before the next successful discharge
                     # leaves the reconciliation to that startup path.
                     _handoff_settled = discard_goal_continuation_handoff(
-                        s.session_id, goal_continuation_attempt_id
+                        s.session_id, _current_goal_continuation_attempt_id()
                     )
                     discard_goal_continuation_rollback_receipt(
-                        s.session_id, goal_continuation_attempt_id
+                        s.session_id, _current_goal_continuation_attempt_id()
                     )
                     if not _handoff_settled:
                         logger.error(
@@ -25788,7 +25796,7 @@ def _start_chat_stream_for_session(
                             "discharge did not commit; recovery will reconcile "
                             "against the recorded stream identity",
                             s.session_id,
-                            goal_continuation_attempt_id,
+                            _current_goal_continuation_attempt_id(),
                             stream_id,
                         )
                 except Exception as exc:
