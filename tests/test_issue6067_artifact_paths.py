@@ -13,6 +13,7 @@ from _layout_helpers import assert_layout_sane
 WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+MASTER_PATH_FIXTURE = ROOT / "tests" / "fixtures" / "issue6067_master_artifact_paths.json"
 EXPECT_VISIBLE = os.environ.get("ISSUE6067_EXPECT_VISIBLE", "1") != "0"
 HEADLESS = os.environ.get("ISSUE6067_HEADLESS", "1") != "0"
 SCREENSHOT_PATH = os.environ.get("ISSUE6067_SCREENSHOT_PATH")
@@ -30,6 +31,34 @@ ARTIFACT_CASES = [
     {"path": "/workspace/über/<unsafe>/routes/quote&.py", "source": "<source>&", "display": "über/<unsafe>/routes/quote&.py", "name": "quote&.py", "head": "über/<unsafe>/", "tail": "routes/"},
     {"path": "2026-07-20-quarterly-revenue-analysis-with-regional-breakdown-and-confidence-intervals/summary.json", "source": "", "display": "2026-07-20-quarterly-revenue-analysis-with-regional-breakdown-and-confidence-intervals/summary.json", "name": "summary.json", "head": "", "tail": "2026-07-20-quarterly-revenue-analysis-with-regional-breakdown-and-confidence-intervals/"},
 ]
+
+
+def test_artifact_path_opener_matches_frozen_master_baseline():
+    import json
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:  # pragma: no cover
+        pytest.skip("node not available")
+
+    fixture = json.loads(MASTER_PATH_FIXTURE.read_text(encoding="utf-8"))
+    normalizer = _function(WORKSPACE_JS, "_normalizeExplicitArtifactPath")
+    classifier = _function(WORKSPACE_JS, "_classifyArtifactPath")
+    script = f"""
+{normalizer}
+{classifier}
+const cases={json.dumps(fixture)};
+console.log(JSON.stringify(cases.map(item=>({{
+  displayPath:_classifyArtifactPath(item.path,item.workspace).displayPath,
+  openPath:_classifyArtifactPath(item.path,item.workspace).openPath
+}}))));
+"""
+    proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    actual = json.loads(proc.stdout)
+    assert [entry["openPath"] for entry in actual] == [entry["master_open"] for entry in fixture]
+    assert [entry["displayPath"] for entry in actual] == [entry["pr_display"] for entry in fixture]
 
 
 def _function(source, name):

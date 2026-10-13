@@ -269,7 +269,7 @@ def test_restore_settled_session_projects_through_production_path(browser, works
             "absoluteDisplayOnly": True,
             "opened": "reports/output.md",
             "api": [
-                "/api/session?session_id=session-a",
+                "/api/session?session_id=session-a&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1",
                 "/api/list?session_id=session-b&path=reports",
             ],
         }

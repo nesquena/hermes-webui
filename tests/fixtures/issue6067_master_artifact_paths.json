@@ -1,0 +1,16 @@
+[
+  {
+    "path": "src//users.py",
+    "workspace": "/workspace",
+    "master_display": "src/users.py",
+    "master_open": "src/users.py",
+    "pr_display": "src//users.py"
+  },
+  {
+    "path": "/workspace/dir/",
+    "workspace": "/workspace",
+    "master_display": "dir",
+    "master_open": "dir",
+    "pr_display": "dir/"
+  }
+]
