@@ -21305,7 +21305,7 @@ function autoResizeTextarea(ta) {
 
 function _lastUserMessageIndex(){
   const msgs=Array.isArray(S.messages)?S.messages:[];
-  for(let i=msgs.length-1;i>=0;i--){ if(msgs[i]&&msgs[i].role==='user') return i; }
+  for(let i=msgs.length-1;i>=0;i--){ if(msgs[i]&&msgs[i].role==='user'&&_messageIsRenderable(msgs[i])) return i; }
   return -1;
 }
 
@@ -21314,85 +21314,83 @@ async function submitEdit(msgIdx, newText) {
   if(!S.session || S.busy || _submitEditInFlight) return;
   _submitEditInFlight = true;
   try {
-  const initialSid = S.session.session_id;
-  const absoluteKeepCount = _oldestIdx + msgIdx;
-  const editedText = newText;
-  const sourceProfile = S.session.profile || S.activeProfile || 'default';
-  const sourceModel = S.session.model || '';
-  const sourceProvider = S.session.model_provider || '';
-  const sourceWorkspace = S.session.workspace || '';
-  // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
-  // initialSid — a non-default session model (vs profile default), which is
-  // inference-free and survives the failed send's marker consumption. See
-  // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
-  const _recoveryPick=_deliberateSessionModelPick(initialSid);
-  if(typeof _ensureAllMessagesLoaded==='function'){
-    await _ensureAllMessagesLoaded();
-  }
-  if(!S.session || S.session.session_id !== initialSid) return;
-  const lastUserIdx=_lastUserMessageIndex();
-  const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
-    ? _isBranchableReadOnlySession(S.session)
-    : false;
-  const lastUserKeepCount=lastUserIdx>=0 ? _oldestIdx+lastUserIdx : -1;
-  if(branchableReadOnlySession || (lastUserIdx>=0 && absoluteKeepCount!==lastUserKeepCount)){
-    const trailing=Math.max(0,(Array.isArray(S.messages)?S.messages.length:0)-absoluteKeepCount-1);
-    const ok=await showConfirmDialog({
-      title:t('edit_fork_title'),
-      message:t('edit_fork_message',trailing),
-      confirmLabel:t('edit_fork_confirm'),
-    });
-    if(!ok) return;
+    const initialSid = S.session.session_id;
+    const absoluteKeepCount = _oldestIdx + msgIdx;
+    const editedText = newText;
+    const sourceProfile = S.session.profile || S.activeProfile || 'default';
+    const sourceProvider = S.session.model_provider || '';
+    const sourceWorkspace = S.session.workspace || '';
+    // #5924: capture the deliberate-pick signal up front (pre-network), scoped to
+    // initialSid — a non-default session model (vs profile default), which is
+    // inference-free and survives the failed send's marker consumption. See
+    // _deliberateSessionModelPick. null → no re-arm → server resolution runs.
+    const _recoveryPick=_deliberateSessionModelPick(initialSid);
+    if(typeof _ensureAllMessagesLoaded==='function'){
+      await _ensureAllMessagesLoaded();
+    }
     if(!S.session || S.session.session_id !== initialSid) return;
-    try{
-      const data=await api('/api/session/branch',{method:'POST',body:JSON.stringify({
-        session_id:initialSid,
-        keep_count:absoluteKeepCount,
-      })});
+    const lastUserIdx=_lastUserMessageIndex();
+    const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
+      ? _isBranchableReadOnlySession(S.session)
+      : false;
+    const lastUserKeepCount=lastUserIdx>=0 ? _oldestIdx+lastUserIdx : -1;
+    if(branchableReadOnlySession || (lastUserIdx>=0 && absoluteKeepCount!==lastUserKeepCount)){
+      const trailing=Math.max(0,(Array.isArray(S.messages)?S.messages.length:0)-absoluteKeepCount-1);
+      const ok=await showConfirmDialog({
+        title:t('edit_fork_title'),
+        message:t('edit_fork_message',trailing),
+        confirmLabel:t('edit_fork_confirm'),
+      });
+      if(!ok) return;
       if(!S.session || S.session.session_id !== initialSid) return;
-      if(!data||!data.session_id) throw new Error('branch returned no session');
-      const childSid=data.session_id;
-      await loadSession(childSid);
-      if(!S.session || S.session.session_id !== childSid) return;
-      const childProfile=S.session.profile||sourceProfile;
-      const childModel=S.session.model||sourceModel;
-      const childProvider=S.session.model_provider||sourceProvider;
-      const childWorkspace=S.session.workspace||sourceWorkspace;
-      if(childProfile!==sourceProfile||childModel!==sourceModel||childProvider!==sourceProvider||childWorkspace!==sourceWorkspace){
-        setStatus(t('branch_failed')+'child session contract changed');
-        return;
-      }
-      if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
-      if(!S.session || S.session.session_id !== childSid) return;
-      if(typeof renderSessionList==='function') await renderSessionList();
-      if(!S.session || S.session.session_id!==childSid){ showToast(t('branch_forked'),3000); return; }
-      $('msg').value=editedText;
-      if(typeof autoResize==='function') autoResize();
-      _reArmRecoveryPick(childSid,_recoveryPick);
-      showToast(t('branch_forked'),3000);
+      try{
+        const data=await api('/api/session/branch',{method:'POST',body:JSON.stringify({
+          session_id:initialSid,
+          keep_count:absoluteKeepCount,
+        })});
+        if(!S.session || S.session.session_id !== initialSid) return;
+        if(!data||!data.session_id) throw new Error('branch returned no session');
+        const childSid=data.session_id;
+        await loadSession(childSid);
+        if(!S.session || S.session.session_id !== childSid) return;
+        $('msg').value=editedText;
+        if(typeof autoResize==='function') autoResize();
+        const childProfile=S.session.profile||sourceProfile;
+        const childProvider=S.session.model_provider||sourceProvider;
+        const childWorkspace=S.session.workspace||sourceWorkspace;
+        if(childProfile!==sourceProfile||childProvider!==sourceProvider||childWorkspace!==sourceWorkspace){
+          setStatus(t('branch_failed')+'child session contract changed');
+          return;
+        }
+        if(typeof _ensureAllMessagesLoaded==='function') await _ensureAllMessagesLoaded();
+        if(!S.session || S.session.session_id !== childSid) return;
+        if(typeof renderSessionList==='function') await renderSessionList();
+        if(!S.session || S.session.session_id!==childSid){ showToast(t('branch_forked'),3000); return; }
+        _reArmRecoveryPick(childSid,_recoveryPick);
+        showToast(t('branch_forked'),3000);
+        await send();
+      }catch(e){ setStatus(t('branch_failed')+(e&&e.message||e)); }
+      return;
+    }
+    try {
+      await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
+        session_id: initialSid,
+        keep_count: absoluteKeepCount
+      })});
+      // #5924 SILENT-race guard: a session switch during the truncate await must not
+      // let this recovery apply session A's intent (truncate/re-arm/send) to the
+      // newly-visible session.
+      if(!S.session || S.session.session_id !== initialSid) return;
+      S.messages = S.messages.slice(0, absoluteKeepCount);
+      renderMessages();
+      $('msg').value = editedText;
+      // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
+      // Re-arm the single-shot explicit-pick marker from the captured non-default
+      // pick — only if still safe at fire time (session unchanged, current model
+      // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
+      _reArmRecoveryPick(initialSid, _recoveryPick);
       await send();
-    }catch(e){ setStatus(t('branch_failed')+(e&&e.message||e)); }
-    return;
-  }
-  try {
-    await api('/api/session/truncate', {method:'POST', body:JSON.stringify({
-      session_id: initialSid,
-      keep_count: absoluteKeepCount
-    })});
-    // #5924 SILENT-race guard: a session switch during the truncate await must not
-    // let this recovery apply session A's intent (truncate/re-arm/send) to the
-    // newly-visible session.
-    if(!S.session || S.session.session_id !== initialSid) return;
-    S.messages = S.messages.slice(0, absoluteKeepCount);
-    renderMessages();
-    $('msg').value = editedText;
-    // #5924 (Facet 1 + Facet 4): edit-resubmit is a recovery send. Re-arm the
-    // Re-arm the single-shot explicit-pick marker from the captured non-default
-    // pick — only if still safe at fire time (session unchanged, current model
-    // still matches, no newer onchange marker to clobber). See _reArmRecoveryPick.
-    _reArmRecoveryPick(initialSid, _recoveryPick);
-    await send();
-  } catch(e) { setStatus(t('edit_failed') + e.message); }
+    } catch(e) { setStatus(t('edit_failed') + e.message); }
   } finally {
     _submitEditInFlight = false;
   }

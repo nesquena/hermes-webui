@@ -47,13 +47,22 @@ def _function_source(source, signature):
 def _run_node(scenario):
     source = UI.read_text(encoding="utf-8")
     script = f"""
+{_function_source(source, "function msgContent")}
+{_function_source(source, "function _isRecoveryControlMessageText")}
+{_function_source(source, "function _isRecoveryControlMessage(m)")}
+{_function_source(source, "function _messageIsRenderable")}
+const _isContextCompactionMessage = () => false;
+const _isPreservedCompressionTaskListMessage = () => false;
+const _messageHasReasoningPayload = () => false;
+const _assistantMessageHasVisibleContent = () => false;
 {_function_source(source, "function _lastUserMessageIndex")}
+let _submitEditInFlight = false;
 {_function_source(source, "async function submitEdit")}
 const scenario = {json.dumps(scenario)};
 const calls = [];
 let confirmResult = scenario.confirm !== false;
 let activeSid = 'source';
-const S = {{session: {{session_id: 'source', profile:'default', model:'m', model_provider:'p', workspace:'/w', read_only:!!scenario.readOnly}}, messages: scenario.messages, busy:false, activeProfile:'default'}};
+const S = {{session: {{session_id: 'source', profile:'default', model:'m', model_provider:'p', workspace:'/w', read_only:!!scenario.readOnly}}, messages: scenario.messages.map(m => ({{content:"visible", ...m}})), busy:false, activeProfile:'default'}};
 let _oldestIdx = scenario.oldest || 0;
 const _deliberateSessionModelPick = () => null;
 const _isBranchableReadOnlySession = (session) => !!session.read_only && !!scenario.branchable;
@@ -61,7 +70,7 @@ const _reArmRecoveryPick = (...args) => calls.push(['rearm', ...args]);
 const _ensureAllMessagesLoaded = async () => {{ if(scenario.resetOldest) _oldestIdx = 0; }};
 const showConfirmDialog = async () => {{ calls.push(['confirm']); return confirmResult; }};
 const api = async (url, options) => {{ calls.push([url, JSON.parse(options.body)]); if(url.includes('/branch')) {{ if(scenario.branchFailure) throw new Error('branch unavailable'); if(scenario.switchAfterBranch) S.session={{session_id:'other'}}; return {{session_id:'child'}}; }} return {{}}; }};
-const loadSession = async (sid) => {{ calls.push(['load', sid]); S.session = scenario.contractMismatch ? {{session_id:sid, profile:'other', model:'m', model_provider:'p', workspace:'/w'}} : {{session_id:sid, profile:'default', model:'m', model_provider:'p', workspace:'/w'}}; activeSid=sid; }};
+const loadSession = async (sid) => {{ calls.push(['load', sid]); S.session = scenario.contractMismatch ? {{session_id:sid, profile:'other', model:'m', model_provider:'p', workspace:'/w'}} : {{session_id:sid, profile:'default', model:'m', model_provider:'p', workspace:'/w'}}; if(scenario.modelDrift) S.session.model='normalized-model'; activeSid=sid; }};
 const renderSessionList = async () => calls.push(['render-list']);
 const renderMessages = () => calls.push(['render']);
 const send = async () => calls.push(['send', S.session.session_id]);
@@ -69,8 +78,9 @@ const showToast = (...args) => calls.push(['toast', ...args]);
 const setStatus = (...args) => calls.push(['status', ...args]);
 const autoResize = () => calls.push(['resize']);
 const t = (key, value) => key + (value === undefined ? '' : ':' + value);
-const $ = () => ({{value:''}});
-(async () => {{ await submitEdit(scenario.index, 'edited'); console.log(JSON.stringify({{calls, session:S.session.session_id}})); }})();
+const composer = {{value:''}};
+const $ = () => composer;
+(async () => {{ if(scenario.concurrent) await Promise.all([submitEdit(scenario.index, 'edited'), submitEdit(scenario.index, 'edited')]); else await submitEdit(scenario.index, 'edited'); console.log(JSON.stringify({{calls, session:S.session.session_id, draft:composer.value}})); }})();
 """
     result = subprocess.run(
         ["node", "--input-type=module", "-e", script],
@@ -88,8 +98,8 @@ def test_older_edit_forks_without_truncating_and_sends_once():
         "confirm",
         "/api/session/branch",
         "load",
-        "render-list",
         "resize",
+        "render-list",
         "rearm",
         "toast",
         "send",
@@ -157,6 +167,8 @@ def test_child_contract_mismatch_aborts_before_send():
         {"index": 0, "contractMismatch": True, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]}
     )
     assert [call[0] for call in result["calls"]][-1] == "status"
+    assert result["draft"] == "edited"
+    assert [call[0] for call in result["calls"]][-2] == "resize"
     assert "contract changed" in result["calls"][-1][1]
     assert "send" not in [call[0] for call in result["calls"]]
 
@@ -190,3 +202,23 @@ def test_empty_branch_is_persisted_for_first_prompt_edit():
     branch_block = branch_block[: branch_block.index('if parsed.path == "/api/session/compress/start"')]
     assert "branch.save()" in branch_block
     assert "if forked_messages:" not in branch_block
+
+
+def test_model_display_drift_keeps_edit_and_sends_in_child():
+    result = _run_node({"index": 0, "modelDrift": True, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]})
+    assert result["draft"] == "edited"
+    assert [call for call in result["calls"] if call[0] == "send"] == [["send", "child"]]
+    assert "status" not in [call[0] for call in result["calls"]]
+
+
+def test_hidden_trailing_user_rows_keep_latest_visible_edit_on_truncate_path():
+    for hidden in ({"role": "user", "content": ""}, {"role": "user", "recovery_control": True}, {"role": "user", "content": "The live worker stopped before this run finished."}):
+        result = _run_node({"index": 0, "messages": [{"role": "user"}, {"role": "assistant"}, hidden]})
+        assert result["calls"][0] == ["/api/session/truncate", {"session_id": "source", "keep_count": 0}]
+        assert [call for call in result["calls"] if call[0] == "send"] == [["send", "source"]]
+
+
+def test_concurrent_older_edit_creates_one_child_and_sends_once():
+    result = _run_node({"index": 0, "concurrent": True, "messages": [{"role": "user"}, {"role": "assistant"}, {"role": "user"}]})
+    assert [call[0] for call in result["calls"]].count("/api/session/branch") == 1
+    assert [call for call in result["calls"] if call[0] == "send"] == [["send", "child"]]
