@@ -892,7 +892,7 @@ def test_git_branch_icon_exists():
         "git-branch icon should be defined in LI_PATHS"
 
 
-@pytest.mark.parametrize("draft_text", [None, "edited prompt"])
+@pytest.mark.parametrize("draft_text", [None, "edited prompt", "x" * 50001], ids=["none", "short", "long"])
 def test_branch_route_persists_child_draft_without_changing_parent(monkeypatch, tmp_path, draft_text):
     import api.models as models
 
@@ -925,7 +925,7 @@ def test_branch_route_persists_child_draft_without_changing_parent(monkeypatch, 
         routes.SESSIONS.pop(child_sid, None)
 
 
-@pytest.mark.parametrize("draft_text", [{"text": "invalid"}, "x" * 50001], ids=["invalid-type", "oversized"])
+@pytest.mark.parametrize("draft_text", [{"text": "invalid"}], ids=["invalid-type"])
 def test_branch_route_rejects_invalid_draft_before_creation(monkeypatch, draft_text):
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: {"session_id": "source-draft", "draft_text": draft_text})

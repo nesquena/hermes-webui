@@ -17598,8 +17598,6 @@ def handle_post(handler, parsed) -> bool:
         draft_text = body.get("draft_text")
         if draft_text is not None and not isinstance(draft_text, str):
             return bad(handler, "draft_text must be a string")
-        if isinstance(draft_text, str) and len(draft_text) > 50_000:
-            return bad(handler, "draft_text must be at most 50000 characters")
         source = _load_branch_source_or_refuse(handler, body["session_id"])
         if source is None:
             return True
