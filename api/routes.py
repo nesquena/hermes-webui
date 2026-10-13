@@ -9223,6 +9223,22 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
 
 
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
+    """Sidebar-window metadata for a session id, with an exact-id fallback.
+
+    ``get_cli_sessions()`` is a bounded, recency-ordered sidebar projection, so a
+    sidecar-less Hermes Desktop/TUI/CLI conversation that has aged out of the
+    window (``CLI_VISIBLE_SESSION_LIMIT``, 20 by default) was indistinguishable
+    from an unknown id: GET /api/session answered 404 and rename/move/archive/
+    delete answered "Session not found" for a session that was still in
+    ``state.db`` (#8061).
+
+    A window miss therefore falls through to a profile-scoped single-row read by
+    exact id (``get_cli_session_metadata_by_id``). The sidebar stays bounded —
+    the fallback is one indexed primary-key fetch, not a wider scan — and the
+    caller's ownership, tombstone and foreign-source gates still decide
+    visibility. Every session-scoped caller uses this helper, so GET and the
+    mutation paths resolve the same way.
+    """
     if not session_id:
         return {}
     try:
@@ -9230,8 +9246,14 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
             if row.get("session_id") == session_id:
                 return row
     except Exception:
+        logger.debug("Sidebar CLI session lookup failed for %s", session_id, exc_info=True)
+    # Window miss: the row can still exist. Resolve it by exact id instead of
+    # reporting a 404/not-found for a session that is present in state.db.
+    try:
+        return get_cli_session_metadata_by_id(session_id, all_profiles=all_profiles) or {}
+    except Exception:
+        logger.debug("Exact-id CLI session fallback failed for %s", session_id, exc_info=True)
         return {}
-    return {}
 
 
 def _session_index_marks_was_webui(sid: str) -> bool:
@@ -11780,6 +11802,7 @@ from api.models import (
     import_cli_session,
     CLAUDE_CODE_SOURCE,
     get_cli_sessions,
+    get_cli_session_metadata_by_id,
     get_cli_session_messages,
     get_state_db_session_messages,
     get_state_db_session_message_prefix_summary,

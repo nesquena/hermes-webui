@@ -681,6 +681,111 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
     return projected
 
 
+def read_agent_session_row_by_id(db_path: Path, session_id: str, *, log=None) -> dict:
+    """Read exactly ONE agent session row by id, in the sidebar's row shape.
+
+    ``read_importable_agent_session_rows()`` is a *windowed* projection: it caps
+    its candidates at ``limit`` (the sidebar's ``CLI_VISIBLE_SESSION_LIMIT`` —
+    20 by default, clamped to 200) and then layers lineage/subagent/visibility
+    projection on top. An id can therefore be missing from its result while the
+    row itself still exists, which callers read as "this session does not
+    exist" (#8061).
+
+    This is the exact-id counterpart: the same column set and the same source
+    normalization, but narrowed to ``WHERE s.id = ? LIMIT 1`` with no window, no
+    recency ordering and no visibility filtering. Callers stay responsible for
+    the ownership, tombstone and read-only gates — this reader answers only
+    whether the row is there. Cost is one indexed primary-key fetch plus the
+    row's own message aggregate, so it is bounded regardless of history size.
+
+    Returns ``{}`` when the id is absent, the DB/table is missing, or the read
+    fails: like the windowed reader, this bridge never raises.
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return {}
+    try:
+        if not db_path.exists():
+            return {}
+    except OSError:
+        return {}
+    try:
+        with closing(open_state_db_readonly(db_path, log)) as conn:
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(sessions)")
+            session_cols = {str(r[1]) for r in cur.fetchall()}
+            if "id" not in session_cols:
+                return {}
+            row_columns = (
+                "title",
+                "model",
+                "message_count",
+                "started_at",
+                "source",
+                "session_source",
+                "model_config",
+                "user_id",
+                "chat_id",
+                "chat_type",
+                "thread_id",
+                "session_key",
+                "origin_chat_id",
+                "origin_user_id",
+                "platform",
+                "project_id",
+                "parent_session_id",
+                "ended_at",
+                "end_reason",
+                "archived",
+            )
+            select_cols = ", ".join(
+                _optional_col(name, session_cols, "0" if name == "message_count" else "NULL")
+                for name in row_columns
+            )
+            cur.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'messages'"
+            )
+            message_cols: set[str] = set()
+            if cur.fetchone() is not None:
+                cur.execute("PRAGMA table_info(messages)")
+                message_cols = {str(r[1]) for r in cur.fetchall()}
+            actual_count_expr = "NULL"
+            last_activity_expr = "NULL"
+            if "session_id" in message_cols:
+                actual_count_expr = (
+                    "(SELECT COUNT(*) FROM messages m WHERE m.session_id = s.id)"
+                )
+                if "timestamp" in message_cols:
+                    last_activity_expr = (
+                        "(SELECT MAX(m.timestamp) FROM messages m WHERE m.session_id = s.id)"
+                    )
+            cur.execute(
+                f"""
+                SELECT s.id, {select_cols},
+                       {actual_count_expr} AS actual_message_count,
+                       {last_activity_expr} AS last_activity
+                FROM sessions s
+                WHERE s.id = ?
+                LIMIT 1
+                """,
+                (sid,),
+            )
+            raw = cur.fetchone()
+            if raw is None:
+                return {}
+            row = dict(raw)
+    except (OSError, sqlite3.Error) as exc:
+        if log is not None:
+            log.debug("Exact-id agent session read failed for %s: %s", sid, exc)
+        return {}
+    except Exception:
+        return {}
+    row["id"] = sid
+    row["source"] = str(row.get("source") or "").strip().lower() or "cli"
+    return _with_normalized_source(row)
+
+
 def read_importable_agent_session_rows(
     db_path: Path,
     limit: int | None = 200,
