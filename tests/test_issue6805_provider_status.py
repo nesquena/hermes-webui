@@ -3,6 +3,10 @@
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+import subprocess
+import sys
 import threading
 import time
 
@@ -433,72 +437,73 @@ def test_fetch_timeout_is_fail_soft(monkeypatch):
     assert status._fetch("https://status.example/feed")[0] == {}
 
 
-def test_fetch_process_main_reports_result(monkeypatch):
-    expected = ({"openai": {"slug": "openai", "status": "operational", "checkedAt": "now"}}, 60, None)
-    monkeypatch.setattr(status, "_fetch_once", lambda url: expected)
-    seen = []
-
-    class ResultQueue:
-        def put(self, value):
-            seen.append(value)
-
-    status._fetch_process_main("https://status.example/feed", ResultQueue())
-    assert seen == [("ok", expected)]
-
-
-def test_fetch_killable_owns_successful_process_lifecycle(monkeypatch):
-    expected = ({"openai": {"slug": "openai", "status": "operational", "checkedAt": "now"}}, 60, None)
-    calls = []
-
-    class ResultQueue:
-        def get(self, timeout):
-            calls.append(("get", timeout))
-            return ("ok", expected)
-        def close(self): calls.append(("close",))
-        def join_thread(self): calls.append(("join_thread",))
-
-    class Process:
-        def start(self): calls.append(("start",))
-        def is_alive(self): return False
-        def join(self, timeout=None): calls.append(("join", timeout))
-        def terminate(self): calls.append(("terminate",))
-
-    class Context:
-        def Queue(self, maxsize): return ResultQueue()
-        def Process(self, target, args):
-            calls.append(("process", target, args))
-            return Process()
-
-    monkeypatch.setattr(status.multiprocessing, "get_context", lambda name: Context())
-    assert status._fetch_killable("https://status.example/feed") == expected
-    assert ("start",) in calls
-    assert ("close",) in calls
-    assert ("join_thread",) in calls
-
-
 def test_fetch_killable_terminates_timed_out_process(monkeypatch):
     calls = []
 
-    class ResultQueue:
-        def get(self, timeout): raise status.queue.Empty()
-        def close(self): calls.append(("close",))
-        def join_thread(self): calls.append(("join_thread",))
-
     class Process:
-        def start(self): calls.append(("start",))
-        def is_alive(self): return True
-        def join(self, timeout=None): calls.append(("join", timeout))
-        def terminate(self): calls.append(("terminate",))
+        returncode = None
+        def communicate(self, timeout=None):
+            calls.append(("communicate", timeout))
+            if timeout is None:
+                return "", ""
+            raise status.subprocess.TimeoutExpired("worker", timeout)
+        def kill(self): calls.append(("kill",))
+        def poll(self): return None
 
-    class Context:
-        def Queue(self, maxsize): return ResultQueue()
-        def Process(self, target, args): return Process()
-
-    monkeypatch.setattr(status.multiprocessing, "get_context", lambda name: Context())
+    monkeypatch.setattr(status.subprocess, "Popen", lambda *args, **kwargs: Process())
     assert status._fetch_killable("https://status.example/feed") == ({}, status.MIN_CACHE_TTL, None)
-    assert ("terminate",) in calls
-    assert ("close",) in calls
-    assert ("join_thread",) in calls
+    assert calls[0][0] == "communicate"
+    assert 0 < calls[0][1] <= status.FETCH_TIMEOUT_SECONDS
+    assert calls.count(("kill",)) == 1
+
+
+def test_server_entrypoint_uses_standalone_provider_status_worker(tmp_path):
+    body = json.dumps(_payload()).encode()
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    entrypoint = tmp_path / "server.py"
+    repo_root = Path(status.__file__).resolve().parent.parent
+    entrypoint.write_text(
+        "import json, sys\n"
+        f"sys.path.insert(0, {str(repo_root)!r})\n"
+        "from api.provider_status import _fetch_killable\n"
+        "rows, ttl, deadline = _fetch_killable(sys.argv[1])\n"
+        "print(json.dumps({'rows': rows, 'ttl': ttl, 'deadline': deadline.isoformat() if deadline else None}))\n",
+        encoding="utf-8",
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, str(entrypoint), f"http://127.0.0.1:{server.server_port}/status"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    rows, ttl, freshness_deadline = payload["rows"], payload["ttl"], payload["deadline"]
+    assert rows["openai"]["status"] == "operational"
+    assert ttl == status.DEFAULT_SUCCESS_TTL
+    assert freshness_deadline is not None
 
 
 def test_slow_drip_body_hits_wall_clock_deadline_and_releases_waiters(monkeypatch):

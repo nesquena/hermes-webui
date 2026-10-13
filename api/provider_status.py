@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import email.utils
 import json
-import multiprocessing
 import os
-import queue
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -174,7 +174,11 @@ def _read_body(response: Any, *, deadline: float) -> bytes:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("provider status response exceeded wall-clock deadline")
-        sock.settimeout(remaining)
+        if sock is not None:
+            try:
+                sock.settimeout(remaining)
+            except OSError:
+                sock = None
         chunk = response.read(min(8192, MAX_BODY_BYTES + 1 - size))
         if not chunk:
             return b"".join(chunks)
@@ -220,45 +224,39 @@ def _fetch(url: str) -> tuple[dict[str, dict[str, str]], int, datetime | None]:
     return result[0] if result else ({}, MIN_CACHE_TTL, None)
 
 
-def _fetch_process_main(url: str, result_queue) -> None:
-    try:
-        result_queue.put(("ok", _fetch_once(url)))
-    except BaseException as exc:
-        result_queue.put(("error", str(exc)))
-
-
 def _fetch_killable(url: str) -> tuple[dict[str, dict[str, str]], int, datetime | None]:
     """Run the real network fetch in a process that can be terminated."""
-    ctx = multiprocessing.get_context("spawn")
-    result_queue = ctx.Queue(maxsize=1)
-    process = ctx.Process(target=_fetch_process_main, args=(url, result_queue))
-    started = False
+    deadline = time.monotonic() + FETCH_TIMEOUT_SECONDS
+    process: subprocess.Popen[str] | None = None
     try:
-        process.start()
-        started = True
-        try:
-            status, *payload = result_queue.get(timeout=FETCH_TIMEOUT_SECONDS)
-        except queue.Empty:
-            if process.is_alive():
-                process.terminate()
-            process.join(timeout=FETCH_TIMEOUT_SECONDS)
+        process = subprocess.Popen(
+            [sys.executable, "-m", "api.provider_status_worker", url],
+            cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        stdout, _ = process.communicate(timeout=max(0, deadline - time.monotonic()))
+        if process.returncode != 0 or not stdout:
             return {}, MIN_CACHE_TTL, None
-        process.join(timeout=FETCH_TIMEOUT_SECONDS)
-        if process.is_alive():
-            process.terminate()
-            process.join(timeout=FETCH_TIMEOUT_SECONDS)
-        if status != "ok" or not payload:
+        payload = json.loads(stdout)
+        rows = payload.get("rows")
+        ttl = payload.get("ttl")
+        raw_deadline = payload.get("freshness_deadline")
+        if not isinstance(rows, dict) or not isinstance(ttl, int):
             return {}, MIN_CACHE_TTL, None
-        return payload[0]
-    except BaseException:
-        if started and process.is_alive():
-            process.terminate()
-        if started:
-            process.join(timeout=FETCH_TIMEOUT_SECONDS)
+        freshness_deadline = datetime.fromisoformat(raw_deadline) if raw_deadline else None
+        return rows, ttl, freshness_deadline
+    except subprocess.TimeoutExpired:
+        if process is not None:
+            process.kill()
+            process.communicate()
         return {}, MIN_CACHE_TTL, None
-    finally:
-        result_queue.close()
-        result_queue.join_thread()
+    except Exception:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.communicate()
+        return {}, MIN_CACHE_TTL, None
 
 
 _ORIGINAL_FETCH = _fetch
