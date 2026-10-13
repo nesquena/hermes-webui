@@ -2,6 +2,7 @@ import json
 import sqlite3
 import subprocess
 import textwrap
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 from pathlib import Path
 
@@ -538,7 +539,7 @@ def test_foreign_summary_cache_reuses_30_second_polls_and_tracks_sqlite_commits(
     monkeypatch.setattr(
         Path,
         "stat",
-        lambda path, *args, **kwargs: stable_stat if path.resolve() == db_path else real_stat(path, *args, **kwargs),
+        lambda path, *args, **kwargs: stable_stat if path == db_path else real_stat(path, *args, **kwargs),
     )
     now = [100.0]
     monkeypatch.setattr(routes.time, "monotonic", lambda: now[0])
@@ -564,6 +565,21 @@ def test_foreign_summary_cache_reuses_30_second_polls_and_tracks_sqlite_commits(
     updated = routes._foreign_display_coordinate_summary(sid)
     assert updated["message_count"] == first["message_count"] + 1
     assert reader_calls == [sid, sid]
+
+
+def test_foreign_summary_revision_monitor_is_safe_across_request_threads(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    _foreign_fixture(monkeypatch, tmp_path)
+    first = routes._foreign_display_coordinate_state_db_revision(None)
+    assert first is not None
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        second = executor.submit(
+            routes._foreign_display_coordinate_state_db_revision, None
+        ).result()
+
+    assert second == first
 
 
 def test_foreign_metadata_read_preserves_a_concurrent_sidecar_append(monkeypatch, tmp_path):
