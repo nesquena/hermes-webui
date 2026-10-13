@@ -91,7 +91,9 @@ def open_state_db_readonly(db_path: Path, log: logging.Logger | None = None) -> 
 
 MESSAGING_SOURCES = {
     'discord',
+    'dingtalk',
     'email',
+    'feishu',
     'wecom',
     'wecom_callback',
     'slack',
@@ -128,8 +130,10 @@ SOURCE_LABELS = {
     'api_server': 'API',
     'cli': 'CLI',
     'cron': 'Cron',
+    'dingtalk': 'DingTalk',
     'discord': 'Discord',
     'email': 'Email',
+    'feishu': 'Feishu',
     'kanban': 'Kanban',
     'wecom': 'WeCom',
     'wecom_callback': 'WeCom Callback',

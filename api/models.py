@@ -1499,6 +1499,7 @@ class Session:
                  transcript_generation: int=0,
                  transcript_generation_baseline: int=0,
                  gateway_routing=None, gateway_routing_history=None,
+                 last_used_model=None,
                  llm_title_generated: bool=False,
                  manual_title: bool=False,
                 parent_session_id: str=None,
@@ -1610,6 +1611,7 @@ class Session:
         )
         self.gateway_routing = gateway_routing if isinstance(gateway_routing, dict) else None
         self.gateway_routing_history = gateway_routing_history if isinstance(gateway_routing_history, list) else []
+        self.last_used_model = str(last_used_model).strip()[:240] if last_used_model else None
         self.llm_title_generated = bool(llm_title_generated)
         self.manual_title = bool(manual_title)
         self.parent_session_id = parent_session_id
@@ -1708,7 +1710,7 @@ class Session:
             'intentional_shrink_generation',
             'transcript_generation',
             'transcript_generation_baseline',
-            'gateway_routing', 'gateway_routing_history', 'llm_title_generated', 'manual_title',
+            'gateway_routing', 'gateway_routing_history', 'last_used_model', 'llm_title_generated', 'manual_title',
             'parent_session_id',
             'worktree_path', 'worktree_branch', 'worktree_repo_root', 'worktree_created_at',
             'is_cli_session', 'source_tag', 'raw_source', 'session_source', 'source_label', 'read_only',
@@ -2213,6 +2215,7 @@ class Session:
             'recommended_recovery_action': self.recommended_recovery_action,
             'gateway_routing': self.gateway_routing,
             'gateway_routing_history': self.gateway_routing_history,
+            'last_used_model': self.last_used_model,
             'manual_title': self.manual_title,
             # Only emit 'parent_session_id' when set (the /branch fork link, #1342).
             # Sessions without a fork must not leak None — see test_session_lineage_metadata_api.
@@ -6441,6 +6444,35 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping messages)."""
     return _resolve_session(sid, metadata_only=metadata_only)
+
+
+def get_session_profile_readonly(sid):
+    """Read ownership without repairing sidecars or publishing/promoting cache entries."""
+    if not is_safe_session_id(sid):
+        raise KeyError(sid)
+    with LOCK:
+        cached = SESSIONS.get(sid)
+        if cached is not None and str(getattr(cached, 'session_id', '') or '') == sid:
+            profile = getattr(cached, 'profile', None)
+            if profile is not None and not isinstance(profile, str):
+                raise ValueError('Invalid session profile')
+            return profile
+    path = SESSION_DIR / f'{sid}.json'
+    try:
+        prefix = _read_metadata_json_prefix(path)
+        data = json.loads(prefix) if prefix else None
+        # Legacy layouts may put profile after messages/scenes. Read the JSON
+        # directly: Session.load() can collapse partials and save a shrink backup.
+        if not isinstance(data, dict) or 'profile' not in data:
+            data = json.loads(path.read_bytes())
+    except FileNotFoundError:
+        raise KeyError(sid) from None
+    if not isinstance(data, dict) or data.get('session_id') != sid:
+        raise ValueError('Invalid session ownership metadata')
+    profile = data.get('profile')
+    if profile is not None and not isinstance(profile, str):
+        raise ValueError('Invalid session profile')
+    return profile
 
 
 _COMPRESSION_RECOVERY_PROFILE_UNSET = object()

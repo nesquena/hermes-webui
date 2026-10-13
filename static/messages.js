@@ -2094,11 +2094,12 @@ function _shouldForceCompletionNotification(sid, streamId){
   return wasHidden||wasBackgrounded;
 }
 
-function closeLiveStream(sessionId, streamId, source){
+function closeLiveStream(sessionId, streamId, source, reconnecting=false){
   const live=LIVE_STREAMS[sessionId];
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
+  if(typeof live.dispose==='function') live.dispose(reconnecting);
   if(typeof live.cancelIdleRecovery==='function') live.cancelIdleRecovery();
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
   // per-event snapshot (snapshotLiveTurn) only fires on content/tool_complete
@@ -2463,7 +2464,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _persistTimer=setTimeout(()=>{_persistTimer=null;persistInflightState();},2000);
   }
   function _closeSource(source){
-    closeLiveStream(activeSid, streamId, source);
+    // Transport recovery reuses this attachment's accumulators and handlers.
+    closeLiveStream(activeSid, streamId, source, true);
   }
   function _clearStreamEndRecovery(){
     if(_streamEndRecoveryTimer){
@@ -2566,6 +2568,22 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     };
     if(typeof updateThinking==='function') updateThinking(text, opts);
     else appendThinking(text, opts);
+  }
+  function _flushPendingReasoningRender(){
+    if(!_reasoningRenderPending) return;
+    _reasoningRenderPending=false;
+    const text=String(liveReasoningText||'').trim();
+    if(!text) return;
+    const active=_isActiveSession()&&S.activeStreamId===streamId;
+    const opts={deferRender:_streamFinalized||!active};
+    if(!_upsertAnchorReasoning(text, opts)&&!opts.deferRender){
+      _updateLiveThinkingCard(text,{
+        ...opts,
+        anchorRenderFallback:true,
+        sessionId:activeSid,
+        streamId,
+      });
+    }
   }
   // Split a content string into {reasoning, content} by extracting any <think>...
   // blocks (or other known reasoning-tag pairs). If reasoning is already
@@ -2750,6 +2768,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // settled the DOM — which was causing the thinking card to reappear below
   // the final answer or the response to render twice.
   let _streamFinalized=false;
+  let _reasoningRenderPending=false;
   let _pendingRafHandle=null;
   let _streamFadeVisibleText='';
   let _streamFadeLastTickMs=0;
@@ -2820,6 +2839,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   // Applying an event and painting it are separate outcomes. Reasoning uses the
   // optional holder to decide whether a temporary visible fallback is needed.
   function _applyToAnchor(sourceEventType, rawEventData, sseEvent, renderOutcome, options={}){
+    if(sourceEventType!=='reasoning') _flushPendingReasoningRender();
     if(renderOutcome&&typeof renderOutcome==='object') renderOutcome.rendered=false;
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return null;
     const raw=(rawEventData&&typeof rawEventData==='object')?rawEventData:{};
@@ -3630,7 +3650,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const tool=row.tool&&typeof row.tool==='object'?row.tool:{};
       return `tool:${row.tool_call_id||tool.id||tool.tid||tool.tool_call_id||tool.tool_use_id||tool.call_id||row.row_id||''}`;
     }
-    if(row.role==='prose'||row.role==='thinking') return `${row.role}:${_anchorSceneTextKey(row.text)}`;
+    if(row.role==='prose'||row.role==='thinking'){
+      const identity=row.identity&&typeof row.identity==='object'?row.identity:{};
+      const durableId=row.local_id||row.row_id||row.event_id||identity.local_id||identity.row_id||identity.event_id;
+      if(durableId) return `${row.role}:id:${durableId}`;
+      return `${row.role}:${_anchorSceneTextKey(row.text)}`;
+    }
     return `${row.role||row.kind}:${row.source_event_type||''}:${row.status||''}:${row.row_id||''}`;
   }
   function _anchorSceneRowHasLiveIdentity(row){
@@ -3743,18 +3768,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const seen=new Set();
     const seenTextKeys=[];
     const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];
-    const orderedRows=[];
-    for(const row of projectedRows){
-      if(row&&row.role==='terminal') continue;
-      orderedRows.push(row);
-    }
-    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
-      const bucket=messageRows.get(idx)||[];
-      for(const row of bucket) orderedRows.push(row);
-    }
-    for(const row of projectedRows){
-      if(row&&row.role==='terminal') orderedRows.push(row);
-    }
+    // ── provenance-aware projection mirror tracking ────────────
+    // (allocated below, after the final-answer guards are defined, so slots
+    // are reserved only by projected rows that survive running-row
+    // settlement, final-answer filtering, and same-ID coalescing)
     // #5758 gap: final-segment eligibility must be judged against the LIVE
     // projection's own chronology. The settled per-message tool rows appended
     // into orderedRows above re-list tools that ran EARLIER in the turn, so an
@@ -3770,7 +3787,86 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(idx>lastProjectedToolIndex&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')) finalSegmentLiveProseRows.add(row);
     });
     const rowIsLiveTokenFinalPrefix=(row,textKey,finalSegmentEligible)=>finalSegmentEligible&&row&&row.role==='prose'&&row.kind==='process_prose'&&String(row.source_event_type||'')==='token'&&String(row.local_id||'').startsWith('live-prose:')&&textKey&&finalKey&&textKey.length<finalKey.length&&finalKey.startsWith(textKey);
-    const pushRow=(row)=>{
+    // ── provenance-aware projection mirror tracking ────────────
+    // Mirror slots are allocated ONLY from projected rows that survive
+    // running-row settlement (_anchorSceneSettleLiveRunningRow), the
+    // final-answer guards, and same-ID coalescing. A projected running
+    // thinking row that is discarded because settled thinking replaced it
+    // must not reserve a mirror slot, or its settled replacement would be
+    // consumed as a mirror and the thinking would disappear entirely.
+    // Mirror capacity is keyed by ROLE + normalized text, never by text alone:
+    // a projected PROSE row and a settled THINKING row can carry the same
+    // normalized text (the content-parts path emits prose and thinking
+    // independently and does not reject cross-role text equality). Keyed by
+    // text alone, a surviving projected prose row reserved a slot that an
+    // EARLIER settled thinking row of the same text then consumed, so the
+    // settled thinking disappeared and the real settled prose survived as a
+    // duplicate.
+    const _mirrorSlotKey=(role,textKey)=>`${String(role||'').toLowerCase()}\u0000${textKey}`;
+    const projectedMirrorSlots={};
+    const _idToLatestSlot={};
+    for(const row of projectedRows){
+      if(!row||row.role==='terminal'||(row.role!=='prose'&&row.role!=='thinking')) continue;
+      // Running rows discarded by settlement (e.g. projected running thinking
+      // with a settled-thinking replacement) allocate no slot.
+      const settledRow=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
+      if(!settledRow||typeof settledRow!=='object') continue;
+      const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
+      const textKey=_anchorSceneTextKey(settledRow.text);
+      if(!textKey) continue;
+      // Rows dropped by the final-answer guards allocate no slot either.
+      if(rowIsLiveTokenFinalPrefix(settledRow,textKey,finalSegmentEligible)) continue;
+      if(_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) continue;
+      const key=_anchorSceneExistingRowKey(settledRow)||'__no_key__';
+      const slotKey=_mirrorSlotKey(settledRow.role,textKey);
+      const prevSlot=_idToLatestSlot[key];
+      if(prevSlot){
+        if(prevSlot!==slotKey){
+          // Same identity re-appeared under a different role/text key: move its
+          // single slot to the latest key instead of allocating a second one.
+          projectedMirrorSlots[prevSlot]=(projectedMirrorSlots[prevSlot]||1)-1;
+          if(projectedMirrorSlots[prevSlot]<=0) delete projectedMirrorSlots[prevSlot];
+          _idToLatestSlot[key]=slotKey;
+          projectedMirrorSlots[slotKey]=(projectedMirrorSlots[slotKey]||0)+1;
+        }
+        // Same key + same role/text: the identity already holds one slot; do not
+        // double-count repeated snapshots of the same identity.
+      }else{
+        _idToLatestSlot[key]=slotKey;
+        projectedMirrorSlots[slotKey]=(projectedMirrorSlots[slotKey]||0)+1;
+      }
+    }
+    const _projectedSlotKeys=Object.keys(projectedMirrorSlots);
+    // ── end provenance tracking ────────────────────────────────
+    const _consumeMirror=(role,textKey)=>{
+      if(!role||!textKey) return false;
+      const slotKey=_mirrorSlotKey(role,textKey);
+      if(!projectedMirrorSlots[slotKey]) return false;
+      if(projectedMirrorSlots[slotKey]<=0) return false;
+      projectedMirrorSlots[slotKey]-=1;
+      return true;
+    };
+    const _tryNearOverlapMirror=(role,textKey)=>{
+      if(!role||!textKey||textKey.length<80) return false;
+      const selfKey=_mirrorSlotKey(role,textKey);
+      const rolePrefix=`${String(role||'').toLowerCase()}\u0000`;
+      for(const slotKey of _projectedSlotKeys){
+        // Near-overlap capacity is role-scoped too: a thinking write-up that
+        // happens to contain a projected prose prefix is a different identity
+        // class and must not be consumed by the prose mirror.
+        if(slotKey===selfKey||slotKey.indexOf(rolePrefix)!==0) continue;
+        const pk=slotKey.slice(rolePrefix.length);
+        if(!pk||pk.length<80) continue;
+        if(pk.includes(textKey)||textKey.includes(pk)){
+          if(projectedMirrorSlots[slotKey]>0){
+            projectedMirrorSlots[slotKey]-=1;
+            return true;
+          }
+        }
+      }
+      return false;
+    };
+    const pushRow=(row,origin)=>{
       if(!row||typeof row!=='object') return;
       const finalSegmentEligible=finalSegmentLiveProseRows.has(row);
       row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);
@@ -3779,11 +3875,36 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(rowIsLiveTokenFinalPrefix(row,textKey,finalSegmentEligible)) return;
       const isTextual=row.role==='prose'||row.role==='thinking';
       if(isTextual&&_anchorSceneRowLooksLikeFinalAnswer(textKey,finalKey)) return;
-      if(isTextual&&_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
       const key=_anchorSceneExistingRowKey(row);
-      if(key&&seen.has(key)) return;
+      // ── same-identity enrichment: keep latest/richest value ──
+      if(key&&seen.has(key)){
+        const existingIdx=rows.findIndex(r=>_anchorSceneExistingRowKey(r)===key);
+        if(isTextual&&existingIdx>=0){
+          rows[existingIdx]={...rows[existingIdx],...row,display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode)};
+        }
+        return;
+      }
       if(key) seen.add(key);
-      if(isTextual&&textKey) seenTextKeys.push(textKey);
+      // ── provenance-aware mirror consumption (settled rows) ───
+      if(origin==='settled'&&isTextual&&textKey){
+        if(_consumeMirror(row.role,textKey)) return;
+        // Fallback: near-overlap mirror matching for >=80 char texts
+        if(_tryNearOverlapMirror(row.role,textKey)) return;
+      }
+      // ── legacy text-only dedup ────────────────────────────────────
+      // Exact-text dedup applies only to rows without a durable ID
+      // (rows with IDs are already deduped by _anchorSceneExistingRowKey).
+      // Long-text ≥80 near-overlap protection applies unconditionally.
+      if(isTextual&&textKey){
+        const hasDurableId=!!(row.local_id||row.row_id||row.event_id||(row.identity&&(row.identity.local_id||row.identity.row_id||row.identity.event_id)));
+        if(!hasDurableId){
+          if(_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+          seenTextKeys.push(textKey);
+        }else if(textKey.length>=80){
+          // For rows that carry a durable ID, only the >=80 char near-overlap leg applies
+          if(_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)) return;
+        }
+      }
       rows.push({
         ...row,
         display_hint:_anchorSceneRowDisplayHintForMode(row,sceneMode),
@@ -3791,7 +3912,20 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         seq:rows.length,
       });
     };
-    orderedRows.forEach((row)=>pushRow(row));
+    // Phase 1: projected non-terminal rows
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') continue;
+      pushRow(row,'projected');
+    }
+    // Phase 2: settled/backfill rows (from per-message buckets)
+    for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1){
+      const bucket=messageRows.get(idx)||[];
+      for(const row of bucket) pushRow(row,'settled');
+    }
+    // Phase 3: projected terminal rows
+    for(const row of projectedRows){
+      if(row&&row.role==='terminal') pushRow(row,'projected');
+    }
     const scene={
       ...base,
       version:'activity_scene_v1',
@@ -4168,6 +4302,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         status:options.sealed?'completed':'running',
         payload:{text:clean,activitySegmentSeq:segmentSeq,activityBurstId:_currentActivityBurstId},
       });
+      if(options.deferRender) return replaced;
       return _renderAnchorLiveScene()?replaced:null;
     }
     const renderOutcome={rendered:false};
@@ -4178,8 +4313,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       status:options.sealed?'completed':'running',
       activitySegmentSeq:segmentSeq,
       activityBurstId:_currentActivityBurstId,
-    },null,renderOutcome);
-    return renderOutcome.rendered?_findAnchorActivityEventByLocalId(localId,'reasoning'):null;
+    },null,renderOutcome,{render:!options.deferRender});
+    return (renderOutcome.rendered||options.deferRender)?_findAnchorActivityEventByLocalId(localId,'reasoning'):null;
   }
   function _compactVisibleEchoText(value){
     return String(value||'').replace(/\s+/g,'');
@@ -4270,6 +4405,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return removed||anchorRemoved||domRemoved;
   }
   function _flushReasoningToAnchor(){
+    _flushPendingReasoningRender();
     if(_anchorReasoningFlushed||!reasoningText) return;
     _anchorReasoningFlushed=true;
     if(_anchorHasReasoningEvents()) return;
@@ -4326,18 +4462,43 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _hydrateAnchorRegistryFromActivityScene(scene){
     if(!_anchorRegistry||!_anchorApi||typeof _anchorApi.applyAssistantTurnAnchorSourceEvent!=='function') return false;
-    if(!scene||scene.version!=='activity_scene_v1'||!Array.isArray(scene.activity_rows)||!scene.activity_rows.length) return false;
+    if(!scene||scene.version!=='activity_scene_v1') return false;
+    const rows=Array.isArray(scene.activity_rows)?scene.activity_rows:[];
+    const sideEffects=Array.isArray(scene.side_effects)?scene.side_effects:[];
+    if(!rows.length&&!sideEffects.length) return false;
     const sceneIdentity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
     const sceneStreamId=sceneIdentity.stream_id||streamId;
     const sceneRunId=sceneIdentity.run_id||sceneStreamId;
-    const sceneKey=[
+    const outcomeKey=(items)=>items.map((item,index)=>{
+      if(!item||typeof item!=='object') return `invalid:${index}`;
+      const source=String(item.source_event_type||'');
+      const eventId=String(item.event_id||'');
+      const seq=(item.seq===undefined||item.seq===null)?'':String(item.seq);
+      return [source,eventId,seq].join('@');
+    }).join('|');
+    const sceneKey=JSON.stringify([
       sceneRunId||'',
       sceneStreamId||'',
-      scene.activity_rows.length,
-      scene.activity_rows.map(row=>row&&row.row_id||row&&row.local_id||'').join('|'),
-    ].join(':');
+      rows.map(row=>row&&row.row_id||row&&row.local_id||''),
+      outcomeKey(sideEffects),
+    ]);
     if(_anchorRegistry._hydrated_activity_scene_key===sceneKey) return true;
-    const rows=scene.activity_rows;
+    const applySourceEvent=(sourceEvent)=>{
+      try{
+        _anchorApi.applyAssistantTurnAnchorSourceEvent(
+          _anchorRegistry,
+          sourceEvent,
+          {session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId}
+        );
+        return true;
+      }catch(err){
+        if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
+          _anchorShadowWarned=true;
+          console.warn('assistant turn anchor snapshot hydration failed',err);
+        }
+        return false;
+      }
+    };
     for(let i=0;i<rows.length;i+=1){
       const row=rows[i];
       if(!row||typeof row!=='object') continue;
@@ -4376,16 +4537,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // (payload may not carry created_at even when the row does). (#5739 gate.)
         created_at:payload.created_at??row.created_at??undefined,
       };
-      try{
-        _anchorApi.applyAssistantTurnAnchorSourceEvent(_anchorRegistry,sourceEvent,{session_id:activeSid,stream_id:sceneStreamId,run_id:sceneRunId});
-      }catch(err){
-        if(!_anchorShadowWarned&&typeof console!=='undefined'&&console.warn){
-          _anchorShadowWarned=true;
-          console.warn('assistant turn anchor snapshot hydration failed',err);
-        }
-        return false;
-      }
+      if(!applySourceEvent(sourceEvent)) return false;
     }
+    const applyOwnedOutcomes=(items,expectedSource,offset)=>{
+      for(let i=0;i<items.length;i+=1){
+        const outcome=items[i];
+        if(!outcome||typeof outcome!=='object') continue;
+        const sourceType=String(outcome.source_event_type||expectedSource).trim();
+        if(sourceType!==expectedSource) continue;
+        const payload=(outcome.payload&&typeof outcome.payload==='object')
+          ? {...outcome.payload}
+          : {};
+        const sourceEvent={
+          ...outcome,
+          payload,
+          source_event_type:sourceType,
+          local_id:outcome.local_id||`snapshot-outcome:${sceneStreamId}:${offset+i}`,
+          event_id:outcome.event_id||null,
+          seq:outcome.seq??undefined,
+          session_id:outcome.session_id||activeSid,
+          stream_id:outcome.stream_id||sceneStreamId,
+          run_id:outcome.run_id||sceneRunId,
+          created_at:outcome.created_at??undefined,
+        };
+        if(!applySourceEvent(sourceEvent)) return false;
+      }
+      return true;
+    };
+    if(!applyOwnedOutcomes(sideEffects,'state_saved',rows.length)) return false;
     _anchorRegistry._hydrated_activity_scene_key=sceneKey;
     return true;
   }
@@ -4450,6 +4629,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     return _extractInlineThinkingFromContent(_stripXmlToolCalls(assistantText), liveReasoningText, {streaming:true});
   }
   function _renderLiveThinking(parsed){
+    if(_reasoningRenderPending){_flushPendingReasoningRender();return;}
     if(window._showThinking===false){removeThinking();return;}
     const text=(parsed&&parsed.thinkingText)||'';
     if(text||(parsed&&parsed.inThinking)){
@@ -4654,6 +4834,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     _streamFadeSilentPrefixChars=0;
   }
   function _cancelAnimationFramePendingStreamRender(){
+    _flushPendingReasoningRender();
     if(_pendingRafHandle===null) return;
     cancelAnimationFrame(_pendingRafHandle);
     clearTimeout(_pendingRafHandle);
@@ -5187,13 +5368,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(/[:;]["\x27)\]]*$/.test(trimmed)) return 30;
     return 0;
   }
-  function _streamFadeNextText(targetText){
+  function _streamFadeNextText(targetText, revealAll=false){
     targetText=String(targetText||'');
     const now=performance.now();
     if(!targetText){
       const hadVisible=!!_streamFadeVisibleText;
       _resetStreamFadeState();
       return {text:'', caughtUp:true, changed:hadVisible};
+    }
+    if(revealAll){
+      // Synchronous flush (transport recovery): show the whole backlog now and
+      // move the playout cursor to the end, so the next fade frame continues
+      // from the painted text instead of rewinding to the last revealed word.
+      const changed=_streamFadeVisibleText!==targetText;
+      _streamFadeVisibleText=targetText;
+      _streamFadeVisibleWords=_streamFadeWordCountOf(targetText);
+      _streamFadeWordCarry=0;
+      _streamFadeHoldUntilMs=0;
+      return {text:targetText, caughtUp:true, changed};
     }
     if(!_streamFadeVisibleText||!targetText.startsWith(_streamFadeVisibleText)){
       // Markdown/tool stripping can rewrite the visible prefix. Shrink the
@@ -5296,9 +5488,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(_streamFadeVisibleText.length>targetText.length) _streamFadeVisibleText=targetText;
     return {text:_streamFadeVisibleText,caughtUp:_streamFadeVisibleText===targetText,changed:true};
   }
-  function _renderStreamingFadeMarkdown(displayText){
+  function _renderStreamingFadeMarkdown(displayText, revealAll=false){
     if(!assistantBody) return true;
-    const next=_streamFadeNextText(displayText);
+    const next=_streamFadeNextText(displayText, revealAll);
     if(!next.changed) return next.caughtUp;
     assistantBody.classList.add('stream-fade-active');
     if(!_shouldUseTransparentStreamFade()){
@@ -5373,6 +5565,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     step();
   }
   function _flushPendingSegmentRender(options={}){
+    _flushPendingReasoningRender();
     const force=!!(options&&options.force);
     const skipAnchorProcessProse=!!(options&&options.skipAnchorProcessProse);
     if(!assistantBody||(!force&&!_renderPending)) return;
@@ -5384,6 +5577,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     const displayText=segmentStart===0
       ? _parseStreamState().displayText
       : _stripXmlToolCalls(assistantText.slice(segmentStart));
+    if(!force&&_shouldUseLiveProseFade()){
+      // Transport recovery keeps this segment open. Paint through the fade
+      // renderer so its playout cursor and DOM stay consistent; the plain smd
+      // path below would be rewound by the next fade frame.
+      _renderStreamingFadeMarkdown(displayText,true);
+      const fadeText=_streamFadeDomText||displayText;
+      if(!skipAnchorProcessProse) _upsertAnchorProcessProse(fadeText);
+      if(typeof _syncLiveWorklogReasonsForAnchor==='function') _syncLiveWorklogReasonsForAnchor(assistantRow, fadeText);
+      return;
+    }
     if(_smdParser){
       _smdWrite(displayText);
     } else if(window.smd){
@@ -5725,9 +5928,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _renderPending=false;
       // Guard: a pending setTimeout+rAF can outlive stream finalization.
       if(_streamFinalized) return;
-      // #6449: guard — the frontend session changed between rAF schedule and execution.
-      // Writing DOM into this stream's assistantBody would leak text into the wrong pane.
-      if(!_isActiveSession()) return;
+      if(!_isActiveSession()||S.activeStreamId!==streamId){
+        _flushPendingReasoningRender();
+        return;
+      }
       // Mobile scroll-jank guard: temporarily disable overflow-anchor before DOM
       // writes to suppress Chromium scroll re-anchoring during streaming growth.
       if(typeof window._fixMobileScrollJank==='function') window._fixMobileScrollJank();
@@ -5777,7 +5981,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     if(sinceLastMs>=frameIntervalMs){
       _pendingRafHandle=requestAnimationFrame(_doRender);
     } else {
-      _pendingRafHandle=setTimeout(()=>requestAnimationFrame(_doRender), frameIntervalMs-sinceLastMs);
+      _pendingRafHandle=setTimeout(()=>{_pendingRafHandle=requestAnimationFrame(_doRender);}, frameIntervalMs-sinceLastMs);
     }
   }
 
@@ -5869,10 +6073,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _wireSSE(source){
     const existingLive=LIVE_STREAMS[activeSid];
     if(existingLive&&existingLive.source&&existingLive.source!==source){
+      if(typeof existingLive.dispose==='function') existingLive.dispose(true);
       if(typeof existingLive.cancelIdleRecovery==='function') existingLive.cancelIdleRecovery();
       try{if(existingLive.source.readyState!==2)existingLive.source.close();}catch(_){ }
     }
-    LIVE_STREAMS[activeSid]={streamId,source};
+    LIVE_STREAMS[activeSid]={streamId,source,dispose:(reconnecting=false)=>{
+      if(reconnecting) _flushPendingSegmentRender();
+      else _streamFinalized=true;
+      _cancelAnimationFramePendingStreamRender();
+    }};
     _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
 
     // Note on #631 Bug B: the original PR description stated the server
@@ -5924,6 +6133,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         return;
       }
       if(reasoningEcho) _stripLiveReasoningEcho(visible);
+      _flushPendingReasoningRender();
       liveReasoningText='';
       if(alreadyStreamed){
         if(!S.session||S.session.session_id!==activeSid){
@@ -6007,16 +6217,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       if(d.text&&S.session&&S.session.session_id===activeSid) _completeAutomaticCompressionOnLiveProgress(activeSid);
       syncInflightAssistantMessage();
       if(text&&S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId){
-        const liveThinkingText=_liveThinkingText();
-        const anchorReasoningFallback={};
-        if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){
-          _updateLiveThinkingCard(liveThinkingText,{
-            ...anchorReasoningFallback,
-            anchorRenderFallback:true,
-            sessionId:activeSid,
-            streamId,
-          });
-        }
+        // Replay can deliver hundreds of growing reasoning chunks at once.
+        _reasoningRenderPending=true;
+        _scheduleRender();
       }
     });
 
@@ -6162,11 +6365,28 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _showPersistentStateToast(d.kind, d.name||'', {created:String(d.action||'').toLowerCase()==='created'});
     });
 
+    // Stream-local titles survive the delayed done/fade rebind after compression.
+    const _pendingTitleUpdates=new Map();
+    const _pendingTitleExpectedCurrent=new Map();
     source.addEventListener('title',e=>{
       let d={};
       try{ d=JSON.parse(e.data||'{}'); }catch(_){}
-      if((d.session_id||activeSid)!==activeSid) return;
-      applySessionTitleUpdate(activeSid, d.title);
+      // Accept either the title TARGET session or the stream OWNER session:
+      // after an A→B compression rotation a reattached listener runs with
+      // activeSid=B, and the server keys this event on the title target (B)
+      // while a mid-stream listener that captured the pre-rotation activeSid=A
+      // must still receive it. Matching either id rejects only genuinely
+      // foreign streams (#7318 re-gate).
+      if((d.session_id||activeSid)!==activeSid && d.stream_owner_session_id!==activeSid) return;
+      const targetSid=d.target_session_id||d.session_id||activeSid;
+      _pendingTitleUpdates.set(targetSid, d.title);
+      _pendingTitleExpectedCurrent.set(targetSid, d.expectedCurrent);
+      // Pass the server-declared previous title as expectedCurrent: after a
+      // compression rotation or SSE reattach, the open session's title is the
+      // malformed persisted value and nothing is remembered provisionally, so
+      // a bare listener-style call would be refused and the recovered title
+      // would only appear after a full reload (#7318 re-gate).
+      applySessionTitleUpdate(targetSid, d.title, {expectedCurrent:d.expectedCurrent});
     });
 
     source.addEventListener('title_status',e=>{
@@ -6366,6 +6586,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           const _prevCacheRead=(S.session&&S.session.cache_read_tokens)||0;
           const _prevCacheWrite=(S.session&&S.session.cache_write_tokens)||0;
           S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          if(_pendingTitleUpdates.has(completedSid)){
+            applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
+            _pendingTitleUpdates.delete(completedSid);
+            _pendingTitleExpectedCurrent.delete(completedSid);
+          }
           // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
           if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           S.messages=_filterRecoveryControlMessages(S.messages || []);

@@ -434,10 +434,11 @@ async function _manualTitleRegenerateTimeoutMs(){
 function _formatSessionModelWithGateway(s){
   if(!s||!s.model)return'';
   const routing=(typeof _latestGatewayRoutingForSession==='function')?_latestGatewayRoutingForSession(s):(s.gateway_routing||null);
+  const fallbackModel=s.last_used_model||s.model;
   if(typeof _formatGatewayModelLabel==='function'){
-    return _formatGatewayModelLabel(s.model,s.model,routing)||getModelLabel(s.model);
+    return _formatGatewayModelLabel(fallbackModel,getModelLabel(fallbackModel),routing)||getModelLabel(fallbackModel);
   }
-  return s.model;
+  return fallbackModel;
 }
 
 function _getSessionViewedCounts() {
@@ -1609,7 +1610,13 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const anchorActivityScene=(snapshot.anchor_activity_scene&&snapshot.anchor_activity_scene.version==='activity_scene_v1')
     ? snapshot.anchor_activity_scene
     : ((snapshot.anchorActivityScene&&snapshot.anchorActivityScene.version==='activity_scene_v1')?snapshot.anchorActivityScene:null);
-  const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
+  const hasAnchorActivityScene=!!(
+    anchorActivityScene&&(
+      (Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length)
+      || (Array.isArray(anchorActivityScene.side_effects)&&anchorActivityScene.side_effects.length)
+      || anchorActivityScene.side_effects_truncated===true
+    )
+  );
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
     streamId:String(snapshot.stream_id||snapshot.streamId||''),
@@ -1629,6 +1636,34 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
     activityBurstAnchors,
   };
+}
+
+function _notifyRunJournalSideEffectRecoveryTruncation(inflight, sid, activeStreamId){
+  const scene=inflight&&inflight.anchorActivityScene;
+  if(!scene||scene.version!=='activity_scene_v1'||scene.side_effects_truncated!==true) return false;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const sceneStreamId=String(identity.stream_id||inflight.streamId||'').trim();
+  const requestedStreamId=String(activeStreamId||'').trim();
+  if(requestedStreamId&&sceneStreamId&&sceneStreamId!==requestedStreamId) return false;
+  const sessionId=String(sid||identity.session_id||'').trim();
+  if(!sessionId||!sceneStreamId||typeof showToast!=='function') return false;
+  const cursor=String(inflight.lastRunJournalEventId||inflight.lastRunJournalSeq||'').trim();
+  const key=[sessionId,sceneStreamId,cursor].join('|');
+  const root=(typeof window!=='undefined')?window:globalThis;
+  const notified=root._runJournalSideEffectRecoveryTruncationNotified
+    || (root._runJournalSideEffectRecoveryTruncationNotified=new Set());
+  if(notified.has(key)) return false;
+  if(notified.size>=128){
+    const first=notified.values().next();
+    if(first&&!first.done) notified.delete(first.value);
+  }
+  notified.add(key);
+  showToast(
+    'Some saved-state updates could not be fully restored after reconnect.',
+    7000,
+    'warning'
+  );
+  return true;
 }
 
 function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
@@ -2099,6 +2134,13 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    // #7865: New Chat replaces S.session without going through loadSession(),
+    // so drop the previous session's explicit-picker evidence here (placed
+    // AFTER the provider fallback assignment on purpose — see the note in
+    // _pickerExplicitPickKey about not disturbing the newSession source-shape
+    // window). The marker must never authorize a provider override for a
+    // different (new) session.
+    if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(S.session.session_id);
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
@@ -2345,6 +2387,22 @@ async function loadSession(sid){
   // triggered compression.
   if(typeof clearCompressionUi==='function') clearCompressionUi();
   else window._compressionUi=null;
+  // #7865: drop the explicit-picker evidence for the session being left. The
+  // marker authorizes _modelProviderForSend to let the dropdown override the
+  // loaded session's provider, so it must never outlive the session it was
+  // written for: a restored session's provider comes from the session itself,
+  // and a stale pick from the previous session would hijack it when the
+  // catalog repaint leaves another provider's identically-valued option
+  // selected (the restore syncs the topbar before the catalog refresh).
+  if(currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(currentSid);
+  // #7865: also drop the marker for the session being LOADED, not just the one
+  // being left. The marker lives in sessionStorage, so it survives a page
+  // reload: on a fresh boot S.session is null, so currentSid above is null and
+  // nothing is cleared for the session the boot is restoring. A stale pick
+  // would then survive into the restored session and let the dropdown override
+  // the provider the session itself holds. Clearing the target sid covers both
+  // the fresh-boot restore and the A->B->A round trip.
+  if(sid&&sid!==currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(sid);
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
@@ -2380,6 +2438,13 @@ async function loadSession(sid){
     }
   }
   const _keepStaleUntilLoaded = !!opts.keepStaleUntilLoaded && sameSessionForceReload;
+  // #7865: a force-reload (external refresh / state.db change / boot restore of
+  // the SAME session) is also a session load. Clear this session's explicit
+  // picker evidence so the reloaded session's own provider stays authoritative:
+  // the catalog repaint after a restore can leave another provider's
+  // identically-valued option selected, and a surviving pick would let that
+  // option hijack the provider the session record holds.
+  if(sameSessionForceReload&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(sid);
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we
@@ -2720,8 +2785,12 @@ async function loadSession(sid){
     : null;
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
-  if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
-  else if(hadLiveRecoveryInflight&&activeStreamId){
+  if(liveRecoveryInflight){
+    INFLIGHT[sid]=liveRecoveryInflight;
+    _notifyRunJournalSideEffectRecoveryTruncation(
+      liveRecoveryInflight,sid,activeStreamId
+    );
+  }else if(hadLiveRecoveryInflight&&activeStreamId){
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
@@ -3036,7 +3105,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix', 'signal']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix', 'signal', 'feishu', 'dingtalk']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -3047,6 +3116,8 @@ const _MESSAGING_SOURCE_LABELS = {
   wecom_callback: 'WeCom Callback',
   matrix: 'Matrix',
   signal: 'Signal',
+  feishu: 'Feishu',
+  dingtalk: 'DingTalk',
 };
 
 function _isMessagingSession(session) {
@@ -5193,7 +5264,7 @@ function _renderBatchActionBar(){
   // Move
   const moveBtn=document.createElement('button');moveBtn.className='batch-action-btn';
   moveBtn.textContent=t('session_batch_move');
-  moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker();};bar.appendChild(moveBtn);
+  moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker(moveBtn);};bar.appendChild(moveBtn);
   // Delete
   const deleteBtn=document.createElement('button');deleteBtn.className='batch-action-btn batch-action-btn-danger';
   deleteBtn.textContent=t('session_batch_delete');
@@ -5235,19 +5306,19 @@ function _renderBatchActionBar(){
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
-function _showBatchProjectPicker(){
+function _showBatchProjectPicker(openerEl){
   const ids=[..._selectedSessions];if(!ids.length)return;
   const bar=$('batchActionBar');if(!bar)return;
   bar.querySelectorAll('.batch-project-picker').forEach(p=>p.remove());
   const picker=document.createElement('div');picker.className='project-picker batch-project-picker';
-  const none=document.createElement('div');none.className='project-picker-item';none.textContent='No project';
+  const none=_projectPickerItem();none.textContent=t('project_picker_none');
   none.onclick=async()=>{picker.remove();
     try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:null})})));
       showToast('Removed from project');exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Move failed: '+(e.message||e));}
   };picker.appendChild(none);
   for(const p of(_allProjects||[])){
-    const item=document.createElement('div');item.className='project-picker-item';
+    const item=_projectPickerItem();
     if(p.color){const dot=document.createElement('span');dot.className='color-dot';
       dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';item.appendChild(dot);}
     const name=document.createElement('span');name.textContent=p.name;item.appendChild(name);
@@ -5260,6 +5331,13 @@ function _showBatchProjectPicker(){
   bar.appendChild(picker);
   const close=(e)=>{if(!picker.contains(e.target)){picker.remove();document.removeEventListener('click',close);}};
   setTimeout(()=>document.addEventListener('click',close),0);
+  // Escape closes the picker and hands focus back to the Move button (#8044).
+  picker.setAttribute('aria-label',t('session_batch_move'));
+  _wireProjectPickerKeys(picker,()=>{
+    picker.remove();document.removeEventListener('click',close);
+    _focusSessionActionMenuRestoreTarget(openerEl);
+  });
+  _focusProjectPickerItem(picker);
 }
 
 function _focusSessionActionMenuRestoreTarget(target){
@@ -8801,7 +8879,7 @@ function renderSessionListFromCache(){
     // "All" chip
     const allChip=document.createElement('span');
     allChip.className='project-chip'+(!_activeProject?' active':'');
-    allChip.textContent='All';
+    allChip.textContent=t('project_chip_all');
     allChip.onclick=()=>{_setActiveProjectFilter(null);};
     bar.appendChild(allChip);
     // "Unassigned" chip — only when there are sessions with no project to
@@ -8810,8 +8888,8 @@ function renderSessionListFromCache(){
     if(hasUnprojected){
       const noneChip=document.createElement('span');
       noneChip.className='project-chip no-project'+(_activeProject===NO_PROJECT_FILTER?' active':'');
-      noneChip.textContent='Unassigned';
-      noneChip.title='Show conversations not yet assigned to a project';
+      noneChip.textContent=t('project_chip_unassigned');
+      noneChip.title=t('project_chip_unassigned_title');
       noneChip.onclick=()=>{_setActiveProjectFilter(NO_PROJECT_FILTER);};
       bar.appendChild(noneChip);
     }
@@ -10330,9 +10408,8 @@ function _showProjectPicker(session, anchorEl){
   const picker=document.createElement('div');
   picker.className='project-picker';
   // "No project" option
-  const none=document.createElement('div');
-  none.className='project-picker-item'+(!session.project_id?' active':'');
-  none.textContent='No project';
+  const none=_projectPickerItem('',!session.project_id);
+  none.textContent=t('project_picker_none');
   none.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
@@ -10368,8 +10445,7 @@ function _showProjectPicker(session, anchorEl){
   };
   for(const p of _allProjects){
     if (_profileHidesProject(p.profile)) continue;
-    const item=document.createElement('div');
-    item.className='project-picker-item'+(session.project_id===p.project_id?' active':'');
+    const item=_projectPickerItem('',session.project_id===p.project_id);
     if(p.color){
       const dot=document.createElement('span');
       dot.className='color-dot';
@@ -10394,9 +10470,8 @@ function _showProjectPicker(session, anchorEl){
     picker.appendChild(item);
   }
   // "+ New project" shortcut at the bottom
-  const createItem=document.createElement('div');
-  createItem.className='project-picker-item project-picker-create';
-  createItem.textContent='+ New project';
+  const createItem=_projectPickerItem('project-picker-create');
+  createItem.textContent=t('project_picker_new');
   createItem.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
@@ -10428,26 +10503,198 @@ function _showProjectPicker(session, anchorEl){
   // Append to body and position using getBoundingClientRect so it isn't clipped
   // by overflow:hidden on .session-item ancestors
   document.body.appendChild(picker);
-  const rect=anchorEl.getBoundingClientRect();
   picker.style.position='fixed';
   picker.style.zIndex='999';
-  // Prefer opening below; flip above if too close to bottom of viewport
-  const spaceBelow=window.innerHeight-rect.bottom;
-  if(spaceBelow<160&&rect.top>160){
-    picker.style.bottom=(window.innerHeight-rect.top+4)+'px';
-    picker.style.top='auto';
-  }else{
-    picker.style.top=(rect.bottom+4)+'px';
-    picker.style.bottom='auto';
+  _positionProjectPicker(picker,anchorEl);
+  // Close on outside click
+  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
+  setTimeout(()=>document.addEventListener('click',close),0);
+  // Keyboard (#8044): arrows move between the rows, Escape closes the picker
+  // and hands focus back to the conversation's ⋮ trigger.
+  picker.setAttribute('aria-label',t('session_move_project'));
+  const dismiss=(opts)=>{
+    picker.remove();
+    document.removeEventListener('click',close);
+    // Not to a row that is going out of sight with its sidebar.
+    if(opts&&opts.restoreFocus===false) return;
+    _focusSessionActionMenuRestoreTarget(_projectPickerFocusReturnTarget(session,anchorEl));
+  };
+  _wireProjectPickerKeys(picker,dismiss);
+  _openProjectPicker={picker,anchorEl,sessionId:session.session_id,dismiss};
+  _focusProjectPickerItem(picker);
+}
+
+// The open single-conversation picker, for the resize listener below. A closed
+// picker is found out by being detached, so no close path has to clear this.
+let _openProjectPicker=null;
+
+function _positionProjectPicker(picker, anchorEl){
+  const rect=anchorEl.getBoundingClientRect();
+  // Placed as _positionSessionActionMenu places the ⋮ menu: below the anchor,
+  // above it when that fits whole, else slid up over the anchor until it fits.
+  // Natural height first (the CSS already caps it at 100dvh - 16px).
+  picker.style.maxHeight='';
+  const pickerH=picker.offsetHeight||0;
+  const margin=8;
+  const maxAvail=window.innerHeight-margin*2;
+  let top=rect.bottom+4;
+  if(top+pickerH>window.innerHeight-margin && rect.top>pickerH+12){
+    top=rect.top-pickerH-4;            // flip above when there is room
   }
+  if(pickerH>maxAvail){
+    picker.style.maxHeight=maxAvail+'px'; // taller than the screen: pin and scroll
+    top=margin;
+  }else{
+    if(top+pickerH>window.innerHeight-margin) top=window.innerHeight-margin-pickerH;
+    if(top<margin) top=margin;         // slide to fit, overlapping the anchor
+  }
+  picker.style.top=top+'px';
+  picker.style.bottom='auto';
   // Align right edge of picker with right edge of button; keep within viewport
   const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
   let left=rect.right-pickerW;
   if(left<8) left=8;
   picker.style.left=left+'px';
-  // Close on outside click
-  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
-  setTimeout(()=>document.addEventListener('click',close),0);
+}
+
+// An open picker follows a resize or a rotation, as the ⋮ menu does. A sidebar
+// repaint may have replaced the row it was opened from: place it by the row
+// that conversation has now.
+window.addEventListener('resize',()=>{
+  const open=_openProjectPicker;
+  if(!open) return;
+  if(!open.picker.isConnected){
+    _openProjectPicker=null;
+    return;
+  }
+  // On the next frame: boot.js collapses the sidebar in a resize listener of
+  // its own, which runs after this one.
+  requestAnimationFrame(()=>{
+    if(!open.picker.isConnected) return;
+    let anchor=open.anchorEl;
+    if(!anchor.isConnected){
+      // The row for a long press, the row's own ⋮ trigger for a picker opened from one.
+      anchor=_findSessionRenameRow(open.sessionId);
+      if(anchor&&open.anchorEl.classList.contains('session-actions-trigger')){
+        anchor=_projectPickerFocusReturnTarget({session_id:open.sessionId},null)||anchor;
+      }
+    }
+    // A resize can hide the sidebar the row is in. The row is then still laid
+    // out for a moment, inside a sidebar that fades or slides out of sight, so
+    // the hidden state is read from what hides it, and focus is not handed
+    // back to the row.
+    if(!anchor||!anchor.offsetParent||_projectPickerSidebarHidden(anchor)){
+      open.dismiss({restoreFocus:false});
+      return;
+    }
+    _positionProjectPicker(open.picker,anchor);
+    // A shorter window can cap the picker's height over the row the keyboard is on.
+    const focused=document.activeElement;
+    if(focused&&open.picker.contains(focused)) _focusProjectPickerRow(open.picker,focused);
+  });
+});
+
+// Whether the sidebar that holds `el` is out of sight: collapsed at desktop
+// widths (a turned phone closes the drawer and collapses it), or a drawer that
+// is not open at phone widths (a large phone turned upright, a window narrowed
+// below boot.js's 641px).
+function _projectPickerSidebarHidden(el){
+  const sidebar=el.closest('.sidebar');
+  if(!sidebar||sidebar.classList.contains('mobile-open')) return false;
+  if(sidebar.closest('.layout.sidebar-collapsed')) return true;
+  return typeof _isDesktopWidth==='function'&&!_isDesktopWidth();
+}
+
+// ── Project picker rows and keyboard (#8044) ────────────────────────────
+// A picker row is a real button, so Tab reaches it and Enter/Space activate
+// it. `active` is the session's current project: the single-session picker
+// passes a boolean and the row becomes a checked radio item; the batch picker
+// passes nothing, since several sessions have no one current project.
+function _projectPickerItem(extraClass, active){
+  const item=document.createElement('button');
+  item.type='button';
+  item.className='project-picker-item'+(extraClass?' '+extraClass:'')+(active?' active':'');
+  if(typeof active==='boolean'){
+    item.setAttribute('role','menuitemradio');
+    item.setAttribute('aria-checked',active?'true':'false');
+  }else{
+    item.setAttribute('role','menuitem');
+  }
+  return item;
+}
+
+// Menu keys for a project picker, as on the session ⋮ menu: ArrowDown/ArrowUp
+// wrap, Home/End jump, Escape runs `onEscape`. Tab closes the menu too and is
+// then left to the browser, so focus moves on from where the picker was opened
+// instead of leaving an open picker behind that no key can reach any more.
+function _wireProjectPickerKeys(picker, onEscape){
+  picker.setAttribute('role','menu');
+  const pickerItems=()=>Array.from(picker.querySelectorAll('.project-picker-item:not([disabled])'));
+  picker.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){
+      e.preventDefault();
+      e.stopPropagation();
+      onEscape();
+      return;
+    }
+    if(e.key==='Tab'){
+      onEscape();
+      return;
+    }
+    const items=pickerItems();
+    if(!items.length) return;
+    const currentIndex=Math.max(0,items.indexOf(document.activeElement));
+    let nextIndex=null;
+    if(e.key==='ArrowDown') nextIndex=(currentIndex+1)%items.length;
+    else if(e.key==='ArrowUp') nextIndex=(currentIndex-1+items.length)%items.length;
+    else if(e.key==='Home') nextIndex=0;
+    else if(e.key==='End') nextIndex=items.length-1;
+    if(nextIndex===null) return;
+    e.preventDefault();
+    _focusProjectPickerRow(picker,items[nextIndex]);
+  });
+}
+
+// Focus a row and bring it into the picker's own scroll box. The focus itself
+// must not scroll (that would move the sidebar or the page), so a row past the
+// edge of a long, scrolling picker is revealed here instead.
+function _focusProjectPickerRow(picker, row){
+  if(!_focusSessionActionMenuRestoreTarget(row)) return false;
+  // Inside the picker's border, or the edge row's focus ring is clipped.
+  const top=picker.getBoundingClientRect().top+picker.clientTop;
+  const bottom=top+picker.clientHeight;
+  const rect=row.getBoundingClientRect();
+  if(rect.top<top) picker.scrollTop-=top-rect.top;
+  else if(rect.bottom>bottom) picker.scrollTop+=rect.bottom-bottom;
+  // With a mouse the batch picker is no scroll box: it grows inside the
+  // conversation list, and the list is what brings its row onto the screen.
+  row.scrollIntoView({block:'nearest'});
+  return true;
+}
+
+// On open, focus lands on the session's current project, else on the first row.
+function _focusProjectPickerItem(picker){
+  const target=picker.querySelector('.project-picker-item.active')||picker.querySelector('.project-picker-item');
+  return _focusProjectPickerRow(picker,target);
+}
+
+// Where focus returns when a session's picker closes: the conversation's ⋮
+// trigger. The picker is anchored on that trigger, or, after a right click or
+// a long press, on the row or its actions box, which hold the trigger but
+// cannot take focus themselves. The sidebar may also have been repainted
+// since, which replaces all of them: then it is the trigger of the row now
+// showing the session.
+function _projectPickerFocusReturnTarget(session, anchorEl){
+  const triggerOf=el=>{
+    if(!el||!el.isConnected) return null;
+    if(el.classList&&el.classList.contains('session-actions-trigger')) return el;
+    // An expanded parent row also holds its fork children's rows, each with a
+    // trigger of its own, and they come before the parent's in the DOM. Only
+    // the row's own trigger will do: a child of the actions box, which is a
+    // child of the row.
+    return el.querySelector(':scope > .session-actions-trigger, :scope > .session-actions > .session-actions-trigger');
+  };
+  return triggerOf(anchorEl)||triggerOf(_findSessionRenameRow(session&&session.session_id));
 }
 
 // Resize a .project-create-input to fit its current value (or placeholder).

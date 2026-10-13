@@ -652,10 +652,13 @@ def _session_id_visible_to_request_profile(handler, sid, *, emit_error: bool = T
     if not is_safe_session_id(sid):
         return True
     try:
-        session = get_session(sid, metadata_only=True)
+        session_profile = get_session_profile_readonly(sid) or None
     except KeyError:
         return True
-    session_profile = getattr(session, "profile", None) or None
+    except (OSError, ValueError, TypeError):
+        if emit_error:
+            bad(handler, "Session not found", 404)
+        return False
     if not _session_visible_to_active_profile(session_profile, handler):
         if emit_error:
             if session_profile:
@@ -3002,7 +3005,11 @@ from api.config import (
     set_reasoning_display,
     set_reasoning_effort,
     create_stream_channel,
+    publish_pre_admission_claim,
+    retire_pre_admission_claim_if_owned,
+    is_orphaned_stream,
     get_config,
+    _expand_env_vars,
     get_webui_session_save_mode,
     get_config_snapshot,
     STREAM_GOAL_RELATED,
@@ -3567,6 +3574,88 @@ def _run_journal_snapshot_event_id_for_run(
     return f"{run_id}:{event_seq}" if event_seq else None
 
 
+_RUN_JOURNAL_STATE_SAVED_MAX_EVENTS = 128
+_RUN_JOURNAL_STATE_SAVED_MAX_BYTES = 64_000
+
+
+def _run_journal_state_saved_side_effect(
+    event: dict,
+    *,
+    session_id: str,
+    run_id: str,
+    stream_id: str,
+) -> dict | None:
+    """Return one canonical server-owned ``state_saved`` Anchor outcome.
+
+    Run-journal envelopes are durable server evidence. Recovery must not infer
+    ownership from payload text or a transport fallback: session id, run id,
+    event id, and sequence must all agree before the side effect can enter the
+    Anchor scene. Only the bounded public state metadata is projected; any
+    additional producer payload stays in the journal.
+    """
+    if not isinstance(event, dict):
+        return None
+    if str(event.get("event") or event.get("type") or "").strip() != "state_saved":
+        return None
+    if not isinstance(event.get("session_id"), str) or event.get("session_id").strip() != session_id:
+        return None
+    event_run_id, malformed_run_id = _run_journal_envelope_run_id_result(event)
+    if malformed_run_id or event_run_id != run_id:
+        return None
+    seq = event.get("seq")
+    if type(seq) is not int or seq <= 0:
+        return None
+    raw_event_id = event.get("event_id")
+    if not isinstance(raw_event_id, str) or not raw_event_id.strip():
+        return None
+    event_id = raw_event_id.strip()
+    event_id_run, event_id_seq = _shared_parse_run_journal_event_id(event_id)
+    if event_id_run != run_id or event_id_seq != seq:
+        return None
+    payload = event.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    payload_session_id = payload.get("session_id")
+    if not isinstance(payload_session_id, str) or payload_session_id.strip() != session_id:
+        return None
+    kind = payload.get("kind")
+    action = payload.get("action")
+    if not isinstance(kind, str) or not kind.strip() or len(kind.strip()) > 128:
+        return None
+    if not isinstance(action, str) or not action.strip() or len(action.strip()) > 128:
+        return None
+    canonical_payload = {
+        "session_id": session_id,
+        "kind": kind.strip(),
+        "action": action.strip(),
+    }
+    if "name" in payload:
+        name = payload.get("name")
+        if not isinstance(name, str) or len(name) > 512:
+            return None
+        if name.strip():
+            canonical_payload["name"] = name.strip()
+    created_at = event.get("created_at")
+    if isinstance(created_at, bool) or not isinstance(created_at, (int, float)):
+        return None
+    try:
+        created_at = float(created_at)
+    except OverflowError:
+        return None
+    if created_at != created_at or created_at in (float("inf"), float("-inf")):
+        return None
+    return {
+        "source_event_type": "state_saved",
+        "event_id": event_id,
+        "session_id": session_id,
+        "run_id": run_id,
+        "stream_id": stream_id,
+        "seq": seq,
+        "created_at": created_at,
+        "payload": canonical_payload,
+    }
+
+
 def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict | None:
     stream_id = str(stream_id or "").strip()
     if not stream_id:
@@ -3635,6 +3724,10 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
     reasoning_index = _CompactEchoIndex()
     messages: list[dict] = []
     tool_calls: list[dict] = []
+    side_effects: list[dict] = []
+    seen_side_effect_event_ids: set[str] = set()
+    side_effect_bytes = 0
+    side_effects_truncated = False
     activity_burst_anchors: list[dict] = []
     current_activity_burst_id = 0
     fresh_segment = True
@@ -3747,6 +3840,39 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             # their per-row work while preserving the last_ts watermark they
             # carry.
             last_ts = event.get("created_at", last_ts)
+            continue
+        if event_name == "state_saved":
+            last_ts = event.get("created_at", last_ts)
+            side_effect = _run_journal_state_saved_side_effect(
+                event,
+                session_id=session_id,
+                run_id=run_id,
+                stream_id=stream_id,
+            )
+            if (
+                side_effect is not None
+                and side_effect["event_id"] not in seen_side_effect_event_ids
+            ):
+                if side_effects_truncated:
+                    continue
+                try:
+                    encoded_side_effect = json.dumps(
+                        side_effect,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                except UnicodeEncodeError:
+                    continue
+                if (
+                    len(side_effects) >= _RUN_JOURNAL_STATE_SAVED_MAX_EVENTS
+                    or side_effect_bytes + len(encoded_side_effect)
+                    > _RUN_JOURNAL_STATE_SAVED_MAX_BYTES
+                ):
+                    side_effects_truncated = True
+                    continue
+                seen_side_effect_event_ids.add(side_effect["event_id"])
+                side_effects.append(side_effect)
+                side_effect_bytes += len(encoded_side_effect)
             continue
         payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
         last_ts = event.get("created_at", last_ts)
@@ -4180,6 +4306,8 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "final_message_ref": None,
             "terminal_state": None,
             "activity_rows": anchor_activity_rows,
+            "side_effects": side_effects,
+            "side_effects_truncated": side_effects_truncated,
         },
     }
 
@@ -4332,6 +4460,11 @@ def _sanitize_anchor_activity_scene(scene):
         raise ValueError("scene.activity_rows is too large")
     scene_copy = copy.deepcopy(scene)
     encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
+    if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES and "side_effects" in scene_copy:
+        # Recovered outcomes must not displace a rows-only Worklog that fits.
+        # Keep the original rows and the same UTF-8 persistence budget.
+        scene_copy.pop("side_effects")
+        encoded = json.dumps(scene_copy, ensure_ascii=False, separators=(",", ":"), default=str).encode("utf-8")
     if len(encoded) > _ANCHOR_ACTIVITY_SCENE_MAX_BYTES:
         raise ValueError("scene payload is too large")
     return json.loads(encoded.decode("utf-8"))
@@ -7827,6 +7960,45 @@ def _read_profile_config_cached(profile_name: str, cfg_path: str) -> dict | None
     return parsed
 
 
+def _sync_routing_kwargs(profile_cfg: dict | None, agent_params: set) -> dict:
+    """Build the sync POST /api/chat provider_routing kwargs from a profile config.
+
+    ``profile_cfg`` is the raw dict returned by ``_read_profile_model_config()``:
+    a plain ``yaml.safe_load`` of the profile's ``config.yaml`` with NO env
+    expansion (that only runs in the main ``get_config()`` loader, which caches
+    the expanded view). Expanding with the same ``_expand_env_vars()`` the
+    loader uses keeps a ``provider_routing`` reference such as
+    ``only: [${ROUTE_PROVIDER}]`` from reaching the Agent as the literal
+    ``${ROUTE_PROVIDER}`` string (and hence into OpenRouter's request body).
+    The streaming path reads its routing from an already-expanded config, so
+    both paths agree. ``_expand_env_vars()`` returns a fresh structure, so the
+    cached raw dict is never mutated.
+
+    The seam runs under the thread-only fail-closed profile scope
+    (``profile_env_for_thread_readonly``), so a ``${VAR}`` only the server
+    process env defines is NOT expanded here. Any routing value that still
+    contains ``${...}`` after expansion is dropped (with a warning) via
+    ``api.streaming._drop_unresolved_routing_refs()`` (inside the shared
+    ``_provider_routing_kwargs_for_agent``) instead of being forwarded literally:
+    a literal would make OpenRouter target a nonexistent provider and fail a
+    turn master (no routing on this path) completes, and re-enabling the
+    process-env fallback to avoid the drop would widen what a profile can
+    read from the server environment.
+
+    Falls back to ``get_config()`` (already env-expanded) when the session has
+    no usable profile config, matching the previous ``_pp_cfg or get_config()``
+    semantics at the sync site. Mapping to AIAgent kwargs stays in the shared
+    signature-gated helper ``_provider_routing_kwargs_for_agent``.
+    """
+    if isinstance(profile_cfg, dict) and profile_cfg:
+        cfg = _expand_env_vars(profile_cfg)
+    else:
+        cfg = get_config()
+    # The shared helper drops (with a warning) any routing value that still
+    # carries an unresolved ${...} after expansion, on both chat paths.
+    return _provider_routing_kwargs_for_agent(cfg, agent_params)
+
+
 def _load_profile_config_dict(session) -> dict | None:
     """Load the session profile's config.yaml as a dict, or None."""
     if not getattr(session, "profile", None):
@@ -8667,6 +8839,57 @@ def _session_model_state_from_request(
             provider,
         )
     return model_value, provider
+
+
+def _invalidate_session_route_state_if_changed(
+    session,
+    *,
+    model: str | None,
+    provider: str | None = None,
+    provider_specified: bool = True,
+    already_resolved: bool = False,
+) -> bool:
+    """Normalize and update requested route, clearing route-derived state if changed.
+
+    Preserves gateway_routing_history. When the normalized model or provider
+    differs from the session's existing route, clears last_used_model,
+    gateway_routing, context_length, threshold_tokens, and last_prompt_tokens.
+    Returns True if a real route change occurred, False otherwise.
+    """
+    old_model = getattr(session, "model", None)
+    old_provider = getattr(session, "model_provider", None)
+
+    if already_resolved:
+        norm_model = model
+        norm_provider = provider
+    else:
+        norm_model, norm_provider = _session_model_state_from_request(
+            model,
+            provider if provider_specified else None,
+            current_provider=old_provider,
+        )
+    if norm_model is not None:
+        session.model = norm_model
+    session.model_provider = norm_provider
+
+    # Compare normalized values to avoid spurious invalidation on whitespace/case drift
+    old_norm_model = str(old_model or "").strip()
+    new_norm_model = str(session.model or "").strip()
+    old_norm_provider = _clean_session_model_provider(old_provider) or ""
+    new_norm_provider = _clean_session_model_provider(session.model_provider) or ""
+
+    changed = (old_norm_model != new_norm_model) or (old_norm_provider != new_norm_provider)
+    if changed:
+        session.last_used_model = None
+        session.gateway_routing = None
+        session.context_length = _resolve_context_length_for_session_model(
+            session.model,
+            session.model_provider,
+        )
+        session.threshold_tokens = 0
+        session.last_prompt_tokens = 0
+
+    return changed
 
 
 def _lookup_gateway_session_identity(session_id: str) -> dict:
@@ -11218,6 +11441,7 @@ def _keep_latest_messaging_session_per_source(
 from api.models import (
     Session,
     get_session,
+    get_session_profile_readonly,
     get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
@@ -11503,6 +11727,7 @@ from api.streaming import (
     _sse_keepalive,
     _sse_set_write_deadline,
     _run_agent_streaming,
+    _provider_routing_kwargs_for_agent,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
@@ -11642,6 +11867,7 @@ def _session_attention_summary(session_id: str) -> dict | None:
 _SIDEBAR_SESSION_RESPONSE_FIELDS = (
     _route_session_list_cache._SIDEBAR_SESSION_RESPONSE_FIELDS
 )
+
 
 
 def _sidebar_session_response_item(session: dict, *, redact_enabled: bool | None = None) -> dict:
@@ -16623,6 +16849,7 @@ def handle_post(handler, parsed) -> bool:
                 # the duplicate should behave identically.
                 gateway_routing=copy.deepcopy(getattr(session, "gateway_routing", None)),
                 gateway_routing_history=copy.deepcopy(getattr(session, "gateway_routing_history", None) or []),
+                last_used_model=getattr(session, "last_used_model", None),
                 # Preserve LLM-generated title flag so we don't regenerate title on duplicate.
                 llm_title_generated=getattr(session, "llm_title_generated", False),
                 manual_title=getattr(session, "manual_title", False),
@@ -17061,8 +17288,6 @@ def handle_post(handler, parsed) -> bool:
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be updated from WebUI", 403)
         old_ws = getattr(s, "workspace", "")
-        old_model = getattr(s, "model", None)
-        old_provider = getattr(s, "model_provider", None)
         try:
             new_ws = str(resolve_trusted_workspace(body.get("workspace", s.workspace), profile=getattr(s, "profile", None)))
         except ValueError as e:
@@ -17070,24 +17295,13 @@ def handle_post(handler, parsed) -> bool:
         with _get_session_agent_lock(body["session_id"]):
             s.workspace = new_ws
             if "model" in body or "model_provider" in body:
-                model, provider = _session_model_state_from_request(
-                    body.get("model", s.model),
-                    body.get("model_provider") if "model_provider" in body else None,
-                    getattr(s, "model_provider", None),
+                changed = _invalidate_session_route_state_if_changed(
+                    s,
+                    model=body.get("model", s.model),
+                    provider=body.get("model_provider") if "model_provider" in body else None,
+                    provider_specified="model_provider" in body,
                 )
-                if model is not None:
-                    s.model = model
-                s.model_provider = provider
-                if (
-                    str(old_model or "") != str(getattr(s, "model", "") or "")
-                    or str(old_provider or "") != str(getattr(s, "model_provider", "") or "")
-                ):
-                    s.context_length = _resolve_context_length_for_session_model(
-                        getattr(s, "model", None),
-                        getattr(s, "model_provider", None),
-                    )
-                    s.threshold_tokens = 0
-                    s.last_prompt_tokens = 0
+                if changed:
                     from api.config import _evict_session_agent
 
                     _evict_session_agent(body["session_id"])
@@ -17544,6 +17758,7 @@ def handle_post(handler, parsed) -> bool:
             context_messages=copy.deepcopy(forked_context),
             # Gateway routing — inherit from source
             gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
+            last_used_model=getattr(source, "last_used_model", None),
             # Context engine — inherit state so branch's context engine starts correctly
             context_engine=getattr(source, "context_engine", None),
             context_engine_state=copy.deepcopy(getattr(source, "context_engine_state", None) or {}),
@@ -21283,6 +21498,28 @@ def _handle_tts(handler, parsed):
             from api.helpers import bad as _bad
             return _bad(handler, "unauthorized", 401)
 
+    # A chunked playback captures the profile that owns it, so a mid-playback
+    # profile switch cannot stream the previous profile's text under the new
+    # profile's provider/credentials. Requests that omit the field stay accepted
+    # (legacy direct callers); only an explicit MISMATCH is rejected, and it is
+    # rejected here — before the limiter, credential lookup or config access —
+    # so a mismatched chunk costs no quota and reads no other profile's config.
+    try:
+        claimed_profile = data.get("profile")
+    except Exception:
+        claimed_profile = None
+    if isinstance(claimed_profile, str) and claimed_profile.strip():
+        from api.helpers import bad as _bad
+        from api.profiles import _profiles_match, get_active_profile_name
+
+        claimed = claimed_profile.strip()
+        if not _profiles_match(claimed, get_active_profile_name()):
+            return _bad(
+                handler,
+                "playback profile no longer active",
+                409,
+            )
+
     # High-quality per-client rate limiting for TTS.
     if not hasattr(_handle_tts, "_tts_limiter"):
         import time as _time, threading as _threading
@@ -22722,11 +22959,39 @@ def _handle_session_sse_stream(handler, parsed):
                 payload = q.get(timeout=_SSE_HEARTBEAT_INTERVAL_SECONDS)
             except queue.Empty:
                 _sse_keepalive(handler)
+                # A completed keepalive is proof of life for an idle subscriber
+                # (re-gate finding 1): without this mark the reaper cannot tell a
+                # quiet-but-healthy tab from a half-open socket on an idle session,
+                # because an idle session never fills a subscriber's queue.
+                ch.note_subscriber_write_ok(q)
                 continue
             if payload is None:
+                # End-of-stream sentinel: the channel was deliberately closed
+                # (SessionChannel.close(), reaper or owner). Simply returning here
+                # does NOT end the response: under HTTP/1.1 keep-alive, with no
+                # Content-Length and no chunked framing, the server keeps the
+                # socket open, the browser's EventSource never sees EOF and stays
+                # attached to a channel the reaper already removed -- silently
+                # missing every later event (the "tab stops receiving updates"
+                # defect this change fixes). Flag the socket so the server closes
+                # it after this handler returns and the client reconnects onto the
+                # replacement channel. The #3103 note still holds: never advertise
+                # `Connection: close` up front (reconnect storms); this applies
+                # only to a deliberate end-of-channel.
+                try:
+                    handler.close_connection = True
+                except Exception:
+                    logger.debug(
+                        "session-stream: could not flag socket close for %s", sid,
+                        exc_info=True,
+                    )
                 break
             event_name, data = payload
             _sse(handler, event_name, data)
+            # Delivered: that write completed, so this subscriber is alive right
+            # now (re-gate finding 1). A write that raises instead never reaches
+            # this line, and its handler path unsubscribes in the finally below.
+            ch.note_subscriber_write_ok(q)
     except _CLIENT_DISCONNECT_ERRORS:
         pass  # client went away — normal for long-lived connections
     finally:
@@ -23890,6 +24155,12 @@ def _handle_btw(handler, body):
         register_stream_owner(stream_id, ephemeral.session_id)
         with STREAMS_LOCK:
             STREAMS[stream_id] = stream
+            # Launch-phase ownership claim (re-gate finding B): the reaper's sweep
+            # makes this load-bearing on EVERY registration edge, not just the two
+            # chat/start paths -- an unclaimed stream whose worker has not been
+            # admitted yet is indistinguishable from a dead one, and the sweep would
+            # harvest it before the worker runs the task.
+            publish_pre_admission_claim(stream_id, streams_lock_held=True)
         from api.background import track_btw
         track_btw(body["session_id"], ephemeral.session_id, stream_id, question)
         thr = threading.Thread(
@@ -24005,6 +24276,11 @@ def _handle_background(handler, body):
         register_stream_owner(stream_id, bg.session_id)
         with STREAMS_LOCK:
             STREAMS[stream_id] = stream
+            # Same launch-phase claim as every other registration edge (re-gate
+            # finding B): its worker is scheduled below, and until it admits itself
+            # the claim is the only thing that tells the reaper's sweep this stream
+            # is launching rather than dead.
+            publish_pre_admission_claim(stream_id, streams_lock_held=True)
         track_background(parent_sid, bg_sid, stream_id, task_id, prompt)
         thr = threading.Thread(target=_run_bg_and_notify, daemon=True)
         thr.start()
@@ -24313,8 +24589,13 @@ def _prepare_chat_start_session_for_stream(
         else source
     )
     s.workspace = workspace
-    s.model = model
-    s.model_provider = model_provider
+    _invalidate_session_route_state_if_changed(
+        s,
+        model=model,
+        provider=model_provider,
+        provider_specified=True,
+        already_resolved=True,
+    )
     s.active_stream_id = stream_id
     register_session_writeback_owner(s.session_id, stream_id)
     s.post_compression_context_tokens_estimate = None
@@ -24456,6 +24737,12 @@ def _cleanup_chat_start_launch_failure(
         unregister_stream_owner(stream_id)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+            # A launch whose worker never started must not strand its launch-phase
+            # claim: this path clears the registries directly and never reaches the
+            # canonical release funnel, and the orphan check keeps a claimed stream
+            # alive whatever the pending age -- so a stale claim would block every
+            # later chat/start for this stream id (re-gate finding 3).
+            retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
         STREAM_GOAL_RELATED.pop(stream_id, None)
     except Exception:
         logger.debug(
@@ -24531,6 +24818,29 @@ def _is_hidden_empty_session(s) -> bool:
     )
 
 
+def _pending_turn_in_registration_window(session) -> bool:
+    """Return whether a pending turn is still inside its registration grace window.
+
+    ``active_stream_id`` is published before the SSE channel is registered and
+    before the worker lands in ``ACTIVE_RUNS``, so a very fresh pending turn must
+    keep blocking duplicate chat/start requests even though neither registry
+    shows anything yet. Past the grace window a pending turn is no evidence of a
+    live worker: it is what a crashed turn leaves behind.
+    """
+    if not getattr(session, "pending_user_message", None):
+        return False
+    try:
+        from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
+        grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
+    except Exception:
+        grace_seconds = 30.0
+    try:
+        pending_started_at = float(getattr(session, "pending_started_at", None) or 0)
+    except Exception:
+        pending_started_at = 0.0
+    return bool(pending_started_at and time.time() - pending_started_at < grace_seconds)
+
+
 def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     """Return whether an active_stream_id still owns this session's next turn.
 
@@ -24538,32 +24848,100 @@ def _active_stream_blocks_chat_start(session, stream_id: str | None) -> bool:
     very fresh pending turn must also block duplicate chat_start requests. If we
     only check STREAMS here, a second request can race through the registration
     gap and overwrite the sidecar owner.
+
+    STREAMS membership alone is not evidence of a live turn: the entry is only
+    removed by the worker's own finalization, so a hard-killed or wedged worker
+    leaves it behind and every later chat/start for that session is refused with
+    ``409 session already has an active stream`` — for hours, since the SSE
+    channel reaper never touches this registry. The authoritative liveness check
+    is ``ACTIVE_RUNS`` (keyed by ``stream_id``, unregistered in the worker's
+    outer ``finally``); the fresh-pending guard covers the window between stream
+    registration and worker registration. When a stream is registered, no worker
+    is live and no pending turn is inside that window, it is an orphan: drop it
+    from both registries and let the caller admit a fresh turn.
     """
     if not stream_id:
         return False
+    orphan_released = False
     with STREAMS_LOCK:
         if stream_id in STREAMS:
-            return True
+            # ONE definition of "orphan", shared with every other reader
+            # (re-gate finding 2): registered, no live worker, no launch-phase
+            # claim, and no pending turn inside its registration window. The claim
+            # check is what keeps a stream that is still launching alive whatever
+            # the pending age (finding 5).
+            # The predicate fails CLOSED on its own when the worker registry cannot
+            # be read (api.config._is_orphaned_stream_locked returns False for an
+            # unreadable ACTIVE_RUNS), so no second guard belongs here: one
+            # definition, one owner. A local try/except would be unreachable.
+            if not is_orphaned_stream(
+                stream_id,
+                pending_turn_in_window=_pending_turn_in_registration_window(session),
+                streams_lock_held=True,
+            ):
+                return True
+            # Confirmed orphan. Clear the WHOLE stream-owned state, not just the
+            # registry entry: a crashed or wedged worker never reaches its own
+            # teardown, so this stream's agent instance / cancel flag / partial
+            # and reasoning text / live tool calls / goal marker / last event id
+            # would otherwise stay allocated for the life of the process -- one
+            # stale set per recovered orphan. The set and the lock mirror the
+            # canonical teardown (api/streaming.py, api/gateway_chat.py).
+            # STREAMS_LOCK is already held and threading.Lock is not reentrant,
+            # so the entries are removed directly instead of by re-entering a
+            # helper. Lock order stays STREAMS_LOCK -> STREAM_SESSION_OWNERS_LOCK,
+            # the order the rest of the lifecycle uses (never the reverse).
+            from api import config as _live_config
+            _orphan_session_id = getattr(session, "session_id", None)
+            # ONE call releases every registry the stream owns
+            # (the shared stream_owned_registries() list + both owner registries) -- the single
+            # teardown entry point, so this path can never clear a hand-picked
+            # subset again. The session writeback entry is compare-and-clear: a
+            # successor admitted after this orphan keeps its registry claim.
+            # STREAMS_LOCK is already held and threading.Lock is not reentrant.
+            try:
+                _live_config.release_stream_owned_registries(
+                    stream_id,
+                    session_id=_orphan_session_id,
+                    streams_lock_held=True,
+                )
+            except Exception:
+                logger.debug(
+                    "chat/start: could not release the stream-owned registries "
+                    "for orphan %s",
+                    stream_id,
+                    exc_info=True,
+                )
+            logger.info(
+                "chat/start: cleared orphaned stream %s for session %s "
+                "(no live worker, no pending turn in the registration window)",
+                stream_id,
+                _orphan_session_id or "?",
+            )
+            orphan_released = True
+    if orphan_released:
+        # Gateway-owned rows (run lifecycle / run id / endpoint) live in
+        # api/gateway_chat.py and are released through their no-op-safe
+        # lifecycle/waiter path, which must NOT run nested under STREAMS_LOCK:
+        # the canonical Gateway teardown releases that lock before the same step.
+        try:
+            from api.gateway_chat import release_gateway_stream_state
+
+            release_gateway_stream_state(stream_id)
+        except Exception:
+            logger.debug(
+                "chat/start: could not release the Gateway state for orphan %s",
+                stream_id,
+                exc_info=True,
+            )
+        return False
     try:
-        from api import config as _live_config
-        with _live_config.ACTIVE_RUNS_LOCK:
-            if stream_id in (_live_config.ACTIVE_RUNS or {}):
+        with ACTIVE_RUNS_LOCK:
+            if stream_id in (ACTIVE_RUNS or {}):
                 return True
     except Exception:
         pass
-    if getattr(session, "pending_user_message", None):
-        try:
-            from api.models import _REPAIR_STALE_PENDING_GRACE_SECONDS
-            grace_seconds = float(_REPAIR_STALE_PENDING_GRACE_SECONDS)
-        except Exception:
-            grace_seconds = 30.0
-        try:
-            pending_started_at = float(getattr(session, "pending_started_at", None) or 0)
-        except Exception:
-            pending_started_at = 0.0
-        if pending_started_at and time.time() - pending_started_at < grace_seconds:
-            return True
-    return False
+    return _pending_turn_in_registration_window(session)
 
 
 def _local_agent_worker_kwargs(*, model_provider, goal_related: bool, moa_config) -> dict:
@@ -24666,6 +25044,9 @@ def _start_regeneration_stream_locked(
             STREAM_GOAL_RELATED.pop(stream_id, None)
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+            # Launch failure ends the launch phase: the claim must not outlive the
+            # registration it was published for (#7302 finding 5).
+            retire_pre_admission_claim_if_owned(stream_id, streams_lock_held=True)
         unregister_stream_owner(stream_id)
         clear_session_writeback_owner_if_owned(s.session_id, stream_id)
         if gateway_starting:
@@ -24737,6 +25118,11 @@ def _start_regeneration_stream_locked(
         register_stream_owner(stream_id, s.session_id)
         with STREAMS_LOCK:
             STREAMS[stream_id] = stream
+            # Launch-phase ownership claim (#7302 finding 5): published atomically
+            # with the registration so the orphan check keeps this stream while its
+            # worker is still being admitted -- this path holds that worker at
+            # release_worker.wait() while s.save() runs below.
+            publish_pre_admission_claim(stream_id, streams_lock_held=True)
         if goal_related:
             STREAM_GOAL_RELATED[stream_id] = True
         if backend_is_gateway:
@@ -25325,6 +25711,10 @@ def _start_chat_stream_for_session(
                     register_stream_owner(stream_id, s.session_id)
                     with STREAMS_LOCK:
                         STREAMS[stream_id] = stream
+                        # Same launch-phase claim as the regeneration path
+                        # (#7302 finding 5): the ordinary start has the same
+                        # registration-then-worker-admission window.
+                        publish_pre_admission_claim(stream_id, streams_lock_held=True)
                     # #1932: mark stream as goal-related so the streaming hook evaluates the goal.
                     if goal_related:
                         STREAM_GOAL_RELATED[stream_id] = True
@@ -26189,6 +26579,7 @@ def _handle_session_compression_recovery_start(handler, body):
                 threshold_tokens=getattr(source, "threshold_tokens", None),
                 gateway_routing=copy.deepcopy(getattr(source, "gateway_routing", None)),
                 gateway_routing_history=copy.deepcopy(getattr(source, "gateway_routing_history", None) or []),
+                last_used_model=getattr(source, "last_used_model", None),
                 parent_session_id=getattr(source, "session_id", sid),
                 worktree_path=getattr(source, "worktree_path", None),
                 worktree_branch=getattr(source, "worktree_branch", None),
@@ -27104,6 +27495,50 @@ def _handle_chat_sync(handler, body):
             _provider = _bundle["provider"]
             _api_key = _bundle["api_key"]
             _base_url = _bundle["base_url"]
+            # OpenRouter provider_routing prefs (parity with tui_gateway and the
+            # gateway's TurnRunner). _pp_cfg is this session's profile config,
+            # already parsed above: a RAW yaml.safe_load with no env expansion
+            # (only the get_config() loader expands). _sync_routing_kwargs
+            # expands ${VAR} references with the same _expand_env_vars() that
+            # loader uses, then maps the block through the shared
+            # signature-gated helper the streaming path uses, so (a) an older
+            # hermes-agent build lacking any of the six params does not
+            # TypeError this endpoint, (b) a malformed provider_routing block
+            # (string/list) is treated as empty instead of 500ing the request,
+            # and (c) a value like only: [${ROUTE_PROVIDER}] reaches the Agent
+            # resolved, never as a literal ${...} string in OpenRouter's
+            # request body. Falls back to the active profile's config for
+            # profile-less sessions.
+            # The expansion must run with this session's profile env bound:
+            # the HTTP handler thread for POST /api/chat has no profile-
+            # scoped thread-local env, so an unbound _expand_env_vars() would
+            # resolve ${VAR} against the server process env (the process-
+            # wide profile's .env). A different process value would apply the
+            # wrong provider routing, while the streaming path (which binds
+            # the profile env in its worker) does not.
+            # The binding is THREAD-ONLY (profile_env_for_thread_readonly):
+            # the seam does a pure in-memory expansion and reads nothing from
+            # os.environ, so mirroring the profile env into the process env
+            # (as profile_env_for_background_worker does for agent bodies)
+            # would only let this request's setup/restore clobber a
+            # concurrent streaming turn's mirrored env, and vice versa. The
+            # thread-only scope also sets the fail-closed
+            # block_process_env_fallback boundary: a ${VAR} only the server
+            # process env defines does not expand here, and
+            # _sync_routing_kwargs drops any routing value that still carries
+            # ${...} after expansion (with a warning) instead of forwarding
+            # the literal, which would make OpenRouter target a nonexistent
+            # provider. The scope is a no-op for default-profile sessions, so
+            # profile-less behavior is unchanged.
+            try:
+                _sync_routing_params = set(inspect.signature(AIAgent.__init__).parameters)
+            except (TypeError, ValueError):
+                _sync_routing_params = set()
+            from api.profiles import profile_env_for_thread_readonly
+            with profile_env_for_thread_readonly(
+                s, "sync provider routing", logger_override=logger,
+            ):
+                _routing_kwargs = _sync_routing_kwargs(_pp_cfg, _sync_routing_params)
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
@@ -27115,6 +27550,7 @@ def _handle_chat_sync(handler, body):
                 quiet_mode=True,
                 enabled_toolsets=_resolve_cli_toolsets(),
                 session_id=s.session_id,
+                **_routing_kwargs,
                 **_agent_bundle_kwargs(AIAgent, _bundle),
             )
             from api.streaming import (

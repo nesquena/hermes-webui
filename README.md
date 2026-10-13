@@ -240,6 +240,12 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Edit, create, delete, and rename files; create folders
 - Binary file download (auto-detected from server)
 - File preview auto-closes on directory navigation (with unsaved-edit guard)
+- Dismissing the workspace panel is respected: resizing the viewport or showing the
+  on-screen keyboard no longer force-reopens the panel after you close it (#6710)
+- Previews report their real load outcome -- a broken source is reported as a
+  failure instead of a silent success -- and a response that never settles is
+  released by a bounded wait so the panel still opens; the source keeps loading
+  and a late failure is surfaced in the status line (#6710)
 - Git detection -- branch name and dirty file count badge in workspace header
 - Right panel is drag-resizable
 - Syntax highlighted code preview (Prism.js)
@@ -396,6 +402,8 @@ before the session's named-profile Gateway ownership is known.
 | State directory | `HERMES_WEBUI_STATE_DIR` env, then `$HERMES_HOME/webui` (Windows default `%LOCALAPPDATA%\hermes\webui`, POSIX default `~/.hermes/webui`) |
 | Default workspace | `HERMES_WEBUI_DEFAULT_WORKSPACE` env, then `~/workspace`, then state dir |
 | Port | `HERMES_WEBUI_PORT` env or first argument, default `8787` |
+
+Before it installs the agent or writes any state, the bootstrap binds the resolved host and port as a preflight. If another service already holds the port, it stops right there, names the address it could not bind, and prints a free alternative to pass to `./start.sh <port>` or set as `HERMES_WEBUI_PORT` in `.env`. The running service and your existing configuration are left untouched. When the listener on that port is a healthy WebUI -- the instance you already started -- bootstrap reports it ready and leaves it alone, browser included; only a foreign service gets the conflict message.
 
 If discovery finds everything, nothing else is required.
 

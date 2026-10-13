@@ -1195,6 +1195,8 @@ def test_agent_session_source_normalization_contract():
         'slack': ('messaging', 'Slack'),
         'matrix': ('messaging', 'Matrix'),
         'signal': ('messaging', 'Signal'),
+        'feishu': ('messaging', 'Feishu'),
+        'dingtalk': ('messaging', 'DingTalk'),
         'cron': ('cron', 'Cron'),
         'webhook': ('webhook', 'Webhook'),
         'tool': ('tool', 'Tool'),
@@ -1220,7 +1222,7 @@ def test_sessions_js_treats_email_as_messaging_source():
     raw_section = src[src.find("_MESSAGING_RAW_SOURCES"):src.find("function _isMessagingSession")]
     label_section = src[src.find("_MESSAGING_SOURCE_LABELS"):src.find("function _isMessagingSession")]
 
-    for raw_source in ("email", "wecom", "wecom_callback", "matrix", "signal"):
+    for raw_source in ("email", "wecom", "wecom_callback", "matrix", "signal", "feishu", "dingtalk"):
         assert f"'{raw_source}'" in raw_section, f"Missing raw source {raw_source!r} in _MESSAGING_RAW_SOURCES"
 
     assert "email: 'Email'" in label_section
@@ -1228,6 +1230,8 @@ def test_sessions_js_treats_email_as_messaging_source():
     assert "wecom_callback: 'WeCom Callback'" in label_section
     assert "matrix: 'Matrix'" in label_section
     assert "signal: 'Signal'" in label_section
+    assert "feishu: 'Feishu'" in label_section
+    assert "dingtalk: 'DingTalk'" in label_section
 
 
 def test_sessions_js_treats_messaging_sidecars_behaviorally():
@@ -1245,6 +1249,8 @@ const cases = [
   {{ session_source: 'other', source: 'matrix' }},
   {{ session_source: 'other', source: 'signal' }},
   {{ session_source: 'other', raw_source: 'signal' }},
+  {{ session_source: 'other', source: 'feishu' }},
+  {{ session_source: 'other', raw_source: 'dingtalk' }},
   {{ session_source: 'messaging', source: 'anything' }},
 ];
 for (const c of cases) {{
