@@ -4338,6 +4338,7 @@ async function _fetchLiveModels(provider, sel, requestSeq=null, opts={}){
       if(required) throw new Error(t('providers_live_models_empty'));
       return;
     }
+    if(cacheKey!==_liveModelCacheKey(provider)) return;
     if(generation!==(_liveModelCacheGen[cacheKey]||0)) return;
     _liveModelCache[cacheKey]=data.models;
     if(requestSeq!==null&&requestSeq!==_modelDropdownRequestSeq) return;

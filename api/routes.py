@@ -23265,11 +23265,11 @@ def _handle_live_models(handler, parsed):
             # fallback, not a replacement.  The live endpoint should return ALL
             # models the key has access to, not just what's listed in config.yaml.
             if provider == "custom" or provider.startswith("custom:"):
-                from api.config import _resolve_custom_record_key
+                from api.config import _resolve_custom_record_credential
 
                 _record = custom_provider_entry or cfg.get("model", {})
                 _base_url = _record.get("base_url")
-                _api_key = _resolve_custom_record_key(_record.get("api_key"), _record.get("key_env"), provider)
+                _api_key, _pool_runtime = _resolve_custom_record_credential(_record, _base_url, provider)
                 # Fallback: try credential pool for base_url + api_key
                 if not _base_url or not _api_key:
                     try:
@@ -23302,6 +23302,8 @@ def _handle_live_models(handler, parsed):
                         else:
                             _models_url = f"{_ep}/v1/models"
                         
+                        _api_key = _api_key() if callable(_api_key) else _api_key
+                        _api_key = str(_api_key or "").strip()
                         _headers = {}
                         if _api_key:
                             _headers["Authorization"] = f"Bearer {_api_key}"

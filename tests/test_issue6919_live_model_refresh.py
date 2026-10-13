@@ -811,6 +811,8 @@ globalThis.eval({json.dumps(bundle)});
     ("custom:relay-prod", {}, {"CUSTOM_RELAY_PROD_API_KEY": "conventional-key"}, "Bearer conventional-key"),
     ("custom:relay-prod", {}, {"CUSTOM:RELAY-PROD_API_KEY": "legacy-key"}, "Bearer legacy-key"),
     ("custom:relay-prod", {"api_key": "literal-key"}, {}, "Bearer literal-key"),
+    ("custom", {"key_cmd": "print-token", "api_key": "old-token"}, {}, "Bearer command-token"),
+    ("custom:relay-prod", {"key_cmd": "print-token"}, {}, "Bearer command-token"),
     ("custom", {}, {"POOL": "pool-key"}, "Bearer pool-key"),
     ("custom:relay-prod", {}, {"POOL": "pool-key"}, "Bearer pool-key"),
 ])
@@ -831,6 +833,15 @@ def test_custom_discovery_resolves_credentials(monkeypatch, provider, record, en
     pool = types.ModuleType("agent.credential_pool")
     pool.load_pool = lambda _: types.SimpleNamespace(select=lambda: types.SimpleNamespace(runtime_api_key=env.get("POOL", "")))
     monkeypatch.setitem(sys.modules, "agent.credential_pool", pool)
+    commands = []
+    command_source = types.ModuleType("agent.command_token_source")
+
+    def build_command(command, name):
+        commands.append((command, name))
+        return lambda: "command-token"
+
+    command_source.build_command_token_provider = build_command
+    monkeypatch.setitem(sys.modules, "agent.command_token_source", command_source)
     requests = []
 
     class Response:
@@ -853,6 +864,8 @@ def test_custom_discovery_resolves_credentials(monkeypatch, provider, record, en
     assert requests[0].full_url == "https://relay.example/v1/models"
     assert requests[0].get_header("Authorization") == expected_auth
     assert [model["id"] for model in result["models"]] == ["live-model"]
+    if "key_cmd" in record:
+        assert commands == [("print-token", provider)]
 
 
 def test_successful_lookup_invalidated_by_another_request_cannot_publish(monkeypatch):
@@ -880,3 +893,39 @@ def test_successful_lookup_invalidated_by_another_request_cannot_publish(monkeyp
     assert [model["id"] for model in fresh["models"]] == ["fresh-model"]
     assert routes._get_cached_live_models(key) == fresh
     assert key not in routes._LIVE_MODELS_REFRESH_REQUIRED
+
+
+def test_settings_live_models_discard_response_after_profile_switch():
+    source = (REPO / "static" / "ui.js").read_text(encoding="utf-8")
+    bundle = (
+        "globalThis._liveModelCache={}; globalThis._liveModelCacheGen={}; "
+        "globalThis._liveModelFetchPending=new Set(); globalThis._modelDropdownRequestSeq=0; "
+        "globalThis.S={activeProfile:'profile-a'}; "
+        "globalThis.document={baseURI:'http://localhost/'}; globalThis._redirectIfUnauth=()=>false; "
+        "globalThis.syncModelChip=()=>{}; "
+        + _extract_js_function(source, "function _liveModelCacheKey(")
+        + "\n"
+        + _extract_js_function(source, "async function _fetchLiveModels(")
+        + "\nglobalThis.runFetch=_fetchLiveModels;"
+    )
+    script = f"""
+const resolvers=[]; const applied=[];
+globalThis.fetch=()=>new Promise(resolve=>resolvers.push(resolve));
+globalThis._addLiveModelsToSelect=(provider,models,select)=>{{applied.push(models.map(model=>model.id)); return 0;}};
+globalThis.eval({json.dumps(bundle)});
+(async()=>{{
+  const select={{id:'settingsModelSelect'}};
+  const old=globalThis.runFetch('provider',select);
+  globalThis.S.activeProfile='profile-b';
+  resolvers.shift()({{ok:true,json:async()=>({{models:[{{id:'old-profile-model'}}]}})}});
+  const result=await old;
+  const appliedAfterOld=applied.length;
+  const current=globalThis.runFetch('provider',select);
+  resolvers.shift()({{ok:true,json:async()=>({{models:[{{id:'current-profile-model'}}]}})}});
+  await current;
+  console.log(JSON.stringify({{oldResult:result??null,appliedAfterOld,applied,pending:globalThis._liveModelFetchPending.size}}));
+}})();
+"""
+    assert _run_node(script) == {
+        "oldResult": None, "appliedAfterOld": 0, "applied": [["current-profile-model"]], "pending": 0,
+    }
