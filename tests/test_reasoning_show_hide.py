@@ -13,6 +13,7 @@ Covers:
 
 import pathlib
 import re
+from tests.js_source_extract import extract_command_entry
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -182,9 +183,7 @@ class TestReasoningCommand:
         assert m
         commands_block = m.group(1)
         # Find the reasoning entry
-        rm = re.search(r"\{name:'reasoning'.*?\}", commands_block, re.DOTALL)
-        assert rm, "reasoning entry not found in COMMANDS"
-        entry = rm.group(0)
+        entry = extract_command_entry(src, "reasoning")
         assert 'show' in entry, "subArgs must include 'show'"
         assert 'hide' in entry, "subArgs must include 'hide'"
 
@@ -322,9 +321,7 @@ class TestReasoningCommand:
     def test_reasoning_subargs_match_cli_levels(self):
         """Autocomplete subArgs must expose every CLI effort level + show/hide."""
         src = read('static/commands.js')
-        m = re.search(r"\{name:'reasoning'[^}]*\}", src, re.DOTALL)
-        assert m, "reasoning COMMANDS entry not found"
-        entry = m.group(0)
+        entry = extract_command_entry(src, "reasoning")
         for suggestion in (
             'show', 'hide', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'
         ):

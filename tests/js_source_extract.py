@@ -14,3 +14,11 @@ def extract_function(js: str, name: str, prefix: str = "function") -> str:
         i += 1
     assert depth == 0, f"{name} function braces unbalanced"
     return js[start:i]
+
+
+def extract_command_entry(js: str, name: str) -> str:
+    marker = f"{{name:'{name}'"
+    start = js.index(marker, js.index("const COMMANDS=["))
+    next_entry = js.find("\n  {name:'", start + len(marker))
+    end = next_entry if next_entry >= 0 else js.index("\n];", start)
+    return js[start:end].rstrip().removesuffix(",")

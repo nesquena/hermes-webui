@@ -66,6 +66,49 @@ Promise.resolve(started).then(result=>{{
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_fresh_english_page_waits_for_unloaded_locale_before_activating():
+    core_path = ROOT / "static" / "i18n-core.js"
+    german_path = ROOT / "static" / "locales" / "de.js"
+    script = f"""
+const fs=require('fs');
+const vm=require('vm');
+const scripts=[];
+const ctx={{
+  URL,
+  setTimeout(fn){{return setTimeout(fn,0);}},
+  clearTimeout,
+  localStorage:{{getItem:()=>null,setItem(){{}}}},
+  document:{{
+    baseURI:'https://example.test/',currentScript:null,
+    documentElement:{{lang:''}},querySelectorAll:()=>[],
+    createElement:()=>({{async:false}}),
+    head:{{appendChild(script){{scripts.push(script);}}}},
+  }},
+}};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync({json.dumps(str(core_path))},'utf8'),ctx);
+const started=vm.runInContext("activateLocale('de')",ctx);
+const before={{active:vm.runInContext('getActiveLocale()',ctx),scripts:scripts.length}};
+vm.runInContext(fs.readFileSync({json.dumps(str(german_path))},'utf8'),ctx);
+Promise.resolve(started).then(result=>{{
+  process.stdout.write(JSON.stringify({{
+    before,
+    status:result.status,
+    active:vm.runInContext('getActiveLocale()',ctx),
+    text:vm.runInContext("t('cmd_use')",ctx),
+  }}));
+}});
+"""
+    result = subprocess.run([NODE, "-e", script], capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) == {
+        "before": {"active": "en", "scripts": 1},
+        "status": "applied",
+        "active": "de",
+        "text": "Einen Skill für die nächste Nachricht erzwingen",
+    }
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_late_script_callbacks_do_not_reject_a_locale_retry():
     core_path = ROOT / "static" / "i18n-core.js"
     french_path = ROOT / "static" / "locales" / "fr.js"

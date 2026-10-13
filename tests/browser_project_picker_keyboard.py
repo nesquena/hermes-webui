@@ -124,6 +124,20 @@ LONG_PROJECTS = [
 ]
 
 
+def _activate_locale(page, lang):
+    return page.evaluate(
+        """async lang => {
+          const result = await activateLocale(lang);
+          const active = getActiveLocale();
+          if (result.status !== 'applied' || active !== lang) {
+            throw new Error(`locale ${lang} was not ready: ${result.status}/${active}`);
+          }
+          return result;
+        }""",
+        lang,
+    )
+
+
 def _wait_for_health(timeout=30):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -428,7 +442,7 @@ def _check_single(page, seed):
         fail(f"a click on a project sent {moves}")
 
     # The two labels follow the interface language.
-    page.evaluate("setLocale('de')")
+    _activate_locale(page, "de")
     problem = _open_single_picker(page, alpha)
     if problem:
         return failures + [f"  [single] reopen in German: {problem}"]
@@ -483,7 +497,7 @@ def _check_batch(page, seed):
     def fail(message):
         failures.append(f"  [batch] {message}")
 
-    page.evaluate("setLocale('de')")
+    _activate_locale(page, "de")
     problem = _open_batch_picker(page, seed)
     if problem:
         return [f"  [batch] {problem}"]
@@ -1286,7 +1300,7 @@ def _screenshots(browser, directory, seed):
         if page is None:
             print(f"screenshot {width}x{height}: {errors}", file=sys.stderr)
             continue
-        page.evaluate("() => { setLocale('de'); if (typeof applyLocaleToDOM === 'function') applyLocaleToDOM(); }")
+        _activate_locale(page, "de")
         if mobile:
             _open_mobile_drawer(page)
         page.evaluate("renderSessionList()")
