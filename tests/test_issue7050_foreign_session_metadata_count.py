@@ -447,7 +447,10 @@ def test_messaging_metadata_control_stays_on_messaging_path(monkeypatch, tmp_pat
     assert payload["message_count"] == 1
 
 
-def test_read_only_messaging_paged_load_with_empty_cli_uses_sidecar(monkeypatch, tmp_path):
+@pytest.mark.parametrize("snapshot_parent", [False, True])
+@pytest.mark.parametrize("cli_has_messages", [False, True])
+def test_read_only_messaging_counts_match_transcript(monkeypatch, tmp_path, snapshot_parent, cli_has_messages):
+    import api.models as models
     import api.routes as routes
 
     parent_id = "messaging_empty_cli_parent_7050"
@@ -457,7 +460,9 @@ def test_read_only_messaging_paged_load_with_empty_cli_uses_sidecar(monkeypatch,
         {"role": "user", "content": "saved user", "timestamp": 1000.0},
         {"role": "assistant", "content": "saved answer", "timestamp": 1001.0},
     ]
-    _install_test_session(monkeypatch, tmp_path, parent_id, parent_messages)
+    parent = _install_test_session(monkeypatch, tmp_path, parent_id, parent_messages)
+    parent.pre_compression_snapshot = snapshot_parent
+    parent.save(touch_updated_at=False)
     session = _install_test_session(monkeypatch, tmp_path, sid, sidecar)
     session.parent_session_id = parent_id
     session.is_cli_session = True
@@ -471,10 +476,52 @@ def test_read_only_messaging_paged_load_with_empty_cli_uses_sidecar(monkeypatch,
         "_lookup_cli_session_metadata",
         lambda _sid: {"source_tag": "slack", "session_source": "messaging", "is_cli_session": True},
     )
-    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: [])
+    monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid: sidecar if cli_has_messages else [])
 
     handler = _GetHandler(f"/api/session?session_id={sid}&messages=1&resolve_model=0&msg_limit=30")
     routes.handle_get(handler, urlparse(handler.path))
 
     assert handler.status == 200
-    assert handler.response_json["session"]["messages"] == sidecar
+    paged = handler.response_json["session"]
+    models.SESSIONS.clear()
+    metadata = _session_payload(routes, f"/api/session?session_id={sid}&messages=0&resolve_model=0")
+    models.SESSIONS.clear()
+    full = _session_payload(routes, f"/api/session?session_id={sid}&messages=1&resolve_model=0")
+    expected = parent_messages + sidecar if snapshot_parent else sidecar
+    assert paged["messages"] == full["messages"] == expected
+    assert metadata["message_count"] == paged["message_count"] == full["message_count"] == len(expected)
+
+
+def test_foreign_summary_cache_hit_avoids_lineage_parsing(monkeypatch, tmp_path):
+    import api.models as models
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path)
+    child = models.Session.load(sid)
+    parent = models.Session(session_id="summary_parent_7050", messages=[{"role": "user", "content": "parent", "timestamp": 900.0}])
+    parent.save(touch_updated_at=False)
+    child.parent_session_id = parent.session_id
+    child.save(touch_updated_at=False)
+    first = routes._foreign_display_coordinate_summary(sid)
+    monkeypatch.setattr(models.Session, "load", classmethod(lambda *_args: pytest.fail("cache hit parsed a sidecar")))
+    assert routes._foreign_display_coordinate_summary(sid) == first
+
+
+def test_foreign_summary_cache_expires_same_aggregate_rewrite(monkeypatch, tmp_path):
+    import api.routes as routes
+
+    sid = _foreign_fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(routes, "_foreign_display_coordinate_state_db_identity", lambda _profile: "unchanged-token")
+    now = [100.0]
+    monkeypatch.setattr(routes.time, "monotonic", lambda: now[0])
+    first = routes._foreign_display_coordinate_summary(sid)
+    with sqlite3.connect(tmp_path / "state.db") as conn:
+        before = conn.execute("SELECT COUNT(*), MAX(timestamp) FROM messages").fetchone()
+        conn.execute("UPDATE messages SET content = 'distinct' WHERE rowid = (SELECT MAX(rowid) FROM messages WHERE content = 'hello')")
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*), MAX(timestamp) FROM messages").fetchone() == before
+    now[0] += 6.0
+    second = routes._foreign_display_coordinate_summary(sid)
+    assert first["message_count"] == 4
+    assert second["message_count"] == 5
+    assert second["last_message_at"] == first["last_message_at"] == 1003.0
