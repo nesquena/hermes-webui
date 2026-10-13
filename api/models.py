@@ -2286,13 +2286,40 @@ class Session:
         return session
 
     @classmethod
+    def load_readonly(cls, sid):
+        """Load a normalized sidecar without writing repairs or backups."""
+        if not is_safe_session_id(sid):
+            return None
+        path = SESSION_DIR / f'{sid}.json'
+        try:
+            pre_read_sig = _sidecar_stat_signature(path)
+            data = json.loads(path.read_text(encoding='utf-8'))
+        except FileNotFoundError:
+            return None
+        data['messages'], _ = _collapse_adjacent_duplicate_partials(data.get('messages'))
+        session = cls(**data)
+        if 'anchor_scene_index' not in data:
+            try:
+                _legacy_sidecar_facts_put(
+                    sid,
+                    len(getattr(session, 'messages', None) or []),
+                    _anchor_scene_index_from_records(
+                        getattr(session, 'anchor_activity_scenes', None)
+                    ),
+                    expected_sig=pre_read_sig,
+                )
+            except Exception:
+                logger.debug("legacy sidecar facts cache populate failed", exc_info=True)
+        return session
+
+    @classmethod
     def load_metadata_only(cls, sid, *, index_message_counts=None):
         """Load only the compact metadata fields, skipping the messages array.
 
         Session JSON files have metadata fields (session_id, title, model, etc.)
         at the top level, before the large messages array. Read only up to the
         top-level "messages" field and synthesize a small metadata-only object.
-        Falls back to load() for legacy or unexpected file layouts.
+        Falls back to a read-only full load for legacy or unexpected layouts.
         """
         # Same path-safety contract as load(): hyphens are valid session ids,
         # path separators and traversal dots are not.
@@ -2304,11 +2331,11 @@ class Session:
         try:
             prefix = _read_metadata_json_prefix(p)
             if not prefix:
-                return cls.load(sid)
+                return cls.load_readonly(sid)
             parsed = json.loads(prefix)
             needed = {'session_id', 'title', 'created_at', 'updated_at'}
             if not needed.issubset(parsed.keys()):
-                return cls.load(sid)
+                return cls.load_readonly(sid)
             parsed['messages'] = []
             parsed['tool_calls'] = []
             parsed = _apply_session_draft_overlay(parsed, sid)
@@ -2347,11 +2374,11 @@ class Session:
                     session._metadata_message_count = _parse_nonnegative_int(_facts.get('message_count'))
                     session._loaded_metadata_only = True
                     return session
-                # Cache miss → full-load. cls.load() itself populates the legacy
-                # facts cache with a TOCTOU-guarded write (expected_sig), so we
+                # Cache miss → full-load. load_readonly() populates the legacy
+                # facts cache with a TOCTOU-guarded put (expected_sig), so we
                 # do NOT re-cache here (an unguarded second write could stamp
                 # stale facts under a replacement file's signature — Codex r5).
-                return cls.load(sid)
+                return cls.load_readonly(sid)
             # Modern sidecars carry an accurate message_count, so it is the
             # source of truth and we skip the per-row _index.json read in the
             # common case. The sidebar index is only a cache (it can lag behind
@@ -2377,8 +2404,8 @@ class Session:
             session._loaded_metadata_only = True
             return session
         except Exception:
-            # Corrupt prefix or decode error — fall back to full load
-            return cls.load(sid)
+            # Corrupt prefix or decode error — fall back to a read-only load.
+            return cls.load_readonly(sid)
 
     @staticmethod
     def _compute_user_message_count(messages) -> int:
