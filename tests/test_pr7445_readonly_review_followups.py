@@ -191,7 +191,10 @@ def test_open_state_db_readonly_uses_platform_uri_builder(tmp_path, monkeypatch)
     monkeypatch.setattr(agent_sessions.sqlite3, "connect", recording)
     with closing(agent_sessions.open_state_db_readonly(path)) as conn:
         assert conn.execute("SELECT COUNT(*) FROM t").fetchone() == (0,)
-    assert calls == [(agent_sessions.state_db_readonly_uri(path.resolve()), {"uri": True})]
+    assert calls == [(
+        agent_sessions.state_db_readonly_uri(path.resolve()),
+        {"uri": True, "check_same_thread": True},
+    )]
     assert calls[0][0].endswith("?mode=ro")
 
 
