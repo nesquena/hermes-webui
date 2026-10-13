@@ -645,7 +645,7 @@ try {
                 for wrapped in (False, True):
                     page = browser.new_page(viewport={"width":500, "height":500})
                     page.set_content("<!doctype html><html><body></body></html>")
-                    height = 900 if total > 80 else 320
+                    height = 900 if total == 200 else 320
                     page.add_script_tag(content=fixture.replace("__TOTAL__", str(total)).replace("__LIST_HEIGHT__", str(height)).replace("__SHOW_SOURCE_TABS__", str(source_tabs).lower()).replace("__WRAPPED_PROJECT_BAR__", str(wrapped).lower()))
                     observed_by_total[total][(source_tabs, wrapped)] = page.evaluate("window.groupedGeometry")
                     page.close()
