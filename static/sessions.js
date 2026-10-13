@@ -8728,7 +8728,7 @@ function _sessionFullTitleTooltip(rawTitle, cleanTitle, session){
   if(_showAllProfiles && session && typeof session.profile==='string' && session.profile.trim()){
     const activeProfileName=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string')?S.activeProfile.trim():'default';
     const sessionProfileName=session.profile.trim();
-    if(sessionProfileName && sessionProfileName!==activeProfileName){
+    if(sessionProfileName && !_profileMatchesActiveProfile(sessionProfileName, activeProfileName)){
       title=title + ' [' + sessionProfileName + ']';
     }
   }
@@ -10173,7 +10173,7 @@ function renderSessionListFromCache(){
     if(_showAllProfiles && s.profile){
       const sessionProfileName=(typeof s.profile==='string')?s.profile.trim():'';
       const activeProfileName=(typeof S!=='undefined'&&S&&typeof S.activeProfile==='string')?S.activeProfile.trim():'default';
-      if(sessionProfileName && sessionProfileName!==activeProfileName){
+      if(sessionProfileName && !_profileMatchesActiveProfile(sessionProfileName, activeProfileName)){
         const profileDot=document.createElement('span');
         profileDot.className='session-profile-dot';
         const dotColor=_profileColor(sessionProfileName);
