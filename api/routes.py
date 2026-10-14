@@ -7935,7 +7935,14 @@ def _repair_foreign_session_model_provider(
         or any(_catalog_group_owns_exact_model(group, stored_model) for group in stored_groups)
     ):
         return resolved_provider
-    if not stored_groups:
+    # A canonical group match is not proof the RAW stored id is valid: a
+    # session stored as ``glm``/``z-ai`` canonicalises to the ``zai`` group,
+    # and group presence alone must not skip the proof chain below, which
+    # master's raw-id group comparison gave for free (#8179 re-gate).
+    if not any(
+        str(group.get("provider_id") or "").strip().lower() == stored_provider
+        for group in groups
+    ):
         # A missing stored group used to preserve the lane unconditionally,
         # which let a stale catalog-backed provider (e.g. "openrouter" left on
         # a session after moving to another provider without an OpenRouter
