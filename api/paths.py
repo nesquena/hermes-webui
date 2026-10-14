@@ -105,7 +105,9 @@ def _require_writable_target(write_path: Path) -> os.stat_result | None:
         os.close(probe_fd)
 
 
-def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None:
+def _atomic_write_text(
+    path: Path, text: str, *, encoding: str = "utf-8", mode: int | None = None
+) -> None:
     """Atomically replace *path* with *text*.
 
     Writes to a temp file in the same directory, flushes + ``os.fsync``, then
@@ -149,6 +151,11 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
     semantics is impossible. Other ``PermissionError``s still propagate.
     Successful renames fsync the parent directory where supported.
 
+    ``mode`` pins the published file's permission bits instead of inheriting
+    them from the target or, for a new file, from the process umask. It is
+    applied to the temp descriptor before any bytes are written, so private
+    content is never staged under a looser mode.
+
     The caller is responsible for ensuring ``path.parent`` exists.
     """
     path = Path(path)
@@ -158,7 +165,10 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         existing_stat = os.stat(write_path)
     except FileNotFoundError:
         existing_stat = None
-    mode = stat.S_IMODE(existing_stat.st_mode) if existing_stat else None
+    existing_mode = stat.S_IMODE(existing_stat.st_mode) if existing_stat else None
+    # An explicit mode is the caller's instruction, so it wins over whatever
+    # the current target happens to carry.
+    target_mode = mode if mode is not None else existing_mode
 
     def _verify_symlink_target() -> None:
         if symlink_target is not None and path.resolve(strict=False) != symlink_target:
@@ -194,10 +204,12 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
         probed_stat = _require_writable_target(write_path)
         if probed_stat is not None and stat.S_ISREG(probed_stat.st_mode):
             existing_stat = probed_stat
-            mode = stat.S_IMODE(existing_stat.st_mode)
+            if mode is None:
+                target_mode = stat.S_IMODE(existing_stat.st_mode)
         else:
             existing_stat = probed_stat
-            mode = None
+            if mode is None:
+                target_mode = None
         if existing_stat is not None and (
             existing_stat.st_nlink > 1 or _has_extended_attributes(write_path)
         ):
@@ -231,10 +243,10 @@ def _atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> Non
                 os.unlink(tmp)
                 _write_in_place()
                 return
-        if mode is not None and hasattr(os, "fchmod"):
-            os.fchmod(fd, mode)
-        elif mode is not None:
-            os.chmod(tmp, mode)
+        if target_mode is not None and hasattr(os, "fchmod"):
+            os.fchmod(fd, target_mode)
+        elif target_mode is not None:
+            os.chmod(tmp, target_mode)
         f = os.fdopen(fd, "w", encoding=encoding)
         owns_fd = False
         with f:

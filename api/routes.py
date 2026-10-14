@@ -15933,6 +15933,15 @@ def _save_saved_prompts(prompts: list) -> None:
     # #7644: serialize the whole payload first, so neither publication below
     # can start from a payload that fails to encode.
     payload = json.dumps(prompts, ensure_ascii=False, indent=2)
+    backup = Path(str(p) + ".bak")
+    # A primary resolving onto its own recovery path makes the two generations
+    # one file: unlinking the backup would drop the primary's referent, and the
+    # replacement below would be published through it into the recovery path.
+    # Refuse the topology before anything is mutated.
+    if p.is_symlink() and p.resolve(strict=False) == backup.resolve(strict=False):
+        raise SavedPromptPersistenceError(
+            "saved_prompts.json symlinks onto its own backup; refusing to publish"
+        )
     # Only a primary that still parses as a prompt list is worth preserving, so
     # a torn file can never overwrite the one known-good backup generation.
     try:
@@ -15942,25 +15951,18 @@ def _save_saved_prompts(prompts: list) -> None:
         current = None
         known_good = False
     if known_good:
-        # Publish an INDEPENDENT snapshot of the live generation instead of
-        # moving the primary aside. The primary stays where it is, so when the
-        # shared writer publishes the replacement it still finds the original
-        # target and keeps its mode, owner, symlinks, hard links and extended
-        # attributes — and a 0444 primary still refuses the write. Moving the
-        # file away first handed the writer a brand-new path with none of that
-        # authority, and left the primary absent if the publish then failed.
-        backup = Path(str(p) + ".bak")
+        # Publish an independent snapshot of the live generation while the
+        # primary keeps its mode, owner, links and metadata, so the shared
+        # writer's protections still govern the replacement below.
         try:
-            try:
-                shares_primary_inode = os.path.samefile(p, backup)
-            except OSError:
-                shares_primary_inode = False
-            if shares_primary_inode:
-                # A backup that is an alias of the primary would be rewritten
-                # through the alias by the writer's compatibility path; give
-                # the snapshot its own inode instead.
-                backup.unlink()
-            _atomic_write_text(backup, current)
+            primary_mode = _stat.S_IMODE(os.stat(p).st_mode)
+            # Publish on a FRESH inode: unlinking first means no alias parked
+            # at the backup path (a symlink or extra hard link to an unrelated
+            # file, or the primary itself) is ever written through, and the
+            # primary's restrictions reach the temp inode before its bytes do —
+            # never a chmod after the fact.
+            backup.unlink(missing_ok=True)
+            _atomic_write_text(backup, current, mode=primary_mode)
         except OSError as exc:
             # Preparation failure: the destructive mutation must not run with
             # no recoverable copy left behind.
