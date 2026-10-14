@@ -7480,6 +7480,10 @@ async function switchToProfile(name) {
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
   if (_titlebarLabel) _titlebarLabel.textContent = name;
+  // Optimistically clear the cached display name: the switch target's label
+  // resolves from /api/profiles below, and until then the canonical name is
+  // the honest value to show (#8055).
+  S.activeProfileDisplayName = '';
 
   // ── Clear stale content + show loading skeletons immediately (#4662) ───────
   // The conversation list and workspace tree still show the PREVIOUS profile's
@@ -7565,6 +7569,13 @@ async function switchToProfile(name) {
     // reconciliation below; every other exit releases it in `finally`.
     _tabVisGuardHeld = true;
     if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
+    if (typeof data.display_name === 'string') S.activeProfileDisplayName = data.display_name;
+    if (typeof applyBotName === 'function') applyBotName();
+    if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
+    const _switchedChipLabel = $('profileChipLabel');
+    if (_switchedChipLabel) _switchedChipLabel.textContent = profileChipDisplayLabel();
+    const _switchedTitleLabel = $('titlebarProfileLabel');
+    if (_switchedTitleLabel) _switchedTitleLabel.textContent = profileChipDisplayLabel();
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
