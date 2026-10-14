@@ -5745,9 +5745,15 @@ def resolve_model_reasoning_efforts(
     resolve against the request config snapshot they captured under the cache
     lock, so the provider-list lookup below never reads the shared cache.
     """
-    raw = _resolve_model_reasoning_efforts_impl(
-        model_id, provider_id, base_url, config_data=config_data
-    )
+    if config_data is None:
+        # Keep the historical call shape when no snapshot is threaded:
+        # existing monkeypatches replace this helper with strict-signature
+        # stand-ins that do not accept the extra keyword.
+        raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    else:
+        raw = _resolve_model_reasoning_efforts_impl(
+            model_id, provider_id, base_url, config_data=config_data
+        )
     if not raw:
         return raw
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
@@ -5940,12 +5946,22 @@ def coerce_reasoning_effort_for_model(
         return "none"
     if raw not in VALID_REASONING_EFFORTS:
         return ""
-    supported = resolve_model_reasoning_efforts(
-        model_id,
-        provider_id=provider_id,
-        base_url=base_url,
-        config_data=config_data,
-    )
+    if config_data is None:
+        # Same legacy-shape rule as resolve_model_reasoning_efforts(): keep
+        # the historical keyword set so strict-signature stand-ins keep
+        # working when no snapshot was threaded.
+        supported = resolve_model_reasoning_efforts(
+            model_id,
+            provider_id=provider_id,
+            base_url=base_url,
+        )
+    else:
+        supported = resolve_model_reasoning_efforts(
+            model_id,
+            provider_id=provider_id,
+            base_url=base_url,
+            config_data=config_data,
+        )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
     # models.dev / heuristics, and those can (a) return [] for an unrecognized

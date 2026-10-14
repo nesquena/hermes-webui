@@ -712,6 +712,13 @@ def test_profile_settings_survive_a_concurrent_default_profile_read(monkeypatch)
             time.sleep(0.0005)
             shared.clear()
             shared.update(copy.deepcopy(analyst_cfg))
+        # Yield outside the lock too: a reader that re-acquires cache_lock
+        # immediately after release (while still holding the GIL) can starve
+        # the request thread indefinitely on slow CI runners — this test hit
+        # pytest-timeout's >60s kill in CI shards 2 of 3.11/3.12. Sleeping
+        # here hands the lock back so the request thread always makes
+        # progress between reads.
+        time.sleep(0.0005)
 
     monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
     monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
