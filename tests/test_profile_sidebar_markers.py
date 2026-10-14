@@ -207,3 +207,125 @@ def test_renamed_root_own_legacy_default_session_is_not_foreign():
 
 def test_renamed_root_foreign_session_still_marked():
     assert _foreign_decision("bravo", "renamed-root", is_default_root=True) is True
+
+
+# ── Stylesheet parse: the dot rule must not eat the #8044 comment ────────
+
+def _strip_css_comments(css: str) -> str:
+    """Remove every ``/* ... */`` comment, refusing the two shapes that mean a
+    comment was opened or closed in the wrong place: an unterminated comment
+    and a stray ``*/`` with nothing open."""
+    out = []
+    i = 0
+    while i < len(css):
+        if css.startswith("/*", i):
+            end = css.find("*/", i + 2)
+            if end == -1:
+                raise AssertionError(f"unterminated CSS comment at offset {i}")
+            i = end + 2
+            continue
+        if css.startswith("*/", i):
+            raise AssertionError(f"stray CSS comment close at offset {i}")
+        out.append(css[i])
+        i += 1
+    return "".join(out)
+
+
+def _top_level_selectors(css: str) -> list:
+    """The prelude of every top-level rule in ``css``, comments removed.
+
+    A comment body that survives as text shows up here as prose glued to the
+    following selector, which is exactly how a browser loses that rule.
+    """
+    css = _strip_css_comments(css)
+    selectors = []
+    depth = 0
+    start = 0
+    i = 0
+    while i < len(css):
+        ch = css[i]
+        if ch in "\"'":
+            quote = ch
+            i += 1
+            while i < len(css) and css[i] != quote:
+                i += 2 if css[i] == "\\" else 1
+            i += 1
+            continue
+        if depth == 0 and ch == "{":
+            selectors.append(css[start:i].strip())
+            depth = 1
+            i += 1
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                start = i + 1
+        i += 1
+    return [part.strip() for sel in selectors for part in sel.split(";")[-1].split(",")]
+
+
+def test_the_dot_rule_leaves_the_picker_focus_rule_intact():
+    """Merge resolution put ``.session-profile-dot`` where the ``/* #8044:`` opener
+    of the comment above ``.project-picker-item:focus-visible`` used to start, and
+    kept the comment's prose and its closing ``*/``. The result is not a comment:
+    Chromium reads the prose together with the next selector and drops the focus
+    rule, so the row loses its keyboard focus outline. Source-presence assertions
+    cannot see that; the parsed stylesheet can."""
+    css = _style_css()
+    selectors = _top_level_selectors(css)
+    assert ".session-profile-dot" in selectors
+    assert ".project-picker-item:focus-visible" in selectors
+    assert ".project-picker-item.active:focus-visible" in selectors
+    # The comment's own words never reach a selector.
+    assert "finger-sized row on a touch screen" not in _strip_css_comments(css)
+
+
+def test_the_browser_stylesheet_keeps_the_picker_focus_rule():
+    """The same failure observed the way a browser observes it: through CSSOM."""
+    try:
+        from playwright.sync_api import Error as PlaywrightError, sync_playwright
+    except Exception:  # pragma: no cover - dependency optional
+        pytest.skip("playwright is unavailable; run `playwright install chromium`")
+
+    with sync_playwright() as playwright:
+        browser = None
+        try:
+            try:
+                browser = playwright.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-dev-shm-usage"],
+                )
+            except PlaywrightError as exc:
+                if "Executable doesn't exist at" in str(exc):
+                    pytest.skip(
+                        "playwright chromium executable is unavailable; "
+                        "run `playwright install chromium`"
+                    )
+                raise
+            page = browser.new_page()
+            page.set_content(f"<style>{_style_css()}</style>")
+            found = page.evaluate(
+                """
+                () => {
+                  const sheet = document.styleSheets[0];
+                  const seen = [];
+                  const walk = rules => {
+                    for (const rule of rules) {
+                      if (rule.selectorText) seen.push(rule.selectorText);
+                      if (rule.cssRules) walk(rule.cssRules);
+                    }
+                  };
+                  walk(sheet.cssRules);
+                  return seen;
+                }"""
+            )
+        finally:
+            if browser is not None:
+                browser.close()
+
+    joined = [part.strip() for sel in found for part in sel.split(",")]
+    assert ".session-profile-dot" in joined
+    assert ".project-picker-item:focus-visible" in joined
+    assert ".project-picker-item.active:focus-visible" in joined
