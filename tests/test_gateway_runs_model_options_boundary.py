@@ -250,17 +250,22 @@ def test_gateway_run_model_options_degrades_supra_levels_without_an_advertised_l
             }, f"caps={caps} should fail closed from {effort} to xhigh"
 
 
-def test_gateway_request_effort_accepts_ultra_before_receiver_negotiation(monkeypatch):
-    """A newer Agent-written ultra value must reach the transport negotiation."""
+def test_gateway_request_effort_applies_model_limit_before_ultra_negotiation(monkeypatch):
+    """An Agent-written ultra value must respect the selected model's ceiling."""
     import api.config as config
     from api.gateway_chat import _gateway_reasoning_effort_for_request
 
     monkeypatch.setattr(config, "resolve_model_reasoning_efforts", lambda *_a, **_k: [])
     assert _gateway_reasoning_effort_for_request(
         {"agent": {"reasoning_effort": "ultra"}},
-        model="future-model",
-        model_provider="future-provider",
+        model="gpt-5.6",
+        model_provider="openai",
     ) == "ultra"
+    assert _gateway_reasoning_effort_for_request(
+        {"agent": {"reasoning_effort": "ultra"}},
+        model="o3-mini",
+        model_provider="openai",
+    ) == "high"
 
 
 def test_installed_receiver_import_failure_does_not_fall_back_green(tmp_path, monkeypatch):

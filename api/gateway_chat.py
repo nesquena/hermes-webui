@@ -369,10 +369,19 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
         effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
         raw_normalized = str(effort_raw or "").strip().lower()
         # A newer Agent/CLI can write ``ultra`` before this WebUI exposes it in
-        # its user-facing ladder. Preserve that value for receiver negotiation
-        # instead of letting the older local coercion table erase it first.
+        # its user-facing ladder. Use the existing ``max`` coercion as the
+        # selected model's ceiling: preserve ``ultra`` only when that model can
+        # already accept the top WebUI-visible level, otherwise return the
+        # model-safe downgrade before receiver negotiation.
         if raw_normalized == "ultra":
-            return "ultra"
+            model_ceiling = coerce_reasoning_effort_for_model(
+                "max",
+                model,
+                provider_id=model_provider,
+            )
+            if not model_ceiling:
+                return None
+            return "ultra" if model_ceiling == "max" else str(model_ceiling)
         coerced = coerce_reasoning_effort_for_model(
             effort_raw,
             model,
