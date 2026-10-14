@@ -63,6 +63,8 @@ def isolated_session_env():
         "SESSIONS": _cfg.SESSIONS,
         "LOCK": _cfg.LOCK,
         "SESSIONS_MAX": _cfg.SESSIONS_MAX,
+        "get_sessions_cache_max": _cfg.get_sessions_cache_max,
+        "last_applied_cap": _cfg._LAST_APPLIED_SESSIONS_CACHE_MAX,
     }
 
     index_file = sessions_dir / "_index.json"
@@ -74,6 +76,12 @@ def isolated_session_env():
     _models.LOCK = _cfg.LOCK
     _cfg.SESSIONS = collections.OrderedDict()
     _models.SESSIONS = _cfg.SESSIONS
+    # The eviction pass asks get_sessions_cache_max() BEFORE falling back to
+    # SESSIONS_MAX, so a webui.sessions_cache_max in the operator's config.yaml
+    # would override the caps these tests assert on. Resolve from the isolated
+    # SESSIONS_MAX instead, and restore the diagnostics cap the pass publishes
+    # on every run, so neither leaks into other tests (#6351).
+    _cfg.get_sessions_cache_max = lambda config_data=None: _cfg.SESSIONS_MAX
 
     try:
         yield sessions_dir
@@ -89,6 +97,8 @@ def isolated_session_env():
         _cfg.LOCK = old["LOCK"]
         _models.LOCK = old["LOCK"]
         _cfg.SESSIONS_MAX = old["SESSIONS_MAX"]
+        _cfg.get_sessions_cache_max = old["get_sessions_cache_max"]
+        _cfg._LAST_APPLIED_SESSIONS_CACHE_MAX = old["last_applied_cap"]
         shutil.rmtree(tmpdir, ignore_errors=True)
 
 
@@ -175,6 +185,73 @@ def test_sweep_never_evicts_an_active_or_unsaved_session(isolated_session_env):
         "(7 resident, cap 5, one pinned)"
     )
     assert len(_cfg.SESSIONS) == 5
+
+
+def test_sweep_never_evicts_a_session_with_unsaved_messages(isolated_session_env):
+    """Invariant 2 of #4765 under the sweep: on-disk-behind entries stay resident.
+
+    The active-stream case above pins the streaming guard; this one pins the
+    persistence guard — a session whose newest turn never reached its sidecar
+    would be unreadable after an eviction (``get_session()`` reloads from disk).
+    """
+    from api import config as _cfg
+    from api import models
+
+    _cfg.SESSIONS_MAX = 5
+    unsaved = _make_persisted_session(0)
+    unsaved.messages.append(
+        {"role": "assistant", "content": "reply that never hit disk", "timestamp": time.time()}
+    )
+    _insert_without_eviction(unsaved)
+    for i in range(1, 8):
+        _insert_without_eviction(_make_persisted_session(i))
+
+    evicted = models.sweep_sessions_cache_over_cap()
+
+    assert unsaved.session_id in _cfg.SESSIONS, (
+        "a session with messages its sidecar does not have yet must never be dropped"
+    )
+    assert evicted == 3, (
+        "the pass reclaims only disk-backed entries until the cache fits the cap "
+        "(8 resident, cap 5, one pinned by unsaved messages)"
+    )
+    assert len(_cfg.SESSIONS) == 5
+
+
+def test_sweep_reclaims_entries_that_pin_then_go_clean_between_ticks(isolated_session_env):
+    """Issue shape 2: pinned during a burst, clean afterwards, no request (#6351).
+
+    Tick 1 runs while every protected entry is still streaming, so the cache
+    stays over its cap. The streams then complete without any request touching
+    the cache, and tick 2 — the periodic pass alone — finishes the reclaim.
+    """
+    from api import config as _cfg
+    from api import models
+
+    _cfg.SESSIONS_MAX = 5
+    pinned = [_make_persisted_session(i, active_stream_id=f"stream-burst-{i}") for i in range(6)]
+    for s in pinned:
+        _insert_without_eviction(s)
+    for i in range(6, 9):
+        _insert_without_eviction(_make_persisted_session(i))
+
+    first = models.sweep_sessions_cache_over_cap()
+
+    assert first == 3, "tick 1 reclaims every clean entry (9 resident, cap 5)"
+    assert len(_cfg.SESSIONS) == 6, (
+        "six still-streaming entries keep the cache over its cap after tick 1"
+    )
+    assert all(s.session_id in _cfg.SESSIONS for s in pinned)
+
+    # The streams complete between ticks — no request runs an eviction pass.
+    for s in pinned:
+        s.active_stream_id = None
+
+    second = models.sweep_sessions_cache_over_cap()
+
+    assert second == 1, "tick 2 reclaims the now-clean entries with no traffic"
+    assert len(_cfg.SESSIONS) == 5, "the periodic pass brings the cache to its cap"
+    assert pinned[0].session_id not in _cfg.SESSIONS
 
 
 def test_sweep_runs_the_eviction_pass_under_the_cache_lock(isolated_session_env, monkeypatch):
