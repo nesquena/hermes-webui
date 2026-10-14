@@ -11,6 +11,8 @@ class _Session:
     def __init__(self, session_id="stream-session", read_only=False):
         self.session_id = session_id
         self.read_only = read_only
+        self.active_stream_id = "stream-session"
+        self.clear_generation = None
         self.skill_provenance = {}
         self.saved = []
 
@@ -28,6 +30,8 @@ class _Session:
 
 def _record(*args, **kwargs):
     recorder = streaming._record_streaming_skill_usage
+    kwargs.setdefault("stream_id", "stream-session")
+    kwargs.setdefault("clear_generation", None)
     return recorder(*args, **kwargs)
 
 
@@ -86,16 +90,47 @@ def test_streaming_read_only_owner_is_unchanged(monkeypatch):
     assert session.skill_provenance == {}
 
 
+def test_streaming_recorder_rejects_old_run_and_clear_generation(monkeypatch):
+    session = _Session()
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: nullcontext())
+
+    session.active_stream_id = "successor-stream"
+    assert _record(
+        "stream-session",
+        "skill_view",
+        {"success": True, "name": "old-run"},
+        stream_id="old-stream",
+    ) is False
+
+    session.active_stream_id = "stream-session"
+    session.clear_generation = "after-clear"
+    assert _record(
+        "stream-session",
+        "skill_view",
+        {"success": True, "name": "pre-clear"},
+        clear_generation=None,
+    ) is False
+    assert session.skill_provenance == {}
+    assert session.saved == []
+
+
 def test_streaming_persists_a_real_session_sidecar(monkeypatch, tmp_path):
     import api.models as models
 
     monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
     session = Session(session_id="stream-sidecar")
+    session.active_stream_id = "stream-sidecar-run"
     session.save(touch_updated_at=False, skip_index=True)
     monkeypatch.setattr(streaming, "get_session", lambda sid: Session.load(sid))
     monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: nullcontext())
-    assert _record("stream-sidecar", "skill_view", '{"success":true,"name":"review"}') is True
+    assert _record(
+        "stream-sidecar",
+        "skill_view",
+        '{"success":true,"name":"review"}',
+        stream_id="stream-sidecar-run",
+    ) is True
     assert Session.load("stream-sidecar").skill_provenance == {"review": 1}
 
 

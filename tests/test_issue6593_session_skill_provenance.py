@@ -2,6 +2,7 @@
 
 import copy
 import io
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -348,6 +349,8 @@ def test_clear_resets_skill_usage_without_recovery_resurrection(isolated_session
         messages=[{"role": "user", "content": "hello"}],
         skill_provenance={"review": 3},
     )
+    session.active_stream_id = "issue6593-old-run"
+    old_clear_generation = session.clear_generation
     session.save(touch_updated_at=False, skip_index=True)
     body = {"session_id": session.session_id}
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
@@ -360,6 +363,20 @@ def test_clear_resets_skill_usage_without_recovery_resurrection(isolated_session
         _Handler("POST"), SimpleNamespace(path="/api/session/clear", query="")
     )
     assert response["session"]["skill_provenance"] == {}
+    persisted = Session.load(session.session_id)
+    assert persisted.skill_provenance == {}
+    assert session.active_stream_id is None
+    assert session.clear_generation != old_clear_generation
+
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: nullcontext())
+    assert streaming._record_streaming_skill_usage(
+        session.session_id,
+        "skill_view",
+        {"success": True, "name": "review"},
+        stream_id="issue6593-old-run",
+        clear_generation=old_clear_generation,
+    ) is False
     assert Session.load(session.session_id).skill_provenance == {}
 
 

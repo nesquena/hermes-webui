@@ -236,6 +236,8 @@ def _record_streaming_skill_usage(
     tool_name,
     function_result,
     *,
+    stream_id,
+    clear_generation,
     ephemeral=False,
 ) -> bool:
     """Persist a successful skill_view result for the live session owner."""
@@ -255,6 +257,10 @@ def _record_streaming_skill_usage(
         if current_session is None or str(getattr(current_session, "session_id", "")) != sid:
             return False
         if getattr(current_session, "read_only", False):
+            return False
+        if getattr(current_session, "active_stream_id", None) != stream_id:
+            return False
+        if getattr(current_session, "clear_generation", None) != clear_generation:
             return False
         try:
             if not current_session.record_skill_usage(name):
@@ -11736,6 +11742,7 @@ def _run_agent_streaming(
     # once. Sentinel: None=not computed, 0=not applicable/failed, >0=real cap.
     _real_ctx_cache = [None]
     _live_usage_session_cache = [None]
+    _stream_clear_generation = None
 
     def _current_live_usage_session():
         return _live_usage_session_snapshot(
@@ -12307,6 +12314,7 @@ def _run_agent_streaming(
         # session lock before dispatch, so a mismatch here means a newer picker
         # write won the race and must not be clobbered by the worker thread.
         with _agent_lock:
+            _stream_clear_generation = getattr(s, "clear_generation", None)
             _last_persisted_model = getattr(s, "model", None)
             _last_persisted_provider = getattr(s, "model_provider", None)
             if _last_persisted_provider is not None:
@@ -13199,6 +13207,8 @@ def _run_agent_streaming(
                         session_id,
                         name,
                         function_result,
+                        stream_id=stream_id,
+                        clear_generation=_stream_clear_generation,
                         ephemeral=ephemeral,
                     )
                 except Exception:
