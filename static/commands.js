@@ -417,7 +417,8 @@ async function _loadSlashSkillSubArgs(force=false){
       // belongs to the previous profile, so leave the cache empty for the fresh
       // read instead of publishing stale names (#7509).
       if(gen!==_slashSkillCacheGen) return _slashSkillCache||[];
-      _slashSkillCache=deduped;
+      // Partial local results are usable now, but the next lookup must retry.
+      _slashSkillCache=data.runtime_scope==='unavailable'?null:deduped;
       return deduped;
     }catch(_){
       if(gen===_slashSkillCacheGen) _slashSkillCache=null;
@@ -2272,7 +2273,8 @@ async function loadSkillCommands(force=false){
       // (and not "ready") so the composer's next pass loads the new profile (#7509).
       if(gen!==_slashSkillCacheGen) return _skillCommandCache;
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
-      _committed=true;
+      // Keep the local working set visible without making it reusable.
+      _committed=data.runtime_scope!=='unavailable';
     }catch(_){
       if(gen===_slashSkillCacheGen)_skillCommandCache=[];
     }

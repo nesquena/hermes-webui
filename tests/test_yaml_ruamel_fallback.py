@@ -3,8 +3,10 @@
 import builtins
 import importlib
 import io
+import os
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -77,6 +79,75 @@ def test_config_loader_reads_yaml_without_pyyaml(ruamel_compat, tmp_path, monkey
     cfg = tmp_path / "config.yaml"
     cfg.write_text(ruamel_compat.safe_dump(CFG), encoding="utf-8")
     assert onboarding._load_yaml_config(cfg) == CFG
+
+
+def test_skills_import_and_route_work_with_ruamel_only(tmp_path):
+    pytest.importorskip('ruamel.yaml')
+    home = tmp_path / 'home'
+    (home / 'skills').mkdir(parents=True)
+    (home / 'shared' / 'shared-one').mkdir(parents=True)
+    (home / 'shared' / 'shared-one' / 'SKILL.md').write_text(
+        '---\nname: shared-one\ndescription: Test skill\n---\n', encoding='utf-8',
+    )
+    (home / 'config.yaml').write_text(
+        'skills:\n  external_dirs: ["${HERMES_HOME}/shared"]\n', encoding='utf-8',
+    )
+    env = {key: value for key, value in os.environ.items()
+           if not key.startswith('HERMES_') and key != 'PYTHONPATH'}
+    env.update(HERMES_HOME=str(home), HERMES_BASE_HOME=str(home),
+               HERMES_WEBUI_STATE_DIR=str(tmp_path / 'state'))
+    script = textwrap.dedent('''
+        import builtins, sys, types
+        from pathlib import Path
+        from unittest.mock import MagicMock
+        from urllib.parse import urlparse
+        original = builtins.__import__
+        def no_pyyaml(name, *args, **kwargs):
+            if name == 'yaml' or name.startswith('yaml.'):
+                raise ImportError('PyYAML disabled for skills regression')
+            return original(name, *args, **kwargs)
+        builtins.__import__ = no_pyyaml
+        from api import profiles, routes, yaml_compat
+        assert yaml_compat.BACKEND == 'ruamel'
+        home = Path(sys.argv[1])
+        # Stub only the Agent routing and scanner API; YAML parsing and the
+        # profile environment/resolver/HTTP route remain production code.
+        constants = types.ModuleType('hermes_constants')
+        constants.set_hermes_home_override = lambda value: None
+        constants.reset_hermes_home_override = lambda token: None
+        constants.hermes_home_key = lambda path: str(path)
+        agent = types.ModuleType('agent')
+        agent.__path__ = []
+        scope = types.ModuleType('agent.secret_scope')
+        scope.serves_routed_profile = lambda: False
+        scanner = types.ModuleType('agent.skill_utils')
+        scanner.iter_skill_index_files = lambda root, pattern: root.rglob(pattern)
+        tools = types.ModuleType('tools')
+        tools.__path__ = []
+        skills = types.ModuleType('tools.skills_tool')
+        skills.MAX_DESCRIPTION_LENGTH = 512
+        skills._EXCLUDED_SKILL_DIRS = set()
+        skills._parse_frontmatter = lambda text: (yaml_compat.safe_load(text.split('---')[1]), '')
+        skills._sort_skills = lambda values: values
+        skills.skill_matches_platform = lambda frontmatter: True
+        sys.modules.update({'hermes_constants':constants, 'agent':agent,
+            'agent.secret_scope':scope, 'agent.skill_utils':scanner,
+            'tools':tools, 'tools.skills_tool':skills})
+        profiles.get_active_profile_name = lambda: 'default'
+        profiles.get_hermes_home_for_profile = lambda name: home
+        profiles.get_active_hermes_home = lambda: home
+        profiles.get_process_profile_home = lambda: home
+        payloads = []
+        routes.j = lambda handler, payload, **kwargs: payloads.append(payload)
+        routes.handle_get(MagicMock(), urlparse('/api/skills'))
+        assert payloads[-1]['runtime_scope'] == 'profile', payloads
+        assert [s['name'] for s in payloads[-1]['skills']] == ['shared-one'], payloads
+        from api.skill_runtime import profile_external_skill_dirs
+        assert profile_external_skill_dirs(home) == [home / 'shared']
+    ''')
+    proc = subprocess.run([sys.executable, '-c', script, str(home)], cwd=REPO,
+                          env=env, capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
 
 
 # YAML 1.1 words that PyYAML (and the Agent's hermes_yaml reader) treat as booleans.

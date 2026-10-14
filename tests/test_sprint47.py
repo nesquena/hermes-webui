@@ -56,8 +56,10 @@ def test_skills_subargs_route_through_dedicated_loader():
 def test_skill_mutations_invalidate_slash_skill_caches():
     assert "function invalidateSlashSkillCaches()" in COMMANDS_JS
     assert "window.invalidateSlashSkillCaches=invalidateSlashSkillCaches;" in COMMANDS_JS
+    assert "window.invalidateSlashSkillCaches()" in _function_body(
+        PANELS_JS, "_invalidateSkillCachesAfterWrite")
     for function_name in ("saveSkillForm", "deleteCurrentSkill", "toggleSkill"):
-        assert "window.invalidateSlashSkillCaches()" in _function_body(PANELS_JS, function_name)
+        assert "_invalidateSkillCachesAfterWrite(" in _function_body(PANELS_JS, function_name)
 
 
 def test_builtin_commands_take_precedence_over_skill_slug_collisions():
