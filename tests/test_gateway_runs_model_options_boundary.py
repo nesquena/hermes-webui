@@ -18,7 +18,9 @@ import json
 import os
 import re
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -78,17 +80,16 @@ def _compose_with_installed_handler(vectors):
     """Feed request vectors through the installed API server's parsing chain.
 
     The receiver is cross-repository authority, so this must never degrade into
-    a silent ``skip``: a missing or unimportable receiver would make the whole
-    contract claim disappear exactly when it stops holding. Two topologies:
+    a silent ``skip``: a broken discovered receiver would make the whole contract
+    claim disappear exactly when it stops holding. Two topologies:
 
-    * ``HERMES_WEBUI_REQUIRE_AGENT_RECEIVER=1`` (the supported topology, and how
-      a gate re-runs these): a missing tree, missing venv, or nonzero
-      import/subprocess result is a hard FAILURE.
-    * Otherwise (contributor checkout / upstream CI without an Agent install):
-      fall back to the vendored parser contract in ``_RECEIVER_CONTRACT`` so the
-      assertions still execute. ``test_receiver_contract_matches_installed_agent``
-      independently proves that fixture matches the real receiver whenever one
-      is present, so the fallback cannot drift unnoticed.
+    * A fully absent Agent tree falls back to the vendored parser contract unless
+      ``HERMES_WEBUI_REQUIRE_AGENT_RECEIVER=1`` requires an install.
+    * Once an Agent tree is discovered, a missing venv or nonzero
+      import/subprocess result is always a hard FAILURE. A broken install must
+      never silently look green. ``test_receiver_contract_matches_installed_agent``
+      independently proves that the fallback fixture matches the real receiver
+      whenever one is present, so the contract cannot drift unnoticed.
     """
     required = os.environ.get("HERMES_WEBUI_REQUIRE_AGENT_RECEIVER", "").strip() in ("1", "true", "yes")
     agent_dir = _installed_agent_dir()
@@ -101,9 +102,7 @@ def _compose_with_installed_handler(vectors):
         return _compose_with_contract(vectors)
     python = _installed_agent_python(agent_dir)
     if python is None:
-        if required:
-            pytest.fail(f"hermes-agent venv python not found under {agent_dir}")
-        return _compose_with_contract(vectors)
+        pytest.fail(f"hermes-agent venv python not found under {agent_dir}")
     proc = subprocess.run(
         [python, "-c", _COMPOSE_SCRIPT, str(agent_dir)],
         input=json.dumps(vectors),
@@ -112,9 +111,7 @@ def _compose_with_installed_handler(vectors):
         timeout=120,
     )
     if proc.returncode != 0:
-        if required:
-            pytest.fail(f"installed api_server import failed: {proc.stderr.strip()[:400]}")
-        return _compose_with_contract(vectors)
+        pytest.fail(f"installed api_server import failed: {proc.stderr.strip()[:400]}")
     return json.loads(proc.stdout.strip().splitlines()[-1])
 
 
@@ -246,10 +243,43 @@ def test_gateway_run_model_options_degrades_supra_levels_without_an_advertised_l
     )
     for caps in ambiguous_probes:
         monkeypatch.setattr(config, "get_gateway_caps", lambda *a, _c=caps, **k: _c)
-        assert _gateway_run_model_options("max", base_url="http://gw:8642") == {
-            "reasoning": {"enabled": True, "effort": "xhigh"},
-            "reasoning_effort": "xhigh",
-        }, f"caps={caps} should fail closed to xhigh"
+        for effort in ("max", "ultra"):
+            assert _gateway_run_model_options(effort, base_url="http://gw:8642") == {
+                "reasoning": {"enabled": True, "effort": "xhigh"},
+                "reasoning_effort": "xhigh",
+            }, f"caps={caps} should fail closed from {effort} to xhigh"
+
+
+def test_gateway_request_effort_accepts_ultra_before_receiver_negotiation(monkeypatch):
+    """A newer Agent-written ultra value must reach the transport negotiation."""
+    import api.config as config
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    monkeypatch.setattr(config, "resolve_model_reasoning_efforts", lambda *_a, **_k: [])
+    assert _gateway_reasoning_effort_for_request(
+        {"agent": {"reasoning_effort": "ultra"}},
+        model="future-model",
+        model_provider="future-provider",
+    ) == "ultra"
+
+
+def test_installed_receiver_import_failure_does_not_fall_back_green(tmp_path, monkeypatch):
+    """A discovered but unusable receiver is a failed boundary proof, not a fallback."""
+    agent_dir = tmp_path / "agent"
+    server = agent_dir / "gateway" / "platforms" / "api_server.py"
+    server.parent.mkdir(parents=True)
+    server.write_text("_REASONING_EFFORTS = frozenset({'low'})\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "tests.test_gateway_runs_model_options_boundary._installed_agent_dir",
+        lambda: agent_dir,
+    )
+    monkeypatch.setattr(
+        "tests.test_gateway_runs_model_options_boundary._installed_agent_python",
+        lambda _agent_dir: None,
+    )
+
+    with pytest.raises(pytest.fail.Exception, match="venv python"):
+        _compose_with_installed_handler([{"kind": "model_options", "model_options": {}}])
 
 
 def test_gateway_run_model_options_preserves_supra_levels_when_receiver_advertises(monkeypatch):
@@ -343,6 +373,8 @@ def _capture_gateway_wire_body(
     *,
     use_runs_api=True,
     service_tier=None,
+    session_profile=None,
+    profile_effort=None,
 ):
     """Run the real gateway worker and return its Agent-facing request body."""
     import api.config as config
@@ -379,7 +411,7 @@ def _capture_gateway_wire_body(
     mock_session.workspace = "/tmp"
     mock_session.model = "test-model"
     mock_session.model_provider = None
-    mock_session.profile = None
+    mock_session.profile = session_profile
     mock_session.context_messages = []
     mock_session.messages = []
     mock_session.pending_user_message = None
@@ -387,6 +419,23 @@ def _capture_gateway_wire_body(
     mock_session.pending_started_at = None
 
     cfg = {"agent": {"reasoning_effort": effort}}
+    active_profile = {"name": None}
+    entered_profiles = []
+
+    @contextmanager
+    def fake_profile_scope(profile_name, purpose="detached worker", logger_override=None):
+        entered_profiles.append(profile_name)
+        previous = active_profile["name"]
+        active_profile["name"] = profile_name
+        try:
+            yield
+        finally:
+            active_profile["name"] = previous
+
+    def fake_get_config():
+        if session_profile and active_profile["name"] == session_profile:
+            return {"agent": {"reasoning_effort": profile_effort}}
+        return cfg
 
     try:
         with patch.dict(
@@ -400,7 +449,8 @@ def _capture_gateway_wire_body(
         ):
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_a, **_k: True), \
                  patch("api.gateway_chat.gateway_approval_unavailable_reason", lambda *_a, **_k: None), \
-                 patch("api.config.get_config", lambda: cfg), \
+                 patch("api.config.get_config", fake_get_config), \
+                 patch("api.profiles.profile_scope_for_detached_worker", fake_profile_scope), \
                  patch("api.config.get_gateway_caps", lambda *_a, **_k: {"reasoning_efforts": None}), \
                  patch(
                      "api.config._main_model_request_overrides",
@@ -425,14 +475,15 @@ def _capture_gateway_wire_body(
     target = "/v1/runs" if use_runs_api else "/v1/chat/completions"
     agent_requests = [req for req in requests if req.full_url.endswith(target)]
     assert agent_requests, f"worker never POSTed {target}"
-    return json.loads(agent_requests[0].data.decode("utf-8"))
+    return json.loads(agent_requests[0].data.decode("utf-8")), entered_profiles
 
 
 def _capture_runs_wire_body(effort):
-    return _capture_gateway_wire_body(
+    body, _entered = _capture_gateway_wire_body(
         effort,
         use_runs_api=True,
     )
+    return body
 
 
 def _capture_legacy_chat_wire_body(
@@ -440,11 +491,62 @@ def _capture_legacy_chat_wire_body(
     *,
     service_tier=None,
 ):
-    return _capture_gateway_wire_body(
+    body, _entered = _capture_gateway_wire_body(
         effort,
         use_runs_api=False,
         service_tier=service_tier,
     )
+    return body
+
+
+def test_gateway_worker_resolves_effort_inside_session_profile_scope():
+    body, entered = _capture_gateway_wire_body(
+        "none",
+        use_runs_api=True,
+        session_profile="named-profile",
+        profile_effort="high",
+    )
+
+    assert entered == ["named-profile"]
+    assert body["model_options"]["reasoning_effort"] == "high"
+
+
+def test_runner_request_resolves_effort_inside_session_profile_scope(monkeypatch):
+    from api import gateway_chat, routes
+
+    active_profile = {"name": None}
+    entered = []
+
+    @contextmanager
+    def fake_scope(profile_name, purpose="detached worker", logger_override=None):
+        entered.append(profile_name)
+        previous = active_profile["name"]
+        active_profile["name"] = profile_name
+        try:
+            yield
+        finally:
+            active_profile["name"] = previous
+
+    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(
+        routes,
+        "get_config",
+        lambda: {"agent": {"reasoning_effort": "high" if active_profile["name"] else "none"}},
+    )
+    monkeypatch.setattr(
+        gateway_chat,
+        "_gateway_reasoning_effort_for_request",
+        lambda cfg, **_kwargs: cfg["agent"]["reasoning_effort"],
+    )
+
+    effort = routes._runner_reasoning_effort_for_session(
+        SimpleNamespace(profile="named-profile"),
+        model="test-model",
+        model_provider="test-provider",
+    )
+
+    assert entered == ["named-profile"]
+    assert effort == "high"
 
 
 def test_runs_wire_body_nests_effective_effort_under_model_options():

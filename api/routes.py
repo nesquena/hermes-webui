@@ -26634,6 +26634,28 @@ def _external_model_alias_lane_response(alias_route, *, external_owned: bool) ->
     }
 
 
+def _runner_reasoning_effort_for_session(session, *, model=None, model_provider=None):
+    """Resolve the runner override under the session's authoritative profile."""
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    def _resolve():
+        return _gateway_reasoning_effort_for_request(
+            get_config(),
+            model=model,
+            model_provider=model_provider,
+        )
+
+    profile_name = str(getattr(session, "profile", "") or "").strip()
+    if not profile_name:
+        return _resolve()
+    with profile_scope_for_detached_worker(
+        profile_name,
+        "runner reasoning request settings",
+        logger_override=logger,
+    ):
+        return _resolve()
+
+
 def _start_run(
     s,
     *,
@@ -26746,10 +26768,10 @@ def _start_run(
             return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
 
         try:
-            from api.gateway_chat import _gateway_reasoning_effort_for_request
-
-            runner_reasoning_effort = _gateway_reasoning_effort_for_request(
-                get_config(), model=model, model_provider=model_provider,
+            runner_reasoning_effort = _runner_reasoning_effort_for_session(
+                s,
+                model=model,
+                model_provider=model_provider,
             )
             adapter = build_runtime_adapter(
                 legacy_adapter_factory=_legacy_adapter_factory,

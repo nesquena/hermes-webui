@@ -367,6 +367,12 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
         cfg_data = cfg if isinstance(cfg, dict) else {}
         effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
         effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
+        raw_normalized = str(effort_raw or "").strip().lower()
+        # A newer Agent/CLI can write ``ultra`` before this WebUI exposes it in
+        # its user-facing ladder. Preserve that value for receiver negotiation
+        # instead of letting the older local coercion table erase it first.
+        if raw_normalized == "ultra":
+            return "ultra"
         coerced = coerce_reasoning_effort_for_model(
             effort_raw,
             model,
@@ -376,6 +382,58 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
         return None if not coerced else str(coerced)
     except Exception:
         return None
+
+
+def _gateway_request_settings_for_session(
+    session,
+    *,
+    model=None,
+    model_provider=None,
+    reattach_endpoint=None,
+):
+    """Resolve Agent-facing request settings in the session's profile scope."""
+    from api.config import _main_model_request_overrides, get_config
+
+    def _resolve():
+        cfg = get_config()
+        reasoning_effort = _gateway_reasoning_effort_for_request(
+            cfg,
+            model=model,
+            model_provider=model_provider,
+        )
+        base_url, api_key = reattach_endpoint or (
+            _gateway_base_url(cfg),
+            _gateway_api_key(),
+        )
+        try:
+            overrides = _main_model_request_overrides(
+                cfg,
+                effective_model=model,
+                effective_provider=model_provider,
+            )
+        except Exception:
+            overrides = {}
+        return (
+            cfg,
+            reasoning_effort,
+            base_url,
+            api_key,
+            overrides,
+            _gateway_use_runs_api_enabled(cfg),
+        )
+
+    profile_name = str(getattr(session, "profile", "") or "").strip()
+    if not profile_name:
+        return _resolve()
+
+    from api.profiles import profile_scope_for_detached_worker
+
+    with profile_scope_for_detached_worker(
+        profile_name,
+        "gateway chat request settings",
+        logger_override=logger,
+    ):
+        return _resolve()
 
 
 def _gateway_session_yolo_enabled(session_id: str) -> bool:
@@ -470,6 +528,11 @@ _GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS = ("none", "minimal", "low", "medium", "hi
 # ``features.reasoning_efforts``. Once a receiver advertises, this function
 # preserves exactly what it declares — including 'max'/'ultra'.
 _GATEWAY_SUPRA_LEGACY_MODEL_OPTIONS_EFFORTS = ("max", "ultra")
+_GATEWAY_MODEL_OPTIONS_EFFORT_ORDER = (
+    *_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS,
+    *_GATEWAY_SUPRA_LEGACY_MODEL_OPTIONS_EFFORTS,
+)
+_GATEWAY_PROBE_RECEIVER_EFFORTS = object()
 
 
 def _gateway_receiver_supported_efforts(base_url="", api_key=""):
@@ -499,7 +562,13 @@ def _gateway_receiver_supported_efforts(base_url="", api_key=""):
     return levels or legacy
 
 
-def _gateway_run_model_options(effort, base_url="", api_key=""):
+def _gateway_run_model_options(
+    effort,
+    base_url="",
+    api_key="",
+    *,
+    receiver_supported_efforts=_GATEWAY_PROBE_RECEIVER_EFFORTS,
+):
     """Serialize the effective reasoning effort under the receiver's model_options contract.
 
     The installed Hermes Agent API server constructs ``AIAgent.reasoning_config``
@@ -522,14 +591,17 @@ def _gateway_run_model_options(effort, base_url="", api_key=""):
         return {"reasoning": {"enabled": False}, "reasoning_effort": "none"}
     wire_effort = effort
     if effort not in _GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS:
-        supported = _gateway_receiver_supported_efforts(base_url, api_key)
+        if receiver_supported_efforts is _GATEWAY_PROBE_RECEIVER_EFFORTS:
+            supported = _gateway_receiver_supported_efforts(base_url, api_key)
+        else:
+            advertised = receiver_supported_efforts or ()
+            supported = [
+                str(level).strip().lower()
+                for level in advertised
+                if str(level).strip()
+            ] or list(_GATEWAY_LEGACY_MODEL_OPTIONS_EFFORTS)
         if effort not in supported:
-            try:
-                from api.config import VALID_REASONING_EFFORTS
-
-                ladder = [str(level) for level in VALID_REASONING_EFFORTS]
-            except Exception:
-                ladder = []
+            ladder = list(_GATEWAY_MODEL_OPTIONS_EFFORT_ORDER)
             wire_effort = None
             if effort in ladder:
                 idx = ladder.index(effort)
@@ -2163,27 +2235,21 @@ def _run_gateway_chat_streaming(
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        from api.config import get_config  # imported lazily to avoid config-cycle churn
-
-        cfg = get_config()
-        reasoning_effort = _gateway_reasoning_effort_for_request(
+        (
             cfg,
+            reasoning_effort,
+            base_url,
+            api_key,
+            _gw_overrides,
+            _runs_api_enabled,
+        ) = _gateway_request_settings_for_session(
+            s,
             model=model,
             model_provider=model_provider,
+            reattach_endpoint=reattach_endpoint,
         )
-        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
-        try:
-            from api.config import _main_model_request_overrides
-            _gw_overrides = _main_model_request_overrides(
-                cfg,
-                effective_model=model,
-                effective_provider=model_provider,
-            )
-        except Exception:
-            _gw_overrides = {}
-        _runs_api_enabled = _gateway_use_runs_api_enabled(cfg)
         _use_runs_api = bool(reattach_run) or (_runs_api_enabled and gateway_supports_approval(base_url, api_key))
         if not _use_runs_api and runs_api_pending_marked:
             _finish_gateway_run_starting(stream_id, result="fallback")

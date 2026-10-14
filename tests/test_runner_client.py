@@ -95,6 +95,44 @@ def test_runner_client_start_run_posts_explicit_boundary_payload(monkeypatch):
     }
 
 
+def test_runner_client_capability_probe_uses_no_redirect_transport(monkeypatch):
+    """Supra-level negotiation must not bypass the runner's hardened opener."""
+    calls = []
+
+    def fake_open(req, timeout=0):
+        calls.append((req.get_method(), req.full_url, dict(req.header_items())))
+        if req.full_url.endswith("/v1/capabilities"):
+            return FakeResponse({
+                "features": {
+                    "reasoning_efforts": [
+                        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                    ],
+                },
+            })
+        return FakeResponse({"run_id": "run-max", "stream_id": "run-max", "status": "running"})
+
+    _patch_opener(monkeypatch, fake_open)
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda *_a, **_k: pytest.fail("runner capability probe bypassed _NoRedirect opener"),
+    )
+    client = HttpRunnerClient(base_url="http://runner.local", api_key="secret")
+
+    result = client.start_run(StartRunRequest(
+        session_id="s-max",
+        message="hello",
+        reasoning_effort="max",
+    ))
+
+    assert result["run_id"] == "run-max"
+    assert [url for _method, url, _headers in calls] == [
+        "http://runner.local/v1/capabilities",
+        "http://runner.local/v1/runs",
+    ]
+    assert all(headers["Authorization"] == "Bearer secret" for _method, _url, headers in calls)
+
+
 def test_runner_client_maps_observe_status_and_controls(monkeypatch):
     calls = []
 
