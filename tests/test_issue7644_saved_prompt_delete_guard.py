@@ -13,6 +13,7 @@ These tests pin the fix on both layers:
 """
 import io
 import json
+import os
 
 import pytest
 from pathlib import Path
@@ -77,6 +78,9 @@ def test_delete_control_has_a_44px_hit_target() -> None:
     halo = _body(css, ".saved-prompt-delete::after{")
     assert "inset:-8px" in halo, "the ::after halo must add 8px per side (44px total)"
     assert ".saved-prompt-delete.is-armed{" in css, "armed state needs its own style"
+    assert "animation:none" in _body(
+        css, "@media (prefers-reduced-motion:reduce){.saved-prompt-delete.is-armed{"
+    ), "the armed confirmation must respect prefers-reduced-motion"
 
 
 def test_save_is_atomic_and_keeps_one_generation(tmp_path, monkeypatch) -> None:
@@ -367,3 +371,173 @@ def test_a_blocked_recovery_copy_surfaces_an_error_instead_of_success(
     assert handler.status == 500
     assert "error" in handler.json_body()
     assert p.read_text(encoding="utf-8") == before, "the prompt must still be there"
+
+
+# ── Recovery-copy confidentiality and alias handling ─────────────────────
+#
+# The primary may be 0600, so publishing its bytes as a 0644 .bak hands the
+# whole prompt list to anyone who can traverse the state directory. And a
+# `.bak` that is an alias belongs to somebody else — an unrelated file, or the
+# primary itself — so publication must break the alias and land the bytes on a
+# fresh inode carrying the primary's restrictions *before* they exist on disk,
+# never via a chmod after the rename.
+
+
+def _fail_backup_publish(monkeypatch):
+    """Make only the recovery publication fail, as an fsync/preparation
+    failure would."""
+    from api import paths
+
+    original = paths._atomic_write_text
+
+    def failing(path, text, **kwargs):
+        if Path(path).name.endswith(".bak"):
+            raise OSError("injected preparation failure")
+        return original(path, text, **kwargs)
+
+    monkeypatch.setattr(paths, "_atomic_write_text", failing)
+
+
+@pytest.mark.parametrize(
+    "backup_state",
+    ["missing", "permissive", "hardlinked"],
+    ids=["missing", "permissive-0644", "hardlinked-to-primary"],
+)
+def test_the_recovery_copy_never_widens_a_private_primary(
+    tmp_path, monkeypatch, backup_state
+):
+    """0600 primary + 0022 umask must not publish a readable `.bak` — whether
+    the backup is absent, already 0644, or a hard link of the primary."""
+    routes, p = _paths(tmp_path, monkeypatch)
+    bak = Path(str(p) + ".bak")
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+
+    old_umask = os.umask(0o022)
+    try:
+        os.chmod(p, 0o600)
+        if backup_state == "permissive":
+            bak.write_text("[]", encoding="utf-8")
+            os.chmod(bak, 0o644)
+        elif backup_state == "hardlinked":
+            os.link(p, bak)
+
+        routes._save_saved_prompts(
+            [{"id": "a", "text": "one"}, {"id": "b", "text": "two"}]
+        )
+
+        assert os.stat(bak).st_mode & 0o777 == 0o600, (
+            "the recovery inode must carry the primary's restrictions, got "
+            f"{os.stat(bak).st_mode & 0o777:04o}"
+        )
+    finally:
+        os.umask(old_umask)
+
+    assert os.stat(p).st_mode & 0o777 == 0o600, "the primary keeps 0600"
+    assert json.loads(bak.read_text(encoding="utf-8")) == [{"id": "a", "text": "one"}]
+    assert json.loads(p.read_text(encoding="utf-8"))[1]["id"] == "b"
+    assert os.stat(p).st_ino != os.stat(bak).st_ino, "independent recovery inode"
+
+
+def test_a_primary_symlinked_onto_its_backup_is_refused_before_any_mutation(
+    tmp_path, monkeypatch
+):
+    """Alias direction 1 — saved_prompts.json -> saved_prompts.json.bak: the
+    backup IS the primary's referent, so publishing a fresh recovery inode
+    would delete it, and the replacement would be written through the primary
+    link into the recovery path, collapsing both generations. Preparation
+    failure or not, the topology must be refused with everything intact."""
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    bak = Path(str(p) + ".bak")
+    p.replace(bak)  # the live generation sits at the recovery path
+    p.symlink_to(bak.name)
+    before = bak.read_text(encoding="utf-8")
+    _fail_backup_publish(monkeypatch)
+
+    with pytest.raises(routes.SavedPromptPersistenceError) as exc:
+        routes._save_saved_prompts(
+            [{"id": "a", "text": "one"}, {"id": "b", "text": "two"}]
+        )
+
+    assert "symlinks onto its own backup" in str(exc.value), (
+        "the topology gate must fire before any publication attempt"
+    )
+    assert p.is_symlink(), "the refusal must not repoint or replace the primary"
+    assert bak.is_file() and bak.read_text(encoding="utf-8") == before, (
+        "the primary's referent must survive the refusal byte-for-byte"
+    )
+    assert routes._load_saved_prompts() == [{"id": "a", "text": "one"}]
+
+
+def test_a_backup_symlinked_onto_the_primary_gets_its_own_inode(
+    tmp_path, monkeypatch
+):
+    """Alias direction 2 — saved_prompts.json.bak -> saved_prompts.json: the
+    shared writer follows that alias, so publishing through it would write the
+    old prompts over the live primary and collapse the generations."""
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    bak = Path(str(p) + ".bak")
+    bak.symlink_to(p.name)
+
+    routes._save_saved_prompts(
+        [{"id": "a", "text": "one"}, {"id": "b", "text": "two"}]
+    )
+
+    assert not bak.is_symlink(), "the recovery copy must break the alias, not follow it"
+    assert os.stat(p).st_ino != os.stat(bak).st_ino
+    assert json.loads(bak.read_text(encoding="utf-8")) == [{"id": "a", "text": "one"}]
+    assert json.loads(p.read_text(encoding="utf-8"))[1]["id"] == "b"
+
+
+def test_a_backup_aliasing_the_primary_survives_a_preparation_failure(
+    tmp_path, monkeypatch
+):
+    """Alias direction 2 with the recovery publication failing after the alias
+    was broken: the previous generation must stay readable as the primary."""
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    bak = Path(str(p) + ".bak")
+    bak.symlink_to(p.name)
+    before = p.read_text(encoding="utf-8")
+    _fail_backup_publish(monkeypatch)
+
+    with pytest.raises(routes.SavedPromptPersistenceError):
+        routes._save_saved_prompts(
+            [{"id": "a", "text": "one"}, {"id": "b", "text": "two"}]
+        )
+
+    assert p.read_text(encoding="utf-8") == before, "the primary must be untouched"
+    assert not bak.is_symlink(), "the alias at the recovery path must stay broken"
+    assert routes._load_saved_prompts() == [{"id": "a", "text": "one"}]
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink"], ids=["symlink", "hardlink"])
+def test_an_unrelated_backup_alias_is_never_written_through(
+    tmp_path, monkeypatch, kind
+):
+    """A `.bak` pointing at an unrelated file is somebody else's data: the
+    publication must give the recovery path its own inode and leave the
+    unrelated file byte-identical."""
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    stranger = tmp_path / "stranger.json"
+    stranger.write_text('["stranger"]', encoding="utf-8")
+    bak = Path(str(p) + ".bak")
+    if kind == "symlink":
+        bak.symlink_to(stranger)
+    else:
+        os.link(stranger, bak)
+
+    routes._save_saved_prompts(
+        [{"id": "a", "text": "one"}, {"id": "b", "text": "two"}]
+    )
+
+    assert stranger.read_text(encoding="utf-8") == '["stranger"]', (
+        "recovery publication must not write through an unrelated alias"
+    )
+    assert not bak.is_symlink() and os.stat(bak).st_nlink == 1, (
+        "the recovery path must end up on its own inode"
+    )
+    assert json.loads(bak.read_text(encoding="utf-8")) == [{"id": "a", "text": "one"}]
+    assert json.loads(p.read_text(encoding="utf-8"))[1]["id"] == "b"
