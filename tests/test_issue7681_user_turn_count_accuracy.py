@@ -2359,3 +2359,79 @@ def test_inactive_row_flag_survives_the_http_row_projection():
     assert "'has_inactive_user_rows': row.get('has_inactive_user_rows')," in models_src, (
         "api/models.py's cli_sessions projection drops has_inactive_user_rows"
     )
+
+
+# ── Re-gate 2026-10-12: every-loader propagation (finding 4) ──
+#
+# The 2026-10-12 re-warm review: the additive cron and webhook projections in
+# api/models.py dropped `has_inactive_user_rows` while the primary CLI
+# projection kept it, so a compacted/rewound background session rendered an
+# inflated count. Historical counting stays separate from label suppression.
+
+
+def test_inactive_row_flag_survives_the_cron_projection(monkeypatch, tmp_path):
+    """#7681 finding 4 (re-gate 2026-10-12): the additive cron projection dropped
+    has_inactive_user_rows while the primary CLI projection kept it."""
+    import api.models as models
+
+    db = tmp_path / "state.db"
+    db.write_text("", encoding="utf-8")
+
+    def fake_read_rows(_db_path, **kwargs):
+        if kwargs.get("include_sources") == ("cron",):
+            return [{
+                "id": "cron-1", "source": "cron", "session_source": "cron",
+                "title": "Cron run", "model": "m", "started_at": 10.0,
+                "last_activity": 11.0, "message_count": 3,
+                "actual_message_count": 3, "actual_user_message_count": 2,
+                "archived": 0, "has_inactive_user_rows": True,
+            }]
+        return []
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", fake_read_rows)
+    monkeypatch.setattr(models, "get_last_workspace", lambda profile=None: tmp_path)
+    monkeypatch.setattr(models, "ensure_cron_project", lambda **_kw: "cron-project-id")
+    monkeypatch.setattr(models, "ensure_webhook_project", lambda **_kw: "webhook-project-id", raising=False)
+    monkeypatch.setattr(models.Session, "load_metadata_only", lambda _sid: None)
+
+    rows = models._load_cli_sessions_uncached(tmp_path, db, _cli_profile=None)
+    by_id = {r["session_id"]: r for r in rows}
+    assert "cron-1" in by_id, f"cron row missing: {list(by_id)}"
+    assert by_id["cron-1"]["has_inactive_user_rows"] is True, (
+        "the cron projection drops has_inactive_user_rows, so a compacted cron "
+        "session's inflated count cannot be suppressed"
+    )
+
+
+def test_inactive_row_flag_survives_the_webhook_projection(monkeypatch, tmp_path):
+    """#7681 finding 4 (re-gate 2026-10-12): the additive webhook projection
+    dropped has_inactive_user_rows as well."""
+    import api.models as models
+
+    db = tmp_path / "state.db"
+    db.write_text("", encoding="utf-8")
+
+    def fake_read_rows(_db_path, **kwargs):
+        if kwargs.get("include_sources") == ("webhook",):
+            return [{
+                "id": "webhook-1", "source": "webhook", "session_source": "webhook",
+                "title": "Webhook run", "model": "m", "started_at": 10.0,
+                "last_activity": 11.0, "message_count": 3,
+                "actual_message_count": 3, "actual_user_message_count": 2,
+                "archived": 0, "has_inactive_user_rows": True,
+            }]
+        return []
+
+    monkeypatch.setattr(models, "read_importable_agent_session_rows", fake_read_rows)
+    monkeypatch.setattr(models, "get_last_workspace", lambda profile=None: tmp_path)
+    monkeypatch.setattr(models, "ensure_cron_project", lambda **_kw: "cron-project-id")
+    monkeypatch.setattr(models, "ensure_webhook_project", lambda **_kw: "webhook-project-id", raising=False)
+    monkeypatch.setattr(models.Session, "load_metadata_only", lambda _sid: None)
+
+    rows = models._load_cli_sessions_uncached(tmp_path, db, _cli_profile=None)
+    by_id = {r["session_id"]: r for r in rows}
+    assert "webhook-1" in by_id, f"webhook row missing: {list(by_id)}"
+    assert by_id["webhook-1"]["has_inactive_user_rows"] is True, (
+        "the webhook projection drops has_inactive_user_rows, so a compacted "
+        "webhook session's inflated count cannot be suppressed"
+    )

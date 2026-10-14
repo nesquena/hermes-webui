@@ -10708,6 +10708,10 @@ def _load_cli_sessions_uncached(
                     '_lineage_root_id': row.get('_lineage_root_id'),
                     '_lineage_tip_id': row.get('_lineage_tip_id'),
                     '_compression_segment_count': row.get('_compression_segment_count'),
+                    # #7681 finding 4: the primary projection carries the
+                    # inactive-row flag; the additive cron pass must too, or a
+                    # compacted/rewound cron session renders an inflated count.
+                    'has_inactive_user_rows': row.get('has_inactive_user_rows'),
                     'is_cli_session': is_cli_session_row(row),
                 })
                 existing_sids.add(sid)
@@ -10777,6 +10781,10 @@ def _load_cli_sessions_uncached(
                     '_lineage_root_id': row.get('_lineage_root_id'),
                     '_lineage_tip_id': row.get('_lineage_tip_id'),
                     '_compression_segment_count': row.get('_compression_segment_count'),
+                    # #7681 finding 4: the additive webhook pass must carry the
+                    # inactive-row flag like the primary projection, or a
+                    # compacted/rewound webhook session renders an inflated count.
+                    'has_inactive_user_rows': row.get('has_inactive_user_rows'),
                     'is_cli_session': is_cli_session_row({**row, **_source_meta}),
                 })
                 existing_sids.add(sid)
@@ -10844,6 +10852,10 @@ def _load_cli_sessions_uncached(
                     '_lineage_root_id': row.get('_lineage_root_id'),
                     '_lineage_tip_id': row.get('_lineage_tip_id'),
                     '_compression_segment_count': row.get('_compression_segment_count'),
+                    # #7681 finding 4: the additive kanban pass must carry the
+                    # inactive-row flag like the primary projection, or a
+                    # compacted/rewound kanban session renders an inflated count.
+                    'has_inactive_user_rows': row.get('has_inactive_user_rows'),
                     'is_cli_session': is_cli_session_row({**row, **_source_meta}),
                 })
                 existing_sids.add(sid)
