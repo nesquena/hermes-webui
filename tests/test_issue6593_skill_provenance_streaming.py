@@ -113,6 +113,12 @@ def test_returned_auth_retry_allows_skill_completion_and_concurrent_stop(tmp_pat
         context_messages=[],
     )
     checks = {}
+    journal_events = []
+    monkeypatch.setattr(
+        streaming,
+        "append_turn_journal_event_for_stream",
+        lambda *_args: journal_events.append(_args[-1]),
+    )
 
     class AuthThenRetryAgent:
         runs = 0
@@ -208,6 +214,7 @@ def test_returned_auth_retry_allows_skill_completion_and_concurrent_stop(tmp_pat
     assert checks["callback_finished_during_retry"] is True
     assert checks["stop_finished_during_retry"] is True
     assert checks["stop_result"] is True
+    assert any(event.get("event") == "interrupted" for event in journal_events)
     persisted = Session.load(sid)
     assert persisted.skill_provenance == {"review": 1}
     assert persisted.active_stream_id is None
@@ -216,3 +223,130 @@ def test_returned_auth_retry_allows_skill_completion_and_concurrent_stop(tmp_pat
         for message in persisted.messages
         if isinstance(message, dict)
     )
+
+
+def test_failed_retry_after_followup_admission_preserves_followup(tmp_path, monkeypatch):
+    from tests.test_compression_snapshot_revision import _install_streaming_session
+
+    sid = "issue6593-followup-writeback"
+    stream_id = "stream-issue6593-followup-writeback"
+    followup_id = "stream-issue6593-followup"
+    session, _events = _install_streaming_session(
+        monkeypatch,
+        tmp_path,
+        sid=sid,
+        stream_id=stream_id,
+        messages=[],
+        context_messages=[],
+    )
+    retry_entered = threading.Event()
+    retry_can_raise = threading.Event()
+    journal_events = []
+    monkeypatch.setattr(
+        streaming,
+        "append_turn_journal_event_for_stream",
+        lambda *_args: journal_events.append(_args[-1]),
+    )
+
+    class AuthThenRaisingRetryAgent:
+        runs = 0
+
+        def __init__(self, session_id=None, **_kwargs):
+            self.session_id = session_id
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def interrupt(self, _message):
+            return None
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            if type(self).runs == 1:
+                return {
+                    "messages": list(kwargs.get("conversation_history") or []),
+                    "error": {
+                        "type": "authentication_error",
+                        "status_code": 401,
+                        "message": "token invalid",
+                    },
+                }
+            retry_entered.set()
+            if not retry_can_raise.wait(timeout=10):
+                raise TimeoutError("retry test was not released")
+            raise RuntimeError("refreshed credential also failed")
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: AuthThenRaisingRetryAgent)
+    monkeypatch.setattr(
+        streaming,
+        "_attempt_credential_self_heal",
+        lambda *_args, **_kwargs: {
+            "api_key": "refreshed-key",
+            "provider": "test-provider",
+            "base_url": None,
+            "credential_pool": None,
+        },
+    )
+    worker_errors = []
+
+    def run_worker():
+        try:
+            streaming._run_agent_streaming(
+                session_id=sid,
+                msg_text="original turn",
+                model="test-model",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+                attachments=[],
+            )
+        except Exception as exc:
+            worker_errors.append(exc)
+
+    worker = threading.Thread(target=run_worker, daemon=True)
+    worker.start()
+    assert retry_entered.wait(timeout=5)
+
+    stop_done = threading.Event()
+    stop_result = []
+
+    def stop_stream():
+        try:
+            stop_result.append(streaming.cancel_stream(stream_id))
+        finally:
+            stop_done.set()
+
+    stop = threading.Thread(target=stop_stream, daemon=True)
+    stop.start()
+    stop.join(timeout=5)
+    stopped_before_retry_raise = stop_done.is_set()
+    followup_admitted_before_retry_raise = False
+    if stopped_before_retry_raise and stop_result == [True]:
+        with streaming._get_session_agent_lock(sid):
+            session.active_stream_id = followup_id
+            session.pending_user_message = "follow-up turn"
+            session.pending_attachments = [{"name": "follow-up.txt"}]
+            session.pending_started_at = 20.0
+            session.pending_user_source = "webui"
+            session.save(touch_updated_at=False)
+        followup_admitted_before_retry_raise = True
+
+    retry_can_raise.set()
+    worker.join(timeout=10)
+    stop.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert not stop.is_alive()
+    assert not worker_errors
+    assert AuthThenRaisingRetryAgent.runs == 2
+    assert stopped_before_retry_raise is True
+    assert followup_admitted_before_retry_raise is True
+    persisted = Session.load(sid)
+    assert persisted.active_stream_id == followup_id
+    assert persisted.pending_user_message == "follow-up turn"
+    assert persisted.pending_attachments == [{"name": "follow-up.txt"}]
+    assert not any(
+        message.get("content") == "Authentication failed"
+        for message in persisted.messages
+        if isinstance(message, dict)
+    )
+    assert any(event.get("event") == "interrupted" for event in journal_events)
