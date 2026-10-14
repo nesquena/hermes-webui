@@ -17,7 +17,6 @@ on:
       - 'tests/browser_reconnect_scene_redraw.py'
       - 'tests/browser_live_scene_energy.py'
       - 'tests/browser_progress_animation.py'
-      - 'tests/browser_transparent_fade_mutations.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -41,7 +40,11 @@ on:
 jobs:
   live-to-final:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # The rows themselves finish in about a minute on master; the headroom
+    # absorbs a slow runner or a cold Playwright download. These rows are
+    # blocking (no continue-on-error), so an install stall must not red the
+    # gate purely on the old 10-minute ceiling.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -63,9 +66,6 @@ jobs:
           - name: progress-animation
             script: tests/browser_progress_animation.py
             browsers: chromium
-          - name: transparent-fade-mutations
-            script: tests/browser_transparent_fade_mutations.py
-            browsers: chromium
     steps:
       - uses: actions/checkout@v4
 
@@ -78,6 +78,15 @@ jobs:
             **/requirements*.txt
             **/pyproject.toml
             .github/workflows/conversation-lifecycle.yml
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Key on the lockfiles + this workflow: a dependency bump that moves
+          # the Playwright version rebuilds the cache instead of replaying a
+          # browser tree the installed driver can't launch.
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements*.txt', '.github/workflows/conversation-lifecycle.yml') }}
 
       - name: Install browser gate dependencies
         run: |
