@@ -315,7 +315,7 @@ class TestTransferredLiveProseNormalization:
         ]
         import json
 
-        assert "OK" in self._harness(json.dumps(cases))
+        assert "OK" in _run_node(self._harness(json.dumps(cases)))
 
     def test_helper_is_wired_into_the_preserve_swap(self):
         ui = read("static/ui.js")
@@ -393,4 +393,147 @@ class TestTransparentSettleInPlace:
         assert "_sessionHtmlCache.delete" in src, (
             "the skipped full render also rewrote the session HTML cache; drop "
             "the stale entry so a later switch rebuilds from S.messages"
+        )
+
+    @staticmethod
+    def _disclosure_helpers_src():
+        """The REAL detail-disclosure state helpers from ui.js (no mirrors)."""
+        ui = read("static/ui.js")
+        m = re.search(
+            r"^const _worklogDetailDisclosureSelector=.*$",
+            ui,
+            re.M,
+        )
+        assert m, "_worklogDetailDisclosureSelector const not found"
+        selector = m.group(0)
+        helpers = [
+            "_worklogDetailTextKey",
+            "_worklogDetailBaseKey",
+            "_worklogDetailDisclosureIsOpen",
+            "_worklogDetailScrollableBody",
+            "_setWorklogDetailDisclosureOpen",
+            "_worklogDetailDisclosureKeyForElement",
+            "_captureWorklogDetailDisclosureState",
+            "_restoreWorklogDetailDisclosureState",
+        ]
+        return "\n".join(
+            [selector] + [extract_function(ui, name) for name in helpers]
+        )
+
+    @staticmethod
+    def _bracket_harness(case):
+        finalizer = extract_function(
+            read(str(REPO / "static/ui.js")), "_finalizeJustSettledTransparentScene"
+        )
+        helpers = TestTransparentSettleInPlace._disclosure_helpers_src()
+        return textwrap.dedent(
+            f"""
+            const assert=require('assert');
+            {helpers}
+            const CASE={case};
+            const S={{session:{{session_id:'s1'}}, messages:[{{role:'assistant',_anchor_activity_scene:{{}}}}]}};
+            const window={{_worklogDetailsExpandedDefault:CASE.defaultOpen}};
+            function mkBody(){{
+              return {{scrollTop:0, scrollHeight:1000, clientHeight:200}};
+            }}
+            function mkCard(){{
+              const classes=new Set();
+              const body=mkBody();
+              return {{
+                classList:{{
+                  add:(c)=>classes.add(c),
+                  remove:(c)=>classes.delete(c),
+                  contains:(c)=>classes.has(c),
+                  toggle:(c,v)=>{{ v?classes.add(c):classes.delete(c); }},
+                }},
+                getAttribute:()=>null,
+                closest:()=>null,
+                matches:()=>false,
+                querySelector:(sel)=>sel.indexOf('.thinking-card-body')!==-1?body:null,
+                _body:body,
+              }};
+            }}
+            // Two thinking-cards inside the turn, in document order. The first
+            // carries the reader's manual choice; the second stays at default.
+            let cards=[mkCard(), mkCard()];
+            cards[0].classList.add('thinking-card');
+            cards[1].classList.add('thinking-card');
+            if(CASE.manualOpen){{
+              cards[0].classList.add('open');
+              cards[0]._body.scrollTop=CASE.scrollTop;
+            }}else{{
+              cards[1].classList.add('open');
+            }}
+            const visibleRow={{}};
+            const turn={{
+              querySelectorAll(sel){{
+                if(sel.indexOf('transparent-event-row')!==-1) return [visibleRow];
+                return cards;
+              }},
+            }};
+            const segment={{
+              closest:(sel)=>sel==='.assistant-turn'?turn:null,
+            }};
+            const inner={{
+              querySelector:()=>segment,
+            }};
+            function $(id){{ return id==='msgInner'?inner:null; }}
+            function isTransparentStream(){{ return true; }}
+            function _settledAssistantStreamId(){{ return 'st1'; }}
+            function _assistantTurnHasVisibleRenderedSegment(){{ return true; }}
+            const _sessionHtmlCache={{delete:()=>{{}}}};
+            // The real scene renderer REPLACES this turn's rows: fresh elements
+            // with the global default detail state and scroll at 0. That is the
+            // behavior the capture/restore bracket must absorb.
+            function _renderSettledAnchorSceneTransparentForMessage(){{
+              cards=[mkCard(), mkCard()];
+              cards[0].classList.add('thinking-card');
+              cards[1].classList.add('thinking-card');
+              if(!CASE.defaultOpen){{
+                // fresh render leaves both cards at the default-closed state
+              }}else{{
+                cards[0].classList.add('open');
+                cards[1].classList.add('open');
+              }}
+              return true;
+            }}
+            {finalizer}
+            assert.strictEqual(_finalizeJustSettledTransparentScene('st1'), true);
+            console.log(JSON.stringify({{
+              open: cards.map((c)=>c.classList.contains('open')),
+              scrollTop: cards.map((c)=>c._body.scrollTop),
+            }}));
+            """
+        )
+
+    def _run_bracket_case(self, case):
+        import json
+        return json.loads(_run_node(self._bracket_harness(json.dumps(case))).strip())
+
+    def test_settle_finalize_preserves_default_closed_manually_opened_detail(self):
+        """Default-closed detail manually opened + scrolled must survive finalize."""
+        out = self._run_bracket_case(
+            {"defaultOpen": False, "manualOpen": True, "scrollTop": 123}
+        )
+        assert out["open"][0] is True, (
+            "a manually opened detail must stay open after the in-place finalize "
+            "(the fresh scene render resets it to the closed default)"
+        )
+        assert out["scrollTop"][0] == 123, (
+            "the opened detail's body scroll position must be restored after the "
+            "in-place finalize"
+        )
+        assert out["open"][1] is False, "untouched default-closed detail stays closed"
+
+    def test_settle_finalize_preserves_default_open_manually_closed_detail(self):
+        """Manually closed detail under an open default must stay closed."""
+        out = self._run_bracket_case(
+            {"defaultOpen": True, "manualOpen": False, "scrollTop": 0}
+        )
+        assert out["open"][1] is True, (
+            "the untouched detail was open before and after — no change expected"
+        )
+        assert out["open"][0] is False, (
+            "a manually closed detail must stay closed after the in-place "
+            "finalize even though the default is open"
         )

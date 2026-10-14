@@ -17311,7 +17311,17 @@ function _finalizeJustSettledTransparentScene(streamId){
   if(!segment) return false;
   const turn=typeof segment.closest==='function'?segment.closest('.assistant-turn'):null;
   if(!turn) return false;
-  if(!_renderSettledAnchorSceneTransparentForMessage(msgs[ownerIdx],segment,ownerIdx)) return false;
+  // The scene renderer replaces this turn's rows with the global default
+  // detail state; bracket it with the existing capture/restore pair (the same
+  // bracket renderMessages uses) so the reader's disclosure choices and detail
+  // body scroll survive the in-place finalize.
+  const detailDisclosureState=typeof _captureWorklogDetailDisclosureState==='function'
+    ? _captureWorklogDetailDisclosureState(turn)
+    : null;
+  const settledSceneRendered=_renderSettledAnchorSceneTransparentForMessage(msgs[ownerIdx],segment,ownerIdx);
+  if(typeof _restoreWorklogDetailDisclosureState==='function')
+    _restoreWorklogDetailDisclosureState(turn,detailDisclosureState);
+  if(!settledSceneRendered) return false;
   const _visibleRows=turn.querySelectorAll('.transparent-event-row:not([hidden]):not([aria-hidden="true"])');
   if(_assistantTurnHasVisibleRenderedSegment(turn)!==true&&!_visibleRows.length) return false;
   // The skipped full render was also the one that (re)wrote _sessionHtmlCache:
