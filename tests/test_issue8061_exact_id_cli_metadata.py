@@ -20,7 +20,12 @@ contract:
 * the owner profile comes from the resolved DB context (root and named profile),
 * the deleted-WebUI tombstone still wins over a surviving ``state.db`` row,
 * foreign sources (messaging) are not suppressed by that tombstone,
-* the window row wins whenever the sidebar already has the id.
+* the window row wins whenever the sidebar already has the id,
+* the mutation callers sharing that lookup (rename/archive/move/delete) reach the
+  same aged-out id instead of answering 404,
+* the guard input they read from the lookup (messaging/read-only detection for an
+  out-of-window row) resolves too — before the fix those guards were evaluated
+  against an empty record.
 """
 
 import json
@@ -424,3 +429,236 @@ def test_get_session_serves_an_aged_out_sidecar_less_session(tmp_path, monkeypat
     models.clear_cli_sessions_cache()
     routes.handle_get(SimpleNamespace(), parsed)
     assert captured.get("status") == 404, captured
+
+
+# ---------------------------------------------------------------------------
+# #8061, second half of the maintainer spec: the session-scoped mutation
+# callers take the same lookup, so an out-of-window sidecar-less session has to
+# be reachable there as well. Before the fix rename/archive/move answered
+# "Session not found" for exactly the id GET had started to serve.
+# ---------------------------------------------------------------------------
+
+import io  # noqa: E402  (test-only helper, kept next to its users)
+from urllib.parse import urlparse  # noqa: E402
+
+
+class _MutationEnv:
+    """Fixture state: one sidecar-less id inside and one outside the window."""
+
+    def __init__(self, sid, msg_sid, captured, body_state):
+        self.sid = sid
+        self.msg_sid = msg_sid
+        self._captured = captured
+        self._body_state = body_state
+
+    def post(self, path, body):
+        """Dispatch the real POST route; returns ``(status, payload)``."""
+        import api.routes as routes
+
+        self._captured.clear()
+        self._body_state["body"] = dict(body)
+        routes.handle_post(_FakeHandler(), urlparse(path))
+        return self._captured.get("status"), self._captured.get("data")
+
+
+class _FakeHandler:
+    """The minimum the POST dispatcher touches (same shape as test_465)."""
+
+    def __init__(self):
+        self.status = None
+        self.headers = {"Content-Type": "application/json", "Content-Length": "1"}
+        self.rfile = io.BytesIO(b"")
+        self.wfile = io.BytesIO()
+        self.command = "POST"
+        self.path = "/"
+        self.client_address = ("127.0.0.1", 12345)
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, key, value):
+        self.headers[key] = value
+
+    def end_headers(self):
+        pass
+
+
+def _seed_mutation_state_db(path, rows):
+    """state.db with the full column set the mutation path reads.
+
+    The mutation callers import the transcript (``_get_or_materialize_session``
+    bails out with the same 404 when a row has no readable messages), so unlike
+    the metadata-only tests above this fixture needs ``content`` and the
+    ``cwd``/``archived`` columns too.
+    """
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, title TEXT, model TEXT,"
+        " message_count INTEGER, started_at REAL, source TEXT, cwd TEXT, archived INTEGER DEFAULT 0)"
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        " session_id TEXT, role TEXT, content TEXT, timestamp REAL)"
+    )
+    for sid, title, source, ts in rows:
+        conn.execute(
+            "INSERT INTO sessions (id, title, model, message_count, started_at, source, cwd)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (sid, title, "gpt-x", 2, ts, source, "/tmp"),
+        )
+        for i, role in enumerate(("user", "assistant")):
+            conn.execute(
+                "INSERT INTO messages (session_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+                (sid, role, f"{role} turn {i}", ts + i),
+            )
+    conn.commit()
+    conn.close()
+
+
+def _build_mutation_env(tmp_path, monkeypatch, *, exact_id=True):
+    import api.config as cfg
+    import api.helpers as helpers
+    import api.profiles as profiles
+    import api.routes as routes
+
+    home = tmp_path / "hermes" / "profiles" / "arbeit"
+    home.mkdir(parents=True)
+    sessions_dir = tmp_path / "webui-state" / "sessions"
+    sessions_dir.mkdir(parents=True)
+    index = sessions_dir / "_index.json"
+    index.write_text("[]", encoding="utf-8")
+    projects = tmp_path / "projects.json"
+    projects.write_text("[]", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home)
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: "arbeit")
+    monkeypatch.setattr(routes, "_get_active_profile_name", lambda: "arbeit")
+    monkeypatch.setattr(cfg, "PROJECTS_FILE", projects)
+    monkeypatch.setattr(models, "PROJECTS_FILE", projects)
+    monkeypatch.setattr(models, "_projects_migrated", True)
+    monkeypatch.setattr(models, "SESSION_DIR", sessions_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", index)
+    monkeypatch.setattr(routes, "SESSION_INDEX_FILE", index)
+    monkeypatch.setattr(models, "CLI_VISIBLE_SESSION_LIMIT", 20)
+
+    # A conversation older than the window without a WebUI sidecar (the reported
+    # shape), plus a messaging row in the same state: both aged out.
+    older = _rows(1, newest_ts=1_700_100_000.0, prefix="20261011_101010_")
+    messaging = _rows(1, newest_ts=1_700_200_000.0, source="telegram", prefix="20261011_202020_")
+    newer = _rows(25, prefix="20261011_303030_")
+    rows = older + messaging + newer
+    _seed_mutation_state_db(home / "state.db", rows)
+    models.clear_cli_sessions_cache()
+    routes.SESSIONS.clear()
+
+    sid, msg_sid = older[0][0], messaging[0][0]
+    visible = {row["session_id"] for row in models.get_cli_sessions()}
+    assert sid not in visible and msg_sid not in visible, "fixture must age both ids out of the window"
+
+    captured = {}
+    body_state = {"body": {}}
+
+    def _j(_handler, data, status=200, extra_headers=None):
+        captured["data"], captured["status"] = data, status
+        return data
+
+    def _bad(_handler, message, code=400):
+        captured["data"], captured["status"] = message, code
+        return True
+
+    monkeypatch.setattr(routes, "j", _j)
+    monkeypatch.setattr(helpers, "j", _j)
+    monkeypatch.setattr(routes, "bad", _bad)
+    monkeypatch.setattr(helpers, "bad", _bad)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: dict(body_state["body"]))
+
+    if not exact_id:
+        # The pre-fix lookup: the window miss returns nothing at all.
+        # ``raising=False``: on a tree that predates the fallback the name does not
+        # exist yet — the pre-fix simulation must still be expressible there.
+        monkeypatch.setattr(routes, "get_cli_session_metadata_by_id", lambda *a, **k: {}, raising=False)
+        models.clear_cli_sessions_cache()
+
+    return _MutationEnv(sid, msg_sid, captured, body_state)
+
+
+@pytest.fixture
+def mutation_env(tmp_path, monkeypatch):
+    return _build_mutation_env(tmp_path, monkeypatch)
+
+
+@pytest.fixture
+def mutation_env_without_exact_id(tmp_path, monkeypatch):
+    return _build_mutation_env(tmp_path, monkeypatch, exact_id=False)
+
+
+def test_rename_reaches_an_out_of_window_sidecar_less_session(mutation_env):
+    status, payload = mutation_env.post(
+        "/api/session/rename", {"session_id": mutation_env.sid, "title": "Umbenannt"}
+    )
+    assert status == 200, payload
+    assert payload["session"]["session_id"] == mutation_env.sid
+    assert payload["session"]["title"] == "Umbenannt"
+    assert payload["session"]["profile"] == "arbeit"
+
+
+def test_rename_is_the_reported_404_without_the_exact_id_fallback(mutation_env_without_exact_id):
+    env = mutation_env_without_exact_id
+    assert env.post("/api/session/rename", {"session_id": env.sid, "title": "Umbenannt"}) == (
+        404,
+        "Session not found",
+    )
+
+
+def test_archive_reaches_an_out_of_window_sidecar_less_session(mutation_env):
+    status, payload = mutation_env.post("/api/session/archive", {"session_id": mutation_env.sid})
+    assert status == 200, payload
+    assert payload["session"]["archived"] is True
+
+
+def test_archive_is_the_reported_404_without_the_exact_id_fallback(mutation_env_without_exact_id):
+    env = mutation_env_without_exact_id
+    assert env.post("/api/session/archive", {"session_id": env.sid}) == (404, "Session not found")
+
+
+def test_move_reaches_an_out_of_window_sidecar_less_session(mutation_env):
+    status, payload = mutation_env.post("/api/session/move", {"session_id": mutation_env.sid})
+    assert status == 200, payload
+    assert payload["ok"] is True
+    assert payload["session"]["session_id"] == mutation_env.sid
+
+
+def test_move_is_the_reported_404_without_the_exact_id_fallback(mutation_env_without_exact_id):
+    env = mutation_env_without_exact_id
+    assert env.post("/api/session/move", {"session_id": env.sid}) == (404, "Session not found")
+
+
+def test_delete_of_an_out_of_window_session_stays_available(mutation_env):
+    """Delete never needed the metadata to answer, so it must keep working.
+
+    Its guards *do* read the same lookup, which is what the next two tests pin.
+    """
+    status, payload = mutation_env.post("/api/session/delete", {"session_id": mutation_env.sid})
+    assert status == 200, payload
+    assert payload["ok"] is True
+
+
+def test_the_messaging_guard_input_resolves_for_an_out_of_window_row(mutation_env):
+    """The delete/rename guards ask the same lookup (#8061)."""
+    import api.routes as routes
+
+    meta = routes._lookup_cli_session_metadata(mutation_env.msg_sid)
+    assert meta, "an out-of-window messaging row must still be resolvable"
+    assert meta.get("session_source") == "messaging"
+    assert routes._is_messaging_session_id(mutation_env.msg_sid) is True
+
+
+def test_the_messaging_guard_input_was_blind_without_the_exact_id_fallback(
+    mutation_env_without_exact_id,
+):
+    """Pre-fix: the guards ran against an empty record for the same id."""
+    import api.routes as routes
+
+    env = mutation_env_without_exact_id
+    assert routes._lookup_cli_session_metadata(env.msg_sid) == {}
+    assert routes._is_messaging_session_id(env.msg_sid) is False
