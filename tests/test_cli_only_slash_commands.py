@@ -635,7 +635,8 @@ def test_send_intercepts_reload_mcp_agent_command_before_agent_round_trip():
 
     assert "const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'')" in intercept
     assert "if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName))" in intercept
-    assert "executeAgentCommand(text,_agentCmd||{name:_agentCmdName})" in intercept
+    assert "executeAgentCommand(text,{" in intercept
+    assert "draftClearPromise:_cmdDraftClearPromise" in intercept
 
 
 def test_reload_mcp_reload_skills_and_codex_runtime_webui_intercept_aliases_are_defined_in_js_whitelist():

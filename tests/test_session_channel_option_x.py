@@ -970,7 +970,7 @@ def test_load_session_rearms_stream_on_every_early_return():
 
     # The fetch-error catch must restart the stream for the on-screen session,
     # but guarded against the self-healed-current (404'd) case so it never
-    # spins the reconnect loop against a dead session_id.
+    # spins the reconnect loop against a dead session.
     catch_ix = body.index("const _selfHealedCurrent")
     catch_end = body.index("\n  if (!data) {", catch_ix)
     catch_src = body[catch_ix:catch_end]

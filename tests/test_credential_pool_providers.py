@@ -765,6 +765,16 @@ def test_custom_provider_detected_by_get_available_models(monkeypatch, tmp_path)
     })
     monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
 
+    import urllib.error
+    import urllib.request
+
+    def _fake_custom_endpoint(request, *args, **kwargs):
+        url = getattr(request, "full_url", str(request))
+        assert url == "https://bothub.chat/v1/models", url
+        raise urllib.error.URLError("offline custom endpoint")
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake_custom_endpoint)
+
     # Need both auth.json (for pool) and custom_providers config (for model enumeration)
     (tmp_path / "auth.json").write_text(json.dumps({
         "version": 1,
