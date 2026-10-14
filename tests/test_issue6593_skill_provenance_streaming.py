@@ -226,6 +226,7 @@ def test_returned_auth_retry_allows_skill_completion_and_concurrent_stop(tmp_pat
 
 
 def test_failed_retry_after_followup_admission_preserves_followup(tmp_path, monkeypatch):
+    import api.config as config
     from tests.test_compression_snapshot_revision import _install_streaming_session
 
     sid = "issue6593-followup-writeback"
@@ -239,6 +240,7 @@ def test_failed_retry_after_followup_admission_preserves_followup(tmp_path, monk
         messages=[],
         context_messages=[],
     )
+    monkeypatch.setattr(config, "SESSION_WRITEBACK_OWNERS", {})
     retry_entered = threading.Event()
     retry_can_raise = threading.Event()
     journal_events = []
@@ -327,6 +329,7 @@ def test_failed_retry_after_followup_admission_preserves_followup(tmp_path, monk
             session.pending_attachments = [{"name": "follow-up.txt"}]
             session.pending_started_at = 20.0
             session.pending_user_source = "webui"
+            config.register_session_writeback_owner(sid, followup_id)
             session.save(touch_updated_at=False)
         followup_admitted_before_retry_raise = True
 
@@ -342,6 +345,7 @@ def test_failed_retry_after_followup_admission_preserves_followup(tmp_path, monk
     assert followup_admitted_before_retry_raise is True
     persisted = Session.load(sid)
     assert persisted.active_stream_id == followup_id
+    assert config.session_writeback_owner(sid) == followup_id
     assert persisted.pending_user_message == "follow-up turn"
     assert persisted.pending_attachments == [{"name": "follow-up.txt"}]
     assert not any(
