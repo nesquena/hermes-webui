@@ -8551,6 +8551,34 @@ def _repair_foreign_session_model_provider(
     requested_provider = _clean_session_model_provider(requested_provider)
     resolved_provider = _clean_session_model_provider(resolved_provider)
     profile_provider = _clean_session_model_provider(profile_provider)
+    # A stored provider that IS a valid identity must route exactly as on
+    # master: only a provider that genuinely has no credentials may be
+    # repaired (#7585 gate, maintainer review of #8179). Two such identities
+    # are checked BEFORE any canonicalisation can mistake them for a
+    # credential-less lane:
+    #   1. an opaque model-alias lane — its digest is not a provider id, so
+    #      generic resolution would misread it, switch the endpoint and
+    #      persist ``custom:ambient``;
+    #   2. a registered NAMED custom provider whose name happens to
+    #      canonicalise to a catalog group — canonicalising would fabricate a
+    #      stored-group match and skip the custom-provider/credential guards
+    #      inside ``if not stored_groups``.
+    # Both fail safe to ``resolved_provider`` (the pre-repair lane) if their
+    # lookup raises, matching every other lookup on this path.
+    try:
+        from api.config import is_model_alias_route_provider
+
+        if is_model_alias_route_provider(stored_provider):
+            return resolved_provider
+    except Exception:
+        return resolved_provider
+    try:
+        from api.config import _named_custom_provider_slug_for_provider
+
+        if _named_custom_provider_slug_for_provider(stored_provider, profile_config):
+            return resolved_provider
+    except Exception:
+        return resolved_provider
     # Canonically-equivalent ids (``my_local``/``my-local``, ``z-ai``/``zai``)
     # are ONE provider: every provider comparison below uses the catalog-side
     # normalisation so a lane is never "foreign" only because of spelling
