@@ -33,7 +33,6 @@ file uses, and they drive both clocks (the check epoch and the recovery
 generation) rather than collapsing them.
 """
 import json
-import re
 import shutil
 import subprocess
 from pathlib import Path
