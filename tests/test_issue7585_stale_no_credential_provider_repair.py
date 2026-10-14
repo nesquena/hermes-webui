@@ -895,3 +895,107 @@ def test_codex_oauth_token_in_top_level_model_key_does_not_block_repair(
     _patch_catalog(monkeypatch, _catalog(_group("nous", "deepseek/deepseek-v4.1-flash")))
 
     assert _repair(_session(provider="openai"), profile_config=profile_cfg) == "nous"
+
+
+# ---------------------------------------------------------------------------
+# HTTP-level coverage for the two "valid identity must route as on master"
+# shapes the maintainer gate asked for on #8179. Both drive the real
+# ``_handle_chat_start`` request path and assert the provider handed to
+# ``_start_run`` is NOT rewritten to ``custom:ambient``.
+# ---------------------------------------------------------------------------
+
+
+def _drive_chat_start(monkeypatch, tmp_path, *, session, catalog, profile_cfg):
+    """Run a chat start through the HTTP handler and return captured kwargs."""
+    captured = {}
+    monkeypatch.setattr(routes, "_get_or_materialize_session", lambda _sid, **_k: session)
+    monkeypatch.setattr(
+        routes, "_resolve_chat_workspace_with_recovery", lambda _s, _w: str(tmp_path)
+    )
+    monkeypatch.setattr(
+        routes,
+        "_read_profile_model_config",
+        lambda _s, _p: (None, None, profile_cfg),
+    )
+    monkeypatch.setattr(
+        routes, "get_available_models", lambda *, prefer_cache=False: catalog
+    )
+
+    def _start_run(s, **kwargs):
+        captured.update(kwargs)
+        return {"stream_id": "stream-8179"}
+
+    monkeypatch.setattr(routes, "_start_run", _start_run)
+    monkeypatch.setattr(routes, "j", lambda _h, payload, status=200: payload)
+    routes._handle_chat_start(
+        None, {"session_id": session.session_id, "message": "continue"}
+    )
+    return captured
+
+
+def _chat_session(tmp_path, **overrides):
+    fields = dict(
+        session_id="issue-8179",
+        workspace=str(tmp_path),
+        model="deepseek/deepseek-v4.1-flash",
+        model_provider="model-alias-abcdef0123456789",
+        profile="default",
+        messages=[],
+        context_messages=[],
+        pending_user_message=None,
+        save=lambda: None,
+    )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def test_model_alias_lane_not_rewritten_by_repair(monkeypatch, tmp_path):
+    """An opaque model-alias lane must route exactly as master (#8179 shape 1).
+
+    Master sends an alias-routed session to the alias's own endpoint with the
+    alias key. A repair that mistakes the opaque ``model-alias-*`` digest for a
+    credential-less provider would rewrite the session to ``custom:ambient``.
+    The guard must return the stored alias lane untouched.
+    """
+    session = _chat_session(tmp_path)
+    # A single-owner catalog that WOULD claim the model if the guard were absent.
+    catalog = _catalog(_group("nous", "deepseek/deepseek-v4.1-flash"))
+    profile_cfg = {"model": {"provider": "nous"}}
+    captured = _drive_chat_start(
+        monkeypatch, tmp_path, session=session, catalog=catalog, profile_cfg=profile_cfg
+    )
+    # The alias lane is preserved: not switched to a catalog owner or ambient.
+    assert captured["model_provider"] == session.model_provider, captured
+
+
+def test_named_custom_provider_not_rewritten_when_canonical_group_exists(
+    monkeypatch, tmp_path
+):
+    """A registered named custom provider keeps its lane (#8179 shape 2).
+
+    A custom provider named ``glm`` whose name canonicalises to the catalog
+    group ``zai`` must keep routing to ``/glm`` with its own credential. A
+    repair that canonicalises ``glm`` -> ``zai`` fabricates a stored-group
+    match (the ``zai`` group) that skips the custom-provider/credential guards
+    inside ``if not stored_groups``; with exactly one OTHER group owning the
+    model, the buggy path rewrites the session to that owner. The guard must
+    return the stored ``glm`` lane untouched.
+    """
+    session = _chat_session(tmp_path, model_provider="glm")
+    # ``zai`` is the canonical target of ``glm`` and exists as a catalog group
+    # but does NOT own the model; a separate ``nous`` group owns it. Without
+    # the guard the single ``nous`` owner wins and the glm lane is lost.
+    catalog = _catalog(
+        _group("zai", "zai-unused-model"),
+        _group("nous", "deepseek/deepseek-v4.1-flash"),
+    )
+    profile_cfg = {
+        "model": {"provider": "nous"},
+        "custom_providers": [
+            {"name": "glm", "api_base": "https://glm.example/v1", "api_key": "dummy-glm"}
+        ],
+    }
+    captured = _drive_chat_start(
+        monkeypatch, tmp_path, session=session, catalog=catalog, profile_cfg=profile_cfg
+    )
+    assert captured["model_provider"] == "glm", captured
