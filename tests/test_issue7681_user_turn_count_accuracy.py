@@ -1715,6 +1715,71 @@ def test_blank_user_turn_predicate_itself_excludes_empty_payloads():
         assert blank({"role": "user", "content": [{"type": "image_url", "image_url": {}}]}) is False
 
 
+# ── Re-gate 2026-10-12: the two supplement carrier shapes (finding 5) ──
+#
+# The 2026-10-12 re-warm review: `_summary_carrier_has_live_user_ask` /
+# `_live_payload_after_prior_context` still tested nonblank text instead of
+# classifying the unwrapped candidate. Both assertions run the production
+# predicate with the agent import disabled for the ENTIRE call
+# (`_mirror_predicate` re-enters the blocked context per call), matching the
+# agent's installed source semantics: strip-before-header
+# (context_compressor.py:4641-4643), classify the unwrapped candidate
+# (:5860-5863), exclude the exact continuation marker (:4444-4446).
+
+_CONTINUATION_MARKER = (
+    "Continue from the compressed conversation context above. "
+    "This marker exists because no human user turn was available."
+)
+
+
+def test_exact_continuation_marker_payload_is_not_a_live_ask():
+    """#7681 finding 5 supplement 1: the exact continuation-marker payload must
+    return False with the agent import disabled for the entire predicate call.
+
+    The mirror used to test nonblank text, so a flagged merged carrier whose
+    pre-delimiter slice is only the continuation marker counted as a live ask.
+    The agent's `_is_synthetic_compression_user_turn` excludes the exact marker
+    (context_compressor.py:4444-4446); the unwrapped candidate must be
+    CLASSIFIED, not just checked for text.
+    """
+    predicate = _mirror_predicate()
+    row = {
+        "role": "user",
+        "content": (
+            f"{_CONTINUATION_MARKER}"
+            f"\n\n{_DELIM}\n\n## Summary\nwe discussed X"
+        ),
+        "_compressed_summary": True,
+    }
+    assert predicate(row) is False, (
+        "a carrier whose pre-delimiter payload is exactly the continuation "
+        "marker is scaffolding in the agent's classifier, not a user turn"
+    )
+
+
+def test_leading_whitespace_plus_header_only_payload_is_not_a_live_ask():
+    """#7681 finding 5 supplement 2: strip whitespace BEFORE removing the header.
+
+    A leading tab/newline followed only by the prior-context header used to
+    count as a live ask because the header check ran before the strip. The
+    agent strips the pre-delimiter slice first (context_compressor.py:4641),
+    then removes the header (:4642-4643) — leaving nothing.
+    """
+    predicate = _mirror_predicate()
+    row = {
+        "role": "user",
+        "content": (
+            f"\n\t{_PRIOR_HEADER}"
+            f"\n\n{_DELIM}\n\n## Summary\nwe discussed X"
+        ),
+        "_compressed_summary": True,
+    }
+    assert predicate(row) is False, (
+        "whitespace followed by only the reference-only header is an empty "
+        "payload, not a live ask"
+    )
+
+
 # ── Finding 3 (re-gate 2026-10-08): recovery nudges and summary carriers ──
 #
 # Two defects made the SQL aggregate disagree with the Agent's own count on the

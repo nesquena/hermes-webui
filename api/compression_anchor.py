@@ -418,51 +418,110 @@ def _summary_carrier_has_live_user_ask(message: dict) -> bool:
             return split(message)[1] is not None
         except Exception:
             pass
+    candidate = _unwrap_carrier_candidate(message)
+    if candidate is None:
+        return False
+    return _classify_unwrapped_candidate(candidate)
+
+
+def _unwrap_carrier_candidate(message: dict):
+    """Unwrap a summary carrier into a fresh candidate, or ``None``.
+
+    Mirrors the agent's ``_strip_context_summary_handoff_message``
+    (context_compressor.py:4639-4683): the merged form takes
+    ``content.split(delim, 1)[0].strip()`` and then drops the reference-only
+    prior-context header (:4641-4643); the legacy form takes whatever follows
+    the end marker, left-stripped (:4645). The durable summary flag and
+    ``display_kind`` are popped from the candidate exactly as the agent does
+    before classifying it (:4636, :5849).
+    """
     content = message.get("content")
+
+    def _candidate(new_content):
+        if not new_content:
+            return None
+        unwrapped = {**message, "content": new_content}
+        unwrapped.pop("_compressed_summary", None)
+        unwrapped.pop("display_kind", None)
+        unwrapped.pop("display_metadata", None)
+        return unwrapped
+
+    if isinstance(content, str):
+        if _MERGED_SUMMARY_DELIMITER in content:
+            # Merged form: the live payload sits BEFORE the delimiter, after the
+            # reference-only prior-context header is stripped.
+            payload = _live_payload_after_prior_context(
+                content.split(_MERGED_SUMMARY_DELIMITER, 1)[0]
+            )
+        elif _SUMMARY_END_MARKER in content:
+            # Legacy form: the live ask follows the end marker directly.
+            payload = content.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
+        else:
+            return None
+        return _candidate(payload)
     if isinstance(content, list):
         # The agent walks the parts, keeps everything before the delimiter part,
         # and stops at the part carrying it. Joining all parts first would fold
         # the summary block back into the pre-delimiter slice and make every
         # standalone carrier look live (#7681 finding 5).
         before: list[str] = []
+        found_delimiter = False
         for item in content:
             text = _part_text(item)
             if _MERGED_SUMMARY_DELIMITER in text:
                 before.append(text.split(_MERGED_SUMMARY_DELIMITER, 1)[0])
+                found_delimiter = True
                 break
             before.append(text)
-        if not any(_MERGED_SUMMARY_DELIMITER in _part_text(item) for item in content):
+        if found_delimiter:
+            payload = _live_payload_after_prior_context(_join_parts_text(before))
+        else:
             # Legacy list form: the live ask follows the end marker in whichever
             # part carries it.
             joined = _join_parts(content)
             if _SUMMARY_END_MARKER not in joined:
-                return False
-            return bool(joined.split(_SUMMARY_END_MARKER, 1)[1].strip())
-        return _live_payload_after_prior_context(_join_parts_text(before))
-    if not isinstance(content, str):
-        return False
-    if _MERGED_SUMMARY_DELIMITER in content:
-        # Merged form: the live payload sits BEFORE the delimiter, after the
-        # reference-only prior-context header is stripped.
-        return _live_payload_after_prior_context(content.split(_MERGED_SUMMARY_DELIMITER, 1)[0])
-    if _SUMMARY_END_MARKER in content:
-        # Legacy form: the live ask follows the end marker directly.
-        tail = content.split(_SUMMARY_END_MARKER, 1)[1]
-        return bool(tail.strip())
-    return False
+                return None
+            payload = joined.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
+        return _candidate(payload)
+    return None
 
 
-def _live_payload_after_prior_context(before_delimiter: str) -> bool:
-    """True when the pre-delimiter slice still holds a live ask.
+def _live_payload_after_prior_context(before_delimiter: str):
+    """The live payload in front of the merged delimiter, or ``None``.
 
-    The agent strips the ``[END OF PRIOR CONTEXT ...]`` header off the slice in
-    front of the delimiter; what remains after that header is the live payload.
-    A slice that is only the header (or empty) is a standalone summary.
+    The agent strips the pre-delimiter slice FIRST
+    (``content.split(delim, 1)[0].strip()``, context_compressor.py:4641), then
+    removes the reference-only ``[PRIOR CONTEXT ...]`` header and left-strips
+    what remains (:4642-4643). The old mirror checked for the header BEFORE
+    stripping, so a leading tab/newline followed by only the header was never
+    recognized as an empty payload and counted as a live ask (#7681 finding 5).
     """
-    payload = before_delimiter
+    payload = before_delimiter.strip()
     if _MERGED_PRIOR_CONTEXT_HEADER and payload.startswith(_MERGED_PRIOR_CONTEXT_HEADER):
-        payload = payload[len(_MERGED_PRIOR_CONTEXT_HEADER):]
-    return bool(payload.strip())
+        payload = payload[len(_MERGED_PRIOR_CONTEXT_HEADER):].lstrip()
+    return payload or None
+
+
+def _classify_unwrapped_candidate(candidate) -> bool:
+    """Classify an unwrapped carrier candidate with the complete local predicate.
+
+    The candidate is a fresh row that is no longer a summary carrier (the
+    durable flag and ``display_kind`` were popped by the unwrap), so the carrier
+    branches are omitted — running ``is_user_originated_turn`` here would
+    re-enter the same row's split. Mirrors the agent applying
+    ``_is_real_user_turn`` to the unwrapped candidate
+    (context_compressor.py:5860-5863), which rejects the exact continuation
+    marker and the other synthetic exact/prefix shapes (:4444-4452).
+    """
+    if not isinstance(candidate, dict):
+        return False
+    if candidate.get("role") != "user":
+        return False
+    if _is_blank_user_turn(candidate):
+        return False
+    if _is_internal_user_row(candidate):
+        return False
+    return True
 
 
 def _part_text(item) -> str:
