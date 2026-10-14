@@ -4566,6 +4566,18 @@ def _append_journaled_partial_output(
                 assistant_started_at = None
                 if 0 <= existing_idx < len(session.messages):
                     existing_message = session.messages[existing_idx]
+                    # #7167 round-6: an authorized legacy recovery row
+                    # (journal provenance without a stream tag — written
+                    # before stream tagging existed) is invisible to the
+                    # stream-scoped rehome and to the cancel-journal
+                    # ownership gates, so it stays below its marker or reads
+                    # as another stream's row. Stamp it with the proven
+                    # stream id BEFORE the context projection below.
+                    if (
+                        existing_message.get('_recovered_from_run_journal') is True
+                        and not existing_message.get('_recovered_stream_id')
+                    ):
+                        existing_message['_recovered_stream_id'] = str(stream_id)
                     append_context_projection(existing_message)
                     if attach_display_reasoning(existing_message, reasoning):
                         appended_any = True
@@ -5941,7 +5953,16 @@ def _promote_or_refresh_reused_marker(
         _strip_journal_retry_meta(marker)
         # Recovered rows may have landed below the marker (appended at the
         # tail by this pass or an earlier one) — hoist them above it.
-        _reorder_journal_tail_above_marker(session, marker_idx)
+        # #7167 round-6: rehome ONLY this stream's recovered rows. The
+        # unscoped reorder moved every recovered row after the marker
+        # (including another stream's answer) and rebased the tool indexes
+        # of the moved rows alone, so a later-arriving recovered answer
+        # landed before its own user turn and an ordinary answer's tool
+        # index could end up pointing at a USER row.
+        if stream_id:
+            _rehome_cancel_journal_rows(session, marker_idx, str(stream_id))
+        else:
+            _reorder_journal_tail_above_marker(session, marker_idx)
     else:
         # Refresh the retry budget on the reused marker: the previous
         # attempt counter would otherwise keep counting from a stale base.
@@ -5950,7 +5971,14 @@ def _promote_or_refresh_reused_marker(
         ) + 1
         if stream_id and not marker.get('_journal_retry_stream_id'):
             marker['_journal_retry_stream_id'] = str(stream_id)
-        _reorder_journal_tail_above_marker(session, marker_idx)
+        # #7167 round-6: same stream-scoped rehome as the resolved arm above
+        # (see the note there) — an unscoped reorder moved another stream's
+        # recovered rows above this marker and left this stream's own rows
+        # below it.
+        if stream_id:
+            _rehome_cancel_journal_rows(session, marker_idx, str(stream_id))
+        else:
+            _reorder_journal_tail_above_marker(session, marker_idx)
 
 
 def _marker_reuse_index(session, stream_id: str | None) -> int | None:
@@ -6132,11 +6160,11 @@ def _apply_core_sync_or_error_marker(
             _latest_user,
             session.pending_started_at,
         )
-        # #7167 re-gate: the matched row is REUSED, not re-materialized, so the
-        # pending turn's attachments/source must be copied onto it before the
-        # pending cleanup below drops the only other copy. Gated on the
-        # ownership proof so a save-failure rollback still leaves memory
-        # byte-identical (test_cancel_recovery_properties rollback cases).
+        # #7167 round-6: the textual tail predicates below are a pure TEXT
+        # match against the transcript's last message. They stay as-is for
+        # the append gate, but they are NOT an identity proof: an earlier
+        # UNRELATED turn that reused the same prompt would otherwise be
+        # stamped with this turn's attachment/source/turn token.
         _tail_message = session.messages[-1] if session.messages else None
         _tail_user_already_checkpointed = _message_matches_pending_checkpoint(
             _tail_message,
@@ -6148,17 +6176,23 @@ def _apply_core_sync_or_error_marker(
             _tail_message,
             session.pending_user_message,
         )
-        # #7167 re-gate: the matched row is REUSED, not re-materialized, so the
-        # pending turn's attachments/source must be copied onto it before the
-        # pending cleanup below drops the only other copy. Gated on the
-        # ownership proof so a save-failure rollback still leaves memory
-        # byte-identical (test_cancel_recovery_properties rollback cases).
-        if _already_checkpointed or _tail_user_already_checkpointed:
-            _backfill_pending_metadata_onto_reused_row(session, _latest_user)
+        # #7167 round-6: the backfill may run ONLY on the token-bound proof
+        # (``_already_checkpointed``). The textual tail predicate above is a
+        # pure text match, so gating on it let an earlier UNRELATED turn that
+        # used the same prompt receive the pending turn's
+        # attachments/source/pending-turn token — and the genuinely recovered
+        # row received them too, leaving two user rows sharing one
+        # ``_active_turn_token`` (SILENT round-6 finding).
         _pending_started_at = session.pending_started_at
         if _run_journal_terminal_state(session, _stream_id) == 'completed':
             if not _already_checkpointed:
                 _append_recovered_pending_turn(session, timestamp=_recovered_row_ts)
+            else:
+                # Completed-stream repair that REUSES the checkpointed row
+                # instead of materializing a new one: the pending state is
+                # cleared right below, so this is the last chance to copy the
+                # turn's metadata onto the reused row.
+                _backfill_pending_metadata_onto_reused_row(session, _latest_user)
             _append_journaled_partial_output(
                 session,
                 _stream_id,
@@ -6177,6 +6211,15 @@ def _apply_core_sync_or_error_marker(
                 _stream_id,
             )
             return True
+        # #7167 round-6: the non-completed arm keeps its own reuse backfill,
+        # but only on the token-bound proof. The textual tail predicate can
+        # name an earlier UNRELATED turn that reused the same prompt, and
+        # stamping that row would steal the pending turn's
+        # attachments/source/turn token. Placed here — AFTER the
+        # completed-stream branch's return and BEFORE the #6366
+        # advanced-past check — so the completed arm is unaffected.
+        if _already_checkpointed:
+            _backfill_pending_metadata_onto_reused_row(session, _latest_user)
         # #6366 re-gate: when the durable transcript has already
         # advanced past this pending turn into a newer settled
         # user/assistant boundary, the recovery path must NOT
