@@ -886,6 +886,108 @@ def test_explicit_provider_coercion_resolves_from_the_captured_snapshot(monkeypa
     ) == "high"
 
 
+def test_lmstudio_probe_uses_profile_snapshot_during_concurrent_reload(monkeypatch):
+    """LM Studio endpoint and key must come from the captured profile snapshot.
+
+    The request pauses after selecting the explicit LM Studio provider while a
+    second thread swaps the process-global cache to the default profile. Both
+    Gateway and runner lanes must still probe only the analyst endpoint/key and
+    preserve its ``high`` ladder instead of degrading to the default's ``low``.
+    """
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    analyst_cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {
+            "provider": "lmstudio",
+            "base_url": "http://analyst-lm.test/v1",
+            "api_key": "analyst-key",
+        },
+    }
+    default_cfg = {
+        "agent": {"reasoning_effort": "low"},
+        "model": {
+            "provider": "lmstudio",
+            "base_url": "http://default-lm.test/v1",
+            "api_key": "default-key",
+        },
+    }
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
+
+    original_alias = config._resolve_provider_alias
+    probes = []
+    entered = threading.Event()
+    reloaded = threading.Event()
+    pause_once = {"armed": False}
+
+    def gated_alias(provider):
+        resolved = original_alias(provider)
+        if resolved == "lmstudio" and pause_once["armed"]:
+            pause_once["armed"] = False
+            entered.set()
+            assert reloaded.wait(timeout=5), "default-profile reload did not run"
+        return resolved
+
+    def fake_probe(_model, base_url, *, api_key=None, timeout=5.0):
+        probes.append((base_url, api_key))
+        if base_url == "http://analyst-lm.test/v1" and api_key == "analyst-key":
+            return ["off", "low", "high"]
+        return ["off", "low"]
+
+    monkeypatch.setattr(config, "_resolve_provider_alias", gated_alias)
+    monkeypatch.setattr(config, "_lmstudio_model_reasoning_options", fake_probe)
+
+    def run_with_concurrent_reload(call):
+        entered.clear()
+        reloaded.clear()
+        pause_once["armed"] = True
+        monkeypatch.setattr(config, "cfg", copy.deepcopy(analyst_cfg))
+
+        def reload_default_profile():
+            assert entered.wait(timeout=5), "request never reached provider resolution"
+            config.cfg = copy.deepcopy(default_cfg)
+            reloaded.set()
+
+        reader = threading.Thread(target=reload_default_profile)
+        reader.start()
+        try:
+            return call()
+        finally:
+            reader.join(timeout=5)
+            assert not reader.is_alive()
+
+    gateway_settings = run_with_concurrent_reload(
+        lambda: gateway_chat._gateway_request_settings_for_session(
+            SimpleNamespace(profile="analyst"),
+            model="test-model",
+            model_provider="lmstudio",
+        )
+    )
+    runner_effort = run_with_concurrent_reload(
+        lambda: routes._runner_reasoning_effort_for_session(
+            SimpleNamespace(profile="analyst"),
+            model="test-model",
+            model_provider="lmstudio",
+        )
+    )
+
+    assert gateway_settings[1] == "high"
+    assert runner_effort == "high"
+    assert probes == [
+        ("http://analyst-lm.test/v1", "analyst-key"),
+        ("http://analyst-lm.test/v1", "analyst-key"),
+    ]
+
+
 def test_runs_wire_body_nests_effective_effort_under_model_options():
     """The actual /v1/runs POST must carry the effective value in model_options."""
     run_body = _capture_runs_wire_body("low")

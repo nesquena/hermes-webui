@@ -5586,17 +5586,19 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _get_lmstudio_reasoning_probe_api_key() -> str | None:
+def _get_lmstudio_reasoning_probe_api_key(
+    config_data: dict | None = None,
+) -> str | None:
     """Resolve the LM Studio key for reasoning probes with WebUI precedence."""
-    config_data = cfg
-    model_cfg = config_data.get("model") or {}
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    model_cfg = active_cfg.get("model") or {}
     if isinstance(model_cfg, dict):
         active_provider = str(model_cfg.get("provider") or "").strip().lower()
         model_key = str(model_cfg.get("api_key") or "").strip()
         if active_provider == "lmstudio" and model_key:
             return model_key
 
-    providers_cfg = config_data.get("providers") or {}
+    providers_cfg = active_cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         lmstudio_cfg = providers_cfg.get("lmstudio") or {}
         if isinstance(lmstudio_cfg, dict):
@@ -5912,7 +5914,15 @@ def _resolve_model_reasoning_efforts_impl(
         )
 
     if provider == "lmstudio":
-        configured_base = _get_provider_base_url(provider)
+        # Request lanes supply their lock-protected profile snapshot. Keep both
+        # the endpoint and credential lookup on that same snapshot: consulting
+        # the process-global cache here can pair an analyst request with the
+        # default profile after a concurrent profile reload.
+        configured_base = (
+            _get_provider_base_url(provider)
+            if config_data is None
+            else _get_provider_base_url(provider, config_data=config_data)
+        )
         probe_base = resolved_base_url or configured_base
         # SECURITY: only forward the configured LM Studio credential when the
         # probe target is the configured LM Studio endpoint. /api/reasoning
@@ -5926,7 +5936,11 @@ def _resolve_model_reasoning_efforts_impl(
             and _normalize_base_url_for_match(probe_base)
             == _normalize_base_url_for_match(configured_base)
         ):
-            probe_key = _get_lmstudio_reasoning_probe_api_key()
+            probe_key = (
+                _get_lmstudio_reasoning_probe_api_key()
+                if config_data is None
+                else _get_lmstudio_reasoning_probe_api_key(config_data=config_data)
+            )
         opts = _lmstudio_model_reasoning_options(
             hinted_model,
             probe_base,
