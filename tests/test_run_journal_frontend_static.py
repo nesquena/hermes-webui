@@ -131,7 +131,7 @@ const insertedAfterHistory = _mergePendingSessionMessage(pendingSession, pending
 const pendingBeforeLive = [historical, historicalAnswer, liveAssistant];
 const insertedBeforeLive = _mergePendingSessionMessage(pendingSession, pendingBeforeLive);
 
-const optimisticCurrent = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3}};
+const optimisticCurrent = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3, _pending:true}};
 const pendingWithCurrent = [historical, historicalAnswer, optimisticCurrent, liveAssistant];
 const insertedWithCurrent = _mergePendingSessionMessage(pendingSession, pendingWithCurrent);
 
@@ -226,9 +226,9 @@ const prompt = {json.dumps(prompt)};
 const historical = {{role:'user', content:prompt, _ts:1}};
 const historicalWorkspace = {{role:'user', content:{json.dumps(historical_workspace_prompt)}, _ts:1}};
 const historicalAnswer = {{role:'assistant', content:'done', _ts:2}};
-const currentTail = {{role:'user', content:prompt, _ts:3}};
-const currentWorkspaceTail = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3}};
-const currentTailForCompaction = {{role:'user', content:prompt, _ts:3}};
+const currentTail = {{role:'user', content:prompt, _ts:3, _active_turn_user:true}};
+const currentWorkspaceTail = {{role:'user', content:{json.dumps(current_workspace_prompt)}, _ts:3, _active_turn_user:true}};
+const currentTailForCompaction = {{role:'user', content:prompt, _ts:3, _active_turn_user:true}};
 const liveAssistant = {{role:'assistant', content:'working', _live:true, _ts:4}};
 const attachments = [{{name:'note.txt', path:'note.txt', mime:'text/plain'}}];
 const compactionMarker = {{
@@ -297,7 +297,7 @@ const midRunStartedAt = 500;
 const midRunTranscript = [
   {{role:'user', content:'earlier question', timestamp:100}},
   {{role:'assistant', content:'earlier answer', timestamp:200}},
-  {{role:'user', content:prompt, timestamp:midRunStartedAt}},
+  {{role:'user', content:prompt, timestamp:midRunStartedAt, _active_turn_user:true}},
   {{role:'assistant', content:'', timestamp:midRunStartedAt+15}},
   {{role:'tool', content:'{{"ok":true}}', timestamp:midRunStartedAt+16}},
   {{role:'assistant', content:'partial answer', timestamp:midRunStartedAt+60}},
@@ -309,15 +309,15 @@ const midRunResult = getPendingSessionMessage(
 const midRunWorkspaceTranscript = [
   {{role:'user', content:'earlier question', timestamp:100}},
   {{role:'assistant', content:'earlier answer', timestamp:200}},
-  {{role:'user', content:{json.dumps(current_workspace_prompt)}, timestamp:midRunStartedAt}},
+  {{role:'user', content:{json.dumps(current_workspace_prompt)}, timestamp:midRunStartedAt, _active_turn_user:true}},
   {{role:'assistant', content:'partial answer', timestamp:midRunStartedAt+30}},
 ];
 const midRunWorkspaceResult = getPendingSessionMessage(
   {{pending_user_message:prompt, pending_started_at:midRunStartedAt}},
   midRunWorkspaceTranscript
 );
-// A same-text row from an OLDER turn must never be adopted: only the row whose
-// timestamp matches pending_started_at identifies the active turn.
+// A same-text row from an OLDER turn must never be adopted without an
+// active-turn marker, even when its timestamp matches pending_started_at.
 const staleSameTextTranscript = [
   {{role:'user', content:prompt, timestamp:midRunStartedAt-600}},
   {{role:'assistant', content:'old answer', timestamp:midRunStartedAt-500}},
@@ -329,7 +329,7 @@ const staleSameTextResult = getPendingSessionMessage(
 // Legacy/absent pending_started_at disables the fallback rather than guessing.
 const noStartedAtResult = getPendingSessionMessage(
   {{pending_user_message:prompt}},
-  midRunTranscript
+  midRunTranscript.map(m=>({{...m,_active_turn_user:undefined}}))
 );
 
 // Regression (review round 2): two completed identical-text turns whose
