@@ -5730,6 +5730,7 @@ def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
@@ -5739,8 +5740,14 @@ def resolve_model_reasoning_efforts(
     applied uniformly. The UI dropdown and coercion therefore agree: ``max`` is
     retained for GPT-5.6 and other models whose native ladder includes it, and
     stripped where it would be rejected or mishandled.
+
+    ``config_data`` lets profile-scoped callers (the Gateway / runner lanes)
+    resolve against the request config snapshot they captured under the cache
+    lock, so the provider-list lookup below never reads the shared cache.
     """
-    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    raw = _resolve_model_reasoning_efforts_impl(
+        model_id, provider_id, base_url, config_data=config_data
+    )
     if not raw:
         return raw
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
@@ -5792,6 +5799,7 @@ def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none."""
     model = str(model_id or "").strip()
@@ -5800,11 +5808,14 @@ def _resolve_model_reasoning_efforts_impl(
 
     provider = str(provider_id or "").strip().lower() if provider_id else ""
     resolved_base_url = str(base_url or "").strip() or None
+    # Profile-scoped callers pass their captured request snapshot; without
+    # one, keep the historical process-global cache behavior.
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
     if not provider:
         try:
             _, provider, resolved_base_url = resolve_model_provider(model)
         except Exception:
-            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+            provider = str((active_cfg.get("model") or {}).get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
 
@@ -5828,14 +5839,14 @@ def _resolve_model_reasoning_efforts_impl(
     _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
-            for _entry in _custom_provider_entries():
+            for _entry in _custom_provider_entries(active_cfg):
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = (active_cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model
@@ -5907,8 +5918,14 @@ def coerce_reasoning_effort_for_model(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    config_data: dict | None = None,
 ) -> str:
-    """Return the closest supported effort for the target model/provider."""
+    """Return the closest supported effort for the target model/provider.
+
+    ``config_data`` passes a profile-scoped caller's captured config snapshot
+    through to the provider-ladder lookup, keeping coercion off the shared
+    process-global cache.
+    """
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
@@ -5927,6 +5944,7 @@ def coerce_reasoning_effort_for_model(
         model_id,
         provider_id=provider_id,
         base_url=base_url,
+        config_data=config_data,
     )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /

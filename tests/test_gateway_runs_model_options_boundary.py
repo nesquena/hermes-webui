@@ -14,10 +14,13 @@ compose the captured wire body with the INSTALLED handler's parsing chain in a
 subprocess, asserting the Agent reasoning config the receiver constructs.
 """
 
+import copy
 import json
 import os
 import re
 import subprocess
+import threading
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -306,6 +309,28 @@ def test_gateway_request_effort_matches_agent_override_spelling_variants():
     ) == "high"
 
 
+def test_gateway_request_effort_prefers_the_bare_model_override_key():
+    """Both spellings configured: the bare key must win, as the Agent does.
+
+    With ``{o3-mini: high, openai/o3-mini: low}`` master and the Agent resolve
+    ``o3-mini`` to ``high``; resolving the override on a provider-prefixed
+    name flipped this PR to ``low`` (re-gate finding).
+    """
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    cfg = {
+        "agent": {
+            "reasoning_effort": "none",
+            "reasoning_overrides": {"o3-mini": "high", "openai/o3-mini": "low"},
+        }
+    }
+    assert _gateway_reasoning_effort_for_request(
+        cfg,
+        model="o3-mini",
+        model_provider="openai",
+    ) == "high"
+
+
 def test_installed_receiver_import_failure_does_not_fall_back_green(tmp_path, monkeypatch):
     """A discovered but unusable receiver is a failed boundary proof, not a fallback."""
     agent_dir = tmp_path / "agent"
@@ -480,6 +505,9 @@ def _capture_gateway_wire_body(
             return {"agent": {"reasoning_effort": profile_effort}}
         return cfg
 
+    def fake_get_config_snapshot():
+        return copy.deepcopy(fake_get_config())
+
     try:
         with patch.dict(
             "os.environ",
@@ -493,6 +521,7 @@ def _capture_gateway_wire_body(
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_a, **_k: True), \
                  patch("api.gateway_chat.gateway_approval_unavailable_reason", lambda *_a, **_k: None), \
                  patch("api.config.get_config", fake_get_config), \
+                 patch("api.config.get_config_snapshot", fake_get_config_snapshot), \
                  patch("api.profiles.profile_scope_for_detached_worker", fake_profile_scope), \
                  patch("api.config.get_gateway_caps", lambda *_a, **_k: {"reasoning_efforts": None}), \
                  patch(
@@ -577,6 +606,11 @@ def test_runner_request_resolves_effort_inside_session_profile_scope(monkeypatch
         lambda: {"agent": {"reasoning_effort": "high" if active_profile["name"] else "none"}},
     )
     monkeypatch.setattr(
+        routes,
+        "get_config_snapshot",
+        lambda: {"agent": {"reasoning_effort": "high" if active_profile["name"] else "none"}},
+    )
+    monkeypatch.setattr(
         gateway_chat,
         "_gateway_reasoning_effort_for_request",
         lambda cfg, **_kwargs: cfg["agent"]["reasoning_effort"],
@@ -593,35 +627,172 @@ def test_runner_request_resolves_effort_inside_session_profile_scope(monkeypatch
 
 
 def test_profile_request_settings_use_deep_config_snapshots(monkeypatch):
+    """Both lanes must capture request config via get_config_snapshot().
+
+    The capture has to be the lock-protected copy, never the live cache: a
+    concurrent default-profile read clears and refills the shared cache in
+    place, which the earlier bare ``deepcopy(get_config())`` could pick up
+    (wrong effort / endpoint) or crash on mid-iteration (re-gate round 3).
+    """
     from api import config, gateway_chat, routes
     import api.profiles as profiles
 
-    shared = {"agent": {"reasoning_effort": "high"}}
+    snapshot = {"agent": {"reasoning_effort": "high"}}
 
     @contextmanager
     def fake_scope(*_args, **_kwargs):
         yield
 
-    def mutate_then_read(cfg, **_kwargs):
-        shared["agent"]["reasoning_effort"] = "none"
-        return cfg["agent"]["reasoning_effort"]
+    def live_cache_must_not_be_read():
+        raise AssertionError("request settings must use get_config_snapshot()")
 
     monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
     monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
-    monkeypatch.setattr(config, "get_config", lambda: shared)
-    monkeypatch.setattr(routes, "get_config", lambda: shared)
-    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", mutate_then_read)
+    monkeypatch.setattr(config, "get_config", live_cache_must_not_be_read)
+    monkeypatch.setattr(routes, "get_config", live_cache_must_not_be_read)
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
+    monkeypatch.setattr(
+        config, "resolve_model_reasoning_efforts", lambda *a, **k: list(config.VALID_REASONING_EFFORTS)
+    )
 
     settings = gateway_chat._gateway_request_settings_for_session(
         SimpleNamespace(profile="analyst"), model="test-model"
     )
     assert settings[1] == "high"
 
-    shared["agent"]["reasoning_effort"] = "high"
     effort = routes._runner_reasoning_effort_for_session(
         SimpleNamespace(profile="analyst"), model="test-model"
     )
     assert effort == "high"
+
+
+def test_profile_settings_survive_a_concurrent_default_profile_read(monkeypatch):
+    """Two threads: an analyst send and a default-profile reader.
+
+    The reader keeps clearing and refilling the one shared cache dict the way
+    ``_refresh_config_cache`` does on every cross-profile read. Pre-fix both
+    lanes deep-copied that dict outside the cache lock: the copy could catch
+    the default profile's "none" or die mid-iteration ("dictionary changed
+    size during iteration"). The lock-protected snapshot must hold up.
+    """
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    analyst_cfg = {"agent": {"reasoning_effort": "high"}}
+    default_cfg = {"agent": {"reasoning_effort": "none"}}
+    shared = copy.deepcopy(analyst_cfg)
+    cache_lock = threading.Lock()
+    active_profile = {"name": None}
+
+    @contextmanager
+    def fake_scope(profile_name, purpose="detached worker", logger_override=None):
+        previous = active_profile["name"]
+        active_profile["name"] = profile_name
+        try:
+            yield
+        finally:
+            active_profile["name"] = previous
+
+    def fake_get_config():
+        return shared
+
+    def fake_get_config_snapshot():
+        # get_config_snapshot() copies under the cache lock for the scoped
+        # path, so the analyst scope keeps the analyst content.
+        with cache_lock:
+            source = analyst_cfg if active_profile["name"] == "analyst" else shared
+            return copy.deepcopy(source)
+
+    def default_profile_read():
+        # _refresh_config_cache(): in-place clear + refill under the lock.
+        with cache_lock:
+            shared.clear()
+            shared.update(copy.deepcopy(default_cfg))
+            time.sleep(0.0005)
+            shared.clear()
+            shared.update(copy.deepcopy(analyst_cfg))
+
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(config, "get_config", fake_get_config)
+    monkeypatch.setattr(routes, "get_config", fake_get_config)
+    monkeypatch.setattr(config, "get_config_snapshot", fake_get_config_snapshot)
+    monkeypatch.setattr(routes, "get_config_snapshot", fake_get_config_snapshot)
+    monkeypatch.setattr(
+        config, "resolve_model_reasoning_efforts", lambda *a, **k: list(config.VALID_REASONING_EFFORTS)
+    )
+
+    stop = threading.Event()
+
+    def reader():
+        while not stop.is_set():
+            default_profile_read()
+
+    reader_thread = threading.Thread(target=reader, daemon=True)
+    reader_thread.start()
+    failures = []
+    try:
+        for _ in range(200):
+            try:
+                settings = gateway_chat._gateway_request_settings_for_session(
+                    SimpleNamespace(profile="analyst"), model="test-model"
+                )
+                effort = routes._runner_reasoning_effort_for_session(
+                    SimpleNamespace(profile="analyst"), model="test-model"
+                )
+            except Exception as exc:
+                failures.append(f"raised {exc!r}")
+                break
+            if settings[1] != "high":
+                failures.append(f"gateway resolved {settings[1]!r}")
+                break
+            if effort != "high":
+                failures.append(f"runner resolved {effort!r}")
+                break
+    finally:
+        stop.set()
+        reader_thread.join(timeout=5)
+
+    assert not failures, failures[0]
+
+
+def test_reasoning_coercion_uses_the_captured_snapshot(monkeypatch):
+    """Coercion resolves the ladder from the snapshot, not the shared cache.
+
+    A concurrent default-profile reload replaces the process-global cache with
+    a narrower ladder for the same model; consulting it degraded "high" to
+    "low" even after the settings copy (re-gate probe, api/config.py:5838).
+    """
+    from api import config
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    snapshot = {
+        "agent": {"reasoning_effort": "high"},
+        "providers": {
+            "test-provider": {
+                "models": {"test-model": {"reasoning_efforts": ["none", "low", "high"]}}
+            }
+        },
+    }
+    # The raced global cache: the default profile's narrower ladder.
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "providers": {
+                "test-provider": {
+                    "models": {"test-model": {"reasoning_efforts": ["none", "low"]}}
+                }
+            }
+        },
+    )
+
+    assert _gateway_reasoning_effort_for_request(
+        snapshot,
+        model="test-model",
+        model_provider="test-provider",
+    ) == "high"
 
 
 def test_runs_wire_body_nests_effective_effort_under_model_options():

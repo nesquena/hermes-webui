@@ -1,7 +1,6 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
-import copy
 import json
 import logging
 import os
@@ -366,6 +365,7 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
     """Read and coerce user-configured reasoning effort for a gateway request."""
     try:
         cfg_data = cfg if isinstance(cfg, dict) else {}
+        config_data = cfg if isinstance(cfg, dict) else None
         effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
         effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
         if isinstance(effort_cfg, dict):
@@ -376,11 +376,13 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
             if parsed_hint is not None:
                 model_name, hinted_provider = parsed_hint
                 model_provider = model_provider or hinted_provider
-            override_model = (
-                f"{model_provider}/{model_name}" if model_provider and model_name else model_name
-            )
+            # Resolve with the bare model name — the same key the Agent's own
+            # resolver uses. Prefixing model_provider here would let a
+            # provider-qualified override key beat the bare spelling whenever
+            # both are configured, flipping the Agent's precedence; the
+            # provider is only needed for the capability coercion below.
             override = resolve_per_model_reasoning_effort(
-                override_model,
+                model_name,
                 effort_cfg.get("reasoning_overrides"),
             )
             if override is not None:
@@ -390,12 +392,14 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
         # its user-facing ladder. Use the existing ``max`` coercion as the
         # selected model's ceiling: preserve ``ultra`` only when that model can
         # already accept the top WebUI-visible level, otherwise return the
-        # model-safe downgrade before receiver negotiation.
+        # model-safe downgrade before receiver negotiation. Both coercion
+        # calls read the captured snapshot, never the shared cache.
         if raw_normalized == "ultra":
             model_ceiling = coerce_reasoning_effort_for_model(
                 "max",
                 model,
                 provider_id=model_provider,
+                config_data=config_data,
             )
             if not model_ceiling:
                 return None
@@ -404,6 +408,7 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
             effort_raw,
             model,
             provider_id=model_provider,
+            config_data=config_data,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
         return None if not coerced else str(coerced)
@@ -419,10 +424,16 @@ def _gateway_request_settings_for_session(
     reattach_endpoint=None,
 ):
     """Resolve Agent-facing request settings in the session's profile scope."""
-    from api.config import _main_model_request_overrides, get_config
+    from api.config import _main_model_request_overrides, get_config_snapshot
 
     def _resolve():
-        cfg = copy.deepcopy(get_config())
+        # get_config_snapshot() copies under the cache lock. get_config()
+        # returns the one process-global mutable _cfg_cache, which a
+        # concurrent cross-profile read clears and refills in place — a bare
+        # deepcopy here could capture the other profile's settings (endpoint,
+        # runs-API flag, effort) or die mid-iteration ("dictionary changed
+        # size during iteration").
+        cfg = get_config_snapshot()
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,

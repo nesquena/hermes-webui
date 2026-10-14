@@ -26636,13 +26636,14 @@ def _external_model_alias_lane_response(alias_route, *, external_owned: bool) ->
 
 def _runner_reasoning_effort_for_session(session, *, model=None, model_provider=None):
     """Resolve the runner override under the session's authoritative profile."""
-    import copy
-
     from api.gateway_chat import _gateway_reasoning_effort_for_request
 
     def _resolve():
+        # Same capture rule as _gateway_request_settings_for_session:
+        # get_config_snapshot() copies under the cache lock, so a concurrent
+        # default-profile read cannot swap this lane's resolved settings.
         return _gateway_reasoning_effort_for_request(
-            copy.deepcopy(get_config()),
+            get_config_snapshot(),
             model=model,
             model_provider=model_provider,
         )
