@@ -6077,6 +6077,7 @@ main.main > #mainPlugin{display:none;}
 .saved-prompt-delete.is-armed{color:#fff;background:var(--danger,#e53e3e);animation:saved-prompt-delete-arm .15s ease-out;}
 .saved-prompt-delete.is-armed:hover{color:#fff;background:var(--danger,#e53e3e);opacity:.9;}
 @keyframes saved-prompt-delete-arm{from{transform:scale(.9);}to{transform:scale(1);}}
+@media (prefers-reduced-motion:reduce){.saved-prompt-delete.is-armed{animation:none;}}
 .saved-prompt-add-row{padding:6px 4px 2px;border-top:1px solid var(--border);margin-top:4px;}
 .saved-prompt-save-btn{width:100%;padding:6px 10px;border-radius:6px;background:var(--accent-bg);border:1px solid var(--accent-bg-strong);color:var(--accent-text);font-size:12px;font-weight:600;cursor:pointer;text-align:center;}
 .saved-prompt-save-btn:hover{background:var(--accent-bg-strong);}
