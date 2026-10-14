@@ -886,33 +886,26 @@ def test_explicit_provider_coercion_resolves_from_the_captured_snapshot(monkeypa
     ) == "high"
 
 
-def test_lmstudio_probe_uses_profile_snapshot_during_concurrent_reload(monkeypatch):
-    """LM Studio endpoint and key must come from the captured profile snapshot.
+def _lmstudio_lanes_under_default_profile_reload(
+    monkeypatch,
+    *,
+    analyst_cfg,
+    default_cfg,
+    model_provider,
+):
+    """Run both request lanes while another profile reloads the global cache.
 
-    The request pauses after selecting the explicit LM Studio provider while a
-    second thread swaps the process-global cache to the default profile. Both
-    Gateway and runner lanes must still probe only the analyst endpoint/key and
-    preserve its ``high`` ladder instead of degrading to the default's ``low``.
+    Both lanes capture ``analyst_cfg``; each request pauses after provider
+    resolution while a second thread replaces the process-global cache with
+    ``default_cfg``, the way ``_refresh_config_cache`` does on a cross-profile
+    read. Every LM Studio probe must stay on the analyst endpoint/key and keep
+    the analyst ladder. Returns ``(gateway_settings, runner_effort, probes)``.
     """
     from api import config, gateway_chat, routes
     import api.profiles as profiles
 
-    analyst_cfg = {
-        "agent": {"reasoning_effort": "high"},
-        "model": {
-            "provider": "lmstudio",
-            "base_url": "http://analyst-lm.test/v1",
-            "api_key": "analyst-key",
-        },
-    }
-    default_cfg = {
-        "agent": {"reasoning_effort": "low"},
-        "model": {
-            "provider": "lmstudio",
-            "base_url": "http://default-lm.test/v1",
-            "api_key": "default-key",
-        },
-    }
+    analyst_endpoint = analyst_cfg["model"]["base_url"]
+    analyst_key = analyst_cfg["model"]["api_key"]
 
     @contextmanager
     def fake_scope(*_args, **_kwargs):
@@ -939,7 +932,7 @@ def test_lmstudio_probe_uses_profile_snapshot_during_concurrent_reload(monkeypat
 
     def fake_probe(_model, base_url, *, api_key=None, timeout=5.0):
         probes.append((base_url, api_key))
-        if base_url == "http://analyst-lm.test/v1" and api_key == "analyst-key":
+        if base_url == analyst_endpoint and api_key == analyst_key:
             return ["off", "low", "high"]
         return ["off", "low"]
 
@@ -969,15 +962,60 @@ def test_lmstudio_probe_uses_profile_snapshot_during_concurrent_reload(monkeypat
         lambda: gateway_chat._gateway_request_settings_for_session(
             SimpleNamespace(profile="analyst"),
             model="test-model",
-            model_provider="lmstudio",
+            model_provider=model_provider,
         )
     )
     runner_effort = run_with_concurrent_reload(
         lambda: routes._runner_reasoning_effort_for_session(
             SimpleNamespace(profile="analyst"),
             model="test-model",
-            model_provider="lmstudio",
+            model_provider=model_provider,
         )
+    )
+    return gateway_settings, runner_effort, probes
+
+
+def _lmstudio_profile_pair(*, analyst_base_url, analyst_key, default_base_url, default_key):
+    """Analyst/default profile configs that differ only in LM Studio identity."""
+    analyst_cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {
+            "provider": "lmstudio",
+            "base_url": analyst_base_url,
+            "api_key": analyst_key,
+        },
+    }
+    default_cfg = {
+        "agent": {"reasoning_effort": "low"},
+        "model": {
+            "provider": "lmstudio",
+            "base_url": default_base_url,
+            "api_key": default_key,
+        },
+    }
+    return analyst_cfg, default_cfg
+
+
+def test_lmstudio_probe_uses_profile_snapshot_during_concurrent_reload(monkeypatch):
+    """LM Studio endpoint and key must come from the captured profile snapshot.
+
+    The request pauses after selecting the explicit LM Studio provider while a
+    second thread swaps the process-global cache to the default profile. Both
+    Gateway and runner lanes must still probe only the analyst endpoint/key and
+    preserve its ``high`` ladder instead of degrading to the default's ``low``.
+    """
+    analyst_cfg, default_cfg = _lmstudio_profile_pair(
+        analyst_base_url="http://analyst-lm.test/v1",
+        analyst_key="analyst-key",
+        default_base_url="http://default-lm.test/v1",
+        default_key="default-key",
+    )
+
+    gateway_settings, runner_effort, probes = _lmstudio_lanes_under_default_profile_reload(
+        monkeypatch,
+        analyst_cfg=analyst_cfg,
+        default_cfg=default_cfg,
+        model_provider="lmstudio",
     )
 
     assert gateway_settings[1] == "high"
@@ -986,6 +1024,113 @@ def test_lmstudio_probe_uses_profile_snapshot_during_concurrent_reload(monkeypat
         ("http://analyst-lm.test/v1", "analyst-key"),
         ("http://analyst-lm.test/v1", "analyst-key"),
     ]
+
+
+def test_lmstudio_probe_uses_snapshot_when_provider_is_omitted(monkeypatch):
+    """Omitted provider: the snapshot still supplies both endpoint and key.
+
+    The callers leave ``model_provider`` unset and let config routing pick LM
+    Studio. Pre-fix the probe kept the analyst endpoint but dropped its key,
+    because the configured endpoint it compares against came from the raced
+    global cache; the ladder then degraded to the default profile's ``low``.
+    """
+    analyst_cfg, default_cfg = _lmstudio_profile_pair(
+        analyst_base_url="http://analyst-lm.test/v1",
+        analyst_key="analyst-key",
+        default_base_url="http://default-lm.test/v1",
+        default_key="default-key",
+    )
+
+    gateway_settings, runner_effort, probes = _lmstudio_lanes_under_default_profile_reload(
+        monkeypatch,
+        analyst_cfg=analyst_cfg,
+        default_cfg=default_cfg,
+        model_provider=None,
+    )
+
+    assert gateway_settings[1] == "high"
+    assert runner_effort == "high"
+    assert probes == [
+        ("http://analyst-lm.test/v1", "analyst-key"),
+        ("http://analyst-lm.test/v1", "analyst-key"),
+    ]
+
+
+def test_lmstudio_probe_key_follows_snapshot_on_a_shared_endpoint(monkeypatch):
+    """Same endpoint, different key: the snapshot's credential must win.
+
+    Both profiles point at one LM Studio server but hold different keys, so a
+    key read from the raced cache still matches the endpoint and is forwarded.
+    The probe must send the analyst key and keep ``high``.
+    """
+    analyst_cfg, default_cfg = _lmstudio_profile_pair(
+        analyst_base_url="http://shared-lm.test/v1",
+        analyst_key="analyst-key",
+        default_base_url="http://shared-lm.test/v1",
+        default_key="default-key",
+    )
+
+    gateway_settings, runner_effort, probes = _lmstudio_lanes_under_default_profile_reload(
+        monkeypatch,
+        analyst_cfg=analyst_cfg,
+        default_cfg=default_cfg,
+        model_provider="lmstudio",
+    )
+
+    assert gateway_settings[1] == "high"
+    assert runner_effort == "high"
+    assert probes == [
+        ("http://shared-lm.test/v1", "analyst-key"),
+        ("http://shared-lm.test/v1", "analyst-key"),
+    ]
+
+
+def test_lmstudio_probe_refuses_key_for_an_unowned_endpoint_with_snapshot(monkeypatch):
+    """Control: an endpoint the snapshot does not own still gets no key.
+
+    ``/api/reasoning`` accepts a caller-supplied ``base_url``, so the
+    snapshot-aware probe must keep withholding the captured credential from any
+    endpoint the snapshot does not own (#3837) — and must not fall back to the
+    raced global cache for one either.
+    """
+    from api import config
+
+    snapshot = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {
+            "provider": "lmstudio",
+            "base_url": "http://analyst-lm.test/v1",
+            "api_key": "analyst-key",
+        },
+    }
+    monkeypatch.setattr(
+        config,
+        "cfg",
+        {
+            "model": {
+                "provider": "lmstudio",
+                "base_url": "http://default-lm.test/v1",
+                "api_key": "default-key",
+            }
+        },
+    )
+    probes = []
+
+    def fake_probe(_model, base_url, *, api_key=None, timeout=5.0):
+        probes.append((base_url, api_key))
+        return ["off", "low", "high"]
+
+    monkeypatch.setattr(config, "_lmstudio_model_reasoning_options", fake_probe)
+
+    efforts = config._resolve_model_reasoning_efforts_impl(
+        "test-model",
+        "lmstudio",
+        "http://unowned-lm.test/v1",
+        config_data=snapshot,
+    )
+
+    assert probes == [("http://unowned-lm.test/v1", None)]
+    assert efforts == ["low", "high"]
 
 
 def test_runs_wire_body_nests_effective_effort_under_model_options():
