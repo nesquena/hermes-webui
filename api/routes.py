@@ -899,10 +899,34 @@ def _persist_cleared_project_ids(project_id, sids, lock_timeout=None) -> int:
     return written
 
 
-def _record_session_skill_usage(session_id, handler, names) -> bool:
-    """Persist successful server-resolved skill names for an owning session."""
+def _capture_session_skill_usage_generation(session_id, handler):
     sid = str(session_id or "").strip()
     if not sid or not is_safe_session_id(sid):
+        return None
+    with _get_session_agent_lock(sid):
+        try:
+            session = get_session(sid)
+        except Exception:
+            return None
+        if session is None:
+            return None
+        if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
+            return None
+        if _session_is_subagent_view_only(sid) or getattr(session, "read_only", False):
+            return None
+        return getattr(session, "skill_provenance_generation", 0)
+
+
+def _record_session_skill_usage(
+    session_id,
+    handler,
+    names,
+    *,
+    expected_generation=None,
+) -> bool:
+    """Persist successful server-resolved skill names for an owning session."""
+    sid = str(session_id or "").strip()
+    if not sid or not is_safe_session_id(sid) or expected_generation is None:
         return False
     with _get_session_agent_lock(sid):
         try:
@@ -914,6 +938,8 @@ def _record_session_skill_usage(session_id, handler, names) -> bool:
         if not _session_visible_to_active_profile(getattr(session, "profile", None), handler):
             return False
         if _session_is_subagent_view_only(sid) or getattr(session, "read_only", False):
+            return False
+        if getattr(session, "skill_provenance_generation", 0) != expected_generation:
             return False
         try:
             if not session.record_skill_usage(names):
@@ -16320,15 +16346,21 @@ def handle_get(handler, parsed) -> bool:
                 handler,
                 {"content": target.read_text(encoding="utf-8"), "path": file_path},
             )
+        session_id = qs.get("session_id", [""])[0]
+        skill_usage_generation = (
+            _capture_session_skill_usage_generation(session_id, handler)
+            if session_id
+            else None
+        )
         data = _skill_view_from_active_dir(name)
         if not isinstance(data.get("linked_files"), dict):
             data["linked_files"] = {}
-        session_id = qs.get("session_id", [""])[0]
-        if data.get("success") is True and session_id:
+        if data.get("success") is True and skill_usage_generation is not None:
             _record_session_skill_usage(
                 session_id,
                 handler,
                 data.get("name"),
+                expected_generation=skill_usage_generation,
             )
         return j(handler, data)
 
@@ -18478,6 +18510,12 @@ def handle_post(handler, parsed) -> bool:
         command = str(body.get("command", "") or "").strip()
         if not command:
             return bad(handler, "command is required")
+        session_id = str(body.get("session_id") or "").strip()
+        skill_usage_generation = (
+            _capture_session_skill_usage_generation(session_id, handler)
+            if session_id
+            else None
+        )
 
         try:
             # Existing response shape: return j(handler, resolve_bundle_command(command))
@@ -18488,9 +18526,13 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, str(e), 400)
         except RuntimeError as e:
             return bad(handler, _sanitize_error(e), 500)
-        session_id = str(body.get("session_id") or "").strip()
-        if session_id and isinstance(result, dict):
-            _record_session_skill_usage(session_id, handler, result.get("loaded_skills"))
+        if skill_usage_generation is not None and isinstance(result, dict):
+            _record_session_skill_usage(
+                session_id,
+                handler,
+                result.get("loaded_skills"),
+                expected_generation=skill_usage_generation,
+            )
         return j(handler, result)
 
     if parsed.path == "/api/commands/exec":

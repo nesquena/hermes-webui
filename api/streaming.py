@@ -237,11 +237,11 @@ def _record_streaming_skill_usage(
     function_result,
     *,
     stream_id,
-    clear_generation,
+    skill_provenance_generation,
     ephemeral=False,
 ) -> bool:
     """Persist a successful skill_view result for the live session owner."""
-    if ephemeral:
+    if ephemeral or not stream_id or skill_provenance_generation is None:
         return False
     name = _successful_skill_view_name(tool_name, function_result)
     if name is None:
@@ -256,11 +256,14 @@ def _record_streaming_skill_usage(
             return False
         if current_session is None or str(getattr(current_session, "session_id", "")) != sid:
             return False
+        if stream_id and not _stream_writeback_is_current(current_session, stream_id):
+            return False
+        if (
+            getattr(current_session, "skill_provenance_generation", 0)
+            != skill_provenance_generation
+        ):
+            return False
         if getattr(current_session, "read_only", False):
-            return False
-        if getattr(current_session, "active_stream_id", None) != stream_id:
-            return False
-        if getattr(current_session, "clear_generation", None) != clear_generation:
             return False
         try:
             if not current_session.record_skill_usage(name):
@@ -12314,7 +12317,9 @@ def _run_agent_streaming(
         # session lock before dispatch, so a mismatch here means a newer picker
         # write won the race and must not be clobbered by the worker thread.
         with _agent_lock:
-            _stream_clear_generation = getattr(s, "clear_generation", None)
+            _skill_provenance_generation = getattr(
+                s, "skill_provenance_generation", 0,
+            )
             _last_persisted_model = getattr(s, "model", None)
             _last_persisted_provider = getattr(s, "model_provider", None)
             if _last_persisted_provider is not None:
@@ -13204,11 +13209,11 @@ def _run_agent_streaming(
                     logger.debug('Failed to update live prompt estimate on tool completion', exc_info=True)
                 try:
                     _record_streaming_skill_usage(
-                        session_id,
+                        getattr(s, "session_id", None) or session_id,
                         name,
                         function_result,
                         stream_id=stream_id,
-                        clear_generation=_stream_clear_generation,
+                        skill_provenance_generation=_skill_provenance_generation,
                         ephemeral=ephemeral,
                     )
                 except Exception:

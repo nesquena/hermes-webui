@@ -1669,6 +1669,10 @@ class Session:
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
         self.skill_provenance = _normalize_skill_provenance(skill_provenance)
+        self.skill_provenance_generation = max(
+            0,
+            _parse_nonnegative_int(kwargs.get('skill_provenance_generation')) or 0,
+        )
         self.gateway_run = gateway_run if isinstance(gateway_run, dict) else None
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
@@ -1771,6 +1775,7 @@ class Session:
             'process_wakeup_pause',
             'share_token', 'share_created_at',
             'skill_provenance',
+            'skill_provenance_generation',
             'gateway_run',
         ]
         guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
@@ -2392,6 +2397,7 @@ class Session:
 
     def clear_skill_usage(self) -> None:
         self.skill_provenance = {}
+        self.skill_provenance_generation += 1
 
 
 PROCESS_WAKEUP_PROVIDER_UNAVAILABLE_TYPES = frozenset({

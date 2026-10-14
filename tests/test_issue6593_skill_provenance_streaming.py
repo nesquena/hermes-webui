@@ -12,8 +12,8 @@ class _Session:
         self.session_id = session_id
         self.read_only = read_only
         self.active_stream_id = "stream-session"
-        self.clear_generation = None
         self.skill_provenance = {}
+        self.skill_provenance_generation = 0
         self.saved = []
 
     def record_skill_usage(self, names):
@@ -30,8 +30,8 @@ class _Session:
 
 def _record(*args, **kwargs):
     recorder = streaming._record_streaming_skill_usage
-    kwargs.setdefault("stream_id", "stream-session")
-    kwargs.setdefault("clear_generation", None)
+    kwargs.setdefault("stream_id", args[0])
+    kwargs.setdefault("skill_provenance_generation", 0)
     return recorder(*args, **kwargs)
 
 
@@ -90,7 +90,7 @@ def test_streaming_read_only_owner_is_unchanged(monkeypatch):
     assert session.skill_provenance == {}
 
 
-def test_streaming_recorder_rejects_old_run_and_clear_generation(monkeypatch):
+def test_streaming_recorder_rejects_old_run_and_usage_from_before_clear(monkeypatch):
     session = _Session()
     monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
     monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: nullcontext())
@@ -104,15 +104,36 @@ def test_streaming_recorder_rejects_old_run_and_clear_generation(monkeypatch):
     ) is False
 
     session.active_stream_id = "stream-session"
-    session.clear_generation = "after-clear"
+    session.skill_provenance_generation = 1
     assert _record(
         "stream-session",
         "skill_view",
         {"success": True, "name": "pre-clear"},
-        clear_generation=None,
+        skill_provenance_generation=0,
     ) is False
     assert session.skill_provenance == {}
     assert session.saved == []
+
+
+def test_streaming_recorder_rejects_usage_from_before_clear(monkeypatch):
+    session = Session(
+        session_id="stream-clear-generation",
+        active_stream_id="stream-clear-generation",
+        skill_provenance={"old": 1},
+    )
+    captured_generation = session.skill_provenance_generation
+    session.clear_skill_usage()
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: nullcontext())
+
+    assert _record(
+        session.session_id,
+        "skill_view",
+        {"success": True, "name": "late-result"},
+        stream_id=session.active_stream_id,
+        skill_provenance_generation=captured_generation,
+    ) is False
+    assert session.skill_provenance == {}
 
 
 def test_streaming_persists_a_real_session_sidecar(monkeypatch, tmp_path):
@@ -120,8 +141,10 @@ def test_streaming_persists_a_real_session_sidecar(monkeypatch, tmp_path):
 
     monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
     monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "_index.json")
-    session = Session(session_id="stream-sidecar")
-    session.active_stream_id = "stream-sidecar-run"
+    session = Session(
+        session_id="stream-sidecar",
+        active_stream_id="stream-sidecar-run",
+    )
     session.save(touch_updated_at=False, skip_index=True)
     monkeypatch.setattr(streaming, "get_session", lambda sid: Session.load(sid))
     monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: nullcontext())
@@ -132,6 +155,85 @@ def test_streaming_persists_a_real_session_sidecar(monkeypatch, tmp_path):
         stream_id="stream-sidecar-run",
     ) is True
     assert Session.load("stream-sidecar").skill_provenance == {"review": 1}
+
+
+def test_late_skill_completion_cannot_restore_usage_after_clear(tmp_path, monkeypatch):
+    from tests.test_compression_snapshot_revision import _install_streaming_session
+
+    sid = "issue6593-late-skill-clear"
+    stream_id = "stream-issue6593-late-skill-clear"
+    session, _events = _install_streaming_session(
+        monkeypatch,
+        tmp_path,
+        sid=sid,
+        stream_id=stream_id,
+        messages=[],
+        context_messages=[],
+    )
+    callback_ready = threading.Event()
+    continue_run = threading.Event()
+    worker_errors = []
+
+    class DelayedSkillAgent:
+        def __init__(self, session_id=None, tool_complete_callback=None, **_kwargs):
+            self.session_id = session_id
+            self.tool_complete_callback = tool_complete_callback
+            self.context_compressor = None
+            self.ephemeral_system_prompt = None
+            self._last_error = None
+
+        def interrupt(self, _message):
+            return None
+
+        def run_conversation(self, **kwargs):
+            callback_ready.set()
+            if not continue_run.wait(timeout=10):
+                raise TimeoutError("clear race test was not released")
+            self.tool_complete_callback(
+                "skill-call",
+                "skill_view",
+                {},
+                {"success": True, "name": "late-result"},
+            )
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "completed": True,
+                "final_response": "done",
+                "messages": history + [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "done"},
+                ],
+            }
+
+    monkeypatch.setattr(streaming, "_get_ai_agent", lambda: DelayedSkillAgent)
+
+    def run_worker():
+        try:
+            streaming._run_agent_streaming(
+                session_id=sid,
+                msg_text="new webui turn",
+                model="test-model",
+                workspace=str(tmp_path),
+                stream_id=stream_id,
+                attachments=[],
+            )
+        except Exception as exc:
+            worker_errors.append(exc)
+
+    worker = threading.Thread(target=run_worker, daemon=True)
+    worker.start()
+    assert callback_ready.wait(timeout=5)
+
+    with streaming._get_session_agent_lock(sid):
+        session.clear_skill_usage()
+        session.save(touch_updated_at=False)
+    continue_run.set()
+    worker.join(timeout=10)
+
+    assert not worker.is_alive()
+    assert not worker_errors
+    assert session.skill_provenance == {}
+    assert session.skill_provenance_generation == 1
 
 
 def test_returned_auth_retry_allows_skill_completion_and_concurrent_stop(tmp_path, monkeypatch):

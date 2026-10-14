@@ -2,7 +2,6 @@
 
 import copy
 import io
-from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
@@ -62,7 +61,13 @@ def _route_get(monkeypatch, name, session_id=None):
 
 def _call_writer(session_id, handler, names):
     writer = routes._record_session_skill_usage
-    return writer(session_id, handler, names)
+    generation = routes._capture_session_skill_usage_generation(session_id, handler)
+    return writer(
+        session_id,
+        handler,
+        names,
+        expected_generation=generation,
+    )
 
 
 def test_session_skill_usage_persists_canonical_names_without_invented_caps(isolated_sessions):
@@ -81,7 +86,9 @@ def test_session_skill_usage_persists_canonical_names_without_invented_caps(isol
     assert restored.skill_provenance["exact name"] == 3
     assert restored.skill_provenance["new name"] == 1
     assert all(restored.skill_provenance[name] == 1 for name in many)
+    assert restored.skill_provenance_generation == 0
     assert restored.compact()["skill_provenance"] == restored.skill_provenance
+    assert "skill_provenance_generation" not in restored.compact()
     assert "skill_provenance" not in restored.compact(sidebar_metadata_only=True)
 
 
@@ -104,6 +111,28 @@ def test_skill_content_records_resolved_name_for_authorized_owner(monkeypatch):
     assert "client-authored" not in session.skill_provenance
     assert saved == [{"touch_updated_at": False, "skip_index": True}]
     assert response["name"] == "server-resolved"
+
+
+def test_skill_content_started_before_clear_does_not_restore_usage(monkeypatch):
+    session = Session(
+        session_id="issue6593-content-clear-race",
+        profile="default",
+        skill_provenance={"old": 1},
+    )
+    session.save = lambda **_kwargs: None
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+
+    def resolve_skill(_name):
+        session.clear_skill_usage()
+        return {"success": True, "name": "late-result", "content": "body"}
+
+    monkeypatch.setattr(routes, "_skill_view_from_active_dir", resolve_skill)
+    _route_get(monkeypatch, "review", session.session_id)
+
+    assert session.skill_provenance == {}
+    assert session.skill_provenance_generation == 1
 
 
 def test_skill_content_without_owner_and_linked_file_do_not_count(monkeypatch, tmp_path):
@@ -173,6 +202,38 @@ def test_bundle_records_loaded_skills_and_preserves_response(monkeypatch):
     assert session.skill_provenance == {"one": 2, "two": 1}
     assert saved == [{"touch_updated_at": False, "skip_index": True}]
     assert response["missing_skills"] == ["missing"]
+
+
+def test_bundle_started_before_clear_does_not_restore_usage(monkeypatch):
+    session = Session(
+        session_id="issue6593-bundle-clear-race",
+        profile="default",
+        skill_provenance={"old": 1},
+    )
+    session.save = lambda **_kwargs: None
+    body = {"command": "/bundle request", "session_id": session.session_id}
+    result = {"loaded_skills": ["late-result"]}
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
+
+    def resolve_bundle(_command):
+        session.clear_skill_usage()
+        return result
+
+    monkeypatch.setattr("api.commands.resolve_bundle_command", resolve_bundle)
+    response = routes.handle_post(
+        _Handler("POST"),
+        SimpleNamespace(path="/api/commands/bundles/resolve", query=""),
+    )
+
+    assert response is result
+    assert session.skill_provenance == {}
+    assert session.skill_provenance_generation == 1
 
 
 def test_provenance_writer_enforces_profile_read_only_and_subagent_owners(monkeypatch):
@@ -367,17 +428,9 @@ def test_clear_resets_skill_usage_without_recovery_resurrection(isolated_session
     assert persisted.skill_provenance == {}
     assert session.active_stream_id is None
     assert session.clear_generation != old_clear_generation
-
-    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
-    monkeypatch.setattr(streaming, "_get_session_agent_lock", lambda _sid: nullcontext())
-    assert streaming._record_streaming_skill_usage(
-        session.session_id,
-        "skill_view",
-        {"success": True, "name": "review"},
-        stream_id="issue6593-old-run",
-        clear_generation=old_clear_generation,
-    ) is False
-    assert Session.load(session.session_id).skill_provenance == {}
+    restored = Session.load(session.session_id)
+    assert restored.skill_provenance == {}
+    assert restored.skill_provenance_generation == 1
 
 
 def test_skill_usage_projection_boundaries(monkeypatch):
