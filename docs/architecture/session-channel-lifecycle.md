@@ -89,6 +89,14 @@ The claim check is mandatory. Without it a stream that is still launching is cla
 orphaned and reaped, and its first worker exits without running its turn (#7302, maintainer
 finding 5).
 
+Two periodic sweeps in the same tick are *not* stream-lifecycle state and are listed here only
+because they ride the loop: the delivered-completion dedup map
+(`BG_TASK_COMPLETE_EVENTS_SEEN`, gated on `PENDING_BG_TASK_COMPLETIONS`) and, since #6351,
+`api/models.py::sweep_sessions_cache_over_cap()` — the SESSIONS cache-cap pass, so an over-cap
+cache is reclaimed without waiting for the next session-touching request. Both are best-effort
+per tick and take their own lock only after the stream sweeps have released theirs, so the loop
+never holds two of the locks it touches at once.
+
 ## Lock discipline
 
 - `STREAMS_LOCK → ACTIVE_RUNS_LOCK` is the documented order (Stop/Steer and both admission

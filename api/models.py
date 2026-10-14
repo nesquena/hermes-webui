@@ -6477,6 +6477,36 @@ def _evict_sessions_over_cap(cap: int | None = None) -> int:
     return evicted
 
 
+def sweep_sessions_cache_over_cap() -> int:
+    """Enforce the SESSIONS cache cap from a periodic/idle maintenance pass (#6351).
+
+    ``_evict_sessions_over_cap()`` only ever runs where a session-touching
+    request happens to run it, so a cache that is ABOVE its cap stays there
+    until some later request corrects it. Two shapes reach that state on their
+    own: an insertion path that never calls the eviction pass (the
+    projects/delete cache refresh, the chat/start foreign-session claim), and
+    entries that were pinned active/unsaved during a busy burst and turn clean
+    afterwards while the process goes idle. On a long-running self-hosted
+    install — cron/headless, no tab attached — no such request arrives, so the
+    resident working set keeps the shape of the busiest moment of the process's
+    life. That is the growth curve #6351 reports, and its Q3 asks for exactly
+    this: a periodic/idle eviction pass to flatten it.
+
+    This is the SAME safe eviction, driven from the SessionChannel reaper's
+    periodic tick instead of from a request, so cap enforcement no longer
+    depends on traffic. CALLER CONTRACT: none — this wrapper takes ``LOCK``
+    itself, which is why the periodic pass needs its own entry point: the
+    reaper must not be told to hold the cache lock (it holds none when it calls
+    here), and ``_evict_sessions_over_cap()`` requires the lock to already be
+    held rather than acquiring it.
+
+    Returns the number of sessions evicted: 0 when the cache is at/below the
+    cap or when every over-cap candidate is active or unsaved.
+    """
+    with LOCK:
+        return _evict_sessions_over_cap()
+
+
 def get_session_for_scan(sid):
     """Read a session for a one-pass scan without disturbing the LRU.
 
