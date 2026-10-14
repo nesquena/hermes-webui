@@ -28681,6 +28681,18 @@ function applyLocaleToDOM() {
   // "1 active · 1 total" summary to the static "Todos" label. Repaint the live
   // values after the restamp (guarded: i18n.js loads standalone in some tests).
   if (typeof renderChatTodos === 'function') renderChatTodos();
+  // #7732: the two context controls above (#ctxIndicator, its mobile twin
+  // #composerMobileContextAction) carry a *generic* data-i18n-aria-label but
+  // their accessible name is dynamically owned by _syncCtxIndicator() /
+  // _syncMobileCtxDisplay(), which append the live "42% used · $0.02" metrics.
+  // The static stamp just overwrote those with the bare label. Recompute them
+  // from the authoritative current usage so a locale repaint (settings change
+  // or global repaint) never drops the percentage/cost/no-prompt metrics.
+  if (typeof _syncCtxIndicator === 'function') {
+    try {
+      _syncCtxIndicator((typeof S !== 'undefined' && S.lastUsage) || {});
+    } catch (e) { /* dynamic repaint is best-effort; never block locale */ }
+  }
   if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();
   if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
 }

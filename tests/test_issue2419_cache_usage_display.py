@@ -50,7 +50,9 @@ def test_context_indicator_surfaces_cache_hit_rate():
     assert "cacheWriteTok=usage.cache_write_tokens||0" in src
     assert "cacheHitPct=usage.cache_hit_percent" in src
     assert "t('usage_cache_hit_detail',cacheHitPct" in src
-    assert "Estimated cost: $${cost<0.01?cost.toFixed(4):cost.toFixed(2)}" in src
+    # #7732 localized the cost label: the tooltip cost line is now built from
+    # the ctx_estimated_cost i18n key rather than a hardcoded English literal.
+    assert "costText=t('ctx_estimated_cost',cost<0.01?cost.toFixed(4):cost.toFixed(2))" in src
     assert "cacheHitPct=msg._turnUsage.cache_hit_percent" in src
     assert "t('usage_cached_percent',cacheHitPct)" in src
     assert "cacheHitPct!=null" in src
