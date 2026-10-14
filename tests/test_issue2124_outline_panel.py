@@ -11,6 +11,7 @@ OUTLINE_JS  = (STATIC / "outline.js").read_text(encoding="utf-8")
 STYLE_CSS   = (STATIC / "style.css").read_text(encoding="utf-8")
 BOOT_JS     = (STATIC / "boot.js").read_text(encoding="utf-8")
 PANELS_JS   = (STATIC / "panels.js").read_text(encoding="utf-8")
+MESSAGES_JS = (STATIC / "messages.js").read_text(encoding="utf-8")
 CONFIG_PY   = (ROOT / "api" / "config.py").read_text(encoding="utf-8")
 
 # Number of locale blocks in i18n.js: en, it, ja, ru, es, de, zh, zh-Hant, pt, ko, fr, tr
@@ -21,6 +22,16 @@ def _css_rule_body(selector):
     rule = re.search(re.escape(selector) + r"\{(?P<body>[^}]*)\}", STYLE_CSS, re.S)
     assert rule
     return rule.group("body")
+
+
+def _outline_compact_css():
+    """The @media(max-width:900px) block that re-shapes the outline panel."""
+    tail = STYLE_CSS.split(
+        ".outline-jump-flash{animation:outline-flash 1.2s ease-out forwards;}", 1
+    )[1]
+    block = tail.split("/* Settings search */", 1)[0]
+    assert "@media(max-width:900px)" in block
+    return block
 
 
 def _css_px(rule_body, property_name):
@@ -76,12 +87,17 @@ def test_outline_navigation_and_long_session_contract():
         "_messageRenderWindowSize = Math.max(",
         "renderMessages({ preserveScroll: true })",
         "if (S.busy || S.activeStreamId) return;",
+        # Outline jumps address rows by absolute transcript index, so the
+        # full-transcript escape hatch must stay explicit (see
+        # test_session_default_window.py).
+        "&msg_limit=all",
     ):
         assert marker in OUTLINE_JS
 
 
 def test_outline_opt_in_layout_and_render_state_contract():
-    """The enabled outline must stay desktop-only and avoid stale render states."""
+    """The enabled outline must be gated on the setting + chat view, and avoid
+    stale render states."""
     for marker in (
         "window._showConversationOutline === true",
         "toggle.hidden = !enabled",
@@ -96,7 +112,6 @@ def test_outline_opt_in_layout_and_render_state_contract():
     ):
         assert marker in OUTLINE_JS
 
-    assert "#outlineToggleBtn,#outlinePanelWrapper{display:none!important;}" in STYLE_CSS
     assert "right:calc(var(--outline-workspace-offset, 0px) + 20px)" in STYLE_CSS
     assert "if (!S.messages || !S.messages.length)" not in OUTLINE_JS
 
@@ -148,3 +163,57 @@ def test_outline_fab_stacks_with_scroll_controls():
     outline_gap = _css_px(outline_css, "bottom")
     scroll_top = _css_px(scroll_css, "bottom") + _css_px(scroll_css, "height")
     assert outline_gap > scroll_top
+
+
+def test_outline_serves_narrow_viewports_as_a_bottom_sheet():
+    """Narrow viewports keep the outline. It used to be hidden outright below
+    900px; that same breakpoint now only decides WHICH shape it renders in — a
+    bottom sheet instead of the floating side panel — so a phone gets the same
+    jump list. The compact form is modal (dimmed backdrop) and collapses after a
+    jump, while the desktop panel stays non-modal."""
+    compact_css = _outline_compact_css()
+
+    # The compact form re-shapes the panel; it must not hide it anymore.
+    assert "display:none" not in compact_css
+    assert "#outlineToggleBtn,#outlinePanelWrapper{display:none!important;}" not in STYLE_CSS
+    assert "left:0;right:0;bottom:0;width:auto" in compact_css
+    assert ".outline-backdrop{" in compact_css
+
+    # Desktop positioning stays intact, so the two forms cannot drift together.
+    desktop_css = _css_rule_body("#outlinePanelWrapper")
+    assert "--outline-workspace-offset" in desktop_css
+    assert "display:flex" in desktop_css
+
+    # Both layers must key on the same breakpoint, or the JS gate and the sheet
+    # styling would disagree (sheet styles at a width where no backdrop is added).
+    assert "max-width:900px" in compact_css
+    assert "matchMedia('(max-width:900px)')" in OUTLINE_JS
+
+    # One helper answers "is this the compact form?" for the gate, the backdrop
+    # and the post-jump collapse; the gate no longer rejects narrow viewports.
+    assert "_outlineIsCompact" in OUTLINE_JS
+    assert "window._showConversationOutline === true && onChatView" in OUTLINE_JS
+    assert "!compact" not in OUTLINE_JS
+    assert "window.closeOutlinePanel = closeOutlinePanel" in OUTLINE_JS
+    assert "if (_outlineIsCompact()) closeOutlinePanel();" in OUTLINE_JS
+    assert "const wanted = _panelOpen && _outlineIsCompact();" in OUTLINE_JS
+    # The backdrop exists only for the compact form and is torn down otherwise.
+    assert "backdrop.remove()" in OUTLINE_JS
+    assert "document.body.appendChild(backdrop)" in OUTLINE_JS
+
+    # The compact form is modal, so dialog semantics + the focus lifecycle are
+    # applied and removed at runtime while the markup keeps its desktop
+    # role="navigation". Post-open interactions (Escape, Tab containment, focus
+    # restore, breakpoint crossing, prompt preemption) are covered observably in
+    # tests/test_issue2124_outline_bottom_sheet.py.
+    assert "wrapper.setAttribute('role', 'dialog')" in OUTLINE_JS
+    assert "wrapper.setAttribute('aria-modal', 'true')" in OUTLINE_JS
+    assert "wrapper.setAttribute('role', 'navigation')" in OUTLINE_JS
+    assert 'role="navigation"' in INDEX_HTML
+
+    # The sheet yields to a prompt by wrapping its two entry points, so those
+    # globals must still be the top-level function declarations in messages.js.
+    assert "['showApprovalCard', 'approvalCard']" in OUTLINE_JS
+    assert "['showClarifyCard', 'clarifyCard']" in OUTLINE_JS
+    assert "function showApprovalCard(" in MESSAGES_JS
+    assert "function showClarifyCard(" in MESSAGES_JS
