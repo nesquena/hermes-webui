@@ -2,8 +2,11 @@
 import json
 import pathlib
 import re
+import shutil
 import subprocess
 import textwrap
+
+import pytest
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 
@@ -20,6 +23,8 @@ def _resolve_en(key: str, *args) -> str:
     user actually sees, not the shape of the call site.
     """
     expr = "t(" + ", ".join([json.dumps(key), *(json.dumps(a) for a in args)]) + ")"
+    if shutil.which("node") is None:
+        pytest.skip("node not on PATH")
     script = textwrap.dedent(
         f"""
         const fs = require('fs');

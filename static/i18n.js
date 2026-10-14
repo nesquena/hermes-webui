@@ -28690,7 +28690,19 @@ function applyLocaleToDOM() {
   // or global repaint) never drops the percentage/cost/no-prompt metrics.
   if (typeof _syncCtxIndicator === 'function') {
     try {
-      _syncCtxIndicator((typeof S !== 'undefined' && S.lastUsage) || {});
+      const usage = Object.assign({}, (typeof S !== 'undefined' && S.lastUsage) || {});
+      const sess = (typeof S !== 'undefined' && S.session) || {};
+      // A model switch refreshes S.session.context_length (and its threshold /
+      // compression estimate) without touching S.lastUsage, so repainting from
+      // the raw usage object would redraw the previous model's window. The
+      // session copy is what the live path (_resolveSessionModelForDisplaySoon)
+      // already treats as authoritative.
+      if (Number(sess.context_length) > 0) usage.context_length = sess.context_length;
+      if (Number(sess.threshold_tokens) > 0) usage.threshold_tokens = sess.threshold_tokens;
+      if (sess.post_compression_context_tokens_estimate != null) {
+        usage.post_compression_context_tokens_estimate = sess.post_compression_context_tokens_estimate;
+      }
+      _syncCtxIndicator(usage);
     } catch (e) { /* dynamic repaint is best-effort; never block locale */ }
   }
   if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();

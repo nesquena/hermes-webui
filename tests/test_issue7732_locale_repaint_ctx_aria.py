@@ -116,6 +116,7 @@ global.navigator = { languages: ['en'], language: 'en' };
 
 // Global S with the authoritative current usage (the metrics source).
 global.S = { lastUsage: JSON.parse(process.argv[4]) };
+if (process.argv[6]) global.S.session = JSON.parse(process.argv[6]);
 eval('var S = global.S;');
 
 // ---- real i18n: eval the WHOLE file so forward-referenced catalog helpers
@@ -174,10 +175,12 @@ USAGE = {
 }
 
 
-def _repaint(driver_path, lang, usage=USAGE):
+def _repaint(driver_path, lang, usage=USAGE, session=None):
+    args = [NODE, driver_path, str(I18N_JS), str(UI_JS), json.dumps(usage), lang]
+    if session is not None:
+        args.append(json.dumps(session))
     result = subprocess.run(
-        [NODE, driver_path, str(I18N_JS), str(UI_JS), json.dumps(usage), lang],
-        capture_output=True, text=True, timeout=40,
+        args, capture_output=True, text=True, timeout=40,
     )
     if result.returncode != 0:
         raise RuntimeError(f"node driver failed: {result.stderr}")
@@ -207,3 +210,15 @@ def test_same_locale_repaint_also_preserves_metrics(driver_path):
     out = _repaint(driver_path, "en")
     assert out["afterDesktop"] == out["beforeDesktop"], out
     assert "% used" in out["afterDesktop"], out
+
+
+def test_repaint_uses_current_session_context_limit(driver_path):
+    # A model change refreshes S.session.context_length without touching
+    # S.lastUsage (static/sessions.js `_resolveSessionModelForDisplaySoon`).
+    # The repaint must redraw the percentage from the session's limit, not the
+    # stale one still sitting in the usage object.
+    out = _repaint(driver_path, "ja", session={"context_length": 600000})
+    assert "42%" in out["beforeDesktop"], out
+    assert "42%" not in out["afterDesktop"], out
+    assert "9%" in out["afterDesktop"], out
+    assert "9%" in out["afterMobile"], out
