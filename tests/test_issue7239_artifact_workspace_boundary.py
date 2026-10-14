@@ -203,13 +203,18 @@ def test_unc_paths_match_server_share_and_workspace_before_opening():
             r"\\server\share\other\report.md",
             r"\\server\other\proj\report.md",
             r"\\foreign\share\proj\report.md",
+            "reports/output.md",
+            "README",
         ],
         r"\\server\share\proj",
     )
     assert [row["kind"] for row in rows] == [
         "workspace-contained", "outside", "outside", "outside",
+        "workspace-relative", "workspace-relative",
     ]
     assert rows[0]["openPath"] == "report.md"
+    assert rows[4]["openPath"] == "reports/output.md"
+    assert rows[5]["openPath"] == "README"
 
 
 def test_unc_open_checks_contained_path_and_blocks_foreign_share():
@@ -221,20 +226,30 @@ def test_unc_open_checks_contained_path_and_blocks_foreign_share():
     ) + f'''
 const calls=[]; const S={{session:{{workspace:{workspace},session_id:'s'}}}}; const t=k=>k;
 const switchWorkspacePanelTab=()=>calls.push('tab');
-const api=async url=>{{calls.push(url);return {{entries:[{{name:'report.md',path:'report.md'}}]}}}};
+const api=async url=>{{calls.push(url);return {{entries:[{{name:'report.md',path:'report.md'}},{{name:'README'}},{{name:'output.md',path:'reports/output.md'}}]}}}};
 const setStatus=status=>calls.push(status); const openFile=async path=>{{calls.push(path);return true}};
 (async()=>{{
   const opened=await openArtifactPath({contained});
+  const relative=await openArtifactPath('reports/output.md');
+  const readme=await openArtifactPath('README');
   const foreignOpened=await openArtifactPath({foreign});
-  process.stdout.write(JSON.stringify({{opened,foreignOpened,calls}}));
+  process.stdout.write(JSON.stringify({{opened,relative,readme,foreignOpened,calls}}));
 }})();'''
     assert _node_json(script) == {
         "opened": True,
+        "relative": True,
+        "readme": True,
         "foreignOpened": False,
         "calls": [
             "tab",
             "/api/list?session_id=s&path=.",
             "report.md",
+            "tab",
+            "/api/list?session_id=s&path=reports",
+            "reports/output.md",
+            "tab",
+            "/api/list?session_id=s&path=.",
+            "README",
             "workspace_artifact_outside_workspace",
         ],
     }

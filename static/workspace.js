@@ -490,7 +490,6 @@ function _classifyArtifactPath(path, workspace){
   const pathIsUNC = normalized.startsWith('//');
   const workspaceIsUNC = ws.startsWith('//');
   if(normalized.startsWith('///') || ws.startsWith('///')) return blocked('unsupported');
-  if(pathIsUNC !== workspaceIsUNC) return blocked(ws ? 'outside' : 'unsupported');
   if(/^[A-Za-z]:[^/]/.test(normalized)) return blocked('unsupported');
   const pathIsWindows = /^[A-Za-z]:\//.test(normalized) || pathIsUNC;
   const workspaceIsWindows = /^[A-Za-z]:\//.test(ws) || workspaceIsUNC;
@@ -506,6 +505,7 @@ function _classifyArtifactPath(path, workspace){
       openPath:relative,
     };
   }
+  if(pathIsUNC !== workspaceIsUNC) return blocked(ws ? 'outside' : 'unsupported');
   if(!ws) return blocked('unsupported');
   if(pathIsWindows !== workspaceIsWindows) return blocked('outside');
   if(!(workspaceIsWindows || ws.startsWith('/'))) return blocked('outside');
