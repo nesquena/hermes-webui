@@ -26746,6 +26746,11 @@ def _start_run(
             return LegacyJournalRuntimeAdapter(start_run_delegate=_legacy_start_run)
 
         try:
+            from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+            runner_reasoning_effort = _gateway_reasoning_effort_for_request(
+                get_config(), model=model, model_provider=model_provider,
+            )
             adapter = build_runtime_adapter(
                 legacy_adapter_factory=_legacy_adapter_factory,
                 runner_client_factory=_runtime_runner_client_factory,
@@ -26761,6 +26766,7 @@ def _start_run(
                     profile=getattr(s, "profile", None),
                     provider=model_provider,
                     model=model,
+                    reasoning_effort=runner_reasoning_effort,
                     source=source,
                     metadata={
                         "route": route,
