@@ -22,6 +22,21 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 LONG_PATTERN = "ERROR.*(timeout|refused|reset|unavailable).*after [0-9]+ retries over [0-9]+ seconds"
+LONG_DELEGATION_ID = "deleg_7062a9f8_fanout_of_two_subagents_with_a_very_long_identifier_tail"
+DELEGATION_BODY = "\n".join(
+    [
+        f"[ASYNC DELEGATION BATCH COMPLETE \u2014 {LONG_DELEGATION_ID}]",
+        "A background fan-out of 2 subagent(s) you dispatched earlier has finished.",
+        "",
+        "Role: leaf   Model: m   Total duration: 12s",
+        "",
+        "--- \u2713 TASK 1/2: alpha  (status=completed) ---",
+        "ok",
+        "",
+        "--- \u2717 TASK 2/2: beta  (status=error) ---",
+        "(error: boom)",
+    ]
+)
 
 
 def _extract_func(name: str) -> str:
@@ -39,16 +54,47 @@ def _extract_func(name: str) -> str:
     raise AssertionError(f"{name} body did not close")
 
 
+def _extract_const(name: str) -> str:
+    start = UI_JS.find(f"const {name}=")
+    assert start != -1, f"{name} not found"
+    return UI_JS[start:UI_JS.index("\n", start)]
+
+
 def _fixture_script() -> str:
     return "\n".join(
         [
             "function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\"/g,'&quot;');}",
             "function li(name,size){return '<svg data-icon=\"'+name+'\" style=\"width:11px;height:11px\"></svg>';}",
             "function t(k){return k==='process_wakeup_label'?'Background wakeup':(k==='process_wakeup_matched'?'Watch pattern matched':k);}",
+            # Grammar constants the parser/card helpers close over.
+            _extract_const("_ASYNC_DELEGATION_WAKEUP_HEADER_RE"),
+            _extract_const("_ASYNC_DELEGATION_CHIP_CLASS"),
+            _extract_func("_asyncDelegationBatchStatus"),
+            _extract_func("_asyncDelegationSingleStatus"),
             _extract_func("_parseProcessWakeupBody"),
             _extract_func("_processWakeupInfo"),
             _extract_func("_processWakeupCardHtml"),
             """
+            window.__renderDelegationCard = (body) => {
+              const info = _processWakeupInfo({}, body);
+              const extras = {timeHtml: '<span class="msg-time">14:32</span>', filesHtml: '', footHtml: ''};
+              const wrap = document.createElement('div');
+              wrap.className = 'process-wakeup-notice process-wakeup-notice-card';
+              wrap.innerHTML = _processWakeupCardHtml(info, body, extras);
+              document.body.appendChild(wrap);
+              const card = wrap.querySelector('details.process-wakeup-card');
+              const summary = wrap.querySelector('summary.process-wakeup-summary');
+              const r = summary.getBoundingClientRect();
+              return {
+                summaryScrollWidth: summary.scrollWidth,
+                summaryClientWidth: summary.clientWidth,
+                cardClientWidth: card.clientWidth,
+                summaryHeight: Math.round(r.height),
+                docScrollWidth: document.documentElement.scrollWidth,
+                docClientWidth: document.documentElement.clientWidth,
+                cardOpen: card.open,
+              };
+            };
             window.__renderWakeupCard = (pattern) => {
               const body = '[IMPORTANT: Background process w1 matched watch pattern "' + pattern
                 + '".\\nCommand: tail -f /var/log/app.log\\nMatched output:\\nERROR connection timeout]';
@@ -75,7 +121,7 @@ def _fixture_script() -> str:
     )
 
 
-def _measure(viewport_width: int):
+def _measure(viewport_width: int, *, renderer: str = "__renderWakeupCard", arg: str = LONG_PATTERN):
     try:
         from playwright.sync_api import sync_playwright
     except Exception:  # pragma: no cover - dependency missing path
@@ -99,7 +145,7 @@ def _measure(viewport_width: int):
         page.set_content("<!doctype html><html><head></head><body></body></html>")
         page.add_style_tag(content=STYLE_CSS)
         page.add_script_tag(content=_fixture_script())
-        result = page.evaluate("(pattern) => window.__renderWakeupCard(pattern)", LONG_PATTERN)
+        result = page.evaluate(f"(value) => window.{renderer}(value)", arg)
     finally:
         browser.close()
         playwright.stop()
@@ -121,3 +167,14 @@ def test_tablet_820_no_horizontal_overflow():
     m = _measure(820)
     assert m["summaryScrollWidth"] <= m["summaryClientWidth"] + 1, m
     assert m["docScrollWidth"] <= m["docClientWidth"] + 1, m
+
+
+def test_delegation_card_fits_narrow_viewport_and_stays_collapsed():
+    """The async-delegation variant swaps the command slot for a delegation id
+    and an aggregate chip; it must obey the same narrow-viewport contract."""
+    m = _measure(390, renderer="__renderDelegationCard", arg=DELEGATION_BODY)
+    assert m["summaryScrollWidth"] <= m["summaryClientWidth"] + 1, m
+    assert m["summaryClientWidth"] <= m["cardClientWidth"] + 1, m
+    assert m["docScrollWidth"] <= m["docClientWidth"] + 1, m
+    assert m["summaryHeight"] >= 44, m
+    assert m["cardOpen"] is False, m
