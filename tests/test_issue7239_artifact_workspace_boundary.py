@@ -196,6 +196,50 @@ def test_windows_containment_matrix():
     assert rows[1]["openPath"] == "report.pdf"
 
 
+def test_unc_paths_match_server_share_and_workspace_before_opening():
+    rows = _classify(
+        [
+            r"\\SERVER\Share\Proj\report.md",
+            r"\\server\share\other\report.md",
+            r"\\server\other\proj\report.md",
+            r"\\foreign\share\proj\report.md",
+        ],
+        r"\\server\share\proj",
+    )
+    assert [row["kind"] for row in rows] == [
+        "workspace-contained", "outside", "outside", "outside",
+    ]
+    assert rows[0]["openPath"] == "report.md"
+
+
+def test_unc_open_checks_contained_path_and_blocks_foreign_share():
+    workspace = json.dumps(r"\\server\share\proj")
+    contained = json.dumps(r"\\server\share\proj\report.md")
+    foreign = json.dumps(r"\\other\share\proj\report.md")
+    script = _common_js(
+        "_classifyArtifactPath", "_workspacePathExists", "openArtifactPath"
+    ) + f'''
+const calls=[]; const S={{session:{{workspace:{workspace},session_id:'s'}}}}; const t=k=>k;
+const switchWorkspacePanelTab=()=>calls.push('tab');
+const api=async url=>{{calls.push(url);return {{entries:[{{name:'report.md',path:'report.md'}}]}}}};
+const setStatus=status=>calls.push(status); const openFile=async path=>{{calls.push(path);return true}};
+(async()=>{{
+  const opened=await openArtifactPath({contained});
+  const foreignOpened=await openArtifactPath({foreign});
+  process.stdout.write(JSON.stringify({{opened,foreignOpened,calls}}));
+}})();'''
+    assert _node_json(script) == {
+        "opened": True,
+        "foreignOpened": False,
+        "calls": [
+            "tab",
+            "/api/list?session_id=s&path=.",
+            "report.md",
+            "workspace_artifact_outside_workspace",
+        ],
+    }
+
+
 def test_explicit_root_filename_is_contained_with_a_known_workspace():
     posix = _classify(["/workspace/README"], "/workspace")[0]
     windows = _classify([r"D:\Proj\README"], r"D:\Proj")[0]
