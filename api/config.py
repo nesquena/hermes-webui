@@ -5699,11 +5699,30 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _get_lmstudio_reasoning_probe_api_key(config_data: dict | None = None) -> str | None:
+def _get_lmstudio_reasoning_probe_api_key(
+    config_data: dict | None = None,
+    *,
+    environ: dict[str, str] | None = None,
+) -> str | None:
     """Resolve the LM Studio key for reasoning probes with WebUI precedence.
 
     ``config_data`` scopes the lookup to the caller's profile config snapshot;
     when omitted the module-global ``cfg`` is used (historical behaviour).
+
+    ``environ`` scopes the ENV lookup to the caller's captured owner-profile
+    env: when given, the probe reads ONLY that env — the ambient process
+    ``os.environ`` is never consulted (issue #7170 round-2 finding 2: a
+    scoped probe must not leak another profile's ``LM_API_KEY`` into a
+    different profile's endpoint).
+
+    When ``environ`` is omitted the scope of ``config_data`` decides the env
+    source: a caller that handed in a profile snapshot (scoped) reads only
+    the thread-captured owner env (``api.config._thread_ctx.env``, which
+    request/worker scopes populate via ``api.profiles.profile_env_for_*``) —
+    a detached worker thread has none, so the probe goes KEYLESS rather than
+    borrowing the process-active profile's credential. Only historical
+    unscoped callers (no snapshot — ``config_data`` IS the module ``cfg``)
+    keep the ambient ``os.environ`` fallback.
     """
     config_data = config_data if isinstance(config_data, dict) else cfg
     model_cfg = config_data.get("model") or {}
@@ -5721,11 +5740,23 @@ def _get_lmstudio_reasoning_probe_api_key(config_data: dict | None = None) -> st
             if config_key:
                 return config_key
 
-    env_key = str(os.getenv("LM_API_KEY") or "").strip()
+    if environ is None:
+        if config_data is cfg:
+            # Unscoped historical lookup: ambient process env.
+            environ = dict(os.environ)
+        else:
+            # Scoped: the thread-captured owner env only — never the ambient
+            # process env (round-2 finding 2). A detached worker thread has no
+            # captured env, so the probe goes keyless instead of borrowing the
+            # process-active profile's credential.
+            thread_env = getattr(_thread_ctx, "env", {})
+            environ = thread_env if isinstance(thread_env, dict) else {}
+
+    env_key = str(environ.get("LM_API_KEY") or "").strip()
     if env_key:
         return env_key
 
-    legacy_env_key = str(os.getenv("LMSTUDIO_API_KEY") or "").strip()
+    legacy_env_key = str(environ.get("LMSTUDIO_API_KEY") or "").strip()
     if legacy_env_key:
         return legacy_env_key
 
@@ -6529,12 +6560,26 @@ def set_reasoning_effort(
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
     (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
 
-    An empty string is accepted as "clear the override" — it removes the
-    ``agent.reasoning_effort`` key so the provider default takes effect. This is
-    the re-enable path for thinking-toggle-only models (GLM-4.5–5.1 on native
-    zai): the dropdown's "Default"/"On" option POSTs ``effort:''`` to switch
-    thinking back on after the user selected "None". Without this, the toggle
-    would be one-way (off-only) for those models. (#6219 round-3)
+    With a model context (``model_id`` given — the composer chip path) the
+    selection is written as the per-model ``agent.reasoning_overrides`` entry
+    in addition to the historical global ``agent.reasoning_effort`` write
+    (issue #7170 round-2 finding 3): the status / chip read
+    ``configured_reasoning_effort_for_model`` prefers the override, so writing
+    only the global key made the chip snap back to the stale override value.
+    The override is what the chip reads back, so its own selection sticks; the
+    global write is kept for master compatibility (the CLI-parity contract
+    pinned by the zai gating tests — an unscoped selection and a model-context
+    selection both persist ``agent.reasoning_effort``). An empty string in a
+    model context clears THAT model's override (``Default``) and the global
+    key, so the provider default applies again.
+
+    An empty string without a model context is accepted as "clear the
+    override" — it removes the ``agent.reasoning_effort`` key so the provider
+    default takes effect. This is the re-enable path for thinking-toggle-only
+    models (GLM-4.5–5.1 on native zai): the dropdown's "Default"/"On" option
+    POSTs ``effort:''`` to switch thinking back on after the user selected
+    "None". Without this, the toggle would be one-way (off-only) for those
+    models. (#6219 round-3)
 
     Raises ``ValueError`` on any other unrecognised level so callers can 400.
     """
@@ -6544,13 +6589,35 @@ def set_reasoning_effort(
             f"Unknown reasoning effort '{effort}'. "
             f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
         )
+    model = str(model_id or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        if raw:
+        if model:
+            # Model-context selection: write the per-model override (and
+            # "Default" clears it) so the chip reads its own selection back
+            # instead of snapping to the stale override (#7170 round-2
+            # finding 3). The historical global write is kept alongside for
+            # master/CLI parity (zai gating contract). Key spelling mirrors
+            # the read-side matchers in
+            # configured_reasoning_effort_for_model (lowercased exact id).
+            overrides = agent_cfg.get("reasoning_overrides")
+            if not isinstance(overrides, dict):
+                overrides = {}
+            override_key = model.lower()
+            if raw:
+                overrides[override_key] = raw
+                agent_cfg["reasoning_effort"] = raw
+            else:
+                overrides.pop(override_key, None)
+                # Default also clears the global key (historical empty-effort
+                # contract, #6219 round-3): the provider default applies.
+                agent_cfg.pop("reasoning_effort", None)
+            agent_cfg["reasoning_overrides"] = overrides
+        elif raw:
             agent_cfg["reasoning_effort"] = raw
         else:
             # Clear the override so the provider default takes effect (the

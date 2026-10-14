@@ -408,31 +408,51 @@ def _gateway_session_api_key(session) -> str:
     profile A's credential to profile B's gateway endpoint, or fail auth
     because the keys disagree).
 
-    Returns the empty string when the session profile's ``.env`` does not
-    configure a key (matches the historical contract of ``_gateway_api_key``,
-    which also returns ``""`` on absence). The worker is the only consumer;
-    it treats an empty string identically to a missing key (no
-    ``Authorization`` header is sent — issue #7074 keeps the anonymous path
-    for unauthenticated local gateways working).
+    The key environ is built EXACTLY like ``_gateway_session_base_url()``
+    below: ``os.environ`` minus the loaded profile env keys (so a key that
+    some profile's ``.env`` loaded into the process env can never leak into
+    another profile's capture), overlaid with the session profile's filtered
+    runtime env. That also picks up LAUNCHER-provided keys the documented
+    docker-compose deployments set on the process env
+    (``HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:-}``): no profile
+    ``.env`` claims those, so they survive the strip and are captured for
+    every session — the round-2 BRICK finding (the old code read only the
+    profile runtime env, captured ``""`` for the launcher key and sent an
+    anonymous request the keyed Gateway rejected with 401).
+
+    Returns the empty string when neither the process env nor the session
+    profile's env configure a key (matches the historical contract of
+    ``_gateway_api_key``, which also returns ``""`` on absence). The worker
+    is the only consumer; it treats an empty string identically to a missing
+    key (no ``Authorization`` header is sent — issue #7074 keeps the
+    anonymous path for unauthenticated local gateways working).
     """
     try:
+        from api import profiles as _profiles
         from api.models import _get_profile_home
-        from api.profiles import get_profile_runtime_env
         home = _get_profile_home(getattr(session, "profile", None))
     except Exception:
         return ""
     if not home:
         return ""
     try:
-        runtime_env = get_profile_runtime_env(home) or {}
+        # Never let the loaded profile env keys (process-active profile)
+        # override the session-owning profile's key; the launcher/operator
+        # process-env key that no profile .env claims survives the strip.
+        environ = {
+            k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys
+        }
+        environ.update(
+            _profiles.filter_runtime_env_for_gateway_parity(
+                _profiles.get_profile_runtime_env(home)
+            )
+        )
+    except Exception:
+        environ = None
+    try:
+        return _gateway_api_key(environ)
     except Exception:
         return ""
-    raw = (
-        runtime_env.get("HERMES_WEBUI_GATEWAY_API_KEY")
-        or runtime_env.get("API_SERVER_KEY")
-        or ""
-    )
-    return str(raw).strip()
 
 
 def _gateway_session_base_url(session) -> str:

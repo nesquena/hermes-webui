@@ -163,6 +163,21 @@ def anonymous_profile_b_no_key(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "KEY_FOR_PROFILE_A")
     monkeypatch.delenv("API_SERVER_KEY", raising=False)
 
+    # Production marking: the ambient process env holds profile A's key/URL
+    # BECAUSE profile A's .env was loaded into it at startup — production
+    # records those keys in profiles._loaded_profile_env_keys, so the
+    # session-profile capture strips them for any other profile. Without the
+    # marking, the round-2 launcher-env fix (capture reads the process env
+    # minus loaded keys) would treat A's key as a launcher-provided one and
+    # leak it into anonymous profile B's capture.
+    import api.profiles as _profiles_mod
+
+    monkeypatch.setattr(
+        _profiles_mod,
+        "_loaded_profile_env_keys",
+        {"HERMES_WEBUI_GATEWAY_API_KEY", "HERMES_WEBUI_GATEWAY_BASE_URL"},
+    )
+
     monkeypatch.setattr(
         models, "_get_profile_home", lambda profile: profile_b_home
     )

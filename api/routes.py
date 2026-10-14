@@ -26637,8 +26637,21 @@ def _start_regeneration_stream_locked(
         # #7170: same dispatch-time session-profile config snapshot as the
         # normal /api/chat/start path — the detached gateway worker must not
         # resolve config on its own thread (ambient profile leak).
-        from api.gateway_chat import _gateway_session_owner_cfg
+        from api.gateway_chat import (
+            _gateway_session_api_key,
+            _gateway_session_base_url,
+            _gateway_session_owner_cfg,
+        )
+
         worker_kwargs["session_cfg"] = _gateway_session_owner_cfg(s)
+        # #7170 round-2 finding 1: capture the session-owning profile's
+        # Gateway API key + base URL on this same request thread, exactly like
+        # the normal /api/chat/start dispatch. Without the capture this launch
+        # site falls back to the AMBIENT env pair inside the worker — on a
+        # keyed Gateway (launcher-provided key in the process env) that either
+        # fails auth or sends the wrong credential to the wrong endpoint.
+        worker_kwargs["session_api_key"] = _gateway_session_api_key(s)
+        worker_kwargs["session_base_url"] = _gateway_session_base_url(s)
     else:
         worker_kwargs = _local_agent_worker_kwargs(
             model_provider=model_provider,
