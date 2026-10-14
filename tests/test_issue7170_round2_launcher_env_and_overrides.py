@@ -28,8 +28,6 @@ F3 [SILENT] ``api/config.py`` ``set_reasoning_effort`` wrote only the global
    corresponding override; Default (``""``) clears it.
 """
 
-from collections import OrderedDict
-import os
 import threading
 import types
 from pathlib import Path
@@ -43,7 +41,7 @@ import api.models as models
 import api.routes as routes
 import api.session_ops as session_ops
 import api.turn_journal as turn_journal
-from api.config import STREAMS, create_stream_channel
+from api.config import STREAMS
 
 
 @pytest.fixture(autouse=True)
