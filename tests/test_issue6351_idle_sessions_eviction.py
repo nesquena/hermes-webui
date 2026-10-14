@@ -285,3 +285,53 @@ def test_chat_start_synth_insert_runs_the_eviction_pass():
         "the chat/start synth insert must run the cache-cap eviction pass, "
         "otherwise claiming foreign sessions grows SESSIONS past its cap"
     )
+
+
+# ─── issue Q2: an abandoned stream's offline buffer must not outlive it ─────
+
+def test_abandoned_stream_channel_and_its_offline_buffer_are_reclaimed():
+    """Issue Q2: `_offline_buffer` is freed when a stream completes with no subscriber.
+
+    The buffer only exists while its `StreamChannel` is reachable, so the
+    guarantee is that the STREAMS entry — the last production reference — is
+    dropped for a stream nobody is attached to. This pins the reaper's orphan
+    reclaim (the path a worker that died before teardown leaves behind), which
+    is what keeps a no-tab turn from pinning its buffered frames for the life
+    of the process.
+    """
+    import gc
+    import weakref
+
+    from api import config as cfg
+
+    sid = "test-offline-buffer-reclaim-6351"
+    ch = cfg.create_stream_channel()
+    for i in range(64):
+        ch.put_nowait(("token", f"frame-{i}", f"evt-{i}"))
+    assert len(ch._offline_buffer) == 64, "frames buffered with no subscriber"
+
+    with cfg.STREAMS_LOCK:
+        cfg.STREAMS[sid] = ch
+    cfg.register_stream_owner(sid, "test-offline-buffer-session")
+    ref = weakref.ref(ch)
+    del ch
+
+    try:
+        assert cfg.is_orphaned_stream(sid) is True, (
+            "a stream with no worker, no claim and no pending turn is an orphan"
+        )
+        assert cfg.release_orphaned_stream_if_still_orphaned(sid) is True
+        assert sid not in cfg.STREAMS, (
+            "the STREAMS entry holds the channel; dropping it is what frees the "
+            "offline buffer (issue Q2: no subscriber ever attached)"
+        )
+        gc.collect()
+        assert ref() is None, (
+            "the abandoned stream's channel — and with it its 64 buffered "
+            "frames — must be garbage-collectable, not pinned for the "
+            "process lifetime"
+        )
+    finally:
+        with cfg.STREAMS_LOCK:
+            cfg.STREAMS.pop(sid, None)
+        cfg.unregister_stream_owner(sid)
