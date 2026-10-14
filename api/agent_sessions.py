@@ -1021,16 +1021,6 @@ def read_importable_agent_session_rows(
                 # below is generated from the same content rules the sidecar
                 # producer classifies with (api/compression_anchor), so the two
                 # counters can never drift apart.
-                # #7681 finding 2: `display_kind` is the agent's own marker for
-                # scaffolding rows that carry role='user' but are not human
-                # input (async-delegation, hidden operational notices). The
-                # Python classifier rejects every non-empty value except
-                # 'steer'; the SQL must do the same or the two counters drift.
-                display_kind_guard = (
-                    " AND COALESCE(m.display_kind, '') IN ('', 'steer')"
-                    if 'display_kind' in message_cols
-                    else ""
-                )
                 content_expr = "LOWER(LTRIM(COALESCE(m.content, '')))"
                 # #7681 finding 3 (second half): a flagged summary carrier is not
                 # automatically scaffolding. The agent unwraps it and keeps the
@@ -1083,8 +1073,13 @@ def read_importable_agent_session_rows(
                 # input (async-delegation, hidden operational notices). The
                 # Python classifier rejects every non-empty value except
                 # 'steer'; the SQL must do the same or the two counters drift.
+                # #7681 finding 3: 'hidden' is the legacy compaction wrapper and
+                # can still wrap a live ask (the Python mirror keeps it), so a
+                # hidden row whose carrier embeds a live payload counts too.
                 display_kind_guard = (
-                    " AND COALESCE(m.display_kind, '') IN ('', 'steer')"
+                    " AND (COALESCE(m.display_kind, '') IN ('', 'steer')"
+                    " OR (COALESCE(m.display_kind, '') = 'hidden'"
+                    f" AND {_flagged_carrier_has_live_payload_sql(content_expr)}))"
                     if 'display_kind' in message_cols
                     else ""
                 )

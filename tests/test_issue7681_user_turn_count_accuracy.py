@@ -1943,6 +1943,102 @@ def test_live_ask_inside_a_summary_carrier_counts_as_a_user_turn(tmp_path):
     )
 
 
+# ── Re-gate 2026-10-12: SQL carrier classification (finding 3) ──
+#
+# The 2026-10-12 re-warm review: the production SQLite loader still applied the
+# raw display-kind guard and a nonblank payload test, so three shapes came out
+# wrong. Each is pinned against the agent's source semantics
+# (context_compressor.py:4641-4643 strip-before-header, :4444-4446
+# exclude-the-exact-marker):
+#   1. a hidden legacy summary carrier with a real ask after its end marker
+#      counts (display_kind='hidden' is the legacy compaction wrapper);
+#   2. a flagged merged carrier whose pre-delimiter payload is only the exact
+#      continuation marker does NOT count;
+#   3. leading whitespace followed only by the prior-context header does NOT
+#      count.
+
+
+def _sql_carrier_classification_db(path):
+    """One-session state.db whose user rows exercise the three finding-3 SQL shapes."""
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE sessions (
+            id TEXT PRIMARY KEY, source TEXT, session_source TEXT, title TEXT,
+            model TEXT, started_at REAL NOT NULL, message_count INTEGER DEFAULT 0,
+            parent_session_id TEXT, ended_at REAL, end_reason TEXT
+        );
+        CREATE TABLE messages (
+            id TEXT PRIMARY KEY, session_id TEXT, role TEXT, content TEXT,
+            timestamp REAL, _compressed_summary INTEGER NOT NULL DEFAULT 0,
+            active INTEGER NOT NULL DEFAULT 1, display_kind TEXT
+        );
+        CREATE INDEX idx_messages_session ON messages(session_id, timestamp);
+        """
+    )
+    conn.execute(
+        "INSERT INTO sessions (id, source, session_source, title, model, started_at,"
+        " message_count, parent_session_id, ended_at, end_reason)"
+        " VALUES ('s1', 'cli', 'cli', 'S', 'm', 10.0, 6, NULL, NULL, NULL)"
+    )
+    rows = [
+        # A plain human ask: MUST count.
+        ("m0", "user", "first real question", 0, None),
+        # Hidden legacy summary carrier with a real ask after its end marker:
+        # MUST count (assertion 1 — the raw display-kind guard rejected every
+        # 'hidden' row regardless of payload).
+        (
+            "m1", "user",
+            f"## Summary\nwe discussed X\n\n{_END_MARKER}\n\nplease fix the login bug",
+            0, "hidden",
+        ),
+        # Flagged merged carrier whose pre-delimiter payload is ONLY the exact
+        # continuation marker: must NOT count (assertion 2).
+        (
+            "m2", "user",
+            f"{_CONTINUATION_MARKER}\n\n{_DELIM}\n\n## Summary\nwe discussed X",
+            1, None,
+        ),
+        # Leading tab/newline followed only by the prior-context header:
+        # must NOT count (assertion 3).
+        (
+            "m3", "user",
+            f"\n\t{_PRIOR_HEADER}\n\n{_DELIM}\n\n## Summary\nwe discussed X",
+            1, None,
+        ),
+    ]
+    for mid, role, content, flag, display_kind in rows:
+        conn.execute(
+            "INSERT INTO messages (id, session_id, role, content, timestamp,"
+            " _compressed_summary, active, display_kind) VALUES (?,?,?,?,?,?,?,?)",
+            (mid, "s1", role, content, 11.0, flag, 1, display_kind),
+        )
+    conn.commit()
+    conn.close()
+
+
+def test_sql_carrier_classification_pins_the_three_finding_3_shapes(tmp_path):
+    """#7681 finding 3 (re-gate 2026-10-12): the SQLite loader must classify the
+    unwrapped carrier payload, not apply a raw display-kind guard or a nonblank
+    payload test."""
+    db = tmp_path / "state.db"
+    _sql_carrier_classification_db(db)
+
+    sys.path.insert(0, str(REPO_ROOT))
+    try:
+        from api.agent_sessions import read_importable_agent_session_rows
+    finally:
+        sys.path.pop(0)
+
+    by_id = {row["id"]: row for row in read_importable_agent_session_rows(db)}
+    assert "s1" in by_id, f"row missing: {list(by_id)}"
+    assert by_id["s1"]["actual_user_message_count"] == 2, (
+        "expected 2: the plain ask + the hidden legacy carrier's embedded ask; "
+        "the marker-only carrier and the whitespace+header-only carrier are "
+        f"scaffolding, got {by_id['s1']['actual_user_message_count']}"
+    )
+
+
 # ── Finding 4 (re-gate 2026-10-08): inactive-row detection ──
 #
 # The flag keyed on `_compressed_summary`, so `/undo` (which soft-archives with

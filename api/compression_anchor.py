@@ -502,37 +502,62 @@ def _flagged_carrier_has_live_payload_sql(content_expr: str) -> str:
     lowercased too — ``INSTR`` is case-sensitive and a lowered column compared
     against a mixed-case needle silently never matches.
 
+    The unwrapped payload is CLASSIFIED, not just tested for nonblankness: the
+    agent strips the pre-delimiter slice before removing the reference-only
+    header (``split(delim, 1)[0].strip()`` then header then lstrip,
+    context_compressor.py:4641-4643) and then rejects a candidate whose payload
+    is a synthetic exact marker (:4444-4446). Both are mirrored here:
+
+    * the slice in front of the merged delimiter is full-whitespace TRIM'd
+      BEFORE the header comparison, so a leading tab/newline followed by only
+      the header leaves nothing;
+    * a payload that equals an exact internal marker (the continuation markers,
+      the max-iterations request, the recovery nudges) — or starts with an
+      internal prefix — is scaffolding.
+
     Merged form — the agent keeps ``content.split(delim, 1)[0]`` and then strips
-    the reference-only prior-context header:
-
-        ``TRIM(SUBSTR(c, header_len + 1), ' ' || char(9) || char(10) || char(13)) != ''``
-
-    Legacy form — the live ask follows the end marker, so anything non-blank
-    after it counts.
+    the reference-only prior-context header. Legacy form — the live ask follows
+    the end marker, so anything non-blank after it counts, classified the same
+    way.
     """
+
+    def _not_synthetic(expr: str) -> str:
+        conditions = (
+            [f"INSTR({expr}, {_sql_literal(p)}) = 1" for p in USER_TURN_INTERNAL_PREFIXES]
+            + [f"{expr} = {_sql_literal(e)}" for e in USER_TURN_INTERNAL_EXACT]
+        )
+        return f"NOT ({' OR '.join(conditions)})"
+
     delim = _sql_literal(_MERGED_SUMMARY_DELIMITER.lower())
     header = _sql_literal(_MERGED_PRIOR_CONTEXT_HEADER.lower())
     end_marker = _sql_literal(_SUMMARY_END_MARKER.lower())
+    ws = "' ' || char(9) || char(10) || char(13)"
     before = (
         f"CASE WHEN INSTR({content_expr}, {delim}) > 0"
         f" THEN SUBSTR({content_expr}, 1, INSTR({content_expr}, {delim}) - 1)"
         f" ELSE {content_expr} END"
     )
+    trimmed_before = f"TRIM({before}, {ws})"
     without_header = (
-        f"CASE WHEN SUBSTR({before}, 1, LENGTH({header})) = {header}"
-        f" THEN SUBSTR({before}, LENGTH({header}) + 1)"
-        f" ELSE {before} END"
+        f"CASE WHEN SUBSTR({trimmed_before}, 1, LENGTH({header})) = {header}"
+        f" THEN TRIM(SUBSTR({trimmed_before}, LENGTH({header}) + 1), {ws})"
+        f" ELSE {trimmed_before} END"
     )
+    payload = f"TRIM({without_header}, {ws})"
     merged_live = (
         f"(INSTR({content_expr}, {delim}) > 0"
-        f" AND TRIM({without_header}, ' ' || char(9) || char(10) || char(13)) != '')"
+        f" AND {payload} != ''"
+        f" AND {_not_synthetic(payload)})"
+    )
+    legacy_tail = (
+        f"TRIM(SUBSTR({content_expr},"
+        f" INSTR({content_expr}, {end_marker}) + LENGTH({end_marker})), {ws})"
     )
     legacy_live = (
         f"(INSTR({content_expr}, {delim}) = 0"
         f" AND INSTR({content_expr}, {end_marker}) > 0"
-        f" AND TRIM(SUBSTR({content_expr},"
-        f" INSTR({content_expr}, {end_marker}) + LENGTH({end_marker})),"
-        " ' ' || char(9) || char(10) || char(13)) != '')"
+        f" AND {legacy_tail} != ''"
+        f" AND {_not_synthetic(legacy_tail)})"
     )
     return f"({merged_live} OR {legacy_live})"
 
