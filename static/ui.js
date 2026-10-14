@@ -13432,6 +13432,9 @@ function restoreLiveTurnHtmlForSession(sid){
   const liveGroup=restored.querySelector('.tool-call-group[data-live-tool-call-group="1"]');
   if(liveGroup&&typeof _startActivityElapsedTimer==='function') _startActivityElapsedTimer(liveGroup);
   if(typeof placeLiveToolCardsHost==='function') placeLiveToolCardsHost();
+  // Synchronously ensure the restored live turn is highlighted, tree-initialized, and
+  // copy-button-attached BEFORE the deferred post-process so it never paints an
+  // unhighlighted frame (#7752).
   try{
   if(typeof highlightCode==='function') highlightCode(restored);
   if(typeof addCopyButtons==='function') addCopyButtons(restored);
@@ -21248,6 +21251,7 @@ function renderMessages(options){
       if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
       _wireMessageWindowLoadEarlierButton();
       if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
+      // Sync highlight/tree/copy before scroll restore so no unhighlighted frame paints (#7752).
       try{
       if(typeof highlightCode==='function') highlightCode(inner);
       if(typeof addCopyButtons==='function') addCopyButtons(inner);

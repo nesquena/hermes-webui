@@ -83,7 +83,16 @@ def test_cached_session_restore_runs_highlight_synchronously(ui_js_content):
     """The fast-path cached session restore must also synchronously ensure highlighting before scrolling."""
     cache_branch_idx = ui_js_content.find("_sessionHtmlCache.get(sid);")
     assert cache_branch_idx != -1, "Session HTML cache branch not found"
-    cache_slice = ui_js_content[cache_branch_idx : cache_branch_idx + 1200]
+    # Slice from the cache lookup to the fast-path branch terminator (first `return;`
+    # after the restore) instead of a fixed char window — fixed windows break when the
+    # branch grows (same lesson master recorded for restoreLiveTurnHtmlForSession in
+    # #7912). The #7778 prismSig gate makes this branch longer than master's, so a
+    # fixed 1200-char slice cannot cover highlightCode through _scrollAfterMessageRender.
+    restore_idx = ui_js_content.find("inner.innerHTML=cached.html;", cache_branch_idx)
+    assert restore_idx != -1, "Session HTML cache restore statement not found"
+    return_idx = ui_js_content.find("return;", restore_idx)
+    assert return_idx != -1, "Session HTML cache fast-path branch terminator not found"
+    cache_slice = ui_js_content[cache_branch_idx : return_idx]
 
     highlight_call = "if(typeof highlightCode==='function') highlightCode(inner);"
     tree_init_call = "if(typeof initTreeViews==='function') initTreeViews(inner);"
