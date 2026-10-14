@@ -4147,6 +4147,15 @@ function _hasCurrentTailUserDuplicate(messages,candidate){
 function _hasInflightTailUserDuplicate(messages,candidate){
   if(!candidate||String(candidate.role||'')!=='user') return false;
   const list=Array.isArray(messages)?messages:[];
+  // Round-4 (plan a): a candidate that is the client's OWN speculative row —
+  // _pending, unmarked, id-less — is provisional. Only the CANDIDATE can be
+  // provisional: treating a base row as provisional would re-open the dropped-
+  // reply case. The provisional candidate is the current turn's row by
+  // construction and folds onto the row it pairs with unless a completed
+  // answer proves the pair spans two settled turns.
+  const _provisionalCandidate=candidate._pending===true
+    && !(candidate._active_turn_user===true)
+    && !(candidate.id||candidate._id);
   for(let i=list.length-1;i>=0;i--){
     const msg=list[i];
     if(!msg) continue;
@@ -4179,7 +4188,33 @@ function _hasInflightTailUserDuplicate(messages,candidate){
       const _aTok=typeof msg._active_turn_token==='string'?msg._active_turn_token:'';
       const _bTok=typeof candidate._active_turn_token==='string'?candidate._active_turn_token:'';
       if(_aTok&&_bTok){ return _aTok===_bTok?_sameText(msg,candidate):false; }
+      // The completed-answer scan gates BOTH the marker branch and the
+      // both-stamped branch (round-4 F2/P5): a completed assistant between
+      // the two rows is a settled-turn boundary, so even an authoritative
+      // marker must never pair across it — the marker branch used to ignore
+      // both timestamps and paired the marked current row with a PREVIOUS
+      // same-text turn, hiding the live reply ('go, ok, go' -> two rows).
+      const _sawCompletedAnswer=(()=>{
+        for(let j=i+1;j<list.length;j++){
+          const between=list[j];
+          if(!between) continue;
+          if(String(between.role||'')==='assistant'&&!between._live) return true;
+        }
+        return false;
+      })();
       if(msg._active_turn_user===true||candidate._active_turn_user===true){
+        // A completed answer between the rows means different settled turns.
+        if(_sawCompletedAnswer) return false;
+        // The provisional candidate is the client's own speculative row for
+        // the active turn: skip the stamp veto, text equality decides.
+        if(_provisionalCandidate) return _sameText(msg,candidate);
+        // The marker branch still respects the stamps: a marked pair whose
+        // timestamps are a whole second apart is a different turn.
+        if(_aTs&&_bTs){
+          const _eps=(typeof _PENDING_ACTIVE_TURN_TS_EPSILON==='number')?_PENDING_ACTIVE_TURN_TS_EPSILON:1e-6;
+          if(Math.abs(_aTs-_bTs)<=_eps) return _sameText(msg,candidate);
+          return false;
+        }
         return _sameText(msg,candidate);
       }
       if(_aTs&&_bTs){
@@ -4188,6 +4223,11 @@ function _hasInflightTailUserDuplicate(messages,candidate){
         // different turn (a rapid "继续" repeat lands ~1s later).
         const _eps=(typeof _PENDING_ACTIVE_TURN_TS_EPSILON==='number')?_PENDING_ACTIVE_TURN_TS_EPSILON:1e-6;
         if(Math.abs(_aTs-_bTs)<=_eps) return _sameText(msg,candidate);
+        // Round-4 (plan a): a provisional candidate folds despite the stamp
+        // gap ONLY when no completed answer sits between the rows — the stale
+        // client stamp vs the server's pending_started_at restamp (regenerate
+        // round trip, unmarked state.db drift row).
+        if(_provisionalCandidate&&!_sawCompletedAnswer) return _sameText(msg,candidate);
         return false;
       }
       if(_aTs||_bTs){
@@ -4204,15 +4244,8 @@ function _hasInflightTailUserDuplicate(messages,candidate){
         // the pair is the same turn seen by two producers (one of which never
         // stamps), so text equality decides. The scan already walks past live
         // rows and tool rows, so "no completed answer between" is exactly
-        // "we reached this user without passing a settled assistant".
-        const _sawCompletedAnswer=(()=>{
-          for(let j=i+1;j<list.length;j++){
-            const between=list[j];
-            if(!between) continue;
-            if(String(between.role||'')==='assistant'&&!between._live) return true;
-          }
-          return false;
-        })();
+        // "we reached this user without passing a settled assistant" (the
+        // scan itself is hoisted above the marker and both-stamped branches).
         if(_sawCompletedAnswer) return false; // different turns, correctly
         return !!_sameTranscriptMessage(msg,candidate);
       }

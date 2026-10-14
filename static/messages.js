@@ -2023,6 +2023,10 @@ async function startRegeneration(sessionId, regenerationRevision){
     const response=await api('/api/chat/start',{method:'POST',body:JSON.stringify({
       session_id:sid,regenerate:true,regeneration_revision:regenerationRevision
     })});
+   if(response&&typeof response.pending_started_at==='number'){
+     retained.timestamp=response.pending_started_at;
+     retained._ts=response.pending_started_at;
+   }
     if(!S.session||S.session.session_id!==sid)return;
     const streamId=response&&response.stream_id;
     if(!streamId)throw new Error('Regeneration did not start a stream.');
