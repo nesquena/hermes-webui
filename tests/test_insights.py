@@ -337,6 +337,56 @@ def test_insights_mobile_models_table_has_contained_overflow():
     assert 'insights-model-table' in section_block or 'insights-card' in section_block
 
 
+def test_insights_usage_grid_desktop_split_favors_models():
+    # Usage row (Token Breakdown + Models): on wide content columns the Models
+    # card gets 3x the width of Token Breakdown so long model IDs
+    # (e.g. "vendor/org/model:quant") are ellipsized less — increased name
+    # allocation, not a universal full-name guarantee (the title tooltip
+    # carries the complete string).
+    # The split is gated on the CONTENT column (container query), not the
+    # viewport, so a narrow column (small window or sidebar open) stacks the
+    # row instead of squeezing either card past its minimum.
+    assert '#insightsContent{container-type:inline-size' in STYLE_CSS, \
+        'insights content column must declare a size container'
+    # Stacked state must contain each card to the content width: without
+    # min-width:0 the single 1fr track inherits the Models table's ~432px
+    # automatic minimum and stretches both cards past the scrollport,
+    # hiding the Token Breakdown values at narrow content widths (gate
+    # repro: 641px viewport + open sidebar -> 241px column).
+    containment = [line for line in STYLE_CSS.splitlines()
+                   if line.startswith('.insights-usage-grid .insights-card{')]
+    assert containment and 'min-width:0' in containment[0] and 'overflow-x:auto' in containment[0], \
+        f'stacked cards must be contained to the content width, got: {containment}'
+    cq_start = STYLE_CSS.find('@container insights (min-width: 620px)')
+    assert cq_start != -1, 'the 25/75 split must be gated on the insights container width'
+    cq_end = STYLE_CSS.find('}', STYLE_CSS.find('}', cq_start) + 1)
+    cq_block = STYLE_CSS[cq_start:cq_end + 1]
+    assert 'minmax(160px,1fr) minmax(0,3fr)' in cq_block, \
+        f'container-gated rule must split 25/75 with a 160px floor, got: {cq_block}'
+    # Both ends of the container query must stay connected (release review of #8157, Greptile P2): the content
+    # column must NAME the container the query targets, and the gated rule must target the usage grid. Without
+    # these, renaming the container or the selector would silently drop the desktop split while this test passed.
+    content_rule = [line for line in STYLE_CSS.splitlines() if line.startswith('#insightsContent{')]
+    assert content_rule and 'container-name:insights' in content_rule[0], \
+        f'#insightsContent must declare container-name:insights, got: {content_rule}'
+    assert '.insights-usage-grid{' in cq_block, \
+        f'the @container insights rule must target .insights-usage-grid, got: {cq_block}'
+    # Default (outside the query): stacked single column, so narrow columns
+    # never split the row below the Models table's minimum width.
+    default_rules = [line for line in STYLE_CSS.splitlines()
+                     if line.startswith('.insights-usage-grid{')]
+    assert default_rules and all('grid-template-columns:1fr;' in r for r in default_rules), \
+        f'default usage-grid rule must stack, got: {default_rules}'
+    # The #2104 mobile block must still force single-column inside its scoped
+    # @media block (belt-and-braces below 640px viewport).
+    mobile_start = STYLE_CSS.find('/* ── Mobile layout for Token Breakdown + Models')
+    mobile_end = STYLE_CSS.find('/* ── Checkpoints', mobile_start)
+    mobile_block = STYLE_CSS[mobile_start:mobile_end]
+    assert '@media (max-width: 640px)' in mobile_block, 'mobile block must be scoped to <=640px'
+    assert 'grid-template-columns: 1fr' in mobile_block, \
+        'mobile block must force single-column for the usage grid'
+
+
 # ── #3189: CLI/gateway sessions in Insights + webui double-count guard ──────
 
 

@@ -112,6 +112,14 @@ function syncAppTitlebar() {
       inp.type = 'text';
       inp.className = 'app-titlebar-rename-input';
       inp.value = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
+      // #7542: this is a chat-title editor, not a credentials field.
+      // Chrome and password-manager extensions (1Password, LastPass,
+      // Bitwarden, Dashlane) mis-classify it as a login form because
+      // it accepts arbitrary user input and is rendered next to the
+      // chat UI. Disable autofill / form-fill explicitly so the
+      // browser does not surface the "save password" dialog after
+      // the user renames a conversation.
+      _markNonCredentialInput(inp);
 
       // Prevent click/dblclick on the input from bubbling — we don't want
       // panel switches, session switches, or any other handler firing.
@@ -432,6 +440,8 @@ async function switchPanel(name, opts = {}) {
     if (sidebar) {
       sidebar.classList.remove('mobile-session-page');
       sidebar.classList.add('mobile-panel-drawer', 'mobile-open');
+      // #7924: an open drawer must never stay inert (see mobileSwitchPanel).
+      if (typeof _setPanelInert === 'function') _setPanelInert(sidebar, true);
     }
   }
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
@@ -1233,8 +1243,29 @@ function _renderCronDetail(job){
   if (!title || !body) return;
   title.textContent = job.name || job.schedule_display || '(unnamed)';
   const status = _cronStatusMeta(job);
-  const nextRun = job.next_run_at ? new Date(job.next_run_at).toLocaleString() : t('not_available');
-  const lastRun = job.last_run_at ? new Date(job.last_run_at).toLocaleString() : t('never');
+  // #7140: render `next_run_at` / `last_run_at` in the zone the timestamp
+  // itself was stamped in — NOT the operator's browser zone, and NOT a
+  // single process-wide server zone.
+  //
+  // The agent serialises these timestamps with the offset of the zone the
+  // job was scheduled in (per-profile: `hermes_time._resolve_timezone_name()`
+  // reads the ACTIVE PROFILE's config.yaml `timezone`).  So on a UTC
+  // container whose profile configures `timezone: America/New_York` the
+  // value on the wire is "2026-09-24T09:00:00-07:00" and the operator must
+  // read 9:00 AM — neither the browser zone nor `_server_tz_offset()` knows
+  // that, and per-profile the same process can host jobs on different
+  // offsets (DST flips the offset twice a year too).
+  //
+  // `_formatInIsoTz()` parses the ±HH:MM out of the string, shifts the
+  // instant by it and formats with timeZone:'UTC' — so the wall clock comes
+  // from the job's own data.  Fallback for a value with no offset (naive):
+  // render it in the browser zone exactly like the pre-fix panel did
+  // (`new Date(value).toLocaleString()`) — a naive string has no
+  // trustworthy server offset to apply, so the panel always renders.
+  const _isoTz = (typeof _formatInIsoTz === 'function') ? _formatInIsoTz : () => null;
+  const _fmtDate = (value) => _isoTz(value) || new Date(value).toLocaleString();
+  const nextRun = job.next_run_at ? _fmtDate(job.next_run_at) : t('not_available');
+  const lastRun = job.last_run_at ? _fmtDate(job.last_run_at) : t('never');
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
@@ -1274,6 +1305,7 @@ function _renderCronDetail(job){
         <p>Switch to ${esc(ownerProfileLabel)} to run, edit, or inspect live status and output for this cron job.</p>
       </div>` : '';
   const toastNotifications = job.toast_notifications !== false;
+  const badgeNotifications = job.badge_notifications !== false;
   const outputTitle = _cronOutputTitle(job);
   const skillsRow = isNoAgent ? '' : `<div class="detail-row"><div class="detail-row-label">${esc(t('cron_skills_label') || 'Skills')}</div><div class="detail-row-value">${esc(skills)}</div></div>`;
   const instructionCard = isNoAgent ? _cronScriptCardHtml(job) : _cronAgentPromptCardHtml(job);
@@ -1293,6 +1325,7 @@ function _renderCronDetail(job){
         ${showOwnerRow ? `<div class="detail-row"><div class="detail-row-label">Owner profile</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? (t('cron_toast_notifications_enabled') || 'Enabled') : (t('cron_toast_notifications_disabled') || 'Disabled'))}</span></div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('cron_badge_notifications_label') || 'Tasks badge')}</div><div class="detail-row-value"><span class="detail-badge ${badgeNotifications ? 'active' : ''}">${esc(badgeNotifications ? (t('cron_badge_notifications_enabled') || 'Enabled') : (t('cron_badge_notifications_disabled') || 'Disabled'))}</span></div></div>
         ${skillsRow}
         ${lastError}
       </div>
@@ -1574,6 +1607,7 @@ function duplicateCurrentCron(){
     deliver: job.deliver || 'local',
     profile: job.profile || '',
     toast_notifications: job.toast_notifications !== false,
+    badge_notifications: job.badge_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
     model: job.model || '',
@@ -1637,6 +1671,7 @@ function openCronEdit(job){
     deliver: job.deliver || 'local',
     profile: job.profile || '',
     toast_notifications: job.toast_notifications !== false,
+    badge_notifications: job.badge_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
     model: job.model || '',
@@ -1651,13 +1686,14 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, badge_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
   if (!body || !title) return;
   const isNoAgent = !!no_agent;
   const toastNotifications = toast_notifications !== false;
+  const badgeNotifications = badge_notifications !== false;
   title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
   const promptBlock = isNoAgent ? '' : `
         <div class="detail-form-row">
@@ -1758,6 +1794,13 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
           <label class="detail-form-check" for="cronFormToastNotifications">
             <input type="checkbox" id="cronFormToastNotifications" ${toastNotifications ? 'checked' : ''}>
             <span>${esc(t('cron_toast_notifications_hint') || 'Show a toast when this cron finishes.')}</span>
+          </label>
+        </div>
+        <div class="detail-form-row">
+          <label for="cronFormBadgeNotifications">${esc(t('cron_badge_notifications_label') || 'Tasks badge')}</label>
+          <label class="detail-form-check" for="cronFormBadgeNotifications">
+            <input type="checkbox" id="cronFormBadgeNotifications" ${badgeNotifications ? 'checked' : ''}>
+            <span>${esc(t('cron_badge_notifications_hint') || 'Count this job\u0027s completions in the Tasks badge and new-run marker. Turn off for high-frequency silent jobs.')}</span>
           </label>
         </div>
         ${skillsBlock}
@@ -1966,6 +2009,7 @@ async function saveCronForm(){
   const delivEl=$('cronFormDeliver');
   const profileEl=$('cronFormProfile');
   const toastEl=$('cronFormToastNotifications');
+  const badgeEl=$('cronFormBadgeNotifications');
   const errEl=$('cronFormError');
   if(!schEl||!errEl) return;
   const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
@@ -1976,6 +2020,7 @@ async function saveCronForm(){
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
   const toastNotifications=toastEl?!!toastEl.checked:true;
+  const badgeNotifications=badgeEl?!!badgeEl.checked:true;
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
@@ -1984,7 +2029,7 @@ async function saveCronForm(){
     const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
     const selectedModel = modelEl ? (modelEl.value || '').trim() : '';
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
+      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications};
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       if (deliver) updates.deliver = deliver;
@@ -2014,7 +2059,7 @@ async function saveCronForm(){
       if (job) openCronDetail(job);
       return;
     }
-    const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications};
+    const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications};
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
@@ -5341,7 +5386,7 @@ const MEMORY_SECTIONS = [
   { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
   { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
   { key: 'soul',   labelKey: 'agent_soul', emptyKey: 'no_soul_yet', iconKey: 'sparkles' },
-  { key: 'project_context', label: 'Project Context', empty: 'No project context file found for this workspace.', iconKey: 'file-text', readOnly: true },
+  { key: 'project_context', labelKey: 'memory_project_context_title', emptyKey: 'memory_project_context_empty', iconKey: 'file-text', readOnly: true },
   { key: 'external_notes', labelKey: 'external_notes_sources', emptyKey: 'external_notes_empty', iconKey: 'book-open' },
 ];
 
@@ -5948,7 +5993,13 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
     async()=>{
       closeWsDropdown();
       try{
-        await newSession(false,{worktree:true});
+        // Pass the DISPLAYED workspace explicitly: with a project bound to a
+        // different workspace, newSession()'s active-project merge would
+        // otherwise fill `workspace` with the project's default and the
+        // worktree would be created there (a non-git default made the request
+        // 400). An explicit `workspace` option wins over any project binding —
+        // same opt-out switchToWorkspace() below uses for the same reason.
+        await newSession(false,{worktree:true,workspace:currentWs});
         await renderSessionList();
         const msg=$('msg');
         if(msg)msg.focus();
@@ -6498,7 +6549,12 @@ async function switchToWorkspace(path,name){
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
-    if(typeof newSession==='function') await newSession(false);
+    // Also pass the workspace explicitly: with a project bound to workspace A,
+    // an active project filter would otherwise merge the project's default
+    // workspace into the request and the explicit B choice would lose (the
+    // chip-new-chat path posts A, master posts B). An explicit `workspace`
+    // option wins over any project binding in newSession().
+    if(typeof newSession==='function') await newSession(false,{workspace:path});
     showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
@@ -7021,6 +7077,8 @@ function _openProfileSwitchSessionBrowser(){
     try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
     sidebar.classList.remove('mobile-session-page');
     sidebar.classList.add('mobile-panel-drawer','mobile-open');
+    // #7924: an open drawer must never stay inert (see mobileSwitchPanel).
+    if(typeof _setPanelInert==='function')_setPanelInert(sidebar,true);
   }catch(_){}
 }
 
@@ -8119,113 +8177,82 @@ function _extractSettingsValueText(field) {
   return chunks.join(' ');
 }
 
-async function _buildSettingsIndex() {
-  if (_settingsIndex) return;
-  // Memoize the in-flight build so concurrent searches share one pass; the
-  // lazy pane loaders are not guaranteed re-entrant.
+function _settingsSearchIdentityBase(entry) {
+  return JSON.stringify([
+    entry.sectionKey || '',
+    entry.i18nKey || '',
+    entry.cardName || '',
+    entry.fieldLabel || '',
+    entry.label || '',
+  ]);
+}
+
+function _buildSettingsIndex() {
+  // Share one lazy-pane build across concurrent searches.
   if (_settingsIndexPromise) return _settingsIndexPromise;
+  if (_settingsIndex) return null;
+  _settingsIndex = _collectSettingsIndex(false);
   const promise = (async () => {
-    // Ensure lazy-loaded panes are populated before reading the DOM
     await Promise.all([loadProvidersPanel(), loadPluginsPanel(), loadExtensionsPanel()]);
-    const index = [];
-    const add = (entry) => {
-      index.push({ ...entry, _settingsSearchIndex: index.length });
-    };
-    const sectionMap = {
-      settingsPaneConversation: 'conversation',
-      settingsPaneAppearance: 'appearance',
-      settingsPanePreferences: 'preferences',
-      settingsPaneProviders: 'providers',
-      settingsPanePlugins: 'plugins',
-      settingsPaneExtensions: 'extensions',
-      settingsPaneSystem: 'system',
-      settingsPaneHelp: 'help',
-    };
-    for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
-      const pane = $(paneId);
-      if (!pane) continue;
-      pane.querySelectorAll('.settings-field').forEach(field => {
-        // The i18n key may live on the <label> itself (label[data-i18n]) OR on
-        // a child of the label — the common toggle shape is
-        // <label><input><span data-i18n="..."></span></label>. Match both, plus
-        // a plain <label> with no i18n key, so every field is searchable
-        // (previously only label[data-i18n] indexed, silently dropping most
-        // checkbox settings). #4340 review fix.
-        const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
-        if (!labelEl) return;
-        const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
-        const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
-        if (!titleText) return;
-        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
-        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
-        const searchBlob = [titleText, valueText, descriptionText, field.textContent]
-          .filter(Boolean)
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        add({
-          label: titleText,
-          titleText,
-          valueText,
-          descriptionText,
-          searchBlob,
-          sectionKey,
-          i18nKey,
-          el: field,
-        });
+    // Do not resurrect an index invalidated by a panel-session reset.
+    if (_settingsIndexPromise === promise) {
+      _settingsIndex = _collectSettingsIndex(true);
+      _settingsIndexPromise = null;
+    }
+  })().catch(e => { if (_settingsIndexPromise === promise) { _settingsIndex = null; _settingsIndexPromise = null; } throw e; });
+  _settingsIndexPromise = promise;
+  return promise;
+}
+
+function _collectSettingsIndex(includeDynamic = true) {
+  const index = [];
+  const add = (entry) => {
+    index.push({ ...entry, _settingsSearchIndex: index.length });
+  };
+  const sectionMap = {
+    settingsPaneConversation: 'conversation',
+    settingsPaneAppearance: 'appearance',
+    settingsPanePreferences: 'preferences',
+    settingsPaneProviders: 'providers',
+    settingsPanePlugins: 'plugins',
+    settingsPaneExtensions: 'extensions',
+    settingsPaneSystem: 'system',
+    settingsPaneHelp: 'help',
+  };
+  for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
+    if (!includeDynamic && ['providers', 'plugins', 'extensions'].includes(sectionKey)) continue;
+    const pane = $(paneId);
+    if (!pane) continue;
+    pane.querySelectorAll('.settings-field').forEach(field => {
+      // Cover i18n keys on labels, nested spans, and plain labels so toggle
+      // settings remain searchable. #4340 review fix.
+      const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
+      if (!labelEl) return;
+      const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
+      const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
+      if (!titleText) return;
+      const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+      const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
+      const searchBlob = [titleText, valueText, descriptionText, field.textContent]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      add({
+        label: titleText,
+        titleText,
+        valueText,
+        descriptionText,
+        searchBlob,
+        sectionKey,
+        i18nKey,
+        el: field,
       });
-      if (sectionKey === 'providers') {
-        pane.querySelectorAll('.provider-card').forEach(card => {
-          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) {
-            const titleText = cardName;
-            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
-            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
-            const searchBlob = [cardName, valueText, descriptionText, card.textContent]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            add({
-              label: cardName,
-              titleText,
-              valueText,
-              descriptionText,
-              searchBlob,
-              sectionKey,
-              el: card,
-              cardName,
-            });
-          }
-          card.querySelectorAll('.provider-card-field').forEach(field => {
-            const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
-            const label = [cardName, fieldLabel].filter(Boolean).join(' ');
-            if (!label) return;
-            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
-            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
-            const searchBlob = [label, valueText, descriptionText, field.textContent]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            add({
-              label,
-              titleText: label,
-              valueText,
-              descriptionText,
-              searchBlob,
-              sectionKey,
-              el: field,
-              cardName,
-              fieldLabel,
-            });
-          });
-        });
-      }
-      if (sectionKey === 'plugins') {
-        pane.querySelectorAll('.plugin-card').forEach(card => {
-          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (!cardName) return;
+    });
+    if (sectionKey === 'providers') {
+      pane.querySelectorAll('.provider-card').forEach(card => {
+        const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+        if (cardName) {
           const titleText = cardName;
           const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
           const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
@@ -8244,15 +8271,58 @@ async function _buildSettingsIndex() {
             el: card,
             cardName,
           });
+        }
+        card.querySelectorAll('.provider-card-field').forEach(field => {
+          const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+          const label = [cardName, fieldLabel].filter(Boolean).join(' ');
+          if (!label) return;
+          const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+          const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
+          const searchBlob = [label, valueText, descriptionText, field.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          add({
+            label,
+            titleText: label,
+            valueText,
+            descriptionText,
+            searchBlob,
+            sectionKey,
+            el: field,
+            cardName,
+            fieldLabel,
+          });
         });
-      }
+      });
     }
-    // A panel-session reset while building clears the memo; drop this result
-    // instead of resurrecting a stale index for the new session.
-    if (_settingsIndexPromise === promise) _settingsIndex = index;
-  })().catch(e => { if (_settingsIndexPromise === promise) _settingsIndexPromise = null; throw e; });
-  _settingsIndexPromise = promise;
-  return promise;
+    if (sectionKey === 'plugins') {
+      pane.querySelectorAll('.plugin-card').forEach(card => {
+        const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+        if (!cardName) return;
+        const titleText = cardName;
+        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+        const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        add({
+          label: cardName,
+          titleText,
+          valueText,
+          descriptionText,
+          searchBlob,
+          sectionKey,
+          el: card,
+          cardName,
+        });
+      });
+    }
+  }
+  return index;
 }
 
 async function filterSettings(query) {
@@ -8261,55 +8331,96 @@ async function filterSettings(query) {
   const q = (query || '').trim().toLowerCase();
   if (!q) { ++_settingsSearchSeq; resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
   const seq = ++_settingsSearchSeq;
-  await _buildSettingsIndex();
-  // A newer keystroke superseded this query while the index was building.
-  if (seq !== _settingsSearchSeq) return;
-  const sectionLabels = {
-    conversation: t('settings_tab_conversation') || 'Conversation',
-    appearance: t('settings_tab_appearance') || 'Appearance',
-    preferences: t('settings_tab_preferences') || 'Preferences',
-    providers: t('providers_tab_title') || 'Providers',
-    plugins: t('settings_tab_plugins') || 'Plugins',
-    extensions: t('settings_tab_extensions') || 'Extensions',
-    system: t('settings_tab_system') || 'System',
-    help: t('settings_tab_help') || 'Help',
-  };
-  const matches = (_settingsIndex || []).map((entry) => {
-    const score = _scoreSettingsSearchMatch(entry, q);
-    return score ? { entry, score, index: entry._settingsSearchIndex } : null;
-  }).filter(Boolean);
-  if (!matches.length) {
-    resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
-    resultsEl.style.display = '';
-    return;
-  }
-  resultsEl.innerHTML = '';
-  matches.sort((left, right) => {
-    if (left.score.bucketIndex !== right.score.bucketIndex) {
-      return left.score.bucketIndex - right.score.bucketIndex;
+  const buildPromise = _buildSettingsIndex();
+  const renderResults = (dynamicPanesLoading = false) => {
+    const sectionLabels = {
+      conversation: t('settings_tab_conversation') || 'Conversation',
+      appearance: t('settings_tab_appearance') || 'Appearance',
+      preferences: t('settings_tab_preferences') || 'Preferences',
+      providers: t('providers_tab_title') || 'Providers',
+      plugins: t('settings_tab_plugins') || 'Plugins',
+      extensions: t('settings_tab_extensions') || 'Extensions',
+      system: t('settings_tab_system') || 'System',
+      help: t('settings_tab_help') || 'Help',
+    };
+    const matches = (_settingsIndex || []).map((entry) => {
+      const score = _scoreSettingsSearchMatch(entry, q);
+      return score ? { entry, score, index: entry._settingsSearchIndex } : null;
+    }).filter(Boolean);
+    if (!matches.length) {
+      if (dynamicPanesLoading) {
+        resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
+        return;
+      }
+      resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
+      resultsEl.style.display = '';
+      return;
     }
-    if (left.score.matchIndex !== right.score.matchIndex) {
-      return left.score.matchIndex - right.score.matchIndex;
-    }
-    return left.index - right.index;
-  });
-  for (const { entry: m } of matches.slice(0, 12)) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'settings-search-result';
-    item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
-      `<span class="settings-search-arrow">›</span>` +
-      `<span class="settings-search-label">${esc(m.label)}</span>`;
-    item.addEventListener('click', () => {
-      _navigateToSettingsField(m);
-      resultsEl.style.display = 'none';
-      resultsEl.innerHTML = '';
-      const input = $('settingsSearch');
-      if (input) input.value = '';
+    matches.sort((left, right) => {
+      if (left.score.bucketIndex !== right.score.bucketIndex) {
+        return left.score.bucketIndex - right.score.bucketIndex;
+      }
+      if (left.score.matchIndex !== right.score.matchIndex) {
+        return left.score.matchIndex - right.score.matchIndex;
+      }
+      return left.index - right.index;
     });
-    resultsEl.appendChild(item);
-  }
-  resultsEl.style.display = '';
+    const visibleMatches = matches.slice(0, 12);
+    const identityCounts = new Map();
+    const nextIdentities = visibleMatches.map(({ entry }) => {
+      const identityBase = _settingsSearchIdentityBase(entry);
+      const identityIndex = identityCounts.get(identityBase) || 0;
+      identityCounts.set(identityBase, identityIndex + 1);
+      return `${identityBase}:${identityIndex}`;
+    });
+    const currentItems = [...resultsEl.querySelectorAll('.settings-search-result')];
+    const identitiesUnchanged = currentItems.length === nextIdentities.length &&
+      currentItems.every((item, index) => item.dataset.settingsSearchIdentity === nextIdentities[index]);
+    if (identitiesUnchanged) {
+      resultsEl.style.display = '';
+      return;
+    }
+    const activeResult = document.activeElement && typeof document.activeElement.closest === 'function'
+      ? document.activeElement.closest('.settings-search-result')
+      : null;
+    const focusedIdentity = activeResult && resultsEl.contains(activeResult)
+      ? activeResult.dataset.settingsSearchIdentity
+      : null;
+    resultsEl.innerHTML = '';
+    let focusTarget = null;
+    for (const [matchIndex, { entry: m }] of visibleMatches.entries()) {
+      const identity = nextIdentities[matchIndex];
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'settings-search-result';
+      item.dataset.settingsSearchIdentity = identity;
+      item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
+        `<span class="settings-search-arrow">›</span>` +
+        `<span class="settings-search-label">${esc(m.label)}</span>`;
+      item.addEventListener('click', () => {
+        ++_settingsSearchSeq;
+        _navigateToSettingsField(m);
+        resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
+        const input = $('settingsSearch');
+        if (input) input.value = '';
+      });
+      resultsEl.appendChild(item);
+      if (focusedIdentity === identity) focusTarget = item;
+    }
+    resultsEl.style.display = '';
+    const focusDestination = focusTarget || (focusedIdentity ? $('settingsSearch') : null);
+    if (focusDestination && typeof focusDestination.focus === 'function') {
+      focusDestination.focus({ preventScroll: true });
+    }
+  };
+  renderResults(!!buildPromise);
+  if (!buildPromise) return;
+  await buildPromise;
+  // A newer keystroke superseded this query while the dynamic panes loaded.
+  if (seq !== _settingsSearchSeq) return;
+  renderResults(false);
 }
 
 function _scoreSettingsSearchMatch(entry, q) {
@@ -9011,12 +9122,53 @@ async function _autosavePreferencesSettings(payload){
     const pwField=$('settingsPassword');
     const pwDirty=!!(pwField&&pwField.value);
     const modelSel=$('settingsModel');
+    // The raw select value and _settingsHermesDefaultModelOnOpen speak the same
+    // language — both are the qualified dropdown value (@<provider>:<model> for
+    // catalog options), as written on open (models.default_model) and on save
+    // (body.default_model). Comparing the provider-stripped modelState.model
+    // against it marked the picker dirty on every autosave after a qualified
+    // default was saved (#7865 re-gate), so only the provider is taken from
+    // modelState — a same-value/different-provider re-pick still counts.
+    //
+    // The model half of that comparison must also accept the normalized form:
+    // when the catalog producer (_deduplicate_model_ids) hits a collision it
+    // qualifies the custom provider's option (@custom:foo:claude-sonnet-5)
+    // while the saved default is stored as the bare model + provider
+    // (claude-sonnet-5 / custom:foo). An unchanged default then only matches
+    // on the captured model, so the raw-value side alone reports a phantom
+    // edit and the unsaved-changes bar never clears (#7865 re-gate 2). The
+    // provider still decides on its own, so a same-model/different-provider
+    // re-pick keeps reading dirty.
     const modelState=(typeof _captureModelDropdownSelection==='function'&&modelSel)
       ? (_captureModelDropdownSelection(modelSel)||{model:String((modelSel&&modelSel.value)||''),model_provider:null})
       : {model:String((modelSel&&modelSel.value)||''),model_provider:null};
+    const rawModelValue=String((modelSel&&modelSel.value)||'');
+    const capturedModelValue=String((modelState&&modelState.model)||'');
+    const savedModelOnOpen=String(_settingsHermesDefaultModelOnOpen||'');
+    // #7865 SHOULD-FIX (re-gate): a THIRD form. After "Save Settings" the server
+    // stores the bare model while the default-model global still holds the raw
+    // qualified value the picker rendered. Re-opening Settings therefore shows
+    // the qualified option, and _modelStateForSelect now SKIPS the strip for a
+    // configured default — so captured and raw are both
+    // "@custom:foo:claude-sonnet-5" while saved-on-open is the bare
+    // "claude-sonnet-5". Neither of the two comparisons above matches, and the
+    // unsaved-changes bar reappears on the next autosaved edit even though
+    // nothing was changed.
+    //
+    // Accept the raw value with the captured provider's own "@<provider>:"
+    // prefix removed. It is still anchored on the captured provider, so a
+    // same-model/different-provider re-pick keeps reading dirty.
+    const _capturedProvider=String((modelState&&modelState.model_provider)||'').trim();
+    const _ownPrefix=_capturedProvider?`@${_capturedProvider}:`:'';
+    const prefixStrippedValue=(_ownPrefix&&rawModelValue.toLowerCase().startsWith(_ownPrefix.toLowerCase()))
+      ?rawModelValue.slice(_ownPrefix.length)
+      :rawModelValue;
+    const modelUnchanged=rawModelValue===savedModelOnOpen
+      ||capturedModelValue===savedModelOnOpen
+      ||prefixStrippedValue===savedModelOnOpen;
     const modelDirty=!!(
       modelSel&&(
-        (modelState.model||'')!==(_settingsHermesDefaultModelOnOpen||'')||
+        !modelUnchanged||
         ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null))
       )
     );
@@ -9699,14 +9851,40 @@ async function loadSettingsPanel(){
           {value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
+          {value:'en-US-AndrewMultilingualNeural',label:'Andrew (English, Male, Multilingual)'},
+          {value:'en-US-AvaMultilingualNeural',label:'Ava (English, Female, Multilingual)'},
+          {value:'en-US-BrianMultilingualNeural',label:'Brian (English, Male, Multilingual)'},
+          {value:'en-US-EmmaMultilingualNeural',label:'Emma (English, Female, Multilingual)'},
           {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
+          {value:'fr-FR-RemyMultilingualNeural',label:'Rémy (French, Male, Multilingual)'},
+          {value:'fr-FR-VivienneMultilingualNeural',label:'Vivienne (French, Female, Multilingual)'},
+          {value:'fr-FR-DeniseNeural',label:'Denise (French, Female)'},
+          {value:'fr-FR-EloiseNeural',label:'Eloise (French, Female, Child)'},
+          {value:'fr-FR-HenriNeural',label:'Henri (French, Male)'},
+          {value:'fr-CA-AntoineNeural',label:'Antoine (French Canadian, Male)'},
+          {value:'fr-CA-JeanNeural',label:'Jean (French Canadian, Male)'},
+          {value:'fr-CA-SylvieNeural',label:'Sylvie (French Canadian, Female)'},
+          {value:'fr-CA-ThierryNeural',label:'Thierry (French Canadian, Male)'},
         ];
         ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
-        edgeVoices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.value;opt.textContent=v.label;
-          if(v.value===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
+        // Group by language (macOS / Windows / Edge Read Aloud convention) now that
+        // the list spans five locales; order inside each group is unchanged.
+        const edgeVoiceGroups=[
+          ['zh-CN','Chinese'],['en-US','English'],['id-ID','Indonesian'],
+          ['fr-FR','French'],['fr-CA','French (Canada)'],
+        ];
+        edgeVoiceGroups.forEach(([prefix,groupLabel])=>{
+          const voices=edgeVoices.filter(v=>v.value.startsWith(prefix+'-'));
+          if(!voices.length) return;
+          const og=document.createElement('optgroup');
+          og.label=groupLabel;
+          voices.forEach(v=>{
+            const opt=document.createElement('option');
+            opt.value=v.value;opt.textContent=v.label;
+            if(v.value===current) opt.selected=true;
+            og.appendChild(opt);
+          });
+          ttsVoiceSel.appendChild(og);
         });
       } else {
         if(!('speechSynthesis' in window)){
@@ -9714,7 +9892,10 @@ async function loadSettingsPanel(){
           return;
         }
         const voices=speechSynthesis.getVoices();
-        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
+        // #7582: the rebuilt default option would otherwise be hardcoded
+        // English; route it through the same key the static HTML option
+        // uses so locale switching keeps both call sites in sync.
+        ttsVoiceSel.innerHTML=`<option value="" data-i18n="settings_tts_voice_default_system">${t('settings_tts_voice_default_system')}</option>`;
         voices.forEach(v=>{
           const opt=document.createElement('option');
           opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
@@ -12272,6 +12453,7 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
+    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
     const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
@@ -12307,14 +12489,14 @@ async function checkUpdatesNow(channelOverride){
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
         if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       }
     }
   } catch(e){
@@ -12937,7 +13119,14 @@ async function saveSettings(andClose){
         try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
-        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        // The provider comes from the same dropdown selection as `model` above
+        // (both captured from $('settingsModel')), so there is no cross-check to
+        // perform against the raw select value: the raw value can be a qualified
+        // @<provider>:<model> id while modelState.model carries the
+        // provider-stripped model, and comparing them directly would write null
+        // for every qualified option — clearing window._activeProvider on save
+        // (#7865 re-gate).
+        body.default_model_provider=modelState.model_provider||null;
         }catch(_modelErr){
           // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
           // one provider) is user-fixable, not a partial success. Surface the
@@ -12973,7 +13162,14 @@ async function saveSettings(andClose){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
-        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        // The provider comes from the same dropdown selection as `model` above
+        // (both captured from $('settingsModel')), so there is no cross-check to
+        // perform against the raw select value: the raw value can be a qualified
+        // @<provider>:<model> id while modelState.model carries the
+        // provider-stripped model, and comparing them directly would write null
+        // for every qualified option — clearing window._activeProvider on save
+        // (#7865 re-gate).
+        body.default_model_provider=modelState.model_provider||null;
         }catch(_modelErr){
           // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
           // one provider) is user-fixable, not a partial success. Surface the
@@ -13070,11 +13266,20 @@ let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
 let _cronPollGeneration=0;
+// #7652 review follow-up: completions that fired while the tab was hidden
+// but reached no surface (the user has notifications disabled or denied) are
+// queued here so a reload of the page (or a visibility change) can flush them
+// as a toast. Without this the completion is consumed with no surface at all.
+const _cronPendingToasts=[];
+let _cronPollInFlight=false;  // one tick at a time (overlapping ticks double-notify)
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
 
 function _resetCronUnreadForProfileSwitch(){
   _cronPollGeneration++;
   _cronNewJobIds.clear();
+  // Queued completions belong to the profile being left; never flush their
+  // toasts into the incoming profile's timeline (#5960 gate).
+  _cronPendingToasts.length=0;
   _cronPollSince=Date.now()/1000;
   // Clear persisted cron sidebar markers from the profile we left. Non-cron
   // completion unread stays intact (#5960 gate: sticky all-profile leak).
@@ -13093,32 +13298,128 @@ window.addEventListener('hermes:cron_created', () => {
 
 function startCronPolling(){
   if(_cronPollTimer) return;
-  _cronPollTimer=setInterval(async()=>{
-    if(document.hidden) return;  // don't poll when tab is in background
-    try{
-      const pollGeneration=_cronPollGeneration;
-      const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
-      if(pollGeneration!==_cronPollGeneration) return;
-      if(data.completions&&data.completions.length>0){
-        for(const c of data.completions){
-          if(c.toast_notifications !== false){
-            showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
-          }
-          _cronPollSince=Math.max(_cronPollSince,c.completed_at);
-          if(c.job_id) _cronNewJobIds.add(String(c.job_id));
-          if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
-            const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
-            _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
-              source:'cron',
-              profile:activeProfile,
-            });
+  _cronPollTimer=setInterval(_runCronPollTick,30000);
+}
+
+// One recent-completions tick. Split out of the interval callback so the
+// in-flight guard can span the whole await (see _cronPollInFlight): two
+// overlapping ticks would each read the same _cronPollSince and each notify
+// the same completion (#7652 review).
+async function _runCronPollTick(){
+  if(_cronPollInFlight) return;
+  _cronPollInFlight=true;
+  try{
+    const pollGeneration=_cronPollGeneration;
+    const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+    if(pollGeneration!==_cronPollGeneration) return;
+    if(data.completions&&data.completions.length>0){
+      for(const c of data.completions){
+        if(c.toast_notifications !== false){
+          // #7257: even when the tab is backgrounded we still want the
+          // user to know a cron job just completed. With the old
+          // ``if(document.hidden) return`` gate, the entire recent-fetch
+          // skipped silently and no surface (toast or notification) ever
+          // fired. Now: visible tabs keep the existing showToast,
+          // hidden tabs get a browser notification routed through
+          // sendBrowserNotification (which itself honors the user's
+          // notification permission and enabled setting). _cronPollSince,
+          // _cronNewJobIds, and the session-unread marker all advance
+          // regardless of which surface fires.
+          const statusText = c.status==='error' ? t('status_failed') : t('status_completed');
+          if(document.hidden){
+            // A hidden completion only counts as delivered when the
+            // notification actually reached the user's channel. The helper
+            // awaits the real display result, so a display failure is NOT
+            // mistaken for delivery and the completion is queued instead
+            // (#7652 review: SILENT gap).
+            const notified=await _cronSendHiddenCompletionNotification(c.name,statusText,c.session_id);
+            // The await yields: the profile may have switched (the queue
+            // state belongs to the old profile) or the tab may have become
+            // visible (the user is already looking at a live surface). Skip
+            // a stale tick's fallback entirely.
+            if(pollGeneration!==_cronPollGeneration) return;
+            if(!notified){
+              if(typeof document!=='undefined'&&document.hidden){
+                // Notification channel closed or the display failed: queue
+                // the completion so the user still gets it as a toast when
+                // the tab comes back. Otherwise _cronPollSince advances past
+                // it and the completion is consumed with no surface at all.
+                _cronPendingToasts.push({name:c.name,statusText});
+              }else{
+                // The tab became visible while the delivery was pending:
+                // surface it immediately rather than waiting for another
+                // visibility change.
+                showToast(t('cron_completion_status', c.name, statusText), 4000);
+              }
+            }
+          } else {
+            showToast(t('cron_completion_status', c.name, statusText), 4000);
           }
         }
-        // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
-        updateCronBadge();
+        _cronPollSince=Math.max(_cronPollSince,c.completed_at);
+        if(c.job_id && c.badge_notifications !== false) _cronNewJobIds.add(String(c.job_id));
+        if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
+          const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+          _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
+            source:'cron',
+            profile:activeProfile,
+          });
+        }
       }
-    }catch(e){}
-  },30000);
+      // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
+      updateCronBadge();
+    }
+  }catch(e){}
+  finally{ _cronPollInFlight=false; }
+}
+
+// True when a notification for a completion would actually reach the user
+// right now. sendBrowserNotification silently no-ops otherwise, so a hidden
+// tab must not treat its completion as delivered (#7652 review).
+function _cronCanNotify(){
+  return !!(window._notificationsEnabled && typeof Notification!=='undefined'
+    && Notification.permission==='granted');
+}
+
+// Notify for a completion that arrived while the tab was hidden. Resolves true
+// only when sendBrowserNotification reports that the notification actually
+// reached the user's notification channel, so the caller can decide whether to
+// queue a fallback toast. This must be AWAITED: `_cronCanNotify()` is only a
+// permission pre-check, and the real primitive still resolves false when the
+// service-worker path finds no active registration while the direct
+// Notification constructor throws — the normal case on some mobile browsers
+// and installed-PWA contexts that only allow SW notifications. Returning true
+// without awaiting made such a completion vanish (#7652 review).
+async function _cronSendHiddenCompletionNotification(name,statusText,sessionId){
+  if(!_cronCanNotify()) return false;
+  if(typeof sendBrowserNotification!=='function') return false;
+  // #7652 review: pass an explicit sessionless marker when the completion has
+  // no session_id. Without it _notificationOptions falls back to the user's
+  // CURRENT session, so clicking the notification opens the wrong chat (and
+  // reuses that session's notification tag). The `panel` intent is the click
+  // target: a sessionless completion belongs to no chat, so the click must
+  // land on the Tasks panel the run lives in — not the root, which would
+  // restore the last chat the user had open (#7652 review round 4).
+  try{
+    const delivered=await sendBrowserNotification(name,statusText,{sid:sessionId||null,sessionless:!sessionId,panel:!sessionId?'tasks':''});
+    // Fail closed on anything that is not an explicit success: the primitive
+    // returns undefined when it short-circuits before delivery.
+    return delivered===true;
+  }catch(_err){
+    return false;
+  }
+}
+
+// Flush completions that arrived while hidden but reached no surface, as
+// toasts. Runs from the visibilitychange handler below; a no-op while the
+// document is still hidden.
+function _flushCronPendingToasts(){
+  if(!_cronPendingToasts.length) return;
+  if(typeof document!=='undefined'&&document.hidden) return;
+  while(_cronPendingToasts.length){
+    const queued=_cronPendingToasts.shift();
+    showToast(t('cron_completion_status', queued.name, queued.statusText), 4000);
+  }
 }
 
 function updateCronBadge(){
@@ -13154,6 +13455,14 @@ switchPanel=async function(name,opts){ return _origSwitchPanel(name,opts); };
 
 // Start polling on page load
 startCronPolling();
+
+// #7652 review: a completion that fired while the tab was hidden and could not
+// notify (notifications disabled/denied) is queued in _cronPendingToasts.
+// Flushing on becoming visible is what turns it into a toast — without this
+// listener the queued completion would sit there forever.
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden) _flushCronPendingToasts();
+});
 
 // ── Background agent error tracking ──────────────────────────────────────────
 

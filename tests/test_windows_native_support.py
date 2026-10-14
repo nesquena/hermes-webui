@@ -140,6 +140,8 @@ class TestBootstrapForegroundWindows:
     def stub_main_dependencies(self, monkeypatch, tmp_path):
         import bootstrap as bs
         monkeypatch.setattr(bs, "ensure_supported_platform", lambda: None)
+        monkeypatch.setattr(bs, "_check_port_available", lambda *a, **kw: None)
+        monkeypatch.setattr(bs, "_already_serving_scheme", lambda *a, **kw: "")
         monkeypatch.setattr(bs, "discover_agent_dir", lambda: tmp_path / "agent")
         monkeypatch.setattr(bs, "hermes_command_exists", lambda: True)
         python_exe = sys.executable

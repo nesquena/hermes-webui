@@ -434,10 +434,11 @@ async function _manualTitleRegenerateTimeoutMs(){
 function _formatSessionModelWithGateway(s){
   if(!s||!s.model)return'';
   const routing=(typeof _latestGatewayRoutingForSession==='function')?_latestGatewayRoutingForSession(s):(s.gateway_routing||null);
+  const fallbackModel=s.last_used_model||s.model;
   if(typeof _formatGatewayModelLabel==='function'){
-    return _formatGatewayModelLabel(s.model,s.model,routing)||getModelLabel(s.model);
+    return _formatGatewayModelLabel(fallbackModel,getModelLabel(fallbackModel),routing)||getModelLabel(fallbackModel);
   }
-  return s.model;
+  return fallbackModel;
 }
 
 function _getSessionViewedCounts() {
@@ -1609,7 +1610,13 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
   const anchorActivityScene=(snapshot.anchor_activity_scene&&snapshot.anchor_activity_scene.version==='activity_scene_v1')
     ? snapshot.anchor_activity_scene
     : ((snapshot.anchorActivityScene&&snapshot.anchorActivityScene.version==='activity_scene_v1')?snapshot.anchorActivityScene:null);
-  const hasAnchorActivityScene=!!(anchorActivityScene&&Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length);
+  const hasAnchorActivityScene=!!(
+    anchorActivityScene&&(
+      (Array.isArray(anchorActivityScene.activity_rows)&&anchorActivityScene.activity_rows.length)
+      || (Array.isArray(anchorActivityScene.side_effects)&&anchorActivityScene.side_effects.length)
+      || anchorActivityScene.side_effects_truncated===true
+    )
+  );
   if(!messages.length&&!toolCalls.length&&!lastAssistantText&&!lastReasoningText&&!hasAnchorActivityScene) return null;
   return {
     streamId:String(snapshot.stream_id||snapshot.streamId||''),
@@ -1629,6 +1636,34 @@ function _serverLiveSnapshotInflight(snapshot, uploaded){
     currentLiveSegmentSeq:Number(snapshot.current_live_segment_seq||snapshot.currentLiveSegmentSeq||0)||0,
     activityBurstAnchors,
   };
+}
+
+function _notifyRunJournalSideEffectRecoveryTruncation(inflight, sid, activeStreamId){
+  const scene=inflight&&inflight.anchorActivityScene;
+  if(!scene||scene.version!=='activity_scene_v1'||scene.side_effects_truncated!==true) return false;
+  const identity=(scene.identity&&typeof scene.identity==='object')?scene.identity:{};
+  const sceneStreamId=String(identity.stream_id||inflight.streamId||'').trim();
+  const requestedStreamId=String(activeStreamId||'').trim();
+  if(requestedStreamId&&sceneStreamId&&sceneStreamId!==requestedStreamId) return false;
+  const sessionId=String(sid||identity.session_id||'').trim();
+  if(!sessionId||!sceneStreamId||typeof showToast!=='function') return false;
+  const cursor=String(inflight.lastRunJournalEventId||inflight.lastRunJournalSeq||'').trim();
+  const key=[sessionId,sceneStreamId,cursor].join('|');
+  const root=(typeof window!=='undefined')?window:globalThis;
+  const notified=root._runJournalSideEffectRecoveryTruncationNotified
+    || (root._runJournalSideEffectRecoveryTruncationNotified=new Set());
+  if(notified.has(key)) return false;
+  if(notified.size>=128){
+    const first=notified.values().next();
+    if(first&&!first.done) notified.delete(first.value);
+  }
+  notified.add(key);
+  showToast(
+    'Some saved-state updates could not be fully restored after reconnect.',
+    7000,
+    'warning'
+  );
+  return true;
 }
 
 function _selectLiveRecoveryInflight(localInflight, serverLiveSnapshot, activeStreamId){
@@ -1868,6 +1903,55 @@ function _clearEmptyComposerModelOverride(){
   _emptyComposerModelOverrideHost._emptyComposerModelOverride=null;
 }
 
+const _composerModelPickHost=typeof window!=='undefined'?window:globalThis;
+
+// Track explicit picker intent independently of S.session. During deletion the
+// picker can change both before and after the active session is cleared.
+function _rememberComposerModelPick(model, modelProvider){
+  const resolvedModel=String(model||'').trim();
+  if(!resolvedModel) return;
+  const previous=_composerModelPickHost._composerModelPick;
+  _composerModelPickHost._composerModelPick={
+    model:resolvedModel,
+    model_provider:modelProvider||null,
+    revision:(Number(previous&&previous.revision||0)||0)+1,
+  };
+}
+
+function _readComposerModelPick(){
+  const state=_composerModelPickHost._composerModelPick;
+  if(!state||!state.model) return null;
+  return {
+    model:String(state.model||''),
+    model_provider:state.model_provider||null,
+    revision:Number(state.revision||0)||0,
+  };
+}
+
+function _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete){
+  const currentPick=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const currentRevision=Number(currentPick&&currentPick.revision||0)||0;
+  const preservePick=currentPick&&currentRevision!==(Number(modelPickRevisionAtDelete||0)||0);
+  const model=String(preservePick?currentPick.model:(window._defaultModel||'')).trim();
+  const provider=preservePick?currentPick.model_provider:(window._activeProvider||null);
+  if(preservePick){
+    if(typeof _rememberEmptyComposerModelOverride==='function'){
+      _rememberEmptyComposerModelOverride(model,provider);
+    }
+  }else if(typeof _clearEmptyComposerModelOverride==='function'){
+    _clearEmptyComposerModelOverride();
+  }
+  const modelSel=$('modelSelect');
+  if(!model||!modelSel) return null;
+  const applied=typeof _ensureModelOptionInDropdown==='function'
+    ? _ensureModelOptionInDropdown(model,modelSel,provider)
+    : (typeof _applyModelToDropdown==='function'?_applyModelToDropdown(model,modelSel,provider):null);
+  if(applied&&typeof syncReasoningChip==='function') syncReasoningChip();
+  return applied;
+}
+
 let _newSessionWorkspaceAnnouncementClearTimer=null;
 
 function _setNewSessionWorkspaceCue(message){
@@ -1958,19 +2042,52 @@ async function newSession(flash, options={}){
     _messagesTruncated=false;
     _oldestIdx=0;
     clearLiveToolCards();
-    // Explicit profile switch wins, then the current conversation, then the profile default.
+    // Chat-header/rail "+" (btnNewChat) with an active project filter applies
+    // that project's bindings (default workspace / model) exactly
+    // like the project-chip quick-create (+): selecting a project then
+    // pressing the top-level New Chat button must open the session in the
+    // project's pinned workspace. Only merge when the caller did NOT pass an
+    // explicit project_id (chip + passes one — never double-apply), and only
+    // fill fields the caller did not already set explicitly.
+    if(!Object.prototype.hasOwnProperty.call(options,'project_id')
+       && _activeProject && _activeProject!==NO_PROJECT_FILTER){
+      const _proj=(typeof _allProjects!=='undefined'?_allProjects:[]).find(p=>p.project_id===_activeProject);
+      // Profile boundary: right after a profile switch the sidebar may still
+      // expose the PREVIOUS profile's project chips (session list repaints
+      // before _allProjects refreshes), and merging its workspace/model would
+      // file the new session under the wrong profile. Only merge bindings from
+      // a project that belongs to the ACTIVE profile.
+      const _projOnActiveProfile=_proj&&(typeof _profileMatchesActiveProfile==='function'
+        ? _profileMatchesActiveProfile(_proj.profile,S.activeProfile)
+        : true);
+      if(_projOnActiveProfile){
+        const _pb=_projectBindingsForNewSession(_proj);
+        const _merged=Object.assign({},options);
+        if(_pb.workspace&&!Object.prototype.hasOwnProperty.call(_merged,'workspace')) _merged.workspace=_pb.workspace;
+        if(_pb.model&&!Object.prototype.hasOwnProperty.call(_merged,'model')) _merged.model=_pb.model;
+        if(_pb.model_provider&&!Object.prototype.hasOwnProperty.call(_merged,'model_provider')) _merged.model_provider=_pb.model_provider;
+        options=_merged;
+      }
+    }
+    // Project-bound workspace (quick-create with bindings) wins first,
+    // then explicit profile-switch, then current conversation, then profile default.
     // Provenance lets the server recover only a deleted inherited path; explicit paths stay strict.
     const switchWs=S._profileSwitchWorkspace;
     S._profileSwitchWorkspace=null;
     const sessionWs=(!switchWs&&S.session)?S.session.workspace:null;
-    const inheritWs=switchWs||sessionWs||(S._profileDefaultWorkspace||null);
+    const boundWs=(options&&options.workspace)||null;
+    const inheritWs=boundWs||switchWs||sessionWs||(S._profileDefaultWorkspace||null);
     const reqBody={
       workspace:inheritWs,
       profile:S.activeProfile||'default',
     };
     if(S.session&&S.session.session_id){
       reqBody.prev_session_id=S.session.session_id;
-      if(sessionWs) reqBody.workspace_inherited_from_prev_session=true;
+      // Provenance flag ONLY when the workspace actually came from the previous
+      // session: the server uses it to RECOVER a deleted inherited path from the
+      // last workspace, so flagging an explicit project-bound path let a project
+      // chat silently open elsewhere (Greptile P1 2026-10-10T05:08:54Z).
+      if(sessionWs&&!boundWs) reqBody.workspace_inherited_from_prev_session=true;
     }
     // Three-value worktree contract (#6022): explicit true/false is forwarded
     // verbatim; an ABSENT key lets the server apply the agent's config-level
@@ -1979,7 +2096,14 @@ async function newSession(flash, options={}){
     if(options&&Object.prototype.hasOwnProperty.call(options,'worktree')) reqBody.worktree=!!options.worktree;
     if(Object.prototype.hasOwnProperty.call(options,'project_id')){
       reqBody.project_id=options.project_id;
-    } else if(_activeProject&&_activeProject!==NO_PROJECT_FILTER){
+    } else if(_activeProject===NO_PROJECT_FILTER){
+      // The sidebar's "No project" view: send an EXPLICIT null. The server
+      // treats an absent field as "opt into auto-assignment", so omitting it
+      // filed the new chat under an auto-assigned project and then hid it from
+      // the unassigned-only list that created it (maintainer re-gate
+      // 2026-10-09T23:55:01Z). null is the "no project" the server preserves.
+      reqBody.project_id=null;
+    } else if(_activeProject){
       reqBody.project_id=_activeProject;
     }
     // Forward a pre-session toolset override only from the empty composer (#4490).
@@ -1988,11 +2112,17 @@ async function newSession(flash, options={}){
     const explicitModelOverride=(typeof _readEmptyComposerModelOverride==='function')
       ? _readEmptyComposerModelOverride()
       : null;
+    // Project-bound model (quick-create with bindings) wins over everything
+    // else — the project pins the model for sessions opened from its + button.
+    const boundModel=(options&&options.model)||null;
+    const boundProvider=(options&&options.model_provider)||null;
     const hasLoadedSession=!!(S.session&&S.session.session_id);
     let newModelState=null;
     let consumedExplicitModelOverride=false;
     let usingConfiguredDefault=false;
-    if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
+    if(boundModel){
+      newModelState={model:boundModel, model_provider:boundProvider||null};
+    }else if(!hasLoadedSession&&explicitModelOverride&&explicitModelOverride.model){
       newModelState=explicitModelOverride;
       consumedExplicitModelOverride=true;
     }else if(window._defaultModel){
@@ -2035,9 +2165,12 @@ async function newSession(flash, options={}){
       // server fast path passes the pair through verbatim (no validation) and
       // silently routes to the wrong backend — so leave model_provider=null and
       // let the slow-path family repair run (mirrors routes.py _normalize_provider_id).
-      const _fallbackProvider=_bareModel
-        ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
-        : '';
+      const _fallbackProvider=boundModel&&!boundProvider
+        ? ''  // project-bound model without an explicit provider: pin nothing,
+              // let the server's slow-path normalization resolve the family
+        : (_bareModel
+          ? ((usingConfiguredDefault?window._activeProvider:(window._activeProvider||(S.session&&S.session.model_provider)))||'')
+          : '');
       const _familyProvider=(m=>{const s=String(m||'').toLowerCase();
         if(s.startsWith('gpt'))return 'openai';if(s.startsWith('claude'))return 'anthropic';
         if(s.startsWith('gemini'))return 'google';return '';})(newModelState.model);
@@ -2050,6 +2183,13 @@ async function newSession(flash, options={}){
         ||((_bareModel&&!_familyMismatch&&!_fallbackIsNamedCustom)?(_fallbackProvider||null):null)
         ||null;
     }
+    // #7865: New Chat replaces S.session without going through loadSession(),
+    // so drop the previous session's explicit-picker evidence here (placed
+    // AFTER the provider fallback assignment on purpose — see the note in
+    // _pickerExplicitPickKey about not disturbing the newSession source-shape
+    // window). The marker must never authorize a provider override for a
+    // different (new) session.
+    if(S.session&&S.session.session_id&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(S.session.session_id);
     const data=await api('/api/session/new',{method:'POST',body:JSON.stringify(reqBody)});
     if(consumedExplicitModelOverride&&typeof _clearEmptyComposerModelOverride==='function'){
       _clearEmptyComposerModelOverride();
@@ -2059,6 +2199,35 @@ async function newSession(flash, options={}){
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     S.lastUsage={...(data.session.last_usage||{})};
+    // Project-bound reasoning effort: apply after the session exists so the
+    // effort chip / agent config reflects the project's pinned level. The
+    // binding's own model+provider are used as the effort context (falling
+    // back to the session's model) so the effort is attached to the right
+    // model family rather than the currently-selected one.
+    // Authority: this intentionally mutates the profile-default preference
+    // (agent.reasoning_effort per model family in config.yaml via
+    // /api/reasoning), not a session-local override. Nathan to decide if
+    // project/session-local scoping is desired — current contract matches
+    // the existing global reasoning_effort model.
+    //
+    // DORMANT since the UX re-gate 2026-10-08T23:39:33Z (item A): no caller
+    // forwards reasoning_effort any more — _projectBindingsForNewSession no
+    // longer does — because the per-project dialog cannot show or clear the
+    // stored value, so applying it read as a silent profile-wide change. The
+    // branch stays for per-session effort (#7881), which will re-supply the
+    // option.
+    const boundEffort=(options&&options.reasoning_effort)||null;
+    if(boundEffort&&typeof api==='function'){
+      const effModel=boundModel||(data.session&&data.session.model)||null;
+      const effProvider=boundProvider||(data.session&&data.session.model_provider)||null;
+      const effBody={effort:boundEffort};
+      if(effModel) effBody.model=effModel;
+      if(effProvider) effBody.provider=effProvider;
+      try{
+        const st=await api('/api/reasoning',{method:'POST',body:JSON.stringify(effBody)});
+        if(typeof _applyReasoningChip==='function') _applyReasoningChip((st&&st.reasoning_effort)||boundEffort, st||{});
+      }catch(_){ /* effort is a preference; a failed apply must not fail the session */ }
+    }
     if(!(options&&options.worktree)) _rememberNewChatDraftSession(S.session);
     if(flash)S.session._flash=true;
     try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
@@ -2128,40 +2297,18 @@ async function newSession(flash, options={}){
       if(_dirP&&typeof _dirP.catch==='function') _dirP.catch(()=>{});
     }
     // Refresh sidebar to include the newly created session (#3874).
-    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session')).catch(()=>{})}
+    // force:true -> deferWhileInteracting:false so the new row paints and the
+    // active highlight moves even while the pointer hovers #sessionList. The
+    // handlers used to guarantee this with their own awaited render (#7936);
+    // now that newSession() owns the sole refresh it must force the paint,
+    // matching the project "+" path (#5002: "newSession doesn't render; callers must").
+    if(typeof refreshSessionList==='function'){Promise.resolve(refreshSessionList('new-session',{force:true})).catch(()=>{})}
   })();
   try{
     return await _newSessionInFlight;
   }finally{
     _newSessionInFlight=null;
     _setNewSessionPending(false);
-  }
-}
-
-/**
- * Self-heal: clear the stuck session ID from localStorage and URL when a
- * loadSession() call failed during boot (no currentSid). This prevents the
- * browser from retrying the same dead session on every refresh.
- *
- * Called from loadSession() after 401 redirect (undefined data) or any
- * non-404 error (400, 403, 500, network). The 404 path has its own
- * inline self-heal; this helper consolidates the non-404 cases.
- *
- * Only clears when !currentSid — no session is active on screen, so
- * the stored ID is definitely stale. When currentSid is set (already
- * viewing a session), a non-404 failure could be a transient server error
- * and the session may still exist on the server; wiping localStorage in
- * that case is unnecessarily destructive (#4028 follow-up).
- *
- * A click into a *different* dead session (currentSid && currentSid!==sid)
- * must not run it: localStorage and the URL still point at the live session
- * (both are only updated on a successful load), so wiping them would log
- * the user out of a healthy session (#2782).
- */
-function _clearStuckSessionOnBoot(sid, currentSid){
-  if(!currentSid){
-    try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-    try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
   }
 }
 
@@ -2240,13 +2387,17 @@ async function _switchProfileForSessionLoad(profile){
 }
 
 async function loadSession(sid){
-  const opts = arguments[1] || {};
+  let opts = arguments[1] || {};
+  const requestedSid=sid;
   // Resolve canonical lineage SID BEFORE both the direct and sidebar preload
   // notifications so extensions always see the canonical session id, not the
   // raw sidebar click id (which may differ after lineage folding).
   if(!opts.skipLineageResolve && typeof _resolveSessionIdFromSidebarLineage==='function'){
-    const resolvedSid=_resolveSessionIdFromSidebarLineage(sid);
-    if(resolvedSid&&resolvedSid!==sid) sid=resolvedSid;
+    const resolvedSid=(typeof _sessionUrlTargetsExactSid==='function' && _sessionUrlTargetsExactSid(sid)) ? sid : _resolveSessionIdFromSidebarLineage(sid);
+    if(resolvedSid&&resolvedSid!==sid){
+      if(!opts._continuationParentSid) opts={...opts,_continuationParentSid:sid};
+      sid=resolvedSid;
+    }
   }
   // Extension pre-open hook — fires once per sidebar click, not on every call.
   // _openSidebarSession passes _preloadNotified:true so the hook isn't re-fired
@@ -2314,6 +2465,22 @@ async function loadSession(sid){
   // triggered compression.
   if(typeof clearCompressionUi==='function') clearCompressionUi();
   else window._compressionUi=null;
+  // #7865: drop the explicit-picker evidence for the session being left. The
+  // marker authorizes _modelProviderForSend to let the dropdown override the
+  // loaded session's provider, so it must never outlive the session it was
+  // written for: a restored session's provider comes from the session itself,
+  // and a stale pick from the previous session would hijack it when the
+  // catalog repaint leaves another provider's identically-valued option
+  // selected (the restore syncs the topbar before the catalog refresh).
+  if(currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(currentSid);
+  // #7865: also drop the marker for the session being LOADED, not just the one
+  // being left. The marker lives in sessionStorage, so it survives a page
+  // reload: on a fresh boot S.session is null, so currentSid above is null and
+  // nothing is cleared for the session the boot is restoring. A stale pick
+  // would then survive into the restored session and let the dropdown override
+  // the provider the session itself holds. Clearing the target sid covers both
+  // the fresh-boot restore and the A->B->A round trip.
+  if(sid&&sid!==currentSid&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(sid);
   // Show loading indicator immediately for responsiveness.
   // Cleared by renderMessages() once full session data arrives.
   // Persist the current composer draft before switching away so it can be
@@ -2349,6 +2516,13 @@ async function loadSession(sid){
     }
   }
   const _keepStaleUntilLoaded = !!opts.keepStaleUntilLoaded && sameSessionForceReload;
+  // #7865: a force-reload (external refresh / state.db change / boot restore of
+  // the SAME session) is also a session load. Clear this session's explicit
+  // picker evidence so the reloaded session's own provider stays authoritative:
+  // the catalog repaint after a restore can leave another provider's
+  // identically-valued option selected, and a surviving pick would let that
+  // option hijack the provider the session record holds.
+  if(sameSessionForceReload&&typeof _clearExplicitPickerPick==='function') _clearExplicitPickerPick(sid);
   if (currentSid !== sid || forceReload) {
     // #3306: When force-reloading the currently-active session (e.g. external
     // poll triggering a refresh), snapshot the existing messages BEFORE we
@@ -2399,6 +2573,13 @@ async function loadSession(sid){
     const _msgInner = $('msgInner');
     if (_msgInner && currentSid !== sid) _msgInner.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Loading conversation...</div>';
   }
+  // A superseded navigation can return here with this session's transcript
+  // still cached. Snapshot its width before metadata replaces S.session and
+  // drops the old message count and regeneration revision. If an interrupted
+  // forced refresh already cleared the rows, retain its saved width instead.
+  if(currentSid === sid && !forceReload && Array.isArray(S.messages) && S.messages.length > 0){
+    _captureSameSessionForceReloadHint(sid);
+  }
   // Phase 1: Load metadata only (~1KB) for fast session switching. Keep model
   // resolution out of the first-paint path; old provider-shaped model IDs are
   // repaired by the deferred resolver after S.session is assigned.
@@ -2407,6 +2588,7 @@ async function loadSession(sid){
   try {
     data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`);
   } catch(e) {
+    const metadataErrorStatus=e.status;
     const profileMismatch=_sessionProfileMismatchFromError(e);
     if(profileMismatch && profileMismatch.profile && !opts.skipProfileResolve){
       if (!_isCurrentLoad()) {
@@ -2429,6 +2611,7 @@ async function loadSession(sid){
         return loadSession(sid,{...opts,skipProfileResolve:true,force:true,_preloadNotified:true});
       }catch(switchErr){
         e=switchErr;
+        if(e&&metadataErrorStatus!==undefined) e.status=metadataErrorStatus;
       }
     }
     const _msgInner = $('msgInner');
@@ -2443,36 +2626,49 @@ async function loadSession(sid){
       _rearmActiveSessionStream();
       return;
     }
+    // A continuation retry (including one after a profile switch) still owns
+    // the original parent navigation. If that child is definitively missing,
+    // load the parent once with hint resolution disabled.
+    if(e.status===404&&opts._continuationParentSid){
+      const parentSid=opts._continuationParentSid;
+      _clearSameSessionForceReloadHint(sid);
+      if(_isCurrentLoad()) _loadingSessionId=null;
+      return loadSession(parentSid,{
+        ...opts,
+        _continuationParentSid:null,
+        skipLineageResolve:true,
+        skipContinuationResolve:true,
+        skipProfileResolve:false,
+        force:true,
+        _preloadNotified:true
+      });
+    }
     if(_msgInner){
       if(e.status===404){
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Session not available in web UI.</div>';
-        // Self-heal (clear saved id + strip /session/<id> URL) only when the
-        // 404'd id is the one we are activating: a boot-time restore
-        // (!currentSid, #2798) or a mid-session reload of the *current* session
-        // whose sidecar was deleted server-side (#2782). A click into a
-        // *different* dead session (currentSid && currentSid!==sid) must not run
-        // it: localStorage and the URL still point at the live session (both are
-        // only updated on a successful load), so wiping them would log the user
-        // out of a healthy session. The URL strip is needed in the self-heal
-        // case because _sessionIdFromLocation() re-injects the id on reload.
-        // Only the rethrow stays gated on !currentSid: boot rethrows to fall
-        // through to empty-state; mid-session there is no boot path to reach.
-        if(!currentSid || currentSid===sid){
-          try{ localStorage.removeItem('hermes-webui-session'); }catch(_){ }
-          try{ history.replaceState(null,'',_appRootPath()); }catch(_){ }
-          if (_isCurrentLoad()) _loadingSessionId = null;
-          if(!currentSid){
-            throw e;
+        // Self-heal only the route/localStorage component that still names the
+        // missing requested ID. A route can override a different valid saved
+        // session during boot, which must remain available for the next load.
+        // The current-load guard above owns this cleanup; each component is
+        // checked independently so unrelated saved or routed sessions survive.
+        try{
+          if(localStorage.getItem('hermes-webui-session')===requestedSid){
+            localStorage.removeItem('hermes-webui-session');
           }
+        }catch(_){ }
+        try{
+          if(typeof _sessionIdFromLocation==='function'&&_sessionIdFromLocation()===requestedSid){
+            history.replaceState(null,'',_appRootPath());
+          }
+        }catch(_){ }
+        if (_isCurrentLoad()) _loadingSessionId = null;
+        if(!currentSid){
+          throw e;
         }
       } else {
-        // Non-404, non-401 failure (400, 403, 500, network): 401 is handled
-        // via the if(!data) guard below since api() returns undefined on 401
-        // rather than throwing. Clear the stuck session ID only during boot
-        // (!currentSid) so the next boot doesn't retry the same dead session.
-        // When currentSid is set, a 500/network error may be transient — the
-        // session might still exist on the server (#4028 follow-up).
-        _clearStuckSessionOnBoot(sid, currentSid);
+        // Non-404, non-401 failures (400, 403, 500, network) do not establish
+        // that the session is gone. Preserve route and localStorage so boot can
+        // retry; 401 returns undefined and is handled below.
         _msgInner.innerHTML='<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:14px;padding:40px;text-align:center;">Failed to load session. Try refreshing or switching sessions.</div>';
         if(typeof showToast==='function') showToast('Failed to load session',3000,'error');
       }
@@ -2533,12 +2729,12 @@ async function loadSession(sid){
   // follow the backend's continuation hint to the visible continuation so a
   // mobile reload mid-compression doesn't strand the user on a hidden snapshot.
   // Do NOT write URL/localStorage here — let the re-entrant loadSession update
-  // them only once the continuation actually loads, so a rejected/deleted/
-  // cross-profile continuation can't poison restore state with an unusable id.
+  // them only once the continuation actually loads. If the hint is definitively
+  // missing, retry this valid parent once without following the hint.
   const continuationSid=(data.session&&data.session.continuation_session_id)||'';
   if(continuationSid&&continuationSid!==sid&&!opts.skipContinuationResolve){
     _loadingSessionId=null;
-    return loadSession(continuationSid,{...opts,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
+    return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
@@ -2674,8 +2870,12 @@ async function loadSession(sid){
     : null;
   const hadLiveRecoveryInflight=!!INFLIGHT[sid];
   const liveRecoveryInflight=_selectLiveRecoveryInflight(INFLIGHT[sid], serverLiveSnapshot, activeStreamId);
-  if(liveRecoveryInflight) INFLIGHT[sid]=liveRecoveryInflight;
-  else if(hadLiveRecoveryInflight&&activeStreamId){
+  if(liveRecoveryInflight){
+    INFLIGHT[sid]=liveRecoveryInflight;
+    _notifyRunJournalSideEffectRecoveryTruncation(
+      liveRecoveryInflight,sid,activeStreamId
+    );
+  }else if(hadLiveRecoveryInflight&&activeStreamId){
     delete INFLIGHT[sid];
     if(typeof clearInflightState==='function') clearInflightState(sid);
   }
@@ -2995,7 +3195,7 @@ const _HANDOFF_THRESHOLD = 10;  // conversation rounds
 const _HANDOFF_STORAGE_PREFIX = 'handoff:';
 const _HANDOFF_SUFFIX_DISMISSED_AT = 'dismissed_at';
 const _HANDOFF_SUFFIX_SUMMARY_HANDLED_AT = 'summary_handled_at';
-const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix', 'signal']);
+const _MESSAGING_RAW_SOURCES = new Set(['weixin', 'telegram', 'discord', 'slack', 'email', 'wecom', 'wecom_callback', 'matrix', 'signal', 'feishu', 'dingtalk']);
 const _MESSAGING_SOURCE_LABELS = {
   weixin: 'WeChat',
   telegram: 'Telegram',
@@ -3006,6 +3206,8 @@ const _MESSAGING_SOURCE_LABELS = {
   wecom_callback: 'WeCom Callback',
   matrix: 'Matrix',
   signal: 'Signal',
+  feishu: 'Feishu',
+  dingtalk: 'DingTalk',
 };
 
 function _isMessagingSession(session) {
@@ -3722,8 +3924,10 @@ async function _ensureMessagesLoaded(sid, opts) {
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
   const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
   if (!_ownsLoad()) return;
-  // Already have messages? (e.g. from INFLIGHT restore path, already set)
-  if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role) {
+  // Metadata-only reads omit regeneration authority. Cached rows alone do
+  // not prove that the current session payload can authorize regeneration.
+  if (!opts.force && S.messages && S.messages.length > 0 && S.messages[0] && S.messages[0].role &&
+      S.session && S.session.session_id === sid && S.session.regeneration_revision) {
     _clearSameSessionForceReloadHint(sid);
     return;
   }
@@ -5092,6 +5296,63 @@ function _profileQueryIntentFromLocation(){
     };
   }catch(_e){return empty;}
 }
+// #7652 review round 4: a sessionless cron notification carries an explicit
+// panel intent so the click lands on the panel the run belongs to instead of
+// the last chat the user had open. Only panels the main view actually renders
+// are accepted, so a stray parameter can never leave the app on a blank view.
+// Review round 5: a bare `^[a-z0-9][a-z0-9_-]*$` shape check accepted
+// `?panel=doesnotexist` — a valid-looking intent that made boot skip the
+// saved-chat restore and then had switchPanel select nothing. The name is
+// validated against the real panel set instead: the rail's own data-panel
+// attributes when the DOM is available, with the rendered panel views as a
+// headless fallback.
+function _knownPanelNames(){
+  const names=new Set();
+  try{
+    if(typeof document!=='undefined'&&document&&typeof document.querySelectorAll==='function'){
+      document.querySelectorAll('[data-panel]').forEach((el)=>{
+        const n=el&&el.dataset?el.dataset.panel:'';
+        if(n) names.add(String(n));
+      });
+      document.querySelectorAll('.panel-view').forEach((el)=>{
+        if(!el||!el.id) return;
+        const m=/^panel([A-Z][A-Za-z]*)$/.exec(el.id);
+        if(m) names.add(m[1].charAt(0).toLowerCase()+m[1].slice(1));
+      });
+    }
+  }catch(_e){/* fall through to the static set */}
+  if(!names.size){
+    ['chat','tasks','kanban','skills','memory','workspaces','profiles','todos','insights','logs','settings','plugin']
+      .forEach((n)=>names.add(n));
+  }
+  return names;
+}
+function _panelQueryIntentFromLocation(){
+  const empty={hasParam:false,valid:false,name:''};
+  if(typeof window==='undefined'||!window.location) return empty;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    if(!qs.has('panel')) return empty;
+    const name=String(qs.get('panel')||'');
+    return {
+      hasParam:true,
+      valid:/^[a-z0-9][a-z0-9_-]{0,63}$/.test(name)&&_knownPanelNames().has(name),
+      name
+    };
+  }catch(_e){return empty;}
+}
+function _consumePanelQueryParamFromLocation(){
+  if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
+  try{
+    const current=new URL(window.location.href);
+    const before=current.searchParams.toString();
+    current.searchParams.delete('panel');
+    const after=current.searchParams.toString();
+    if(after===before) return;
+    const next=current.pathname+(after?`?${after}`:'')+(current.hash||'');
+    window.history.replaceState(window.history.state||null,'',next);
+  }catch(_e){}
+}
 function _consumeProfileQueryParamFromLocation(){
   if(typeof window==='undefined'||!window.location||!window.history||typeof window.history.replaceState!=='function') return;
   try{
@@ -5136,6 +5397,10 @@ function _sessionUrlForSid(sid){
     current.searchParams.delete('q');
     current.searchParams.delete('prompt');
     current.searchParams.delete('send');
+    // `exact` is a one-shot child-row new-tab hint (see _markSessionUrlExact),
+    // not a durable page parameter: drop it so it cannot leak into the next
+    // session URL this tab navigates to.
+    current.searchParams.delete('exact');
     const retained=new URLSearchParams();
     current.searchParams.forEach((value,key)=>{
       if(key!=='action'||value!=='new-chat') retained.append(key,value);
@@ -5147,7 +5412,15 @@ function _sessionUrlForSid(sid){
 }
 function _setActiveSessionUrl(sid){
   if(typeof window==='undefined'||!window.history||!sid) return;
-  const next=_sessionUrlForSid(sid);
+  let next=_sessionUrlForSid(sid);
+  // Keep the one-shot exact-target marker while this tab stays on the same
+  // session, so a refresh of a child row's new tab still lands on the child
+  // instead of folding into its compressed parent; switching sessions drops it.
+  if(typeof _sessionUrlRequestsExactTarget==='function' && typeof _markSessionUrlExact==='function'
+     && typeof _sessionIdFromLocation==='function'
+     && _sessionIdFromLocation()===sid && _sessionUrlRequestsExactTarget()){
+    next=_markSessionUrlExact(next);
+  }
   if(next && next!==(window.location.pathname+window.location.search+window.location.hash)){
     let consumeLaunchAction=false;
     try{
@@ -5157,6 +5430,178 @@ function _setActiveSessionUrl(sid){
     const method=consumeLaunchAction?'replaceState':'pushState';
     window.history[method]({session_id:sid},'',next);
   }
+}
+
+/**
+ * Middle-click (or Ctrl/Cmd+click) on a sidebar session row opens that
+ * session's deep link (`/session/<id>`) in a new browser tab instead of
+ * switching the current tab. Boot already resolves the id from the URL
+ * (`_sessionIdFromLocation` + `loadSession(saved)`), so the new tab lands
+ * directly on the session. Never fires for the ⋮ action menu, checkboxes,
+ * tag chips, lineage/child toggles, while renaming, or in batch select mode.
+ */
+// Whether the row's owning agent profile can be loaded in a NEW tab without
+// breaking the tab that issued the gesture. A new tab that boots a session
+// owned by another profile switches the shared `hermes_profile` cookie, so the
+// source tab keeps its session but its next /api/chat/start, approval and
+// metadata calls fail with 409 session_profile_mismatch. With "show sessions
+// from all profiles" off every row belongs to the active profile; with it on,
+// an unknown owner is treated as unverifiable and refused.
+function _newTabOwningProfileAllowed(session){
+  const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)?S.activeProfile:'default';
+  const owningProfile=(typeof _sidebarSessionProfileName==='function')?_sidebarSessionProfileName(session):'';
+  // A KNOWN owner is authoritative regardless of the show-all toggle: turning
+  // "show sessions from all profiles" off flips `_showAllProfiles` immediately,
+  // but the sidebar keeps rendering the previous scope's foreign rows until the
+  // refetch lands. A toggle-based shortcut would wave those retained foreign
+  // rows through, switching the shared cookie and 409'ing the source tab. So
+  // always compare a known owner against the active profile.
+  if(owningProfile){
+    return _profileMatchesActiveProfile(owningProfile,activeProfile);
+  }
+  // Unknown owner: allow only when the loaded sidebar cache is definitively a
+  // single-profile scope for the active profile (show-all off). Anything else —
+  // show-all on, no scope, an all-profiles scope, or a different scope profile —
+  // is unverifiable and refused.
+  if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles) return false;
+  const scope=(typeof _allSessionsScope!=='undefined'&&_allSessionsScope)?_allSessionsScope:null;
+  if(!scope||scope.allProfiles!==false) return false;
+  const scopeProfile=(typeof scope.profile==='string')?scope.profile.trim():'';
+  if(!scopeProfile) return false;
+  return _profileMatchesActiveProfile(scopeProfile,activeProfile);
+}
+// Whether this environment can actually open a session in a second window.
+// The native macOS shell (hermes-swift-mac) exposes `window.open` but its
+// WKWebView delegate does not implement `webView(_:createWebViewWith:…)`, so
+// WebKit silently drops the tab (hermes-swift-mac#102). Callers that mutate
+// gesture state before opening must consult this *first*: otherwise they park
+// the gesture to idle and the fall-through _finishSessionGesture early-returns,
+// turning the click into a dead click instead of master's same-tab load.
+function _newTabOpenSupported(){
+  if(typeof window==='undefined'||typeof window.open!=='function') return false;
+  const wk=(window.webkit&&window.webkit.messageHandlers)?window.webkit.messageHandlers:null;
+  if(wk&&(wk.hermesNotify||wk.hermesTheme)) return false; // hermes-swift-mac#102
+  return true;
+}
+// Mark a `/session/<id>` deep link as an *exact* target. Boot honors the marker
+// (see `_sessionUrlRequestsExactTarget`) and loads that id without lineage
+// folding, so a nested child row opened in a new tab lands on the child rather
+// than on its compressed parent's lineage row (#7429 review 2026-10-08).
+function _markSessionUrlExact(url){
+  if(!url||typeof url!=='string') return url;
+  if(/([?&])exact=1(\b|$)/.test(url)) return url;
+  const hashIdx=url.indexOf('#');
+  const head=hashIdx>=0?url.slice(0,hashIdx):url;
+  const tail=hashIdx>=0?url.slice(hashIdx):'';
+  return head+(head.indexOf('?')>=0?'&':'?')+'exact=1'+tail;
+}
+// Whether the current deep link carries the exact-target marker. Boot passes
+// `skipLineageResolve` when it does, mirroring a plain child-row same-tab click
+// (`_openSidebarSession(child, {skipLineageResolve:true})`), so the child row's
+// new tab lands on the child and not on its compressed parent's lineage tip.
+// Ordinary deep links keep the lineage-tip landing an old segment URL expects.
+function _sessionUrlRequestsExactTarget(){
+  if(typeof window==='undefined'||!window.location) return false;
+  try{
+    const qs=new URLSearchParams(window.location.search||'');
+    return qs.get('exact')==='1';
+  }catch(_e){return false;}
+}
+// Lineage folding maps a nested child id onto its compressed parent's row. A tab
+// opened on a child via its exact-target link (`/session/<child>?exact=1`) must
+// keep showing that child on every load of it, not only at boot: browser Back
+// to that entry and same-session refreshes (poll, session-updated) also go
+// through loadSession() (#7429 release review). Only the session the URL names
+// is exempt, so navigating elsewhere from that tab folds lineage as usual.
+function _sessionUrlTargetsExactSid(sid){
+  if(!sid || typeof _sessionUrlRequestsExactTarget!=='function' || typeof _sessionIdFromLocation!=='function') return false;
+  return _sessionUrlRequestsExactTarget() && _sessionIdFromLocation()===sid;
+}
+function _openSessionUrlInNewTab(sid, session, opts){
+  if(!sid||typeof window==='undefined'||typeof window.open!=='function') return false;
+  // Native macOS shell (hermes-swift-mac): its WKWebView delegate does not
+  // implement webView(_:createWebViewWith:…), so WebKit silently drops
+  // window.open(url,'_blank','noopener'), and `noopener` makes window.open
+  // return null so the drop is undetectable here. Treat the embedded shell as
+  // having no multi-window support and decline, so every tap path falls back
+  // to its same-tab load (hermes-swift-mac#102). Drop this once the app
+  // implements the delegate.
+  const _wkHandlers=(typeof window!=='undefined'&&window.webkit&&window.webkit.messageHandlers)?window.webkit.messageHandlers:null;
+  if(_wkHandlers&&(_wkHandlers.hermesNotify||_wkHandlers.hermesTheme)) return false;
+  if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
+  if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
+  // Foreign/unknown owning profile: consume the gesture (return true so callers
+  // skip the same-tab path) and surface a notice instead of switching cookies.
+  if(session&&!_newTabOwningProfileAllowed(session)){
+    if(typeof showToast==='function') showToast(t('session_new_tab_other_profile'),3000);
+    return true;
+  }
+  let url=null;
+  try{url=_sessionUrlForSid(sid);}catch(_e){return false;}
+  if(!url) return false;
+  // Child-row call sites pass {exact:true}: the deep link declares the child id
+  // authoritative so boot does not fold it into its compressed parent's row.
+  if(opts&&opts.exact) url=_markSessionUrlExact(url);
+  try{
+    window.open(url,'_blank','noopener');
+    return true;
+  }catch(_e){return false;}
+}
+// Shared choke point for the pointer-tap paths below: returns true when the
+// event was consumed as an open-in-new-tab (caller must skip same-tab open).
+// `opts.exact` (child rows) marks the deep link as the exact target.
+function _consumeSessionNewTabClick(e, sid, session, opts){
+  if(!e||!sid) return false;
+  const isModifiedClick=!!(e.ctrlKey||e.metaKey);
+  const isMiddleClick=(typeof e.button==='number'&&e.button===1)||e.which===2;
+  if(!isModifiedClick&&!isMiddleClick) return false;
+  // The class exclusion list below is the authoritative action-target guard:
+  // every row kind's ⋮ menu lives under `.session-actions` (plus the checkbox,
+  // tag, child/lineage count and lineage-segment controls). The per-row closure
+  // `_isSessionActionTarget` is not visible here and its `typeof` probe never
+  // fired, so it was removed rather than left as a dead check.
+  if(e.target&&e.target.closest){
+    try{
+      if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return false;
+    }catch(_e){}
+  }
+  if(typeof _sessionSelectMode!=='undefined'&&_sessionSelectMode) return false;
+  if(typeof _renamingSid!=='undefined'&&_renamingSid) return false;
+  if(typeof e.preventDefault==='function') e.preventDefault();
+  if(typeof e.stopPropagation==='function') e.stopPropagation();
+  return _openSessionUrlInNewTab(sid, session, opts);
+}
+// `auxclick` fires for the middle button where `click` never does; `mousedown`
+// also preventDefaults button-1 so the browser doesn't start autoscroll.
+function _wireSessionNewTabListeners(node, getSid, getSession, opts){
+  if(!node||typeof node.addEventListener!=='function'||typeof getSid!=='function') return;
+  node.addEventListener('auxclick',(e)=>{
+    if(!e) return;
+    const btn=(typeof e.button==='number')?e.button:(e.which===2?1:0);
+    if(btn!==1) return;
+    if(e.target&&e.target.closest){
+      try{
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return;
+      }catch(_e2){}
+    }
+    if(typeof e.preventDefault==='function') e.preventDefault();
+    if(typeof e.stopPropagation==='function') e.stopPropagation();
+    _openSessionUrlInNewTab(getSid(), typeof getSession==='function'?getSession():undefined, opts);
+  });
+  node.addEventListener('mousedown',(e)=>{
+    if(!e) return;
+    const btn=(typeof e.button==='number')?e.button:(e.which===2?1:0);
+    if(btn!==1) return;
+    if(e.target&&e.target.closest){
+      try{
+        if(e.target.closest('.session-actions,.session-select-cb-wrapper,.session-tag,.session-child-count,.session-lineage-count,.session-lineage-segment')) return;
+      }catch(_e2){}
+    }
+    // Swallow the middle-button default (autoscroll / back-nav chord) without
+    // claiming the gesture: pointerup's _finishSessionGesture still ignores
+    // button!==0, so no swipe/rename/tap side effects can fire from this.
+    if(typeof e.preventDefault==='function') e.preventDefault();
+  });
 }
 
 // ── Batch select mode ──
@@ -5241,7 +5686,7 @@ function _renderBatchActionBar(){
   // Move
   const moveBtn=document.createElement('button');moveBtn.className='batch-action-btn';
   moveBtn.textContent=t('session_batch_move');
-  moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker();};bar.appendChild(moveBtn);
+  moveBtn.onclick=(e)=>{e.stopPropagation();_showBatchProjectPicker(moveBtn);};bar.appendChild(moveBtn);
   // Delete
   const deleteBtn=document.createElement('button');deleteBtn.className='batch-action-btn batch-action-btn-danger';
   deleteBtn.textContent=t('session_batch_delete');
@@ -5255,6 +5700,10 @@ function _renderBatchActionBar(){
       danger:true
     });
     if(!ok)return;
+    const modelPickAtDelete=typeof _readComposerModelPick==='function'
+      ? _readComposerModelPick()
+      : null;
+    const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
     try{
       const results=await Promise.all(ids.map(async sid=>{
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
@@ -5268,7 +5717,10 @@ function _renderBatchActionBar(){
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
         const remaining=await api('/api/sessions'+_sessionListQueryString());
         if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-        else{$('msgInner').innerHTML='';$('emptyState').style.display='';}
+        else{
+          _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
+          $('msgInner').innerHTML='';$('emptyState').style.display='';
+        }
       }
       if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
       else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
@@ -5276,19 +5728,19 @@ function _renderBatchActionBar(){
     }catch(e){showToast('Delete failed: '+(e.message||e));}
   };bar.appendChild(deleteBtn);
 }
-function _showBatchProjectPicker(){
+function _showBatchProjectPicker(openerEl){
   const ids=[..._selectedSessions];if(!ids.length)return;
   const bar=$('batchActionBar');if(!bar)return;
   bar.querySelectorAll('.batch-project-picker').forEach(p=>p.remove());
   const picker=document.createElement('div');picker.className='project-picker batch-project-picker';
-  const none=document.createElement('div');none.className='project-picker-item';none.textContent='No project';
+  const none=_projectPickerItem();none.textContent=t('project_picker_none');
   none.onclick=async()=>{picker.remove();
     try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:null})})));
       showToast('Removed from project');exitSessionSelectMode();await renderSessionList();
     }catch(e){showToast('Move failed: '+(e.message||e));}
   };picker.appendChild(none);
   for(const p of(_allProjects||[])){
-    const item=document.createElement('div');item.className='project-picker-item';
+    const item=_projectPickerItem();
     if(p.color){const dot=document.createElement('span');dot.className='color-dot';
       dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';item.appendChild(dot);}
     const name=document.createElement('span');name.textContent=p.name;item.appendChild(name);
@@ -5301,6 +5753,13 @@ function _showBatchProjectPicker(){
   bar.appendChild(picker);
   const close=(e)=>{if(!picker.contains(e.target)){picker.remove();document.removeEventListener('click',close);}};
   setTimeout(()=>document.addEventListener('click',close),0);
+  // Escape closes the picker and hands focus back to the Move button (#8044).
+  picker.setAttribute('aria-label',t('session_batch_move'));
+  _wireProjectPickerKeys(picker,()=>{
+    picker.remove();document.removeEventListener('click',close);
+    _focusSessionActionMenuRestoreTarget(openerEl);
+  });
+  _focusProjectPickerItem(picker);
 }
 
 function _focusSessionActionMenuRestoreTarget(target){
@@ -5507,6 +5966,8 @@ function _buildSessionRenameStarter(session, displayEl, renderDisplay){
     const inp=document.createElement('input');
     inp.className='session-title-input';
     inp.value=oldTitle;
+    // #7542: chat-title editor in the sidebar, not a credentials field.
+    _markNonCredentialInput(inp);
     ['click','mousedown','dblclick','pointerdown'].forEach(ev=>
       inp.addEventListener(ev, e2=>e2.stopPropagation())
     );
@@ -7598,6 +8059,62 @@ function _formatInServerTz(date, options) {
   return adjusted.toLocaleString(undefined, { ...options, timeZone: 'UTC' });
 }
 
+function _isoOffsetMinutes(iso) {
+  // Extract the ±HH:MM / ±HHMM / ±HH offset (in minutes, signed) embedded in
+  // an ISO 8601 timestamp string, e.g. "2026-09-24T09:00:00-07:00" → -420.
+  //
+  // Returns 0 for a trailing "Z" (explicit UTC — the wall clock needs no
+  // shift) and null for a naive string (no offset at all: the zone is
+  // unknown, so the caller must fall back to its own resolver rather than
+  // silently render it as one zone or another).
+  // Also returns null when the string is not a parseable timestamp.
+  if (typeof iso !== 'string' || !iso.trim()) return null;
+  const trimmed = iso.trim();
+  const m = trimmed.match(/([+-])(\d{2}):?(\d{2})(?::?\d{2}(?:\.\d+)?)?$/);
+  if (!m) {
+    if (/Z$/i.test(trimmed)) return 0;
+    return null;
+  }
+  const sign = m[1] === '+' ? 1 : -1;
+  const min = sign * (parseInt(m[2], 10) * 60 + parseInt(m[3], 10));
+  if (!Number.isFinite(min) || Math.abs(min) > 14 * 60) return null;  // no real zone
+  return min;
+}
+
+function _formatInIsoTz(date, options) {
+  // Format `date` in the wall-clock zone its own ISO string carries.
+  //
+  // The agent serialises cron `next_run_at` / `last_run_at` with the
+  // offset of the zone the job was scheduled in (per-profile:
+  // hermes_time._resolve_timezone_name() → the active profile's
+  // config.yaml timezone), e.g. "2026-09-24T09:00:00-07:00" for a job
+  // whose container runs UTC but whose operator configured
+  // America/Los_Angeles. Formatting from the string's own offset is the
+  // only source that is correct for that job — no process-level inference
+  // (HERMES_TIMEZONE / TZ / strftime) and no per-browser guess can know
+  // which profile's zone a given job used.
+  //
+  // Strategy mirrors _formatInServerTz: shift the instant by the string's
+  // offset, then format with timeZone:'UTC' so no further conversion is
+  // applied — the output reads as the wall-clock time in the timestamp's
+  // own zone, including fractional-hour zones (Sao Paulo is whole-hour
+  // but India/Newfoundland are not).
+  //
+  // Returns null when the input carries no usable offset (naive string,
+  // non-string, unparseable), so the caller can fall back to its own
+  // resolver instead of silently rendering the wrong zone.
+  const iso = typeof date === 'string' ? date
+    : (date && typeof date === 'object' && typeof date.iso === 'string') ? date.iso
+    : null;
+  const offsetMin = iso ? _isoOffsetMinutes(iso) : null;
+  if (offsetMin === null || !Number.isFinite(offsetMin)) return null;
+  const instant = new Date(iso.trim());
+  if (Number.isNaN(instant.getTime())) return null;
+  if (offsetMin === 0) return instant.toLocaleString(undefined, { ...options, timeZone: 'UTC' });
+  const adjusted = new Date(instant.getTime() + offsetMin * 60 * 1000);
+  return adjusted.toLocaleString(undefined, { ...options, timeZone: 'UTC' });
+}
+
 function _localDayOrdinal(timestampMs) {
   const date = new Date(timestampMs);
   return Math.floor(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()) / 86400000);
@@ -7832,7 +8349,14 @@ function _lineageSegmentsForRender(s,lineageKey,skipCached){
     if(!seg||!seg.session_id||seg.session_id===currentSid||seen.has(seg.session_id)) return;
     if(seg.role==='child_session') return;
     seen.add(seg.session_id);
-    segments.push({...seg});
+    const copy={...seg};
+    // Lineage-report rows are serialised by the owning profile's state DB but
+    // ship without a `profile` field (api/agent_sessions.py), so the new-tab
+    // profile gate would treat them as unverifiable and refuse them under
+    // "show all profiles". Attribute an ownerless segment to the row that owns
+    // the report, which is always in the active profile.
+    if(!(typeof copy.profile==='string'&&copy.profile.trim())&&s&&typeof s.profile==='string'&&s.profile.trim()) copy.profile=s.profile;
+    segments.push(copy);
   };
   for(const seg of (Array.isArray(s&&s._lineage_segments)?s._lineage_segments:[])) addSegment(seg);
   if(!skipCached){
@@ -8469,6 +8993,13 @@ function _sidebarRowHasVisibleMessages(s, activeSidForSidebar){
     (S.session&&s.session_id===S.session.session_id&&(S.session.message_count||0)>0);
 }
 
+// Nesting under the parent already marks a delegated run, so the nested label drops the
+// agent's "Subagent: " prefix. Display only: rename and search keep _sessionDisplayTitle().
+function _nestedChildTitle(s){
+  const title=_sessionDisplayTitle(s);
+  return _isDelegatedSubagentRow(s)?title.replace(/^Subagent:\s*/i,''):title;
+}
+
 function _isDelegatedSubagentRow(s){
   if(!_isChildSession(s)) return false;
   const role=[s.raw_source,s.source_tag,s.source].map(v=>String(v||'').trim().toLowerCase()).find(Boolean)||'';
@@ -8592,6 +9123,43 @@ function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){
   return _attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows);
 }
 
+function _projectBindingsForNewSession(project){
+  // Assemble the newSession options that carry a project's pinned context:
+  // default workspace / model / model_provider. Only fields that are actually
+  // bound are forwarded — an unbound project creates sessions with the usual
+  // defaults.
+  //
+  // reasoning_effort is deliberately NOT forwarded (UX re-gate
+  // 2026-10-08T23:39:33Z, item A). The dialog can no longer show or clear a
+  // stored effort, yet forwarding it made the project's + (new chat) silently
+  // change the PROFILE-wide effort for that model family (POST /api/reasoning)
+  // while the chip read "Default". The binding itself is still stored by
+  // /api/projects/bind; it comes back into play with per-session effort
+  // (#7881).
+  const o={};
+  if(project){
+    // Profile boundary: never forward a project's bindings across a profile
+    // switch. Until the project cache refreshes, a chip (or the active
+    // project filter) can still point at the PREVIOUS profile's project — its
+    // workspace/model would then be applied to the new profile's session.
+    // Only the ACTIVE profile's projects contribute bindings.
+    if(typeof _profileMatchesActiveProfile==='function'
+       && !_profileMatchesActiveProfile(project.profile, S.activeProfile)){
+      return o;
+    }
+    // Multi-workspace projects use the marked default (falls back to the
+    // first bound workspace; legacy single `workspace` field still works).
+    const ws=project.default_workspace
+      ||(Array.isArray(project.workspaces)&&project.workspaces[0])
+      ||project.workspace
+      ||null;
+    if(ws) o.workspace=ws;
+    if(project.model) o.model=project.model;
+    if(project.model_provider) o.model_provider=project.model_provider;
+  }
+  return o;
+}
+
 function _attachProjectQuickCreateButton(chip, project){
   const btn=document.createElement('button');
   btn.type='button';
@@ -8612,10 +9180,11 @@ function _attachProjectQuickCreateButton(chip, project){
   };
   btn.onclick=async(e)=>{
     stop(e);
+    const bindings=_projectBindingsForNewSession(project);
     if(_newSessionInFlight){
       // The initiating tap already owns the filter change and rollback path.
       try{
-        await newSession(false,{project_id:project.project_id});
+        await newSession(false,Object.assign({project_id:project.project_id},bindings));
       }catch(_){
         // The initiating tap already owns the visible failure path.
       }
@@ -8624,7 +9193,7 @@ function _attachProjectQuickCreateButton(chip, project){
     const previousProject=(typeof _activeProject!=='undefined')?_activeProject:NO_PROJECT_FILTER;
     _setActiveProjectFilter(project.project_id);
     try{
-      await newSession(false,{project_id:project.project_id});
+      await newSession(false,Object.assign({project_id:project.project_id},bindings));
       // newSession() does not repaint the sidebar (callers own that — see the
       // newSession contract). Repaint from the post-create state so the new
       // project-assigned session appears deterministically.
@@ -8770,7 +9339,7 @@ function renderSessionListFromCache(){
     // "All" chip
     const allChip=document.createElement('span');
     allChip.className='project-chip'+(!_activeProject?' active':'');
-    allChip.textContent='All';
+    allChip.textContent=t('project_chip_all');
     allChip.onclick=()=>{_setActiveProjectFilter(null);};
     bar.appendChild(allChip);
     // "Unassigned" chip — only when there are sessions with no project to
@@ -8779,8 +9348,8 @@ function renderSessionListFromCache(){
     if(hasUnprojected){
       const noneChip=document.createElement('span');
       noneChip.className='project-chip no-project'+(_activeProject===NO_PROJECT_FILTER?' active':'');
-      noneChip.textContent='Unassigned';
-      noneChip.title='Show conversations not yet assigned to a project';
+      noneChip.textContent=t('project_chip_unassigned');
+      noneChip.title=t('project_chip_unassigned_title');
       noneChip.onclick=()=>{_setActiveProjectFilter(NO_PROJECT_FILTER);};
       bar.appendChild(noneChip);
     }
@@ -8910,10 +9479,58 @@ function renderSessionListFromCache(){
   const unpinned=orderedSessions.filter(s=>!s.pinned);
   // Date grouping: Pinned / Today / Yesterday / This week / Last week / Older
   const now=_serverNowMs();
-  // Collapse state persisted in localStorage
-  let _groupCollapsed={};
-  try{_groupCollapsed=JSON.parse(localStorage.getItem('hermes-date-groups-collapsed')||'{}');}catch(e){}
-  const _saveCollapsed=()=>{try{localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));}catch(e){}};
+  // Collapse state: in-memory authority, localStorage as best-effort
+  // persistence. If the write fails (quota, blocked storage) the toggle must
+  // still take effect for this session instead of silently reverting (#7953).
+  if(!window.__hermesDateGroupCollapsed) window.__hermesDateGroupCollapsed={};
+  if(!window.__hermesDateGroupPending) window.__hermesDateGroupPending=new Set();
+  const _groupCollapsed=window.__hermesDateGroupCollapsed;
+  const _pending=window.__hermesDateGroupPending;
+  // localStorage is the shared cross-tab authority. A local toggle is only a
+  // PENDING override until its snapshot is successfully written; that write
+  // releases the key so a newer successful choice from another tab wins on
+  // the next read. A failed write keeps the key pending so the local intent
+  // still takes effect for this session (#7953).
+  const _readStoredCollapsed=()=>{
+    // Distinguish a valid snapshot (possibly empty/cleared) from an
+    // unavailable or malformed read: only a valid one may change state.
+    let raw=null;
+    try{ raw=localStorage.getItem('hermes-date-groups-collapsed'); }catch(e){ return null; }
+    if(raw===null||raw==='') return {};
+    // A valid snapshot must be a JSON object. Non-object roots (string,
+    // number, boolean, array) route through the malformed-read fallback:
+    // `k in fresh` in the merge throws on them and kills the render after
+    // the list has already been cleared. Stored `null` is a valid empty
+    // snapshot (everything expanded).
+    try{ const v=JSON.parse(raw); if(v===null) return {}; return (typeof v==='object'&&!Array.isArray(v))?v:null; }catch(e){ return null; }
+  };
+  const _mergeStoredCollapsed=()=>{
+    const fresh=_readStoredCollapsed();
+    if(fresh===null) return; // unavailable/malformed: keep fallback + pending
+    // Copy only boolean values: a same-origin write of
+    // {"__proto__":{"Older":true}} must not replace this map's prototype
+    // through _groupCollapsed[k]=fresh[k] (gate Oct 4, Opus nit).
+    for(const k in fresh){ if(!_pending.has(k)&&typeof fresh[k]==='boolean') _groupCollapsed[k]=fresh[k]; }
+    // A valid snapshot (even an empty/cleared one) also removes non-pending
+    // keys it no longer contains; a merge that only adds/updates would keep
+    // stale collapses visible.
+    for(const k in _groupCollapsed){
+      if(typeof fresh[k]!=='boolean' && !_pending.has(k)) delete _groupCollapsed[k];
+    }
+  };
+  _mergeStoredCollapsed();
+  const _saveCollapsed=()=>{
+    _mergeStoredCollapsed();
+    try{
+      localStorage.setItem('hermes-date-groups-collapsed',JSON.stringify(_groupCollapsed));
+      // The complete intended snapshot is persisted: release the pending
+      // overrides so another tab's newer successful choice can win next read.
+      _pending.clear();
+    }catch(e){
+      // Failed write: keep the keys pending so the local intent survives.
+      if(typeof console!=='undefined'&&console.warn) console.warn('hermes: date-group collapse state could not be persisted', e);
+    }
+  };
   // Group sessions by date
   const groups=[];
   let curLabel=null,curItems=[];
@@ -9006,6 +9623,7 @@ function renderSessionListFromCache(){
       const isCollapsed=body.style.display==='none';
       body.style.display=isCollapsed?'':'none';
       caret.classList.toggle('collapsed',!isCollapsed);
+      _pending.add(g.label);
       _groupCollapsed[g.label]=!isCollapsed;
       _saveCollapsed();
       renderSessionListFromCache();
@@ -9290,8 +9908,10 @@ function renderSessionListFromCache(){
         row.title=t('session_lineage_segment_open');
         row.onclick=async(e)=>{
           e.stopPropagation();
+          if(_consumeSessionNewTabClick(e, seg.session_id, seg)) return;
           await _openSidebarSession(seg, {skipLineageResolve:true});
         };
+        _wireSessionNewTabListeners(row, ()=>seg.session_id, ()=>seg);
         lineageList.appendChild(row);
       }
       sessionText.appendChild(lineageList);
@@ -9301,11 +9921,14 @@ function renderSessionListFromCache(){
       childList.className='session-child-sessions';
       ['pointerdown','pointerup','click','touchstart','touchmove','touchend','touchcancel'].forEach(ev=>childList.addEventListener(ev,e=>e.stopPropagation()));
       const sortedChildren=[...s._child_sessions];
-      const openChildSession=async(childSession)=>{
+      const openChildSession=async(childSession, openOpts={})=>{
+        // A child row's deep link must land on the child, not on its
+        // compressed parent's lineage tip: mark the new-tab URL exact.
+        if(openOpts&&openOpts.newTab) return _openSessionUrlInNewTab(childSession.session_id, childSession, {exact:true});
         await _openSidebarSession(childSession, {skipLineageResolve:true});
       };
       const childLabelFor=(child)=>{
-        const childTitle=_sessionDisplayTitle(child)||'Untitled child session';
+        const childTitle=_nestedChildTitle(child)||'Untitled child session';
         const childTime=_formatRelativeSessionTime(_sessionTimestampMs(child));
         const parentNote=child._parent_segment_title?` via ${child._parent_segment_title}`:'';
         return `-> ${childTitle}${parentNote} - ${childTime}`;
@@ -9535,8 +10158,10 @@ function renderSessionListFromCache(){
               return;
             }
             e.stopPropagation();
+            if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
             await openChildSession(child);
           };
+          _wireSessionNewTabListeners(mainBtn, ()=>child.session_id, ()=>child, {exact:true});
           row._startRename=_buildSessionRenameStarter(child, mainBtn, ()=>{
             mainBtn.textContent=childLabelFor(child);
           });
@@ -9587,6 +10212,7 @@ function renderSessionListFromCache(){
             e.stopPropagation();
             _openSessionActionMenu(child, actions||row);
           };
+          _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
           childList.appendChild(row);
           continue;
         }
@@ -9597,8 +10223,10 @@ function renderSessionListFromCache(){
         row.title='Open child session';
         row.onclick=async(e)=>{
           e.stopPropagation();
+          if(_consumeSessionNewTabClick(e, child.session_id, child, {exact:true})) return;
           await openChildSession(child);
         };
+        _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
         childList.appendChild(row);
       }
       sessionText.appendChild(childList);
@@ -9962,11 +10590,42 @@ function renderSessionListFromCache(){
     el.onpointerup=(e)=>{
       if(e.pointerType==='touch') return;
       if(e.pointerType==='mouse' && e.button!==0) return;  // ignore right/middle click
+      if((e.ctrlKey||e.metaKey) && !_sessionSelectMode && !_renamingSid && _gestureState!=='idle' && !_longPressMenuOpened && (typeof _newTabOpenSupported!=='function'||_newTabOpenSupported())){
+        // Ctrl/Cmd+click opens in a new tab; keep the current tab untouched.
+        // Gated on select/rename mode: _consumeSessionNewTabClick refuses
+        // those modes, and mutating gesture state first would make the
+        // fall-through _finishSessionGesture early-return on 'idle',
+        // breaking the row (de)select toggle.
+        // Also gated on _gestureState!=='idle' (a press must have begun on
+        // THIS row: a Ctrl-release over a row the user never pressed on must
+        // do nothing, mirroring _finishSessionGesture's own first check) and
+        // on !_longPressMenuOpened (a pen long-press menu is already open, so
+        // don't stack a new tab on top of it — the open Greptile P1).
+        // Settle the gesture machine first via the shared choke point: a pen
+        // (or touch-emulated) drag may have painted swipe offsets, and a
+        // shaky click may have added the 'dragging' class — parking
+        // _gestureState alone would leave the row visually displaced.
+        // _clearPointerDragState() parks idle, disarms the long-press timer,
+        // and settles swipe paint when a drag was in flight.
+        clearTimeout(_tapTimer);_tapTimer=null;_lastTapTime=0;
+        _clearPointerDragState();
+        el.classList.remove('loading');
+        if(_consumeSessionNewTabClick(e, s.session_id, s)) return;
+      }
       if(_finishSessionGesture(e.clientX,e.clientY,e.target,e.pointerType)) e.stopPropagation();
     };
+    _wireSessionNewTabListeners(el, ()=>s.session_id, ()=>s);
     // Add ondblclick for more reliable double-click detection
     el.ondblclick=(e)=>{
       if(e.pointerType==='mouse' && e.button!==0) return;
+      // A Ctrl/Cmd+double-click is two modified clicks: each pointerup opens
+      // one new tab. Don't also start a rename in the current tab (master
+      // only renamed). Outside select mode, bail entirely.
+      if(typeof _newTabOpenSupported!=='function'||_newTabOpenSupported()){
+        if((e.ctrlKey||e.metaKey) && !_sessionSelectMode) return;
+      }
+      // On a shell with no second window _newTabOpenSupported() is false, so
+      // the bail above is skipped and master's rename path stays.
       if(_renamingSid) return;
       if(actions&&actions.contains(e.target)) return;
       if(_sessionSelectMode){e.stopPropagation();if(!readOnly)toggleSessionSelect(s.session_id);return;}
@@ -10135,6 +10794,10 @@ async function deleteSession(sid, beforeDelete=null){
     danger:true
   });
   if(!ok)return false;
+  const modelPickAtDelete=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
   const reflowPositions=_captureSessionReflowPositions();
   const beforeDeleteHold=beforeDelete?Promise.resolve().then(beforeDelete):null;
   const previousSessions=_allSessions;
@@ -10178,6 +10841,7 @@ async function deleteSession(sid, beforeDelete=null){
     if(remaining.sessions&&remaining.sessions.length){
       await loadSession(remaining.sessions[0].session_id);
     }else{
+      _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
       const _tt=$('topbarTitle');if(_tt)_tt.textContent=assistantDisplayName();
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
@@ -10204,9 +10868,8 @@ function _showProjectPicker(session, anchorEl){
   const picker=document.createElement('div');
   picker.className='project-picker';
   // "No project" option
-  const none=document.createElement('div');
-  none.className='project-picker-item'+(!session.project_id?' active':'');
-  none.textContent='No project';
+  const none=_projectPickerItem('',!session.project_id);
+  none.textContent=t('project_picker_none');
   none.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
@@ -10242,8 +10905,7 @@ function _showProjectPicker(session, anchorEl){
   };
   for(const p of _allProjects){
     if (_profileHidesProject(p.profile)) continue;
-    const item=document.createElement('div');
-    item.className='project-picker-item'+(session.project_id===p.project_id?' active':'');
+    const item=_projectPickerItem('',session.project_id===p.project_id);
     if(p.color){
       const dot=document.createElement('span');
       dot.className='color-dot';
@@ -10268,9 +10930,8 @@ function _showProjectPicker(session, anchorEl){
     picker.appendChild(item);
   }
   // "+ New project" shortcut at the bottom
-  const createItem=document.createElement('div');
-  createItem.className='project-picker-item project-picker-create';
-  createItem.textContent='+ New project';
+  const createItem=_projectPickerItem('project-picker-create');
+  createItem.textContent=t('project_picker_new');
   createItem.onclick=async()=>{
     picker.remove();
     document.removeEventListener('click',close);
@@ -10302,26 +10963,198 @@ function _showProjectPicker(session, anchorEl){
   // Append to body and position using getBoundingClientRect so it isn't clipped
   // by overflow:hidden on .session-item ancestors
   document.body.appendChild(picker);
-  const rect=anchorEl.getBoundingClientRect();
   picker.style.position='fixed';
   picker.style.zIndex='999';
-  // Prefer opening below; flip above if too close to bottom of viewport
-  const spaceBelow=window.innerHeight-rect.bottom;
-  if(spaceBelow<160&&rect.top>160){
-    picker.style.bottom=(window.innerHeight-rect.top+4)+'px';
-    picker.style.top='auto';
-  }else{
-    picker.style.top=(rect.bottom+4)+'px';
-    picker.style.bottom='auto';
+  _positionProjectPicker(picker,anchorEl);
+  // Close on outside click
+  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
+  setTimeout(()=>document.addEventListener('click',close),0);
+  // Keyboard (#8044): arrows move between the rows, Escape closes the picker
+  // and hands focus back to the conversation's ⋮ trigger.
+  picker.setAttribute('aria-label',t('session_move_project'));
+  const dismiss=(opts)=>{
+    picker.remove();
+    document.removeEventListener('click',close);
+    // Not to a row that is going out of sight with its sidebar.
+    if(opts&&opts.restoreFocus===false) return;
+    _focusSessionActionMenuRestoreTarget(_projectPickerFocusReturnTarget(session,anchorEl));
+  };
+  _wireProjectPickerKeys(picker,dismiss);
+  _openProjectPicker={picker,anchorEl,sessionId:session.session_id,dismiss};
+  _focusProjectPickerItem(picker);
+}
+
+// The open single-conversation picker, for the resize listener below. A closed
+// picker is found out by being detached, so no close path has to clear this.
+let _openProjectPicker=null;
+
+function _positionProjectPicker(picker, anchorEl){
+  const rect=anchorEl.getBoundingClientRect();
+  // Placed as _positionSessionActionMenu places the ⋮ menu: below the anchor,
+  // above it when that fits whole, else slid up over the anchor until it fits.
+  // Natural height first (the CSS already caps it at 100dvh - 16px).
+  picker.style.maxHeight='';
+  const pickerH=picker.offsetHeight||0;
+  const margin=8;
+  const maxAvail=window.innerHeight-margin*2;
+  let top=rect.bottom+4;
+  if(top+pickerH>window.innerHeight-margin && rect.top>pickerH+12){
+    top=rect.top-pickerH-4;            // flip above when there is room
   }
+  if(pickerH>maxAvail){
+    picker.style.maxHeight=maxAvail+'px'; // taller than the screen: pin and scroll
+    top=margin;
+  }else{
+    if(top+pickerH>window.innerHeight-margin) top=window.innerHeight-margin-pickerH;
+    if(top<margin) top=margin;         // slide to fit, overlapping the anchor
+  }
+  picker.style.top=top+'px';
+  picker.style.bottom='auto';
   // Align right edge of picker with right edge of button; keep within viewport
   const pickerW=Math.min(220,Math.max(160,picker.scrollWidth||160));
   let left=rect.right-pickerW;
   if(left<8) left=8;
   picker.style.left=left+'px';
-  // Close on outside click
-  const close=(e)=>{if(!picker.contains(e.target)&&e.target!==anchorEl){picker.remove();document.removeEventListener('click',close);}};
-  setTimeout(()=>document.addEventListener('click',close),0);
+}
+
+// An open picker follows a resize or a rotation, as the ⋮ menu does. A sidebar
+// repaint may have replaced the row it was opened from: place it by the row
+// that conversation has now.
+window.addEventListener('resize',()=>{
+  const open=_openProjectPicker;
+  if(!open) return;
+  if(!open.picker.isConnected){
+    _openProjectPicker=null;
+    return;
+  }
+  // On the next frame: boot.js collapses the sidebar in a resize listener of
+  // its own, which runs after this one.
+  requestAnimationFrame(()=>{
+    if(!open.picker.isConnected) return;
+    let anchor=open.anchorEl;
+    if(!anchor.isConnected){
+      // The row for a long press, the row's own ⋮ trigger for a picker opened from one.
+      anchor=_findSessionRenameRow(open.sessionId);
+      if(anchor&&open.anchorEl.classList.contains('session-actions-trigger')){
+        anchor=_projectPickerFocusReturnTarget({session_id:open.sessionId},null)||anchor;
+      }
+    }
+    // A resize can hide the sidebar the row is in. The row is then still laid
+    // out for a moment, inside a sidebar that fades or slides out of sight, so
+    // the hidden state is read from what hides it, and focus is not handed
+    // back to the row.
+    if(!anchor||!anchor.offsetParent||_projectPickerSidebarHidden(anchor)){
+      open.dismiss({restoreFocus:false});
+      return;
+    }
+    _positionProjectPicker(open.picker,anchor);
+    // A shorter window can cap the picker's height over the row the keyboard is on.
+    const focused=document.activeElement;
+    if(focused&&open.picker.contains(focused)) _focusProjectPickerRow(open.picker,focused);
+  });
+});
+
+// Whether the sidebar that holds `el` is out of sight: collapsed at desktop
+// widths (a turned phone closes the drawer and collapses it), or a drawer that
+// is not open at phone widths (a large phone turned upright, a window narrowed
+// below boot.js's 641px).
+function _projectPickerSidebarHidden(el){
+  const sidebar=el.closest('.sidebar');
+  if(!sidebar||sidebar.classList.contains('mobile-open')) return false;
+  if(sidebar.closest('.layout.sidebar-collapsed')) return true;
+  return typeof _isDesktopWidth==='function'&&!_isDesktopWidth();
+}
+
+// ── Project picker rows and keyboard (#8044) ────────────────────────────
+// A picker row is a real button, so Tab reaches it and Enter/Space activate
+// it. `active` is the session's current project: the single-session picker
+// passes a boolean and the row becomes a checked radio item; the batch picker
+// passes nothing, since several sessions have no one current project.
+function _projectPickerItem(extraClass, active){
+  const item=document.createElement('button');
+  item.type='button';
+  item.className='project-picker-item'+(extraClass?' '+extraClass:'')+(active?' active':'');
+  if(typeof active==='boolean'){
+    item.setAttribute('role','menuitemradio');
+    item.setAttribute('aria-checked',active?'true':'false');
+  }else{
+    item.setAttribute('role','menuitem');
+  }
+  return item;
+}
+
+// Menu keys for a project picker, as on the session ⋮ menu: ArrowDown/ArrowUp
+// wrap, Home/End jump, Escape runs `onEscape`. Tab closes the menu too and is
+// then left to the browser, so focus moves on from where the picker was opened
+// instead of leaving an open picker behind that no key can reach any more.
+function _wireProjectPickerKeys(picker, onEscape){
+  picker.setAttribute('role','menu');
+  const pickerItems=()=>Array.from(picker.querySelectorAll('.project-picker-item:not([disabled])'));
+  picker.addEventListener('keydown',e=>{
+    if(e.key==='Escape'){
+      e.preventDefault();
+      e.stopPropagation();
+      onEscape();
+      return;
+    }
+    if(e.key==='Tab'){
+      onEscape();
+      return;
+    }
+    const items=pickerItems();
+    if(!items.length) return;
+    const currentIndex=Math.max(0,items.indexOf(document.activeElement));
+    let nextIndex=null;
+    if(e.key==='ArrowDown') nextIndex=(currentIndex+1)%items.length;
+    else if(e.key==='ArrowUp') nextIndex=(currentIndex-1+items.length)%items.length;
+    else if(e.key==='Home') nextIndex=0;
+    else if(e.key==='End') nextIndex=items.length-1;
+    if(nextIndex===null) return;
+    e.preventDefault();
+    _focusProjectPickerRow(picker,items[nextIndex]);
+  });
+}
+
+// Focus a row and bring it into the picker's own scroll box. The focus itself
+// must not scroll (that would move the sidebar or the page), so a row past the
+// edge of a long, scrolling picker is revealed here instead.
+function _focusProjectPickerRow(picker, row){
+  if(!_focusSessionActionMenuRestoreTarget(row)) return false;
+  // Inside the picker's border, or the edge row's focus ring is clipped.
+  const top=picker.getBoundingClientRect().top+picker.clientTop;
+  const bottom=top+picker.clientHeight;
+  const rect=row.getBoundingClientRect();
+  if(rect.top<top) picker.scrollTop-=top-rect.top;
+  else if(rect.bottom>bottom) picker.scrollTop+=rect.bottom-bottom;
+  // With a mouse the batch picker is no scroll box: it grows inside the
+  // conversation list, and the list is what brings its row onto the screen.
+  row.scrollIntoView({block:'nearest'});
+  return true;
+}
+
+// On open, focus lands on the session's current project, else on the first row.
+function _focusProjectPickerItem(picker){
+  const target=picker.querySelector('.project-picker-item.active')||picker.querySelector('.project-picker-item');
+  return _focusProjectPickerRow(picker,target);
+}
+
+// Where focus returns when a session's picker closes: the conversation's ⋮
+// trigger. The picker is anchored on that trigger, or, after a right click or
+// a long press, on the row or its actions box, which hold the trigger but
+// cannot take focus themselves. The sidebar may also have been repainted
+// since, which replaces all of them: then it is the trigger of the row now
+// showing the session.
+function _projectPickerFocusReturnTarget(session, anchorEl){
+  const triggerOf=el=>{
+    if(!el||!el.isConnected) return null;
+    if(el.classList&&el.classList.contains('session-actions-trigger')) return el;
+    // An expanded parent row also holds its fork children's rows, each with a
+    // trigger of its own, and they come before the parent's in the DOM. Only
+    // the row's own trigger will do: a child of the actions box, which is a
+    // child of the row.
+    return el.querySelector(':scope > .session-actions-trigger, :scope > .session-actions > .session-actions-trigger');
+  };
+  return triggerOf(anchorEl)||triggerOf(_findSessionRenameRow(session&&session.session_id));
 }
 
 // Resize a .project-create-input to fit its current value (or placeholder).
@@ -10348,6 +11181,8 @@ function _startProjectCreate(bar, addBtn){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.placeholder='Project name';
+  // #7542: free-text project-name editor, not a credentials field.
+  _markNonCredentialInput(inp);
   let _finishDone=false;
   const finish=async(save)=>{
     if(_finishDone) return;
@@ -10382,10 +11217,906 @@ function _startProjectCreate(bar, addBtn){
   setTimeout(()=>inp.focus(),10);
 }
 
+async function _saveProjectBindings(proj, fields){
+  // Persist one or more binding fields via /api/projects/bind (null clears a
+  // field), then refresh the in-memory project cache + sidebar so chips and
+  // future quick-creates see the new bindings immediately.
+  //
+  // Returns true only when the server ACCEPTED the bind: the dialog stays open
+  // on a failure so the user's unsaved edits survive (Greptile P2
+  // 2026-10-10T02:22:52Z).
+  const body=Object.assign({project_id:proj.project_id}, fields||{});
+  try{
+    const res=await api('/api/projects/bind',{method:'POST',body:JSON.stringify(body)});
+    const updated=res&&res.project;
+    if(updated&&Array.isArray(_allProjects)){
+      const idx=_allProjects.findIndex(p=>p.project_id===proj.project_id);
+      if(idx>=0) _allProjects[idx]=updated;
+    }
+    if(updated){
+      // Keep the OPEN dialog's snapshot in step with what the server just
+      // accepted. Copy the persisted fields IN PLACE: the dialog closure holds
+      // THIS object, so replacing the reference would detach it from
+      // `_allProjects`, and a stale `proj` would put a control back to its
+      // PRE-save value. The dialog's unsaved controls are DOM state and are left
+      // untouched (Greptile P2 2026-10-10T10:11:13Z).
+      for(const _k of ['name','workspaces','default_workspace','model','model_provider']){
+        // The server POPS a CLEARED field instead of echoing it as false/''
+        // (``proj.pop("workspaces", None)`` and friends in /api/projects/bind),
+        // so a key ABSENT from the response means "cleared" and must be deleted
+        // from the snapshot too: copying only the present keys left the old
+        // value behind. `auto_assign` is deliberately NOT tracked here — the
+        // dialog never submits it, because the field is stored but dormant
+        // (maintainer review 5478955688, 2026-10-10T12:35:21Z).
+        if(Object.prototype.hasOwnProperty.call(updated,_k)) proj[_k]=updated[_k];
+        else delete proj[_k];
+      }
+    }
+    try{ if(typeof renderSessionListFromCache==='function') renderSessionListFromCache(); }catch(_){}
+    try{ if(typeof renderSessionList==='function') void renderSessionList({deferWhileInteracting:false}); }catch(_){}
+    if(typeof showToast==='function') showToast(t('pb_updated'));
+    return true;
+  }catch(e){
+    if(typeof showToast==='function') showToast(t('pb_update_failed')+(e&&e.message||e));
+    return false;
+  }
+}
+
+// Custom combobox for the bindings dialog: same look as a native select
+// (see .project-bindings-combo-* in style.css), but rendered as divs so an
+// option can carry a primary name AND a secondary path/subtitle. All three
+// binding fields share this component, so the dropdowns are visually
+// identical across workspace / model / effort.
+
+// Which bindings combo currently owns an open menu. The trigger's click handler
+// stops propagation, so opening a second combo could never run the first one's
+// document-level close and two menus stayed open together (both triggers
+// reporting aria-expanded="true"); _open() now closes the previous owner
+// explicitly, which is what a native <select> does (maintainer UX re-gate
+// 2026-10-10T02:01:36Z).
+let _openBindingsCombo=null;
+// Monotonic id source for the combobox a11y wiring (list id + option ids +
+// the trigger's aria-activedescendant). Declared next to the open-combo slot so
+// the combo probes' extractor picks it up with the component.
+let _comboIdSeq=0;
+
+function _makeBindingsCombo(o){
+  const _cid='pbc-'+(++_comboIdSeq);
+  const wrap=document.createElement('div');
+  wrap.className='project-bindings-combo';
+  const trigger=document.createElement('div');
+  trigger.className='project-bindings-combo-trigger';
+  trigger.tabIndex=0;
+  trigger.setAttribute('role','combobox');
+  trigger.setAttribute('aria-haspopup','listbox');
+  trigger.setAttribute('aria-expanded','false');
+  const nameSpan=document.createElement('span');
+  nameSpan.className='combo-trigger-name';
+  const subSpan=document.createElement('span');
+  subSpan.className='combo-trigger-sub';
+  trigger.appendChild(nameSpan);
+  trigger.appendChild(subSpan);
+  const menu=document.createElement('div');
+  menu.className='project-bindings-combo-menu';
+  menu.setAttribute('role','listbox');
+  menu.setAttribute('id',_cid+'-list');
+  // Screen-reader wiring: the arrows never move DOM focus off the trigger, so the
+  // trigger must name the list it controls and the option currently highlighted
+  // (Greptile P2 2026-10-10T03:29:51Z). The highlight helper keeps
+  // aria-activedescendant in step with the 'active' row.
+  trigger.setAttribute('aria-controls',_cid+'-list');
+  // Accessible name: the visible field labels are sibling divs with no id link,
+  // so a screen reader could not tell a model change from a workspace add
+  // (Greptile P2 2026-10-10T05:08:46Z). Callers pass a localized name; the
+  // add-workspace combo has no visible label at all, so it MUST have one.
+  if(o&&o.ariaLabel) trigger.setAttribute('aria-label',o.ariaLabel);
+  wrap.appendChild(trigger);
+  wrap.appendChild(menu);
+
+  const state={value:(o&&o.value)||'', options:Array.isArray(o&&o.options)?o.options:[], onChange:(o&&typeof o.onChange==='function')?o.onChange:null, filterOptions:(o&&typeof o.filterOptions==='function')?o.filterOptions:null};
+
+  function _currentOption(){
+    return state.options.find(opt=>opt.value===state.value)||null;
+  }
+  function _renderTrigger(){
+    const cur=_currentOption();
+    nameSpan.textContent=(cur&&cur.name)||(o&&o.placeholder)||'';
+    subSpan.textContent=(cur&&cur.sub)||'';
+    subSpan.style.display=(cur&&cur.sub)?'':'none';
+  }
+  // Keep the trigger's aria-activedescendant pointing at the highlighted row so
+  // the arrow move is announced even though focus never leaves the trigger.
+  function _clearActiveDescendant(){
+    // A real DOM drops the attribute; the probes' mini-DOM has no
+    // removeAttribute, so fall back to an empty (equally "no active option")
+    // value there.
+    if(typeof trigger.removeAttribute==='function') trigger.removeAttribute('aria-activedescendant');
+    else trigger.setAttribute('aria-activedescendant','');
+  }
+  function _syncActiveDescendant(){
+    const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+    const row=rows.find(r=>r.classList.contains('active'));
+    const id=row&&row.getAttribute('id');
+    if(id){ trigger.setAttribute('aria-activedescendant',id); return; }
+    _clearActiveDescendant();
+  }
+  function _close(){
+    menu.classList.remove('open');
+    trigger.classList.remove('open');
+    trigger.setAttribute('aria-expanded','false');
+    _clearActiveDescendant();
+    if(_openBindingsCombo===api) _openBindingsCombo=null;
+  }
+  function _open(){
+    // One popup at a time: close whichever bindings combo was open before this
+    // one. The sibling's own click handler stopPropagation()s, so its
+    // document-level close never fires when the OTHER trigger is clicked or
+    // arrowed into (maintainer UX re-gate 2026-10-10T02:01:36Z).
+    if(_openBindingsCombo&&_openBindingsCombo!==api){
+      try{ _openBindingsCombo.close(); }catch(_){ _openBindingsCombo=null; }
+    }
+    // Rebuild options so freshly-fetched lists (workspace names) appear, and
+    // let the caller drop entries that are only invalid NOW: the workspace add
+    // list hides already-bound workspaces, and that bound list changes after
+    // the fetch resolves (a row removed, a path typed in), so filtering once
+    // at fetch time would leave stale rows selectable.
+    menu.innerHTML='';
+    let items=state.options;
+    if(typeof state.filterOptions==='function'){
+      try{ const filtered=state.filterOptions(state.options); if(Array.isArray(filtered)) items=filtered; }catch(_){}
+    }
+    if(!items.length){
+      const empty=document.createElement('div');
+      empty.className='project-bindings-combo-empty';
+      empty.textContent=t('pb_no_options');
+      menu.appendChild(empty);
+    }else{
+      items.forEach((opt,i)=>{
+        const row=document.createElement('div');
+        row.className='ws-opt'+(opt.value===state.value?' active':'');
+        row.setAttribute('role','option');
+        row.setAttribute('id',_cid+'-opt-'+i);
+        row.setAttribute('aria-selected',String(opt.value===state.value));
+        const n=document.createElement('span');
+        n.className='ws-opt-name';
+        n.textContent=opt.name||opt.value||'';
+        row.appendChild(n);
+        if(opt.sub){
+          const p=document.createElement('span');
+          p.className='ws-opt-path';
+          p.textContent=opt.sub;
+          row.appendChild(p);
+        }
+        row.onmousedown=(e)=>{e.preventDefault();};
+        row.onclick=(e)=>{
+          e.stopPropagation();
+          state.value=opt.value;
+          _renderTrigger();
+          _close();
+          if(typeof state.onChange==='function') state.onChange(opt);
+        };
+        menu.appendChild(row);
+      });
+    }
+    // Position the menu FIXED to the trigger's viewport rect so the dialog's
+    // overflow:auto can never clip it. Flip upward when the bottom edge of
+    // the viewport would be hit.
+    const rect=trigger.getBoundingClientRect();
+    const vh=window.innerHeight||0;
+    // The rendered box is capped by CSS at max-height:min(60vh,320px). The flip
+    // decision must use that REAL height, and reading scrollHeight while the menu
+    // is still display:none always returns 0, so the old 240px fallback opened a
+    // long list downward past the viewport edge, where its last options cannot be
+    // clicked or tapped (maintainer must-fix 2026-10-10T03:06:13Z; Greptile P2
+    // 2026-10-10T03:29:51Z). Lay the menu out FIRST — position:fixed at the
+    // trigger's width with visibility:hidden (kept in flow, so it is measurable,
+    // but invisible) — read the true height, choose up/down, cap the box to the
+    // space actually available on that side, then reveal.
+    const cssCap=vh?Math.min(vh*0.6,320):320;
+    menu.style.position='fixed';
+    menu.style.left=rect.left+'px';
+    menu.style.width=rect.width+'px';
+    menu.style.visibility='hidden';
+    menu.classList.add('open');
+    const menuHeight=Math.min(menu.scrollHeight||cssCap, cssCap);
+    const spaceBelow=vh-rect.bottom-8;
+    const spaceAbove=rect.top-8;
+    const flipUp=spaceBelow<menuHeight+8&&spaceAbove>spaceBelow;
+    const avail=Math.max(flipUp?spaceAbove:spaceBelow, 120);
+    menu.style.maxHeight=Math.min(cssCap, avail)+'px';
+    if(flipUp){
+      menu.style.top='auto';
+      menu.style.bottom=(vh-rect.top+6)+'px';
+    }else{
+      menu.style.top=(rect.bottom+4)+'px';
+      menu.style.bottom='auto';
+    }
+    menu.style.visibility='';
+    trigger.classList.add('open');
+    trigger.setAttribute('aria-expanded','true');
+    // Point the trigger at the row that is highlighted on open (the current
+    // value, if it is in the list) so a screen reader announces it.
+    _syncActiveDescendant();
+    _openBindingsCombo=api;
+  }
+  // Move the keyboard highlight over the CURRENTLY RENDERED rows (the filter
+  // runs per open, and the add list both hides bound paths and prepends the
+  // "Type a path…" entry, so the highlight is tracked on the DOM — the same
+  // place the rendered 'active' class lives). Nothing is committed here:
+  // committing is Enter/Space's job.
+  function _setHighlight(row){
+    const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+    rows.forEach(r=>{
+      const on=(r===row);
+      r.classList.toggle('active',on);
+      r.setAttribute('aria-selected',String(on));
+    });
+    // Announce the move: the trigger never loses focus, so it must name the
+    // highlighted option (Greptile P2 2026-10-10T03:29:51Z).
+    _syncActiveDescendant();
+    // The menu is height-capped and scrolls (max-height:min(60vh,320px)), so a
+    // highlight moved past the visible rows must be brought into view —
+    // otherwise Enter commits an option the keyboard user cannot see (Greptile
+    // P2 2026-10-10T00:24:37Z). Guarded: the probes' mini-DOM has no layout.
+    if(row&&typeof row.scrollIntoView==='function'){
+      try{ row.scrollIntoView({block:'nearest'}); }catch(_){ row.scrollIntoView(false); }
+    }
+  }
+  function _moveHighlight(delta){
+    const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+    if(!rows.length) return null;
+    const idx=rows.findIndex(r=>r.classList.contains('active'));
+    const next=delta>0
+      ?(idx<0?0:(idx+1)%rows.length)
+      :(idx<=0?rows.length-1:idx-1);
+    const row=rows[next]||null;
+    if(row){_setHighlight(row);}
+    return row;
+  }
+  trigger.onclick=(e)=>{
+    e.stopPropagation();
+    if(menu.classList.contains('open')){_close();}else{_open();}
+  };
+  trigger.onkeydown=(e)=>{
+    // Two states, two jobs. The old handler tested ArrowDown in the FIRST
+    // branch, so the later "menu is open" ArrowDown branch was unreachable and
+    // down-arrow did nothing once the list was open; Enter/Space were
+    // preventDefault()ed without ever choosing the highlighted row, so the
+    // usual open -> arrow -> Enter flow could not pick a model or workspace
+    // (Greptile P2 2026-10-09T21:47:48Z). Opening the menu and moving/choosing
+    // inside it are now separate branches; inside the open menu the arrows move
+    // the highlight only and Enter/Space commits it (maintainer SHOULD-FIX
+    // 2026-10-09T23:55:01Z).
+    if(!menu.classList.contains('open')){
+      if(e.key==='Enter'||e.key===' '||e.key==='ArrowDown'){
+        e.preventDefault();
+        _open();
+      }
+      return;
+    }
+    if(e.key==='Escape'){e.preventDefault();_close();return;}
+    if(e.key==='ArrowDown'||e.key==='ArrowUp'){
+      // Move the HIGHLIGHT only — never the value. Committing on the arrow
+      // press closed the menu on the first keystroke, which on the add list
+      // (whose first row is "Type a path…") meant open -> ArrowDown opened the
+      // path prompt, and a saved workspace was reachable only by wrapping
+      // ArrowUp from the end. Enter/Space is what commits now
+      // (maintainer SHOULD-FIX 2026-10-09T23:55:01Z).
+      e.preventDefault();
+      _moveHighlight(e.key==='ArrowDown'?1:-1);
+      return;
+    }
+    if(e.key==='Enter'||e.key===' '){
+      // Confirm the row the arrows highlighted (falling back to the first one)
+      // instead of swallowing the key.
+      e.preventDefault();
+      const rows=Array.from(menu.querySelectorAll('.ws-opt'));
+      const idx=rows.findIndex(r=>r.classList.contains('active'));
+      const pick=idx>=0?rows[idx]:rows[0];
+      if(pick){pick.click();}else{_close();}
+    }
+  };
+  // Named so the dialog can drop it again: an anonymous document listener that
+  // outlives the overlay kept the closed dialog's controls (and their captured
+  // state) alive and re-ran them on every later click (Greptile P2
+  // 2026-10-09T21:47:48Z).
+  const _onDocClick=(e)=>{
+    if(!wrap.contains(e.target)) _close();
+  };
+  // The menu is position:fixed and placed ONCE from the trigger's viewport rect,
+  // so any ancestor scroll — the dialog hits its 80vh cap with ten workspaces
+  // and scrolls, and the page scrolls on mobile — left it floating away from its
+  // trigger (maintainer UX re-gate 2026-10-10T02:01:36Z). Close on a capture
+  // scroll like a native <select>, but ignore the menu's OWN scrolling: its list
+  // is height-capped and _setHighlight() scrollIntoView()s the highlighted row.
+  const _onDocScroll=(e)=>{
+    if(menu.classList.contains('open')&&!menu.contains(e.target)) _close();
+  };
+  document.addEventListener('click',_onDocClick);
+  document.addEventListener('scroll',_onDocScroll,true);
+  _renderTrigger();
+  const api={
+    el:wrap,
+    getValue:()=>state.value,
+    setValue:(v)=>{state.value=v||'';_renderTrigger();},
+    setOptions:(opts)=>{state.options=Array.isArray(opts)?opts:[];_renderTrigger();},
+    setOnChange:(fn)=>{state.onChange=typeof fn==='function'?fn:null;},
+    // Exposed so the sibling combo can be closed when this one opens (see
+    // _openBindingsCombo).
+    close:_close,
+    destroy:()=>{
+      document.removeEventListener('click',_onDocClick);
+      document.removeEventListener('scroll',_onDocScroll,true);
+      if(_openBindingsCombo===api) _openBindingsCombo=null;
+    },
+  };
+  return api;
+}
+
+// Close whichever bindings dropdown owns `menu` from OUTSIDE the component — the
+// dialog's capture-phase Escape handler only has the DOM node. Prefer the
+// component's own close when the node belongs to the current open-combo slot:
+// that releases the shared slot AND clears the a11y state (aria-expanded /
+// aria-activedescendant) instead of only dropping the CSS class, which left
+// aria-activedescendant pointing at a now-hidden option (Greptile P2
+// 2026-10-10T04:21:38Z). The DOM fallback stays for a node whose owner is gone.
+function _closeBindingsComboMenu(menu){
+  if(!menu) return false;
+  const owner=_openBindingsCombo;
+  if(owner&&owner.el&&typeof owner.el.contains==='function'&&owner.el.contains(menu)){
+    try{ owner.close(); return true; }catch(_){ _openBindingsCombo=null; }
+  }
+  menu.classList.remove('open');
+  const wrap=menu.closest('.project-bindings-combo');
+  const triggers=wrap?wrap.querySelectorAll('.project-bindings-combo-trigger'):[];
+  const trigger=(triggers&&triggers.length)?triggers[0]:null;
+  if(trigger){trigger.classList.remove('open');trigger.setAttribute('aria-expanded','false');}
+  return true;
+}
+
+// Modal dialog for editing a project's bindings (workspace / model / effort).
+// All three fields use the SAME custom combobox component so the dropdowns
+// look identical; workspace options show name-first with the path as the
+// secondary line. Each field has a "(none)" option to unbind it.
+
+// Provider-scoped model keys for the bindings dialog. Two providers can offer
+// the same bare model id; the synthetic key is "provider\u001fvalue" so each
+// route stays independently selectable, while the WIRE value stays the model id
+// and the provider is sent separately.
+const _modelValueKeyFor=(val,prov)=>prov?(prov+"\u001f"+val):val;
+const _modelValueFor=(k)=>{const i=k.indexOf("\u001f");return i>=0?k.slice(i+1):k;};
+const _modelProvFor=(k)=>{const i=k.indexOf("\u001f");return i>=0?k.slice(0,i):"";};
+
+// Resolve the model-combobox key for a project's saved (model, provider)
+// binding.
+//
+// The server canonicalizes a provider-qualified id — '@custom:backup:model-a:free'
+// is stored as model 'model-a:free' with provider 'custom:backup' — so comparing
+// that bare id with the catalog option VALUE never matched. The dialog then
+// reopened on "(none)"/inherit-default and saving dropped model_provider, which
+// rerouted new sessions to whichever backend owned the bare id. Resolution is
+// therefore by IDENTITY (model + provider): the exact pair first, then the
+// composer's own provider-aware matcher; a saved pair that is missing from the
+// current catalog is re-injected under a provider-scoped key so it stays
+// selectable AND re-savable — and, crucially, never falls back to a DIFFERENT
+// provider that merely offers the same bare model id (re-gate 2026-10-07,
+// static/sessions.js:10566).
+function _bindingModelKeyFor(proj, modelOptions, opts){
+  const o=opts||{};
+  const duplicates=!!o.duplicates;
+  const keyOf=(item)=>duplicates?((item&&item._key)||(item&&item.value)||''):((item&&item.value)||'');
+  const wantModel=String((proj&&proj.model)||'');
+  if(!wantModel) return '';
+  const wantProv=String((proj&&proj.model_provider)||'');
+  if(wantProv){
+    const exact=modelOptions.find(x=>x.value&&x._modelId===wantModel&&String(x._providerId||'')===wantProv);
+    if(exact) return keyOf(exact);
+  }else{
+    // No saved provider: a bare-model hit IS the identity.
+    const bare=modelOptions.find(x=>x.value&&x._modelId===wantModel);
+    if(bare) return keyOf(bare);
+  }
+  if(typeof o.findModelInDropdown==='function'&&o.select){
+    let resolved=null;
+    try{ resolved=o.findModelInDropdown(wantModel,o.select,wantProv||undefined); }catch(_){}
+    if(resolved){
+      const hit=modelOptions.find(x=>x.value===resolved);
+      // With a saved provider, only accept a resolver answer that still carries
+      // it. The resolver is provider-aware, but its last-resort normalization
+      // step can still answer with the row that happens to own the current
+      // value, which is how a 'custom:backup' binding reopened as
+      // 'custom:primary' (only primary offered that model id).
+      if(hit&&(!wantProv||String(hit._providerId||'')===wantProv)) return keyOf(hit);
+    }
+  }
+  // Nothing in the catalog carries the saved (model, provider) pair. Restoring
+  // the bare model would silently reroute new sessions to another backend that
+  // merely shares the model id, so preserve the exact pair under a
+  // provider-scoped key that can never collide with a catalog option.
+  const scoped=duplicates||!!wantProv;
+  const savedKey=scoped?_modelValueKeyFor(wantModel,wantProv):wantModel;
+  modelOptions.push({
+    value:duplicates?wantModel:savedKey,name:wantModel,sub:wantProv,
+    _key:savedKey,_provider:wantProv,_modelId:wantModel,_providerId:wantProv,
+    _saved:true,
+  });
+  return savedKey;
+}
+
+function _wsPathPlaceholderFor(path){
+  // UX re-gate 2026-10-08T23:39:33Z (item B): the "Type a path…" prompt used to
+  // hard-code the Windows drive in `D:\projects\…` on every host. Derive the
+  // hint from a path the dialog already shows so it matches the local path
+  // style (a POSIX host gets `/home/…`, Windows `D:\projects\…`), and fall back
+  // to the localized instruction when there is no path to learn from.
+  const s=String(path||'').trim();
+  const cut=Math.max(s.lastIndexOf('/'),s.lastIndexOf('\\'));
+  return cut>=0 ? s.slice(0,cut+1)+'…' : t('pb_enter_ws_path');
+}
+
+function _showProjectBindingsDialog(proj){
+  // The dialog is built on the app's shared dialog classes (.app-dialog*) so
+  // the registered skins (light mode / geist-contrast / zeus) restyle it, the
+  // Save button picks up the theme's dark-on-accent text instead of white on
+  // yellow, Escape closes it and Tab stays inside it. The overlay intentionally
+  // sits BELOW the shared app dialog's z-index (see .project-bindings-overlay)
+  // so a prompt/confirm opened from inside still stacks on top.
+  // (re-gate 2026-10-07T19:22:30Z, item 4.)
+  const overlay=document.createElement('div');
+  overlay.className='app-dialog-overlay project-bindings-overlay';
+  const dialog=document.createElement('div');
+  dialog.className='app-dialog project-bindings-dialog';
+  dialog.setAttribute('role','dialog');
+  dialog.setAttribute('aria-modal','true');
+  dialog.setAttribute('aria-labelledby','projectBindingsTitle');
+
+  const header=document.createElement('div');
+  header.className='app-dialog-header';
+  const title=document.createElement('div');
+  title.className='app-dialog-title';
+  title.id='projectBindingsTitle';
+  title.textContent=t('pb_bindings_title',proj.name);
+  const closeBtn=document.createElement('button');
+  closeBtn.type='button';
+  closeBtn.className='app-dialog-close';
+  closeBtn.setAttribute('aria-label',t('pb_close'));
+  closeBtn.innerHTML=li('x',14);
+  header.appendChild(title);
+  header.appendChild(closeBtn);
+  dialog.appendChild(header);
+
+  const body=document.createElement('div');
+  body.className='project-bindings-body';
+  dialog.appendChild(body);
+
+  const _field=(labelText,control)=>{
+    const wrap=document.createElement('div');
+    wrap.className='project-bindings-field';
+    const lab=document.createElement('div');
+    lab.className='project-bindings-label';
+    lab.textContent=labelText;
+    wrap.appendChild(lab);
+    wrap.appendChild(control);
+    return wrap;
+  };
+
+  // ── Workspace: multi-value list with default marking + add control ──
+  // Bound workspaces render as rows (name-first with path subtitle). One
+  // row can be marked default (used when the + button starts a session);
+  // the add combobox below pulls from saved workspaces or accepts a fresh
+  // path (server auto-registers it).
+  const wsList=[];   // [{value,name,sub}]
+  const wsListEl=document.createElement('div');
+  wsListEl.className='project-bindings-ws-list';
+  const _wsDefault=()=>wsList.find(x=>x.isDefault)||wsList[0]||null;
+
+  const _wsNameFromPath=(p)=>String(p||'').split(/[\\/]/).pop()||'';
+  function _seedWsList(){
+    const seeded=(Array.isArray(proj.workspaces)&&proj.workspaces.length)
+      ? proj.workspaces.map(p=>({value:p,name:_wsNameFromPath(p),sub:p}))
+      : (proj.workspace?[{value:proj.workspace,name:_wsNameFromPath(proj.workspace),sub:proj.workspace}]:[]);
+    wsList.length=0;
+    seeded.forEach(x=>wsList.push(x));
+    const def=proj.default_workspace||null;
+    if(def){
+      const hit=wsList.find(x=>x.value===def);
+      if(hit) hit.isDefault=true;
+      else if(wsList.length) wsList[0].isDefault=true;
+    }else if(wsList.length){
+      wsList[0].isDefault=true;
+    }
+    _renderWsList();
+  }
+  function _renderWsList(){
+    wsListEl.innerHTML='';
+    if(!wsList.length){
+      const empty=document.createElement('div');
+      empty.className='project-bindings-combo-empty';
+      empty.textContent=t('pb_no_workspaces');
+      wsListEl.appendChild(empty);
+      return;
+    }
+    wsList.forEach((item,idx)=>{
+      const row=document.createElement('div');
+      row.className='project-bindings-ws-row';
+      const info=document.createElement('div');
+      info.className='ws-row-info';
+      const n=document.createElement('div');
+      n.className='ws-row-name';
+      n.textContent=item.name||item.value;
+      info.appendChild(n);
+      const p=document.createElement('div');
+      p.className='ws-row-path';
+      p.textContent=item.sub||item.value;
+      info.appendChild(p);
+      row.appendChild(info);
+      const defBtn=document.createElement('button');
+      defBtn.type='button';
+      defBtn.className='ws-row-default'+(item.isDefault?' is-default':'');
+      defBtn.textContent=item.isDefault?t('pb_mark_default'):t('pb_set_default');
+      defBtn.title=t('pb_set_default_title');
+      defBtn.onclick=(e)=>{
+        e.stopPropagation();
+        wsList.forEach(x=>x.isDefault=false);
+        item.isDefault=true;
+        _renderWsList();
+      };
+      row.appendChild(defBtn);
+      const rm=document.createElement('button');
+      rm.type='button';
+      rm.className='ws-row-remove';
+      // Lucide X (ISC, https://lucide.dev/icons/x): the 12px "×" text glyph
+      // only reached ~2.2:1 on a 1x dark desktop. The SVG strokes currentColor.
+      rm.innerHTML='<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+      rm.title=t('pb_unbind_ws_title');
+      rm.setAttribute('aria-label',t('pb_unbind_ws_title'));
+      rm.onclick=(e)=>{
+        e.stopPropagation();
+        wsList.splice(idx,1);
+        if(!_wsDefault()&&wsList.length) wsList[0].isDefault=true;
+        _renderWsList();
+      };
+      row.appendChild(rm);
+      wsListEl.appendChild(row);
+    });
+  }
+
+  // Add-workspace combobox: saved workspaces not yet bound + a "type a path"
+  // entry that opens a small input dialog (the server auto-registers fresh
+  // paths).
+  const addCombo=_makeBindingsCombo({
+    placeholder:t('pb_add_workspace_placeholder'),
+    ariaLabel:t('pb_add_workspace_title'),
+    value:'',
+    options:[],
+    // Drop workspaces this project already binds, evaluated on every open: the
+    // bound list changes after the initial fetch (a row removed, a path typed
+    // in), so the comment-only promise below was never enough. The custom
+    // "type a path…" entry always survives.
+    filterOptions:(opts)=>opts.filter(o=>o&&(o.value==='__custom_path__'||!wsList.some(x=>x.value===o.value))),
+  });
+  addCombo._customOption={value:'__custom_path__',name:t('pb_type_path'),sub:t('pb_enter_ws_path')};
+  const addRow=document.createElement('div');
+  addRow.className='project-bindings-ws-add';
+  addRow.appendChild(addCombo.el);
+  const addBtn=document.createElement('button');
+  addBtn.type='button';
+  addBtn.className='ws-add-btn';
+  addBtn.textContent=t('pb_add');
+  const _applyAdd=(val)=>{
+    val=String(val||'').trim();
+    if(!val) return;
+    if(wsList.some(x=>x.value===val)){ showToast(t('pb_workspace_already_bound')); return; }
+    wsList.push({value:val,name:_wsNameFromPath(val),sub:val});
+    if(!_wsDefault()) wsList[0].isDefault=true;
+    addCombo.setValue('');
+    _renderWsList();
+  };
+  addCombo.setOnChange((opt)=>{
+    if(opt&&opt.value==='__custom_path__'){
+      // The combo selected the custom entry — clear it and prompt instead.
+      addCombo.setValue('');
+      showPromptDialog({
+        title:t('pb_add_workspace_title'),
+        message:t('pb_add_workspace_message'),
+        value:'',
+        placeholder:_wsPathPlaceholderFor(
+          (wsList[0]&&wsList[0].value)
+          ||(typeof S!=='undefined'&&S.session&&S.session.workspace)
+          ||(typeof S!=='undefined'&&S._profileDefaultWorkspace)),
+        confirmLabel:t('pb_add'),
+      }).then(inp=>{
+        if(inp===null||inp===undefined) return;
+        _applyAdd(inp);
+      });
+    }
+  });
+  addBtn.onclick=()=>{ _applyAdd(addCombo.getValue()); };
+  addRow.appendChild(addBtn);
+  // Fill the add list with the saved workspaces + the custom entry. The
+  // already-bound ones are dropped at OPEN time by addCombo's filterOptions,
+  // because the bound list can change after this fetch resolves.
+  (async()=>{
+    try{
+      const wsRes=await api('/api/workspaces');
+      const rows=(wsRes&&wsRes.workspaces||[]).map(w=>({
+        value:w&&w.path||'',
+        name:(w&&w.name)||_wsNameFromPath(w&&w.path)||'',
+        sub:w&&w.path||'',
+      })).filter(x=>x.value);
+      addCombo.setOptions([addCombo._customOption,...rows]);
+    }catch(_){ addCombo.setOptions([addCombo._customOption]); }
+  })();
+
+  const wsWrap=_field(t('pb_field_workspaces'),wsListEl);
+
+  // ── Model: name-first combobox cloned from the composer modelSelect ──
+  const modelOptions=[{value:'',name:t('pb_none_inherit')}];
+  const srcModelSel=(typeof $==='function')?$('modelSelect'):null;
+  // Authoritative provider for a catalog option: a badge'd <option> carries
+  // dataset.provider, but most options inherit it from the enclosing
+  // <optgroup> (api/ui.js `_getOptionProviderId` walks that chain, and also
+  // parses provider-qualified ids such as '@custom:backup:model-a:free').
+  // Reading dataset alone dropped the provider, so re-opening a binding saved
+  // `model_provider: null` and new sessions routed to the wrong backend.
+  const _optProviderId=(o)=>{
+    try{ if(typeof _getOptionProviderId==='function') return _getOptionProviderId(o)||''; }catch(_){}
+    return (o&&o.dataset&&o.dataset.provider)||'';
+  };
+  if(srcModelSel&&srcModelSel.options){
+    Array.from(srcModelSel.options).forEach(o=>{
+      const val=o.value||'';
+      if(!val) return;
+      const label=(o.textContent||val).trim();
+      const provider=_optProviderId(o);
+      if(!modelOptions.some(x=>x.value===val&&x.sub===provider)){
+        modelOptions.push({value:val,name:label,sub:provider});
+      }
+    });
+  }
+  // Canonical (model, provider) identity per catalog option, resolved through
+  // the composer's own helper. Restoration must match on identity, not on the
+  // raw option value: the server canonicalizes '@custom:backup:model-a:free'
+  // to model 'model-a:free' + provider 'custom:backup', so value equality
+  // never hit and the dialog reopened on inherit-default. (Provider-scoped
+  // keys come from the module-level _modelValueKeyFor/_modelValueFor/
+  // _modelProvFor helpers.)
+  modelOptions.forEach(o=>{
+    if(!o.value){ o._modelId=''; o._providerId=''; return; }
+    let st=null;
+    try{
+      if(typeof _modelStateForSelect==='function'&&srcModelSel) st=_modelStateForSelect(srcModelSel,o.value);
+    }catch(_){}
+    o._modelId=(st&&st.model)||o.value;
+    // The option's OWN captured provider wins (re-gate 2026-10-07,
+    // static/sessions.js:10788): `o.sub` is read off the real <option> when the
+    // list is built (data-provider / <optgroup> chain / qualified-id parse),
+    // whereas `_optProviderId(o)` on this cloned, metadata-less entry and
+    // `_modelStateForSelect(sel,o.value)` both answer with whichever route
+    // currently OWNS that value. With two providers offering the same bare
+    // model id that restored — and then re-saved — the wrong provider.
+    o._providerId=o.sub||(st&&st.model_provider)||'';
+  });
+  const _hasDuplicateModelValues=(()=>{const c={};for(const o of modelOptions){if(!o.value)continue;c[o.value]=(c[o.value]||0)+1;}return Object.values(c).some(n=>n>1);})();
+  if(_hasDuplicateModelValues){
+    // Rewrite options to use provider-scoped keys so each provider route is independently selectable.
+    modelOptions.forEach(o=>{ if(o.value) o._key=_modelValueKeyFor(o.value,o.sub||""); else o._key=""; });
+    // Preserve providers detail under _provider for clarity
+    modelOptions.forEach(o=>{ o._provider=o.sub||""; });
+  }
+  const _initialModelKey=_bindingModelKeyFor(proj, modelOptions, {
+    duplicates:_hasDuplicateModelValues,
+    findModelInDropdown:(typeof _findModelInDropdown==='function')?_findModelInDropdown:null,
+    select:srcModelSel,
+  });
+  const modelCombo=_makeBindingsCombo({
+    placeholder:t('pb_none_inherit'),
+    ariaLabel:t('pb_field_model'),
+    value:_initialModelKey,
+    options:(()=>{ if(!_hasDuplicateModelValues) return modelOptions; return modelOptions.map(o=>({value:o._key, name:o.name, sub:o.sub})); })(),
+  });
+  body.appendChild(_field(t('pb_field_model'),modelCombo.el));
+
+  // ── Reasoning effort: NOT rendered. The value is applied through
+  // /api/reasoning, which sets the effort for that model family across the
+  // WHOLE profile, so a row inside a per-project dialog read as per-project.
+  // The API field is kept (see /api/projects/bind), the row comes back with
+  // per-session effort (#7881). Because the field is not submitted here, an
+  // existing reasoning_effort binding is left untouched.
+  // (re-gate 2026-10-07T19:22:30Z, item 2.)
+
+  // ── Workspaces list (below the model config) ──
+  body.appendChild(wsWrap);
+  body.appendChild(addRow);
+
+  // At most one save request in flight: a second press would race a competing
+  // bind with different settings (Greptile P2 2026-10-10T02:58:01Z).
+  let _saveInFlight=false;
+
+  _seedWsList();
+
+  // ── Actions ──
+  const btnRow=document.createElement('div');
+  btnRow.className='app-dialog-actions';
+  const cancelBtn=document.createElement('button');
+  cancelBtn.type='button';
+  cancelBtn.className='app-dialog-btn';
+  cancelBtn.textContent=t('pb_cancel');
+  cancelBtn.onclick=()=>{ _closeBindingsDialog(); };
+  const saveBtn=document.createElement('button');
+  saveBtn.type='button';
+  saveBtn.className='app-dialog-btn confirm';
+  saveBtn.textContent=t('pb_save');
+  saveBtn.onclick=async()=>{
+    // One save at a time: while a request is pending its snapshot is what the
+    // server is applying, so a competing press with different settings must not
+    // race it (Greptile P2 2026-10-10T02:58:01Z).
+    if(_saveInFlight) return;
+    // Workspaces: the EXACT snapshot Save submits (empty → unbind all),
+    // captured once and never re-read after an await.
+    // (re-gate 2026-10-07T22:04:16Z.)
+    const wsPaths=wsList.map(x=>x.value).filter(Boolean);
+    const def=_wsDefault();
+    const modelVal=modelCombo.getValue();
+    const fields={};
+    fields.workspaces=wsPaths.length?wsPaths:null;
+    fields.default_workspace=(def&&def.value)||null;
+    // auto_assign is deliberately NOT submitted: the field is stored by
+    // /api/projects/bind but dormant in this build (its sweep, toggle and
+    // workspace-keyed filing moved to a follow-up PR), so a Save must leave a
+    // stored value untouched rather than clear it.
+    // Model: empty → unbind; else bind model (+ provider from the option).
+    // Always send model_provider — a selected model WITHOUT provider metadata
+    // must CLEAR any previously-bound provider, otherwise the server keeps the
+    // stale one and quick-create submits an incompatible pair.
+    if(modelVal){
+      const _bare=_modelValueFor(modelVal);
+      fields.model=_bare;
+      const hit=modelOptions.find(x=>_hasDuplicateModelValues ? (x._key===modelVal) : (x.value===modelVal));
+      // `_modelProvFor` recovers the provider from a provider-scoped key and is
+      // a no-op ('') for a plain catalog value, so it is safe to apply
+      // unconditionally: a saved pair re-injected under a scoped key in a
+      // NON-duplicate catalog would otherwise be saved back with the bare model
+      // and no provider (re-gate 2026-10-07, static/sessions.js:10875).
+      let _prov=_modelProvFor(modelVal)||null;
+      // `hit.sub` is the option's own authoritative provider (optgroup chain);
+      // `_providerId` is the fallback for an option we re-injected for a saved
+      // binding that is no longer in the catalog.
+      if(!_prov&&hit) _prov=(hit.sub||hit._providerId||null);
+      // Selection came from outside the catalog (a re-injected canonicalized
+      // binding), so resolve the pair through the composer's own model→provider
+      // resolver before falling back to parsing the raw id.
+      if(!_prov&&typeof _modelStateForSelect==='function'&&srcModelSel){
+        try{
+          const st=_modelStateForSelect(srcModelSel,_bare);
+          if(st&&st.model_provider) _prov=st.model_provider;
+        }catch(_){}
+      }
+      // Last resort: derive the provider from the model id itself (handles a
+      // provider-qualified id whose catalog option isn't loaded yet, e.g.
+      // '@custom:backup:model-a:free' → 'custom:backup'). Never save null for
+      // such an id, or the server keeps/binds the wrong provider route.
+      if(!_prov){
+        try{ if(typeof _getOptionProviderId==='function') _prov=_getOptionProviderId({value:_bare})||null; }catch(_){}
+      }
+      fields.model_provider=_prov;
+    }else{
+      fields.model=null;
+      fields.model_provider=null;
+    }
+    // Close only AFTER the server accepts the bind. The dialog used to close
+    // before the request settled, so a mistyped workspace path (or any failed
+    // request) showed only a toast and threw away every unsaved workspace and
+    // model edit — reopening the dialog rebuilt it from the STORED project
+    // (Greptile P2 2026-10-10T02:22:52Z).  _saveProjectBindings returns true
+    // only on success; a failure keeps the dialog (and its edits) on screen.
+    // The dialog also stays EDITABLE while the request is in flight, so a slow
+    // round-trip must not close over newer edits: snapshot what was submitted
+    // and only close when the controls still match (Greptile P2
+    // 2026-10-10T02:58:01Z).  A second press is ignored for the same reason.
+    const _submitted=JSON.stringify([
+      wsPaths, (def&&def.value)||null, modelVal,
+    ]);
+    _saveInFlight=true;
+    try{
+      const _saved=await _saveProjectBindings(proj,fields);
+      if(!_saved) return;
+      const _nowDefault=_wsDefault();
+      const _current=JSON.stringify([
+        wsList.map(x=>x.value).filter(Boolean),
+        (_nowDefault&&_nowDefault.value)||null,
+        modelCombo.getValue(),
+      ]);
+      if(_current===_submitted) _closeBindingsDialog();
+    }finally{
+      _saveInFlight=false;
+    }
+  };
+  btnRow.appendChild(cancelBtn);
+  btnRow.appendChild(saveBtn);
+  dialog.appendChild(btnRow);
+
+  // Escape closes; Tab cycles inside the dialog (same trap the shared app
+  // dialog installs) — the private overlay used to do neither.
+  const _lastFocus=document.activeElement;
+  let _closed=false;
+  const _focusables=()=>Array.from(
+    overlay.querySelectorAll('button,[href],input,select,textarea,[tabindex]:not([tabindex="-1"])')
+  ).filter(el=>!el.disabled&&el.offsetParent!==null);
+  function _onKey(e){
+    // A shared app dialog (the "Type a path…" prompt / the counted confirm)
+    // opened from INSIDE this one owns the keyboard: ui.js installs its own
+    // document-capture listener that preventDefault()s Escape/Tab/Enter. Both
+    // listeners run for one keydown — stopPropagation() does not stop same-node
+    // listeners — so without this guard Escape closed the prompt AND this
+    // dialog (throwing away unsaved workspace/model edits) and Tab escaped the
+    // modal that was actually on top. Yield in both orders: if the shared
+    // handler ran first it has already called preventDefault(); if this one ran
+    // first, the shared dialog is open. (re-gate 2026-10-07T22:04:16Z —
+    // [CORE] static/sessions.js:10981 + senior-review MUST-FIX.)
+    if(e.defaultPrevented||_isAppDialogOpen()) return;
+    // A combobox dropdown open INSIDE this dialog owns Escape: close only the
+    // dropdown and consume the key so the dialog and its unsaved workspace/model
+    // edits stay. The trigger's own keydown handler cannot do this alone — this
+    // listener is installed on the document in the CAPTURE phase, so it runs
+    // first and used to close the whole dialog with the dropdown still open
+    // (re-gate 2026-10-08T02:11:02Z, [CORE] 1.).
+    if(e.key==='Escape'&&_closeOpenCombo()){
+      e.preventDefault();e.stopPropagation();return;
+    }
+    if(e.key==='Escape'){
+      e.preventDefault();e.stopPropagation();_closeBindingsDialog();return;
+    }
+    if(e.key==='Tab'){
+      const nodes=_focusables();
+      if(!nodes.length) return;
+      const idx=nodes.indexOf(document.activeElement);
+      let next;
+      if(e.shiftKey) next=idx<=0?nodes.length-1:idx-1;
+      else next=(idx===-1||idx===nodes.length-1)?0:idx+1;
+      e.preventDefault();
+      nodes[next].focus();
+    }
+  }
+  function _closeBindingsDialog(){
+    if(_closed) return;
+    _closed=true;
+    document.removeEventListener('keydown',_onKey,true);
+    // Each combobox installs a document click listener; drop both with the
+    // dialog, or every reopen leaves another live listener plus the old
+    // controls it closed over (Greptile P2 2026-10-09T21:47:48Z).
+    try{ if(typeof addCombo.destroy==='function') addCombo.destroy(); }catch(_){}
+    try{ if(typeof modelCombo.destroy==='function') modelCombo.destroy(); }catch(_){}
+    overlay.remove();
+    try{ if(_lastFocus&&typeof _lastFocus.focus==='function') _lastFocus.focus(); }catch(_){}
+  }
+  // Close an open binding-combobox dropdown inside this dialog, mirroring the
+  // combo's own _close() (the same two classes + aria-expanded). Returns true
+  // when a dropdown was actually open, so Escape can be consumed by it instead
+  // of closing the dialog (re-gate 2026-10-08T02:11:02Z, [CORE] 1.).
+  function _closeOpenCombo(){
+    const menu=overlay.querySelector('.project-bindings-combo-menu.open');
+    if(!menu) return false;
+    // Delegate to the component's close so the shared open-combo slot is
+    // released and the a11y state is cleared with the class (Greptile P2
+    // 2026-10-10T04:21:38Z).
+    return _closeBindingsComboMenu(menu);
+  }
+  closeBtn.onclick=()=>{ _closeBindingsDialog(); };
+  overlay.appendChild(dialog);
+  overlay.onclick=(e)=>{if(e.target===overlay) _closeBindingsDialog();};
+  document.addEventListener('keydown',_onKey,true);
+  document.body.appendChild(overlay);
+  try{overlay.querySelector('.project-bindings-combo-trigger').focus();}catch(_){}
+}
+
+
 function _startProjectRename(proj, chip){
   const inp=document.createElement('input');
   inp.className='project-create-input';
   inp.value=proj.name;
+  // #7542: free-text project-name editor, not a credentials field.
+  _markNonCredentialInput(inp);
   let _finishDone=false;
   const finish=async(save)=>{
     if(_finishDone) return;
@@ -10461,6 +12192,30 @@ function _showProjectContextMenu(e, proj, chip){
   });
   menu.appendChild(colorRow);
 
+  // Divider before bindings
+  const bindSep=document.createElement('hr');
+  bindSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+  menu.appendChild(bindSep);
+
+  // ── Project settings: ONE row, nothing else ─────────────────────────────
+  // The chip menu used to grow from 3 rows to 6 + N (an inline binding summary
+  // plus one "Unbind …" row per bound workspace, model and effort) and from
+  // ~193px to ~355px wide, because the longest row is the workspace path —
+  // exactly why _buildSessionAction keeps menus to icon + label. The unbind
+  // rows were redundant too: the dialog already carries an × per workspace and
+  // a "(none)" option for model and effort. One row opens the dialog.
+  // (re-gate 2026-10-07T19:22:30Z, item 1.)
+  const bindItem=document.createElement('div');
+  bindItem.textContent=t('pb_bindings_menu');
+  bindItem.style.cssText='padding:7px 14px;cursor:pointer;font-size:13px;color:var(--text);';
+  bindItem.onmouseenter=()=>bindItem.style.background='var(--hover-bg)';
+  bindItem.onmouseleave=()=>bindItem.style.background='';
+  bindItem.onclick=()=>{
+    menu.remove();
+    _showProjectBindingsDialog(proj);
+  };
+  menu.appendChild(bindItem);
+
   // Divider + Delete
   const sep=document.createElement('hr');
   sep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
@@ -10474,6 +12229,21 @@ function _showProjectContextMenu(e, proj, chip){
   menu.appendChild(delItem);
 
   document.body.appendChild(menu);
+  // Clamp the menu to the viewport the way the session ⋮ menu does (8px
+  // margins + a width cap): with several bound workspaces the old long rows
+  // pushed it off-screen on a 390px phone. (re-gate 2026-10-07T19:22:30Z,
+  // item 5.)
+  const menuW=Math.min(menu.offsetWidth||menu.getBoundingClientRect().width||140, window.innerWidth-16);
+  menu.style.width=menuW+'px';
+  let menuLeft=e.clientX;
+  if(menuLeft+menuW>window.innerWidth-8) menuLeft=window.innerWidth-menuW-8;
+  if(menuLeft<8) menuLeft=8;
+  menu.style.left=menuLeft+'px';
+  const menuH=menu.offsetHeight||0;
+  let menuTop=e.clientY;
+  if(menuTop+menuH>window.innerHeight-8) menuTop=window.innerHeight-menuH-8;
+  if(menuTop<8) menuTop=8;
+  menu.style.top=menuTop+'px';
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
 }

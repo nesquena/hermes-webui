@@ -405,6 +405,58 @@ def test_streaming_cronjob_wrapper_uses_profile_context_only_for_tool_call(tmp_p
     ]
 
 
+def test_streaming_cronjob_wrapper_tolerates_agent_without_dynamic_schema_overrides(monkeypatch):
+    """Older hermes-agent ToolEntry/register() lack ``dynamic_schema_overrides`` (#8186).
+
+    Installing the wrapper must not raise AttributeError (which aborted every
+    chat stream) and must not pass the unknown kwarg to an older register().
+    """
+    import types
+
+    from api import streaming as st
+
+    def original_handler(args, **kwargs):
+        return "ok"
+
+    class Entry:
+        name = "cronjob"
+        toolset = "cronjob"
+        schema = {"name": "cronjob"}
+        handler = staticmethod(original_handler)
+        check_fn = None
+        requires_env = []
+        is_async = False
+        description = ""
+        emoji = "⏰"
+        max_result_size_chars = None
+
+    entry = Entry()
+    registered = []
+
+    class Registry:
+        def get_entry(self, name):
+            return entry
+
+        def register(self, name, toolset, schema, handler, check_fn=None,
+                     requires_env=None, is_async=False, description="", emoji="",
+                     max_result_size_chars=None):
+            registered.append(name)
+            entry.handler = handler
+
+    tools_pkg = types.ModuleType("tools")
+    registry_mod = types.ModuleType("tools.registry")
+    registry_mod.__dict__["registry"] = Registry()
+    monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+    monkeypatch.setitem(sys.modules, "tools.registry", registry_mod)
+    monkeypatch.setattr(st, "_STREAMING_CRONJOB_WRAPPER_INSTALLED", False)
+
+    st._install_streaming_cronjob_profile_wrapper()
+
+    assert registered == ["cronjob"]
+    assert st._STREAMING_CRONJOB_WRAPPER_INSTALLED is True
+    assert entry.handler({"action": "list"}) == "ok"
+
+
 def test_streaming_cronjob_wrapper_context_survives_threadpool_context_copy(tmp_path, monkeypatch):
     """Lock the cross-thread contextvar contract used by agent tool dispatch.
 

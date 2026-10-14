@@ -552,6 +552,43 @@ def test_bare_codex_gpt_runtime_bridge_routes_to_codex(monkeypatch):
     assert base_url is None
 
 
+def test_live_only_codex_model_beats_overlapping_configured_provider(monkeypatch):
+    """Live-only Codex models must not be hijacked by another configured provider."""
+    import api.config as config
+
+    monkeypatch.setitem(config.cfg, "model", {
+        "provider": "openai-codex",
+        "default": "gpt-5.5",
+        "base_url": "https://chatgpt.com/backend-api/codex",
+    })
+    monkeypatch.setitem(config.cfg, "providers", {
+        "shared-relay": {
+            "base_url": "https://relay.example/v1",
+            "models": {"gpt-5.3-codex": {}},
+        }
+    })
+    monkeypatch.setitem(
+        config._PROVIDER_MODELS,
+        "openai-codex",
+        [
+            model for model in config._PROVIDER_MODELS["openai-codex"]
+            if model.get("id") != "gpt-5.3-codex"
+        ],
+    )
+
+    runtime_model = config.model_with_provider_context(
+        "gpt-5.3-codex", "openai-codex"
+    )
+    resolved = config.resolve_model_provider(runtime_model)
+
+    assert runtime_model == "@openai-codex:gpt-5.3-codex"
+    assert resolved == (
+        "gpt-5.3-codex",
+        "openai-codex",
+        "https://chatgpt.com/backend-api/codex",
+    )
+
+
 def test_non_openrouter_slash_model_provider_context_stays_unqualified():
     """Portal/custom slash IDs must keep the provider hint when the session
     provider differs from the profile default (#7333).
@@ -1596,7 +1633,9 @@ class TestFrontendModelProviderState:
     def test_boot_session_update_sends_model_provider(self):
         src = _read("static/boot.js")
         assert "_modelStateForSelect" in src
-        assert "model_provider:modelState.model_provider||null" in src
+        # Whitespace-tolerant: the boot session update must send the picker's
+        # provider (falling back to null), however the object literal is spaced.
+        assert re.search(r"model_provider\s*:\s*modelState\.model_provider\s*\|\|\s*null", src)
 
     def test_new_session_carries_visible_picker_model_into_create_request(self):
         src = _read("static/sessions.js")
