@@ -15,6 +15,21 @@
 
 ---
 
+## Background sidebar refresh and new-tab fixture compatibility
+
+Run `./scripts/test.sh tests/test_session_background_sort_browser.py` with
+Playwright and Chromium installed. The 18-case browser gate executes production
+activity sorting, date grouping, measured windowing and rows at 300px/180px sidebar
+widths, with 40/120 conversations. It checks a partly clipped first row moving
+into Today while selection is outside the viewport, unchanged-height refresh,
+stable-order density/expansion corrections, bounded virtual DOM, and modifier /
+middle-button navigation with child exact-target URLs and click consumption.
+`python tests/browser_session_background_sort.py --output <dir> --before-ref <sha>`
+replays the same pipeline against an exact source revision and retains reports
+and paired screenshots. It supplies synthetic snapshots, not a live Agent/SSE run.
+The shared extracted row fixture composes real new-tab helpers; only outbound
+navigation is recorded in the navigation checks.
+
 ## Cancelled-journal recovery combinations
 
 Run `./scripts/test.sh tests/test_cancel_recovery_properties.py tests/test_cancel_restart_journal_recovery.py`.
@@ -58,6 +73,105 @@ and fallback URLs retain the session and snapshot captured for their fetch,
 including requests started without a session. The Node harness executes the
 real loaders with deferred responses and PDF-ready/timeout callbacks; it does
 not certify browser rendering or real CDN availability.
+
+## Sidebar child-state presentation
+
+Run `./scripts/test.sh tests/test_child_session_status.py tests/test_child_session_ux.py tests/test_parent_notification_scope.py tests/test_sidebar_tooltips.py tests/test_465_session_branching.py tests/test_session_lineage_collapse.py tests/test_session_touch_actions.py tests/test_issue3242_3214_i18n_tooltips.py`.
+The production attach/render component covers independent parent and child
+notifications, archived reference-only inclusion, state precedence, navigation,
+and localized state-first chip labels in every locale.
+
+With Playwright/Chromium available, run
+`python tests/browser_child_session_status.py --output <artifact-directory>`.
+This credential-free component gate loads production sidebar rendering, CSS and
+i18n without starting an Agent or server. It checks collapsed/expanded rows at
+1280/768/390px, light/dark skins (including all five active-row color-inheritance
+skins), approval/clarify/running/unread, equal fork/delegated spinner sizes,
+44px delegated touch targets, compact desktop rows, clipping, and keyboard/tap
+navigation. Screenshots and computed-style results are saved in the artifact
+directory. These isolated fixtures prove presentation and control behavior, not
+live approval producers or runtime streaming. Also check the full app sidebar
+with real session metadata when verifying an installed build.
+
+The concurrent-state UX gate is
+`python tests/browser_child_attention_ux.py --output <artifact-directory>`.
+It checks a single running-only chip spinner, supplemental attention-plus-running
+activity, parent-own notifications, concurrent unread accessible labels,
+search/disclosure transitions, reference-only state, and computed expanded-child
+attention background/accent colors across active light/dark skins and mobile.
+Use `--before-ref <commit>` to record exact previous-head failures.
+
+`python tests/browser_child_finishing_ux.py --output <artifact-directory>` checks
+archived-label glyph bounds at 300/360px (with graceful 180px clipping),
+child-qualified localized attention and delegated action labels in every locale,
+Detailed prior-turn readability, and idle/hover/leave/selection precedence for
+fork and delegated attention rows across the five affected active skins plus
+default, light/dark, desktop/tablet/phone. It saves before/after screenshots using
+`--before-ref <commit>`. The concurrent-state gate also exercises actual touch
+chip expansion at the minimum width: focus must not retarget its synthetic click.
+
+`python tests/browser_child_chip_ownership.py --output <artifact-directory>`
+checks concurrent child activity is contained in the chip, independently of the
+parent's own unread/approval dot. At 180/220/240/300/360px across every locale,
+ordinary rows must retain five actual title glyphs plus ellipsis, the count's first
+glyph and both status marks. Separate badge-heavy 180px rows retain the existing
+24px title floor, not a five-glyph guarantee. Keyboard/touch checks exercise
+both child navigation targets, equal 44px phone row/button heights, and the
+narrow-fine/wide-coarse sides of the touch-target media query.
+Use `--before-ref <commit>` for red-before evidence and screenshots.
+
+`python tests/browser_archived_child_label.py --output <artifact-directory>`
+checks reference-only title glyphs and hit-tested status marks at 180/220/240px
+across every locale, both densities, selected/inactive rows, light/dark Graphite,
+Default, Catppuccin and Geist Contrast. The separate normal-width matrix keeps
+the full child-qualified label readable at 300/360px with parent-own notification
+gutters. Narrow reference chips use a 50% cap and intrinsic title basis when the
+session text content box is at most 220px; wider content retains the 60% cap and
+flexible title basis so localized `Archived child` remains readable. A focused
+220/240/300px German matrix also checks Arial and DejaVu Sans metrics across
+Default/Catppuccin, both densities, selected/inactive rows, and parent-own states,
+so host font fallback cannot hide intermediate-width title clipping. The full
+child-qualified explanation stays in tooltip/ARIA; the chip remains `role="img"`,
+not an empty disclosure button.
+
+`python tests/browser_child_title_spacing.py --output <artifact-directory>`
+checks fork/worktree/project badge combinations at 180–240px and compares
+childless Detailed-density compressed rows with the production renderer/CSS at
+`origin/master`, or an explicit `--baseline-ref <master revision>`. The baseline
+must exist locally; the gate reports an unavailable ref before launching Chromium.
+Childless rows assert master parity, not improved behavior beyond master.
+
+`./scripts/test.sh tests/test_lineage_summary_virtualization.py tests/test_issue500_session_list_virtualization.py`
+checks measured prefix-sum windows/spacers and the queued scroll scheduler.
+`python tests/browser_lineage_scroll_selection.py --output <artifact-directory>`
+exercises the real grouping/window/row renderer and scroll listener: stable top
+conversation and offset at unchanged scrollTop, bounded DOM, bottom reachability,
+reload/search-return active anchoring, localized narrow layouts, density/theme/
+width changes with pending RAF, and child/prior-turn keyboard/touch navigation.
+Use `--before-ref <commit>` for exact-head regression evidence.
+
+`python tests/browser_archived_child_label.py --output <artifact-directory>`
+checks reference-only label glyph fit at 300/360px and mark/title geometry at
+180px across all locales, both densities, parent-own states and desktop/touch
+contexts using production CSS. `--before-ref` records the exact-head regression.
+
+`python tests/browser_session_virtual_geometry.py --case projects --output <artifact-directory>`
+checks 200 Compact rows below 20 production project controls, preserving visible
+rows at scrollTop 596 with six or 40 headers. It also checks bottom reachability,
+normal/search project selection, empty/collapsed headers and pending layout RAFs.
+The default cases cover grouped active anchoring and offscreen preview/selection
+height invalidation. API/filter projection is seeded; rendering/CSS are real.
+
+`python tests/browser_lineage_sidebar_repaint.py --output <artifact-directory>`
+records cold plus five refresh/layout samples for 500/2,000 rows, sparse and all
+lineage summaries, Detailed plain and Compact controls. It includes production
+child projection, grouping, window/row construction and forced layout, excluding
+fixture generation and synthetic unread/viewed-store setup. Measurement inside
+the renderer may force layout before the final layout read; compare `totalMs`,
+not just the final `layoutMs`. DOM row/node counts accompany each sample. This
+component gate excludes full-app/API/filtering/stream latency. Run sequentially
+without concurrent browser matrices, and use `--before-ref` for matched controls.
+Add `--projects` to include 20 production project controls and six date headers.
 
 ## Static JS runtime lint (brick-class regression guard)
 
@@ -160,7 +274,66 @@ the first message typed with no conversation open must be sent; each reads the
 session list once before that, and shows the new row once the list is released
 (#7936, #7996, #8004). Run it locally with `python tests/browser_new_chat_focus.py`.
 
-It also runs `tests/browser_project_picker_keyboard.py`, which imports two
+## Sidebar child-chip presentation gate
+
+With the existing Playwright/Chromium setup, run:
+
+```bash
+python tests/browser_child_chip_visibility.py --output /path/to/artifacts
+```
+
+This isolated component gate uses the production attachment, row renderer,
+stylesheet, and locale dictionaries; it does not start a server or exercise a
+live Agent. It checks approval plus concurrent running children against parent
+unread/approval/clarify combinations, every `Object.keys(LOCALES)` entry, and
+180px/240px/300px sidebars at desktop, tablet, and phone viewports, in compact
+and detailed density. Measurements reset
+horizontal scrolling and hit-test the chip's status mark before any actionability
+scrolling, using `.session-text` as the clipping boundary. The title retains a
+20px minimum; reference-only chips are capped to preserve useful title space.
+Search-forced expansion and concurrent running must appear in the chip's
+accessible state/name. In detailed density, earlier-turn navigation moves below
+metadata when a child chip is present; its full localized count and cue must fit
+inside the pill, measured with text-range geometry rather than just its box.
+Enter/Space disclosure and keyboard/touch navigation to a prior segment are also
+exercised without relying on hover. `--before-ref <commit>` exercises the exact prior source
+and returns failure when the regression is present. JSON and screenshots are
+written to the chosen artifact directory.
+
+## Restored-child and sidebar state-projection gates
+
+```bash
+python tests/browser_session_child_restore.py --output /path/to/restore-artifacts
+python tests/browser_session_state_projection.py --output /path/to/projection-artifacts
+```
+
+The restore gate starts an isolated Agent-free `server.py`, API-imports 200
+conversations and overlays only delegated metadata on the sidebar payload.
+It drives real `loadSession` navigation with 120 parent conversations (the
+expanded parent at position 100), first/last of 80 children from scroll 0/2000,
+20 children in Detailed density, 30 children, 12 children from the bottom and
+last of 40. Its 16 desktop/mobile scenes require the active child wholly inside
+the real list viewport and bounded virtual DOM. Mobile screenshots open the
+production drawer; `--repo PATH` replays the same probe against a control tree.
+A failure on master is control evidence, not automatically a candidate regression.
+
+The 15-case state-projection gate uses production rendering and CSS: it caches a
+Russian prior-turns summary at 180px with 1,000 segments, scrolls it offscreen,
+and changes the parent's running/unread/approval gutter in both directions.
+It demonstrates the real height change and requires stale measurements to be
+invalidated. Adversarial scenes restore first/last of 80 expanded lineage
+segments and a parent in batch-selection mode, requiring the actual title/segment
+rather than a checkbox to be centered. Separate collapsed→expanded→collapsed scenes pair a visible approval
+child with reference-only archived running work; the chip keeps that activity,
+without duplicating supplemental activity when only visible children run. Both
+scripts have exact-count pytest wrappers in `test_session_child_restore_browser.py`.
+The finishing-UX driver waits for CSS transitions and three identical rendered
+style frames, bounded to three seconds, before comparing idle/hover/leave/selected
+paint; the selection/attention assertions are unchanged.
+
+## Project picker keyboard and touch gate
+
+The browser smoke job also runs `tests/browser_project_picker_keyboard.py`, which imports two
 conversations and creates three projects through the API and then drives both
 "Move to project" pickers. The single-conversation picker is opened from the ⋮
 menu with the keyboard: its rows must be buttons in a named menu, focus must

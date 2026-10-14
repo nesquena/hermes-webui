@@ -364,8 +364,10 @@ def test_branch_nested_fork_rows_render_their_own_state_indicator():
     """Expanded fork rows should keep unread/streaming/attention affordances."""
     src = _read('static/sessions.js')
     css = _read('static/style.css')
-    assert "session-state-indicator session-child-session-state" in src, \
-        "Nested fork rows should render a per-row state indicator"
+    assert "'session-state-indicator '+className" in src, \
+        "The shared child indicator should retain the state indicator class"
+    assert "attention:childAttention},'session-child-session-state')" in src, \
+        "Nested fork and delegated rows should render a per-row state indicator"
     assert "session-child-session-fork.streaming" in css, \
         "Nested fork rows should expose row-level streaming styling"
 
