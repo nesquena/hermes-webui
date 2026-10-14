@@ -11,7 +11,10 @@ These tests pin the fix on both layers:
     known-good generation that the loader falls back to when the primary file
     cannot be parsed.
 """
+import io
 import json
+
+import pytest
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -153,3 +156,214 @@ def test_a_corrupt_primary_never_overwrites_the_good_backup(tmp_path, monkeypatc
         "the good backup generation must survive a corrupt primary rotation"
     )
     assert json.loads(p.read_text(encoding="utf-8")) == [{"id": "c", "text": "three"}]
+
+
+# ── The primary's own authority across a publish ─────────────────────────
+#
+# Rotating with `os.replace(p, p.bak)` handed the shared writer a brand-new
+# path: mode, owner, symlinks, hard links and xattrs of the live file were no
+# longer there to preserve. The recovery copy is now published as an
+# independent snapshot while the primary stays exactly where it is.
+
+def _paths(tmp_path, monkeypatch):
+    from api import routes
+
+    p = tmp_path / "webui" / "saved_prompts.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(routes, "_saved_prompts_path", lambda: p)
+    return routes, p
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o664], ids=["0600", "0664"])
+def test_a_private_primary_stays_private_across_a_save(tmp_path, monkeypatch, mode):
+    import os as _os
+
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    _os.chmod(p, mode)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}, {"id": "b", "text": "two"}])
+    assert _os.stat(p).st_mode & 0o777 == mode, (
+        f"a {mode:04o} saved-prompt file must not be re-moded by a save"
+    )
+    assert json.loads(p.read_text(encoding="utf-8"))[1]["id"] == "b"
+
+
+def test_a_read_only_primary_refuses_the_write(tmp_path, monkeypatch):
+    import os as _os
+
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    _os.chmod(p, 0o444)
+    before = p.read_text(encoding="utf-8")
+    try:
+        with pytest.raises(PermissionError):
+            routes._save_saved_prompts([{"id": "a", "text": "one"}, {"id": "b"}])
+    finally:
+        _os.chmod(p, 0o644)
+    assert p.read_text(encoding="utf-8") == before, "a 0444 primary must not be overwritten"
+
+
+def test_a_symlinked_primary_keeps_the_link_and_updates_the_referent(tmp_path, monkeypatch):
+    import os as _os
+
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    real = p.parent / "prompts-real.json"
+    _os.replace(p, real)
+    p.symlink_to(real.name)
+
+    routes._save_saved_prompts([{"id": "a", "text": "one"}, {"id": "b", "text": "two"}])
+
+    assert p.is_symlink(), "saving must not sever the primary's symlink"
+    assert json.loads(real.read_text(encoding="utf-8"))[1]["id"] == "b", (
+        "the referent is what a symlinked primary writes through"
+    )
+    assert json.loads(p.read_text(encoding="utf-8"))[1]["id"] == "b"
+
+
+def test_the_recovery_copy_gets_its_own_inode(tmp_path, monkeypatch):
+    """A compatibility write goes in place so aliases stay valid; if the backup
+    were an alias of the primary, that in-place write would rewrite the live
+    file through it and the two generations would collapse into one."""
+    import os as _os
+
+    routes, p = _paths(tmp_path, monkeypatch)
+    bak = Path(str(p) + ".bak")
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    _os.link(p, bak)  # user-made hard-linked backup
+
+    routes._save_saved_prompts([{"id": "a", "text": "one"}, {"id": "b", "text": "two"}])
+
+    assert json.loads(p.read_text(encoding="utf-8"))[1]["id"] == "b"
+    assert json.loads(bak.read_text(encoding="utf-8")) == [{"id": "a", "text": "one"}], (
+        "the recovery generation must survive as its own inode, not the primary's alias"
+    )
+    assert _os.stat(p).st_ino != _os.stat(bak).st_ino
+
+
+def test_an_unusable_recovery_copy_refuses_the_destructive_save(tmp_path, monkeypatch):
+    """`.bak` that cannot be published (here: a directory) must stop the save
+    before the primary is touched — the old code swallowed the failure and
+    answered 200 over a destroyed file."""
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    before = p.read_text(encoding="utf-8")
+    Path(str(p) + ".bak").mkdir()
+
+    with pytest.raises(routes.SavedPromptPersistenceError):
+        routes._save_saved_prompts([])
+
+    assert p.read_text(encoding="utf-8") == before, "the primary must be untouched"
+    assert routes._load_saved_prompts() == [{"id": "a", "text": "one"}]
+
+
+def test_the_payload_is_serialized_before_anything_is_published(tmp_path, monkeypatch):
+    """Encoding the whole payload first: a failure there can never leave a
+    half-published generation behind."""
+    import inspect
+
+    from api import routes
+
+    source = inspect.getsource(routes._save_saved_prompts)
+    dump_at = source.index("payload = json.dumps(")
+    assert dump_at < source.index("_atomic_write_text(backup"), (
+        "serialize before publishing the recovery copy"
+    )
+    assert dump_at < source.index("_atomic_write_text(p, payload)"), (
+        "serialize before publishing the primary"
+    )
+
+
+# ── Route behaviour: replayed DELETEs ────────────────────────────────────
+
+class _PromptDeleteHandler:
+    def __init__(self, body: dict):
+        raw = json.dumps(body).encode("utf-8")
+        self.status = None
+        self.sent_headers = []
+        self.body = bytearray()
+        self.wfile = self
+        self.rfile = io.BytesIO(raw)
+        self.headers = {"Content-Length": str(len(raw))}
+        self.client_address = ("127.0.0.1", 0)
+
+    def send_response(self, status):
+        self.status = status
+
+    def send_header(self, name, value):
+        self.sent_headers.append((name, value))
+
+    def end_headers(self):
+        pass
+
+    def write(self, data):
+        self.body.extend(data)
+
+    def json_body(self):
+        return json.loads(bytes(self.body).decode("utf-8"))
+
+
+def _delete_via_route(monkeypatch, p, prompt_id: str):
+    from urllib.parse import urlparse
+
+    from api import routes
+
+    monkeypatch.setattr(routes, "_saved_prompts_path", lambda: p)
+    monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+    monkeypatch.setattr(
+        routes,
+        "_guard_request_session_visibility",
+        lambda handler, parsed, body=None, method="DELETE": True,
+    )
+    handler = _PromptDeleteHandler({"id": prompt_id})
+    handled = routes.handle_delete(handler, urlparse("/api/prompts"))
+    assert handled is not False, "DELETE /api/prompts must be handled"
+    return handler
+
+
+def test_a_repeated_delete_of_the_same_id_never_erases_the_recovery_generation(
+    tmp_path, monkeypatch
+):
+    """The frontend helper can replay a DELETE after a network error. The first
+    one publishes primary=[] and backup=[old]; the replay used to publish
+    backup=[] too, so corrupting the primary afterwards recovered nothing."""
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    bak = Path(str(p) + ".bak")
+
+    first = _delete_via_route(monkeypatch, p, "a")
+    assert first.status == 200 and first.json_body() == {"ok": True}
+    assert json.loads(p.read_text(encoding="utf-8")) == []
+    assert json.loads(bak.read_text(encoding="utf-8")) == [{"id": "a", "text": "one"}]
+
+    second = _delete_via_route(monkeypatch, p, "a")
+    assert second.status == 200 and second.json_body() == {"ok": True}
+    assert json.loads(p.read_text(encoding="utf-8")) == [], "the primary is still []"
+    assert json.loads(bak.read_text(encoding="utf-8")) == [{"id": "a", "text": "one"}], (
+        "a replayed DELETE must not rotate the recovery copy down to []"
+    )
+
+    p.write_text("{torn write", encoding="utf-8")
+    assert routes._load_saved_prompts() == [{"id": "a", "text": "one"}]
+
+
+def test_deleting_an_unknown_id_creates_no_files(tmp_path, monkeypatch):
+    routes, p = _paths(tmp_path, monkeypatch)
+    handler = _delete_via_route(monkeypatch, p, "never-there")
+    assert handler.status == 200 and handler.json_body() == {"ok": True}
+    assert not p.exists() and not Path(str(p) + ".bak").exists()
+
+
+def test_a_blocked_recovery_copy_surfaces_an_error_instead_of_success(
+    tmp_path, monkeypatch
+):
+    routes, p = _paths(tmp_path, monkeypatch)
+    routes._save_saved_prompts([{"id": "a", "text": "one"}])
+    before = p.read_text(encoding="utf-8")
+    Path(str(p) + ".bak").mkdir()
+
+    handler = _delete_via_route(monkeypatch, p, "a")
+
+    assert handler.status == 500
+    assert "error" in handler.json_body()
+    assert p.read_text(encoding="utf-8") == before, "the prompt must still be there"
