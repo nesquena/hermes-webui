@@ -7165,7 +7165,9 @@ def get_cli_session_metadata_by_id(session_id: str, *, all_profiles: bool = Fals
     it in the sidebar's row shape, so the existing ownership, tombstone and
     foreign-source gates keep deciding what a caller may see. The sidebar window
     itself is untouched: one indexed primary-key fetch plus the row's own
-    message aggregate, never a history scan.
+    ``message_count`` aggregate, never a window-filling history scan. That
+    aggregate spans the target session's own messages, so the read is bounded by
+    the row's history, not by the size of the table.
 
     The deleted-WebUI tombstone is honored here for the same reason the sidebar
     projection honors it: a deleted WebUI session must stay gone even though its
@@ -7197,8 +7199,15 @@ def get_cli_session_metadata_by_id(session_id: str, *, all_profiles: bool = Fals
         row = read_agent_session_row_by_id(db_path, sid, log=logger)
         if not row:
             continue
-        _source = str(row.get('source') or 'cli').strip().lower() or 'cli'
-        if _source in {'webui', 'fork'}:
+        # No ``or 'cli'`` default (#8061 review): turning an absent/NULL source
+        # into a foreign origin would exempt exactly the rows this tombstone
+        # exists for. Keep the raw value for the decision and report ``unknown``
+        # for display; treat unknown provenance as possibly WebUI-owned, so an
+        # older WebUI row (which may predate source tracking) stays suppressed.
+        # A live sidecar still beats a stale tombstone, as in the projection.
+        _raw_source = str(row.get('source') or '').strip().lower()
+        _source = _raw_source or 'unknown'
+        if _raw_source in {'webui', 'fork'} or not _raw_source:
             try:
                 tombstoned = sid in _load_webui_deleted_session_tombstone()
             except Exception:
@@ -7232,9 +7241,14 @@ def get_cli_session_metadata_by_id(session_id: str, *, all_profiles: bool = Fals
         # Same keys and same fallbacks as the sidebar projection's row builder
         # (_load_cli_sessions_uncached) so every caller of
         # _lookup_cli_session_metadata() sees one row shape regardless of whether
-        # the row came from the window or from this exact-id read.
+        # the row came from the window or from this exact-id read. ``exact_id_fallback``
+        # is the one addition: it tells the write paths that this row came from
+        # outside the sidebar window, so they can apply the admission the claim
+        # path applies (#8061 review) without changing the contract of rows the
+        # window already served.
         return {
             'session_id': sid,
+            'exact_id_fallback': True,
             'title': title or f"{_source.title()} Session",
             'model': row.get('model') or None,
             'message_count': row.get('message_count') or row.get('actual_message_count') or 0,

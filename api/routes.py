@@ -6296,6 +6296,26 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     if cli_meta.get("read_only") or _is_messaging_session_record(cli_meta):
         raise PermissionError("read-only imported session")
 
+    # Admission before materialising (#8061 review).  The exact-id fallback can
+    # hand this branch metadata for an id outside the sidebar window, where the
+    # lookup used to return nothing — and this branch reaches
+    # ``import_cli_session()`` directly, bypassing the admission the shared claim
+    # path applies.  Rows that arrive through that fallback therefore run the
+    # same two gates before anything is imported or saved, and refuse with
+    # KeyError so the caller's existing 404/403 handling stays in charge: a
+    # deleted WebUI session must keep self-healing with a 404 (#2782), and a
+    # foreign-owned session must not gain a writable WebUI sidecar (#4911).
+    #
+    # Scoped to the fallback on purpose: rows the sidebar window already served
+    # keep their previous contract (the window never surfaces NULL-source rows —
+    # ``s.source IS NOT NULL`` — and #4385's cron materialization stays intact),
+    # so this closes the new path without moving the old one.
+    if cli_meta.get("exact_id_fallback"):
+        if _session_index_marks_was_webui(sid) or _session_deleted_tombstone_marks_was_webui(sid):
+            raise KeyError(sid)
+        if not _is_claimable_cli_source(cli_meta, _state_db_session_source(sid))[0]:
+            raise KeyError(sid)
+
     # Preserve source metadata fields
     def _apply_source_meta(s):
         s.is_cli_session = is_cli_session_row(cli_meta)
@@ -9234,10 +9254,12 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
 
     A window miss therefore falls through to a profile-scoped single-row read by
     exact id (``get_cli_session_metadata_by_id``). The sidebar stays bounded —
-    the fallback is one indexed primary-key fetch, not a wider scan — and the
-    caller's ownership, tombstone and foreign-source gates still decide
-    visibility. Every session-scoped caller uses this helper, so GET and the
-    mutation paths resolve the same way.
+    the fallback is one indexed primary-key fetch rather than a wider scan, plus
+    that row's own message aggregate — and the caller's ownership, tombstone and
+    foreign-source gates still decide visibility. Every session-scoped caller
+    uses this helper, so GET and the mutation paths resolve the same way; the
+    write paths additionally run the admission in ``_get_or_materialize_session``
+    and the archive lane before importing anything.
     """
     if not session_id:
         return {}
@@ -9437,8 +9459,15 @@ def _is_claimable_cli_source(cli_meta: dict, state_db_source: str = "") -> tuple
         return False, "messaging_record"
     # Empty cli_meta is the common case for TUI/Desktop; fall through
     # to state.db's source column.  Refuse known-foreign state.db sources.
-    if not cli_meta_source_tag and state_db_source:
-        state_db_source_tag = state_db_source.strip().lower()
+    if not cli_meta_source_tag:
+        state_db_source_tag = (state_db_source or "").strip().lower()
+        if not state_db_source_tag:
+            # Neither the foreign store nor state.db names an origin.  The
+            # sidebar never surfaces such rows (``s.source IS NOT NULL``), so
+            # this is only reachable through the exact-id fallback — and an
+            # unnamed origin is not one the WebUI may take write ownership of
+            # (#8061 review).  Conservatively refuse.
+            return False, "unknown_source"
         if state_db_source_tag in {"claude_code", "cron", "messaging",
                                     "external_agent", "gateway", "subagent", "unknown"}:
             return False, f"state_db_source={state_db_source_tag}"
@@ -18954,6 +18983,17 @@ def handle_post(handler, parsed) -> bool:
                 return bad(handler, "Session not found", 404)
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
+            # Admission before materialising (#8061 review): the exact-id
+            # fallback now hands this lane metadata for ids outside the sidebar
+            # window (it used to see {} and 404), and this is the third
+            # ``import_cli_session`` write path. A deleted WebUI session stays
+            # 404 so the client can self-heal (#2782). Scoped to fallback rows,
+            # like the materialize branch above.
+            if cli_meta.get("exact_id_fallback") and (
+                _session_index_marks_was_webui(sid)
+                or _session_deleted_tombstone_marks_was_webui(sid)
+            ):
+                return bad(handler, "Session not found", 404)
             # Delegated subagent children (#5307) are view-only and owned by the
             # delegate runner — never materialize one into a writable WebUI
             # sidecar via the archive fallback (the 3rd of the shared
@@ -18986,6 +19026,14 @@ def handle_post(handler, parsed) -> bool:
                 s.platform = cli_meta.get("platform")
                 s.save(touch_updated_at=False)
             else:
+                # Foreign-owned rows (gateway/unknown/cron/external_agent/…)
+                # must not gain write ownership through this lane either (#8061
+                # review); messaging rows keep their dedicated stub branch above.
+                # Fallback rows only — see the admission note above.
+                if cli_meta.get("exact_id_fallback") and not _is_claimable_cli_source(
+                    cli_meta, _state_db_session_source(sid)
+                )[0]:
+                    return bad(handler, "Session not found", 404)
                 msgs = get_cli_session_messages(sid)
                 if not msgs:
                     return bad(handler, "Session not found", 404)

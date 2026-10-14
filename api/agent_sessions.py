@@ -695,8 +695,17 @@ def read_agent_session_row_by_id(db_path: Path, session_id: str, *, log=None) ->
     normalization, but narrowed to ``WHERE s.id = ? LIMIT 1`` with no window, no
     recency ordering and no visibility filtering. Callers stay responsible for
     the ownership, tombstone and read-only gates — this reader answers only
-    whether the row is there. Cost is one indexed primary-key fetch plus the
-    row's own message aggregate, so it is bounded regardless of history size.
+    whether the row is there. The primary-key lookup itself is constant, but the
+    ``message_count`` / last-activity aggregate is computed over the target row's
+    own messages, so the read is bounded by that session's history rather than by
+    the size of the table.
+
+    An absent or NULL ``source`` (or a state.db without a ``source`` column at
+    all) stays unknown here: this reader never fabricates a ``cli`` origin for
+    it, because the sidebar listing refuses exactly those rows
+    (``s.source IS NOT NULL``) and a fabricated origin would be the only place a
+    NULL-provenance row becomes writable — defeating both the deleted-WebUI
+    tombstone and the claimability gate (#8061 review).
 
     Returns ``{}`` when the id is absent, the DB/table is missing, or the read
     fails: like the windowed reader, this bridge never raises.
@@ -782,7 +791,11 @@ def read_agent_session_row_by_id(db_path: Path, session_id: str, *, log=None) ->
     except Exception:
         return {}
     row["id"] = sid
-    row["source"] = str(row.get("source") or "").strip().lower() or "cli"
+    # No ``or "cli"`` default (#8061 review): absent/NULL provenance is not an
+    # origin, and inventing one would make the claimability gate read these rows
+    # as local agent sessions. Keep it unknown — callers treat that
+    # conservatively (the tombstone applies, a claim is refused).
+    row["source"] = str(row.get("source") or "").strip().lower()
     return _with_normalized_source(row)
 
 
