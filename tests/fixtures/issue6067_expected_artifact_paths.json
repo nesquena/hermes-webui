@@ -1,0 +1,14 @@
+[
+  {
+    "path": "src//users.py",
+    "workspace": "/workspace",
+    "expected_display": "src//users.py",
+    "expected_open": "src/users.py"
+  },
+  {
+    "path": "/workspace/dir/",
+    "workspace": "/workspace",
+    "expected_display": "dir/",
+    "expected_open": "dir"
+  }
+]

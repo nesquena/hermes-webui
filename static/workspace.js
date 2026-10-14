@@ -487,9 +487,13 @@ function _classifyArtifactPath(path, workspace){
     }
     return result;
   };
-  if(/^\/\//.test(normalized) || /^[A-Za-z]:[^/]/.test(normalized)) return blocked('unsupported');
-  const pathIsWindows = /^[A-Za-z]:\//.test(normalized);
-  const workspaceIsWindows = /^[A-Za-z]:\//.test(ws);
+  const pathIsUNC = normalized.startsWith('//');
+  const workspaceIsUNC = ws.startsWith('//');
+  if(normalized.startsWith('///') || ws.startsWith('///')) return blocked('unsupported');
+  if(pathIsUNC !== workspaceIsUNC) return blocked(ws ? 'outside' : 'unsupported');
+  if(/^[A-Za-z]:[^/]/.test(normalized)) return blocked('unsupported');
+  const pathIsWindows = /^[A-Za-z]:\//.test(normalized) || pathIsUNC;
+  const workspaceIsWindows = /^[A-Za-z]:\//.test(ws) || workspaceIsUNC;
   const absolute = pathIsWindows || normalized.startsWith('/');
   if(!absolute){
     const segments = normalizeSegments(normalized.split('/'));
@@ -517,6 +521,7 @@ function _classifyArtifactPath(path, workspace){
   const pathParts = split(normalized);
   const workspaceParts = split(ws);
   if(!pathParts.segments || !workspaceParts.segments) return blocked('outside');
+  if(pathIsUNC && (pathParts.segments.length < 2 || workspaceParts.segments.length < 2)) return blocked('unsupported');
   const fold = value => pathIsWindows ? value.toLowerCase() : value;
   if(fold(pathParts.drive) !== fold(workspaceParts.drive) || pathParts.segments.length < workspaceParts.segments.length) return blocked('outside');
   for(let i=0;i<workspaceParts.segments.length;i++){

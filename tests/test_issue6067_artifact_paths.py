@@ -13,7 +13,7 @@ from _layout_helpers import assert_layout_sane
 WORKSPACE_JS = (ROOT / "static" / "workspace.js").read_text(encoding="utf-8")
 STYLE_CSS = (ROOT / "static" / "style.css").read_text(encoding="utf-8")
 I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-MASTER_PATH_FIXTURE = ROOT / "tests" / "fixtures" / "issue6067_master_artifact_paths.json"
+EXPECTED_PATH_FIXTURE = ROOT / "tests" / "fixtures" / "issue6067_expected_artifact_paths.json"
 EXPECT_VISIBLE = os.environ.get("ISSUE6067_EXPECT_VISIBLE", "1") != "0"
 HEADLESS = os.environ.get("ISSUE6067_HEADLESS", "1") != "0"
 SCREENSHOT_PATH = os.environ.get("ISSUE6067_SCREENSHOT_PATH")
@@ -33,7 +33,7 @@ ARTIFACT_CASES = [
 ]
 
 
-def test_artifact_path_opener_matches_frozen_master_baseline():
+def test_artifact_path_opener_matches_expected_paths():
     import json
     import shutil
     import subprocess
@@ -42,7 +42,7 @@ def test_artifact_path_opener_matches_frozen_master_baseline():
     if not node:  # pragma: no cover
         pytest.skip("node not available")
 
-    fixture = json.loads(MASTER_PATH_FIXTURE.read_text(encoding="utf-8"))
+    fixture = json.loads(EXPECTED_PATH_FIXTURE.read_text(encoding="utf-8"))
     normalizer = _function(WORKSPACE_JS, "_normalizeExplicitArtifactPath")
     classifier = _function(WORKSPACE_JS, "_classifyArtifactPath")
     script = f"""
@@ -57,8 +57,8 @@ console.log(JSON.stringify(cases.map(item=>({{
     proc = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     actual = json.loads(proc.stdout)
-    assert [entry["openPath"] for entry in actual] == [entry["master_open"] for entry in fixture]
-    assert [entry["displayPath"] for entry in actual] == [entry["pr_display"] for entry in fixture]
+    assert [entry["openPath"] for entry in actual] == [entry["expected_open"] for entry in fixture]
+    assert [entry["displayPath"] for entry in actual] == [entry["expected_display"] for entry in fixture]
 
 
 def _function(source, name):
