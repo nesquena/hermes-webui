@@ -802,6 +802,90 @@ def test_reasoning_coercion_uses_the_captured_snapshot(monkeypatch):
     ) == "high"
 
 
+def _snapshot_and_raced_cache():
+    """An analyst snapshot whose provider differs from the raced global cache."""
+    snapshot = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {"provider": "openai"},
+        "providers": {
+            "openai": {
+                "models": {"test-model": {"reasoning_efforts": ["none", "low", "high"]}}
+            },
+            "anthropic": {
+                "models": {"test-model": {"reasoning_efforts": ["none", "low"]}}
+            },
+        },
+    }
+    raced = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {"provider": "anthropic"},
+        "providers": {
+            "anthropic": {
+                "models": {"test-model": {"reasoning_efforts": ["none", "low"]}}
+            }
+        },
+    }
+    return snapshot, raced
+
+
+def test_omitted_provider_coercion_resolves_from_the_captured_snapshot(monkeypatch):
+    """Provider omitted: coercion must resolve it from the snapshot, not the cache.
+
+    A concurrent default-profile reload swaps the process-global cache to a
+    different provider whose ladder is narrower; the omitted-provider path
+    called the global resolver and degraded "high" to "low" on both lanes
+    (re-gate replay). The captured snapshot's provider must win.
+    """
+    from api import config, routes
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+    import api.profiles as profiles
+
+    snapshot, raced = _snapshot_and_raced_cache()
+    monkeypatch.setattr(config, "cfg", raced)
+
+    assert _gateway_reasoning_effort_for_request(snapshot, model="test-model") == "high"
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
+    assert routes._runner_reasoning_effort_for_session(
+        SimpleNamespace(profile="analyst"), model="test-model"
+    ) == "high"
+
+
+def test_explicit_provider_coercion_resolves_from_the_captured_snapshot(monkeypatch):
+    """Provider explicit: the snapshot's ladder wins on both lanes (control).
+
+    Same raced cache as the omitted case; the explicit provider never needed
+    the global resolver, so this pins the behaviour the repair must keep.
+    """
+    from api import config, routes
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+    import api.profiles as profiles
+
+    snapshot, raced = _snapshot_and_raced_cache()
+    monkeypatch.setattr(config, "cfg", raced)
+
+    assert _gateway_reasoning_effort_for_request(
+        snapshot, model="test-model", model_provider="openai"
+    ) == "high"
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
+    assert routes._runner_reasoning_effort_for_session(
+        SimpleNamespace(profile="analyst"), model="test-model", model_provider="openai"
+    ) == "high"
+
+
 def test_runs_wire_body_nests_effective_effort_under_model_options():
     """The actual /v1/runs POST must carry the effective value in model_options."""
     run_body = _capture_runs_wire_body("low")

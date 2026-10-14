@@ -2511,7 +2511,9 @@ def _is_local_server_provider(provider_id: str) -> bool:
     return False
 
 
-def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> bool:
+def _model_id_declared_in_config(
+    model_id: str, config_provider: str | None, config_data: dict | None = None
+) -> bool:
     """True when the user's own config declares ``model_id`` verbatim (full form).
 
     This is the COLD-catalog provenance signal for #5979: when the live
@@ -2528,7 +2530,8 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     model = str(model_id or "").strip()
     if not model:
         return False
-    model_cfg = cfg.get("model", {})
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    model_cfg = active_cfg.get("model", {})
     if isinstance(model_cfg, dict):
         if str(model_cfg.get("default") or "").strip() == model:
             return True
@@ -2539,7 +2542,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     prov = str(config_provider or "").strip().lower()
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
-        for entry in _custom_provider_entries():
+        for entry in _custom_provider_entries(active_cfg):
             slug = _custom_provider_slug_from_name(entry.get("name"))
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
@@ -2683,7 +2686,7 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     return bare_model, provider_hint
 
 
-def _get_provider_base_url(provider_id):
+def _get_provider_base_url(provider_id, config_data: dict | None = None):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
     Checks two locations, in order:
@@ -2694,13 +2697,17 @@ def _get_provider_base_url(provider_id):
          shape (the model block carries both the active provider AND the
          base URL for that provider in a single record).
 
+    ``config_data`` reads both locations from a caller-captured snapshot
+    instead of the process-global cache; without one, behaviour is unchanged.
+
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    prov_cfg = _get_provider_cfg(provider_id, config_data)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    model_cfg = cfg.get("model", {}) or {}
+    model_cfg = active_cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
@@ -2710,13 +2717,19 @@ def _get_provider_base_url(provider_id):
     return None
 
 
-def _get_providers_cfg() -> dict:
-    providers_cfg = cfg.get("providers")
+def _get_providers_cfg(config_data: dict | None = None) -> dict:
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    providers_cfg = active_cfg.get("providers")
     return providers_cfg if isinstance(providers_cfg, dict) else {}
 
 
-def _get_provider_cfg(provider_id) -> dict:
-    provider_cfg = _get_providers_cfg().get(provider_id, {})
+def _get_provider_cfg(provider_id, config_data: dict | None = None) -> dict:
+    # Keep the historical zero-arg call shape on the legacy path: tests replace
+    # _get_providers_cfg with strict-signature stand-ins that take no arguments.
+    providers_cfg = (
+        _get_providers_cfg() if config_data is None else _get_providers_cfg(config_data)
+    )
+    provider_cfg = providers_cfg.get(provider_id, {})
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
@@ -2799,7 +2812,12 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     return matches[0] if matches else None
 
 
-def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
+def resolve_model_provider(
+    model_id: str,
+    *,
+    explicitly_picked: bool = False,
+    config_data: dict | None = None,
+) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -2829,15 +2847,22 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     leftover, e.g. #433's ``openai/gpt-5.4`` on a bare-only relay) still gets the
     legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
     (endpoint-advertised ids) always takes precedence over this flag.
+
+    ``config_data``: resolve against a caller-captured config snapshot (a
+    profile-scoped request copy) instead of the process-global cache, so every
+    config read below — the default provider, custom_providers[] ownership,
+    providers[] entries, aliases and endpoint lookups — cannot be rerouted by a
+    concurrent cross-profile cache reload. Without one, behaviour is unchanged.
     """
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
     config_provider = None
     config_base_url = None
-    model_cfg = cfg.get("model", {})
+    model_cfg = active_cfg.get("model", {})
     if isinstance(model_cfg, dict):
         config_base_url = model_cfg.get("base_url")
         config_provider = _resolve_configured_provider_id(
             model_cfg.get("provider"),
-            cfg,
+            active_cfg,
             base_url=config_base_url,
             resolve_alias=False,
         )
@@ -2868,7 +2893,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         """
         if isinstance(provider, str) and provider.startswith("custom:"):
             _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
+                active_cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider),
             )
         return model, provider, base_url
@@ -2925,7 +2950,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # own declared models and can't be hijacked by another providers.<slug>
     # entry that happens to list the same bare id earlier in config order (#5511).
     if _canon_config_provider:
-        _providers_cfg_own = cfg.get('providers', {})
+        _providers_cfg_own = active_cfg.get('providers', {})
         if isinstance(_providers_cfg_own, dict):
             for _slug, _pdef in _providers_cfg_own.items():
                 if not isinstance(_pdef, dict):
@@ -2944,7 +2969,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             or model_id in _provider_models_set
         )
     )
-    custom_providers = cfg.get('custom_providers', [])
+    custom_providers = active_cfg.get('custom_providers', [])
     if isinstance(custom_providers, list) and not _skip_custom_providers:
         # Disambiguation guard: when two custom_providers[] entries both list the
         # same bare model id (e.g. dogapi and packyapi both advertise
@@ -3016,7 +3041,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # Check user-defined providers (config.yaml → providers:).
     # Mirrors the custom_providers scan above — exact match against each
     # entry's declared models list (case-sensitive to match custom_providers).
-    providers_cfg = cfg.get('providers', {})
+    providers_cfg = active_cfg.get('providers', {})
     if isinstance(providers_cfg, dict):
         target = model_id.strip()
         # Honor the same active/default ownership guard as the custom_providers
@@ -3091,8 +3116,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # instead of falling back to the default endpoint (HTTP 400 "Invalid
         # model format or no credentials for provider: <bare-model>").
         #
-        # Match via _unique_custom_provider_entry on the module-level `cfg` list:
-        # it is pure and lock-safe, so it stays callable when resolve_model_provider()
+        # Match via _unique_custom_provider_entry on the caller's
+        # custom_providers list (the module-level `cfg` when no snapshot is
+        # threaded): it is pure and lock-safe, so it stays callable when resolve_model_provider()
         # is invoked while the caller already holds the non-reentrant _cfg_lock —
         # a get_config()-based resolver would self-deadlock there. It also does NOT
         # guess: an unmatched slug (e.g. a host:port-derived one absent from
@@ -3107,15 +3133,15 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # to _get_provider_base_url() when no exact custom_providers[] row exists.
         if provider_hint.startswith("custom:"):
             entry = _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
+                active_cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider_hint),
             )
             if entry is not None:
                 base_url = str(entry.get('base_url') or '').strip() or None
             else:
-                base_url = _get_provider_base_url(provider_hint)
+                base_url = _get_provider_base_url(provider_hint, config_data=config_data)
         else:
-            base_url = _get_provider_base_url(provider_hint)
+            base_url = _get_provider_base_url(provider_hint, config_data=config_data)
         return _finalize(bare_model, provider_hint, base_url)
 
     if "/" in model_id:
@@ -3158,7 +3184,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # instead of falling back to the default config provider. MUST come BEFORE
         # the config_base_url branch because many providers have a base_url set.
         if prefix and config_provider and prefix != config_provider:
-            _custom_cfg = cfg.get("custom_providers", [])
+            _custom_cfg = active_cfg.get("custom_providers", [])
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
@@ -3225,7 +3251,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 # (1) Config declares the full id verbatim (model.default /
                 #     model.models / custom_providers[].models). Authoritative and
                 #     network-free, so #5979 survives a cold restart — preserve.
-                if _model_id_declared_in_config(model_id, config_provider):
+                if _model_id_declared_in_config(model_id, config_provider, config_data=config_data):
                     return _finalize(model_id, config_provider, config_base_url)
                 # (2) The endpoint's live/cached catalog advertised it.
                 _advertised = _endpoint_advertised_model_ids(config_provider)
@@ -5819,7 +5845,16 @@ def _resolve_model_reasoning_efforts_impl(
     active_cfg = config_data if isinstance(config_data, dict) else cfg
     if not provider:
         try:
-            _, provider, resolved_base_url = resolve_model_provider(model)
+            if config_data is None:
+                _, provider, resolved_base_url = resolve_model_provider(model)
+            else:
+                # Snapshot-supplied callers must not consult the process-global
+                # cache: resolve the provider from the captured config with the
+                # same routing rules (explicit hints, custom ownership, aliases,
+                # endpoints) the send path uses.
+                _, provider, resolved_base_url = resolve_model_provider(
+                    model, config_data=config_data
+                )
         except Exception:
             provider = str((active_cfg.get("model") or {}).get("provider") or "").strip().lower()
 
