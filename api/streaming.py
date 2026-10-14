@@ -2336,6 +2336,16 @@ def _active_turn_authority(session, stream_id, msg_text):
     )
     return {
         'session_id': getattr(session, 'session_id', None),
+        # #7882 re-gate: fork-ownership context for delegation_wakeup turns —
+        # the row stamp keeps the typed _source, but the _fork_child_turn
+        # ownership proof regeneration requires is derived from the session's
+        # fork identity, not the row source.
+        'session_source': getattr(session, 'session_source', None),
+        'fork_session_id': (
+            getattr(session, 'session_id', None)
+            if str(getattr(session, 'session_source', None) or '').strip().lower() == 'fork'
+            else None
+        ),
         'token': token,
         'text': pending_text if pending_text is not None else msg_text,
         'timestamp': getattr(session, 'pending_started_at', None),
@@ -2363,6 +2373,13 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
     resolved = dict(identity)
     resolved.pop('agent_turn_boundary_resolved', None)
     resolved.pop('agent_turn_boundary_source', None)
+    # Preserve the fork-ownership context (#7882 re-gate): a delegation_wakeup
+    # turn inside a fork session derives its _fork_child_turn proof from these
+    # fields at materialization/settlement time.
+    if 'session_source' not in resolved:
+        resolved['session_source'] = None
+    if 'fork_session_id' not in resolved:
+        resolved['fork_session_id'] = None
 
     # Treat the boundary as one coherent pair. In particular, do not retain the
     # failed Agent instance's index/turn when credential self-heal creates a
@@ -2622,8 +2639,22 @@ def _materialize_active_turn_user(identity, msg_text, source):
             identity.get('source') or source or 'webui',
             active_turn_token=identity.get('token'),
         )
-        if str(identity.get('source') or source or '').strip().lower() == 'fork':
+        _settle_source = str(identity.get('source') or source or '').strip().lower()
+        if _settle_source == 'fork':
             child_session_id = identity.get('session_id')
+            if child_session_id:
+                message['_fork_child_turn'] = child_session_id
+        elif (
+            _settle_source == 'delegation_wakeup'
+            and str(identity.get('session_source') or '').strip().lower() == 'fork'
+        ):
+            # A delegation wakeup INSIDE a fork session: the row's _source stays
+            # delegation_wakeup (the hidden-row predicate keys on it), but the
+            # fork-ownership proof regeneration authorization requires rides on
+            # _fork_child_turn (#7882 re-gate must-fix 2 — without it every
+            # regeneration after an async delegation completes in a fork
+            # returns regeneration_read_only).
+            child_session_id = identity.get('session_id') or identity.get('fork_session_id')
             if child_session_id:
                 message['_fork_child_turn'] = child_session_id
     else:
@@ -2664,8 +2695,19 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             _settle_source,
             active_turn_token=identity.get('token'),
         )
-        if str(_settle_source).strip().lower() == 'fork':
+        _settle_source_lower = str(_settle_source).strip().lower()
+        if _settle_source_lower == 'fork':
             child_session_id = identity.get('session_id')
+            if child_session_id:
+                existing_checkpoint['_fork_child_turn'] = child_session_id
+        elif (
+            _settle_source_lower == 'delegation_wakeup'
+            and str(identity.get('session_source') or '').strip().lower() == 'fork'
+        ):
+            # Fork-internal delegation wakeup (see _materialize_active_turn_user):
+            # keep _source = delegation_wakeup for hiding, but carry the fork
+            # ownership proof so regeneration stays authorized (#7882 re-gate).
+            child_session_id = identity.get('session_id') or identity.get('fork_session_id')
             if child_session_id:
                 existing_checkpoint['_fork_child_turn'] = child_session_id
         if isinstance(checkpoint, dict):
@@ -6688,6 +6730,40 @@ def _is_generic_fallback_title(title) -> bool:
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
+# Internal title-generation statuses are diagnostics, not user-facing text.
+# The manual regenerate route renders its 422 body verbatim in the sidebar
+# toast, so any status a user can trigger manually must be translated (#7693:
+# the toast used to show the raw internal code "llm_language_mismatch_aux").
+_TITLE_FAILURE_HUMAN_REASONS = {
+    'llm_language_mismatch': 'the generated title did not match the conversation language',
+    'llm_language_mismatch_aux': 'the generated title did not match the conversation language',
+    'llm_invalid': 'the title model returned an unusable title',
+    'llm_invalid_aux': 'the title model returned an unusable title',
+    'llm_empty': 'the title model returned an empty title',
+    'llm_empty_aux': 'the title model returned an empty title',
+    'llm_error': 'the title model could not be reached',
+    'llm_error_aux': 'the title model could not be reached',
+    'llm_empty_reasoning': 'the title model spent its budget on reasoning and returned no title',
+    'llm_empty_reasoning_aux': 'the title model spent its budget on reasoning and returned no title',
+    'llm_length': 'the title model hit its output limit before returning a title',
+    'llm_length_aux': 'the title model hit its output limit before returning a title',
+    'missing_exchange': 'this conversation has no assistant reply to title yet',
+    'empty_user_message': 'this session has no user message to title yet',
+    'empty_title': 'no title could be produced for this session',
+    'title_generation_disabled': 'title generation is disabled for this profile',
+}
+
+
+def _human_title_failure_reason(status) -> str:
+    """Map an internal title-generation status to readable failure text.
+
+    Known internal codes are translated; anything else passes through unchanged
+    so a new status stays debuggable instead of turning into an empty message.
+    """
+    key = str(status or '').strip()
+    return _TITLE_FAILURE_HUMAN_REASONS.get(key, key)
+
+
 # Recovery cap for a model that keeps answering badly: an invalid model output
 # suppresses the local fallback so the next completed exchange retries the LLM
 # (the local fallback would mark a warm-up opener as successfully titled). A
@@ -7629,6 +7705,35 @@ def _sanitize_messages_for_api(
         if sanitized.get('role'):
             clean.append(sanitized)
 
+    # #7237 (standalone): repair ADJACENT tool-call/result blocks before the
+    # global pass below. A result belonging to a later, unrelated turn must not
+    # make an earlier orphan call look answered and survive this projection.
+    _repaired_clean = _strip_orphan_tool_calls(clean)
+    clean = [
+        _repaired
+        for _original, _repaired in zip(clean, _repaired_clean, strict=True)
+        if not (
+            _original.get('role') == 'assistant'
+            and _original.get('tool_calls')
+            and not _repaired.get('tool_calls')
+            and not str(_repaired.get('content') or '').strip()
+        )
+    ]
+    # Recompute ownership from the repaired call rows: a tool result linked only
+    # to a now-removed non-adjacent call must be removed too.
+    _surviving_ids = {
+        _tc.get('id') or _tc.get('call_id')
+        for _msg in clean
+        if _msg.get('role') == 'assistant'
+        for _tc in (_msg.get('tool_calls') or [])
+        if isinstance(_tc, dict) and (_tc.get('id') or _tc.get('call_id'))
+    }
+    clean = [
+        _msg for _msg in clean
+        if _msg.get('role') != 'tool'
+        or (_msg.get('tool_call_id') or '') in _surviving_ids
+    ]
+
     # Third pass: strip orphaned tool_calls from assistant messages — calls whose id
     # has no matching tool-role response in the clean list.  Strict providers (DeepSeek,
     # newer OpenAI) reject with 400 when an assistant message references a tool call that
@@ -7757,6 +7862,37 @@ def _api_safe_message_positions(messages):
         if sanitized.get('role'):
             out.append((idx, sanitized))
 
+    # #7237 (standalone): mirror the adjacent-pair repair from
+    # _sanitize_messages_for_api so a non-adjacent later result cannot mask an
+    # early orphan call on this projection either.
+    _original_out = out
+    _repaired_rows = _strip_orphan_tool_calls([_m for _i, _m in _original_out])
+    out = [
+        (_i, _repaired)
+        for (_i, _original), _repaired in zip(_original_out, _repaired_rows, strict=True)
+        if not (
+            _original.get('role') == 'assistant'
+            and _original.get('tool_calls')
+            and not _repaired.get('tool_calls')
+            and not str(_repaired.get('content') or '').strip()
+        )
+    ]
+    # Recompute ownership from the repaired call rows (mirrors
+    # _sanitize_messages_for_api): a tool result linked only to a now-removed
+    # non-adjacent call must leave this projection too, or the two projections
+    # disagree by one row and positional metadata carry-forward misaligns.
+    _surviving_ids = {
+        _tc.get('id') or _tc.get('call_id')
+        for _i, _msg in out
+        if _msg.get('role') == 'assistant'
+        for _tc in (_msg.get('tool_calls') or [])
+        if isinstance(_tc, dict) and (_tc.get('id') or _tc.get('call_id'))
+    }
+    out = [
+        (_i, _msg) for _i, _msg in out
+        if _msg.get('role') != 'tool'
+        or (_msg.get('tool_call_id') or '') in _surviving_ids
+    ]
     # Third pass: strip orphaned tool_calls from assistant messages (mirrors
     # _sanitize_messages_for_api pass 3).
     answered_ids: set = set()
@@ -7863,6 +7999,91 @@ def _deduplicate_context_messages(messages):
             seen.add(key)
         deduped.append(msg)
     return deduped
+
+
+def _strip_orphan_tool_calls(messages):
+    """Return a context-only repair without mutating any input message rows.
+
+    Strict providers reject an assistant ``tool_calls`` entry when no matching
+    ``tool`` result follows in the same context. The repair belongs to the
+    model-facing context projection, not the display transcript, so the input
+    list and every input dictionary must remain unchanged. Clone only rows whose
+    ``tool_calls`` field is actually removed or filtered.
+    """
+    if not isinstance(messages, list):
+        return messages
+    repaired = list(messages)
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        calls = msg.get("tool_calls")
+        if isinstance(calls, str):
+            try:
+                calls = json.loads(calls)
+            except (ValueError, TypeError):
+                continue
+        if not isinstance(calls, list) or not calls:
+            continue
+        # The repair is called at completed-turn writeback sinks. A final row
+        # is not automatically in flight; preserving it solely because it is
+        # last lets settled orphan calls survive into the next request.
+        covered = set()
+        probe = idx + 1
+        while probe < len(messages):
+            following = messages[probe]
+            if not isinstance(following, dict):
+                break
+            # A temporary ``_recovered`` user row is materialized by the #1543
+            # stale-stream recovery path between an assistant's ``tool_calls``
+            # and their ``tool`` results. A later pass in
+            # ``_sanitize_messages_for_api`` / ``_api_safe_message_positions``
+            # drops that row from the final projection, so treat it as
+            # transparent here — otherwise a valid, completed tool pair is
+            # misclassified as an orphan and silently lost on exactly the
+            # recovery path this repair is meant to harden.
+            if following.get("role") == "user" and following.get("_recovered"):
+                probe += 1
+                continue
+            # Consecutive assistant rows merge in the Agent's repair, so an
+            # intermediate progress row between a call and its result is
+            # transparent here too (else a valid pair reads as an orphan).
+            if following.get("role") == "assistant":
+                probe += 1
+                continue
+            if following.get("role") != "tool":
+                break
+            covered.add(str(following.get("tool_call_id") or ""))
+            probe += 1
+        kept = []
+        dropped = []
+        for call in calls:
+            call_id = (
+                str(call.get("id") or call.get("call_id") or "")
+                if isinstance(call, dict)
+                else ""
+            )
+            if call_id and call_id in covered:
+                kept.append(call)
+            else:
+                dropped.append(call_id)
+        if not dropped:
+            continue
+        repaired_msg = copy.deepcopy(msg)
+        if kept:
+            repaired_msg["tool_calls"] = copy.deepcopy(kept)
+        else:
+            repaired_msg.pop("tool_calls", None)
+        repaired[idx] = repaired_msg
+        # debug, not warning: this runs on every projection of every turn, so an
+        # abandoned call would otherwise log several warnings per turn forever.
+        logger.debug(
+            "Dropped %d orphan tool_call id(s) at context index %d (no tool_result "
+            "immediately after); would have caused an upstream 400: %s",
+            len(dropped),
+            idx,
+            ", ".join(d for d in dropped if d) or "<missing id>",
+        )
+    return repaired
 
 
 def _assign_stable_message_ids(result_messages, *existing_arrays):
@@ -10415,6 +10636,13 @@ def _materialize_pending_user_turn_before_error(
         '_recovered': True,
     }
     if str(pending_source or '').strip().lower() == 'fork':
+        recovered['_fork_child_turn'] = session.session_id
+    elif (
+        str(pending_source or '').strip().lower() == 'delegation_wakeup'
+        and str(getattr(session, 'session_source', None) or '').strip().lower() == 'fork'
+    ):
+        # Fork-internal delegation wakeup: keep the typed _source for hiding but
+        # carry the fork-ownership proof regeneration requires (#7882 re-gate).
         recovered['_fork_child_turn'] = session.session_id
     stamp_message_source(recovered, pending_source)
     if pending_attachments:
@@ -14534,7 +14762,7 @@ def _run_agent_streaming(
                             _err_type,
                             _err_hint,
                         )
-                        if _turn_pending_source == 'process_wakeup':
+                        if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                             _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                                 s,
                                 classification=_err_type,
@@ -15563,7 +15791,7 @@ def _run_agent_streaming(
                 with _lock_ctx:
                     if (
                         not ephemeral
-                        and _turn_pending_source == 'process_wakeup'
+                        and _turn_pending_source in ('process_wakeup', 'delegation_wakeup')
                         and _exc_is_credential_pool_empty
                     ):
                         # Merge the pause into the CURRENT session object under
@@ -15970,7 +16198,7 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                    if _turn_pending_source == 'process_wakeup':
+                    if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                         # #6623 re-gate: merge the pause into the CURRENT
                         # session object under the canonical lock — never save
                         # the worker's detached snapshot. The helper fails
@@ -15990,7 +16218,7 @@ def _run_agent_streaming(
                     )
                     return
 
-                if _turn_pending_source == 'process_wakeup':
+                if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                     _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                         s,
                         classification=_exc_type,

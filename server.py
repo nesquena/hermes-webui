@@ -553,7 +553,7 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 
 
 def main() -> None:
-    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND, _AGENT_DIR
 
     _ignore_sigpipe()
 
@@ -625,7 +625,7 @@ def main() -> None:
         for mod, err in errors.items():
             print(f'     {mod}: {err}', flush=True)
         print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
-        auto_install_agent_deps()
+        auto_install_agent_deps(expected_agent_dir=_AGENT_DIR)
         ok, missing, errors = verify_hermes_imports()
         if not ok:
             print(f'[!!] Still missing after install attempt: {missing}', flush=True)

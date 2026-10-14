@@ -20,6 +20,7 @@ from typing import Any
 from api.config import LOCK, _get_session_agent_lock
 from api.models import get_session, SESSIONS
 from api.agent_sessions import normalize_agent_session_source
+from api.process_event_utils import is_hidden_transcript_row
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +65,20 @@ def _selected_regeneration_turn_owned(session, row) -> bool:
     if session_source == "fork":
         if any(source and not _regeneration_source_allowed(source) for source in raw_sources):
             return False
-        if row_source and not _regeneration_source_allowed(row_source):
+        # A delegation wakeup INSIDE a fork session carries
+        # ``_source: delegation_wakeup`` (the hidden-row predicate keys on it)
+        # plus ``_fork_child_turn`` (the fork ownership proof this gate reads).
+        # Rejecting the row on its source alone — before the ownership proof
+        # is consulted — made regeneration after an async delegation in a fork
+        # return regeneration_read_only in both save modes (#7882 re-gate
+        # must-fix 1). Accept the wakeup source ONLY when the row proves fork
+        # ownership below (parent session + matching child turn); the proof
+        # itself is unchanged.
+        if (
+            row_source
+            and row_source != "delegation_wakeup"
+            and not _regeneration_source_allowed(row_source)
+        ):
             return False
         return bool(
             getattr(session, "parent_session_id", None)
@@ -592,16 +606,146 @@ def mark_session_title_generated(session) -> None:
     session.manual_title = False
 
 
-def _truncate_at_last_user(messages):
-    history = messages or []
-    last_user_idx = None
-    for i in range(len(history) - 1, -1, -1):
-        if isinstance(history[i], dict) and history[i].get('role') == 'user':
-            last_user_idx = i
-            break
-    if last_user_idx is None:
+_MERGED_SUMMARY_DELIMITER = "[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]"
+
+
+def _is_merged_compression_carrier(row):
+    """True when a user row is a merged compression carrier.
+
+    The Agent compressor folds a summary into a retained user row when role
+    alternation demands it: the row's content keeps the live text, then the
+    merged-prior-context header, the summary body, and the delimiter suffix
+    ("[PRIOR CONTEXT — for reference only…]…[END OF PRIOR CONTEXT — COMPACTION
+    SUMMARY BELOW]…"). Content-equality matching against such a row is
+    meaningless (the live text rides inside a much larger blob), and its
+    presence makes earlier id-less rows identity-ambiguous.
+    """
+    if not isinstance(row, dict) or row.get('role') != 'user':
+        return False
+    if row.get('_compressed_summary'):
+        return True
+    content = row.get('content')
+    text = content if isinstance(content, str) else ''
+    if not text and isinstance(content, list):
+        text = ' '.join(
+            str(p.get('text') or p.get('content') or '')
+            for p in content
+            if isinstance(p, dict)
+        )
+    return _MERGED_SUMMARY_DELIMITER in text
+
+
+def _truncate_context_before_row(context_messages, target_row):
+    """Cut model context before the exact canonical identity of ``target_row``.
+
+    Retry/undo select the last visible human turn in the display transcript.
+    The model context must be cut at that SAME turn — not at the context's own
+    last user row, which after compression can be an unrelated summary user
+    while the hidden delegation handoff and its reply survive after it
+    (#quiet-delegation gate review). Matching is identity-first (message id),
+    then content, then timestamp — never content alone when both rows carry a
+    timestamp that disagrees.
+
+    Returns the truncated list, or None when the selected turn cannot be
+    proved present in context (compression already dropped it or everything
+    after it): the caller then cuts before the context's own last user row
+    so the removed suffix cannot reach the next send.
+
+    Matching is identity-first (message id), then content, then timestamp.
+    Two rows that BOTH carry ids are different turns when the ids differ —
+    a later user row that repeats the selected turn's text must never
+    capture the cut (greptile P1). Rows with NO id are the sanitized copies
+    manual compression stores: their id/timestamp identity is gone (the
+    sanitize key set drops both, and the writeback re-stamps fresh
+    wall-clock times), so content is the only surviving identity and a
+    content match is accepted even when timestamps disagree (#7882 re-gate
+    must-fix 1) — EXCEPT when a merged compression carrier makes the
+    identity ambiguous (#7882 re-gate round-3 must-fix 1): when a newer
+    merged carrier exists, a text-only match against an EARLIER id-less
+    row is rejected (return None) so the caller's last-user fallback
+    applies. The carrier folds the selected turn's text into the latest
+    user row ("[PRIOR CONTEXT…|continue|END OF PRIOR CONTEXT…]"), so a
+    repeated prompt ("continue") leaves several id-less same-text
+    candidates and the earlier one would cut away rows master keeps.
+    """
+    history = context_messages if isinstance(context_messages, list) else []
+    if not isinstance(target_row, dict):
         return None
-    return history[:last_user_idx]
+    target_text = _extract_text(target_row.get('content', ''))
+    target_id = target_row.get('id') or target_row.get('message_id')
+    target_ts = target_row.get('timestamp')
+    # Locate the newest merged compression carrier (a user row that folded a
+    # summary into retained content — the delimiter suffix marks it). When one
+    # exists, every id-less row BEFORE it is identity-ambiguous: the carrier
+    # carries the selected turn's text inside its merged prior-content, and
+    # manual-compression copies are id-less, so content cannot distinguish
+    # "the selected turn" from "an earlier same-text turn the summary quoted".
+    # Repeated prompts ("continue") hit exactly this shape; picking the earlier
+    # occurrence drops retained rows master keeps. The id/veto paths below are
+    # unaffected (an id match is proof, not an inference).
+    newest_merged_carrier_idx = None
+    for j in range(len(history) - 1, -1, -1):
+        row_j = history[j]
+        if (
+            isinstance(row_j, dict)
+            and row_j.get('role') == 'user'
+            and _is_merged_compression_carrier(row_j)
+        ):
+            newest_merged_carrier_idx = j
+            break
+    for i in range(len(history) - 1, -1, -1):
+        row = history[i]
+        if not isinstance(row, dict) or row.get('role') != 'user':
+            continue
+        row_id = row.get('id') or row.get('message_id')
+        if target_id is not None and row_id is not None and row_id != target_id:
+            continue
+        if target_id is not None and row_id == target_id:
+            return history[:i]
+        if _extract_text(row.get('content', '')) != target_text:
+            continue
+        if row_id is None:
+            # Id-less context row (sanitized compression copy, #7882 re-gate
+            # must-fix 1): content is the only surviving identity; the fresh
+            # re-stamped timestamp must not veto the match. The different-id
+            # veto above still applies whenever BOTH rows carry ids.
+            #
+            # Round-3 must-fix 1: with a newer merged carrier in the context,
+            # this text-only match is ambiguous (the carrier may quote the
+            # same text and the sanitized copy may be an EARLIER turn, not
+            # the selected one). Reject so the caller's last-user fallback
+            # cuts at the carrier instead of dropping retained history.
+            if (
+                newest_merged_carrier_idx is not None
+                and i < newest_merged_carrier_idx
+            ):
+                return None
+            return history[:i]
+        row_ts = row.get('timestamp')
+        if target_ts is not None and row_ts is not None:
+            if row_ts == target_ts:
+                return history[:i]
+            continue
+        return history[:i]
+    return None
+
+
+def _context_prefix_before_last_user(context_messages):
+    """Cut before the context's own last user row (fallback truncation).
+
+    The retry/undo fallback for a selected turn that cannot be proved
+    present in context. Cutting before the LAST user row — hidden
+    delegation rows included — keeps earlier context (e.g. the compression
+    summary user) instead of clearing everything, while still removing the
+    tail that could carry the hidden handoff's reply (the earlier request
+    was to clear the removed suffix, not the whole context).
+    """
+    history = context_messages if isinstance(context_messages, list) else []
+    for i in range(len(history) - 1, -1, -1):
+        row = history[i]
+        if isinstance(row, dict) and row.get('role') == 'user':
+            return history[:i]
+    return []
 
 
 def _truncation_watermark_for(messages):
@@ -986,6 +1130,12 @@ def retry_last(session_id: str) -> dict[str, Any]:
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
                 if history[i].get('role') == 'user':
+                    # Hidden internal rows (delegation_wakeup) are not user
+                    # turns: retrying "past" one would resubmit the internal
+                    # handoff prompt as an ordinary human turn
+                    # (#quiet-delegation gate review).
+                    if is_hidden_transcript_row(history[i]):
+                        continue
                     last_user_idx = i
                     break
             if last_user_idx is None:
@@ -1000,9 +1150,25 @@ def retry_last(session_id: str) -> dict[str, Any]:
             # can distinguish legitimate prefix from deleted suffix.
             s.truncation_boundary = s.truncation_watermark
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_at_last_user(s.context_messages)
+                truncated_context = _truncate_context_before_row(
+                    s.context_messages, history[last_user_idx]
+                )
                 if truncated_context is not None:
                     s.context_messages = truncated_context
+                else:
+                    # The selected visible human turn is not in model context
+                    # any more (e.g. a manual compression stored sanitized
+                    # id-less copies and re-stamped fresh timestamps, and
+                    # nothing matched). Cutting only at the context's own last
+                    # user row would LEAVE the hidden delegation handoff and
+                    # its reply in context while the display transcript lost
+                    # them (gate review finding 2). Cut before the context's
+                    # own last user row — hidden rows included — so the removed
+                    # suffix (handoff + reply) cannot reach the next send while
+                    # the earlier summary context survives (#7882 re-gate).
+                    s.context_messages = _context_prefix_before_last_user(
+                        s.context_messages
+                    )
         s.save()
     return {'last_user_text': last_user_text, 'removed_count': removed_count}
 
@@ -1030,6 +1196,12 @@ def undo_last(session_id: str) -> dict[str, Any]:
             last_user_idx = None
             for i in range(len(history) - 1, -1, -1):
                 if history[i].get('role') == 'user':
+                    # Hidden internal rows (delegation_wakeup) are not user
+                    # turns: undo must remove the last VISIBLE human turn and
+                    # everything after it, not the internal handoff
+                    # (#quiet-delegation gate review).
+                    if is_hidden_transcript_row(history[i]):
+                        continue
                     last_user_idx = i
                     break
             if last_user_idx is None:
@@ -1043,9 +1215,21 @@ def undo_last(session_id: str) -> dict[str, Any]:
             # Persist the original truncate cutoff.
             s.truncation_boundary = s.truncation_watermark
             if isinstance(getattr(s, 'context_messages', None), list) and s.context_messages:
-                truncated_context = _truncate_at_last_user(s.context_messages)
+                truncated_context = _truncate_context_before_row(
+                    s.context_messages, history[last_user_idx]
+                )
                 if truncated_context is not None:
                     s.context_messages = truncated_context
+                else:
+                    # Same compressed-history fallback as retry_last: the
+                    # removed visible turn cannot be proved present in model
+                    # context, so cutting before the context's own last user
+                    # row — hidden rows included — is the way to keep the
+                    # hidden delegation handoff out of the next send without
+                    # discarding the surviving summary context (#7882 re-gate).
+                    s.context_messages = _context_prefix_before_last_user(
+                        s.context_messages
+                    )
         s.save()  # outside LOCK -- save() re-acquires LOCK via _write_session_index()
     preview = (removed_text[:40] + '...') if len(removed_text) > 40 else removed_text
     return {
@@ -1080,6 +1264,13 @@ def session_status(session_id: str) -> dict[str, Any]:
         'workspace': s.workspace,
         'personality': s.personality,
         'message_count': len(s.messages or []),
+        # #quiet-delegation: /status "messages" must not count hidden internal
+        # rows (delegation_wakeup handoffs). The client (static/commands.js)
+        # prefers this visible count and falls back to message_count.
+        'visible_message_count': sum(
+            1 for m in (s.messages or [])
+            if not is_hidden_transcript_row(m)
+        ),
         'created_at': s.created_at,
         'updated_at': s.updated_at,
         'agent_running': bool(getattr(s, 'active_stream_id', None)),

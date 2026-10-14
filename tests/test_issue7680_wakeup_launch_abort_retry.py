@@ -688,10 +688,11 @@ def test_only_process_completion_path_opts_into_rearm():
     """Pin the wiring, not just the behaviour: the process-completion wakeup
     caller opts into the re-arm, and the async-delegation caller does NOT.
 
-    ``_start_async_delegation_wakeup_turn`` starts its turn with
-    ``source="process_wakeup"`` too, so a future refactor that re-derives the
-    opt-in from ``source`` (or flips the flags) would silently reintroduce the
-    double-retry the maintainer found. Assert on the call sites' source text.
+    ``_start_async_delegation_wakeup_turn`` starts its turn with the distinct
+    ``source="delegation_wakeup"`` provenance (quiet-delegation: hidden rows),
+    so a future refactor that re-derives the opt-in from ``source`` (or flips
+    the flags) would silently reintroduce the double-retry the maintainer
+    found. Assert on the call sites' source text.
     """
     import pathlib
 
@@ -715,9 +716,12 @@ def test_only_process_completion_path_opts_into_rearm():
         "deferred-wakeup re-arm delivered one completion twice (#7680 CORE)"
     )
 
-    # Both still share the source; the fix must not have changed that.
+    # Each path keeps its OWN source provenance: the process-completion
+    # caller stays ``process_wakeup``; the delegation caller uses the typed
+    # ``delegation_wakeup`` stamp the hidden-row predicate keys on
+    # (quiet-delegation #7882).
     assert 'source="process_wakeup"' in completion_block
-    assert 'source="process_wakeup"' in delegation_block
+    assert 'source="delegation_wakeup"' in delegation_block
 
 
 def test_rearm_flag_defaults_to_off():
@@ -778,7 +782,9 @@ def test_async_delegation_runner_passes_no_rearm_flag(monkeypatch):
 
     assert len(seen) == 1, f"expected exactly one start_session_turn call, got {seen!r}"
     call = seen[0]
-    assert call["source"] == "process_wakeup"
+    # The delegation runner carries the distinct ``delegation_wakeup``
+    # provenance (quiet-delegation #7882), not the shared process-wakeup one.
+    assert call["source"] == "delegation_wakeup"
     assert "rearm_deferred_wakeup" not in call, (
         "the delegation runner must NOT opt into the launch-abort re-arm: it "
         "already owns a durable claim/retry, so the extra deferred prompt + "
@@ -844,7 +850,8 @@ def test_delegation_launch_failure_keeps_only_its_durable_retry(
     ):
         calls.append({"session_id": session_id, "source": source, **kw})
         # Route into the REAL launch path with exactly what the delegation
-        # caller passes in production: no rearm opt-in.
+        # caller passes in production: no rearm opt-in, distinct
+        # delegation_wakeup provenance.
         return routes._start_chat_stream_for_session(
             session,
             msg=message,
@@ -884,8 +891,9 @@ def test_delegation_launch_failure_keeps_only_its_durable_retry(
 
     # The launch really failed at the worker start, through the real abort path:
     assert _SelectiveThread.starts == 2, "runner + worker thread starts expected"
-    # The delegation caller passed no rearm opt-in:
-    assert calls and calls[0]["source"] == "process_wakeup"
+    # The delegation caller passed the distinct delegation_wakeup provenance
+    # and no rearm opt-in (quiet-delegation #7882).
+    assert calls and calls[0]["source"] == "delegation_wakeup"
     assert "rearm_deferred_wakeup" not in calls[0], (
         "the delegation runner must not opt into the launch-abort re-arm"
     )

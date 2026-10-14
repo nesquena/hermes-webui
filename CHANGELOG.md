@@ -5,6 +5,15 @@
 
 ### Added
 
+- **Project bindings: pin workspaces and a model to a sidebar project.** Right-click a project chip and choose
+  **Project settings…** to bind one or more workspaces (one marked default) and a model, so the project's quick-create
+  (+) button opens a new session already set up for that project. Thanks @silent-reader-cn.
+  (#6836)
+
+- **English multilingual Edge TTS voices.** The English multilingual Edge text-to-speech voices are allowed and listed in
+  Settings alongside the existing voices; the server still accepts only allowlisted voice IDs. Thanks
+  @judah-hermes-agent. (#8210)
+
 - **Middle-click or Ctrl/Cmd-click a conversation in the sidebar to open it in a new tab.** Works for top-level rows
   and for nested sub-conversations (a child of a compressed conversation opens the child itself, also after a refresh),
   keeps each tab on its own profile, and leaves plain clicks, the action menu and touch gestures unchanged. Thanks
@@ -101,6 +110,18 @@
 
 ### Security
 
+- **Pressing Enter on the approval card's Deny button denies.** While a tool approval was pending, Enter on any focused
+  control outside a text field ran "Allow once": Enter on **Deny**, **Allow session** or **Always allow** approved the
+  command once, and Enter on the ⋮ menu, a menu row, the project picker or a control that closes itself on Enter approved
+  the pending action instead of doing its own job. Enter now approves only when it isn't pressed on a control, so each
+  button does what it says. Enter with nothing focused still means Allow once. (#8131, #8130)
+
+- **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
+  crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
+  CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
+  response now gets a clean 400/401 with nothing stored and no session issued, and valid passkeys register and sign in
+  exactly as before. Thanks @ybai08. (#8138, fixes #8126)
+
 - **Remote images in chat no longer load until you click them (zero-click exfiltration fix).** Any assistant-rendered
   `![x](https://host/?d=…)` used to fetch the moment it rendered, which let a prompt-injected reply beacon chat data to
   an outside server. The default CSP `img-src` no longer allows arbitrary `https:` images, and a non-allowlisted remote
@@ -134,6 +155,76 @@
   @laitekin. (#7297, fixes #7294)
 
 ### Fixed
+
+- **Outline jumps land on the message right after a long session opens.** Load-time bottom settling no longer pulls
+  the reader back, and the jump reuses already-loaded history instead of fetching it again. Thanks @dss539. (#8219)
+
+- **Edit, regenerate and fork act on the message you clicked, even after the outline loads full history.** Opening the
+  conversation outline loads older messages without re-rendering, which left on-screen rows with indexes relative to
+  the old window. These actions now resolve each row's current index. Thanks @dss539. (#8218)
+
+- **Updates recover from a renamed remote branch instead of failing to fetch.** When a branch on the remote was renamed
+  so its old name now blocks the new one (`'refs/remotes/origin/x' exists; cannot create ...`, or on git 2.51+ only
+  "some local refs could not be updated; try running 'git remote prune origin'"), the updater prunes just the stale
+  remote-tracking ref and retries once. Local branches, local tags and working-tree changes are never touched. Thanks
+  @UncleLiu-0306. (#8227)
+
+- **WebUI finds the same Agent whether it starts as a service or through bootstrap, and recovers from a half-finished
+  Agent install.** Direct service startup and `bootstrap.py` now share one Agent discovery path, keep the interpreter
+  that actually proved the Agent install for later Agent subprocesses, and retry an incomplete install instead of
+  starting against it. Thanks @rodboev. (#7247, fixes #1019)
+
+- **A git pull that times out no longer returns a 500, and its output can't leak credentials.** The partial git
+  output is decoded instead of crashing the update handler. Credentials embedded in remote URLs or query strings
+  (including values containing quotes) are redacted from the pull-failure and timeout messages, and the redacted
+  text is no longer cut short. Thanks @happy5318. (#8202, fixes #8198)
+
+- **Background-subagent wakeups no longer appear as messages you typed.** When delegated background work finishes, the
+  wakeup the Agent needs is still delivered, but the transcript no longer shows it as a user bubble, and it no longer
+  counts toward message totals, provisional titles, forks or exports. That holds across reloads, session switches and
+  streaming. Thanks @CharlesMcquade. (#7882)
+
+- **Settings search shows results right away.** Typing in the Settings search box now lists matches from the
+  already-loaded panes immediately, instead of waiting for every pane to finish loading, and a result you've clicked
+  no longer reappears when the slower panes arrive. Thanks @yugui923. (#6370)
+
+- **Faster secret redaction on long values.** The redactor no longer runs its environment-assignment and code-key
+  matchers on strings that contain no `=`, which those patterns need to match, so long URL-bearing values in API
+  responses are masked with less CPU. Every other masking rule is unchanged. Thanks @tobenot. (#8192)
+
+- **A finished reply no longer vanishes when the final update arrives empty.** If the stream's closing event carried an
+  empty message list, the done handler replaced the visible transcript with nothing, so the reply you just watched stream
+  disappeared until a reload. The settle now keeps the streamed transcript when the payload is empty. Thanks
+  @MuhammadUsamaMX. (#7836, fixes #6112)
+
+- **Regenerating a title no longer shows an internal status code.** When title regeneration fails, the toast now gives
+  a readable reason instead of leaking the server's internal status (the remaining #7693 cases). Thanks
+  @MuhammadUsamaMX. (#8117)
+
+- **The sign-in page follows your browser language.** The server-rendered `/login` page now honours `Accept-Language`
+  (quality order and regional aliases such as `zh-HK`, `pt-PT`), and an explicitly chosen language still wins. Thanks
+  @MuhammadUsamaMX. (#8182, follow-up to #7622)
+
+- **Signing in works when another app on the same host sets a malformed cookie.** A cookie with illegal characters
+  from a different service on the same host or domain made the WebUI ignore every cookie after it, so a correct password
+  bounced back to the login page and a switched profile fell back to `default`. Cookies are now read one pair at a time,
+  for both the session and the profile cookie. Thanks @pcsokonay. (#8124, #8123)
+
+- **Insights: the Models card gets three times the width of its neighbours in the usage row.** Long model ids such as
+  `anthropic/claude-...` and `openrouter/...` were cut to an 80 px name column, so several rows read identically. The card
+  now takes a 3x share of the row, and on narrow screens its table stays inside the card instead of spilling past
+  the window. Thanks @aleesposito85. (#8157)
+
+- **Metadata-only session reads no longer rebuild a conversation's regeneration history.** A `GET /api/session?messages=0`
+  built the canonical regeneration state even though it returns no messages. It now skips that work, and the browser
+  takes regeneration authority from its message load instead, keeping the history it already has loaded, including
+  after you switch away and back while a refresh is in flight. Metadata-only responses no longer carry
+  `regeneration_revision`. Thanks @tobenot. (#8173)
+
+- **A turn's unanswered tool call no longer passes as answered because a later turn reused its id.** The model context
+  kept any tool call whose id appeared anywhere in the history's tool results, so an earlier interrupted call could pair
+  with a later, unrelated result and send a malformed tool sequence to the provider. Tool calls now pair only with a
+  result immediately after them, in both model-facing projections. Thanks @happy5318. (#8194)
 
 - **Switching back to a long-running conversation no longer freezes the browser.** Reconnecting to a conversation
   whose agent has been reasoning for a long time replayed every reasoning chunk with its own render. A 500-chunk replay
@@ -1073,6 +1164,21 @@
 - **The `/api/models` cache invalidation contract is documented.** `#7556` shipped a change to the catalog cache's source fingerprint, and its review flagged the surrounding contract as undocumented runtime behavior. `docs/architecture/models-cache-invalidation.md` now records what is cached (in-memory snapshot, per-profile `models_cache.json`, cold vs hot path), the three source axes (`config_yaml` stat identity, `auth_json` content hash with a volatile-key deny-list, baked-in plus Codex catalog hashes) and why each is fingerprinted the way it is, and the invariant that both volatile-key sets are deny-lists that may only remove fields which provably do not gate the provider/model set. Changes no runtime behavior. Thanks @webtecnica. (#7560, #7556)
 
 ### Changed
+
+- **An order-dependent CI test failure is fixed.** `test_custom_provider_detected_by_get_available_models` (and four
+  siblings) seeded the config in memory but didn't pin the loaded-config path, so a stale path left by an earlier test
+  reloaded `config.yaml` over the seed in CI shard 0. The tests now pin it, and a regression test proves the fix.
+  (#8237, fixes #8226)
+
+- **Faster status polls and history reads on long sessions.** Finding the `messages` key in a session file's metadata
+  prefix uses a regex tokenizer instead of a per-character Python walk, with identical results. Thanks @dss539. (#8216)
+
+- **Faster saves on long sessions.** The exact-duplicate guard that runs on every save, including draft saves while
+  typing, now fingerprints only rows whose identity actually repeats, instead of hashing the whole transcript. The
+  rows it keeps are unchanged. Thanks @dss539. (#8215)
+
+- **Faster transcript rendering.** Message and worklog timestamps reuse cached Intl formatters instead of building a new
+  one per call, and the cache resets when the language or clock setting changes. Thanks @dss539. (#8217)
 
 - **Two flaky tests are stable again.** Three `get_available_models()` cache-metadata tests raced the 4-second live-rebuild budget on a loaded CI host and could time out onto the stale-cache path. They now pin the budget to `0`, which is the documented setting for the legacy unbounded synchronous rebuild, so they still exercise the real rebuild (#7735). A source-text oracle that string-matched `delete_cli_session`'s source to prove it opens a writable connection is removed. The behavioral test in `test_issue1494_state_db_fd_leak.py` still guards that contract: it fails with `attempt to write a readonly database` if the delete path is ever switched to a read-only connection (#7726). Test-only; no runtime change. Thanks @webtecnica. (#7744, #7742)
 - **The chat composer grows natively instead of being resized by JavaScript on every keystroke.** `autoResize()` measured `scrollHeight` and wrote `style.height` on each input event — a forced synchronous reflow on the most-typed-in surface in the app. Browsers that support CSS `field-sizing: content` (Chromium today; also Firefox 152 and Safari 26.2) now own the geometry directly, gated on `CSS.supports()`, and the existing JavaScript path is untouched for every other engine. Measured behaviour is identical across both paths: 44px resting height, no jump when the first character is typed or the last deleted, growth to the 200px ceiling, then internal scrolling. Because `field-sizing` deliberately includes placeholder text in content sizing, `:placeholder-shown` pins fixed sizing while the composer is empty so a long placeholder can't inflate it. Thanks @starship-s. (#6760, #5514)
