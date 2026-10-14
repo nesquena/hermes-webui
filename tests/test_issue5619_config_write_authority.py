@@ -375,3 +375,158 @@ class TestReadCompareStillResolves:
         # The entry's own name indirection must still be on disk.
         assert raw["custom_providers"][0]["name"] == "${MY_PROVIDER_NAME}"
         _assert_placeholder_survives(cfg_path, "set_auxiliary_model (slug match)")
+
+
+class TestSkillToggleEditTheReadersNames:
+    """The toggle must edit the NAMES THE READER SEES, not the raw text.
+
+    Two silent defects from the 2026-09-29 review: a scalar ``${VAR}`` that
+    expands to a serialized list was saved back as one list item, after which
+    the reader no longer parses it as a list and silently enables the sibling
+    names; and the writer compared the env-expanded value literally while the
+    reader strips, so ``" demo "`` never matched ``demo`` and the API
+    returned ``ok`` while the skill stayed disabled.
+    """
+
+    def _toggle(self, monkeypatch, cfg_path, name, enabled):
+        """Drive _handle_skill_toggle at the isolated cfg_path; assert ok."""
+        import api.routes as routes
+
+        monkeypatch.setattr(
+            routes, "_find_skill_in_dirs", lambda _n, _d: (Path("/x"), "md")
+        )
+        monkeypatch.setattr(routes, "_active_skills_dir", lambda: Path("/x"))
+        monkeypatch.setattr(routes, "_active_skill_search_dirs", lambda d: [d])
+        monkeypatch.setattr(routes, "_active_profile_config_path", lambda: cfg_path)
+        monkeypatch.setattr(routes, "reload_config", lambda *a, **k: None)
+        monkeypatch.setattr(routes, "j", lambda _h, p: p)
+        monkeypatch.setattr(
+            routes, "bad", lambda _h, m, status=400: {"error": m, "status": status}
+        )
+        monkeypatch.setattr(routes, "_SKILLS_STATS_CACHE", {"clear": lambda: None})
+        response = routes._handle_skill_toggle(None, {"name": name, "enabled": enabled})
+        assert response.get("ok") is True, response
+        return routes
+
+    def test_scalar_placeholder_expanding_to_list_enables_only_target(
+        self, cfg_path, monkeypatch, caplog
+    ):
+        """One scalar ``${VAR}`` holding a list must not enable its siblings.
+
+        ``skills.disabled: ${DISABLED}`` with ``DISABLED='["demo","other"]'``
+        reads as both disabled. Enabling ``demo`` must leave ``other``
+        disabled: the placeholder cannot survive a partial edit, so the
+        remaining resolved name is written explicitly (and logged), rather
+        than saved as a list item the reader no longer parses as a list --
+        which silently enables ``other``.
+        """
+        import api.config as config
+
+        monkeypatch.setenv("DISABLED", '["demo","other"]')
+        config._save_yaml_config_file(
+            cfg_path,
+            {
+                "providers": {"openai": {"api_key": PLACEHOLDER}},
+                "skills": {"disabled": "${DISABLED}"},
+            },
+        )
+
+        with caplog.at_level("INFO"):
+            routes = self._toggle(monkeypatch, cfg_path, "demo", True)
+
+        raw = config._load_yaml_config_file_raw(cfg_path)
+        assert config._expand_env_vars(raw["skills"]["disabled"]) == ["other"], (
+            "enabling 'demo' must drop it and keep 'other' disabled; the raw "
+            f"value is {raw['skills']['disabled']!r}"
+        )
+        # The reader's own view: demo out, sibling still in.
+        assert routes._get_disabled_skill_names_for_profile() == {"other"}
+        # Rewriting a placeholder that cannot survive is stated in a log line.
+        assert any("placeholder cannot survive" in r.message for r in caplog.records)
+        _assert_placeholder_survives(cfg_path, "_handle_skill_toggle (scalar list)")
+
+    def test_platform_disabled_webui_gets_the_same_rule(self, cfg_path, monkeypatch):
+        """``skills.platform_disabled.webui`` is held to the same rule.
+
+        The WebUI reader consults this list first, so the identical scalar
+        ``${VAR}`` edit must materialize the remaining name here too -- and a
+        repeat disable must be a byte-for-byte no-op (idempotency control).
+        """
+        import api.config as config
+
+        monkeypatch.setenv("DISABLED", '["demo","other"]')
+        config._save_yaml_config_file(
+            cfg_path,
+            {
+                "providers": {"openai": {"api_key": PLACEHOLDER}},
+                "skills": {
+                    "disabled": [],
+                    "platform_disabled": {"webui": "${DISABLED}"},
+                },
+            },
+        )
+
+        routes = self._toggle(monkeypatch, cfg_path, "demo", True)
+
+        raw = config._load_yaml_config_file_raw(cfg_path)
+        assert config._expand_env_vars(
+            raw["skills"]["platform_disabled"]["webui"]
+        ) == ["other"], (
+            "enabling 'demo' must not silently enable 'other' via the webui "
+            f"list; raw is {raw['skills']['platform_disabled']['webui']!r}"
+        )
+        assert routes._get_disabled_skill_names_for_profile() == {"other"}
+        _assert_placeholder_survives(cfg_path, "_handle_skill_toggle (webui list)")
+
+        # Disable control: demo comes back exactly once...
+        self._toggle(monkeypatch, cfg_path, "demo", False)
+        raw = config._load_yaml_config_file_raw(cfg_path)
+        webui = config._expand_env_vars(raw["skills"]["platform_disabled"]["webui"])
+        assert webui == ["other", "demo"], f"got {webui!r}"
+
+        # ...and a second disable changes nothing on disk.
+        before = cfg_path.read_text(encoding="utf-8")
+        self._toggle(monkeypatch, cfg_path, "demo", False)
+        assert cfg_path.read_text(encoding="utf-8") == before, (
+            "disabling an already-disabled skill rewrote config.yaml; the "
+            "toggle must be idempotent when the raw value already reads right"
+        )
+        assert (
+            config._expand_env_vars(
+                config._load_yaml_config_file_raw(cfg_path)["skills"][
+                    "platform_disabled"
+                ]["webui"]
+            ).count("demo")
+            == 1
+        )
+
+    def test_env_value_whitespace_matches_the_reader(self, cfg_path, monkeypatch):
+        """The reader strips env-expanded names, so the writer must too.
+
+        ``DISABLED_SKILL=" demo "`` resolves to a padded name the reader
+        strips to ``demo``. Enabling ``demo`` must remove the entry --
+        comparing the raw expansion keeps it in place, so the API returned
+        success while the skill stayed disabled.
+        """
+        import api.config as config
+
+        monkeypatch.setenv("DISABLED_SKILL", " demo ")
+        config._save_yaml_config_file(
+            cfg_path,
+            {
+                "providers": {"openai": {"api_key": PLACEHOLDER}},
+                "skills": {"disabled": ["${DISABLED_SKILL}"]},
+            },
+        )
+
+        routes = self._toggle(monkeypatch, cfg_path, "demo", True)
+
+        raw = config._load_yaml_config_file_raw(cfg_path)
+        assert raw["skills"]["disabled"] == [], (
+            "enabling 'demo' left the padded ${DISABLED_SKILL} entry behind: "
+            f"{raw['skills']['disabled']!r}"
+        )
+        assert "demo" not in routes._get_disabled_skill_names_for_profile(), (
+            "the API returned ok but the reader still reports demo disabled"
+        )
+        _assert_placeholder_survives(cfg_path, "_handle_skill_toggle (whitespace)")
