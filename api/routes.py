@@ -20654,6 +20654,15 @@ def handle_post(handler, parsed) -> bool:
                 s.thread_id = cli_meta.get("thread_id")
                 s.session_key = cli_meta.get("session_key")
                 s.platform = cli_meta.get("platform")
+        # Read-only imported sessions (Claude Code / CLI / Gateway rows that
+        # already carry a materialized WebUI sidecar) must not be archived:
+        # archiving mutates the session's own state, and these rows are a
+        # read-only view of an external store. The fallback above 404s read-only
+        # CLI rows before any materialization; this guard covers the main
+        # sidecar path so the WebUI cannot flip `archived` on a read-only
+        # import (mirrors the delete/rename/update read-only guards).
+        if getattr(s, "read_only", False) or getattr(s, "is_read_only", False):
+            return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
         with _get_session_agent_lock(sid):
             # #7738: re-resolve the canonical session under the lock so the
             # object we mutate is the resident one (not a stale, evicted one).
