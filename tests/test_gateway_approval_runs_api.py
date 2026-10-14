@@ -129,6 +129,28 @@ def test_gateway_capability_detection():
     invalidate_gateway_caps()
 
 
+def test_gateway_capability_reasoning_streaming_implies_full_ladder():
+    from api.config import get_gateway_caps, invalidate_gateway_caps
+
+    invalidate_gateway_caps()
+
+    def fake_urlopen(_req, *, timeout=None):
+        body = json.dumps({"features": {"reasoning_streaming": True}}).encode()
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        caps = get_gateway_caps("http://streaming-agent:8642")
+
+    assert caps["reasoning_efforts"] == [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ]
+    invalidate_gateway_caps()
+
+
 def test_gateway_capability_detection_marks_probe_failures_unreachable():
     """Probe failures stay non-fatal but remain distinguishable from unsupported gateways."""
     from api.config import (

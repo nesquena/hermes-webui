@@ -96,6 +96,10 @@ class HttpRunnerClient:
             return None
         raw = features.get("reasoning_efforts")
         if not isinstance(raw, (list, tuple)):
+            if features.get("reasoning_streaming"):
+                return [
+                    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+                ]
             return None
         efforts = [
             str(level).strip().lower()

@@ -268,6 +268,44 @@ def test_gateway_request_effort_applies_model_limit_before_ultra_negotiation(mon
     ) == "high"
 
 
+@pytest.mark.parametrize(
+    ("global_effort", "override", "expected"),
+    [("none", "high", "high"), ("high", "low", "low"), ("high", False, "none")],
+)
+def test_gateway_request_effort_prefers_agent_per_model_override(
+    global_effort, override, expected
+):
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    cfg = {
+        "agent": {
+            "reasoning_effort": global_effort,
+            "reasoning_overrides": {"openai/o3-mini": override},
+        }
+    }
+    assert _gateway_reasoning_effort_for_request(
+        cfg,
+        model="o3-mini",
+        model_provider="openai",
+    ) == expected
+
+
+def test_gateway_request_effort_matches_agent_override_spelling_variants():
+    from api.gateway_chat import _gateway_reasoning_effort_for_request
+
+    cfg = {
+        "agent": {
+            "reasoning_effort": "none",
+            "reasoning_overrides": {"custom-relay/qwen3.6:27b": {"effort": "high"}},
+        }
+    }
+    assert _gateway_reasoning_effort_for_request(
+        cfg,
+        model="qwen3-6:27b",
+        model_provider="custom-relay",
+    ) == "high"
+
+
 def test_installed_receiver_import_failure_does_not_fall_back_green(tmp_path, monkeypatch):
     """A discovered but unusable receiver is a failed boundary proof, not a fallback."""
     agent_dir = tmp_path / "agent"
@@ -551,6 +589,38 @@ def test_runner_request_resolves_effort_inside_session_profile_scope(monkeypatch
     )
 
     assert entered == ["named-profile"]
+    assert effort == "high"
+
+
+def test_profile_request_settings_use_deep_config_snapshots(monkeypatch):
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    shared = {"agent": {"reasoning_effort": "high"}}
+
+    @contextmanager
+    def fake_scope(*_args, **_kwargs):
+        yield
+
+    def mutate_then_read(cfg, **_kwargs):
+        shared["agent"]["reasoning_effort"] = "none"
+        return cfg["agent"]["reasoning_effort"]
+
+    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(config, "get_config", lambda: shared)
+    monkeypatch.setattr(routes, "get_config", lambda: shared)
+    monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", mutate_then_read)
+
+    settings = gateway_chat._gateway_request_settings_for_session(
+        SimpleNamespace(profile="analyst"), model="test-model"
+    )
+    assert settings[1] == "high"
+
+    shared["agent"]["reasoning_effort"] = "high"
+    effort = routes._runner_reasoning_effort_for_session(
+        SimpleNamespace(profile="analyst"), model="test-model"
+    )
     assert effort == "high"
 
 

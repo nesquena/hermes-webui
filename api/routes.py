@@ -26636,11 +26636,13 @@ def _external_model_alias_lane_response(alias_route, *, external_owned: bool) ->
 
 def _runner_reasoning_effort_for_session(session, *, model=None, model_provider=None):
     """Resolve the runner override under the session's authoritative profile."""
+    import copy
+
     from api.gateway_chat import _gateway_reasoning_effort_for_request
 
     def _resolve():
         return _gateway_reasoning_effort_for_request(
-            get_config(),
+            copy.deepcopy(get_config()),
             model=model,
             model_provider=model_provider,
         )

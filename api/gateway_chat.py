@@ -1,6 +1,7 @@
 """Default-off Hermes Gateway bridge for browser-originated chat turns."""
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
@@ -367,6 +368,23 @@ def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=Non
         cfg_data = cfg if isinstance(cfg, dict) else {}
         effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
         effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
+        if isinstance(effort_cfg, dict):
+            from api.config import resolve_per_model_reasoning_effort
+
+            model_name = str(model or "").strip()
+            parsed_hint = _parse_provider_qualified_model_id(model_name)
+            if parsed_hint is not None:
+                model_name, hinted_provider = parsed_hint
+                model_provider = model_provider or hinted_provider
+            override_model = (
+                f"{model_provider}/{model_name}" if model_provider and model_name else model_name
+            )
+            override = resolve_per_model_reasoning_effort(
+                override_model,
+                effort_cfg.get("reasoning_overrides"),
+            )
+            if override is not None:
+                effort_raw = "none" if override.get("enabled") is False else override.get("effort")
         raw_normalized = str(effort_raw or "").strip().lower()
         # A newer Agent/CLI can write ``ultra`` before this WebUI exposes it in
         # its user-facing ladder. Use the existing ``max`` coercion as the
@@ -404,7 +422,7 @@ def _gateway_request_settings_for_session(
     from api.config import _main_model_request_overrides, get_config
 
     def _resolve():
-        cfg = get_config()
+        cfg = copy.deepcopy(get_config())
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,

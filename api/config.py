@@ -4972,13 +4972,86 @@ def parse_reasoning_effort(effort):
     ``{"enabled": True, "effort": <level>}`` for any of
     ``VALID_REASONING_EFFORTS``.
     """
-    if not effort or not str(effort).strip():
+    if effort is None or effort is True:
         return None
+    if isinstance(effort, dict):
+        if effort.get("enabled", True) is False:
+            return {"enabled": False}
+        level = str(effort.get("effort") or "").strip()
+        return {"enabled": True, "effort": level} if level else None
     eff = str(effort).strip().lower()
-    if eff == "none":
+    if eff in {"none", "false", "disabled"}:
         return {"enabled": False}
-    if eff in VALID_REASONING_EFFORTS:
+    if eff in (*VALID_REASONING_EFFORTS, "ultra"):
         return {"enabled": True, "effort": eff}
+    return None
+
+
+def _reasoning_override_model_variants(model: str) -> list[str]:
+    """Mirror Agent's spelling-tolerant model variants for reasoning overrides."""
+    dash_to_dot = lambda value: re.sub(r"(\d)-(\d)", r"\1.\2", value)
+    dot_to_dash = lambda value: re.sub(r"(\d)\.(\d)", r"\1-\2", value)
+    seen: set[str] = set()
+    variants: list[str] = []
+
+    def add(*values):
+        for value in values:
+            if value and value not in seen:
+                seen.add(value)
+                variants.append(value)
+
+    def add_with_derivatives(value):
+        dashed, dotted = value.replace(".", "-"), value.replace("-", ".")
+        add(
+            value,
+            dashed,
+            dotted,
+            dash_to_dot(value),
+            dot_to_dash(value),
+            dash_to_dot(dashed),
+            dot_to_dash(dotted),
+        )
+
+    add_with_derivatives(model)
+    parts = model.split("/")
+    if len(parts) >= 2:
+        add_with_derivatives(parts[-1])
+    if len(parts) >= 3:
+        add_with_derivatives("/".join(parts[1:]))
+    known_providers = (
+        "anthropic", "openai", "google", "openrouter", "groq", "mistral",
+        "xai", "cohere", "perplexity", "together", "fireworks", "deepseek",
+    )
+    for value in [value for value in variants if "/" not in value]:
+        add(*(f"{provider}/{value}" for provider in known_providers))
+    known_aggregators = ("openrouter", "opencode", "fireworks", "groq", "together")
+    for value in [value for value in variants if value.count("/") == 1]:
+        add(*(f"{aggregator}/{value}" for aggregator in known_aggregators))
+    return variants
+
+
+def resolve_per_model_reasoning_effort(model: str, overrides: dict | None):
+    """Return Agent-compatible per-model reasoning config, or ``None``."""
+    if not overrides or not isinstance(overrides, dict) or not model:
+        return None
+    variants = _reasoning_override_model_variants(model)
+    for variant in variants:
+        if variant in overrides:
+            result = parse_reasoning_effort(overrides[variant])
+            if result is not None:
+                return result
+    variant_set = set(variants)
+    for key, raw in overrides.items():
+        if not isinstance(key, str) or "/" not in key:
+            continue
+        parts = key.split("/")
+        key_forms = _reasoning_override_model_variants(parts[-1])
+        if len(parts) >= 3:
+            key_forms += _reasoning_override_model_variants("/".join(parts[1:]))
+        if any(form in variant_set for form in key_forms):
+            result = parse_reasoning_effort(raw)
+            if result is not None:
+                return result
     return None
 
 
@@ -12670,6 +12743,8 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
                 for level in raw_efforts
                 if isinstance(level, str) and str(level).strip()
             ]
+        elif features.get("reasoning_streaming"):
+            caps["reasoning_efforts"] = ["none", *VALID_REASONING_EFFORTS, "ultra"]
     except urllib.error.HTTPError as exc:
         caps["capabilities_reachable"] = True
         caps["probe_error"] = f"{type(exc).__name__}: {exc}"
