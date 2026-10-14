@@ -999,3 +999,84 @@ def test_named_custom_provider_not_rewritten_when_canonical_group_exists(
         monkeypatch, tmp_path, session=session, catalog=catalog, profile_cfg=profile_cfg
     )
     assert captured["model_provider"] == "glm", captured
+
+
+def test_native_provider_record_keeps_lane_when_canonical_group_exists(
+    monkeypatch, tmp_path
+):
+    """Raw ``glm`` backed by the runtime-native ``providers`` form keeps its lane.
+
+    ``_named_custom_provider_slug_for_provider`` only reads
+    ``custom_providers[]``, but a native ``providers.glm`` record with its own
+    ``base_url`` + key declares an equally valid named custom provider, and
+    ``glm`` canonicalises to the ``zai`` catalog group. Group presence alone
+    must not skip the proof chain: the native record's base_url/credential
+    evidence must preserve the lane (#8179 re-gate).
+    """
+    session = _chat_session(tmp_path, model_provider="glm")
+    # ``zai`` is the canonical target of ``glm`` and exists as a catalog group
+    # but does NOT own the model; a separate ``nous`` group owns it.
+    catalog = _catalog(
+        _group("zai", "zai-unused-model"),
+        _group("nous", "deepseek/deepseek-v4.1-flash"),
+    )
+    profile_cfg = {
+        "model": {"provider": "nous"},
+        "providers": {
+            "glm": {"base_url": "https://glm.example/v1", "api_key": "dummy-glm"}
+        },
+    }
+    monkeypatch.setattr(routes, "is_plugin_model_provider", lambda _pid: False, raising=False)
+    captured = _drive_chat_start(
+        monkeypatch, tmp_path, session=session, catalog=catalog, profile_cfg=profile_cfg
+    )
+    assert captured["model_provider"] == "glm", captured
+
+
+def test_alias_form_with_live_credential_keeps_lane_when_canonical_group_exists(
+    monkeypatch, tmp_path
+):
+    """Raw ``z-ai`` with a usable credential sentinel keeps its lane.
+
+    ``z-ai`` canonicalises to the ``zai`` catalog group that does not own the
+    model; without the raw-id proof chain the single ``nous`` owner wins and
+    the credential-live ``z-ai`` lane is lost (#8179 re-gate).
+    """
+    session = _chat_session(tmp_path, model_provider="z-ai")
+    catalog = _catalog(
+        _group("zai", "zai-unused-model"),
+        _group("nous", "deepseek/deepseek-v4.1-flash"),
+    )
+    profile_cfg = {"model": {"provider": "nous"}}
+    monkeypatch.setattr(routes, "is_plugin_model_provider", lambda _pid: False, raising=False)
+    monkeypatch.setattr(
+        routes,
+        "provider_has_usable_credential",
+        lambda pid, **_kw: str(pid).strip().lower() == "z-ai",
+        raising=False,
+    )
+    captured = _drive_chat_start(
+        monkeypatch, tmp_path, session=session, catalog=catalog, profile_cfg=profile_cfg
+    )
+    assert captured["model_provider"] == "z-ai", captured
+
+
+def test_credential_less_openrouter_still_repaired_when_canonical_group_exists(
+    monkeypatch, tmp_path
+):
+    """Control for the raw-id gate: a genuinely credential-less lane is still
+    repaired to the single owner even with a ``zai`` canonical group present."""
+    session = _chat_session(tmp_path, model_provider="openrouter")
+    catalog = _catalog(
+        _group("zai", "zai-unused-model"),
+        _group("nous", "deepseek/deepseek-v4.1-flash"),
+    )
+    profile_cfg = {"model": {"provider": "nous"}}
+    monkeypatch.setattr(routes, "is_plugin_model_provider", lambda _pid: False, raising=False)
+    monkeypatch.setattr(
+        routes, "provider_has_usable_credential", lambda _pid, **_kw: False, raising=False
+    )
+    captured = _drive_chat_start(
+        monkeypatch, tmp_path, session=session, catalog=catalog, profile_cfg=profile_cfg
+    )
+    assert captured["model_provider"] == "nous", captured
