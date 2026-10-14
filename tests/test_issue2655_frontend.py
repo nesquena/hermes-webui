@@ -11,7 +11,7 @@ CHANGELOG = Path("CHANGELOG.md").read_text(encoding="utf-8")
 def test_workspace_artifacts_tab_collects_session_files_and_previews_them():
     assert 'id="workspaceArtifactsTab"' in INDEX_HTML
     assert 'id="workspaceArtifacts"' in INDEX_HTML
-    assert "function collectSessionArtifacts()" in WORKSPACE_JS
+    assert "function collectSessionArtifacts(" in WORKSPACE_JS
     assert "function _artifactCandidatesFromToolCall(tc)" in WORKSPACE_JS
     assert "ARTIFACT_IGNORE_RE" in WORKSPACE_JS
     assert "node_modules" in WORKSPACE_JS and "__pycache__" in WORKSPACE_JS
@@ -41,7 +41,7 @@ def test_artifact_snapshot_consumers_route_through_owner():
 def test_workspace_artifacts_structured_args_are_mutation_gated():
     """Read-only tool args with path fields must not appear as changed files."""
     fn_start = WORKSPACE_JS.index("function _artifactCandidatesFromToolCall(tc)")
-    fn_end = WORKSPACE_JS.index("function collectSessionArtifacts()", fn_start)
+    fn_end = WORKSPACE_JS.index("function collectSessionArtifacts(", fn_start)
     body = WORKSPACE_JS[fn_start:fn_end]
 
     args_gate = body.index("args && typeof args === 'object'")

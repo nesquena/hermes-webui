@@ -442,7 +442,7 @@ def test_session_stream_pauses_while_chat_stream_is_active():
     assert start_src.index("if (_chatStreamActiveForSession(sid))") < start_src.index("new EventSource(")
 
     attach_ix = js.index("function attachLiveStream")
-    attach_src = js[attach_ix:js.index("function transcript()", attach_ix)]
+    attach_src = js[attach_ix:js.index("function transcript(", attach_ix)]
     assert "_suspendSessionStreamForLiveChat(activeSid);" in attach_src
     assert attach_src.index("_suspendSessionStreamForLiveChat(activeSid);") < attach_src.index("new EventSource(")
 
