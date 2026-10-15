@@ -68,6 +68,11 @@
 
 ### Fixed
 
+- **A second attachment with the same filename is kept.** Adding two different files with the same name (for example
+  two phone photos both called `image.jpg`) silently dropped the second one from the composer. Pending files are now
+  identified by more than their name, so both are kept and sent, and re-adding the same file still doesn't create a
+  duplicate chip. Thanks @lucastraba. (#8204)
+
 - **Login keeps your destination behind a subpath mount.** Behind a prefix such as `/hermes/`, the reverse proxy strips
   the prefix from `next=`, so signing in sent you to the site root instead of the page you asked for. The login page now
   remaps a prefix-stripped `next=` onto the app root, and validates the remapped result so a protocol-relative target
