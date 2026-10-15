@@ -1040,6 +1040,43 @@ def test_named_profile_gateway_settings_inherit_operator_defaults(
     assert settings[5] is True
 
 
+def test_named_profile_gateway_settings_use_one_deployment_snapshot(monkeypatch):
+    """A reload cannot mix the old deployment URL with the new credential."""
+    from api import gateway_chat
+
+    old_deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://old-gw.test",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "old-key",
+    }
+    new_deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://new-gw.test",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "new-key",
+    }
+
+    class ReloadDuringCopy:
+        def keys(self):
+            return old_deployment.keys()
+
+        def __getitem__(self, key):
+            value = old_deployment[key]
+            if key == "HERMES_WEBUI_GATEWAY_API_KEY":
+                gateway_chat._GATEWAY_DEPLOYMENT_ENV = new_deployment
+            return value
+
+        def get(self, key, default=None):
+            return old_deployment.get(key, default)
+
+    monkeypatch.setattr(
+        gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", ReloadDuringCopy()
+    )
+
+    request_env = gateway_chat._gateway_request_environ({})
+
+    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV is new_deployment
+    assert request_env["HERMES_WEBUI_GATEWAY_BASE_URL"] == "http://old-gw.test"
+    assert request_env["HERMES_WEBUI_GATEWAY_API_KEY"] == "old-key"
+
+
 def test_runtime_dotenv_reload_refreshes_the_deployment_snapshot(monkeypatch, tmp_path):
     """A runtime _reload_dotenv() must refresh the deployment Gateway snapshot.
 

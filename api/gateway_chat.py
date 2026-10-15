@@ -250,7 +250,8 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None):
     """Return deployment Gateway settings overlaid by one named profile."""
     if profile_environ is None:
         return None
-    merged = dict(_GATEWAY_DEPLOYMENT_ENV)
+    deployment = _GATEWAY_DEPLOYMENT_ENV
+    merged = dict(deployment)
     merged.update(profile_environ)
     # The canonical and legacy Gateway key names are one precedence group, and
     # the launcher's explicit canonical key outranks a profile's alias on the
@@ -261,11 +262,9 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None):
     # that order, then normalize both spellings so either downstream reader
     # sees the same choice.
     profile_canonical = str(profile_environ.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
-    launcher_canonical = str(
-        _GATEWAY_DEPLOYMENT_ENV.get(_WEBUI_GATEWAY_API_KEY_ENV) or ""
-    ).strip()
+    launcher_canonical = str(deployment.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     profile_alias = str(profile_environ.get("API_SERVER_KEY") or "").strip()
-    shared_alias = str(_GATEWAY_DEPLOYMENT_ENV.get("API_SERVER_KEY") or "").strip()
+    shared_alias = str(deployment.get("API_SERVER_KEY") or "").strip()
     resolved_key = profile_canonical or launcher_canonical or profile_alias or shared_alias
     if resolved_key:
         merged[_WEBUI_GATEWAY_API_KEY_ENV] = resolved_key
