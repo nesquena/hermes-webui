@@ -334,10 +334,14 @@ main-thread settlement timing on the same transcript and base revision.
 A missing or rejected terminal snapshot preserves the streamed answer but
 invalidates its regeneration revision. Regeneration then loads saved rows and
 their revision through the full-history loader. It rejects a late response if
-the session or active turn changed. If the saved rows cannot confirm the
-recovered answer at its expected position, regeneration stops without replacing
-the recovered transcript. A full response that establishes ineligibility must
-not cause repeated refreshes. Normal settlement does not fetch full history.
+the session or active turn changed. The saved transcript must identify the same
+latest user turn and confirm its final answer. A streamed turn can occupy one
+local assistant row even when saved history contains separate tool-call, tool
+result, and final-answer rows, so the local assistant position is not a saved
+row identity. If the exchange cannot be confirmed, regeneration stops without
+replacing the recovered transcript. A full response that establishes
+ineligibility must not cause repeated refreshes. Normal settlement does not
+fetch full history.
 
 Run `./scripts/test.sh -q tests/test_issue5720_reasoning_owner.py tests/test_metadata_cached_authority.py tests/test_issue6611_regenerate_browser.py`
 for these recovery cases. Also verify two consecutive completions: when the

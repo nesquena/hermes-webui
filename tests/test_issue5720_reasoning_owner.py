@@ -28,6 +28,7 @@ def _run_reasoning_scene(
     switch_before_frame: bool = False,
     reasoning_boundary: str = "",
     lifecycle_case: str = "",
+    regen_fixture: dict | None = None,
 ) -> dict:
     assert NODE, "node is required for the #5720 browser-chain regression"
     env = os.environ.copy()
@@ -59,6 +60,8 @@ def _run_reasoning_scene(
         env["ISSUE5720_REASONING_BOUNDARY"] = reasoning_boundary
     if lifecycle_case:
         env["ISSUE5720_LIFECYCLE_CASE"] = lifecycle_case
+    if regen_fixture is not None:
+        env["ISSUE5720_REGEN_FIXTURE"] = json.dumps(regen_fixture)
     result = subprocess.run(
         [NODE, "-e", _NODE_SCENE],
         cwd=ROOT,
@@ -70,6 +73,120 @@ def _run_reasoning_scene(
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
+
+
+def _canonical_tool_round_fixture(
+    monkeypatch,
+    *,
+    offset: int = 0,
+    canonical_user: str = "Current prompt",
+    final_answer: str = "Saved final answer",
+    later_user: bool = False,
+    stable_user_id: bool = False,
+    inserted_before_turn: bool = False,
+) -> dict:
+    """Build browser-local rows and the real server-produced canonical payload."""
+    from copy import deepcopy
+
+    from api.models import Session
+    from api.session_ops import regeneration_authority
+    from api.streaming import _session_payload_with_full_messages
+
+    older_rows = [
+        {
+            "role": "user" if index % 2 == 0 else "assistant",
+            "content": "Current prompt" if index == 0 else f"Older row {index}",
+            **({"_source": "webui"} if index % 2 == 0 else {}),
+        }
+        for index in range(offset)
+    ]
+    local_history = [
+        {"role": "user", "content": "Historical prompt", "_source": "webui"},
+        {"role": "assistant", "content": "Historical answer", "reasoning": "Older reasoning"},
+    ]
+    current_user = {"role": "user", "content": canonical_user, "_source": "webui"}
+    local_user = {"role": "user", "content": "Current prompt", "_source": "webui", "_pending": True}
+    if stable_user_id:
+        current_user["message_id"] = "current-turn-user"
+        local_user["message_id"] = "current-turn-user"
+    local_rows = [*local_history, local_user]
+    canonical_rows = [*older_rows, *deepcopy(local_history), deepcopy(current_user)]
+    if inserted_before_turn:
+        canonical_rows.insert(
+            len(older_rows),
+            {"role": "assistant", "content": "Canonical row inserted before the turn"},
+        )
+    tool_owner_index = len(canonical_rows)
+    canonical_rows.extend(
+        [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "current-tool",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": "{}"},
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "current-tool",
+                "name": "read_file",
+                "content": "Saved tool result",
+            },
+            {
+                "role": "assistant",
+                "content": final_answer,
+                "reasoning": "Second round reasoning",
+            },
+        ]
+    )
+    if later_user:
+        canonical_rows.extend(
+            [
+                {"role": "user", "content": "Later prompt", "_source": "webui"},
+                {"role": "assistant", "content": "Later answer"},
+            ]
+        )
+    context_rows = deepcopy(canonical_rows)
+    # Keep the canonical transcript authority real while making this fixture
+    # independent of whichever profile DB is active in the test process.
+    monkeypatch.setattr(
+        "api.session_ops.regeneration_state",
+        lambda _session: (deepcopy(canonical_rows), deepcopy(context_rows)),
+    )
+    session = Session(
+        session_id="sid-1",
+        messages=deepcopy(local_rows),
+        context_messages=deepcopy(local_rows),
+    )
+    tool_summaries = [
+        {
+            "tid": "current-tool",
+            "name": "read_file",
+            "assistant_msg_idx": tool_owner_index,
+        }
+    ]
+    payload = _session_payload_with_full_messages(session, tool_calls=tool_summaries)
+    payload.update({"_messages_offset": 0, "_messages_truncated": False})
+    assert payload["messages"] == canonical_rows
+    assert payload["regeneration_revision"] == regeneration_authority(
+        session,
+        rows=canonical_rows,
+        context=context_rows,
+    )
+    return {
+        "payload": {"session": payload},
+        "local_messages": local_rows,
+        "oldest_idx": offset,
+        "tool_owner_index": tool_owner_index,
+        "final_assistant_index": tool_owner_index + 2,
+        "process_prose": "Planning with the saved tool result.",
+        "final_segment": "Saved final answer",
+        "stable_user_id": stable_user_id,
+    }
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -322,6 +439,101 @@ def test_regeneration_refreshes_authority_after_missing_terminal_snapshot(snapsh
     assert result["operations"] == ["authoritative-get", ["start", "sid-1", "saved-revision"]], result
     assert result["fallback_revision"] is None
     assert result["post_refresh_tool_owner_id"] == "current-tool"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("snapshot", ["absent", "invalid"])
+@pytest.mark.parametrize("offset", [0, 71])
+def test_regeneration_matches_current_user_across_canonical_tool_rounds(
+    monkeypatch, snapshot, offset
+):
+    fixture = _canonical_tool_round_fixture(monkeypatch, offset=offset)
+    result = _run_reasoning_scene(
+        reasoning_burst=True,
+        lifecycle_case=f"done_regeneration_tool_{snapshot}",
+        regen_fixture=fixture,
+    )
+
+    recovered = result["recovered_messages_before_refresh"]
+    assert recovered[-1]["content"] == "Planning with the saved tool result.\n\nSaved final answer"
+    assert recovered[-1]["reasoning"] == "First round reasoning. Second round reasoning."
+    assert result["recovered_tool_owner_index"] == len(fixture["local_messages"])
+    if offset:
+        assert sum(
+            row.get("role") == "user" and row.get("content") == "Current prompt"
+            for row in fixture["payload"]["session"]["messages"]
+        ) == 2
+    activity = recovered[-1]["_anchor_activity_scene"]["activity_rows"]
+    last_tool = max(index for index, item in enumerate(activity) if item["role"] == "tool")
+    final_live_segment = next(
+        item["text"]
+        for item in reversed(activity[last_tool + 1 :])
+        if item["role"] == "prose" and item["kind"] == "process_prose"
+    )
+    assert final_live_segment == "Saved final answer"
+    assert result["start_calls"] == [["sid-1", fixture["payload"]["session"]["regeneration_revision"]]]
+    assert result["revision"] == fixture["payload"]["session"]["regeneration_revision"]
+    assert result["messages"][fixture["tool_owner_index"]]["tool_calls"][0]["id"] == "current-tool"
+    assert result["messages"][fixture["tool_owner_index"] + 1]["tool_call_id"] == "current-tool"
+    assert result["messages"][fixture["final_assistant_index"]]["content"] == "Saved final answer"
+    assert result["messages"][fixture["final_assistant_index"]]["reasoning"] == "Second round reasoning"
+    assert result["post_refresh_tool_owner_index"] == fixture["tool_owner_index"]
+    assert result["latest_assistant_index"] == fixture["final_assistant_index"]
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize(
+    "fixture_kwargs",
+    [
+        {"canonical_user": "Different current prompt"},
+        {"later_user": True},
+        {"final_answer": "Stale incomplete answer"},
+    ],
+    ids=["different-user", "later-user-turn", "stale-answer"],
+)
+def test_regeneration_rejects_unmatched_canonical_exchange_without_losing_recovered_rows(
+    monkeypatch, fixture_kwargs
+):
+    fixture = _canonical_tool_round_fixture(monkeypatch, **fixture_kwargs)
+    result = _run_reasoning_scene(
+        reasoning_burst=True,
+        lifecycle_case="done_regeneration_tool_absent",
+        regen_fixture=fixture,
+    )
+
+    assert result["start_calls"] == []
+    assert result["fallback_revision"] is None
+    assert result["revision"] is None
+    assert result["messages"][-1]["content"] == "Planning with the saved tool result.\n\nSaved final answer"
+    assert result["messages"][-1]["reasoning"] == "First round reasoning. Second round reasoning."
+    assert result["tool_owner_id"] == "current-tool"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_regeneration_uses_stable_user_identity_when_canonical_rows_shift(monkeypatch):
+    fixture = _canonical_tool_round_fixture(
+        monkeypatch,
+        stable_user_id=True,
+        inserted_before_turn=True,
+    )
+    result = _run_reasoning_scene(
+        reasoning_burst=True,
+        lifecycle_case="done_regeneration_tool_absent",
+        regen_fixture=fixture,
+    )
+
+    local_user_index = next(
+        index for index, row in enumerate(fixture["local_messages"])
+        if row.get("message_id") == "current-turn-user"
+    )
+    canonical_user_index = next(
+        index for index, row in enumerate(fixture["payload"]["session"]["messages"])
+        if row.get("message_id") == "current-turn-user"
+    )
+    assert canonical_user_index == local_user_index + 1
+    assert result["start_calls"] == [["sid-1", fixture["payload"]["session"]["regeneration_revision"]]]
+    assert result["messages"][fixture["tool_owner_index"] + 2]["content"] == "Saved final answer"
+    assert result["post_refresh_tool_owner_index"] == fixture["tool_owner_index"]
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
@@ -819,6 +1031,7 @@ if(!source) throw new Error('attachLiveStream did not create EventSource');
 if(process.env.ISSUE5720_STALE_ACTIVE_STREAM==='1') S.activeStreamId='stream-new';
 if(deferredFrames){
   let settled=false;
+  global.renderMd=text=>String(text);
   global.renderMessages=()=>{settled=!S.activeStreamId;};
   for(const name of ['renderSessionList','finalizeThinkingCard','appendLiveToolCard','clearLiveToolCards','setBusy','setComposerStatus','syncTopbar','loadDir','playNotificationSound','sendBrowserNotification','_markSessionViewed','clearInflightState','clearInflightStateStorage','saveInflightState','snapshotLiveTurnHtmlForSession','scrollToBottom','_clearStreamHidden','_clearStreamNotificationBackground','_syncCtxIndicator','removeThinking']) global[name]=()=>{};
   global._activityStatusNode=()=>new FakeElement('div');
@@ -872,6 +1085,9 @@ if(deferredFrames){
   const lifecycle=process.env.ISSUE5720_LIFECYCLE_CASE;
   if(lifecycle){
     (async()=>{
+      const regenFixture=process.env.ISSUE5720_REGEN_FIXTURE
+        ?JSON.parse(process.env.ISSUE5720_REGEN_FIXTURE):null;
+      if(regenFixture) global._oldestIdx=regenFixture.oldest_idx;
       if(lifecycle==='token_reconnect'){
         global.renderMd=text=>String(text);
         await source.emit('token',{text:'LAST WORDS BEFORE DROP'});
@@ -923,15 +1139,24 @@ if(deferredFrames){
         S.session={session_id:'sid-1',active_stream_id:'stream-1',pending_started_at:1,message_count:3,
           input_tokens:2,output_tokens:1,estimated_cost:0.25,cache_read_tokens:3,cache_write_tokens:4,
           regeneration_revision:'previous-revision'};
-        S.messages=[
+        S.messages=regenFixture?regenFixture.local_messages:[
           {role:'user',content:'Historical prompt',_ts:1},
           {role:'assistant',content:'Historical answer',reasoning:'Historical reasoning',_ts:2},
           {role:'user',content:'Current prompt',_ts:3,_pending:true},
         ];
-        await source.emit('reasoning',{text:'Current streamed reasoning'});
-        await source.emit('tool',{name:'read_file',tid:'current-tool',args:{path:'notes.txt'}});
-        await source.emit('tool_complete',{name:'read_file',tid:'current-tool',snippet:'contents'});
-        if(!lifecycle.includes('_reasoning_only_')) await source.emit('token',{text:'Current streamed answer'});
+        if(regenFixture){
+          await source.emit('token',{text:regenFixture.process_prose});
+          await source.emit('reasoning',{text:'First round reasoning.'});
+          await source.emit('tool',{name:'read_file',tid:'current-tool',args:{path:'notes.txt'}});
+          await source.emit('tool_complete',{name:'read_file',tid:'current-tool',snippet:'contents'});
+          await source.emit('reasoning',{text:' Second round reasoning.'});
+          await source.emit('token',{text:'\n\n'+regenFixture.final_segment});
+        }else{
+          await source.emit('reasoning',{text:'Current streamed reasoning'});
+          await source.emit('tool',{name:'read_file',tid:'current-tool',args:{path:'notes.txt'}});
+          await source.emit('tool_complete',{name:'read_file',tid:'current-tool',snippet:'contents'});
+          if(!lifecycle.includes('_reasoning_only_')) await source.emit('token',{text:'Current streamed answer'});
+        }
         let terminal={usage:{input_tokens:4,output_tokens:3,estimated_cost:0.5,cache_read_tokens:7,cache_write_tokens:8,duration_seconds:1,tps:2}};
         if(lifecycle.endsWith('_invalid')) terminal.session={session_id:'sid-1',messages:'invalid',regeneration_revision:'unrelated-revision'};
         if(lifecycle.startsWith('done_usage_two_turns_')){
@@ -967,18 +1192,22 @@ if(deferredFrames){
         let regenResult={};
         if(lifecycle.startsWith('done_regeneration_')){
           installRegenerationDependencies();
+          if(regenFixture) global._oldestIdx=regenFixture.oldest_idx;
           const apiRequests=[];
           const operations=[];
           const startCalls=[];
           const terminalRows=S.messages;
+          const recoveredMessagesBeforeRefresh=terminalRows.map(m=>JSON.parse(JSON.stringify(m)));
+          const recoveredLiveTool=S.toolCalls.find(tc=>tc&&tc.tid==='current-tool')||{};
           const fallbackRevision=S.session?(S.session.regeneration_revision??null):null;
           const canonicalRows=terminalRows.map(m=>{
             const row={...m};delete row._pending;delete row._live;
             for(const field of ['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene']) delete row[field];
             return row;
           });
-          const fullHistory={session:{session_id:'sid-1',messages:canonicalRows,message_count:terminalRows.length,
-            regeneration_revision:'saved-revision',tool_calls:[{tid:'current-tool',name:'read_file',assistant_msg_idx:terminalRows.length-1}]}};
+          const fullHistory=regenFixture?regenFixture.payload:{session:{session_id:'sid-1',messages:canonicalRows,message_count:terminalRows.length,
+            regeneration_revision:'saved-revision',tool_calls:[{tid:'current-tool',name:'read_file',assistant_msg_idx:terminalRows.length-1}],
+            _messages_offset:0,_messages_truncated:false}};
           let resolveRefresh=null;
           global.api=path=>{
             if(!path.includes('msg_limit=all')) return Promise.resolve(null);
@@ -1022,11 +1251,16 @@ if(deferredFrames){
           }else{
             try{await global.regenerateResponse(button);}catch(error){regenError=String(error&&error.message||error);}
           }
-          const refreshedTool=S.toolCalls.find(tc=>tc&&tc.tid==='current-tool')||{};
+          const refreshedTool=(S.session&&Array.isArray(S.session.tool_calls)?S.session.tool_calls:[]).find(tc=>tc&&tc.tid==='current-tool')||{};
+          let latestAssistantIndex=-1;
+          for(let i=S.messages.length-1;i>=0;i--){if(S.messages[i]?.role==='assistant'){latestAssistantIndex=i;break;}}
           regenResult={api_requests:apiRequests,operations,start_calls:startCalls,regen_error:regenError,
             fallback_revision:fallbackRevision,
             revision:S.session?(S.session.regeneration_revision??null):null,session_id:S.session&&S.session.session_id,
             post_refresh_tool_owner_id:refreshedTool.tid||'',post_refresh_tool_owner_index:refreshedTool.assistant_msg_idx??null,
+            recovered_messages_before_refresh:recoveredMessagesBeforeRefresh,
+            recovered_tool_owner_index:recoveredLiveTool.assistant_msg_idx??null,
+            latest_assistant_index:latestAssistantIndex,
             messages:S.messages,busy:S.busy,active_stream:S.activeStreamId,
             inflight_stream:INFLIGHT['sid-1']&&INFLIGHT['sid-1'].streamId||null};
         }
