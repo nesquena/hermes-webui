@@ -6,6 +6,8 @@ from contextlib import contextmanager
 
 import pytest
 
+pytestmark = pytest.mark.perf
+
 import api.agent_sessions as agent_sessions
 
 _REAL_SQLITE_CONNECT = sqlite3.connect

@@ -14,6 +14,10 @@ import threading
 import time
 from unittest.mock import patch, MagicMock
 
+import pytest
+
+pytestmark = pytest.mark.perf
+
 REPO = pathlib.Path(__file__).parent.parent
 SESSIONS_JS = (REPO / "static" / "sessions.js").read_text(encoding="utf-8")
 WORKSPACE_JS = (REPO / "static" / "workspace.js").read_text(encoding="utf-8")

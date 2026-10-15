@@ -24,6 +24,8 @@ import string
 
 import pytest
 
+pytestmark = pytest.mark.perf
+
 
 def _reference_strip_compact_echo_suffix(value, suffix):
     """Deliberately naive oracle: probe every cut index, fold the tail.

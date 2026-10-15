@@ -7,8 +7,60 @@ on:
       - 'exp-v*'
 
 jobs:
+  # --------------------------------------------------------------------------
+  # Backend smoke on the release target OS (Windows) — fast subset only.
+  #
+  # The full test suite already ran twice before this tag was pushed:
+  #   1. Hermes's branch run (Linux, all 21 000+ tests)
+  #   2. Muse's merged-tree review (Linux, full suite + lint)
+  #
+  # Running the whole suite again on windows-latest adds ~25 min and proves
+  # nothing new — it re-proves a known result on a slow runner. Instead we
+  # run the targeted smoke subset that exercises the three things a release
+  # MUST prove on the target OS:
+  #
+  #   • App import / boot — core modules load without crashing
+  #   • API surface — route handlers and health plumbing are present
+  #   • Static asset integrity — index.html / sw.js / critical JS exist
+  #
+  # Timing-budget tests (@pytest.mark.perf) are explicitly excluded: they
+  # assert wall-clock elapsed times that are unreliable on virtualised
+  # Windows runners. They belong in the Linux CI gate (tests.yml) where
+  # they run in every shard. The packaging smoke (packaging/smoke_test.py
+  # on a clean unzip) is the end-to-end proof and runs separately.
+  # --------------------------------------------------------------------------
+  test-smoke-windows:
+    name: Backend smoke (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: |
+            **/setup.cfg
+            **/requirements*.txt
+            **/pyproject.toml
+
+      - name: Install test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml pytest pytest-timeout pytest-asyncio
+
+      - name: Run backend smoke subset (not perf)
+        # Run only the release smoke file; -m "not perf" is belt-and-suspenders.
+        # collect-only count is asserted in the evidence package (see PR body).
+        run: |
+          pytest tests/test_release_smoke.py -q -m "not perf" --tb=short --timeout=60
+
   release:
     runs-on: ubuntu-latest
+    needs: test-smoke-windows
     permissions:
       contents: write   # required: create GitHub Release
       packages: write   # required: push to ghcr.io

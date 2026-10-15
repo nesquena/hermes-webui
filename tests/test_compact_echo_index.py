@@ -18,6 +18,8 @@ import string
 
 import pytest
 
+pytestmark = pytest.mark.perf
+
 
 def _compact(value):
     return re.sub(r'\s+', '', str(value or ''))

@@ -8,6 +8,8 @@ import api.profiles as profiles
 import api.routes as routes
 import pytest
 
+pytestmark = pytest.mark.perf
+
 
 @pytest.fixture(autouse=True)
 def _clear_session_list_cache_between_tests():

@@ -28,7 +28,11 @@ import sqlite3
 import time
 from unittest import mock
 
+import pytest
+
 import api.models as models
+
+pytestmark = pytest.mark.perf
 
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[1]
 

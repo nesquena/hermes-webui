@@ -6,6 +6,8 @@ import random
 import api.session_ops as session_ops
 import pytest
 
+pytestmark = pytest.mark.perf
+
 
 def _old_matcher(context, display, keep):
     """Test-local copy of the pre-indexed matcher for differential checks."""

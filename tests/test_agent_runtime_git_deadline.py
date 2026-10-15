@@ -6,6 +6,8 @@ import types
 
 import pytest
 
+pytestmark = pytest.mark.perf
+
 
 @pytest.fixture
 def clocked_revision(monkeypatch, tmp_path):

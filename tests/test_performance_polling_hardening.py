@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.perf
+
 ROOT = Path(__file__).resolve().parents[1]
 SESSIONS_JS = ROOT / "static" / "sessions.js"
 MESSAGES_JS = ROOT / "static" / "messages.js"

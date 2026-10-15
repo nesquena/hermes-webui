@@ -1,4 +1,7 @@
 import api.models as models
+import pytest
+
+pytestmark = pytest.mark.perf
 
 
 def test_compression_continuation_fallback_reads_only_file_head(monkeypatch, tmp_path):
