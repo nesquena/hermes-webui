@@ -5237,7 +5237,31 @@ def _rehome_interrupted_journal_context(session, context_owner, stream_id: str, 
 
 
 def _rehome_cancel_journal_rows(session, marker_idx: int, stream_id: str) -> None:
-    """Move only this cancelled stream's recovered rows before its marker."""
+    """Move only this cancelled stream's recovered rows before its marker.
+
+    #7167 round-7: an owned marker does not prove its user was materialized.
+    The shared repair appends the current turn's user row AFTER the marker
+    (``_append_recovered_pending_turn``), while this rehome hoists the
+    journaled answer above it — leaving the answer before its own prompt
+    (the ordering variant from the 2026-10-14 re-gate: ``old answer → new
+    answer → marker → new prompt``). Before hoisting, resolve the marker's
+    exact current user ownership:
+
+    * a user row after the marker carrying the active-turn token whose
+      stream component is THIS stream IS the current turn's user — move it
+      up WITH the recovered rows so they stay ordered together;
+    * a user row after the marker that was itself recovered by this repair
+      (``_recovered`` set, no token) is the newly appended current-turn
+      prompt whose ownership is exactly what cannot be established —
+      hoisting the answer above it reproduces the ordering bug, so FAIL
+      CLOSED and do not hoist at all;
+    * a tokenless, non-recovered user row after the marker belongs to a
+      LATER turn's ordinary history (it sits there because the cancelled
+      turn's rows were tail-appended by a previous pass) — hoist normally
+      and leave it in place;
+    * rows carrying an explicit FOREIGN token stream stay put: they are
+      provably another turn's users, never this marker's.
+    """
     messages = getattr(session, 'messages', None)
     if not isinstance(messages, list) or not (0 <= marker_idx < len(messages)):
         return
@@ -5253,6 +5277,42 @@ def _rehome_cancel_journal_rows(session, marker_idx: int, stream_id: str) -> Non
     ]
     if not recovered:
         return
+    # #7167 round-7 ownership resolution (see docstring).
+    target_stream = str(stream_id)
+    owned_user_rows = []
+    for index, row in enumerate(before):
+        if index <= marker_idx or not isinstance(row, dict) or row.get('role') != 'user':
+            continue
+        token = str(row.get('_active_turn_token') or '').strip()
+        if token:
+            # Token-bearing rows are judged by their stream component: this
+            # stream's token proves current-turn ownership (move together);
+            # a foreign token proves another turn's (leave in place).
+            token_stream = token.rsplit(':', 1)[0] if ':' in token else token
+            if token_stream == target_stream:
+                owned_user_rows.append(row)
+            continue
+        if row.get('_recovered') is True or row.get('_recovered_from_run_journal') is True:
+            # A recovered user row without a token: when its journal
+            # provenance names this stream it rises with the answer;
+            # otherwise it is the freshly appended current-turn prompt —
+            # ownership undecidable, fail closed.
+            if (
+                row.get('_recovered_from_run_journal') is True
+                and str(row.get('_recovered_stream_id') or '') == target_stream
+            ):
+                owned_user_rows.append(row)
+            elif row.get('_recovered') is True:
+                return
+            continue
+        # Tokenless, non-recovered user row: ordinary later-turn history —
+        # the hoist above it is the intended recovery behaviour.
+    if owned_user_rows:
+        # Preserve relative transcript order among everything being moved:
+        # the owned user(s) and the recovered rows rise together, user first
+        # (its original position precedes the tail-appended recovered rows).
+        moved_ids = {id(row) for row in recovered} | {id(row) for row in owned_user_rows}
+        recovered = [row for row in before if id(row) in moved_ids]
     recovered_ids = {id(row) for row in recovered}
     remaining = [row for row in before if id(row) not in recovered_ids]
     try:
