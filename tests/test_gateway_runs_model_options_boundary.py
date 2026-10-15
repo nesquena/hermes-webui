@@ -21,7 +21,7 @@ import re
 import subprocess
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -445,7 +445,7 @@ def _capture_gateway_wire_body(
     profile_effort=None,
     real_profile_scope=False,
     gateway_env=None,
-    config_url=None,
+    real_config=False,
     captured=None,
 ):
     """Run the real gateway worker and return its Agent-facing request body.
@@ -453,6 +453,10 @@ def _capture_gateway_wire_body(
     ``real_profile_scope`` keeps ``api.profiles.profile_scope_for_request_read``
     in the loop, so the request's Gateway credential comes from the profile
     directory the worker resolves instead of the process environment.
+    ``real_config`` leaves ``api.config.get_config_snapshot`` unpatched so the
+    session's snapshot comes from the real producer reading the on-disk
+    profile ``config.yaml`` (pair it with ``_pin_scoped_config_read``); the
+    default keeps the fake root/profile split for the effort fixtures.
     ``captured`` receives the POSTed request's headers and body for callers that
     assert on the credential the receiver would authenticate.
     """
@@ -501,8 +505,6 @@ def _capture_gateway_wire_body(
     mock_session.pending_started_at = None
 
     cfg = {"agent": {"reasoning_effort": effort}}
-    if config_url:
-        cfg["webui_gateway_base_url"] = config_url
     active_profile = {"name": None}
     entered_profiles = []
 
@@ -524,10 +526,7 @@ def _capture_gateway_wire_body(
 
     def fake_get_config():
         if session_profile and active_profile["name"] == session_profile:
-            profile_cfg = {"agent": {"reasoning_effort": profile_effort}}
-            if config_url:
-                profile_cfg["webui_gateway_base_url"] = config_url
-            return profile_cfg
+            return {"agent": {"reasoning_effort": profile_effort}}
         return cfg
 
     def fake_get_config_snapshot():
@@ -543,29 +542,64 @@ def _capture_gateway_wire_body(
         gateway_environ.update(gateway_env)
 
     try:
-        with patch.dict("os.environ", gateway_environ):
-            with patch("api.gateway_chat.gateway_supports_approval", lambda *_a, **_k: True), \
-                 patch("api.gateway_chat.gateway_approval_unavailable_reason", lambda *_a, **_k: None), \
-                 patch("api.config.get_config", fake_get_config), \
-                 patch("api.config.get_config_snapshot", fake_get_config_snapshot), \
-                 patch("api.profiles.profile_scope_for_request_read", fake_profile_scope), \
-                 patch("api.config.get_gateway_caps", lambda *_a, **_k: {"reasoning_efforts": None}), \
-                 patch(
-                     "api.config._main_model_request_overrides",
-                     lambda *_a, **_k: ({"service_tier": service_tier} if service_tier else {}),
-                 ), \
-                 patch.object(config, "resolve_model_reasoning_efforts", lambda *a, **k: list(config.VALID_REASONING_EFFORTS)), \
-                 patch("urllib.request.urlopen", side_effect=fake_urlopen), \
-                 patch("api.gateway_chat.get_session", return_value=mock_session), \
-                 patch("api.gateway_chat._stream_writeback_is_current", return_value=True), \
-                 patch("api.gateway_chat.merge_session_messages_append_only", return_value=[]):
-                _run_gateway_chat_streaming(
-                    session_id="sess-model-options",
-                    msg_text="hi",
-                    model="test-model",
-                    workspace="/tmp",
-                    stream_id=stream_id,
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict("os.environ", gateway_environ))
+            stack.enter_context(
+                patch("api.gateway_chat.gateway_supports_approval", lambda *_a, **_k: True)
+            )
+            stack.enter_context(
+                patch(
+                    "api.gateway_chat.gateway_approval_unavailable_reason",
+                    lambda *_a, **_k: None,
                 )
+            )
+            stack.enter_context(patch("api.config.get_config", fake_get_config))
+            if not real_config:
+                stack.enter_context(
+                    patch("api.config.get_config_snapshot", fake_get_config_snapshot)
+                )
+            stack.enter_context(
+                patch("api.profiles.profile_scope_for_request_read", fake_profile_scope)
+            )
+            stack.enter_context(
+                patch(
+                    "api.config.get_gateway_caps",
+                    lambda *_a, **_k: {"reasoning_efforts": None},
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "api.config._main_model_request_overrides",
+                    lambda *_a, **_k: ({"service_tier": service_tier} if service_tier else {}),
+                )
+            )
+            stack.enter_context(
+                patch.object(
+                    config,
+                    "resolve_model_reasoning_efforts",
+                    lambda *a, **k: list(config.VALID_REASONING_EFFORTS),
+                )
+            )
+            stack.enter_context(patch("urllib.request.urlopen", side_effect=fake_urlopen))
+            stack.enter_context(
+                patch("api.gateway_chat.get_session", return_value=mock_session)
+            )
+            stack.enter_context(
+                patch("api.gateway_chat._stream_writeback_is_current", return_value=True)
+            )
+            stack.enter_context(
+                patch(
+                    "api.gateway_chat.merge_session_messages_append_only",
+                    return_value=[],
+                )
+            )
+            _run_gateway_chat_streaming(
+                session_id="sess-model-options",
+                msg_text="hi",
+                model="test-model",
+                workspace="/tmp",
+                stream_id=stream_id,
+            )
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
@@ -1205,6 +1239,33 @@ def _restored_process_env():
         os.environ.update(saved)
 
 
+def _write_gateway_config(home, url: str) -> None:
+    """Compose a real ``config.yaml`` selecting a Gateway URL for one home."""
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "config.yaml").write_text(
+        f"webui_gateway_base_url: {url}\n", encoding="utf-8"
+    )
+
+
+def _pin_scoped_config_read(monkeypatch) -> None:
+    """Make scoped config reads resolve the on-disk profile YAML.
+
+    The suite's global ``HERMES_CONFIG_PATH`` would pin every read to the
+    shared test config, so a scoped read would never see the profile's own
+    ``config.yaml``. Drop it for this test and pin the cache globals empty so
+    no other profile's cached structure leaks into the scoped read.
+    """
+    import api.config as config
+
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    cache = {}
+    monkeypatch.setattr(config, "_cfg_cache", cache)
+    monkeypatch.setattr(config, "cfg", cache)
+    monkeypatch.setattr(config, "_cfg_path", None)
+    monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    monkeypatch.setattr(config, "_cfg_fingerprint", None)
+
+
 def test_owner_dotenv_removal_restores_launcher_gateway_fallback(monkeypatch, tmp_path):
     """Removing an owner override reveals the stable launcher value again."""
     from api import gateway_chat
@@ -1570,16 +1631,18 @@ def test_configured_deployment_url_keeps_its_key_off_the_default_receiver(
 ):
     """A config-set deployment URL must not leak its key to the default receiver.
 
-    The deployment can set ``webui_gateway_base_url`` in config while supplying
-    only its key through the environment. The deployment's effective URL is
-    then the configured remote Gateway — not the request path's built-in
-    default. A named profile that selects ``http://127.0.0.1:8642`` without a
-    key of its own reaches a different receiver and must not carry the
-    deployment credential (security finding on ``2e1f8a1e3``).
+    The deployment sets ``webui_gateway_base_url`` in the process-owner config
+    while supplying only its key through the environment. The owner's
+    effective URL is then the configured remote Gateway — not the request
+    path's built-in default. A named profile that selects
+    ``http://127.0.0.1:8642`` without a key of its own reaches a different
+    receiver and must not carry the deployment credential (security finding
+    on ``2e1f8a1e3``).
     """
     from api import gateway_chat
     import api.profiles as profiles
 
+    _write_gateway_config(tmp_path, "http://remote-gw.test")
     profile_home = tmp_path / "profiles" / "localhost-split"
     profile_home.mkdir(parents=True)
     (profile_home / ".env").write_text(
@@ -1601,6 +1664,7 @@ def test_configured_deployment_url_keeps_its_key_off_the_default_receiver(
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
     monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
 
     captured = {}
     with _restored_process_env():
@@ -1610,7 +1674,7 @@ def test_configured_deployment_url_keeps_its_key_off_the_default_receiver(
             None,
             session_profile="localhost-split",
             real_profile_scope=True,
-            config_url="http://remote-gw.test",
+            real_config=True,
             gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
             captured=captured,
         )
@@ -1619,20 +1683,30 @@ def test_configured_deployment_url_keeps_its_key_off_the_default_receiver(
     assert "Authorization" not in captured["headers"]
 
 
+@pytest.mark.parametrize(
+    "profile_config_url",
+    ("http://remote-gw.test", None),
+    ids=("config-and-env", "env-only"),
+)
 def test_configured_deployment_url_is_shared_when_the_profile_selects_it(
-    monkeypatch, tmp_path
+    monkeypatch, tmp_path, profile_config_url
 ):
-    """Selecting the configured deployment URL is still the shared receiver.
+    """Selecting the owner's configured URL is still the shared receiver.
 
-    With ``webui_gateway_base_url`` set in config, a profile that spells that
-    same URL is on the shared receiver and keeps the deployment credential;
-    only a genuinely different endpoint is dedicated.
+    With ``webui_gateway_base_url`` set in the process-owner config, a named
+    profile that selects that same URL keeps the deployment credential; only
+    a genuinely different endpoint is dedicated. The env-only case has no URL
+    in the profile's YAML at all — the read must still resolve the deployment
+    from the owner's config rather than treating it as the localhost default.
     """
     from api import gateway_chat
     import api.profiles as profiles
 
+    _write_gateway_config(tmp_path, "http://remote-gw.test")
     profile_home = tmp_path / "profiles" / "config-url-shared"
     profile_home.mkdir(parents=True)
+    if profile_config_url:
+        _write_gateway_config(profile_home, profile_config_url)
     (profile_home / ".env").write_text(
         "HERMES_WEBUI_GATEWAY_BASE_URL=http://remote-gw.test\n",
         encoding="utf-8",
@@ -1652,6 +1726,7 @@ def test_configured_deployment_url_is_shared_when_the_profile_selects_it(
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
     monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
 
     captured = {}
     with _restored_process_env():
@@ -1660,13 +1735,73 @@ def test_configured_deployment_url_is_shared_when_the_profile_selects_it(
             None,
             session_profile="config-url-shared",
             real_profile_scope=True,
-            config_url="http://remote-gw.test",
+            real_config=True,
             gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
             captured=captured,
         )
 
     assert captured["url"] == "http://remote-gw.test/v1/runs"
     assert captured["headers"]["Authorization"] == "Bearer deployment-key"
+
+
+@pytest.mark.parametrize(
+    "profile_env_url",
+    ("http://analyst-gw.test", None),
+    ids=("config-and-env", "config-only"),
+)
+def test_config_owner_url_stays_off_a_different_named_profile_receiver(
+    monkeypatch, tmp_path, profile_env_url
+):
+    """A config-set owner URL never extends its key to another receiver.
+
+    Deployment ENV carries only the key; the process-owner ``config.yaml``
+    selects the remote deployment Gateway. The named profile selects its own
+    endpoint in its config (and, in the first case, also .env) without a key
+    of its own: it reaches a different receiver than the deployment owner and
+    must not carry the deployment credential (source-confirmed authority
+    mismatch on ``22fd0f8c``).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "http://remote-gw.test")
+    profile_home = tmp_path / "profiles" / "config-owner-split"
+    _write_gateway_config(profile_home, "http://analyst-gw.test")
+    (profile_home / ".env").write_text(
+        f"HERMES_WEBUI_GATEWAY_BASE_URL={profile_env_url}\n" if profile_env_url else "",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="config-owner-split",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://analyst-gw.test/v1/runs"
+    assert "Authorization" not in captured["headers"]
 
 
 def test_unparseable_gateway_url_does_not_break_request_settings(monkeypatch):

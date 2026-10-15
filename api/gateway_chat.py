@@ -278,6 +278,31 @@ def _gateway_endpoint_identity(raw_url: str) -> tuple[str, str, int | None, str]
     )
 
 
+def _gateway_deployment_owner_base_url(deployment: dict[str, str]) -> str:
+    """Resolve the deployment owner's effective Gateway URL.
+
+    The deployment's receiver belongs to the process owner, not to whichever
+    named profile is serving this request. Resolve the owner's URL the way the
+    owner's own requests resolve it (``_gateway_base_url``): the launcher
+    environment, then the process-owner profile's ``config.yaml``, then the
+    built-in default. The session's named-profile config must never stand in
+    for the owner's: a config-set deployment URL lives in the owner's file,
+    and reading the session's either treated the deployment as the localhost
+    default (dropping the key on a receiver the owner shares) or borrowed the
+    named profile's own endpoint as if it were the shared receiver (leaking
+    the deployment key to a different receiver).
+    """
+    owner_config = None
+    try:
+        from api.config import get_config_for_profile_home
+        from api.profiles import get_process_profile_home
+
+        owner_config = get_config_for_profile_home(get_process_profile_home())
+    except Exception:
+        owner_config = None
+    return _gateway_base_url(owner_config, environ=deployment)
+
+
 def _gateway_request_environ(profile_environ: dict[str, str] | None, config_data=None):
     """Return deployment Gateway settings overlaid by one named profile."""
     if profile_environ is None:
@@ -299,19 +324,23 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None, config_data
     launcher_canonical = str(deployment.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     profile_alias = str(profile_environ.get("API_SERVER_KEY") or "").strip()
     shared_alias = str(deployment.get("API_SERVER_KEY") or "").strip()
-    profile_url = str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
-    # The deployment's effective URL resolves the way the request path
-    # resolves it (``_gateway_base_url``): environment, then config, then the
-    # built-in default. A profile that spells that same receiver is shared and
-    # keeps the deployment credential; a different receiver never inherits it.
-    # Comparing the raw empty value made the default receiver look dedicated
-    # and the shared Gateway lost its key; comparing only the environment
-    # value sent a config-set remote deployment's key to a profile-selected
-    # localhost receiver.
-    effective_deployment_url = _gateway_base_url(config_data, environ=deployment)
-    dedicated_url = bool(
-        profile_url
-        and _gateway_endpoint_identity(profile_url)
+    # The deployment's receiver is resolved from the owner's own sources —
+    # never the session's named-profile config (see the owner helper). The
+    # endpoint this request will actually select — environment overlay, then
+    # the session's config, then the built-in default, the same resolution
+    # the request path runs (``_gateway_base_url``) — is compared against it
+    # before any key inheritance. A profile that spells the owner's receiver
+    # is shared and keeps the deployment credential; any other selected
+    # receiver never inherits it. Comparing the raw empty value made the
+    # default receiver look dedicated and the shared Gateway lost its key;
+    # comparing only the environment value sent a config-set remote
+    # deployment's key to a profile-selected localhost receiver; resolving
+    # the deployment from the session's config borrowed the named profile's
+    # endpoint as if it were the shared receiver.
+    effective_deployment_url = _gateway_deployment_owner_base_url(deployment)
+    selected_url = _gateway_base_url(config_data, environ=merged)
+    dedicated_url = (
+        _gateway_endpoint_identity(selected_url)
         != _gateway_endpoint_identity(effective_deployment_url)
     )
     if dedicated_url:
