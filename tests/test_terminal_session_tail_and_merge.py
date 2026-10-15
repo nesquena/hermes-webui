@@ -97,9 +97,9 @@ def test_terminal_tool_calls_are_projected_and_bounded():
 
 def test_truncated_terminal_tool_calls_reconcile_with_expanded_browser_state():
     messages = [
-        {"role": "user", "content": "run tools"},
-        {"role": "assistant", "content": "working"},
-        {"role": "assistant", "content": "done"},
+        {"id": 1, "role": "user", "content": "run tools"},
+        {"id": 2, "role": "assistant", "content": "working"},
+        {"id": 3, "role": "assistant", "content": "done"},
     ]
     calls = [
         {
@@ -135,9 +135,9 @@ assert.equal(merged.tool_calls.find(c=>c.id==='call-0').snippet,'expanded-prefix
 assert.equal(merged.tool_calls.filter(c=>c.id==='call-1').length,1);
 assert.equal(merged.tool_calls.find(c=>c.id==='call-1').snippet,'incoming-wins');
 const ordinary=apply(
-  {{session_id:'calls',_messages_offset:2,message_count:4,messages:[{{id:'remote-2'}},{{id:'remote-3'}}],tool_calls:[],_tool_calls_truncated:false}},
-  {{session_id:'calls',message_count:4,messages:[{{id:'local-0'}},{{id:'local-1'}},{{id:'local-2'}},{{id:'local-3'}}],tool_calls:[{{id:'before',assistant_msg_idx:0}},{{id:'overlap',assistant_msg_idx:2}}]}},
-  [{{id:'local-0'}},{{id:'local-1'}},{{id:'local-2'}},{{id:'local-3'}}],0,
+  {{session_id:'calls',_messages_offset:2,message_count:4,messages:[{{id:3}},{{id:4}}],tool_calls:[],_tool_calls_truncated:false}},
+  {{session_id:'calls',message_count:4,messages:[{{id:1}},{{id:2}},{{id:3}},{{id:4}}],tool_calls:[{{id:'before',assistant_msg_idx:0}},{{id:'overlap',assistant_msg_idx:2}}]}},
+  [{{id:1}},{{id:2}},{{id:3}},{{id:4}}],0,
 );
 assert.deepEqual(ordinary.tool_calls.map(c=>c.id),['before']);
 const unkeyed=apply(
@@ -166,7 +166,7 @@ def test_truncated_unkeyed_tool_calls_use_occurrence_counts():
     script = f"""
 const assert=require('node:assert/strict');
 const apply=eval('(' + {json.dumps(helper)} + ')');
-const messages=[{{id:'user'}},{{id:'assistant'}},{{id:'done'}}];
+const messages=[{{id:1}},{{id:2}},{{id:3}}];
 const incoming={{session_id:'calls',_messages_offset:0,message_count:3,messages,tool_calls:[
   {{name:'terminal',assistant_msg_idx:1,snippet:'incoming-2'}},
   {{name:'terminal',assistant_msg_idx:1,snippet:'incoming-3'}},
@@ -256,13 +256,13 @@ const settled=apply({{session_id:'same',_messages_offset:1,message_count:3,_mess
   assert.strictEqual(settled._messages_offset,1); assert.strictEqual(settled._messages_truncated,true);
 const currentCalls=[{{assistant_msg_idx:1,duration:3,snippet:'retained'}},{{id:'same',assistant_msg_idx:0,duration:3}},{{id:'legacy',assistant_msg_idx:-1}}];
   const incomingCalls=[{{id:'same',assistant_msg_idx:0,snippet:'settled'}},{{id:'new',assistant_msg_idx:0}},{{id:'legacy-new',assistant_msg_idx:-1}},{{id:'bad',assistant_msg_idx:'1'}}];
-  const withCalls=apply({{session_id:'same',_messages_offset:92,message_count:94,messages:[{{id:'auth'}},{{id:'cancel'}}],tool_calls:incomingCalls}},{{session_id:'same',message_count:93,messages:[{{id:'old'}},{{id:'hidden'}},{{id:'tail'}}],tool_calls:currentCalls}},[{{id:'old'}},{{id:'hidden'}},{{id:'tail'}}],90);
+  const withCalls=apply({{session_id:'same',_messages_offset:92,message_count:94,messages:[{{id:92}},{{id:93}}],tool_calls:incomingCalls}},{{session_id:'same',message_count:93,messages:[{{id:90}},{{id:91}},{{id:92}}],tool_calls:currentCalls}},[{{id:90}},{{id:91}},{{id:92}}],90);
   assert.deepEqual(withCalls.tool_calls.map(c=>[c.id??null,c.assistant_msg_idx,c.duration,c.snippet]),[[null,1,3,'retained'],['same',2,undefined,'settled'],['new',2,undefined,undefined],['legacy-new',-1,undefined,undefined]]);
-const omittedCalls=apply({{session_id:'same',_messages_offset:92,message_count:94,messages:[{{id:'auth'}},{{id:'cancel'}}]}},{{session_id:'same',message_count:93,messages:[{{id:'old'}},{{id:'hidden'}},{{id:'tail'}}],tool_calls:currentCalls}},[{{id:'old'}},{{id:'hidden'}},{{id:'tail'}}],90);
+const omittedCalls=apply({{session_id:'same',_messages_offset:92,message_count:94,messages:[{{id:92}},{{id:93}}]}},{{session_id:'same',message_count:93,messages:[{{id:90}},{{id:91}},{{id:92}}],tool_calls:currentCalls}},[{{id:90}},{{id:91}},{{id:92}}],90);
   assert.deepEqual(omittedCalls.tool_calls.map(c=>[c.id??null,c.assistant_msg_idx]),[[null,1],['same',0],['legacy',-1]]);
-const hidden=[{{id:'old'}},{{id:'hidden',recovery_control:true}},{{id:'tail'}}];
-const hiddenUnion=apply({{session_id:'same',_messages_offset:92,message_count:94,messages:[{{id:'auth'}},{{id:'cancel'}}]}},{{session_id:'same',messages:hidden}},hidden,90);
-assert.deepEqual(hiddenUnion.messages.map(m=>m.id),['old','hidden','auth','cancel']);
+const hidden=[{{id:90,content:'old'}},{{id:91,content:'hidden',recovery_control:true}},{{id:92,content:'tail'}}];
+const hiddenUnion=apply({{session_id:'same',_messages_offset:92,message_count:94,messages:[{{id:92,content:'auth'}},{{id:93,content:'cancel'}}]}},{{session_id:'same',messages:hidden}},hidden,90);
+assert.deepEqual(hiddenUnion.messages.map(m=>m.content||m.id),['old','hidden','auth','cancel']);
 const disjoint=apply({{session_id:'same',_messages_offset:1002,message_count:1003,_messages_truncated:true,messages:[{{role:'assistant',content:'settled final answer'}}],tool_calls:[]}},{{session_id:'same',messages:sameWindow}},sameWindow,910);
   assert.deepEqual(disjoint.messages,[{{role:'assistant',content:'settled final answer'}}]);
   assert.strictEqual(disjoint._messages_offset,1002);
@@ -274,23 +274,36 @@ const sparse=[{{id:'raw-90'}},{{id:'raw-92'}}];
 const sparseResult=apply({{session_id:'same',message_count:94,_messages_offset:92,messages:[{{id:'raw-92'}},{{id:'raw-93'}}]}},{{session_id:'same',message_count:94,messages:sparse}},sparse,90);
   assert.strictEqual(sparseResult,null);
 assert.strictEqual(apply({{messages:[{{id:'bad'}}]}},null,local,0),null);
-const prefix=Array.from({{length:6}},(_,i)=>({{id:'p'+i}}));
+const prefix=Array.from({{length:6}},(_,i)=>({{id:i+1}}));
 const current={{session_id:'before',message_count:6,messages:prefix,tool_calls:[
   {{id:'keep',assistant_msg_idx:3}},{{id:'dup',assistant_msg_idx:4,meta:'old'}}
 ]}};
 const continuation={{session_id:'after',parent_session_id:'before',message_count:8,
   _messages_offset:5,_messages_truncated:true,
-  messages:[{{id:'p5'}},{{id:'tail'}},{{id:'done'}}],tool_calls:[
+  messages:[{{id:6}},{{id:7}},{{id:8}}],tool_calls:[
     {{id:'dup',assistant_msg_idx:0,meta:'new'}},{{id:'new',assistant_msg_idx:1}}
 ]}};
 const merged=apply(continuation,current,prefix,0);
-assert.deepEqual(merged.messages.map(m=>m.id),['p0','p1','p2','p3','p4','p5','tail','done']);
+assert.deepEqual(merged.messages.map(m=>m.id),[1,2,3,4,5,6,7,8]);
 assert.equal(merged.session_id,'after'); assert.equal(merged.parent_session_id,'before');
 assert.equal(merged._messages_offset,0); assert.equal(merged.message_count,8);
 assert.equal(merged._messages_truncated,false);
 assert.deepEqual(merged.tool_calls.map(c=>[c.id,c.assistant_msg_idx,c.meta]),[
   ['keep',3,undefined],['dup',5,'new'],['new',6,undefined]
 ]);
+// A parent link and adjacent offsets do not prove unchanged coordinates.
+const shiftedChild={{session_id:'child',parent_session_id:'parent',_messages_offset:3,
+  _messages_truncated:true,message_count:5,messages:[{{id:3}},{{id:4}}]}};
+const boundary=apply(shiftedChild,{{session_id:'parent',message_count:3}},[{{id:1}},{{id:2}},{{id:3}}],0);
+assert.deepEqual(boundary.messages,shiftedChild.messages);
+assert.equal(boundary._messages_offset,3);
+// A pending user is not a stable identity and cannot be the sole join proof.
+const pendingPrefix=[{{id:1,role:'user'}},{{id:2,role:'assistant'}},{{role:'user',_pending:true}}];
+const shiftedPending={{session_id:'same',_messages_offset:2,_messages_truncated:true,message_count:6,
+  messages:[{{id:1,role:'user'}},{{id:2,role:'assistant'}},{{id:3,role:'user'}},{{id:4,role:'assistant'}}]}};
+const pendingJoin=apply(shiftedPending,{{session_id:'same',message_count:3,active_stream_id:'owner'}},pendingPrefix,0,'owner');
+assert.deepEqual(pendingJoin.messages,shiftedPending.messages);
+assert.equal(pendingJoin._messages_offset,2);
 for(const parent of ['other','']){{
   const raw=apply({{...continuation,parent_session_id:parent}},current,prefix,0);
   assert.equal(raw.messages.length,3); assert.deepEqual(raw.messages,continuation.messages);
@@ -298,7 +311,7 @@ for(const parent of ['other','']){{
 const missingParent={{...continuation}}; delete missingParent.parent_session_id;
 assert.equal(apply(missingParent,current,prefix,0).messages.length,3);
 const S={{session:{{session_id:'before',message_count:6}},messages:prefix}};
-const activeSid='before',_oldestIdx=0;
+const activeSid='before',streamId='stream-before',_oldestIdx=0;
 function applyAppError(d){{
   {apperror_session_path}
   return {{eventMatchesCurrent,_terminalSession}};
@@ -326,6 +339,7 @@ const _mergeSettledToolCallsWithLiveMetadata=rawCalls=>(rawCalls||[]).map(call=>
 function settle(completedSession, provided){{
   const S={{messages:[{{role:'assistant',content:'answer'}}],toolCalls:[{{id:'live'}}]}};
   const _terminalToolCallsProvided=provided;
+  const _localTerminalAssistantIndex=-1;
   {settlement}
   return S.toolCalls;
 }}
@@ -343,8 +357,8 @@ def test_cancel_bounded_recovery_preserves_loaded_prefix_and_validates_sid():
 const assert=require('node:assert/strict');
 const _applyEmbeddedTerminalSession=eval('(' + {json.dumps(merge)} + ')');
 const apply=eval('(' + {json.dumps(cancel)} + ')');
-const activeSid='same'; let _oldestIdx=910,_messagesTruncated=true;
-const local=Array.from({{length:90}},(_,i)=>({{id:'local-'+(910+i)}}));
+const activeSid='same',streamId='stream-1'; let _oldestIdx=910,_messagesTruncated=true;
+const local=Array.from({{length:90}},(_,i)=>({{id:911+i}}));
 // The cancel listener clears this before invoking the payload helper.
 const S={{session:{{session_id:activeSid,message_count:1000}},activeStreamId:null,messages:local}};
 const _carryForwardEphemeralTurnFields=(a,b)=>b,_attachProjectedAnchorSceneToLastAssistant=()=>{{}},_hydrateTodosFromSession=()=>{{}};
@@ -353,22 +367,22 @@ const clearLiveToolCards=()=>{{}},assistantText='',removeThinking=()=>{{}},_mark
 const _setActiveSessionUrl=()=>{{}},localStorage={{setItem(){{}}}};
 assert.equal(apply({{session_id:activeSid,_messages_offset:1002,message_count:1003,messages:[{{id:'gap'}}]}}),false);
 assert.equal(apply({{messages:[{{id:'missing'}}]}}),false);
-const bounded=Array.from({{length:22}},(_,i)=>({{id:'local-'+(980+i)}}));
-bounded[21]={{id:'cancel'}};
-assert.equal(apply({{session_id:activeSid,_messages_offset:980,message_count:1002,_messages_truncated:true,messages:bounded}}),true);
+const bounded=Array.from({{length:22}},(_,i)=>({{id:981+i}}));
+bounded[21]={{id:1002}};
+assert.equal(apply({{session_id:activeSid,_messages_offset:980,message_count:1002,_messages_truncated:true,messages:bounded}}),true,'bounded payload should retain the loaded prefix');
 assert.equal(_oldestIdx,910); assert.equal(_messagesTruncated,true);
-assert.equal(S.messages.length,92); assert.equal(S.messages[0].id,'local-910');
-assert.equal(S.messages[69].id,'local-979'); assert.equal(S.messages[70].id,'local-980');
-assert.equal(S.messages[91].id,'cancel');
+assert.equal(S.messages.length,92); assert.equal(S.messages[0].id,911);
+assert.equal(S.messages[69].id,980); assert.equal(S.messages[70].id,981);
+assert.equal(S.messages[91].id,1002);
 assert.equal(S.activeStreamId,null);
 assert.equal(S.session.message_count,1002);
 assert.equal(apply({{session_id:'other',parent_session_id:'unrelated',messages:[{{id:'other'}}]}}),false);
 assert.equal(apply({{session_id:'rotated',parent_session_id:activeSid,_messages_offset:1002,message_count:1004,_messages_truncated:true,messages:[{{id:'continued'}},{{id:'done'}}]}}),true);
 assert.equal(S.session.session_id,'rotated'); assert.equal(S.session.parent_session_id,activeSid);
-assert.equal(_oldestIdx,910); assert.equal(S.session.message_count,1004);
-assert.equal(S.messages.length,94); assert.equal(S.messages[0].id,'local-910');
-assert.equal(S.messages[91].id,'cancel'); assert.equal(S.messages[92].id,'continued');
-assert.equal(S.messages[93].id,'done');
+assert.equal(_oldestIdx,1002); assert.equal(S.session.message_count,1004);
+assert.equal(_messagesTruncated,true);
+assert.equal(S.messages.length,2); assert.equal(S.messages[0].id,'continued');
+assert.equal(S.messages[1].id,'done');
 console.log('ok');
 """
     assert _node(script) == "ok"

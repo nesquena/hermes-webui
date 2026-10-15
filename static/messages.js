@@ -2171,7 +2171,7 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
     return false;
   }
 }
-function _applyEmbeddedTerminalSession(incoming,currentSession,currentMessages,currentOffset){
+function _applyEmbeddedTerminalSession(incoming,currentSession,currentMessages,currentOffset,streamId){
   if(incoming==null){
     if(!currentSession||typeof currentSession!=='object') return null;
     return {...currentSession,messages:Array.isArray(currentMessages)?currentMessages:(Array.isArray(currentSession.messages)?currentSession.messages:[])};
@@ -2189,7 +2189,7 @@ function _applyEmbeddedTerminalSession(incoming,currentSession,currentMessages,c
   if(!currentSession||!Array.isArray(currentMessages)||!currentSid||!sameCoordinateLineage){
     return {...incoming,messages:incomingMessages};
   }
-  const isOffset=value=>Number.isFinite(value)&&Number.isInteger(value)&&value>=0;
+  const isOffset=value=>Number.isSafeInteger(value)&&value>=0;
   const incomingOffset=incoming._messages_offset;
   const messageCount=incoming.message_count;
   const hasWindowMetadata=Array.isArray(incomingMessages)&&
@@ -2201,12 +2201,53 @@ function _applyEmbeddedTerminalSession(incoming,currentSession,currentMessages,c
   const currentEnd=currentOffset+currentMessages.length;
   const currentCount=currentSession.message_count;
   const incomingEnd=incomingOffset+incomingMessages.length;
-  if(incomingEnd!==messageCount) return null;
+  if(!isOffset(currentEnd)||!isOffset(incomingEnd)||incomingEnd!==messageCount) return null;
   if((currentCount!==undefined&&currentCount!==currentEnd)||incomingOffset>currentEnd){
     if(!Object.prototype.hasOwnProperty.call(incoming,'_messages_truncated')) return null;
     return {...incoming,messages:incomingMessages};
   }
   if(incomingEnd<currentEnd) return null;
+  const exactMessageIdentity=message=>{
+    const id=message&&typeof message==='object'&&!Array.isArray(message)?message.id:null;
+    return Number.isSafeInteger(id)&&id>0?id:null;
+  };
+  const uniqueMessageIdentities=messages=>{
+    const identities=messages.map(exactMessageIdentity);
+    const counts=new Map();
+    for(const identity of identities){
+      if(identity!==null) counts.set(identity,(counts.get(identity)||0)+1);
+    }
+    return identities.map(identity=>identity!==null&&counts.get(identity)===1?identity:null);
+  };
+  const sameMessageIdentity=(left,right)=>left!==null&&right!==null&&left===right;
+  const directWindow=()=>({...incoming,messages:incomingMessages});
+  const currentIdentities=uniqueMessageIdentities(currentMessages);
+  const incomingIdentities=uniqueMessageIdentities(incomingMessages);
+  if(currentEnd>incomingOffset){
+    // Numeric offsets can shift; stable message IDs must prove every shared row.
+    let provenRows=0;
+    const overlapStart=Math.max(currentOffset,incomingOffset);
+    const overlapEnd=Math.min(currentEnd,incomingEnd);
+    for(let coordinate=overlapStart;coordinate<overlapEnd;coordinate++){
+      const currentMessage=currentMessages[coordinate-currentOffset];
+      const incomingMessage=incomingMessages[coordinate-incomingOffset];
+      const localSubmittedUser=!!(
+        streamId&&String(currentSession.active_stream_id||'')===String(streamId)&&
+        coordinate===currentEnd-1&&currentMessage&&currentMessage.role==='user'&&currentMessage._pending===true&&
+        incomingMessage&&incomingMessage.role==='user'
+      );
+      if(localSubmittedUser){
+        continue;
+      }
+      const currentIdentity=currentIdentities[coordinate-currentOffset];
+      const incomingIdentity=incomingIdentities[coordinate-incomingOffset];
+      if(!sameMessageIdentity(currentIdentity,incomingIdentity)) return directWindow();
+      provenRows+=1;
+    }
+    if(!provenRows) return directWindow();
+  }else if(incomingOffset===currentEnd){
+    return directWindow();
+  }
   const mergedOffset=Math.min(currentOffset,incomingOffset);
   const mergedMessages=[];
   for(let coordinate=mergedOffset;coordinate<incomingEnd;coordinate++){
@@ -2457,6 +2498,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _clearOwnerInflightState(){
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
+    const inflight=INFLIGHT[activeSid];
+    if(inflight&&inflight.streamId&&inflight.streamId!==streamId) return;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
@@ -6649,6 +6692,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _currentTerminalSession,
           _currentTerminalMessages,
           _oldestIdx,
+          streamId,
         );
         const _terminalToolCallsProvided=!!(
           _mergedTerminalSession&&
@@ -6667,6 +6711,61 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             _currentTerminalMessages,
             completedSession.messages||[],
           );
+        }
+        const _currentTerminalInflight=INFLIGHT[activeSid];
+        const _ownsCurrentTerminalStream=!!(
+          isActiveSession&&S.activeStreamId===streamId&&
+          (!_currentTerminalInflight||!_currentTerminalInflight.streamId||_currentTerminalInflight.streamId===streamId)
+        );
+        let _localTerminalAssistantIndex=-1;
+        if(!_mergedTerminalSession&&_ownsCurrentTerminalStream&&Array.isArray(completedSession.messages)){
+          const _liveContent=String(typeof _streamDisplay==='function'?_streamDisplay():assistantText||'');
+          const _liveSplit=typeof _splitThinkFromContent==='function'
+            ? _splitThinkFromContent(_liveContent,reasoningText||'')
+            : {content:_liveContent,reasoning:String(reasoningText||liveReasoningText||'')};
+          const _answer=String(_liveSplit.content||'');
+          const _reasoning=String(_liveSplit.reasoning||reasoningText||'');
+          const _hasCurrentLiveTools=Array.isArray(S.toolCalls)&&S.toolCalls.length>0;
+          if(_answer.trim()||_reasoning.trim()||_hasCurrentLiveTools){
+            let _existingIndex=-1;
+            for(let _index=completedSession.messages.length-1;_index>=0;_index--){
+              const _message=completedSession.messages[_index];
+              if(_message&&_message.role==='assistant'&&_message._anchor_stream_id===streamId){
+                _existingIndex=_index;
+                break;
+              }
+            }
+            let _assistantRow=_existingIndex>=0?completedSession.messages[_existingIndex]:null;
+            if(!_assistantRow){
+              if(_currentTerminalInflight&&typeof _ensureInflightLiveAssistantMessage==='function'){
+                _ensureInflightLiveAssistantMessage(_currentTerminalInflight);
+              }
+              const _liveRows=Array.isArray(_currentTerminalInflight&&_currentTerminalInflight.messages)
+                ?_currentTerminalInflight.messages.filter(m=>m&&m.role==='assistant'&&m._live)
+                :[];
+              _assistantRow=_liveRows.length?{..._liveRows[_liveRows.length-1]}:{role:'assistant'};
+              completedSession.messages.push(_assistantRow);
+              _localTerminalAssistantIndex=completedSession.messages.length-1;
+            }else{
+              _localTerminalAssistantIndex=_existingIndex;
+            }
+            _assistantRow.content=_answer;
+            _assistantRow.reasoning=_reasoning||undefined;
+            _assistantRow._anchor_stream_id=streamId;
+            _assistantRow._ts=_assistantRow._ts||Date.now()/1000;
+            delete _assistantRow._live;
+            const _currentPendingUser=[...completedSession.messages].reverse().find(m=>m&&m.role==='user'&&m._pending===true);
+            if(_currentPendingUser) delete _currentPendingUser._pending;
+            completedSession.message_count=Math.max(
+              Number(completedSession.message_count||0),
+              Number(_oldestIdx||0)+completedSession.messages.length,
+            );
+            completedSession.active_stream_id=null;
+            completedSession.pending_user_message=null;
+            completedSession.pending_attachments=[];
+            completedSession.pending_started_at=null;
+            completedSession.pending_user_source=null;
+          }
         }
         const completedSid=completedSession.session_id||activeSid;
         const completedMessageCount=completedSession.message_count != null
@@ -6767,7 +6866,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             }
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
-          lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
+          lastAsst=_mergedTerminalSession
+            ? [...S.messages].reverse().find(m=>m.role==='assistant')
+            : (_ownsCurrentTerminalStream&&_localTerminalAssistantIndex>=0
+              ? S.messages[_localTerminalAssistantIndex]
+              : null);
           // Persist reasoning trace for Worklog Thinking Cards; normal transcript
           // rendering keeps provider reasoning out of the final answer.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
@@ -6840,7 +6943,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
             return hasTc||hasPartialTc||hasTu;
           });
-          if(_terminalToolCallsProvided){
+          if(_localTerminalAssistantIndex>=0){
+            S.toolCalls=(Array.isArray(S.toolCalls)?S.toolCalls:[]).map(tc=>({
+              ...tc,
+              assistant_msg_idx:_localTerminalAssistantIndex,
+              done:true,
+            }));
+            S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc}));
+          } else if(_terminalToolCallsProvided){
             S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(completedSession.tool_calls);
           } else if(!hasMessageToolMetadata&&completedSession.tool_calls&&completedSession.tool_calls.length){
             S.toolCalls=completedSession.tool_calls.map(tc=>tc);
@@ -7152,6 +7262,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _currentTerminalSession,
         _currentTerminalMessages,
         _oldestIdx,
+        streamId,
       );
       if(eventMatchesCurrent){
         _flushReasoningToAnchor();
@@ -7459,6 +7570,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           _currentTerminalSession,
           _currentTerminalMessages,
           _oldestIdx,
+          streamId,
         );
         if(!_terminalSession) return false;
         _terminalSession.messages=_carryForwardEphemeralTurnFields(

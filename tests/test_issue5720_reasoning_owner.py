@@ -266,6 +266,47 @@ def test_sse_error_with_first_reasoning_pending_keeps_one_reasoning_event():
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("snapshot", ["absent", "invalid"])
+def test_done_without_usable_snapshot_settles_the_current_stream_owner(snapshot):
+    result = _run_reasoning_scene(
+        reasoning_burst=True,
+        lifecycle_case=f"done_missing_session_{snapshot}",
+    )
+
+    assert result["messages"][-1]["content"] == "Current streamed answer"
+    assert result["messages"][-1]["reasoning"] == "Current streamed reasoning"
+    assert result["messages"][-1]["_turnUsage"]["output_tokens"] == 2
+    assert result["messages"][-1]["_anchor_stream_id"] == "stream-1"
+    assert result["prior_reasoning"] == "Historical reasoning"
+    assert result["prior_turn_usage"] is None
+    assert result["tool_owner_index"] == len(result["messages"]) - 1
+    assert result["tool_owner_id"] == "current-tool"
+    assert result["settled"] is True
+    assert result["active_stream"] is None
+    assert result["inflight_cleared"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("snapshot", ["absent", "invalid"])
+def test_reasoning_only_done_without_usable_snapshot_does_not_reuse_prior_assistant(snapshot):
+    result = _run_reasoning_scene(
+        reasoning_burst=True,
+        lifecycle_case=f"done_missing_session_reasoning_only_{snapshot}",
+    )
+
+    assert result["messages"][-1]["content"] == ""
+    assert result["messages"][-1]["reasoning"] == "Current streamed reasoning"
+    assert result["messages"][-1]["_turnUsage"]["output_tokens"] == 2
+    assert result["prior_reasoning"] == "Historical reasoning"
+    assert result["prior_turn_usage"] is None
+    assert result["tool_owner_index"] == len(result["messages"]) - 1
+    assert result["tool_owner_id"] == "current-tool"
+    assert result["settled"] is True
+    assert result["active_stream"] is None
+    assert result["inflight_cleared"] is True
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
 @pytest.mark.parametrize("activity_mode", ["transparent_stream", "compact_worklog"])
 def test_transport_recovery_paints_pending_token_before_retry(activity_mode):
     result = _run_reasoning_scene(
@@ -566,6 +607,7 @@ eval(anchorsSrc);
 for(const name of [
   'chatActivityMode','isTransparentStream','isFinalAnswerOnlyMode','isCompactWorklogMode','isSimplifiedToolCalling',
   '_anchorSceneIsSettledSuccessfulCompression','_anchorSceneRowsForRendering',
+  '_anchorSceneToolRowLogicalKey',
   '_anchorSceneRowTimestampSeconds','_anchorSceneTransparentNodeForRow',
   '_transparentLiveRowKey','_transparentLiveRowsCompatible',
   '_transparentLiveRowAttributePairs','_transparentLiveRowInteractiveState',
@@ -590,6 +632,7 @@ const failFirstAnchorRender=process.env.ISSUE5720_FAIL_FIRST_ANCHOR_RENDER==='1'
 const failAnchorRenderOn=Number(process.env.ISSUE5720_FAIL_ANCHOR_RENDER_ON||'0');
 let anchorRenderAttempts=0;
 window._renderLiveAnchorActivitySceneForStream=function(...args){
+  if(String(process.env.ISSUE5720_LIFECYCLE_CASE||'').startsWith('done_missing_session_')) return true;
   anchorRenderAttempts+=1;
   if(failFirstAnchorRender&&anchorRenderAttempts===1) return false;
   if(failAnchorRenderOn&&anchorRenderAttempts===failAnchorRenderOn) return false;
@@ -616,6 +659,8 @@ global._resetStreamScrollFollow=()=>{};
 global._suspendSessionStreamForLiveChat=()=>{};
 global.ensureLiveWorklogShell=()=>null;
 global._extractInlineThinkingFromContent=(content,reasoning)=>({content:String(content||''),displayText:String(content||''),reasoning:String(reasoning||'')});
+global._maybeNotifyPersistentStateSaved=()=>{};
+global.enhanceMarkdownTables=()=>{};
 
 class FakeEventSource {
   static instances=[];
@@ -691,7 +736,7 @@ if(deferredFrames){
         return;
       }
       const initial=lifecycle==='echo'?'Visible echo answer with enough text':'OLD reasoning';
-      await source.emit('reasoning',{text:initial});
+      if(!lifecycle.startsWith('done_missing_session_')) await source.emit('reasoning',{text:initial});
       const oldFrames=Array.from(frames.values());
       if(lifecycle==='reattach'||lifecycle==='reconnect') frames.clear();
       if(lifecycle==='echo'){
@@ -721,6 +766,34 @@ if(deferredFrames){
           }
           for(let j=0;j<10;j++) await Promise.resolve();
         }
+      }else if(lifecycle.startsWith('done_missing_session_')){
+        S.session={session_id:'sid-1',active_stream_id:'stream-1',pending_started_at:1,message_count:3,input_tokens:2,output_tokens:1,estimated_cost:0.25};
+        S.messages=[
+          {role:'user',content:'Historical prompt',_ts:1},
+          {role:'assistant',content:'Historical answer',reasoning:'Historical reasoning',_ts:2},
+          {role:'user',content:'Current prompt',_ts:3,_pending:true},
+        ];
+        await source.emit('reasoning',{text:'Current streamed reasoning'});
+        await source.emit('tool',{name:'read_file',tid:'current-tool',args:{path:'notes.txt'}});
+        await source.emit('tool_complete',{name:'read_file',tid:'current-tool',snippet:'contents'});
+        if(!lifecycle.includes('_reasoning_only_')) await source.emit('token',{text:'Current streamed answer'});
+        const terminal={usage:{input_tokens:4,output_tokens:3,estimated_cost:0.5,duration_seconds:1,tps:2}};
+        if(lifecycle.endsWith('_invalid')) terminal.session={session_id:'sid-1',messages:'invalid'};
+        await source.emit('done',terminal);
+        drainFrames();
+        for(let i=0;i<50&&!settled;i++){
+          if(timers.size){const [id,fn]=timers.entries().next().value;timers.delete(id);await fn();}
+          for(let j=0;j<10;j++) await Promise.resolve();
+          drainFrames();
+        }
+        const current=S.messages.at(-1)||{};
+        const previous=S.messages.find(m=>m&&m.content==='Historical answer')||{};
+        const liveTool=S.toolCalls.find(tc=>tc&&tc.tid==='current-tool')||{};
+        process.stdout.write(JSON.stringify({messages:S.messages,prior_reasoning:previous.reasoning||'',
+          prior_turn_usage:previous._turnUsage||null,tool_owner_index:liveTool.assistant_msg_idx??null,
+          tool_owner_id:liveTool.tid||'',settled,active_stream:S.activeStreamId,
+          inflight_cleared:!INFLIGHT['sid-1'],current_reasoning:current.reasoning||''}));
+        return;
       }
       const rendersBeforeOldFrame=anchorRenderAttempts;
       if(lifecycle==='reattach'||lifecycle==='reconnect') oldFrames.forEach(fn=>fn());
