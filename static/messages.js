@@ -6734,6 +6734,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             ? {..._currentTerminalSession,messages:_currentTerminalMessages}
             : {session_id:activeSid}
         );
+        // A rejected or absent terminal snapshot invalidates the cached
+        // revision. `null` means it must be refreshed; an absent field means
+        // an authoritative full response already established ineligibility.
+        if(!_mergedTerminalSession) completedSession.regeneration_revision=null;
         const _terminalSessionSameSid=!!(
           _currentTerminalSession&&completedSession.session_id===_currentTerminalSession.session_id
         );
@@ -6851,6 +6855,17 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           try{ if(typeof _streamDisplay==='function') _doneFinalAnswer=_streamDisplay()||''; }catch(_){}
           const _preSettle=Array.isArray(S.messages)?S.messages:[];
           S.session=completedSession;
+          // `usage` carries cumulative session totals. The validated embedded
+          // snapshot already owns these values; when it was absent/rejected,
+          // advance only the totals supplied by this done event so the next
+          // turn's delta starts from the correct baseline. Zero is meaningful,
+          // while omitted fields must retain their previous value.
+          if(!_mergedTerminalSession&&d.usage&&S.session){
+            for(const _usageField of ['input_tokens','output_tokens','estimated_cost','cache_read_tokens','cache_write_tokens']){
+              const _usageValue=d.usage[_usageField];
+              if(typeof _usageValue==='number'&&Number.isFinite(_usageValue)) S.session[_usageField]=_usageValue;
+            }
+          }
           if(_terminalSessionSameSid){
             S.messages=completedSession.messages;
           } else if(d.session){
@@ -6861,7 +6876,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             if(typeof _oldestIdx!=='undefined')_oldestIdx=completedSession._messages_offset||0;
           }
           completedSession.messages=S.messages;
-          if(d.session&&typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
+          if(_mergedTerminalSession&&typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
           if(_pendingTitleUpdates.has(completedSid)){
             applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
             _pendingTitleUpdates.delete(completedSid);

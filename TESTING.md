@@ -331,6 +331,20 @@ history is sent in the terminal event. Exercise cancellation and compression
 continuation as well as normal completion. Compare payload bytes and browser
 main-thread settlement timing on the same transcript and base revision.
 
+A missing or rejected terminal snapshot preserves the streamed answer but
+invalidates its regeneration revision. Regeneration then loads saved rows and
+their revision through the full-history loader. It rejects a late response if
+the session or active turn changed. If the saved rows cannot confirm the
+recovered answer at its expected position, regeneration stops without replacing
+the recovered transcript. A full response that establishes ineligibility must
+not cause repeated refreshes. Normal settlement does not fetch full history.
+
+Run `./scripts/test.sh -q tests/test_issue5720_reasoning_owner.py tests/test_metadata_cached_authority.py tests/test_issue6611_regenerate_browser.py`
+for these recovery cases. Also verify two consecutive completions: when the
+first snapshot is absent or invalid, each answer's usage badge must contain
+only its own tokens and cost. Omitted cumulative usage fields retain their
+previous totals; an explicit zero replaces the previous value.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic

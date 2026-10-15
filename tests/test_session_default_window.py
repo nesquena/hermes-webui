@@ -230,7 +230,7 @@ def test_outline_jump_requests_explicit_full_transcript():
     jump = _OUTLINE_JS.split('async function _jumpToMessage(', 1)[1].split('// Brief highlight', 1)[0]
     assert 'await _ensureAllMessagesLoaded()' in jump
     assert 'api(' not in jump
-    loader = _SESSIONS_JS.split('async function _ensureAllMessagesLoaded()', 1)[1].split('const SESSION_ARCHIVED_PAGE_SIZE', 1)[0]
+    loader = _SESSIONS_JS.split('async function _ensureAllMessagesLoaded(options)', 1)[1].split('const SESSION_ARCHIVED_PAGE_SIZE', 1)[0]
     assert _ALL_QS in loader
 
 

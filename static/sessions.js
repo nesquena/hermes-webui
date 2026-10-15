@@ -4905,6 +4905,8 @@ async function _loadOlderMessages() {
 
 // Ensure the full message history is loaded (for undo, export, etc).
 // If the session was loaded with msg_limit, this fetches all messages.
+// Explicit regeneration may also force this existing guarded fetch when the
+// terminal event did not provide a trusted revision.
 //
 // Race-safety (#1937): with the endless-scroll opt-in, _loadOlderMessages
 // may be in flight when this runs (e.g. user scrolled near the top, then
@@ -4916,8 +4918,11 @@ async function _loadOlderMessages() {
 //      ensure-all calls from rapid double-clicks on Start.
 //   2. Bump _messagesGeneration before mutating S.messages so any
 //      in-flight prefetch's post-await generation check bails out.
-async function _ensureAllMessagesLoaded() {
-  if (!_messagesTruncated || !S.session) return;
+async function _ensureAllMessagesLoaded(options) {
+  const ensureOptions=options&&typeof options==='object'?options:{};
+  const forceRefresh=!!ensureOptions.forceRefresh;
+  const sidAtStart=S.session&&S.session.session_id;
+  if ((!_messagesTruncated&&!forceRefresh) || !sidAtStart) return;
   if (_loadingOlder) {
     // A prefetch is mid-flight (between the `_loadingOlder = true` line
     // and its post-await guards). Bumping the generation token now
@@ -4930,19 +4935,35 @@ async function _ensureAllMessagesLoaded() {
     while (_loadingOlder) {
       await new Promise(resolve => setTimeout(resolve, 16));
     }
-    if (!_messagesTruncated || !S.session) return;
+    if (!S.session || S.session.session_id!==sidAtStart || (!_messagesTruncated&&!forceRefresh)) return;
   }
   _loadingOlder = true;
   try {
-    const sid = S.session.session_id;
+    const sid = sidAtStart;
+    // A forced authority refresh may outlive the transcript and stream owner
+    // that requested it. Capture the view after taking the existing mutex so
+    // a late response cannot replace a same-session successor turn.
+    const requestedMessages=forceRefresh?S.messages:null;
+    const requestedGeneration=forceRefresh?_messagesGeneration:null;
+    const requestedStreamId=forceRefresh?(S.activeStreamId||null):null;
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=all`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
-    if (!data || !data.session) return;
+    if (!data || !data.session || data.session.session_id!==sid || !Array.isArray(data.session.messages)) return;
     // Session may have been switched while we awaited. Bail rather than
     // overwrite the new session's messages.
     if (!S.session || S.session.session_id !== sid) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    if(forceRefresh&&(S.messages!==requestedMessages||_messagesGeneration!==requestedGeneration||
+      S.busy||(S.activeStreamId||null)!==requestedStreamId)) return;
     const msgs = (data.session.messages || []).filter(m => m && m.role);
+    const expectedAssistant=forceRefresh&&ensureOptions.expectedAssistant;
+    if(expectedAssistant){
+      const expectedIndex=expectedAssistant.index;
+      const expectedRow=Number.isSafeInteger(expectedIndex)&&expectedIndex>=0?msgs[expectedIndex]:null;
+      if(!expectedRow||expectedRow.role!=='assistant'||
+        String(expectedRow.content??'')!==String(expectedAssistant.content??'')||
+        String(expectedRow.reasoning??'')!==String(expectedAssistant.reasoning??'')) return;
+    }
     // Bump the generation BEFORE the wholesale replace so any racing
     // prefetch (whose snapshot was taken before this call's mutex
     // acquisition) sees the new value and aborts.
