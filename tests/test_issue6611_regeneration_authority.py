@@ -616,17 +616,12 @@ def test_terminal_window_shift_resets_to_canonical_and_append_keeps_prefix(monke
             "_stripForcedSkillEnvelope",
             "_normalizeUserTranscriptText",
             "_sameTranscriptMessage",
+            "_advanceVisibleBaselineForServerKnownRows",
         )
     }
-    upsert_marker = "function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=Date.now()}={}){"
-    upsert_start = sessions_source.index(upsert_marker)
-    upsert_brace = upsert_start + len(upsert_marker) - 1
-    upsert_depth = 1
-    upsert_end = upsert_brace + 1
-    while upsert_depth:
-        upsert_depth += sessions_source[upsert_end] == "{"
-        upsert_depth -= sessions_source[upsert_end] == "}"
-        upsert_end += 1
+    upsert_start = sessions_source.index("function upsertActiveSessionForLocalTurn(")
+    # Match the top-level declaration, not a particular destructured signature.
+    upsert_end = sessions_source.index("\n}", upsert_start) + len("\n}")
     upsert_local_turn = sessions_source[upsert_start:upsert_end]
     node = shutil.which("node")
     if not node:
@@ -640,6 +635,7 @@ const _stripAttachedFilesMarker=eval('(' + {json.dumps(same_transcript_helpers['
 const _stripForcedSkillEnvelope=eval('(' + {json.dumps(same_transcript_helpers['_stripForcedSkillEnvelope'])} + ')');
 const _normalizeUserTranscriptText=eval('(' + {json.dumps(same_transcript_helpers['_normalizeUserTranscriptText'])} + ')');
 const _sameTranscriptMessage=eval('(' + {json.dumps(same_transcript_helpers['_sameTranscriptMessage'])} + ')');
+const _advanceVisibleBaselineForServerKnownRows=eval('(' + {json.dumps(same_transcript_helpers['_advanceVisibleBaselineForServerKnownRows'])} + ')');
 let _loadingSessionId='s1',_loadSessionGeneration=1,_messagesTruncated=false,_oldestIdx=0,_msgLimitMax=100,_messageRenderWindowSize=50,_pendingCarryForwardSnapshot=null;
 let _loadingOlder=false,_messagesGeneration=0,_programmaticScroll=false,_programmaticScrollSetAt=0,_scrollPinned=false;
 const _MSG_LIMIT_MAX=100,_INITIAL_MSG_LIMIT=100,MESSAGE_RENDER_WINDOW_DEFAULT=50;
