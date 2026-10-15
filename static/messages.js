@@ -2213,6 +2213,7 @@ function _applyEmbeddedTerminalSession(incoming,currentSession,currentMessages,c
   const incomingParentSid=String(incoming.parent_session_id||'');
   const currentSid=String(currentSession&&currentSession.session_id||'');
   if(!incomingSid||!incomingMessages) return null;
+  const directContinuation=incomingSid!==currentSid&&incomingParentSid===currentSid;
   const sameCoordinateLineage=incomingSid===currentSid||incomingParentSid===currentSid;
   if(!currentSession||!Array.isArray(currentMessages)||!currentSid||!sameCoordinateLineage){
     return {...incoming,messages:incomingMessages};
@@ -2223,18 +2224,21 @@ function _applyEmbeddedTerminalSession(incoming,currentSession,currentMessages,c
   const hasWindowMetadata=Array.isArray(incomingMessages)&&
     Object.prototype.hasOwnProperty.call(incoming,'_messages_offset')&&
     Object.prototype.hasOwnProperty.call(incoming,'message_count');
-  if(!hasWindowMetadata||!isOffset(incomingOffset)||!isOffset(messageCount)||!isOffset(currentOffset)) return null;
+  if(!hasWindowMetadata||!isOffset(incomingOffset)||!isOffset(messageCount)) return null;
   if(Object.prototype.hasOwnProperty.call(incoming,'_messages_truncated')&&
     (typeof incoming._messages_truncated!=='boolean'||incoming._messages_truncated!==!!incomingOffset)) return null;
+  const directWindow=()=>({...incoming,messages:incomingMessages});
+  const incomingEnd=incomingOffset+incomingMessages.length;
+  if(!isOffset(incomingEnd)||incomingEnd!==messageCount) return null;
+  if(!isOffset(currentOffset)) return directContinuation?directWindow():null;
   const currentEnd=currentOffset+currentMessages.length;
   const currentCount=currentSession.message_count;
-  const incomingEnd=incomingOffset+incomingMessages.length;
-  if(!isOffset(currentEnd)||!isOffset(incomingEnd)||incomingEnd!==messageCount) return null;
+  if(!isOffset(currentEnd)) return directContinuation?directWindow():null;
   if((currentCount!==undefined&&currentCount!==currentEnd)||incomingOffset>currentEnd){
-    if(!Object.prototype.hasOwnProperty.call(incoming,'_messages_truncated')) return null;
-    return {...incoming,messages:incomingMessages};
+    if(!Object.prototype.hasOwnProperty.call(incoming,'_messages_truncated')&&!directContinuation) return null;
+    return directWindow();
   }
-  if(incomingEnd<currentEnd) return null;
+  if(incomingEnd<currentEnd) return directContinuation?directWindow():null;
   const exactMessageIdentity=message=>{
     const id=message&&typeof message==='object'&&!Array.isArray(message)?message.id:null;
     return Number.isSafeInteger(id)&&id>0?id:null;
@@ -2248,7 +2252,6 @@ function _applyEmbeddedTerminalSession(incoming,currentSession,currentMessages,c
     return identities.map(identity=>identity!==null&&counts.get(identity)===1?identity:null);
   };
   const sameMessageIdentity=(left,right)=>left!==null&&right!==null&&left===right;
-  const directWindow=()=>({...incoming,messages:incomingMessages});
   const currentIdentities=uniqueMessageIdentities(currentMessages);
   const incomingIdentities=uniqueMessageIdentities(incomingMessages);
   if(currentEnd>incomingOffset){
