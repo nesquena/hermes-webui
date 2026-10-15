@@ -18645,20 +18645,24 @@ def handle_post(handler, parsed) -> bool:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        try:
-            share_meta = create_or_refresh_share(snapshot_session)
-        except ValueError as exc:
-            return bad(handler, str(exc), 400)
-        persisted_session = stored_session
-        if persisted_session is None:
-            persisted_session = _build_share_metadata_sidecar(
-                sid,
-                snapshot_session,
-                cli_meta=cli_meta,
-            )
-        persisted_session.share_token = share_meta["share_token"]
-        persisted_session.share_created_at = share_meta["share_created_at"]
-        persisted_session.save(touch_updated_at=False)
+        # #8255: take the per-session agent lock for the whole snapshot + token
+        # persist window so a concurrent /api/share/revoke cannot run against
+        # the pre-token sidecar and silently no-op while reporting success.
+        with _get_session_agent_lock(sid):
+            try:
+                share_meta = create_or_refresh_share(snapshot_session)
+            except ValueError as exc:
+                return bad(handler, str(exc), 400)
+            persisted_session = stored_session
+            if persisted_session is None:
+                persisted_session = _build_share_metadata_sidecar(
+                    sid,
+                    snapshot_session,
+                    cli_meta=cli_meta,
+                )
+            persisted_session.share_token = share_meta["share_token"]
+            persisted_session.share_created_at = share_meta["share_created_at"]
+            persisted_session.save(touch_updated_at=False)
         _publish_session_list_changed(
             "session_share_create",
             profile=getattr(persisted_session, "profile", None),
@@ -18692,22 +18696,48 @@ def handle_post(handler, parsed) -> bool:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        target_session = stored_session
-        if target_session is None:
-            token = str(getattr(snapshot_session, "share_token", "") or "").strip()
-            if not token:
-                return bad(handler, "Session not found", 404)
-            target_session = _build_share_metadata_sidecar(
-                sid,
-                snapshot_session,
-                cli_meta=cli_meta,
-            )
-            target_session.share_token = token
-            target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
-        revoke_share(target_session)
-        target_session.share_token = None
-        target_session.share_created_at = None
-        target_session.save(touch_updated_at=False)
+        # #8255: the LRU-cached session is not the share-token authority. The
+        # cache-freshness check compares message/scene state and not share
+        # fields, so a cached copy loaded during a create's save window (or any
+        # other writer's save) still looks current while it carries no
+        # ``share_token``. Revoking from that copy found no token, cleared the
+        # cached metadata and reported ``ok: true`` even though the published
+        # snapshot stayed live. Resolve the token from the durable sidecar
+        # under the per-session agent lock (which /api/share/create now also
+        # holds across its persist window), and only report success once the
+        # snapshot no longer resolves.
+        with _get_session_agent_lock(sid):
+            token = ""
+            durable_session = Session.load(sid)
+            if durable_session is not None:
+                token = str(getattr(durable_session, "share_token", "") or "").strip()
+            target_session = stored_session
+            if target_session is None:
+                token = token or str(
+                    getattr(snapshot_session, "share_token", "") or ""
+                ).strip()
+                if not token:
+                    return bad(handler, "Session not found", 404)
+                target_session = _build_share_metadata_sidecar(
+                    sid,
+                    snapshot_session,
+                    cli_meta=cli_meta,
+                )
+                target_session.share_token = token
+                target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
+            # Fall back to the in-memory token for a session whose snapshot was
+            # published without a durable sidecar write (external sessions).
+            token = token or str(getattr(target_session, "share_token", "") or "").strip()
+            if token:
+                # revoke_share() locates the published snapshot through the
+                # session's token field, so hand it the resolved authority.
+                target_session.share_token = token
+                revoke_share(target_session)
+                if load_share(token) is not None:
+                    return bad(handler, "Share link could not be revoked", 500)
+            target_session.share_token = None
+            target_session.share_created_at = None
+            target_session.save(touch_updated_at=False)
         _publish_session_list_changed(
             "session_share_revoke",
             profile=getattr(target_session, "profile", None),
