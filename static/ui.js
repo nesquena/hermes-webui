@@ -21729,12 +21729,37 @@ async function regenerateResponse(btn) {
   const row=btn&&btn.closest&&btn.closest('[data-msg-idx]');
   if(!row)return;
   const clickedRowIdx=parseInt(row.dataset.msgIdx,10);
-  const clickedAbsoluteIndex=_oldestIdx+(typeof _rowCurrentRawIdx==='function'?_rowCurrentRawIdx(row,clickedRowIdx):clickedRowIdx);
+  const clickedRawIndex=typeof _rowCurrentRawIdx==='function'?_rowCurrentRawIdx(row,clickedRowIdx):clickedRowIdx;
+  const clickedAbsoluteIndex=_oldestIdx+clickedRawIndex;
+  let latestLocalAssistantIndex=-1;
+  for(let i=S.messages.length-1;i>=0;i--){
+    if(S.messages[i]?.role==='assistant'){latestLocalAssistantIndex=i;break;}
+  }
+  const latestLocalAssistant=latestLocalAssistantIndex>=0?S.messages[latestLocalAssistantIndex]:null;
   const initialSid = S.session.session_id;
+  const refreshAuthority=S.session.regeneration_revision===null;
+  const initialStreamId=S.activeStreamId||null;
+  if(refreshAuthority&&!latestLocalAssistant){
+    setStatus(t('regen_failed'));
+    return;
+  }
   if(typeof _ensureAllMessagesLoaded==='function'){
-    await _ensureAllMessagesLoaded();
+    try{
+      await _ensureAllMessagesLoaded({
+        forceRefresh:refreshAuthority,
+        expectedAssistant:refreshAuthority?{
+          index:_oldestIdx+latestLocalAssistantIndex,
+          content:latestLocalAssistant.content,
+          reasoning:latestLocalAssistant.reasoning,
+        }:null,
+      });
+    }catch(e){
+      if(S.session&&S.session.session_id===initialSid) setStatus(t('regen_failed'));
+      return;
+    }
   }
   if(!S.session || S.session.session_id !== initialSid) return;
+  if(refreshAuthority&&(S.busy||(S.activeStreamId||null)!==initialStreamId)) return;
   if(!S.session.regeneration_revision){ setStatus(t('regen_failed')); return; }
   let latestAssistantIndex=-1;
   for(let i=S.messages.length-1;i>=0;i--){
