@@ -1045,6 +1045,8 @@ def test_runtime_dotenv_reload_refreshes_the_deployment_snapshot(monkeypatch, tm
     )
     monkeypatch.setattr(config, "get_config_snapshot", lambda: {})
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", {})
 
     pre_env = {key: os.environ.get(key) for key in reload_keys}
     pre_loaded_keys = set(profiles._loaded_profile_env_keys)
@@ -1117,6 +1119,128 @@ def test_worker_mirrors_never_rewrite_the_deployment_snapshot(monkeypatch, tmp_p
         assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
 
     assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
+
+
+def test_owner_dotenv_removal_restores_launcher_gateway_fallback(monkeypatch, tmp_path):
+    """Removing an owner override reveals the stable launcher value again."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {"HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key"},
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    (tmp_path / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_API_KEY=dotenv-key\n", encoding="utf-8"
+    )
+
+    profiles._reload_dotenv(tmp_path)
+    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+        "HERMES_WEBUI_GATEWAY_API_KEY"
+    ] == "dotenv-key"
+
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    profiles._reload_dotenv(tmp_path)
+    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+        "HERMES_WEBUI_GATEWAY_API_KEY"
+    ] == "launcher-key"
+    assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "launcher-key"
+
+
+@pytest.mark.parametrize(
+    ("apply_name", "body"),
+    (
+        (
+            "apply_onboarding_setup",
+            {
+                "provider": "lmstudio",
+                "model": "local-model",
+                "base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "lm-key",
+            },
+        ),
+        (
+            "apply_self_hosted_provider_setup",
+            {
+                "provider": "lmstudio",
+                "model": "local-model",
+                "base_url": "http://127.0.0.1:1234/v1",
+                "api_key": "lm-key",
+            },
+        ),
+    ),
+)
+def test_named_profile_onboarding_cannot_replace_deployment_gateway(
+    monkeypatch, tmp_path, apply_name, body
+):
+    """Request-owned onboarding reloads must not publish deployment defaults."""
+    from api import gateway_chat, onboarding
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://analyst-gw.test\n"
+        "API_SERVER_KEY=analyst-gateway-key\n"
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API=false\n",
+        encoding="utf-8",
+    )
+    deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "true",
+    }
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", dict(deployment))
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", dict(deployment))
+    monkeypatch.setattr(onboarding, "_get_active_hermes_home", lambda: analyst_home)
+    monkeypatch.setattr(onboarding, "_get_config_path", lambda: analyst_home / "config.yaml")
+    monkeypatch.setattr(onboarding, "reload_config", lambda: None)
+    monkeypatch.setattr(onboarding, "invalidate_models_cache", lambda: None)
+    monkeypatch.setattr(onboarding, "get_onboarding_status", lambda: {"ok": True})
+
+    getattr(onboarding, apply_name)(body)
+
+    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
+
+
+def test_owner_reload_during_worker_mirror_excludes_temporary_gateway_key(
+    monkeypatch, tmp_path
+):
+    """Owner reloads rebuild from stable sources, not a worker's process mirror."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "API_SERVER_KEY=temporary-worker-key\n", encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://owner-gw.test\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+
+    with profiles.profile_env_for_background_worker("analyst", "test mirror"):
+        assert os.environ.get("API_SERVER_KEY") == "temporary-worker-key"
+        profiles._reload_dotenv(tmp_path)
+        assert "API_SERVER_KEY" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+
+    assert "API_SERVER_KEY" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://owner-gw.test"
+    }
 
 
 def test_named_profile_snapshot_expands_key_from_profile_env(monkeypatch, tmp_path):
@@ -1200,6 +1324,44 @@ def test_scoped_snapshot_refreshes_the_shared_cache_for_inferred_providers(monke
 
     assert inferred_provider == "openai"
     assert overrides == {"service_tier": "priority"}
+
+
+def test_service_tier_inference_uses_snapshot_after_another_profile_refresh(monkeypatch):
+    """A raced shared cache cannot change omitted-provider tier inference."""
+    from api import config, gateway_chat
+
+    snapshot = {
+        "model": {"default": "gpt-5.5", "service_tier": "priority"},
+        "providers": {"openai": {"models": {"gpt-5.2-flash": {}}}},
+    }
+    raced = {
+        "model": {
+            "provider": "openrouter",
+            "default": "meta-llama/llama-3.1",
+        }
+    }
+    def capture_then_race():
+        captured = copy.deepcopy(snapshot)
+        config.cfg = raced
+        return captured
+
+    monkeypatch.setattr(config, "cfg", snapshot)
+    monkeypatch.setattr(config, "get_config_snapshot", capture_then_race)
+    monkeypatch.setattr(
+        config,
+        "_resolve_main_model_fast_mode_overrides",
+        config._legacy_openai_service_tier_overrides,
+    )
+    monkeypatch.setattr(
+        gateway_chat, "_gateway_reasoning_effort_for_request", lambda *_a, **_k: None
+    )
+
+    settings = gateway_chat._gateway_request_settings_for_session(
+        SimpleNamespace(profile=""), model="gpt-5.2-flash"
+    )
+
+    assert config.cfg is raced
+    assert settings[4] == {"service_tier": "priority"}
 
 
 def _snapshot_and_raced_cache():

@@ -222,7 +222,7 @@ def _capture_gateway_deployment_env() -> dict[str, str]:
 _GATEWAY_DEPLOYMENT_ENV = _capture_gateway_deployment_env()
 
 
-def refresh_gateway_deployment_env() -> None:
+def refresh_gateway_deployment_env(environ: dict[str, str] | None = None) -> None:
     """Re-capture the deployment snapshot after a permanent dotenv reload.
 
     ``api.profiles._reload_dotenv()`` permanently re-applies the process
@@ -238,7 +238,12 @@ def refresh_gateway_deployment_env() -> None:
     (``_gateway_request_environ``) and never rewrite it.
     """
     global _GATEWAY_DEPLOYMENT_ENV
-    _GATEWAY_DEPLOYMENT_ENV = _capture_gateway_deployment_env()
+    source = os.environ if environ is None else environ
+    _GATEWAY_DEPLOYMENT_ENV = {
+        key: value
+        for key in _GATEWAY_DEPLOYMENT_ENV_KEYS
+        if (value := source.get(key)) is not None
+    }
 
 
 def _gateway_request_environ(profile_environ: dict[str, str] | None):

@@ -41,6 +41,17 @@ _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 # later, but must not be able to change whether the process is isolated.
 _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
+_GATEWAY_DEPLOYMENT_ENV_KEYS = (
+    'HERMES_WEBUI_GATEWAY_BASE_URL',
+    'HERMES_WEBUI_GATEWAY_API_KEY',
+    'HERMES_WEBUI_GATEWAY_USE_RUNS_API',
+    'API_SERVER_KEY',
+)
+_INITIAL_GATEWAY_DEPLOYMENT_ENV = {
+    key: value
+    for key in _GATEWAY_DEPLOYMENT_ENV_KEYS
+    if (value := os.environ.get(key)) is not None
+}
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
 _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
@@ -1708,7 +1719,7 @@ def _set_hermes_home(home: Path):
         logger.debug("Failed to patch cron.scheduler module")
 
 
-def _refresh_gateway_deployment_snapshot() -> None:
+def _refresh_gateway_deployment_snapshot(home: Path, loaded_env: dict[str, str]) -> None:
     """Refresh gateway_chat's deployment snapshot after a permanent dotenv reload.
 
     ``api.gateway_chat`` captures the launcher-owned Gateway settings once at
@@ -1719,17 +1730,37 @@ def _refresh_gateway_deployment_snapshot() -> None:
     also counts as a permanent change: the previous profile's keys were just
     cleared above.
 
+    Only the stable process owner's dotenv may update the snapshot. Values are
+    rebuilt from the launcher snapshot plus that file's parsed values rather
+    than live ``os.environ``, which may currently contain a named worker's
+    temporary mirror. Request-owned onboarding reloads are therefore isolated.
+
     Only an already-imported ``api.gateway_chat`` is refreshed: a
     not-yet-imported module captures the then-current env at import anyway,
     and importing it from here would add a module-load cycle. Temporary
     worker-environment mirrors never call this — only the permanent reload
     path does.
     """
+    try:
+        is_process_owner = home.expanduser().resolve() == get_process_profile_home().expanduser().resolve()
+    except OSError:
+        is_process_owner = home.expanduser() == get_process_profile_home().expanduser()
+    if not is_process_owner:
+        return
+
     gateway_chat = sys.modules.get("api.gateway_chat")
     if gateway_chat is None:
         return
+    deployment_env = dict(_INITIAL_GATEWAY_DEPLOYMENT_ENV)
+    deployment_env.update(
+        {
+            key: value
+            for key, value in loaded_env.items()
+            if key in _GATEWAY_DEPLOYMENT_ENV_KEYS
+        }
+    )
     try:
-        gateway_chat.refresh_gateway_deployment_env()
+        gateway_chat.refresh_gateway_deployment_env(deployment_env)
     except Exception:
         logger.debug("Failed to refresh the gateway deployment snapshot", exc_info=True)
 
@@ -1747,10 +1778,15 @@ def _reload_dotenv(home: Path):
     for key in list(_loaded_profile_env_keys):
         os.environ.pop(key, None)
     _loaded_profile_env_keys = set()
+    # A dotenv value is an overlay on the process launch environment. If that
+    # value disappears on a later reload, restore the launcher's Gateway value
+    # instead of losing the operator fallback when the tracked key is cleared.
+    os.environ.update(_INITIAL_GATEWAY_DEPLOYMENT_ENV)
 
     env_path = home / '.env'
+    loaded_env: dict[str, str] = {}
     if not env_path.exists():
-        _refresh_gateway_deployment_snapshot()
+        _refresh_gateway_deployment_snapshot(home, loaded_env)
         return
     try:
         loaded_keys: set[str] = set()
@@ -1773,11 +1809,12 @@ def _reload_dotenv(home: Path):
                         continue
                     os.environ[k] = v
                     loaded_keys.add(k)
+                    loaded_env[k] = v
         _loaded_profile_env_keys = loaded_keys
     except Exception:
         _loaded_profile_env_keys = set()
         logger.debug("Failed to reload dotenv from %s", env_path)
-    _refresh_gateway_deployment_snapshot()
+    _refresh_gateway_deployment_snapshot(home, loaded_env)
 
 
 def init_profile_state() -> None:

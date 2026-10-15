@@ -6508,7 +6508,9 @@ def _main_model_request_overrides(
     if not gate_provider:
         gate_provider = str(model_cfg.get("provider") or "").strip().lower()
         if not gate_provider:
-            _, gate_provider, _ = resolve_model_provider(gate_model)
+            _, gate_provider, _ = resolve_model_provider(
+                gate_model, config_data=config_data
+            )
     if _main_model_supports_service_tier(gate_model, gate_provider):
         service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
         if service_tier == "priority":

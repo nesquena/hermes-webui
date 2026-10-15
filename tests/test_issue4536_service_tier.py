@@ -105,7 +105,7 @@ class TestIssue4536ServiceTier:
         )
         assert openrouter_payload == {}
 
-        def resolve_alias(model: str, *_args):
+        def resolve_alias(model: str, *_args, **_kwargs):
             return model, "openai", ""
 
         monkeypatch.setattr(config, "resolve_model_provider", resolve_alias)
