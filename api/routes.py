@@ -26596,13 +26596,23 @@ def _server_initiated_turn_routing(session, *, model, model_provider):
             "server-initiated turn routing",
             logger_override=logger,
         ):
+            config_snapshot = get_config_snapshot()
             return (
-                webui_gateway_chat_enabled(get_config_snapshot()),
-                api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+                webui_gateway_chat_enabled(config_snapshot),
+                api_config.resolve_model_alias_runtime(
+                    model_provider,
+                    expected_model=model,
+                    config_data=config_snapshot,
+                ),
             )
+    config_snapshot = get_config_snapshot()
     return (
-        webui_gateway_chat_enabled(get_config_snapshot()),
-        api_config.resolve_model_alias_runtime(model_provider, expected_model=model),
+        webui_gateway_chat_enabled(config_snapshot),
+        api_config.resolve_model_alias_runtime(
+            model_provider,
+            expected_model=model,
+            config_data=config_snapshot,
+        ),
     )
 
 

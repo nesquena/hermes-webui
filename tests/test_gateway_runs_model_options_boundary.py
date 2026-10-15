@@ -942,7 +942,44 @@ def test_named_profile_lane_keeps_lmstudio_env_key_on_its_own_snapshot(
     assert probes == [("http://analyst-lm.test/v1", "analyst-env-key")]
 
 
-def test_named_profile_gateway_settings_inherit_operator_defaults(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("profile_key_env", "deployment_key_env", "expected_key"),
+    (
+        (
+            "HERMES_WEBUI_GATEWAY_API_KEY=profile-canonical\n"
+            "API_SERVER_KEY=profile-alias\n",
+            {
+                "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-canonical",
+                "API_SERVER_KEY": "deployment-alias",
+            },
+            "profile-canonical",
+        ),
+        (
+            "API_SERVER_KEY=profile-alias\n",
+            {
+                "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-canonical",
+                "API_SERVER_KEY": "deployment-alias",
+            },
+            "profile-alias",
+        ),
+        (
+            "",
+            {
+                "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-canonical",
+                "API_SERVER_KEY": "deployment-alias",
+            },
+            "deployment-canonical",
+        ),
+        (
+            "",
+            {"API_SERVER_KEY": "deployment-alias"},
+            "deployment-alias",
+        ),
+    ),
+)
+def test_named_profile_gateway_settings_inherit_operator_defaults(
+    monkeypatch, tmp_path, profile_key_env, deployment_key_env, expected_key
+):
     """A sparse profile overrides deployment Gateway settings only when explicit."""
     from api import config, gateway_chat
     import api.profiles as profiles
@@ -950,7 +987,7 @@ def test_named_profile_gateway_settings_inherit_operator_defaults(monkeypatch, t
     analyst_home = tmp_path / "profiles" / "analyst"
     analyst_home.mkdir(parents=True)
     (analyst_home / ".env").write_text(
-        "HERMES_WEBUI_GATEWAY_API_KEY=analyst-key\n",
+        profile_key_env,
         encoding="utf-8",
     )
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
@@ -959,8 +996,8 @@ def test_named_profile_gateway_settings_inherit_operator_defaults(monkeypatch, t
         "_GATEWAY_DEPLOYMENT_ENV",
         {
             "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
-            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
             "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+            **deployment_key_env,
         },
     )
     monkeypatch.setattr(config, "get_config_snapshot", lambda: {})
@@ -970,7 +1007,7 @@ def test_named_profile_gateway_settings_inherit_operator_defaults(monkeypatch, t
     )
 
     assert settings[2] == "http://deployment-gw.test"
-    assert settings[3] == "analyst-key"
+    assert settings[3] == expected_key
     assert settings[5] is True
 
 

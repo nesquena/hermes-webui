@@ -8682,12 +8682,13 @@ def _public_model_alias_routes() -> dict[str, dict[str, str]]:
 def resolve_model_alias_runtime(
     route_provider: str | None,
     expected_model: str | None = None,
+    config_data: dict | None = None,
 ) -> dict[str, object] | None:
     """Resolve an opaque alias lane to server-side runtime routing material."""
     route_provider = str(route_provider or "").strip().lower()
     if not route_provider.startswith(_MODEL_ALIAS_ROUTE_PREFIX):
         return None
-    aliases = _configured_model_alias_entries()
+    aliases = _configured_model_alias_entries(config_data)
     name = next(
         (alias_name for alias_name in aliases if _model_alias_route_provider(alias_name) == route_provider),
         None,
