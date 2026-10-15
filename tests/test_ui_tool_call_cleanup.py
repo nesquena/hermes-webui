@@ -832,7 +832,10 @@ class TestToolCardDesignTokens:
         assert ".tool-worklog-tool-group-body .tool-card-icon," in CSS
         assert ".tool-group-body .tool-card-icon{display:none;}" in CSS
         assert ".tool-worklog-tool-group-body .tool-card-header," in CSS
-        assert ".tool-group-body .tool-card-header{margin-left:0;padding-left:0;}" in CSS
+        # #7495 UX gate: 5px (not 0) — the running-dot ring scales to 2.4x of
+        # the 7px dot (~4.9px left overflow), so a zero left padding let the
+        # card's overflow:hidden clip the ring straight in Compact Worklog.
+        assert ".tool-group-body .tool-card-header{margin-left:0;padding-left:5px;}" in CSS
         assert ".tool-worklog-tool-group-body .tool-card-detail," in CSS
         assert ".tool-group-body .tool-card-detail{width:100%;max-width:100%;box-sizing:border-box;}" in CSS
 
