@@ -294,10 +294,10 @@ def _gateway_deployment_owner_base_url(deployment: dict[str, str]) -> str:
     """
     owner_config = None
     try:
-        from api.config import get_config_for_profile_home
+        from api.config import get_config_for_process_owner
         from api.profiles import get_process_profile_home
 
-        owner_config = get_config_for_profile_home(get_process_profile_home())
+        owner_config = get_config_for_process_owner(get_process_profile_home())
     except Exception:
         owner_config = None
     return _gateway_base_url(owner_config, environ=deployment)

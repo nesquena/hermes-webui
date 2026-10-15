@@ -1804,6 +1804,112 @@ def test_config_owner_url_stays_off_a_different_named_profile_receiver(
     assert "Authorization" not in captured["headers"]
 
 
+def test_owner_config_placeholders_do_not_expand_from_named_profile_env(
+    monkeypatch, tmp_path
+):
+    """Owner URL identity must be resolved with the owner's environment.
+
+    Both configs deliberately use the same placeholder name.  Expanding the
+    owner's YAML while the named-profile request scope is active makes the two
+    distinct receivers appear identical and forwards the deployment key to the
+    profile-owned receiver.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "${GATEWAY_URL}")
+    profile_home = tmp_path / "profiles" / "placeholder-split"
+    _write_gateway_config(profile_home, "${GATEWAY_URL}")
+    (tmp_path / ".env").write_text(
+        "GATEWAY_URL=http://owner-gw.test\n", encoding="utf-8"
+    )
+    (profile_home / ".env").write_text(
+        "GATEWAY_URL=http://analyst-gw.test\n", encoding="utf-8"
+    )
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="placeholder-split",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://analyst-gw.test/v1/runs"
+    assert "Authorization" not in captured["headers"]
+
+
+def test_owner_gateway_identity_honors_external_config_path(monkeypatch, tmp_path):
+    """An operator-pinned config path is authoritative for owner identity."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    # The home-local file intentionally names the profile receiver.  Ignoring
+    # HERMES_CONFIG_PATH would therefore misclassify it as shared and leak the
+    # deployment credential.
+    _write_gateway_config(tmp_path, "http://analyst-gw.test")
+    external_config = tmp_path / "operator" / "deployment.yaml"
+    _write_gateway_config(external_config.parent, "http://owner-gw.test")
+    (external_config.parent / "config.yaml").replace(external_config)
+    profile_home = tmp_path / "profiles" / "external-config-split"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://analyst-gw.test\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        monkeypatch.setenv("HERMES_CONFIG_PATH", str(external_config))
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="external-config-split",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://analyst-gw.test/v1/runs"
+    assert "Authorization" not in captured["headers"]
+
+
 def test_unparseable_gateway_url_does_not_break_request_settings(monkeypatch):
     """A spelling ``urlsplit`` rejects must not raise out of the overlay.
 

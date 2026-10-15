@@ -312,6 +312,27 @@ def _expand_env_vars(obj):
     return obj
 
 
+def _expand_env_vars_from_mapping(obj, environ: dict[str, str]):
+    """Expand ``${VAR}`` references against one explicit environment.
+
+    This is intentionally separate from ``_expand_env_vars``: the latter is a
+    request/profile-scoped reader, while deployment-owner reads must remain
+    anchored to the process environment even when called from a named-profile
+    request thread.
+    """
+    if isinstance(obj, str):
+        return re.sub(
+            r"\${([^}]+)}",
+            lambda m: str(environ[m.group(1)]) if m.group(1) in environ else m.group(0),
+            obj,
+        )
+    if isinstance(obj, dict):
+        return {k: _expand_env_vars_from_mapping(v, environ) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_env_vars_from_mapping(item, environ) for item in obj]
+    return obj
+
+
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
 _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
@@ -763,6 +784,38 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     profile_cfg = _load_yaml_config_file(target / "config.yaml")
     _apply_config_defaults(profile_cfg)
     return profile_cfg
+
+
+def get_config_for_process_owner(profile_home: "Path | str | None") -> dict:
+    """Return the deployment owner's config without request-profile influence.
+
+    A named-profile request binds its environment to ``_thread_ctx``.  Reusing
+    the ordinary profile-home reader there would expand the owner's YAML with
+    the request profile's values.  That is unsafe for endpoint identity checks:
+    identical placeholder names can make distinct receivers appear shared and
+    extend a deployment credential to the profile receiver.
+
+    Resolve the operator's authoritative ``HERMES_CONFIG_PATH`` first (matching
+    ``_get_config_path``), otherwise read the process owner's ``config.yaml``.
+    Environment expansion is pinned to a snapshot of the actual process env,
+    which is where the owner's dotenv values live; request thread-locals are
+    deliberately excluded.  This is a read-only, cache-safe snapshot.
+    """
+    if not profile_home:
+        return {}
+    try:
+        owner_home = Path(profile_home).expanduser()
+    except Exception:
+        return {}
+
+    owner_environ = dict(os.environ)
+    env_override = str(owner_environ.get("HERMES_CONFIG_PATH") or "").strip()
+    config_path = Path(env_override).expanduser() if env_override else owner_home / "config.yaml"
+    raw = _load_yaml_config_file_raw(config_path, _copy=False)
+    expanded = _expand_env_vars_from_mapping(raw, owner_environ) if raw else {}
+    owner_config = expanded if isinstance(expanded, dict) else {}
+    _apply_config_defaults(owner_config)
+    return owner_config
 
 
 def _config_for_yaml_save(config_data: dict) -> dict:
