@@ -238,7 +238,7 @@ def test_session_message_loads_keep_explicit_longer_timeouts():
     # msg_before paging) via a useBeforePaging ternary, but both keep the long
     # timeoutMs:120000. Assert each URL + timeout survives in the source.
     assert (
-        "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,\n"
+        "`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${requestedBeforeOffset}&msg_limit=${_INITIAL_MSG_LIMIT}`,\n"
         "          {timeoutMs:120000}"
     ) in src
     assert (
