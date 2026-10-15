@@ -16,6 +16,12 @@
 
 ### Performance
 
+- **Draft autosave no longer rewrites the whole session.** Typing in a long conversation could stall, because every
+  changed composer draft was saved by rewriting the full session JSON file. Drafts now go to a small per-session draft
+  file that is overlaid when the session loads, with first-write durability, compression ownership, explicit clears,
+  deletion and session cleanup all preserved. A draft save that fails while switching sessions keeps navigation working
+  without losing the unsaved text. Thanks @starship-s. (#6524)
+
 - **Opening a session reuses a recent model catalog for up to an hour.** The session-visit freshness window for the
   disk-backed models catalog is 1 h instead of 5 min, so installs with many or slow providers stop rebuilding the full
   catalog on most session visits. Thanks @cxk1993. (#8261)

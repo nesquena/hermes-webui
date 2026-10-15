@@ -40,7 +40,27 @@ const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _composerDraftKnownPayloadSessions = new Set();
 const _composerDraftRestoreSuppressedUntilBySid = new Map();
+const _composerDraftLocalFallbackBySid = new Map();
+const _composerDraftLatestIntentSequenceBySid = new Map();
+const _composerDraftPostPromisesBySid = new Map();
+let _composerDraftIntentSequence = 0;
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
+
+function _setComposerDraftLocalIntent(sid, text, files) {
+  const intent = Object.freeze({
+    text: String(text || ''),
+    files: Object.freeze(Array.isArray(files) ? files.filter(Boolean).slice() : []),
+    sequence: ++_composerDraftIntentSequence,
+  });
+  _composerDraftLocalFallbackBySid.set(sid, intent);
+  _composerDraftLatestIntentSequenceBySid.set(sid, intent.sequence);
+  return intent;
+}
+
+function _forgetComposerDraftLocalFallback(sid) {
+  _composerDraftLatestIntentSequenceBySid.set(sid, ++_composerDraftIntentSequence);
+  _composerDraftLocalFallbackBySid.delete(sid);
+}
 
 function _composerDraftFileSignature(file) {
   if (typeof file === 'string') return { value: file };
@@ -221,19 +241,161 @@ function _saveComposerDraft(sid, text, files) {
   if (!sid) return;
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
+  const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  const normalizedDraft = { text: normalizedText, files: normalizedFiles };
+  const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
     _composerDraftKnownPayloadSessions.add(sid);
   }
   _draftSaveTimer = setTimeout(() => {
-    api('/api/session/draft', {
-      method: 'POST',
-      body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-    }).then(() => {
-      _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-    }).catch(() => {});
+    _postComposerDraftPayload(sid, normalizedDraft, intent).catch((error) => {
+      _handleComposerDraftPostFailure(error, sid, normalizedText, liveFiles, intent);
+    });
   }, _DRAFT_SAVE_DELAY_MS);
+}
+
+function _safeDraftSessionId(sid) {
+  if (typeof sid !== 'string') return '';
+  const trimmed = sid.trim();
+  if (!trimmed) return '';
+  return /^[0-9A-Za-z_-]+$/.test(trimmed) ? trimmed : '';
+}
+
+function _parseSessionMovedDraftError(error) {
+  const body = error && error.body;
+  if (typeof body !== 'string') return null;
+  let parsed = null;
+  try {
+    parsed = JSON.parse(body);
+  } catch (err) {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object') return null;
+  const code = String(parsed.code || '').trim();
+  const nextSid = _safeDraftSessionId(parsed.session_id || '');
+  if (code !== 'session_moved' || !nextSid) return null;
+  return nextSid;
+}
+
+function _composerDraftResponseSessionId(response, fallbackSid) {
+  if (!response || response.session_id === undefined || response.session_id === null) return fallbackSid;
+  const sid = _safeDraftSessionId(response.session_id);
+  if (!sid) throw new Error('Invalid composer draft session response');
+  return sid;
+}
+
+function _handleComposerDraftPostFailure(error, sid, text, files, intent=null) {
+  const normalizedText = String(text || '');
+  const normalizedFiles = Array.isArray(files) ? files.filter(Boolean) : [];
+  const fallbacks = typeof _composerDraftLocalFallbackBySid === 'undefined'
+    ? null : _composerDraftLocalFallbackBySid;
+  const failedIntent = intent || (error && error._composerDraftIntent);
+  if (failedIntent && fallbacks && fallbacks.get(sid) !== failedIntent) return;
+  const latest = fallbacks && fallbacks.get(sid);
+  const reportedText = latest ? latest.text : normalizedText;
+  const reportedFiles = latest ? latest.files : normalizedFiles;
+  const suppressed = typeof _isComposerDraftRestoreSuppressed === 'function'
+    && _isComposerDraftRestoreSuppressed(sid, normalizedText, normalizedFiles);
+  if (S.session && S.session.session_id === sid) {
+    if (!suppressed) {
+      const metadataFiles = typeof _composerDraftFilesForPersist === 'function'
+        ? _composerDraftFilesForPersist(reportedFiles) : reportedFiles;
+      S.session.composer_draft = { text: reportedText, files: metadataFiles };
+    }
+  }
+  if (!suppressed && _composerDraftHasPayload(reportedText, reportedFiles)
+      && typeof _composerDraftKnownPayloadSessions !== 'undefined') {
+    _composerDraftKnownPayloadSessions.add(sid);
+  }
+  if (typeof console !== 'undefined' && console.warn) {
+    console.warn(
+      '[composer draft] failed to persist draft',
+      { session_id: sid, error: String(error && error.message ? error.message : error || '') },
+    );
+  }
+}
+
+function _postComposerDraftPayload(sid, draft, intent=null) {
+  const requestSid = _safeDraftSessionId(sid);
+  if (!requestSid) return Promise.resolve();
+  const normalizedText = String((draft && draft.text) || '');
+  const normalizedFiles = Array.isArray(draft && draft.files) ? draft.files.filter(Boolean) : [];
+  const bodyPayload = JSON.parse(JSON.stringify({ text: normalizedText, files: normalizedFiles }));
+  const post = (targetSid, beforeDispatch) => {
+    const previous = _composerDraftPostPromisesBySid.get(targetSid);
+    let resolveWrite;
+    let rejectWrite;
+    const write = new Promise((resolve, reject) => {
+      resolveWrite = resolve;
+      rejectWrite = reject;
+    });
+    const pending = write.finally(() => {
+      if (_composerDraftPostPromisesBySid.get(targetSid) === pending) {
+        _composerDraftPostPromisesBySid.delete(targetSid);
+      }
+    });
+    _composerDraftPostPromisesBySid.set(targetSid, pending);
+    const dispatch = () => {
+      try {
+        if (beforeDispatch) beforeDispatch();
+        resolveWrite(api('/api/session/draft', {
+          method: 'POST',
+          body: JSON.stringify({ session_id: targetSid, ...bodyPayload }),
+        }));
+      } catch (error) {
+        rejectWrite(error);
+      }
+    };
+    if (previous) Promise.resolve(previous).then(dispatch, dispatch);
+    else dispatch();
+    return pending;
+  };
+  const remember = (responseSid) => {
+    if (responseSid !== requestSid) {
+      _composerDraftKnownPayloadSessions.delete(requestSid);
+    }
+    _rememberComposerDraftPayloadState(responseSid, normalizedText, normalizedFiles);
+  };
+  let postedSid = requestSid;
+  const request = post(requestSid).catch((error) => {
+    const movedSid = _parseSessionMovedDraftError(error);
+    if (
+      !error || error.status !== 409
+      || !movedSid
+      || movedSid === requestSid
+    ) {
+      throw error;
+    }
+    if (intent && _composerDraftLocalFallbackBySid.get(requestSid) !== intent) throw error;
+    if (intent && (_composerDraftLatestIntentSequenceBySid.get(movedSid) || 0) > intent.sequence) {
+      throw error;
+    }
+    postedSid = movedSid;
+    return post(movedSid, () => {
+      if (intent && _composerDraftLocalFallbackBySid.get(requestSid) !== intent) throw error;
+      if (intent && (_composerDraftLatestIntentSequenceBySid.get(movedSid) || 0) > intent.sequence) {
+        throw error;
+      }
+    });
+  });
+  return request.then((response) => {
+    if (intent && _composerDraftLocalFallbackBySid.get(requestSid) !== intent) return response;
+    const responseSid = _composerDraftResponseSessionId(response, postedSid);
+    if (intent && responseSid !== requestSid
+        && (_composerDraftLatestIntentSequenceBySid.get(responseSid) || 0) > intent.sequence) {
+      return response;
+    }
+    if (intent) _composerDraftLocalFallbackBySid.delete(requestSid);
+    remember(responseSid);
+    return response;
+  }, (error) => {
+    if (intent && error && (typeof error === 'object' || typeof error === 'function')) {
+      try { Object.defineProperty(error, '_composerDraftIntent', { value: intent }); } catch (_) { }
+    }
+    throw error;
+  });
 }
 
 function _composerDraftHasPayload(text, files) {
@@ -264,7 +426,9 @@ function _saveComposerDraftNow(sid, text, files) {
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
+  const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  const normalizedDraft = { text: normalizedText, files: normalizedFiles };
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
   }
@@ -274,15 +438,12 @@ function _saveComposerDraftNow(sid, text, files) {
   if (!_composerDraftHasPayload(normalizedText, normalizedFiles)
       && S.session && S.session.session_id === sid
       && !_sessionComposerDraftHasPayload(S.session)
-      && !_composerDraftKnownPayloadSessions.has(sid)) {
+      && !_composerDraftKnownPayloadSessions.has(sid)
+      && !_composerDraftLocalFallbackBySid.has(sid)) {
     return Promise.resolve();
   }
-  return api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: normalizedText, files: normalizedFiles }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, normalizedText, normalizedFiles);
-  }).catch(() => {});
+  const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
+  return _postComposerDraftPayload(sid, normalizedDraft, intent);
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -294,14 +455,25 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // targetSid is the session that was requested — if it no longer matches
   // _loadingSessionId, a newer session switch has already begun, so skip.
   if (targetSid && _loadingSessionId !== null && _loadingSessionId !== targetSid) return;
-  const text = (draft && typeof draft.text === 'string') ? draft.text : '';
-  const files = (draft && Array.isArray(draft.files)) ? draft.files : [];
+  let text = (draft && typeof draft.text === 'string') ? draft.text : '';
+  let files = (draft && Array.isArray(draft.files)) ? draft.files : [];
   const current = ta.value || '';
   const preserveActiveInput = !!(opts && opts.preserveActiveInput);
   const restoreSid = targetSid || (S.session && S.session.session_id);
+  const localFallback = restoreSid && _composerDraftLocalFallbackBySid.get(restoreSid);
+  const useLocalFallback = !!localFallback;
+  if (useLocalFallback) {
+    text = localFallback.text;
+    files = localFallback.files;
+  }
   const hasServerDraftPayload = _composerDraftHasPayload(text, files);
+  const serverDraftText = (draft && typeof draft.text === 'string') ? draft.text : '';
+  const serverDraftFiles = (draft && Array.isArray(draft.files)) ? draft.files : [];
+  const serverDraftHasPayload = _composerDraftHasPayload(serverDraftText, serverDraftFiles);
 
   if (restoreSid && hasServerDraftPayload && _isComposerDraftRestoreSuppressed(restoreSid, text, files)) return;
+  if (restoreSid && !hasServerDraftPayload && serverDraftHasPayload
+      && _isComposerDraftRestoreSuppressed(restoreSid, serverDraftText, serverDraftFiles)) return;
   if (restoreSid && !hasServerDraftPayload) _clearComposerDraftRestoreSuppression(restoreSid);
 
   // Same-session force refreshes are driven by external state changes and may
@@ -309,7 +481,14 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
   // composer is the authoritative in-progress draft; never replace non-empty
   // local input with an older server draft. Cross-session switches still restore
   // normally so the previous session's composer contents do not leak forward.
+  const activeFiles = Array.isArray(S.pendingFiles) ? S.pendingFiles : [];
   if (preserveActiveInput && current && current !== text) return;
+  if (preserveActiveInput && activeFiles.length) return;
+
+  // Restore process-local File references only for their owning session. The
+  // server metadata shape cannot recreate browser File objects.
+  S.pendingFiles = useLocalFallback ? localFallback.files.slice() : [];
+  if (typeof renderTray === 'function') renderTray();
 
   // If there's no text and no files, clear the textarea (a previous session's
   // draft may still be sitting there from a cross-session switch).
@@ -327,7 +506,6 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof autoResize === 'function') autoResize();
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
-  // Files restoration is skipped for now (requires S.pendingFiles plumbing).
 }
 
 // Clear the saved draft for a session (called when message is sent).
@@ -337,12 +515,12 @@ function _clearComposerDraft(sid, text, files) {
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
-  return api('/api/session/draft', {
-    method: 'POST',
-    body: JSON.stringify({ session_id: sid, text: '' }),
-  }).then(() => {
-    _rememberComposerDraftPayloadState(sid, '', []);
-  }).catch(() => {});
+  const intent = _setComposerDraftLocalIntent(sid, '', []);
+  return _postComposerDraftPayload(sid, { text: '', files: [] }, intent).catch(() => {
+    if (_composerDraftLocalFallbackBySid.get(sid) === intent) {
+      _composerDraftLocalFallbackBySid.delete(sid);
+    }
+  });
 }
 
 const SESSION_VIEWED_COUNTS_KEY = 'hermes-session-viewed-counts';
@@ -2489,7 +2667,13 @@ async function loadSession(sid){
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
-    await _saveComposerDraftNow(currentSid, ($('msg') || {}).value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    const draftText = ($('msg') || {}).value || '';
+    const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
+    try {
+      await _saveComposerDraftNow(currentSid, draftText, draftFiles);
+    } catch (error) {
+      _handleComposerDraftPostFailure(error, currentSid, draftText, draftFiles);
+    }
     // The awaited draft save above yields the event loop. If another
     // loadSession() started for a different session while we were waiting
     // (rapid switch B→C), _loadingSessionId now points at that newer load —
@@ -2498,6 +2682,10 @@ async function loadSession(sid){
     // close streams for the session the user actually landed on (#1060 guard,
     // extended to cover the new pre-switch await).
     if (!_isCurrentLoad()) return;
+    // The outgoing File objects are now owned by currentSid's in-memory
+    // fallback (if the save failed); detach them before the destination loads.
+    S.pendingFiles = [];
+    if (typeof renderTray === 'function') renderTray();
     // Snapshot the live turn before msgInner is replaced. Preserves the activity
     // timer, partial response, and tool cards so switching back does not rebuild
     // the stream UI from scratch.
@@ -5470,6 +5658,7 @@ function _renderBatchActionBar(){
         const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
         return {response,session:sessionsById.get(sid)||null};
       }));
+      ids.forEach(_forgetComposerDraftLocalFallback);
       const retainedCount=_worktreeResponseCount(results);
       const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
       ids.forEach(_clearHandoffStorageForSession);
@@ -10693,6 +10882,7 @@ async function deleteSession(sid, beforeDelete=null){
   }
   const response=deleteResult&&deleteResult.response;
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
+  _forgetComposerDraftLocalFallback(sid);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;

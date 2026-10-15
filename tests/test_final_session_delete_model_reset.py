@@ -138,6 +138,9 @@ globalThis._optimisticallyRemovedSessionIds = new Set();
 globalThis._allSessions = [{session_id: 'active-session'}];
 globalThis._pendingSessionReflowPositions = null;
 globalThis._selectedSessions = new Set(['active-session']);
+const _composerDraftLocalFallbackBySid = new Map();
+const _composerDraftLatestIntentSequenceBySid = new Map();
+let _composerDraftIntentSequence = 0;
 globalThis.api = async url => {
   if (url === '/api/session/delete') {
     deleteRequested = true;
@@ -154,6 +157,8 @@ globalThis.api = async url => {
 eval(extractFunction(src, 'function _rememberEmptyComposerModelOverride('));
 eval(extractFunction(src, 'function _readEmptyComposerModelOverride('));
 eval(extractFunction(src, 'function _clearEmptyComposerModelOverride('));
+eval(extractFunction(src, 'function _setComposerDraftLocalIntent('));
+eval(extractFunction(src, 'function _forgetComposerDraftLocalFallback('));
 const rememberComposerModelPickSrc=extractFunctionIfPresent(src, 'function _rememberComposerModelPick(');
 if(rememberComposerModelPickSrc) eval(rememberComposerModelPickSrc);
 const readComposerModelPickSrc=extractFunctionIfPresent(src, 'function _readComposerModelPick(');
@@ -183,6 +188,7 @@ async function waitForSessionsRequest() {
 
 (async () => {
   let deletion;
+  _setComposerDraftLocalIntent('active-session', 'pending draft', []);
   if (args.mode === 'batch') {
     _renderBatchActionBar();
     const deleteButton = elements.batchActionBar.children.find(child =>
@@ -218,6 +224,7 @@ async function waitForSessionsRequest() {
     provider: elements.modelSelect._provider,
     emptyStateDisplay: elements.emptyState.style.display,
     override: _readEmptyComposerModelOverride(),
+    draftFallbackRetained: _composerDraftLocalFallbackBySid.has('active-session'),
   }));
 })().catch(err => {
   process.stderr.write(String(err && err.stack ? err.stack : err));
@@ -249,7 +256,9 @@ def _run_case(driver_path, **overrides):
         timeout=30,
     )
     assert result.returncode == 0, result.stderr
-    return json.loads(result.stdout)
+    data = json.loads(result.stdout)
+    assert data["draftFallbackRetained"] is False
+    return data
 
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")

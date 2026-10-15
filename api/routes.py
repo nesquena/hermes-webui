@@ -11886,6 +11886,7 @@ from api.models import (
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
+    _persisted_session_meta_prefix,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
@@ -11896,6 +11897,8 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,
+    _save_session_draft,
+    _delete_session_draft,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -12086,6 +12089,81 @@ def _pre_compression_continuation_session_id(session) -> str | None:
 
     rows.extend(_child_rows_from_sidecars(memory_seen_ids))
     return _resolve_from_rows(rows)
+
+
+def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile) -> bool:
+    """Confirm one bounded compression edge from current on-disk metadata."""
+    snapshot_meta = _persisted_session_meta_prefix(snapshot_sid)
+    continuation_meta = _persisted_session_meta_prefix(continuation_sid)
+    return bool(
+        snapshot_meta
+        and continuation_meta
+        and _profiles_match(snapshot_meta.get("profile"), request_profile)
+        and snapshot_meta.get("pre_compression_snapshot")
+        and _safe_first(snapshot_meta.get("pre_compression_continuation_session_id"))
+        == continuation_sid
+        and _profiles_match(continuation_meta.get("profile"), request_profile)
+        and _safe_first(continuation_meta.get("parent_session_id")) == snapshot_sid
+    )
+
+
+def _draft_pre_compression_continuation_session_authority(
+    session,
+    *,
+    request_profile,
+    seen_authority_sids: set[str],
+    validated_edges: list[tuple[str, str]] | None = None,
+) -> tuple[str | None, str]:
+    """Validate one authoritative compression transition from a snapshot.
+
+    Returns:
+        (next_session, next_sid) when a validated transition exists.
+        (None, best_known_sid) when authority cannot be confirmed.
+    """
+    snapshot_sid = _safe_first(getattr(session, "session_id", None))
+    if not snapshot_sid or not is_safe_session_id(snapshot_sid):
+        return None, snapshot_sid
+
+    continuation_sid = _safe_first(
+        getattr(session, "pre_compression_continuation_session_id", None)
+    )
+    if not continuation_sid or not is_safe_session_id(continuation_sid):
+        return None, snapshot_sid
+    if continuation_sid in seen_authority_sids:
+        return None, continuation_sid
+
+    # Cached session freshness is message-count based and can miss a
+    # profile- or parent-only edit. Check only the bounded metadata prefixes.
+    if not _draft_compression_edge_is_authorized(
+        snapshot_sid, continuation_sid, request_profile
+    ):
+        return None, continuation_sid
+
+    try:
+        continuation_session = get_session(continuation_sid)
+    except KeyError:
+        return None, continuation_sid
+
+    if not _profiles_match(
+        getattr(continuation_session, "profile", None), request_profile
+    ):
+        return None, continuation_sid
+
+    if _safe_first(getattr(continuation_session, "parent_session_id", None)) != snapshot_sid:
+        return None, continuation_sid
+
+    if validated_edges is not None:
+        validated_edges.append((snapshot_sid, continuation_sid))
+
+    return continuation_session, continuation_sid
+
+
+def _draft_compression_edges_still_authorized(edges, request_profile) -> bool:
+    """Recheck each bounded lineage edge after acquiring the final target lock."""
+    return all(
+        _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile)
+        for snapshot_sid, continuation_sid in edges
+    )
 
 from api.workspace import (
     load_workspaces,
@@ -17732,31 +17810,172 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
-        with _get_session_agent_lock(sid):
-            _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
-            else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
-                _draft_mark("after_save")
-                saved_draft = s.composer_draft
+        request_sid = sid
+        request_session = s
+        request_profile = getattr(request_session, "profile", None)
+        authoritative_sid = request_sid
+        _MAX_DRAFT_AUTHORITY_HOPS = 4
+        _seen_authority_sids = {authoritative_sid}
+        _validated_compression_edges = []
+        resolved_once = False
+
+        def _draft_authority_unconfirmed():
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": "Draft authority could not be confirmed",
+                    "code": "draft_authority_unconfirmed",
+                },
+                status=409,
+            )
+
+        for _hop in range(_MAX_DRAFT_AUTHORITY_HOPS):
+            with _get_session_agent_lock(authoritative_sid):
+                _draft_mark("acquired_lock")
+                # A successful parent check releases that lock before this hop
+                # acquires the child lock. Revalidate every traversed edge here
+                # so a cleared/deleted snapshot cannot authorize the write.
+                if _validated_compression_edges and not _draft_compression_edges_still_authorized(
+                    _validated_compression_edges, request_profile
+                ):
+                    return _draft_authority_unconfirmed()
+                try:
+                    request_session = get_session(authoritative_sid)
+                except KeyError:
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "error": "Session no longer active",
+                            "session_id": authoritative_sid,
+                        },
+                        status=409,
+                    )
+
+                resolved_sid = str(getattr(request_session, "session_id", "") or "").strip()
+                if not resolved_sid or not is_safe_session_id(resolved_sid):
+                    return _draft_authority_unconfirmed()
+                if not _profiles_match(getattr(request_session, "profile", None), request_profile):
+                    return _draft_authority_unconfirmed()
+
+                if resolved_sid != authoritative_sid:
+                    if resolved_sid in _seen_authority_sids:
+                        return _draft_authority_unconfirmed()
+                    _seen_authority_sids.add(resolved_sid)
+                    authoritative_sid = resolved_sid
+                    continue
+
+                continuation_sid = None
+                if getattr(request_session, "pre_compression_snapshot", False):
+                    continuation_session, continuation_sid = (
+                        _draft_pre_compression_continuation_session_authority(
+                            request_session,
+                            request_profile=request_profile,
+                            seen_authority_sids=_seen_authority_sids,
+                            validated_edges=_validated_compression_edges,
+                        )
+                    )
+                    if not continuation_session:
+                        return _draft_authority_unconfirmed()
+                    request_session = continuation_session
+                    _seen_authority_sids.add(continuation_sid)
+                    authoritative_sid = continuation_sid
+                    continue
+
+                if authoritative_sid != request_sid:
+                    if (
+                        not _validated_compression_edges
+                        or not _draft_compression_edges_still_authorized(
+                            _validated_compression_edges, request_profile
+                        )
+                    ):
+                        return _draft_authority_unconfirmed()
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "code": "session_moved",
+                            "session_id": authoritative_sid,
+                            "error": "Session moved",
+                        },
+                        status=409,
+                    )
+
+                current_draft = dict(getattr(request_session, "composer_draft", {}) or {})
+                next_draft = dict(current_draft)
+                if text is not None:
+                    next_draft["text"] = text
+                if files is not None:
+                    next_draft["files"] = files
+                if next_draft == current_draft:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    _draft_text = str(next_draft.get("text", "") or "")
+                    _draft_files = next_draft.get("files", []) or []
+                    _has_meaningful_draft = bool(_draft_text) or bool(_draft_files)
+                    if not (SESSION_DIR / f"{authoritative_sid}.json").exists() and _has_meaningful_draft:
+                        with LOCK:
+                            if SESSIONS.get(authoritative_sid) is not request_session:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if len(getattr(request_session, "messages", []) or []) != 0:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if (SESSION_DIR / f"{authoritative_sid}.json").exists():
+                                # Owner appeared while acquiring the shared lock; skip
+                                # materialization and proceed with sidecar save only.
+                                pass
+                            else:
+                                # Publish the small owner record while cache state is locked
+                                # so deletion cannot race first-draft ownership.
+                                draft_session = copy.copy(request_session)
+                                draft_session.composer_draft = {}
+                                # LOCK is non-reentrant; indexing here would acquire it again.
+                                draft_session.save(
+                                    touch_updated_at=False,
+                                    skip_index=True,
+                                )
+                    # Draft persistence is not conversation activity. Touching updated_at
+                    # here makes the active-session external-refresh poll force-reload the
+                    # current chat every few seconds while the user is typing, and that
+                    # delayed reload can restore an older draft over newer local input.
+                    if _validated_compression_edges and not _draft_compression_edges_still_authorized(
+                        _validated_compression_edges, request_profile
+                    ):
+                        return _draft_authority_unconfirmed()
+                    _draft_mark("before_save")
+                    _save_session_draft(authoritative_sid, next_draft)
+                    _draft_mark("after_save")
+                    request_session.composer_draft = next_draft
+                    saved_draft = request_session.composer_draft
+                sid = authoritative_sid
+                resolved_once = True
+                break
+        if not resolved_once:
+            # A bounded walk can stop on another snapshot whose own continuation
+            # authority has not yet been checked; keep that SID out of client replay.
+            return _draft_authority_unconfirmed()
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
             payload["unchanged"] = True
+        payload["session_id"] = sid
         _draft_mark("before_json")
         j(handler, payload)
         _draft_mark("after_json")
@@ -17878,20 +18097,27 @@ def handle_post(handler, parsed) -> bool:
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
+        draft_delete_failed = False
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
             sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
+            with LOCK:
+                SESSIONS.pop(sid, None)
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            try:
+                draft_deleted = bool(_delete_session_draft(sid))
+            except Exception:
+                logger.debug("Failed to delete draft sidecar for session %s", sid, exc_info=True)
+                draft_deleted = False
+            draft_delete_failed = not draft_deleted
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -17962,14 +18188,18 @@ def handle_post(handler, parsed) -> bool:
                 state_db_cleanup_failed = True
                 logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
-        return j(
-            handler,
-            {
-                "ok": True,
-                "state_db_cleanup_failed": state_db_cleanup_failed,
-                **worktree_retained,
-            },
-        )
+        response = {
+            "state_db_cleanup_failed": state_db_cleanup_failed,
+            **worktree_retained,
+        }
+        if draft_delete_failed:
+            response["draft_delete_failed"] = True
+            response.update(
+                {"ok": False, "error": "Failed to delete session draft"}
+            )
+            return j(handler, response, status=500)
+        response["ok"] = True
+        return j(handler, response)
 
     if parsed.path == "/api/session/clear":
         try:
@@ -24898,25 +25128,76 @@ def _handle_memory_read(handler, parsed=None):
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
     phase1_removed_ids = set()
+    draft_delete_failed = False
 
     # Phase 1: Clean orphan session files (existing behavior).
     for p in SESSION_DIR.glob("*.json"):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            session_lock = _get_session_agent_lock(p.stem)
+            if not session_lock.acquire(timeout=5):
+                logger.debug("Session %s is busy; leaving it for later cleanup", p.stem)
+                continue
+            try:
+                s = Session.load(p.stem)
+                if zero_only:
+                    should_delete = s and len(s.messages) == 0
+                else:
+                    should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                if should_delete:
+                    with LOCK:
+                        SESSIONS.pop(p.stem, None)
+                        p.unlink(missing_ok=True)
+                    session_deleted = not p.exists()
+                    if session_deleted:
+                        phase1_removed_ids.add(p.stem)
+                    try:
+                        draft_deleted = bool(_delete_session_draft(p.stem))
+                    except Exception:
+                        logger.debug("Failed to delete draft sidecar during cleanup for %s", p.stem, exc_info=True)
+                        draft_delete_failed = True
+                        draft_deleted = False
+                    if not draft_deleted:
+                        draft_delete_failed = True
+                    if session_deleted:
+                        cleaned += 1
+            finally:
+                session_lock.release()
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
+
+    # Retry dedicated drafts whose owner sidecar was removed by an earlier
+    # cleanup attempt. Coordinate with draft writes before checking ownership.
+    try:
+        for draft_path in (SESSION_DIR / ".drafts").glob("*.json"):
+            sid = draft_path.stem
+            if not is_safe_session_id(sid) or sid in phase1_removed_ids:
+                continue
+            if (SESSION_DIR / f"{sid}.json").exists():
+                continue
+            try:
+                session_lock = _get_session_agent_lock(sid)
+                acquired = session_lock.acquire(timeout=5)
+            except Exception:
+                logger.debug("Failed to acquire session lock during draft cleanup for %s", sid, exc_info=True)
+                draft_delete_failed = True
+                continue
+            if not acquired:
+                logger.debug("Session %s is busy; leaving its orphan draft for retry", sid)
+                draft_delete_failed = True
+                continue
+            try:
+                if not (SESSION_DIR / f"{sid}.json").exists() and not _delete_session_draft(sid):
+                    draft_delete_failed = True
+            except Exception:
+                logger.debug("Failed to retry draft cleanup for %s", sid, exc_info=True)
+                draft_delete_failed = True
+            finally:
+                session_lock.release()
+    except Exception:
+        logger.debug("Failed to scan dedicated session drafts during cleanup", exc_info=True)
+        draft_delete_failed = True
 
     phase1_touched = bool(cleaned)
     phase2_rewrote_index = False
@@ -24995,6 +25276,17 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
 
+    if draft_delete_failed:
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": "Failed to delete one or more session drafts",
+                "cleaned": cleaned,
+                "draft_delete_failed": True,
+            },
+            status=500,
+        )
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
