@@ -42,6 +42,9 @@ FOREIGN = "20261001_202020_foreign_owner"
 TOMBSTONED = "20261001_303030_deleted_webui"
 INDEXED = "20261001_404040_index_marked"
 NULLSOURCE = "20261001_505050_no_provenance"
+# A local session whose state.db row survives a WebUI delete: the external
+# writer re-created it after the tombstone was recorded (#5504).
+RESTORED = "20261001_606060_restored_local"
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +139,32 @@ class _Env:
         self._captured.clear()
         self._body_state["body"] = {"session_id": sid, "archived": True}
         routes.handle_post(_FakeHandler(), urlparse("/api/session/archive"))
+        return self._captured.get("status"), self._captured.get("data")
+
+    def rename(self, sid, title="Renamed session"):
+        """POST /api/session/rename — shares ``_get_or_materialize_session``."""
+        import api.routes as routes
+
+        self._captured.clear()
+        self._body_state["body"] = {"session_id": sid, "title": title}
+        routes.handle_post(_FakeHandler(), urlparse("/api/session/rename"))
+        return self._captured.get("status"), self._captured.get("data")
+
+    def move(self, sid, project_id=None):
+        """POST /api/session/move — shares ``_get_or_materialize_session``.
+
+        No ``project_id`` on purpose: the project lane answers its own 404 for an
+        unknown project, which would be indistinguishable from the admission
+        refusal this suite measures.
+        """
+        import api.routes as routes
+
+        self._captured.clear()
+        body = {"session_id": sid}
+        if project_id:
+            body["project_id"] = project_id
+        self._body_state["body"] = body
+        routes.handle_post(_FakeHandler(), urlparse("/api/session/move"))
         return self._captured.get("status"), self._captured.get("data")
 
     def session_get(self, sid):
@@ -256,6 +285,7 @@ def env(tmp_path, monkeypatch):
             FOREIGN: "gateway",
             TOMBSTONED: "webui",
             INDEXED: "webui",
+            RESTORED: "cli",
         },
         null_source_sid=NULLSOURCE,
     )
@@ -395,3 +425,80 @@ def test_archive_still_reaches_local_agent_out_of_window_row(env):
     status, payload = env.archive(TARGET)
     assert status == 200, payload
     assert env.sidecar(TARGET).exists()
+
+
+# ---------------------------------------------------------------------------
+# Restored local rows keep their mutation verbs (review regression, #5504)
+# ---------------------------------------------------------------------------
+#
+# The admission added for the fallback originally refused *any* tombstoned
+# exact-id row. A durable delete tombstone is only meaningful for a row the
+# WebUI owns, so a local session whose state.db row the external writer
+# re-created after a WebUI delete lost rename/move/archive (404 on all three)
+# while chat start still worked — the regression the review found on exact head
+# ``70c7834``. Every verb now runs the same source-aware predicate
+# ``_claim_or_synthesize_cli_session`` already used. Each case below gets a
+# fresh environment, so no verb can inherit a sidecar materialized by another.
+
+MUTATION_VERBS = ("chat_start", "rename", "move", "archive")
+
+
+def _mutate(env, verb, sid):
+    return getattr(env, verb)(sid)
+
+
+@pytest.mark.parametrize("verb", MUTATION_VERBS)
+def test_restored_local_row_survives_stale_tombstone(env, verb):
+    """``source='cli'`` plus a tombstone: the writer re-created the row, so it
+    stays usable — the tombstone only refuses WebUI/blank provenance."""
+    models._record_webui_deleted_session_tombstone(RESTORED)
+    assert RESTORED in models._load_webui_deleted_session_tombstone()
+    status, payload = _mutate(env, verb, RESTORED)
+    assert status == 200, payload
+    assert env.sidecar(RESTORED).exists(), "an admitted mutation persists its sidecar"
+
+
+@pytest.mark.parametrize("verb", MUTATION_VERBS)
+def test_webui_owned_tombstoned_row_stays_refused(env, verb):
+    """Control: a WebUI-owned row behind a tombstone keeps its self-heal 404."""
+    models._record_webui_deleted_session_tombstone(TOMBSTONED)
+    status, _ = _mutate(env, verb, TOMBSTONED)
+    assert status == 404
+    assert not env.sidecar(TOMBSTONED).exists()
+
+
+@pytest.mark.parametrize("verb", MUTATION_VERBS)
+def test_null_provenance_tombstoned_row_stays_refused(env, verb):
+    """Control: NULL provenance names no owner, so the tombstone still refuses."""
+    models._record_webui_deleted_session_tombstone(NULLSOURCE)
+    status, _ = _mutate(env, verb, NULLSOURCE)
+    assert status == 404
+    assert not env.sidecar(NULLSOURCE).exists()
+
+
+@pytest.mark.parametrize("verb", MUTATION_VERBS)
+def test_index_marked_webui_row_stays_refused(env, verb):
+    """Control: the index mark stays source-blind and refuses every verb."""
+    env.write_index(
+        [
+            {
+                "session_id": INDEXED,
+                "source_tag": "webui",
+                "raw_source": "webui",
+                "session_source": "webui",
+            }
+        ]
+    )
+    status, _ = _mutate(env, verb, INDEXED)
+    assert status == 404
+    assert not env.sidecar(INDEXED).exists()
+
+
+@pytest.mark.parametrize("verb", MUTATION_VERBS)
+@pytest.mark.parametrize("source", ["cli", "tui", "desktop", "acp"])
+def test_local_agent_rows_still_admitted_per_verb(sources_env, source, verb):
+    """Controls: with no tombstone, every local source keeps working per verb."""
+    env = sources_env(source)
+    status, payload = _mutate(env, verb, FOREIGN)
+    assert status == 200, payload
+    assert env.sidecar(FOREIGN).exists()
