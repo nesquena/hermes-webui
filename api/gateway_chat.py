@@ -278,7 +278,7 @@ def _gateway_endpoint_identity(raw_url: str) -> tuple[str, str, int | None, str]
     )
 
 
-def _gateway_request_environ(profile_environ: dict[str, str] | None):
+def _gateway_request_environ(profile_environ: dict[str, str] | None, config_data=None):
     """Return deployment Gateway settings overlaid by one named profile."""
     if profile_environ is None:
         return None
@@ -300,13 +300,15 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None):
     profile_alias = str(profile_environ.get("API_SERVER_KEY") or "").strip()
     shared_alias = str(deployment.get("API_SERVER_KEY") or "").strip()
     profile_url = str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
-    deployment_url = str(deployment.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
-    # An unset deployment URL still means the request path's built-in default
-    # (``_gateway_base_url``): a profile that spells that same default URL is
-    # on the shared receiver and keeps the deployment credential. Comparing
-    # the raw empty value made the default receiver look dedicated, both key
-    # names were removed, and the shared Gateway lost its key.
-    effective_deployment_url = deployment_url or _GATEWAY_DEFAULT_BASE_URL
+    # The deployment's effective URL resolves the way the request path
+    # resolves it (``_gateway_base_url``): environment, then config, then the
+    # built-in default. A profile that spells that same receiver is shared and
+    # keeps the deployment credential; a different receiver never inherits it.
+    # Comparing the raw empty value made the default receiver look dedicated
+    # and the shared Gateway lost its key; comparing only the environment
+    # value sent a config-set remote deployment's key to a profile-selected
+    # localhost receiver.
+    effective_deployment_url = _gateway_base_url(config_data, environ=deployment)
     dedicated_url = bool(
         profile_url
         and _gateway_endpoint_identity(profile_url)
@@ -563,7 +565,7 @@ def _gateway_request_settings_for_session(
         # runs-API flag, effort) or die mid-iteration ("dictionary changed
         # size during iteration").
         cfg = get_config_snapshot()
-        environ = _gateway_request_environ(environ)
+        environ = _gateway_request_environ(environ, config_data=cfg)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,

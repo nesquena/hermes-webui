@@ -445,6 +445,7 @@ def _capture_gateway_wire_body(
     profile_effort=None,
     real_profile_scope=False,
     gateway_env=None,
+    config_url=None,
     captured=None,
 ):
     """Run the real gateway worker and return its Agent-facing request body.
@@ -500,6 +501,8 @@ def _capture_gateway_wire_body(
     mock_session.pending_started_at = None
 
     cfg = {"agent": {"reasoning_effort": effort}}
+    if config_url:
+        cfg["webui_gateway_base_url"] = config_url
     active_profile = {"name": None}
     entered_profiles = []
 
@@ -521,7 +524,10 @@ def _capture_gateway_wire_body(
 
     def fake_get_config():
         if session_profile and active_profile["name"] == session_profile:
-            return {"agent": {"reasoning_effort": profile_effort}}
+            profile_cfg = {"agent": {"reasoning_effort": profile_effort}}
+            if config_url:
+                profile_cfg["webui_gateway_base_url"] = config_url
+            return profile_cfg
         return cfg
 
     def fake_get_config_snapshot():
@@ -1557,6 +1563,110 @@ def test_shared_default_url_without_a_deployment_url_keeps_the_launcher_key(
 
     assert captured["url"] == "http://127.0.0.1:8642/v1/runs"
     assert captured["headers"]["Authorization"] == "Bearer launcher-key"
+
+
+def test_configured_deployment_url_keeps_its_key_off_the_default_receiver(
+    monkeypatch, tmp_path
+):
+    """A config-set deployment URL must not leak its key to the default receiver.
+
+    The deployment can set ``webui_gateway_base_url`` in config while supplying
+    only its key through the environment. The deployment's effective URL is
+    then the configured remote Gateway — not the request path's built-in
+    default. A named profile that selects ``http://127.0.0.1:8642`` without a
+    key of its own reaches a different receiver and must not carry the
+    deployment credential (security finding on ``2e1f8a1e3``).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    profile_home = tmp_path / "profiles" / "localhost-split"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://127.0.0.1:8642\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert "HERMES_WEBUI_GATEWAY_BASE_URL" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        _capture_gateway_wire_body(
+            None,
+            session_profile="localhost-split",
+            real_profile_scope=True,
+            config_url="http://remote-gw.test",
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://127.0.0.1:8642/v1/runs"
+    assert "Authorization" not in captured["headers"]
+
+
+def test_configured_deployment_url_is_shared_when_the_profile_selects_it(
+    monkeypatch, tmp_path
+):
+    """Selecting the configured deployment URL is still the shared receiver.
+
+    With ``webui_gateway_base_url`` set in config, a profile that spells that
+    same URL is on the shared receiver and keeps the deployment credential;
+    only a genuinely different endpoint is dedicated.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    profile_home = tmp_path / "profiles" / "config-url-shared"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://remote-gw.test\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="config-url-shared",
+            real_profile_scope=True,
+            config_url="http://remote-gw.test",
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://remote-gw.test/v1/runs"
+    assert captured["headers"]["Authorization"] == "Bearer deployment-key"
 
 
 def test_unparseable_gateway_url_does_not_break_request_settings(monkeypatch):
