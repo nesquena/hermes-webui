@@ -58,6 +58,11 @@
 
 ### Fixed
 
+- **Docker first start survives files vanishing during the ownership walk.** A fresh container could fail its first
+  start at random when files disappeared while the init script aligned ownership. The walk now tolerates only
+  `chown`'s own ENOENT, migrates old-UID files in writable Agent checkouts and `.git` metadata after a UID change, and
+  still fails on real permission, read-only or disk-full errors. Thanks @gakugaku. (#8154, fixes #8106)
+
 - **Stopping a Gateway chat now carries the interrupted turn into the model's next context.** The cancelled prompt and its
   partial answer are reconciled into context exactly once (also for empty-context sessions, eager-save mode, forks,
   same-second interrupts and cleared sessions), and display-only recovered rows are never resurrected into context.
