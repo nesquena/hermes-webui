@@ -6311,9 +6311,22 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     # ``s.source IS NOT NULL`` — and #4385's cron materialization stays intact),
     # so this closes the new path without moving the old one.
     if cli_meta.get("exact_id_fallback"):
-        if _session_index_marks_was_webui(sid) or _session_deleted_tombstone_marks_was_webui(sid):
+        # The index mark stays source-blind (#2782): an id the session index
+        # still marks as WebUI-owned is never re-imported from state.db. The
+        # durable delete tombstone, however, only refuses a row the WebUI owns —
+        # source webui/fork, or blank for a stale URL whose row is gone. A
+        # foreign-source row that carries a tombstone (a WebUI delete of an
+        # imported session whose state.db row the external writer later
+        # re-created) must stay usable rather than self-heal to a 404 (#5504).
+        # Same predicate as ``_claim_or_synthesize_cli_session`` so the two
+        # admission paths cannot drift apart.
+        _fallback_source = _state_db_session_source(sid)
+        if _session_index_marks_was_webui(sid) or (
+            _session_deleted_tombstone_marks_was_webui(sid)
+            and _fallback_source in ("", "webui", "fork")
+        ):
             raise KeyError(sid)
-        if not _is_claimable_cli_source(cli_meta, _state_db_session_source(sid))[0]:
+        if not _is_claimable_cli_source(cli_meta, _fallback_source)[0]:
             raise KeyError(sid)
 
     # Preserve source metadata fields
@@ -18989,9 +19002,17 @@ def handle_post(handler, parsed) -> bool:
             # ``import_cli_session`` write path. A deleted WebUI session stays
             # 404 so the client can self-heal (#2782). Scoped to fallback rows,
             # like the materialize branch above.
+            # Same source-aware predicate as the materialize branch above and
+            # ``_claim_or_synthesize_cli_session``: the index mark is source-blind
+            # (#2782), while the durable delete tombstone only refuses a
+            # WebUI-owned row (source webui/fork, or blank for a stale URL whose
+            # row is gone) so a restored local session stays archivable (#5504).
             if cli_meta.get("exact_id_fallback") and (
                 _session_index_marks_was_webui(sid)
-                or _session_deleted_tombstone_marks_was_webui(sid)
+                or (
+                    _session_deleted_tombstone_marks_was_webui(sid)
+                    and _state_db_session_source(sid) in ("", "webui", "fork")
+                )
             ):
                 return bad(handler, "Session not found", 404)
             # Delegated subagent children (#5307) are view-only and owned by the
