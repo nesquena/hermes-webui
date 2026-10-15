@@ -1019,7 +1019,8 @@ def test_runtime_dotenv_reload_refreshes_the_deployment_snapshot(monkeypatch, tm
     named profile used to keep the import-time snapshot values and authenticate
     with the stale credential (re-gate: the local receiver accepted the updated
     key and rejected the old one). A second reload must also drop keys the new
-    dotenv no longer defines.
+    dotenv no longer defines. The whole environment preimage is restored around
+    the mutation window, so the synthetic values cannot leak into later tests.
     """
     from api import config, gateway_chat
     import api.profiles as profiles
@@ -1048,46 +1049,45 @@ def test_runtime_dotenv_reload_refreshes_the_deployment_snapshot(monkeypatch, tm
     monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
     monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", {})
 
-    pre_env = {key: os.environ.get(key) for key in reload_keys}
+    # Restore the full environment preimage, not just the three reload keys:
+    # _reload_dotenv() also writes and clears the alias spelling and can drop
+    # other previously tracked keys, so a partial restore leaks into later tests.
     pre_loaded_keys = set(profiles._loaded_profile_env_keys)
-    for key in reload_keys:
-        os.environ.pop(key, None)
-    try:
-        # Runtime reload: the process profile's .env now defines the new
-        # endpoint, key and runs flag.
-        (tmp_path / ".env").write_text(
-            "HERMES_WEBUI_GATEWAY_BASE_URL=http://new-gw.test\n"
-            "HERMES_WEBUI_GATEWAY_API_KEY=new-key\n"
-            "HERMES_WEBUI_GATEWAY_USE_RUNS_API=1\n",
-            encoding="utf-8",
-        )
-        profiles._reload_dotenv(tmp_path)
-
-        settings = gateway_chat._gateway_request_settings_for_session(
-            SimpleNamespace(profile="analyst")
-        )
-        assert settings[2] == "http://new-gw.test"
-        assert settings[3] == "new-key"
-        assert settings[5] is True
-
-        # A second reload must drop keys the new dotenv no longer defines.
-        (tmp_path / ".env").write_text(
-            "HERMES_WEBUI_GATEWAY_BASE_URL=http://newer-gw.test\n",
-            encoding="utf-8",
-        )
-        profiles._reload_dotenv(tmp_path)
-
-        refreshed = gateway_chat._GATEWAY_DEPLOYMENT_ENV
-        assert refreshed.get("HERMES_WEBUI_GATEWAY_BASE_URL") == "http://newer-gw.test"
-        assert "HERMES_WEBUI_GATEWAY_API_KEY" not in refreshed
-        assert "HERMES_WEBUI_GATEWAY_USE_RUNS_API" not in refreshed
-    finally:
-        for key, value in pre_env.items():
-            if value is None:
+    with _restored_process_env():
+        try:
+            for key in reload_keys:
                 os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
-        profiles._loaded_profile_env_keys = pre_loaded_keys
+
+            # Runtime reload: the process profile's .env now defines the new
+            # endpoint, key and runs flag.
+            (tmp_path / ".env").write_text(
+                "HERMES_WEBUI_GATEWAY_BASE_URL=http://new-gw.test\n"
+                "HERMES_WEBUI_GATEWAY_API_KEY=new-key\n"
+                "HERMES_WEBUI_GATEWAY_USE_RUNS_API=1\n",
+                encoding="utf-8",
+            )
+            profiles._reload_dotenv(tmp_path)
+
+            settings = gateway_chat._gateway_request_settings_for_session(
+                SimpleNamespace(profile="analyst")
+            )
+            assert settings[2] == "http://new-gw.test"
+            assert settings[3] == "new-key"
+            assert settings[5] is True
+
+            # A second reload must drop keys the new dotenv no longer defines.
+            (tmp_path / ".env").write_text(
+                "HERMES_WEBUI_GATEWAY_BASE_URL=http://newer-gw.test\n",
+                encoding="utf-8",
+            )
+            profiles._reload_dotenv(tmp_path)
+
+            refreshed = gateway_chat._GATEWAY_DEPLOYMENT_ENV
+            assert refreshed.get("HERMES_WEBUI_GATEWAY_BASE_URL") == "http://newer-gw.test"
+            assert "HERMES_WEBUI_GATEWAY_API_KEY" not in refreshed
+            assert "HERMES_WEBUI_GATEWAY_USE_RUNS_API" not in refreshed
+        finally:
+            profiles._loaded_profile_env_keys = pre_loaded_keys
 
 
 def test_worker_mirrors_never_rewrite_the_deployment_snapshot(monkeypatch, tmp_path):
