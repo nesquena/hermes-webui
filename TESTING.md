@@ -278,7 +278,10 @@ result, and final-answer rows, so the local assistant position is not a saved
 row identity. If the exchange cannot be confirmed, regeneration stops without
 replacing the recovered transcript. A full response that establishes
 ineligibility must not cause repeated refreshes. Normal settlement does not
-fetch full history.
+fetch full history. Answer matching ignores trailing whitespace without
+changing saved or displayed content. If an upload or expanded command leaves
+different optimistic and saved user text, the guard refuses regeneration until
+the canonical transcript is reloaded; it does not guess the turn's identity.
 
 Run `./scripts/test.sh -q tests/test_issue5720_reasoning_owner.py tests/test_metadata_cached_authority.py tests/test_issue6611_regenerate_browser.py`
 for these recovery cases. Also verify two consecutive completions: when the

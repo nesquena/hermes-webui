@@ -4843,7 +4843,7 @@ async function _ensureAllMessagesLoaded(options) {
       const liveFinalSegment=String(expectedTurn.finalSegment||'');
       if(!savedAnswer||!(liveFinalSegment
         ?savedAnswer===liveFinalSegment
-        :liveAnswer.endsWith(savedAnswer))) return;
+        :liveAnswer.trimEnd().endsWith(savedAnswer))) return;
     }
     // Bump the generation BEFORE the wholesale replace so any racing
     // prefetch (whose snapshot was taken before this call's mutex

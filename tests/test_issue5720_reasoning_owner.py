@@ -443,6 +443,20 @@ def test_regeneration_refreshes_authority_after_missing_terminal_snapshot(snapsh
 
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 @pytest.mark.parametrize("snapshot", ["absent", "invalid"])
+def test_regeneration_preserves_trailing_answer_whitespace(snapshot):
+    result = _run_reasoning_scene(
+        reasoning_burst=True,
+        lifecycle_case=f"done_regeneration_newline_{snapshot}",
+    )
+
+    assert len(result["api_requests"]) == 1
+    assert result["start_calls"] == [["sid-1", "saved-revision"]]
+    assert result["messages"][-1]["content"] == "Current streamed answer\n"
+    assert result["revision"] == "saved-revision"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+@pytest.mark.parametrize("snapshot", ["absent", "invalid"])
 @pytest.mark.parametrize("offset", [0, 71])
 def test_regeneration_matches_current_user_across_canonical_tool_rounds(
     monkeypatch, snapshot, offset
@@ -1155,7 +1169,10 @@ if(deferredFrames){
           await source.emit('reasoning',{text:'Current streamed reasoning'});
           await source.emit('tool',{name:'read_file',tid:'current-tool',args:{path:'notes.txt'}});
           await source.emit('tool_complete',{name:'read_file',tid:'current-tool',snippet:'contents'});
-          if(!lifecycle.includes('_reasoning_only_')) await source.emit('token',{text:'Current streamed answer'});
+          if(!lifecycle.includes('_reasoning_only_')){
+            const answerText=lifecycle.includes('_newline_')?'Current streamed answer\n':'Current streamed answer';
+            await source.emit('token',{text:answerText});
+          }
         }
         let terminal={usage:{input_tokens:4,output_tokens:3,estimated_cost:0.5,cache_read_tokens:7,cache_write_tokens:8,duration_seconds:1,tps:2}};
         if(lifecycle.endsWith('_invalid')) terminal.session={session_id:'sid-1',messages:'invalid',regeneration_revision:'unrelated-revision'};
