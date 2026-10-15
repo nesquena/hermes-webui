@@ -253,19 +253,26 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None):
     deployment = _GATEWAY_DEPLOYMENT_ENV
     merged = dict(deployment)
     merged.update(profile_environ)
-    # The canonical and legacy Gateway key names are one precedence group, and
-    # the launcher's explicit canonical key outranks a profile's alias on the
-    # shared Gateway URL (docs/advanced-chat-setup.md). Exact-key overlay alone
-    # let a profile's API_SERVER_KEY — the Agent clones the root .env, whose
-    # alias is its own key, into every new profile — replace the launcher
-    # credential, and the shared receiver answered 401. Resolve the group in
-    # that order, then normalize both spellings so either downstream reader
-    # sees the same choice.
+    # The canonical and legacy Gateway key names are one precedence group. A
+    # profile that explicitly selects its own Gateway URL owns that URL's
+    # credential group: its canonical/alias choice resolves before any
+    # deployment fallback. On the shared/inherited URL the launcher's explicit
+    # canonical key outranks a profile's alias (docs/advanced-chat-setup.md):
+    # exact-key overlay alone let a profile's API_SERVER_KEY — the Agent clones
+    # the root .env, whose alias is its own key, into every new profile —
+    # replace the launcher credential, and the shared receiver answered 401.
+    # Resolve the group in that order, then normalize both spellings so either
+    # downstream reader sees the same choice.
     profile_canonical = str(profile_environ.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     launcher_canonical = str(deployment.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     profile_alias = str(profile_environ.get("API_SERVER_KEY") or "").strip()
     shared_alias = str(deployment.get("API_SERVER_KEY") or "").strip()
-    resolved_key = profile_canonical or launcher_canonical or profile_alias or shared_alias
+    profile_url = str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    deployment_url = str(deployment.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    if profile_url and profile_url != deployment_url:
+        resolved_key = profile_canonical or profile_alias or launcher_canonical or shared_alias
+    else:
+        resolved_key = profile_canonical or launcher_canonical or profile_alias or shared_alias
     if resolved_key:
         merged[_WEBUI_GATEWAY_API_KEY_ENV] = resolved_key
         merged["API_SERVER_KEY"] = resolved_key
