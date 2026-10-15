@@ -2658,10 +2658,20 @@ $('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
 function _applySessionContextMetadataUpdate(data){
   if(!S.session||!data||!data.session)return;
+  if(data.session.session_id && S.session.session_id && String(data.session.session_id) !== String(S.session.session_id)) return;
   S.session.context_length=data.session.context_length||0;
   S.session.threshold_tokens=data.session.threshold_tokens||0;
   S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
   S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
+  if('last_used_model' in data.session){
+    S.session.last_used_model=data.session.last_used_model||null;
+  }
+  if('gateway_routing' in data.session){
+    S.session.gateway_routing=data.session.gateway_routing||null;
+  }
+  if('gateway_routing_history' in data.session){
+    S.session.gateway_routing_history=data.session.gateway_routing_history||[];
+  }
   if(typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
@@ -2706,6 +2716,12 @@ $('modelSelect').onchange=async()=>{
     return;
   }
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
+  const routeChanged = String(S.session.model || '') !== String(modelState.model || '')
+    || String(S.session.model_provider || '') !== String(modelState.model_provider || '');
+  if(routeChanged){
+    S.session.last_used_model = null;
+    S.session.gateway_routing = null;
+  }
   S.session.model=modelState.model;
   S.session.model_provider=modelState.model_provider||null;
   if(typeof syncModelChip==='function') syncModelChip();
@@ -2715,18 +2731,23 @@ $('modelSelect').onchange=async()=>{
   if(typeof showToast==='function'){
     showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
   }
-  const data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
-    session_id:S.session.session_id,
-    workspace:S.session.workspace,
-    model:modelState.model,
-    model_provider:modelState.model_provider||null,
+  S._modelUpdateSeq = (S._modelUpdateSeq || 0) + 1;
+  const updateSeq = S._modelUpdateSeq;
+  const targetSession = S.session;
+  const data = await api('/api/session/update', {method: 'POST', body: JSON.stringify({
+    session_id: S.session.session_id,
+    workspace: S.session.workspace,
+    model: modelState.model,
+    model_provider: modelState.model_provider || null,
   })});
+  if (S.session !== targetSession || S._modelUpdateSeq !== updateSeq) return;
   // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
   // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
   // flow loses the explicit-pick signal before /api/chat/start runs and the server
   // re-reverts a cross-family pick (the #3737 bug, Codex catch). send() clears it
   // after reading a matching pending pick. (#3739/#3737)
   _applySessionContextMetadataUpdate(data);
+  if (typeof syncModelChip === 'function') syncModelChip();
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);
@@ -2893,6 +2914,21 @@ $('msg').addEventListener('keydown',e=>{
   }
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
+// True when Enter belongs to the focused element rather than to a page-level
+// shortcut: text entry, and anything a keyboard user activates with Enter
+// (buttons, links, menu rows, tabs, options, ...). The approval shortcut below
+// uses it so Enter never approves a pending action out from under a control.
+const _ENTER_CONTROL_ROLES=/^(button|link|menuitem|menuitemradio|menuitemcheckbox|option|tab|switch|checkbox|radio|combobox|treeitem|textbox|searchbox|spinbutton|slider)$/;
+function _enterBelongsToFocusedControl(el){
+  if(!el||el===document.body||el===document.documentElement) return false;
+  if(el.isContentEditable) return true;
+  const tag=el.tagName||'';
+  if(tag==='TEXTAREA'||tag==='INPUT'||tag==='SELECT'||tag==='BUTTON'||tag==='SUMMARY') return true;
+  if(tag==='A'&&el.hasAttribute('href')) return true;
+  const role=(el.getAttribute&&el.getAttribute('role'))||'';
+  return _ENTER_CONTROL_ROLES.test(role);
+}
+
 document.addEventListener('keydown',async e=>{
   // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
   // Skip when typing in an input/textarea/contenteditable so text-edit
@@ -2919,12 +2955,19 @@ document.addEventListener('keydown',async e=>{
     if(composer){e.preventDefault();composer.focus();}
     return;
   }
-  // Enter on approval card = Allow once (when a button inside the card is focused or
-  // card is visible and focus is not on an input/textarea/select)
+  // Enter while the approval card is on screen = Allow once, but only when no
+  // control has focus. A focused button, link or menu item (one of the card's own
+  // buttons included) keeps its own Enter: Enter on "Deny" denies, and Enter on the
+  // ⋮ trigger, a menu row or the project picker activates that control instead of
+  // approving the pending action and cancelling the key (#8130).
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
     const card=$('approvalCard');
-    const tag=(document.activeElement||{}).tagName||'';
-    if(card&&card.classList.contains('visible')&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
+    // Judge the element the key was pressed on (e.target), not document.activeElement:
+    // this listener runs after the target's own handlers, and a control that blurs or
+    // removes itself on Enter (queued-message editor, chip rename, "Show earlier steps")
+    // leaves the body focused by now. A handler that already consumed Enter
+    // (defaultPrevented) owns it too.
+    if(card&&card.classList.contains('visible')&&!e.defaultPrevented&&!_enterBelongsToFocusedControl(e.target)){
       e.preventDefault();
       if(typeof respondApproval==='function') respondApproval('once');
       return;

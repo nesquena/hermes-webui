@@ -40,6 +40,11 @@ const _pendingTitleUpdates=new Map();
 const _carryForwardEphemeralTurnFields=(_, next)=>next;
 const _filterRecoveryControlMessages=messages=>messages;
 const _attachProjectedAnchorSceneToLastAssistant=()=>{};
+// #6112 settle guard (PR #7836) runs inside the completion block; stub it like
+// the other transcript helpers so this test stays about tab-state sync.
+const _preSettle=[];
+const _doneFinalAnswer='';
+const _adoptDoneSnapshotMessages=(prev,next)=>({messages:next});
 const preserveVisibleOnShorterTerminalSnapshot=false;
 const stored=new Map([['hermes-webui-session','A']]);
 const urls=[];
