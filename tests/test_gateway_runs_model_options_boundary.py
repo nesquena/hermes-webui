@@ -1314,6 +1314,11 @@ def test_owner_alias_only_gateway_key_owns_the_group_without_a_launcher_canonica
         (None, None),
         ("sparse", ""),
         ("cloned", "API_SERVER_KEY=root-copied-key\n"),
+        (
+            "cloned-slash",
+            "HERMES_WEBUI_GATEWAY_BASE_URL=http://shared-gw.test/\n"
+            "API_SERVER_KEY=root-copied-key\n",
+        ),
     ),
 )
 def test_launcher_gateway_key_wins_on_the_shared_url(
@@ -1336,7 +1341,7 @@ def test_launcher_gateway_key_wins_on_the_shared_url(
     (tmp_path / ".env").write_text(
         "API_SERVER_KEY=root-copied-key\n", encoding="utf-8"
     )
-    for name in ("sparse", "cloned"):
+    for name in ("sparse", "cloned", "cloned-slash"):
         (tmp_path / "profiles" / name).mkdir(parents=True)
     if profile_env_body is not None:
         (tmp_path / "profiles" / profile_name / ".env").write_text(

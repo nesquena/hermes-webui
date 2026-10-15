@@ -267,8 +267,12 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None):
     launcher_canonical = str(deployment.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     profile_alias = str(profile_environ.get("API_SERVER_KEY") or "").strip()
     shared_alias = str(deployment.get("API_SERVER_KEY") or "").strip()
-    profile_url = str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
-    deployment_url = str(deployment.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    profile_url = (
+        str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip().rstrip("/")
+    )
+    deployment_url = (
+        str(deployment.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip().rstrip("/")
+    )
     if profile_url and profile_url != deployment_url:
         resolved_key = profile_canonical or profile_alias or launcher_canonical or shared_alias
     else:
