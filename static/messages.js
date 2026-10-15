@@ -5,7 +5,7 @@ const _AGENT_COMMAND_ALIASES = {
   'credits': 'credits'
 };
 const _AGENT_COMMANDS_RUN_ON_WEBUI = new Set([
-  'reload-mcp','reload-skills','codex-runtime','credits',
+  'reload-mcp','reload-skills','codex-runtime','credits','skills','memory',
   'reload_mcp','reload_skills','codex_runtime','credits'
 ]);
 function _markSessionViewed(sid, messageCount) {
@@ -1589,6 +1589,12 @@ async function send(){
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
         if(!S.session){await newSession();}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+        // Write-approval replies describe the issuing profile's pending writes: capture
+        // the owner now and withhold the reply if the conversation/profile changed.
+        const _writeApprovalCmd=(_agentCmdName==='memory'||_agentCmdName==='skills')
+          &&typeof _skillsResponseOwnerStillValid==='function';
+        const _ownerSid=(S.session&&S.session.session_id)||null;
+        const _ownerProfile=S.activeProfile||'default';
         let _agentOutput='(no output)';
         try{
           _agentOutput=typeof executeAgentCommand==='function'
@@ -1596,6 +1602,10 @@ async function send(){
             : 'Agent command runtime unavailable in WebUI.';
         }catch(e){
           _agentOutput=`Agent command error: ${e&&e.message||e}`;
+        }
+        if(_writeApprovalCmd&&!_skillsResponseOwnerStillValid(_ownerSid,_ownerProfile)){
+          if(typeof showToast==='function') showToast(`/${_agentCmdName} write-approval command finished after you switched conversations; reopen the original conversation and run /${_agentCmdName} pending to check its result.`,4000,'warning');
+          return;
         }
         S.messages.push({role:'assistant',content:String(_agentOutput||'(no output)'),_ts:Date.now()/1000});
         renderMessages();
