@@ -313,9 +313,14 @@ Run it locally with `python tests/browser_session_row_activation.py`.
 
 Ordinary terminal SSE snapshots carry up to 30 renderable messages, with a
 300-raw-row backstop and explicit raw offsets and total counts. The persisted
-transcript remains complete. Settlement must preserve an already-loaded prefix,
-pagination coordinates, tool metadata, and the final answer, including direct
-compression continuations. Gateway cancellation retains its existing bounded
+transcript remains complete. Settlement preserves an already-loaded prefix
+only when unique stable row identities prove the overlap. A stream-owned
+pending user can be replaced within a proven overlap, but neither that row
+alone nor a parent-session link proves alignment. Shifted, adjacent, or
+unidentifiable windows reset to the authoritative bounded window; earlier
+history remains available through pagination. This also applies to compression
+continuations. The merge retains pagination coordinates, tool metadata, and
+the final answer. Gateway cancellation retains its existing bounded
 session-recovery request.
 
 Run `./scripts/test.sh -q tests/test_terminal_session_tail_and_merge.py` for
