@@ -1501,6 +1501,119 @@ def test_dedicated_profile_url_without_profile_key_sends_no_credential(
     assert "Authorization" not in captured["headers"]
 
 
+def test_shared_default_url_without_a_deployment_url_keeps_the_launcher_key(
+    monkeypatch, tmp_path
+):
+    """An unset deployment URL still means the built-in default receiver.
+
+    The launcher may supply only the Gateway key and leave the URL to the
+    request path's default (``http://127.0.0.1:8642``). A named profile that
+    spells that same default URL without a key of its own is on the shared
+    receiver and must keep the launcher credential — treating the missing
+    deployment URL as a different receiver removed both key names and the
+    shared Gateway lost its key (re-gate on ``f7bb9a652``).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    profile_home = tmp_path / "profiles" / "default-url"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://127.0.0.1:8642\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert "HERMES_WEBUI_GATEWAY_BASE_URL" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "launcher-key"
+        _capture_gateway_wire_body(
+            None,
+            session_profile="default-url",
+            real_profile_scope=True,
+            gateway_env={
+                "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+            },
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://127.0.0.1:8642/v1/runs"
+    assert captured["headers"]["Authorization"] == "Bearer launcher-key"
+
+
+def test_unparseable_gateway_url_does_not_break_request_settings(monkeypatch):
+    """A spelling ``urlsplit`` rejects must not raise out of the overlay.
+
+    ``_gateway_endpoint_identity`` parses both URLs to pick shared vs
+    dedicated. An unparseable spelling (malformed IPv6 brackets) used to raise
+    from ``urlsplit`` and fail the whole request settings resolution before
+    the request path could report the bad URL — and a malformed deployment URL
+    broke even a named profile whose own dedicated URL was valid.
+    """
+    from api import gateway_chat
+
+    # A valid dedicated profile URL still resolves with its own credential
+    # group even when the deployment URL cannot be parsed.
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://[::1",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+        },
+    )
+    merged = gateway_chat._gateway_request_environ(
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://analyst-gw.test",
+            "API_SERVER_KEY": "analyst-key",
+        }
+    )
+    assert merged["HERMES_WEBUI_GATEWAY_BASE_URL"] == "http://analyst-gw.test"
+    assert merged["HERMES_WEBUI_GATEWAY_API_KEY"] == "analyst-key"
+    assert merged["API_SERVER_KEY"] == "analyst-key"
+
+    # The same unparseable spelling on both sides keeps the historical
+    # stripped-string equality: the shared branch still resolves a key.
+    merged = gateway_chat._gateway_request_environ(
+        {"HERMES_WEBUI_GATEWAY_BASE_URL": "http://[::1"}
+    )
+    assert merged["HERMES_WEBUI_GATEWAY_API_KEY"] == "deployment-key"
+
+    # An unparseable profile spelling stays distinct from a parseable
+    # deployment URL: the deployment credential is not forwarded.
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+        },
+    )
+    merged = gateway_chat._gateway_request_environ(
+        {"HERMES_WEBUI_GATEWAY_BASE_URL": "http://[::1"}
+    )
+    assert "HERMES_WEBUI_GATEWAY_API_KEY" not in merged
+    assert "API_SERVER_KEY" not in merged
+
+
 @pytest.mark.parametrize(
     ("apply_name", "body"),
     (

@@ -199,6 +199,11 @@ _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
+# Built-in Gateway URL the request path falls back to when neither the
+# environment nor the config sets one (``_gateway_base_url``). The
+# shared-vs-dedicated endpoint comparison uses the same default, so an unset
+# deployment URL still identifies the default receiver.
+_GATEWAY_DEFAULT_BASE_URL = "http://127.0.0.1:8642"
 _GATEWAY_DEPLOYMENT_ENV_KEYS = (
     _WEBUI_GATEWAY_BASE_URL_ENV,
     _WEBUI_GATEWAY_API_KEY_ENV,
@@ -249,7 +254,13 @@ def refresh_gateway_deployment_env(environ: dict[str, str] | None = None) -> Non
 def _gateway_endpoint_identity(raw_url: str) -> tuple[str, str, int | None, str]:
     """Return the normalized network endpoint and path for a Gateway URL."""
     value = str(raw_url or "").strip()
-    parsed = urllib.parse.urlsplit(value)
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        # An unparseable spelling (malformed IPv6 brackets) stays distinct
+        # without turning profile resolution into a new failure point; the
+        # eventual request path reports the bad URL.
+        return value.rstrip("/"), "", None, ""
     scheme = parsed.scheme.lower()
     try:
         port = parsed.port
@@ -290,10 +301,16 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None):
     shared_alias = str(deployment.get("API_SERVER_KEY") or "").strip()
     profile_url = str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
     deployment_url = str(deployment.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    # An unset deployment URL still means the request path's built-in default
+    # (``_gateway_base_url``): a profile that spells that same default URL is
+    # on the shared receiver and keeps the deployment credential. Comparing
+    # the raw empty value made the default receiver look dedicated, both key
+    # names were removed, and the shared Gateway lost its key.
+    effective_deployment_url = deployment_url or _GATEWAY_DEFAULT_BASE_URL
     dedicated_url = bool(
         profile_url
         and _gateway_endpoint_identity(profile_url)
-        != _gateway_endpoint_identity(deployment_url)
+        != _gateway_endpoint_identity(effective_deployment_url)
     )
     if dedicated_url:
         # A profile-selected endpoint must never inherit the deployment
@@ -447,9 +464,9 @@ def _gateway_base_url(config_data=None, environ: dict[str, str] | None = None) -
     raw = str(
         source.get(_WEBUI_GATEWAY_BASE_URL_ENV)
         or cfg.get("webui_gateway_base_url")
-        or "http://127.0.0.1:8642"
+        or _GATEWAY_DEFAULT_BASE_URL
     ).strip()
-    return raw.rstrip("/") or "http://127.0.0.1:8642"
+    return raw.rstrip("/") or _GATEWAY_DEFAULT_BASE_URL
 
 
 def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
