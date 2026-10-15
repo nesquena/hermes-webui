@@ -467,6 +467,19 @@ def get_config_snapshot() -> dict:
     """Return a request-owned config snapshot captured under the cache lock."""
     with _cfg_lock:
         config_path = _get_config_path()
+        # Refresh the process cache for this path FIRST, exactly as the
+        # unscoped read does: module-level ``cfg`` readers reached from the
+        # same scope (resolve_model_alias_runtime -> _configured_model_alias_entries,
+        # resolve_model_provider) rely on that side effect to see the active
+        # profile's config.
+        try:
+            current_mtime = config_path.stat().st_mtime
+        except OSError:
+            current_mtime = 0.0
+        path_changed = _cfg_path != config_path
+        mtime_stale = current_mtime != _cfg_mtime
+        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+            _refresh_config_cache(config_path)
         scoped_profile_read = bool(
             getattr(_thread_ctx, "block_process_env_fallback", False)
         )
@@ -484,14 +497,6 @@ def get_config_snapshot() -> dict:
                 scoped_cfg = {}
             _apply_config_defaults(scoped_cfg)
             return copy.deepcopy(scoped_cfg)
-        try:
-            current_mtime = config_path.stat().st_mtime
-        except OSError:
-            current_mtime = 0.0
-        path_changed = _cfg_path != config_path
-        mtime_stale = current_mtime != _cfg_mtime
-        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
-            _refresh_config_cache(config_path)
         try:
             active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
         except NameError:

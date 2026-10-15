@@ -210,11 +210,35 @@ _GATEWAY_DEPLOYMENT_ENV_KEYS = (
 # replace an operator-configured Gateway with localhost/legacy mode. Keeping a
 # dedicated snapshot also avoids reading a different profile's temporary
 # process-env mirror from a concurrent detached worker.
-_GATEWAY_DEPLOYMENT_ENV = {
-    key: value
-    for key in _GATEWAY_DEPLOYMENT_ENV_KEYS
-    if (value := os.environ.get(key)) is not None
-}
+def _capture_gateway_deployment_env() -> dict[str, str]:
+    """Capture the launcher-owned Gateway settings from the process env."""
+    return {
+        key: value
+        for key in _GATEWAY_DEPLOYMENT_ENV_KEYS
+        if (value := os.environ.get(key)) is not None
+    }
+
+
+_GATEWAY_DEPLOYMENT_ENV = _capture_gateway_deployment_env()
+
+
+def refresh_gateway_deployment_env() -> None:
+    """Re-capture the deployment snapshot after a permanent dotenv reload.
+
+    ``api.profiles._reload_dotenv()`` permanently re-applies the process
+    profile's dotenv to ``os.environ`` (startup, process-wide profile switch,
+    onboarding apply). Without this refresh the import-time snapshot goes
+    stale: the default profile reads the new endpoint/key/runs flag live,
+    while every sparse named profile keeps serving the pre-reload values.
+
+    The replacement is a single rebind, so a concurrent reader always sees
+    one complete snapshot — the old values or the new ones, never a
+    half-updated dict. Only the permanent reload path refreshes; temporary
+    worker-environment mirrors overlay the snapshot per request
+    (``_gateway_request_environ``) and never rewrite it.
+    """
+    global _GATEWAY_DEPLOYMENT_ENV
+    _GATEWAY_DEPLOYMENT_ENV = _capture_gateway_deployment_env()
 
 
 def _gateway_request_environ(profile_environ: dict[str, str] | None):

@@ -1708,6 +1708,32 @@ def _set_hermes_home(home: Path):
         logger.debug("Failed to patch cron.scheduler module")
 
 
+def _refresh_gateway_deployment_snapshot() -> None:
+    """Refresh gateway_chat's deployment snapshot after a permanent dotenv reload.
+
+    ``api.gateway_chat`` captures the launcher-owned Gateway settings once at
+    import; a runtime ``_reload_dotenv()`` (onboarding apply, process-wide
+    switch) changes the process env underneath it, and without this refresh
+    every sparse named profile keeps serving the stale endpoint/key/runs flag
+    while the default profile already reads the new ones. A missing ``.env``
+    also counts as a permanent change: the previous profile's keys were just
+    cleared above.
+
+    Only an already-imported ``api.gateway_chat`` is refreshed: a
+    not-yet-imported module captures the then-current env at import anyway,
+    and importing it from here would add a module-load cycle. Temporary
+    worker-environment mirrors never call this — only the permanent reload
+    path does.
+    """
+    gateway_chat = sys.modules.get("api.gateway_chat")
+    if gateway_chat is None:
+        return
+    try:
+        gateway_chat.refresh_gateway_deployment_env()
+    except Exception:
+        logger.debug("Failed to refresh the gateway deployment snapshot", exc_info=True)
+
+
 def _reload_dotenv(home: Path):
     """Load .env from the profile dir into os.environ with profile isolation.
 
@@ -1724,6 +1750,7 @@ def _reload_dotenv(home: Path):
 
     env_path = home / '.env'
     if not env_path.exists():
+        _refresh_gateway_deployment_snapshot()
         return
     try:
         loaded_keys: set[str] = set()
@@ -1750,6 +1777,7 @@ def _reload_dotenv(home: Path):
     except Exception:
         _loaded_profile_env_keys = set()
         logger.debug("Failed to reload dotenv from %s", env_path)
+    _refresh_gateway_deployment_snapshot()
 
 
 def init_profile_state() -> None:

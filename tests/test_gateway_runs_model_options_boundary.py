@@ -1011,6 +1011,114 @@ def test_named_profile_gateway_settings_inherit_operator_defaults(
     assert settings[5] is True
 
 
+def test_runtime_dotenv_reload_refreshes_the_deployment_snapshot(monkeypatch, tmp_path):
+    """A runtime _reload_dotenv() must refresh the deployment Gateway snapshot.
+
+    Onboarding apply writes the new endpoint, key and runs flag and reloads the
+    process profile's dotenv. The default profile reads them live, but a sparse
+    named profile used to keep the import-time snapshot values and authenticate
+    with the stale credential (re-gate: the local receiver accepted the updated
+    key and rejected the old one). A second reload must also drop keys the new
+    dotenv no longer defines.
+    """
+    from api import config, gateway_chat
+    import api.profiles as profiles
+
+    reload_keys = (
+        "HERMES_WEBUI_GATEWAY_BASE_URL",
+        "HERMES_WEBUI_GATEWAY_API_KEY",
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API",
+    )
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text("", encoding="utf-8")
+
+    # The import-time snapshot holds the pre-reload deployment values.
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://old-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "old-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: {})
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+
+    pre_env = {key: os.environ.get(key) for key in reload_keys}
+    pre_loaded_keys = set(profiles._loaded_profile_env_keys)
+    for key in reload_keys:
+        os.environ.pop(key, None)
+    try:
+        # Runtime reload: the process profile's .env now defines the new
+        # endpoint, key and runs flag.
+        (tmp_path / ".env").write_text(
+            "HERMES_WEBUI_GATEWAY_BASE_URL=http://new-gw.test\n"
+            "HERMES_WEBUI_GATEWAY_API_KEY=new-key\n"
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API=1\n",
+            encoding="utf-8",
+        )
+        profiles._reload_dotenv(tmp_path)
+
+        settings = gateway_chat._gateway_request_settings_for_session(
+            SimpleNamespace(profile="analyst")
+        )
+        assert settings[2] == "http://new-gw.test"
+        assert settings[3] == "new-key"
+        assert settings[5] is True
+
+        # A second reload must drop keys the new dotenv no longer defines.
+        (tmp_path / ".env").write_text(
+            "HERMES_WEBUI_GATEWAY_BASE_URL=http://newer-gw.test\n",
+            encoding="utf-8",
+        )
+        profiles._reload_dotenv(tmp_path)
+
+        refreshed = gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        assert refreshed.get("HERMES_WEBUI_GATEWAY_BASE_URL") == "http://newer-gw.test"
+        assert "HERMES_WEBUI_GATEWAY_API_KEY" not in refreshed
+        assert "HERMES_WEBUI_GATEWAY_USE_RUNS_API" not in refreshed
+    finally:
+        for key, value in pre_env.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        profiles._loaded_profile_env_keys = pre_loaded_keys
+
+
+def test_worker_mirrors_never_rewrite_the_deployment_snapshot(monkeypatch, tmp_path):
+    """Temporary worker mirrors must not leak into the deployment snapshot.
+
+    ``profile_env_for_background_worker`` mirrors a named profile's env into
+    ``os.environ`` for the worker body only. The snapshot exists so request
+    lanes never read such a mirror; only the permanent ``_reload_dotenv`` path
+    may rewrite it, so the mirror body and its exit leave it untouched.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://analyst-mirror.test\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=analyst-mirror-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+    }
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", dict(deployment))
+
+    with profiles.profile_env_for_background_worker("analyst", "test mirror"):
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
+
+    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
+
+
 def test_named_profile_snapshot_expands_key_from_profile_env(monkeypatch, tmp_path):
     """Raw config references expand inside the read-only profile scope."""
     from api import config
@@ -1036,6 +1144,62 @@ def test_named_profile_snapshot_expands_key_from_profile_env(monkeypatch, tmp_pa
         snapshot = config.get_config_snapshot()
 
     assert snapshot["model"]["api_key"] == "analyst-key"
+
+
+def test_scoped_snapshot_refreshes_the_shared_cache_for_inferred_providers(monkeypatch, tmp_path):
+    """A scoped read must refresh the shared cache before it returns.
+
+    ``_main_model_request_overrides`` infers a missing model provider through
+    ``resolve_model_provider``, which reads the module-level ``cfg``. The
+    scoped early return used to skip the cache refresh, so the inference ran
+    against another profile's cache and dropped ``service_tier: priority``
+    (re-gate item 2, api/config.py:480). Refresh-first keeps the inference on
+    the request's own profile.
+    """
+    from api import config
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / "config.yaml").write_text(
+        "model:\n"
+        "  default: gpt-5.5\n"
+        "  service_tier: priority\n"
+        "providers:\n"
+        "  openai:\n"
+        "    models:\n"
+        "      gpt-5.2-flash: {}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    # The shared cache currently holds another profile's config; its providers
+    # table cannot infer this model's provider, so a skipped refresh would
+    # resolve the wrong provider and drop the tier.
+    cache = {"model": {"provider": "openrouter", "default": "meta-llama/llama-3.1"}}
+    monkeypatch.setattr(config, "_cfg_cache", cache)
+    monkeypatch.setattr(config, "cfg", cache)
+    monkeypatch.setattr(config, "_cfg_path", None)
+    monkeypatch.setattr(config, "_cfg_mtime", 0.0)
+    monkeypatch.setattr(config, "_cfg_fingerprint", None)
+    # Pin the fast-mode leaf to the compatibility fallback so the assertion
+    # does not depend on whether the agent package (hermes_cli) is importable
+    # in this environment.
+    monkeypatch.setattr(
+        config,
+        "_resolve_main_model_fast_mode_overrides",
+        config._legacy_openai_service_tier_overrides,
+    )
+
+    with profiles.profile_scope_for_request_read("analyst"):
+        snapshot = config.get_config_snapshot()
+        _, inferred_provider, _ = config.resolve_model_provider("gpt-5.2-flash")
+        overrides = config._main_model_request_overrides(
+            snapshot, effective_model="gpt-5.2-flash"
+        )
+
+    assert inferred_provider == "openai"
+    assert overrides == {"service_tier": "priority"}
 
 
 def _snapshot_and_raced_cache():
