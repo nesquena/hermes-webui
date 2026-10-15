@@ -15,6 +15,7 @@ from tests.js_source_extract import extract_function
 STREAMING_SOURCE = Path("api/streaming.py").read_text(encoding="utf-8")
 GATEWAY_SOURCE = Path("api/gateway_chat.py").read_text(encoding="utf-8")
 MESSAGES_SOURCE = Path("static/messages.js").read_text(encoding="utf-8")
+SESSIONS_SOURCE = Path("static/sessions.js").read_text(encoding="utf-8")
 
 
 class _Session(SimpleNamespace):
@@ -321,6 +322,65 @@ assert.equal(apperror.eventMatchesCurrent,true);
 assert.deepEqual(apperror._terminalSession.messages.map(m=>m.id),merged.messages.map(m=>m.id));
 assert.equal(apperror._terminalSession.session_id,'after');
 assert.equal(apperror._terminalSession.parent_session_id,'before');
+console.log('ok');
+"""
+    assert _node(script) == "ok"
+
+
+def test_direct_continuation_adopts_a_valid_shorter_authoritative_window():
+    merge = extract_function(MESSAGES_SOURCE, "_applyEmbeddedTerminalSession")
+    cancel = _arrow(MESSAGES_SOURCE, "_applyCancelSessionPayload")
+    adopt = extract_function(SESSIONS_SOURCE, "_adoptRegenerationRevision")
+    script = f"""
+const assert=require('node:assert/strict');
+const _applyEmbeddedTerminalSession=eval('(' + {json.dumps(merge)} + ')');
+const _adoptRegenerationRevision=eval('(' + {json.dumps(adopt)} + ')');
+const applyCancel=eval('(' + {json.dumps(cancel)} + ')');
+const parentRows=Array.from({{length:201}},(_,i)=>({{id:i+1,role:i%2?'assistant':'user',content:`parent-${{i}}`}}));
+const parent={{session_id:'before',message_count:201,messages:parentRows}};
+const child={{session_id:'after',parent_session_id:'before',regeneration_revision:'child-revision',
+  _messages_offset:0,_messages_truncated:false,message_count:3,messages:[
+    {{id:9001,role:'user',content:'repeat'}},{{id:9002,role:'assistant',content:'same'}},{{id:9003,role:'user',content:'repeat'}}
+  ],tool_calls:[]}};
+const shorter=_applyEmbeddedTerminalSession(child,parent,parentRows,0,'stream-before');
+assert.ok(shorter,'a valid direct child must not be rejected because its window is shorter than its parent');
+assert.equal(shorter.session_id,'after'); assert.deepEqual(shorter.messages,child.messages);
+assert.equal(shorter.regeneration_revision,'child-revision');
+
+const mismatchedParent={{...parent,message_count:202}};
+const childWithoutTruncationFlag={{...child}}; delete childWithoutTruncationFlag._messages_truncated;
+const mismatched=_applyEmbeddedTerminalSession(childWithoutTruncationFlag,mismatchedParent,parentRows,0,'stream-before');
+assert.ok(mismatched,'parent-local count disagreement must not reject a structurally valid direct child');
+assert.equal(mismatched.session_id,'after'); assert.deepEqual(mismatched.messages,child.messages);
+
+const staleSameSession=_applyEmbeddedTerminalSession(
+  {{session_id:'same',message_count:3,_messages_offset:0,_messages_truncated:false,messages:child.messages}},
+  {{session_id:'same',message_count:201,messages:parentRows}},parentRows,0,
+);
+assert.equal(staleSameSession,null,'a shorter snapshot from the same session remains stale');
+const malformed=_applyEmbeddedTerminalSession(
+  {{...child,message_count:4}},parent,parentRows,0,'stream-before',
+);
+assert.equal(malformed,null,'a direct child with inconsistent window bounds remains malformed');
+const malformedFlag=_applyEmbeddedTerminalSession(
+  {{...child,_messages_truncated:true}},parent,parentRows,0,'stream-before',
+);
+assert.equal(malformedFlag,null,'inconsistent truncation metadata remains malformed');
+
+const S={{session:{{...parent}},messages:parentRows,activeStreamId:null}};
+const activeSid='before',streamId='stream-before'; let _oldestIdx=0,_messagesTruncated=false;
+const _carryForwardEphemeralTurnFields=(_old, incoming)=>incoming;
+const _attachProjectedAnchorSceneToLastAssistant=()=>{{}},_hydrateTodosFromSession=()=>{{}};
+const _isMessagePaneNearBottom=()=>true,_isMessageReaderUnpinned=()=>false,_messageUserUnpinned=false;
+const clearLiveToolCards=()=>{{}},assistantText='',removeThinking=()=>{{}},_markSessionViewed=()=>{{}},renderMessages=()=>{{}},scrollToBottom=()=>{{}};
+let storedSid=null,urlSid=null;
+const localStorage={{setItem:(key,value)=>{{if(key==='hermes-webui-session')storedSid=value;}}}};
+const _setActiveSessionUrl=sid=>{{urlSid=sid;}};
+assert.equal(applyCancel(child),true,'the production cancel settlement helper must adopt the shorter continuation');
+assert.equal(S.session.session_id,'after'); assert.equal(S.messages.length,3);
+assert.equal(S.session.regeneration_revision,'child-revision');
+assert.equal(storedSid,'after'); assert.equal(urlSid,'after');
+assert.equal(_oldestIdx,0); assert.equal(_messagesTruncated,false);
 console.log('ok');
 """
     assert _node(script) == "ok"

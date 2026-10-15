@@ -4508,11 +4508,11 @@ async function _loadOlderMessages() {
   if (!sid || !S.messages.length) return;
   if (_oldestIdx <= 0) { _messagesTruncated = false; return; }
   _loadingOlder = true;
-  // Snapshot the generation BEFORE we await. If S.messages is wholesale
-  // replaced while the request is in flight, the post-await check below
-  // bails out so we never prepend stale older messages onto a freshly
-  // rebuilt transcript (#1937).
+  // Snapshot the transcript view BEFORE we await. Generation can stay stable
+  // when terminal settlement adopts a bounded replacement, so the array
+  // reference and requested offset also belong to this paging request.
   const startGeneration = _messagesGeneration;
+  const requestedMessages = S.messages;
   const requestedBeforeOffset = _oldestIdx;
   try {
     // Two strategies, chosen by whether the growing tail window still fits under
@@ -4553,13 +4553,10 @@ async function _loadOlderMessages() {
     if (!data || !data.session) return;
     if (!S.session || S.session.session_id !== sid) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-    // Generation guard: another code path (typically jumpToSessionStart →
-    // _ensureAllMessagesLoaded) may have replaced S.messages while we were
-    // awaiting. Prepending older messages onto that replacement would
-    // duplicate the head of the transcript. Detect via the generation
-    // counter and abort cleanly. _oldestIdx and _messagesTruncated were
-    // already reset by the wholesale-replace path, so no rollback needed.
-    if (_messagesGeneration !== startGeneration) return;
+    // Every response belongs to the exact transcript view it paged from.
+    if (_messagesGeneration !== startGeneration ||
+        _oldestIdx !== requestedBeforeOffset ||
+        S.messages !== requestedMessages) return;
     let responseSession = data.session;
     let expandedMsgs = (responseSession.messages || []).filter(m => m && m.role);
     const currentMsgs = (S.messages || []).filter(m => m && m.role);
@@ -4603,7 +4600,9 @@ async function _loadOlderMessages() {
         if (!fallback || !fallback.session) { _loadingOlder = false; return; }
         if (!S.session || S.session.session_id !== sid) return;
         if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-        if (_messagesGeneration !== startGeneration) return;
+        if (_messagesGeneration !== startGeneration ||
+            _oldestIdx !== requestedBeforeOffset ||
+            S.messages !== requestedMessages) return;
         responseSession = fallback.session;
       }
       const olderRows = Array.isArray(responseSession.messages) ? responseSession.messages : [];
