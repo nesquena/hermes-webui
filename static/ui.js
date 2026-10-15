@@ -21739,19 +21739,66 @@ async function regenerateResponse(btn) {
   const initialSid = S.session.session_id;
   const refreshAuthority=S.session.regeneration_revision===null;
   const initialStreamId=S.activeStreamId||null;
-  if(refreshAuthority&&!latestLocalAssistant){
-    setStatus(t('regen_failed'));
-    return;
+  let expectedTurn=null;
+  if(refreshAuthority){
+    let latestLocalUserIndex=-1;
+    for(let i=S.messages.length-1;i>=0;i--){
+      const message=S.messages[i];
+      if(message&&message.role==='user'&&
+        !(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(message))){
+        latestLocalUserIndex=i;
+        break;
+      }
+    }
+    if(!latestLocalAssistant||clickedRawIndex!==latestLocalAssistantIndex||
+      latestLocalUserIndex<0||latestLocalUserIndex>=latestLocalAssistantIndex){
+      setStatus(t('regen_failed'));
+      return;
+    }
+    let userSnapshot;
+    try{userSnapshot=JSON.parse(JSON.stringify(S.messages[latestLocalUserIndex]));}
+    catch(_){setStatus(t('regen_failed'));return;}
+    const streamedContent=String(latestLocalAssistant.content||'');
+    const scene=latestLocalAssistant._anchor_activity_scene;
+    const sceneStream=scene&&scene.identity&&String(scene.identity.stream_id||'');
+    const ownerStream=String(latestLocalAssistant._anchor_stream_id||'');
+    const rows=sceneStream===ownerStream&&Array.isArray(scene.activity_rows)?scene.activity_rows:[];
+    const lastToolIndex=rows.reduce((last,item,index)=>item&&item.role==='tool'?index:last,-1);
+    let finalSegment='';
+    for(let i=rows.length-1;i>lastToolIndex;i--){
+      const activity=rows[i];
+      if(activity&&activity.role==='prose'&&activity.kind==='process_prose'&&
+        activity.source_event_type==='token'&&String(activity.local_id||'').startsWith('live-prose:')){
+        finalSegment=String(activity.text||'').trim();
+        break;
+      }
+    }
+    if(!ownerStream||(sceneStream&&sceneStream!==ownerStream)){
+      setStatus(t('regen_failed'));
+      return;
+    }
+    const currentOffset=Number(_oldestIdx);
+    if(!Number.isSafeInteger(currentOffset)||currentOffset<0){
+      setStatus(t('regen_failed'));
+      return;
+    }
+    if(finalSegment&&!streamedContent.trimEnd().endsWith(finalSegment)){
+      setStatus(t('regen_failed'));
+      return;
+    }
+    expectedTurn={
+      userIndex:currentOffset+latestLocalUserIndex,
+      user:userSnapshot,
+      streamedContent,
+      finalSegment,
+    };
   }
+  let refreshResult=null;
   if(typeof _ensureAllMessagesLoaded==='function'){
     try{
-      await _ensureAllMessagesLoaded({
+      refreshResult=await _ensureAllMessagesLoaded({
         forceRefresh:refreshAuthority,
-        expectedAssistant:refreshAuthority?{
-          index:_oldestIdx+latestLocalAssistantIndex,
-          content:latestLocalAssistant.content,
-          reasoning:latestLocalAssistant.reasoning,
-        }:null,
+        expectedTurn,
       });
     }catch(e){
       if(S.session&&S.session.session_id===initialSid) setStatus(t('regen_failed'));
@@ -21760,12 +21807,18 @@ async function regenerateResponse(btn) {
   }
   if(!S.session || S.session.session_id !== initialSid) return;
   if(refreshAuthority&&(S.busy||(S.activeStreamId||null)!==initialStreamId)) return;
+  if(refreshAuthority&&(!refreshResult||!Number.isSafeInteger(refreshResult.assistantIndex))){
+    setStatus(t('regen_failed'));
+    return;
+  }
   if(!S.session.regeneration_revision){ setStatus(t('regen_failed')); return; }
   let latestAssistantIndex=-1;
   for(let i=S.messages.length-1;i>=0;i--){
     if(S.messages[i]?.role==='assistant'){latestAssistantIndex=i;break;}
   }
-  if(clickedAbsoluteIndex!==latestAssistantIndex){
+  if(refreshAuthority
+    ?refreshResult.assistantIndex!==latestAssistantIndex
+    :clickedAbsoluteIndex!==latestAssistantIndex){
     setStatus(t('regen_failed'));
     return;
   }

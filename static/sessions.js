@@ -4748,14 +4748,102 @@ async function _ensureAllMessagesLoaded(options) {
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
     if(forceRefresh&&(S.messages!==requestedMessages||_messagesGeneration!==requestedGeneration||
       S.busy||(S.activeStreamId||null)!==requestedStreamId)) return;
+    if(forceRefresh&&(
+      data.session._messages_offset!==0||
+      data.session._messages_truncated!==false
+    )) return;
     const msgs = (data.session.messages || []).filter(m => m && m.role);
-    const expectedAssistant=forceRefresh&&ensureOptions.expectedAssistant;
-    if(expectedAssistant){
-      const expectedIndex=expectedAssistant.index;
-      const expectedRow=Number.isSafeInteger(expectedIndex)&&expectedIndex>=0?msgs[expectedIndex]:null;
-      if(!expectedRow||expectedRow.role!=='assistant'||
-        String(expectedRow.content??'')!==String(expectedAssistant.content??'')||
-        String(expectedRow.reasoning??'')!==String(expectedAssistant.reasoning??'')) return;
+    let regenerationAssistantIndex=null;
+    if(forceRefresh){
+      const expectedTurn=ensureOptions.expectedTurn;
+      if(!expectedTurn||!expectedTurn.user||expectedTurn.user.role!=='user') return;
+      const hasRevision=Object.prototype.hasOwnProperty.call(data.session,'regeneration_revision');
+      const revision=data.session.regeneration_revision;
+      if(!hasRevision){
+        delete S.session.regeneration_revision;
+        return;
+      }
+      if(typeof revision!=='string'||!revision.trim()) return;
+      const sameValue=(left,right)=>{
+        if(left===right) return true;
+        if(Array.isArray(left)||Array.isArray(right)){
+          return Array.isArray(left)&&Array.isArray(right)&&left.length===right.length&&
+            left.every((value,index)=>sameValue(value,right[index]));
+        }
+        if(left&&right&&typeof left==='object'&&typeof right==='object'){
+          const leftKeys=Object.keys(left).sort();
+          const rightKeys=Object.keys(right).sort();
+          return leftKeys.length===rightKeys.length&&leftKeys.every((key,index)=>
+            key===rightKeys[index]&&sameValue(left[key],right[key]));
+        }
+        return false;
+      };
+      const isUserTurn=row=>!!(row&&row.role==='user'&&
+        !(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row)));
+      const sameTypedUser=(saved,expected)=>!!(
+        isUserTurn(saved)&&
+        sameValue(saved.content,expected.content)&&
+        sameValue(saved.attachments??null,expected.attachments??null)
+      );
+      const identityFields=['message_id','_message_id','id','turn_id','_turn_id'];
+      const stableIdentity=identityFields.filter(field=>{
+        const value=expectedTurn.user[field];
+        return (typeof value==='string'&&value.trim())||typeof value==='number';
+      });
+      let savedUserIndex=-1;
+      if(stableIdentity.length){
+        const matches=[];
+        for(let index=0;index<msgs.length;index++){
+          const row=msgs[index];
+          if(!sameTypedUser(row,expectedTurn.user)||
+            !stableIdentity.every(field=>row[field]===expectedTurn.user[field])) continue;
+          matches.push(index);
+        }
+        if(matches.length!==1) return;
+        savedUserIndex=matches[0];
+      }else{
+        const expectedIndex=expectedTurn.userIndex;
+        const expectedRow=Number.isSafeInteger(expectedIndex)&&expectedIndex>=0?msgs[expectedIndex]:null;
+        if(!sameTypedUser(expectedRow,expectedTurn.user)) return;
+        savedUserIndex=expectedIndex;
+      }
+      let latestUserIndex=-1;
+      for(let index=msgs.length-1;index>=0;index--){
+        if(isUserTurn(msgs[index])){latestUserIndex=index;break;}
+      }
+      if(savedUserIndex!==latestUserIndex) return;
+      for(let index=savedUserIndex+1;index<msgs.length;index++){
+        if(isUserTurn(msgs[index])) return;
+        if(msgs[index]&&msgs[index].role==='assistant') regenerationAssistantIndex=index;
+      }
+      const finalMessage=regenerationAssistantIndex===null?null:msgs[regenerationAssistantIndex];
+      if(!finalMessage||!finalMessage.role||finalMessage.role!=='assistant'||
+        (Array.isArray(finalMessage.tool_calls)&&finalMessage.tool_calls.length)) return;
+      let savedAnswer='';
+      if(Array.isArray(finalMessage.content)){
+        const content=finalMessage.content;
+        let lastToolUse=-1;
+        for(let index=0;index<content.length;index++){
+          const part=content[index];
+          if(!part||typeof part!=='object') continue;
+          const partType=String(part.type||'').toLowerCase();
+          if(partType==='tool_use'||partType==='tool_call'||(!partType&&
+            (part.tool_use_id||part.tool_call_id||part.call_id)&&
+            (part.name||part.tool_name||part.input||part.args))) lastToolUse=index;
+        }
+        savedAnswer=content.slice(lastToolUse+1).filter(part=>{
+          if(!part||typeof part!=='object') return false;
+          const partType=String(part.type||'').toLowerCase();
+          return !partType||partType==='text'||partType==='input_text'||partType==='output_text';
+        }).map(part=>String(part.text||part.content||part.input_text||part.output_text||'')).join('\n').trim();
+      }else{
+        savedAnswer=String(finalMessage.content||'').trim();
+      }
+      const liveAnswer=String(expectedTurn.streamedContent||'');
+      const liveFinalSegment=String(expectedTurn.finalSegment||'');
+      if(!savedAnswer||!(liveFinalSegment
+        ?savedAnswer===liveFinalSegment
+        :liveAnswer.endsWith(savedAnswer))) return;
     }
     // Bump the generation BEFORE the wholesale replace so any racing
     // prefetch (whose snapshot was taken before this call's mutex
@@ -4824,6 +4912,7 @@ async function _ensureAllMessagesLoaded(options) {
         delete S.session.regeneration_revision;
       }
     }
+    if(forceRefresh) return {assistantIndex:regenerationAssistantIndex};
   } finally {
     _loadingOlder = false;
   }
