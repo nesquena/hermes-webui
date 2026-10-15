@@ -467,6 +467,23 @@ def get_config_snapshot() -> dict:
     """Return a request-owned config snapshot captured under the cache lock."""
     with _cfg_lock:
         config_path = _get_config_path()
+        scoped_profile_read = bool(
+            getattr(_thread_ctx, "block_process_env_fallback", False)
+        )
+        # The process-global cache is intentionally expanded against the
+        # process env. A named-profile read cannot copy that already-expanded
+        # structure: references such as ``api_key: ${LM_API_KEY}`` would retain
+        # the process profile's secret even though profile_scope_for_request_read
+        # has bound the correct thread env. Read the memoized RAW YAML and expand
+        # a private structure in this scope. Preserve explicit in-memory
+        # overrides used by tests/runtime callers.
+        if scoped_profile_read and not _cfg_has_in_memory_overrides():
+            raw = _load_yaml_config_file_raw(config_path, _copy=False)
+            scoped_cfg = _expand_env_vars(raw) if raw else {}
+            if not isinstance(scoped_cfg, dict):
+                scoped_cfg = {}
+            _apply_config_defaults(scoped_cfg)
+            return copy.deepcopy(scoped_cfg)
         try:
             current_mtime = config_path.stat().st_mtime
         except OSError:

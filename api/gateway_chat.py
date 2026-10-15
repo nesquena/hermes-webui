@@ -199,6 +199,33 @@ _WEBUI_CHAT_BACKEND_ENV = "HERMES_WEBUI_CHAT_BACKEND"
 _WEBUI_GATEWAY_BASE_URL_ENV = "HERMES_WEBUI_GATEWAY_BASE_URL"
 _WEBUI_GATEWAY_API_KEY_ENV = "HERMES_WEBUI_GATEWAY_API_KEY"
 _WEBUI_GATEWAY_USE_RUNS_API_ENV = "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
+_GATEWAY_DEPLOYMENT_ENV_KEYS = (
+    _WEBUI_GATEWAY_BASE_URL_ENV,
+    _WEBUI_GATEWAY_API_KEY_ENV,
+    _WEBUI_GATEWAY_USE_RUNS_API_ENV,
+    "API_SERVER_KEY",
+)
+# Preserve launcher-owned Gateway settings before profile scopes begin. Named
+# profiles are sparse overlays: omitting one of these values must not silently
+# replace an operator-configured Gateway with localhost/legacy mode. Keeping a
+# dedicated snapshot also avoids reading a different profile's temporary
+# process-env mirror from a concurrent detached worker.
+_GATEWAY_DEPLOYMENT_ENV = {
+    key: value
+    for key in _GATEWAY_DEPLOYMENT_ENV_KEYS
+    if (value := os.environ.get(key)) is not None
+}
+
+
+def _gateway_request_environ(profile_environ: dict[str, str] | None):
+    """Return deployment Gateway settings overlaid by one named profile."""
+    if profile_environ is None:
+        return None
+    merged = dict(_GATEWAY_DEPLOYMENT_ENV)
+    merged.update(profile_environ)
+    return merged
+
+
 _GATEWAY_CHAT_BACKENDS = {"gateway", "api_server", "api-server"}
 # Backend tag of the in-process WebUI runtime. Local workers register their
 # active run with it; cache-only Steer only enqueues on this explicit value.
@@ -434,6 +461,7 @@ def _gateway_request_settings_for_session(
         # runs-API flag, effort) or die mid-iteration ("dictionary changed
         # size during iteration").
         cfg = get_config_snapshot()
+        environ = _gateway_request_environ(environ)
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,

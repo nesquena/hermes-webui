@@ -942,6 +942,65 @@ def test_named_profile_lane_keeps_lmstudio_env_key_on_its_own_snapshot(
     assert probes == [("http://analyst-lm.test/v1", "analyst-env-key")]
 
 
+def test_named_profile_gateway_settings_inherit_operator_defaults(monkeypatch, tmp_path):
+    """A sparse profile overrides deployment Gateway settings only when explicit."""
+    from api import config, gateway_chat
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_API_KEY=analyst-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: {})
+
+    settings = gateway_chat._gateway_request_settings_for_session(
+        SimpleNamespace(profile="analyst")
+    )
+
+    assert settings[2] == "http://deployment-gw.test"
+    assert settings[3] == "analyst-key"
+    assert settings[5] is True
+
+
+def test_named_profile_snapshot_expands_key_from_profile_env(monkeypatch, tmp_path):
+    """Raw config references expand inside the read-only profile scope."""
+    from api import config
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text("LM_API_KEY=analyst-key\n", encoding="utf-8")
+    (analyst_home / "config.yaml").write_text(
+        "model:\n  provider: lmstudio\n  api_key: ${LM_API_KEY}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setenv("LM_API_KEY", "process-key")
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    cache = {}
+    monkeypatch.setattr(config, "_cfg_cache", cache)
+    monkeypatch.setattr(config, "cfg", cache)
+    monkeypatch.setattr(config, "_cfg_path", None)
+    monkeypatch.setattr(config, "_cfg_fingerprint", None)
+
+    with profiles.profile_scope_for_request_read("analyst"):
+        snapshot = config.get_config_snapshot()
+
+    assert snapshot["model"]["api_key"] == "analyst-key"
+
+
 def _snapshot_and_raced_cache():
     """An analyst snapshot whose provider differs from the raced global cache."""
     snapshot = {
