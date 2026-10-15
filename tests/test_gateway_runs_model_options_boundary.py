@@ -1164,6 +1164,48 @@ def test_owner_dotenv_removal_restores_launcher_gateway_fallback(monkeypatch, tm
         assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "launcher-key"
 
 
+def test_owner_alias_only_gateway_key_replaces_launcher_canonical(monkeypatch, tmp_path):
+    """An owner .env that switches to the alias spelling owns the whole group.
+
+    The canonical and legacy Gateway key names are one precedence group, so an
+    explicit alias-only choice must not leave the launcher's canonical value
+    beside it: the readers prefer the canonical name and would send the wrong
+    credential to the updated Gateway.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {"HERMES_WEBUI_GATEWAY_API_KEY": "launcher-old-key"},
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    (tmp_path / ".env").write_text(
+        "API_SERVER_KEY=alias-only-key\n", encoding="utf-8"
+    )
+
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "alias-only-key"
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV["API_SERVER_KEY"] == "alias-only-key"
+        assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "alias-only-key"
+        assert os.environ["API_SERVER_KEY"] == "alias-only-key"
+        assert gateway_chat._gateway_api_key() == "alias-only-key"
+
+        # Switching back to the canonical spelling keeps the same group owner.
+        (tmp_path / ".env").write_text(
+            "HERMES_WEBUI_GATEWAY_API_KEY=canonical-now\n", encoding="utf-8"
+        )
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV["API_SERVER_KEY"] == "canonical-now"
+
+
 @pytest.mark.parametrize(
     ("apply_name", "body"),
     (

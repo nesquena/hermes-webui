@@ -1810,6 +1810,20 @@ def _reload_dotenv(home: Path):
                     os.environ[k] = v
                     loaded_keys.add(k)
                     loaded_env[k] = v
+        # The canonical and legacy Gateway key names are one precedence group
+        # in the reload layer too: a dotenv that switches to the alias spelling
+        # must not leave the launcher's canonical value beside it, which the
+        # readers prefer over the alias and would send the wrong credential.
+        # Resolve this file's own choice first, then mirror it onto both names
+        # for os.environ and for the refreshed deployment snapshot.
+        profile_gateway_key = loaded_env.get(
+            'HERMES_WEBUI_GATEWAY_API_KEY'
+        ) or loaded_env.get('API_SERVER_KEY')
+        if profile_gateway_key:
+            for gateway_key in ('HERMES_WEBUI_GATEWAY_API_KEY', 'API_SERVER_KEY'):
+                os.environ[gateway_key] = profile_gateway_key
+                loaded_env[gateway_key] = profile_gateway_key
+                loaded_keys.add(gateway_key)
         _loaded_profile_env_keys = loaded_keys
     except Exception:
         _loaded_profile_env_keys = set()
