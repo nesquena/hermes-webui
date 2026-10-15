@@ -443,16 +443,29 @@ def _capture_gateway_wire_body(
     service_tier=None,
     session_profile=None,
     profile_effort=None,
+    real_profile_scope=False,
+    gateway_env=None,
+    captured=None,
 ):
-    """Run the real gateway worker and return its Agent-facing request body."""
+    """Run the real gateway worker and return its Agent-facing request body.
+
+    ``real_profile_scope`` keeps ``api.profiles.profile_scope_for_request_read``
+    in the loop, so the request's Gateway credential comes from the profile
+    directory the worker resolves instead of the process environment.
+    ``captured`` receives the POSTed request's headers and body for callers that
+    assert on the credential the receiver would authenticate.
+    """
     import api.config as config
     from api.config import STREAMS, STREAMS_LOCK
     from api.gateway_chat import _run_gateway_chat_streaming
+    from api import profiles as profiles_module
 
     stream_id = "sid-model-options-wire"
     q = MagicMock()
     with STREAMS_LOCK:
         STREAMS[stream_id] = q
+
+    real_scope = profiles_module.profile_scope_for_request_read
 
     requests = []
 
@@ -496,7 +509,13 @@ def _capture_gateway_wire_body(
         previous = active_profile["name"]
         active_profile["name"] = profile_name
         try:
-            yield
+            if not real_profile_scope:
+                yield
+                return
+            with real_scope(
+                profile_name, purpose, logger_override=logger_override
+            ) as profile_environ:
+                yield profile_environ
         finally:
             active_profile["name"] = previous
 
@@ -508,16 +527,17 @@ def _capture_gateway_wire_body(
     def fake_get_config_snapshot():
         return copy.deepcopy(fake_get_config())
 
+    gateway_environ = {
+        "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1" if use_runs_api else "0",
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw:8642",
+        "HERMES_WEBUI_GATEWAY_API_KEY": "secret",
+    }
+    if gateway_env:
+        gateway_environ.update(gateway_env)
+
     try:
-        with patch.dict(
-            "os.environ",
-            {
-                "HERMES_WEBUI_CHAT_BACKEND": "gateway",
-                "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1" if use_runs_api else "0",
-                "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw:8642",
-                "HERMES_WEBUI_GATEWAY_API_KEY": "secret",
-            },
-        ):
+        with patch.dict("os.environ", gateway_environ):
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_a, **_k: True), \
                  patch("api.gateway_chat.gateway_approval_unavailable_reason", lambda *_a, **_k: None), \
                  patch("api.config.get_config", fake_get_config), \
@@ -547,6 +567,9 @@ def _capture_gateway_wire_body(
     target = "/v1/runs" if use_runs_api else "/v1/chat/completions"
     agent_requests = [req for req in requests if req.full_url.endswith(target)]
     assert agent_requests, f"worker never POSTed {target}"
+    if captured is not None:
+        captured["headers"] = dict(agent_requests[0].header_items())
+        captured["body"] = agent_requests[0].data.decode("utf-8")
     return json.loads(agent_requests[0].data.decode("utf-8")), entered_profiles
 
 
@@ -960,7 +983,7 @@ def test_named_profile_lane_keeps_lmstudio_env_key_on_its_own_snapshot(
                 "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-canonical",
                 "API_SERVER_KEY": "deployment-alias",
             },
-            "profile-alias",
+            "deployment-canonical",
         ),
         (
             "",
@@ -980,7 +1003,13 @@ def test_named_profile_lane_keeps_lmstudio_env_key_on_its_own_snapshot(
 def test_named_profile_gateway_settings_inherit_operator_defaults(
     monkeypatch, tmp_path, profile_key_env, deployment_key_env, expected_key
 ):
-    """A sparse profile overrides deployment Gateway settings only when explicit."""
+    """A sparse profile overrides deployment Gateway settings only when explicit.
+
+    The canonical launcher key outranks a profile's ``API_SERVER_KEY`` alias on
+    the shared Gateway URL: a profile that only carries the alias spelling (the
+    Agent clones the root ``.env`` into new profiles) is not an explicit choice
+    for this deployment's Gateway, so the launcher credential still wins.
+    """
     from api import config, gateway_chat
     import api.profiles as profiles
 
@@ -1164,13 +1193,16 @@ def test_owner_dotenv_removal_restores_launcher_gateway_fallback(monkeypatch, tm
         assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "launcher-key"
 
 
-def test_owner_alias_only_gateway_key_replaces_launcher_canonical(monkeypatch, tmp_path):
-    """An owner .env that switches to the alias spelling owns the whole group.
+def test_owner_alias_only_gateway_key_keeps_the_launcher_canonical(monkeypatch, tmp_path):
+    """A dotenv alias must not demote an explicit launcher Gateway key.
 
-    The canonical and legacy Gateway key names are one precedence group, so an
-    explicit alias-only choice must not leave the launcher's canonical value
-    beside it: the readers prefer the canonical name and would send the wrong
-    credential to the updated Gateway.
+    The launcher exports ``HERMES_WEBUI_GATEWAY_API_KEY`` while the root
+    ``~/.hermes/.env`` holds the Agent's own ``API_SERVER_KEY`` (the normal
+    install). Mirroring that alias onto the canonical name made every reader
+    prefer the dotenv key — the default profile and sparse named profiles sent
+    it to the shared Gateway and were rejected with 401. The launcher's
+    explicit canonical key keeps the canonical spelling; the dotenv keeps only
+    the alias spelling it actually set.
     """
     from api import gateway_chat
     import api.profiles as profiles
@@ -1182,6 +1214,38 @@ def test_owner_alias_only_gateway_key_replaces_launcher_canonical(monkeypatch, t
         "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
         {"HERMES_WEBUI_GATEWAY_API_KEY": "launcher-old-key"},
     )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    (tmp_path / ".env").write_text(
+        "API_SERVER_KEY=alias-only-key\n", encoding="utf-8"
+    )
+
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "launcher-old-key"
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV["API_SERVER_KEY"] == "alias-only-key"
+        assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "launcher-old-key"
+        assert os.environ["API_SERVER_KEY"] == "alias-only-key"
+        assert gateway_chat._gateway_api_key() == "launcher-old-key"
+
+
+def test_owner_alias_only_gateway_key_owns_the_group_without_a_launcher_canonical(
+    monkeypatch, tmp_path
+):
+    """Without a launcher canonical key the alias-only dotenv still owns the group.
+
+    Readers prefer the canonical spelling, so an alias-only dotenv has to mirror
+    onto both names in that case; otherwise the credential the operator just set
+    would be invisible to ``_gateway_api_key()``.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "_INITIAL_GATEWAY_DEPLOYMENT_ENV", {})
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
     monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
     (tmp_path / ".env").write_text(
@@ -1204,6 +1268,76 @@ def test_owner_alias_only_gateway_key_replaces_launcher_canonical(monkeypatch, t
         )
         profiles._reload_dotenv(tmp_path)
         assert gateway_chat._GATEWAY_DEPLOYMENT_ENV["API_SERVER_KEY"] == "canonical-now"
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "profile_env_body"),
+    (
+        (None, None),
+        ("sparse", ""),
+        ("cloned", "API_SERVER_KEY=root-copied-key\n"),
+    ),
+)
+def test_launcher_gateway_key_wins_on_the_shared_url(
+    monkeypatch, tmp_path, profile_name, profile_env_body
+):
+    """The launcher credential survives an owner alias and a cloned profile .env.
+
+    Startup state: the launcher exports the shared Gateway URL and
+    ``HERMES_WEBUI_GATEWAY_API_KEY``, and the root ``~/.hermes/.env`` carries
+    the Agent's own ``API_SERVER_KEY``. The Agent clones that root ``.env`` into
+    every new profile, so a cloned profile's copied alias must not replace the
+    launcher credential on the profile's shared URL (the receiver answers 401
+    for the copied key). Asserted on the Authorization header the real worker
+    puts on the wire, for the default profile, a sparse named profile and a
+    cloned named profile.
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    (tmp_path / ".env").write_text(
+        "API_SERVER_KEY=root-copied-key\n", encoding="utf-8"
+    )
+    for name in ("sparse", "cloned"):
+        (tmp_path / "profiles" / name).mkdir(parents=True)
+    if profile_env_body is not None:
+        (tmp_path / "profiles" / profile_name / ".env").write_text(
+            profile_env_body, encoding="utf-8"
+        )
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://shared-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "launcher-key"
+        _capture_gateway_wire_body(
+            None,
+            session_profile=profile_name,
+            real_profile_scope=True,
+            gateway_env={
+                "HERMES_WEBUI_GATEWAY_BASE_URL": "http://shared-gw.test",
+                "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
+            },
+            captured=captured,
+        )
+
+    assert captured["headers"]["Authorization"] == "Bearer launcher-key"
 
 
 @pytest.mark.parametrize(

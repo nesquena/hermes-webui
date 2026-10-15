@@ -1811,14 +1811,24 @@ def _reload_dotenv(home: Path):
                     loaded_keys.add(k)
                     loaded_env[k] = v
         # The canonical and legacy Gateway key names are one precedence group
-        # in the reload layer too: a dotenv that switches to the alias spelling
-        # must not leave the launcher's canonical value beside it, which the
-        # readers prefer over the alias and would send the wrong credential.
-        # Resolve this file's own choice first, then mirror it onto both names
-        # for os.environ and for the refreshed deployment snapshot.
-        profile_gateway_key = loaded_env.get(
+        # in the reload layer, but a dotenv alias must not demote an explicit
+        # launcher ``HERMES_WEBUI_GATEWAY_API_KEY`` (docs/advanced-chat-setup.md:
+        # the canonical name wins, ``API_SERVER_KEY`` is the fallback when it is
+        # absent). Mirroring an alias-only dotenv onto the canonical name made
+        # every canonical reader prefer the dotenv value — and the Agent clones
+        # the root ``.env``, whose ``API_SERVER_KEY`` is the Agent's own key, so
+        # that copy replaced the launcher credential on the shared Gateway and
+        # the receiver answered 401. Only mirror the alias onto both names when
+        # no launcher canonical exists; a dotenv canonical (an explicit choice)
+        # still replaces the launcher one.
+        if loaded_env.get('HERMES_WEBUI_GATEWAY_API_KEY'):
+            profile_gateway_key = loaded_env['HERMES_WEBUI_GATEWAY_API_KEY']
+        elif loaded_env.get('API_SERVER_KEY') and not _INITIAL_GATEWAY_DEPLOYMENT_ENV.get(
             'HERMES_WEBUI_GATEWAY_API_KEY'
-        ) or loaded_env.get('API_SERVER_KEY')
+        ):
+            profile_gateway_key = loaded_env['API_SERVER_KEY']
+        else:
+            profile_gateway_key = ''
         if profile_gateway_key:
             for gateway_key in ('HERMES_WEBUI_GATEWAY_API_KEY', 'API_SERVER_KEY'):
                 os.environ[gateway_key] = profile_gateway_key

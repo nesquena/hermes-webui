@@ -252,19 +252,24 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None):
         return None
     merged = dict(_GATEWAY_DEPLOYMENT_ENV)
     merged.update(profile_environ)
-    # The canonical and legacy Gateway key names are one precedence group.
-    # Exact-key overlay alone can leave a deployment canonical key beside a
-    # profile alias, after which _gateway_api_key() incorrectly prefers the
-    # inherited canonical value. Resolve within the profile layer first, then
-    # normalize both spellings so either downstream reader sees that choice.
-    profile_key = str(
-        profile_environ.get(_WEBUI_GATEWAY_API_KEY_ENV)
-        or profile_environ.get("API_SERVER_KEY")
-        or ""
+    # The canonical and legacy Gateway key names are one precedence group, and
+    # the launcher's explicit canonical key outranks a profile's alias on the
+    # shared Gateway URL (docs/advanced-chat-setup.md). Exact-key overlay alone
+    # let a profile's API_SERVER_KEY — the Agent clones the root .env, whose
+    # alias is its own key, into every new profile — replace the launcher
+    # credential, and the shared receiver answered 401. Resolve the group in
+    # that order, then normalize both spellings so either downstream reader
+    # sees the same choice.
+    profile_canonical = str(profile_environ.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    launcher_canonical = str(
+        _GATEWAY_DEPLOYMENT_ENV.get(_WEBUI_GATEWAY_API_KEY_ENV) or ""
     ).strip()
-    if profile_key:
-        merged[_WEBUI_GATEWAY_API_KEY_ENV] = profile_key
-        merged["API_SERVER_KEY"] = profile_key
+    profile_alias = str(profile_environ.get("API_SERVER_KEY") or "").strip()
+    shared_alias = str(_GATEWAY_DEPLOYMENT_ENV.get("API_SERVER_KEY") or "").strip()
+    resolved_key = profile_canonical or launcher_canonical or profile_alias or shared_alias
+    if resolved_key:
+        merged[_WEBUI_GATEWAY_API_KEY_ENV] = resolved_key
+        merged["API_SERVER_KEY"] = resolved_key
     return merged
 
 
