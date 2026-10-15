@@ -80,6 +80,62 @@ npm run lint:runtime
 npx eslint --no-config-lookup -c eslint.runtime-guard.config.mjs "static/**/*.js"
 ```
 
+## Assignment redaction preconditions
+
+Run `./scripts/test.sh tests/test_redaction_assignment_preconditions.py tests/test_security_redaction.py tests/test_issue5204_redactor_memoization_contract.py tests/test_redact_large_string_cache.py`.
+The assignment patterns require a literal `=`. The focused regression counts
+their calls through the actual redactor, including large URL-bearing text that
+passes the public-text prefilter, and checks masking and occurrence-aware code
+literal restoration. The agent compatibility cases use synthetic modern and
+legacy redactors; they do not certify an installed Agent registry. The fallback
+checks the post-credential-pass text, while literal restoration checks the
+original input. Other credential passes remain active without `=`. Cache policy,
+runtime pattern registration, and public API redaction settings are unchanged.
+Call counts prove omitted impossible scans, not latency, RSS, or responsiveness.
+
+Run `./scripts/test.sh tests/test_redaction_benchmark_statistics.py` for the
+benchmark's statistical regression. It executes the real benchmark entry point
+with deterministic clocks and synthetic redactors, then checks that console and
+JSON speedups both use the median of per-pair ratios. Its fixed samples make this
+measure differ from the ratio of timing medians; it does not test wall-time speed.
+
+Run a synthetic, uncached direct-function comparison against an explicit Git base:
+
+```bash
+.venv/bin/python scripts/benchmark_redaction_assignments.py \
+  --base-ref bfe40ffba8a09b6342189cd50c55535220a30d48 \
+  --agent-dir /path/to/hermes-agent --rounds 12 --output benchmark.json
+```
+
+Example measured on October 13, 2026, Python 3.11.15 / Linux x86_64, AMD EPYC
+9754 host, with actual Agent redactor source byte-identical to official commit
+`3f2abce7f468cf194bb7f9ff9c6a033b075d834c`. Two
+separate 12-round runs, one untimed warmup per version/shape, alternating
+base/candidate order. Input generation and function construction are excluded
+from timing. The raw paired wall/CPU samples are in
+[`scripts/redaction_assignment_benchmark_samples.csv`](scripts/redaction_assignment_benchmark_samples.csv).
+
+| Synthetic input | Base wall median (ms) | Candidate wall median (ms) | Median paired speedup |
+|---|---:|---:|---:|
+| uppercase_url_64k_no_equals | 210.533 | 20.152 | 10.30x |
+| uppercase_url_256k_no_equals | 878.037 | 76.576 | 10.95x |
+| ordinary_url_64k_no_equals | 23.679 | 20.062 | 1.18x |
+| uppercase_url_64k_has_equals | 323.537 | 341.480 | 1.00x |
+| ordinary_url_64k_equals_first | 26.771 | 26.792 | 1.00x |
+| ordinary_url_64k_equals_last | 26.581 | 26.461 | 1.01x |
+| small_url_1k_no_equals | 0.376 | 0.316 | 1.19x |
+| small_assignment | 0.046 | 0.046 | 1.00x |
+
+Each row contains 24 pairs. Paired speedup is the median of each pair's
+base/candidate ratio, not the ratio of the two pooled medians. The host is shared:
+for the equals-containing uppercase case the separate run ratios changed
+direction; 12 pairs favored each version, and median paired delta was +0.068ms.
+No stable benefit is claimed for that case. All timed outputs matched; two
+seeded 500-case differential batches also matched. These synthetic shapes
+establish mechanism and input-dependent function cost, not production input
+frequency, request p95, RSS, browser responsiveness or a resolved incident.
+Large strings remain uncached; no Agent redaction pass is bypassed.
+
 ## Native raster redaction boundary
 
 Run `./scripts/test.sh tests/test_mpf_jpeg_redaction.py tests/test_raster_data_uri_redaction.py tests/test_security_redaction.py`.
@@ -2013,6 +2069,8 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 
 ### Sprint 14: Visual Polish + Workspace Ops
 - Create a mermaid code block in a response. Verify diagram renders inline.
+- Send the same prompt twice so two replies contain an identical mermaid block. Verify both diagrams render
+  (neither falls back to a `mermaid` code block), on desktop and at phone width, and again after a page reload.
 - Message timestamps visible next to role labels (hover for full date).
 - Double-click a file in workspace panel to rename. Enter saves, Escape cancels.
 - Create a folder via folder icon in workspace header.

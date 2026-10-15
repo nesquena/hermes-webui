@@ -1367,6 +1367,82 @@ def profile_env_for_background_worker(
 
 
 @contextmanager
+def profile_env_for_thread_readonly(
+    session,
+    purpose: str = "thread-local read",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Bind a session profile's env to the CURRENT THREAD only.
+
+    For pure reads that resolve through the thread-local channel
+    (``api.config._thread_ctx`` via ``_expand_env_vars`` /
+    ``_thread_local_env_value``) and must NOT mutate process-wide
+    ``os.environ``. ``profile_env_for_background_worker`` mirrors the
+    profile env into ``os.environ`` because agent bodies still have
+    Hermes readers that call ``os.getenv()`` directly; its ``_ENV_LOCK``
+    covers setup/restore only, not the body, so two interleaved scopes
+    (e.g. an HTTP handler thread and a concurrent streaming worker)
+    restore over each other's mirrored env. A pure read needs no such
+    mirror: binding ``_thread_ctx`` alone is sufficient, and the state is
+    per-thread, so concurrent requests on other threads never interfere.
+
+    Like the background worker, the scope sets
+    ``block_process_env_fallback`` so a ``${VAR}`` that only the server
+    process env defines does NOT expand for a named profile (fail-closed
+    profile isolation). Callers that feed the expanded result to an
+    outbound request must treat any value that still contains ``${...}``
+    after expansion as absent (see
+    ``api.streaming._drop_unresolved_routing_refs``) instead of forwarding
+    the literal.
+
+    Accepts a session-like object with ``.profile`` or a profile name.
+    No-ops for default-profile sessions; on resolution failure it logs and
+    yields with the thread's current env state untouched.
+    """
+    log = logger_override or logger
+    raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
+    profile = str(raw_profile or "").strip()
+    if not profile or profile == "default":
+        yield
+        return
+
+    try:
+        # Lazy import avoids a module-load cycle: api.config imports
+        # api.profiles at module level.
+        from api.config import _thread_ctx
+
+        profile_home_path = Path(get_hermes_home_for_profile(profile))
+        runtime_env = get_profile_runtime_env(profile_home_path)
+        safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
+    except Exception:
+        log.debug(
+            "Failed to resolve profile env for %s profile %s; keeping the "
+            "thread's current env",
+            purpose,
+            profile,
+            exc_info=True,
+        )
+        yield
+        return
+
+    previous_env = getattr(_thread_ctx, "env", {})
+    previous_env = dict(previous_env) if isinstance(previous_env, dict) else {}
+    previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+    thread_env = dict(safe_runtime_env)
+    thread_env["HERMES_HOME"] = str(profile_home_path)
+    try:
+        _thread_ctx.env = thread_env
+        _thread_ctx.block_process_env_fallback = True
+        yield
+    finally:
+        _thread_ctx.block_process_env_fallback = previous_block
+        if previous_env:
+            _thread_ctx.env = previous_env
+        else:
+            _thread_ctx.env = {}
+
+
+@contextmanager
 def profile_env_for_active_request_readonly(
     purpose: str = "provider/model read",
     logger_override: Optional[logging.Logger] = None,

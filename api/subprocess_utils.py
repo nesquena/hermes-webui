@@ -50,7 +50,7 @@ _CREDENTIAL_IN_URL_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)([^/@\s'\"]+)@"
 _GITHUB_TOKEN_RE = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})\b")
 _QUERY_SECRET_RE = re.compile(
     r"([?&](?:access_token|oauth_token|private_token|client_secret|app_secret|"
-    r"api[_-]?key|token|password|secret|auth|key)=)[^&\s'\"]+",
+    r"api[_-]?key|token|password|secret|auth|key)=)[^&\s\"]+",
     re.IGNORECASE,
 )
 _URL_REMOTE_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")

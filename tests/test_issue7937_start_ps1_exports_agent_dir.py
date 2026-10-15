@@ -261,39 +261,17 @@ def test_home_hermes_agent_precedes_program_files_roots():
     assert "$env:LOCALAPPDATA, ${env:ProgramW6432}" not in server_block
 
 
-def test_program_files_only_after_both_server_passes():
-    """CORE: stale Program Files source must not beat LOCALAPPDATA pip Agent.
-
-    Both run_agent.py and hermes_cli passes over $serverCandidates must complete
-    before any launcher-only (legacy .hermes + Program Files) fallback pass.
-    Otherwise an all-source first pass over a combined list picks Program Files
-    over a working LOCALAPPDATA pip root.
-    """
+def test_authoritative_sources_runtime_and_fallback_precede_marker_roots():
+    """Authoritative sources beat runtimes; all usable paths beat markers."""
     block = _discovery_block(_start_ps1_source())
-    assert "$serverCandidates = @()" in block
-    assert "$launcherOnlyCandidates = @()" in block
     server_run = block.index("foreach ($c in $serverCandidates)")
-    server_pip = block.index(
-        "Test-Path (Join-Path $c 'hermes_cli') -PathType Container"
-    )
-    legacy_marker = block.index(
-        "Join-Path $env:USERPROFILE '.hermes\\hermes-agent'"
-    )
-    pf_marker = block.index("${env:ProgramW6432}")
-    launcher_run = block.index("foreach ($c in $launcherOnlyCandidates)")
-    assert server_run < server_pip < legacy_marker < pf_marker < launcher_run, (
-        "server source+pip passes must both precede launcher-only legacy+PF "
-        f"(server_run@{server_run}, server_pip@{server_pip}, "
-        f"legacy@{legacy_marker}, pf_list@{pf_marker}, launcher_run@{launcher_run})"
-    )
-    between = block[server_pip:launcher_run]
-    assert "if (-not $AgentDir)" in between, (
-        "launcher-only source pass must be gated on AgentDir still empty "
-        "after both server-equivalent passes"
-    )
-    before_pf = block[:pf_marker]
-    assert "$serverCandidates += (Join-Path $root" not in before_pf
-    assert "$launcherOnlyCandidates += (Join-Path $root" in block[pf_marker:]
+    runtime = block.index("$runtimeCandidates =")
+    fallback_run = block.index("foreach ($c in $launcherOnlyCandidates)")
+    marker_pass = block.index("foreach ($c in @($serverCandidates) + @($launcherOnlyCandidates))")
+    assert server_run < runtime < fallback_run < marker_pass
+    assert "_agent_dir_from_hermes_cli() or _agent_dir_from_python(sys.executable)" in block
+    assert "Test-Path (Join-Path $c 'run_agent.py')" in block[fallback_run:marker_pass]
+    assert "Test-Path (Join-Path $c 'hermes_cli')" in block[marker_pass:]
 
 
 def test_explicit_webui_state_dir_skips_legacy_home_migration():
@@ -358,53 +336,19 @@ def test_legacy_hermes_is_launcher_only_before_program_files():
         "legacy .hermes/hermes-agent must precede Program Files among "
         f"launcher-only roots (legacy@{legacy_pos}, pf@{pf_pos})"
     )
-    server_pip = block.index(
-        "Test-Path (Join-Path $c 'hermes_cli') -PathType Container"
-    )
-    assert server_pip < legacy_pos
+    fallback_run = block.index("foreach ($c in $launcherOnlyCandidates)")
+    assert legacy_pos < pf_pos < fallback_run
 
 
-def test_launcher_only_roots_are_ranked_by_path_not_by_kind():
-    """BRICK: a stale Program Files source must not outrank a legacy pip Agent.
-
-    %USERPROFILE%\\.hermes\\hermes-agent is a pip install (hermes_cli) and comes
-    first in $launcherOnlyCandidates; %ProgramFiles%\\hermes\\hermes-agent is a
-    stale source checkout (run_agent.py). Splitting the launcher-only roots into
-    a run_agent.py pass and then a hermes_cli pass let the stale Program Files
-    source win purely by kind, and its hermes_bootstrap.py can SystemExit before
-    the server binds. These roots are not in api/config.py's candidate list, so
-    there is no server pass order to mirror here: take them in path order and
-    accept either kind.
-    """
+def test_marker_only_roots_follow_authoritative_then_fallback_path_order():
+    """Marker-only compatibility roots keep their path order in the final tier."""
     block = _discovery_block(_start_ps1_source())
-    launcher = block[block.index("$launcherOnlyCandidates = @()") :]
-    legacy_pos = launcher.index("Join-Path $env:USERPROFILE '.hermes\\hermes-agent'")
-    pf_pos = launcher.index("${env:ProgramW6432}")
-    assert legacy_pos < pf_pos, (
-        "legacy .hermes/hermes-agent must stay ahead of Program Files so the "
-        "interleaved pass can reach it first"
+    marker_pass = block.index("foreach ($c in @($serverCandidates) + @($launcherOnlyCandidates))")
+    marker_check = block.index(
+        "Test-Path (Join-Path $c 'hermes_cli') -PathType Container", marker_pass
     )
-    # The two kinds must be tested in ONE condition, not as two separate loops.
-    interleaved = launcher.index(
-        "if ((Test-Path (Join-Path $c 'hermes_cli') -PathType Container"
-    )
-    assert launcher[interleaved:].split("\n", 1)[0].rstrip().endswith(") -or"), (
-        "hermes_cli and run_agent.py must be tested in one -or condition"
-    )
-    assert interleaved > pf_pos, (
-        "the launcher-only pass must come after the roots are built"
-    )
-    single_pass = launcher[interleaved:]
-    # No kind-splitting loop may remain over $launcherOnlyCandidates.
-    run_agent_kind_loop = single_pass.index(
-        "Test-Path (Join-Path $c 'run_agent.py') -PathType Leaf"
-    )
-    assert single_pass[run_agent_kind_loop - 40 : run_agent_kind_loop].count(
-        "foreach"
-    ) == 0, (
-        "run_agent.py must be part of the same condition as hermes_cli in the "
-        "launcher-only phase, not a separate preceding loop"
-    )
+    assert marker_pass < marker_check
+    assert "if (-not $AgentDir)" in block[marker_pass - 40:marker_pass]
 
 
 def test_agent_discovery_uses_the_servers_default_home_plus_the_platform_home():

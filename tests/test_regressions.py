@@ -952,16 +952,20 @@ def test_messages_js_supports_live_reasoning_and_tool_completion(cleanup_test_se
         "messages.js must listen for live reasoning SSE events"
     assert "liveReasoningText += text" in src, \
         "live reasoning SSE events must update the active Worklog Thinking Card text"
-    assert "const liveThinkingText=_liveThinkingText();" in src, \
-        "live reasoning SSE events must compute the current segment's Worklog Thinking Card text once"
-    assert "const anchorReasoningFallback={};" in src, \
-        "live reasoning SSE events must capture the active anchor id for fallback"
-    assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback))" in src, \
-        "live reasoning SSE events must prefer the anchor renderer before falling back"
-    assert "_updateLiveThinkingCard(liveThinkingText,{" in src and "...anchorReasoningFallback" in src, \
-        "live reasoning SSE events must carry anchor identity into the fallback renderer"
-    assert "anchorRenderFallback:true" in src and "sessionId:activeSid" in src and "streamId" in src, \
-        "live reasoning SSE events must keep the current segment's Worklog Thinking Card as fallback"
+    # #8171: reasoning SSE events are coalesced. The listener only accumulates
+    # and schedules; _flushPendingReasoningRender() renders once per frame.
+    assert "_reasoningRenderPending=true;" in src and "_scheduleRender();" in src, \
+        "live reasoning SSE events must schedule one coalesced Thinking Card render"
+    flush_start = src.index("function _flushPendingReasoningRender(){")
+    flush = src[flush_start:src.index("// Split a content string", flush_start)]
+    assert "const text=String(liveReasoningText||'').trim();" in flush, \
+        "the coalesced render must compute the current segment's Worklog Thinking Card text once"
+    assert "if(!_upsertAnchorReasoning(text, opts)&&!opts.deferRender){" in flush, \
+        "live reasoning renders must prefer the anchor renderer before falling back"
+    assert "_updateLiveThinkingCard(text,{" in flush and "...opts" in flush, \
+        "live reasoning renders must carry anchor identity (written into opts) into the fallback renderer"
+    assert "anchorRenderFallback:true" in flush and "sessionId:activeSid" in flush and "streamId" in flush, \
+        "live reasoning renders must keep the current segment's Worklog Thinking Card as fallback"
     assert "source.addEventListener('tool_complete'" in src or 'source.addEventListener("tool_complete"' in src, \
         "messages.js must listen for live tool completion SSE events"
     assert "function _parseStreamState()" in src, \

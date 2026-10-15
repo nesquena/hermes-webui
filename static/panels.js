@@ -5386,7 +5386,7 @@ const MEMORY_SECTIONS = [
   { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
   { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
   { key: 'soul',   labelKey: 'agent_soul', emptyKey: 'no_soul_yet', iconKey: 'sparkles' },
-  { key: 'project_context', label: 'Project Context', empty: 'No project context file found for this workspace.', iconKey: 'file-text', readOnly: true },
+  { key: 'project_context', labelKey: 'memory_project_context_title', emptyKey: 'memory_project_context_empty', iconKey: 'file-text', readOnly: true },
   { key: 'external_notes', labelKey: 'external_notes_sources', emptyKey: 'external_notes_empty', iconKey: 'book-open' },
 ];
 
@@ -5993,7 +5993,13 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
     async()=>{
       closeWsDropdown();
       try{
-        await newSession(false,{worktree:true});
+        // Pass the DISPLAYED workspace explicitly: with a project bound to a
+        // different workspace, newSession()'s active-project merge would
+        // otherwise fill `workspace` with the project's default and the
+        // worktree would be created there (a non-git default made the request
+        // 400). An explicit `workspace` option wins over any project binding —
+        // same opt-out switchToWorkspace() below uses for the same reason.
+        await newSession(false,{worktree:true,workspace:currentWs});
         await renderSessionList();
         const msg=$('msg');
         if(msg)msg.focus();
@@ -6543,7 +6549,12 @@ async function switchToWorkspace(path,name){
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
-    if(typeof newSession==='function') await newSession(false);
+    // Also pass the workspace explicitly: with a project bound to workspace A,
+    // an active project filter would otherwise merge the project's default
+    // workspace into the request and the explicit B choice would lose (the
+    // chip-new-chat path posts A, master posts B). An explicit `workspace`
+    // option wins over any project binding in newSession().
+    if(typeof newSession==='function') await newSession(false,{workspace:path});
     showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
@@ -8166,113 +8177,82 @@ function _extractSettingsValueText(field) {
   return chunks.join(' ');
 }
 
-async function _buildSettingsIndex() {
-  if (_settingsIndex) return;
-  // Memoize the in-flight build so concurrent searches share one pass; the
-  // lazy pane loaders are not guaranteed re-entrant.
+function _settingsSearchIdentityBase(entry) {
+  return JSON.stringify([
+    entry.sectionKey || '',
+    entry.i18nKey || '',
+    entry.cardName || '',
+    entry.fieldLabel || '',
+    entry.label || '',
+  ]);
+}
+
+function _buildSettingsIndex() {
+  // Share one lazy-pane build across concurrent searches.
   if (_settingsIndexPromise) return _settingsIndexPromise;
+  if (_settingsIndex) return null;
+  _settingsIndex = _collectSettingsIndex(false);
   const promise = (async () => {
-    // Ensure lazy-loaded panes are populated before reading the DOM
     await Promise.all([loadProvidersPanel(), loadPluginsPanel(), loadExtensionsPanel()]);
-    const index = [];
-    const add = (entry) => {
-      index.push({ ...entry, _settingsSearchIndex: index.length });
-    };
-    const sectionMap = {
-      settingsPaneConversation: 'conversation',
-      settingsPaneAppearance: 'appearance',
-      settingsPanePreferences: 'preferences',
-      settingsPaneProviders: 'providers',
-      settingsPanePlugins: 'plugins',
-      settingsPaneExtensions: 'extensions',
-      settingsPaneSystem: 'system',
-      settingsPaneHelp: 'help',
-    };
-    for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
-      const pane = $(paneId);
-      if (!pane) continue;
-      pane.querySelectorAll('.settings-field').forEach(field => {
-        // The i18n key may live on the <label> itself (label[data-i18n]) OR on
-        // a child of the label — the common toggle shape is
-        // <label><input><span data-i18n="..."></span></label>. Match both, plus
-        // a plain <label> with no i18n key, so every field is searchable
-        // (previously only label[data-i18n] indexed, silently dropping most
-        // checkbox settings). #4340 review fix.
-        const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
-        if (!labelEl) return;
-        const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
-        const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
-        if (!titleText) return;
-        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
-        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
-        const searchBlob = [titleText, valueText, descriptionText, field.textContent]
-          .filter(Boolean)
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        add({
-          label: titleText,
-          titleText,
-          valueText,
-          descriptionText,
-          searchBlob,
-          sectionKey,
-          i18nKey,
-          el: field,
-        });
+    // Do not resurrect an index invalidated by a panel-session reset.
+    if (_settingsIndexPromise === promise) {
+      _settingsIndex = _collectSettingsIndex(true);
+      _settingsIndexPromise = null;
+    }
+  })().catch(e => { if (_settingsIndexPromise === promise) { _settingsIndex = null; _settingsIndexPromise = null; } throw e; });
+  _settingsIndexPromise = promise;
+  return promise;
+}
+
+function _collectSettingsIndex(includeDynamic = true) {
+  const index = [];
+  const add = (entry) => {
+    index.push({ ...entry, _settingsSearchIndex: index.length });
+  };
+  const sectionMap = {
+    settingsPaneConversation: 'conversation',
+    settingsPaneAppearance: 'appearance',
+    settingsPanePreferences: 'preferences',
+    settingsPaneProviders: 'providers',
+    settingsPanePlugins: 'plugins',
+    settingsPaneExtensions: 'extensions',
+    settingsPaneSystem: 'system',
+    settingsPaneHelp: 'help',
+  };
+  for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
+    if (!includeDynamic && ['providers', 'plugins', 'extensions'].includes(sectionKey)) continue;
+    const pane = $(paneId);
+    if (!pane) continue;
+    pane.querySelectorAll('.settings-field').forEach(field => {
+      // Cover i18n keys on labels, nested spans, and plain labels so toggle
+      // settings remain searchable. #4340 review fix.
+      const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
+      if (!labelEl) return;
+      const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
+      const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
+      if (!titleText) return;
+      const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+      const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
+      const searchBlob = [titleText, valueText, descriptionText, field.textContent]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      add({
+        label: titleText,
+        titleText,
+        valueText,
+        descriptionText,
+        searchBlob,
+        sectionKey,
+        i18nKey,
+        el: field,
       });
-      if (sectionKey === 'providers') {
-        pane.querySelectorAll('.provider-card').forEach(card => {
-          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) {
-            const titleText = cardName;
-            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
-            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
-            const searchBlob = [cardName, valueText, descriptionText, card.textContent]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            add({
-              label: cardName,
-              titleText,
-              valueText,
-              descriptionText,
-              searchBlob,
-              sectionKey,
-              el: card,
-              cardName,
-            });
-          }
-          card.querySelectorAll('.provider-card-field').forEach(field => {
-            const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
-            const label = [cardName, fieldLabel].filter(Boolean).join(' ');
-            if (!label) return;
-            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
-            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
-            const searchBlob = [label, valueText, descriptionText, field.textContent]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            add({
-              label,
-              titleText: label,
-              valueText,
-              descriptionText,
-              searchBlob,
-              sectionKey,
-              el: field,
-              cardName,
-              fieldLabel,
-            });
-          });
-        });
-      }
-      if (sectionKey === 'plugins') {
-        pane.querySelectorAll('.plugin-card').forEach(card => {
-          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (!cardName) return;
+    });
+    if (sectionKey === 'providers') {
+      pane.querySelectorAll('.provider-card').forEach(card => {
+        const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+        if (cardName) {
           const titleText = cardName;
           const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
           const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
@@ -8291,15 +8271,58 @@ async function _buildSettingsIndex() {
             el: card,
             cardName,
           });
+        }
+        card.querySelectorAll('.provider-card-field').forEach(field => {
+          const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+          const label = [cardName, fieldLabel].filter(Boolean).join(' ');
+          if (!label) return;
+          const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+          const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
+          const searchBlob = [label, valueText, descriptionText, field.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          add({
+            label,
+            titleText: label,
+            valueText,
+            descriptionText,
+            searchBlob,
+            sectionKey,
+            el: field,
+            cardName,
+            fieldLabel,
+          });
         });
-      }
+      });
     }
-    // A panel-session reset while building clears the memo; drop this result
-    // instead of resurrecting a stale index for the new session.
-    if (_settingsIndexPromise === promise) _settingsIndex = index;
-  })().catch(e => { if (_settingsIndexPromise === promise) _settingsIndexPromise = null; throw e; });
-  _settingsIndexPromise = promise;
-  return promise;
+    if (sectionKey === 'plugins') {
+      pane.querySelectorAll('.plugin-card').forEach(card => {
+        const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+        if (!cardName) return;
+        const titleText = cardName;
+        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+        const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        add({
+          label: cardName,
+          titleText,
+          valueText,
+          descriptionText,
+          searchBlob,
+          sectionKey,
+          el: card,
+          cardName,
+        });
+      });
+    }
+  }
+  return index;
 }
 
 async function filterSettings(query) {
@@ -8308,55 +8331,96 @@ async function filterSettings(query) {
   const q = (query || '').trim().toLowerCase();
   if (!q) { ++_settingsSearchSeq; resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
   const seq = ++_settingsSearchSeq;
-  await _buildSettingsIndex();
-  // A newer keystroke superseded this query while the index was building.
-  if (seq !== _settingsSearchSeq) return;
-  const sectionLabels = {
-    conversation: t('settings_tab_conversation') || 'Conversation',
-    appearance: t('settings_tab_appearance') || 'Appearance',
-    preferences: t('settings_tab_preferences') || 'Preferences',
-    providers: t('providers_tab_title') || 'Providers',
-    plugins: t('settings_tab_plugins') || 'Plugins',
-    extensions: t('settings_tab_extensions') || 'Extensions',
-    system: t('settings_tab_system') || 'System',
-    help: t('settings_tab_help') || 'Help',
-  };
-  const matches = (_settingsIndex || []).map((entry) => {
-    const score = _scoreSettingsSearchMatch(entry, q);
-    return score ? { entry, score, index: entry._settingsSearchIndex } : null;
-  }).filter(Boolean);
-  if (!matches.length) {
-    resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
-    resultsEl.style.display = '';
-    return;
-  }
-  resultsEl.innerHTML = '';
-  matches.sort((left, right) => {
-    if (left.score.bucketIndex !== right.score.bucketIndex) {
-      return left.score.bucketIndex - right.score.bucketIndex;
+  const buildPromise = _buildSettingsIndex();
+  const renderResults = (dynamicPanesLoading = false) => {
+    const sectionLabels = {
+      conversation: t('settings_tab_conversation') || 'Conversation',
+      appearance: t('settings_tab_appearance') || 'Appearance',
+      preferences: t('settings_tab_preferences') || 'Preferences',
+      providers: t('providers_tab_title') || 'Providers',
+      plugins: t('settings_tab_plugins') || 'Plugins',
+      extensions: t('settings_tab_extensions') || 'Extensions',
+      system: t('settings_tab_system') || 'System',
+      help: t('settings_tab_help') || 'Help',
+    };
+    const matches = (_settingsIndex || []).map((entry) => {
+      const score = _scoreSettingsSearchMatch(entry, q);
+      return score ? { entry, score, index: entry._settingsSearchIndex } : null;
+    }).filter(Boolean);
+    if (!matches.length) {
+      if (dynamicPanesLoading) {
+        resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
+        return;
+      }
+      resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
+      resultsEl.style.display = '';
+      return;
     }
-    if (left.score.matchIndex !== right.score.matchIndex) {
-      return left.score.matchIndex - right.score.matchIndex;
-    }
-    return left.index - right.index;
-  });
-  for (const { entry: m } of matches.slice(0, 12)) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'settings-search-result';
-    item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
-      `<span class="settings-search-arrow">›</span>` +
-      `<span class="settings-search-label">${esc(m.label)}</span>`;
-    item.addEventListener('click', () => {
-      _navigateToSettingsField(m);
-      resultsEl.style.display = 'none';
-      resultsEl.innerHTML = '';
-      const input = $('settingsSearch');
-      if (input) input.value = '';
+    matches.sort((left, right) => {
+      if (left.score.bucketIndex !== right.score.bucketIndex) {
+        return left.score.bucketIndex - right.score.bucketIndex;
+      }
+      if (left.score.matchIndex !== right.score.matchIndex) {
+        return left.score.matchIndex - right.score.matchIndex;
+      }
+      return left.index - right.index;
     });
-    resultsEl.appendChild(item);
-  }
-  resultsEl.style.display = '';
+    const visibleMatches = matches.slice(0, 12);
+    const identityCounts = new Map();
+    const nextIdentities = visibleMatches.map(({ entry }) => {
+      const identityBase = _settingsSearchIdentityBase(entry);
+      const identityIndex = identityCounts.get(identityBase) || 0;
+      identityCounts.set(identityBase, identityIndex + 1);
+      return `${identityBase}:${identityIndex}`;
+    });
+    const currentItems = [...resultsEl.querySelectorAll('.settings-search-result')];
+    const identitiesUnchanged = currentItems.length === nextIdentities.length &&
+      currentItems.every((item, index) => item.dataset.settingsSearchIdentity === nextIdentities[index]);
+    if (identitiesUnchanged) {
+      resultsEl.style.display = '';
+      return;
+    }
+    const activeResult = document.activeElement && typeof document.activeElement.closest === 'function'
+      ? document.activeElement.closest('.settings-search-result')
+      : null;
+    const focusedIdentity = activeResult && resultsEl.contains(activeResult)
+      ? activeResult.dataset.settingsSearchIdentity
+      : null;
+    resultsEl.innerHTML = '';
+    let focusTarget = null;
+    for (const [matchIndex, { entry: m }] of visibleMatches.entries()) {
+      const identity = nextIdentities[matchIndex];
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'settings-search-result';
+      item.dataset.settingsSearchIdentity = identity;
+      item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
+        `<span class="settings-search-arrow">›</span>` +
+        `<span class="settings-search-label">${esc(m.label)}</span>`;
+      item.addEventListener('click', () => {
+        ++_settingsSearchSeq;
+        _navigateToSettingsField(m);
+        resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
+        const input = $('settingsSearch');
+        if (input) input.value = '';
+      });
+      resultsEl.appendChild(item);
+      if (focusedIdentity === identity) focusTarget = item;
+    }
+    resultsEl.style.display = '';
+    const focusDestination = focusTarget || (focusedIdentity ? $('settingsSearch') : null);
+    if (focusDestination && typeof focusDestination.focus === 'function') {
+      focusDestination.focus({ preventScroll: true });
+    }
+  };
+  renderResults(!!buildPromise);
+  if (!buildPromise) return;
+  await buildPromise;
+  // A newer keystroke superseded this query while the dynamic panes loaded.
+  if (seq !== _settingsSearchSeq) return;
+  renderResults(false);
 }
 
 function _scoreSettingsSearchMatch(entry, q) {
@@ -9787,6 +9851,10 @@ async function loadSettingsPanel(){
           {value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
+          {value:'en-US-AndrewMultilingualNeural',label:'Andrew (English, Male, Multilingual)'},
+          {value:'en-US-AvaMultilingualNeural',label:'Ava (English, Female, Multilingual)'},
+          {value:'en-US-BrianMultilingualNeural',label:'Brian (English, Male, Multilingual)'},
+          {value:'en-US-EmmaMultilingualNeural',label:'Emma (English, Female, Multilingual)'},
           {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
           {value:'fr-FR-RemyMultilingualNeural',label:'Rémy (French, Male, Multilingual)'},
           {value:'fr-FR-VivienneMultilingualNeural',label:'Vivienne (French, Female, Multilingual)'},

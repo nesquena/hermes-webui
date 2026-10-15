@@ -33,6 +33,7 @@ from urllib.parse import parse_qs, urlparse
 
 # ── Basic layout ──────────────────────────────────────────────────────────────
 import api.paths as _paths
+from api import startup as _startup
 from api.plugin_providers import (
     effective_provider_display_name as _effective_provider_display_name,
     is_plugin_model_provider as _is_plugin_model_provider,
@@ -165,92 +166,30 @@ def _env_mb_bytes(name: str, default_mb: int) -> int:
 
 
 # ── Hermes agent directory discovery ─────────────────────────────────────────
-def _discover_agent_dir() -> Path:
-    """
-    Locate the hermes-agent checkout using a multi-strategy search.
-
-    Priority:
-      1. HERMES_WEBUI_AGENT_DIR env var  -- explicit override always wins
-      2. HERMES_HOME / hermes-agent      -- e.g. ~/.hermes/hermes-agent
-      3. Sibling of this repo            -- ../hermes-agent
-      4. Parent of this repo             -- ../../hermes-agent (nested layout)
-      5. Common install paths            -- ~/.hermes/hermes-agent (again as fallback)
-      6. HOME / hermes-agent             -- ~/hermes-agent (simple flat layout)
-    """
-    explicit_override = os.getenv("HERMES_WEBUI_AGENT_DIR")
-    if explicit_override:
-        explicit_path = Path(explicit_override).expanduser().resolve()
-        if explicit_path.exists() and _looks_like_agent_source_root(explicit_path):
-            return explicit_path
-
-    candidates = []
-
-    # 2. HERMES_HOME / hermes-agent
-    hermes_home = os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))
-    candidates.append(Path(hermes_home).expanduser() / "hermes-agent")
-
-    # 3. Sibling: <repo-root>/../hermes-agent
-    candidates.append(REPO_ROOT.parent / "hermes-agent")
-
-    # 4. Parent is the agent repo itself (repo cloned inside hermes-agent/)
-    if _looks_like_agent_source_root(REPO_ROOT.parent):
-        candidates.append(REPO_ROOT.parent)
-
-    # 5. ~/.hermes/hermes-agent (explicit common path)
-    candidates.append(_DEFAULT_HERMES_HOME / "hermes-agent")
-
-    # 6. ~/hermes-agent
-    candidates.append(HOME / "hermes-agent")
-
-    # 7. XDG_DATA_HOME / hermes-agent  (e.g. ~/.local/share/hermes-agent)
-    xdg_data = Path(os.getenv("XDG_DATA_HOME", str(HOME / ".local" / "share")))
-    candidates.append(xdg_data.expanduser() / "hermes-agent")
-
-    # 8. System-wide install paths (e.g. /opt/hermes-agent, /usr/local/hermes-agent)
-    for sys_prefix in ("/opt", "/usr/local", "/usr/local/share"):
-        candidates.append(Path(sys_prefix) / "hermes-agent")
-
-    # Prefer real source checkouts before pip-style roots so lookalikes cannot preempt them.
-    for path in candidates:
-        if path.exists() and (path / "run_agent.py").exists():
-            return path.resolve()
-
-    for path in candidates:
-        if path.exists() and _looks_like_pip_style_agent_source_root(path):
-            return path.resolve()
-
-    return None
-
-
-def _looks_like_agent_source_root(path: Path) -> bool:
-    """Return True when a directory resembles a hermes-agent source root."""
-    if (path / "run_agent.py").exists():
-        return True
-    return _looks_like_pip_style_agent_source_root(path)
-
-
-def _looks_like_pip_style_agent_source_root(path: Path) -> bool:
-    """Return True for pip-style agent roots with a real agent package signal."""
-    if not (path / "cron" / "jobs.py").exists():
-        return False
-    if (path / "hermes").exists():
-        return True
-    hermes_cli_dir = path / "hermes_cli"
-    return (
-        (hermes_cli_dir / "__init__.py").exists()
-        or (hermes_cli_dir / "main.py").exists()
+def _discovery_result():
+    return _startup._discover_agent_identity(
+        repo_root=REPO_ROOT,
+        hermes_home=Path(os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))),
+        default_hermes_home=_DEFAULT_HERMES_HOME,
+        user_home=HOME,
+        python_exe=os.getenv("HERMES_WEBUI_PYTHON") or sys.executable,
     )
 
 
-def _discover_python(agent_dir: Path) -> str:
+def _discover_agent_dir() -> Path | None:
+    return _discovery_result().agent_dir
+
+
+def _discover_python(agent_dir: Path | None, proven_python: str | None = None) -> str:
     """
     Locate a Python executable that has the Hermes agent dependencies installed.
 
     Priority:
       1. HERMES_WEBUI_PYTHON env var
       2. Agent venv at <agent_dir>/venv/bin/python
-      3. Local .venv inside this repo
-      4. System python3
+      3. Interpreter that proved the Agent root
+      4. Local .venv inside this repo
+      5. System python3
     """
     if os.getenv("HERMES_WEBUI_PYTHON"):
         return os.getenv("HERMES_WEBUI_PYTHON")
@@ -268,10 +207,13 @@ def _discover_python(agent_dir: Path) -> str:
         venv_py_win = agent_dir / "venv" / "Scripts" / "python.exe"
         if venv_py_win.exists():
             return str(venv_py_win)
-        
+
         venv_py_win = agent_dir / ".venv" / "Scripts" / "python.exe"
         if venv_py_win.exists():
             return str(venv_py_win)
+
+    if proven_python:
+        return proven_python
 
     # Local .venv inside this repo
     for subdir, binary in (("bin", "python"), ("Scripts", "python.exe")):
@@ -291,8 +233,9 @@ def _discover_python(agent_dir: Path) -> str:
 
 
 # Run discovery
-_AGENT_DIR = _discover_agent_dir()
-PYTHON_EXE = _discover_python(_AGENT_DIR)
+_DISCOVERY = _discovery_result()
+_AGENT_DIR = _DISCOVERY.agent_dir
+PYTHON_EXE = _discover_python(_AGENT_DIR, _DISCOVERY.python_exe)
 
 # ── Inject agent dir into sys.path so Hermes modules are importable ──────────
 
@@ -6771,7 +6714,7 @@ _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
-_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
+_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
@@ -8896,6 +8839,7 @@ def _save_models_cache_to_disk(
                 if build_fingerprint is not None
                 else _models_cache_source_fingerprint()
             ),
+            "_built_at": time.time(),
             "active_provider": cache["active_provider"],
             "default_model": cache["default_model"],
             "configured_model_badges": cache["configured_model_badges"],
@@ -11768,11 +11712,39 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         return copy.deepcopy(_static_models_catalog_without_live_probes())
 
 
-def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+def _models_disk_cache_built_at(cache_path: Path) -> float | None:
+    """Return the persisted ``_built_at`` (last live rebuild) stamp, if present.
+
+    Returns None for caches written before the stamp existed (their freshness
+    falls back to file mtime), future-stamped caches, and any unreadable/unparseable
+    payload, so the freshness decision never hard-fails on a malformed cache.
+    """
     try:
-        return max(0.0, now - cache_path.stat().st_mtime)
+        with open(cache_path, encoding="utf-8") as f:
+            payload = json.load(f)
+        built_at = payload.get("_built_at")
+        if isinstance(built_at, (int, float)) and math.isfinite(built_at) and 0 < built_at <= time.time():
+            return float(built_at)
+        return None
+    except Exception:
+        return None
+
+
+def _models_cache_file_age_seconds(cache_path: Path, now: float) -> float | None:
+    """Age of the disk models cache judged against when it was built.
+
+    The refresh clock is the persisted ``_built_at`` stamp (last live rebuild)
+    written by ``_save_models_cache_to_disk``. A cache written before the stamp
+    existed (or carrying an invalid/future stamp) falls back to mtime age.
+    """
+    try:
+        mtime_age = max(0.0, now - cache_path.stat().st_mtime)
     except OSError:
         return None
+    built_at = _models_disk_cache_built_at(cache_path)
+    if built_at is not None:
+        return max(0.0, now - built_at)
+    return mtime_age
 
 
 def warm_models_catalog_provenance_if_cold() -> None:

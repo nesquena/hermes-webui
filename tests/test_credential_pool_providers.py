@@ -90,6 +90,9 @@ def _call_get_available_models(monkeypatch, tmp_path, auth_payload, *, with_load
     old_mtime = config._cfg_mtime
     config.cfg.clear()
     config.cfg["model"] = {}
+    # Pin the loaded-config path too: a stale _cfg_path left by an earlier test makes the next config
+    # read reload config.yaml over this in-memory seed (order-dependent CI flake, #8226).
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path())
     try:
         # Pin mtime to avoid reload_config() clobbering our in-memory cfg patch.
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
@@ -490,6 +493,9 @@ def test_ollama_cloud_empty_catalog_skips_group(monkeypatch, tmp_path):
     old_mtime = config._cfg_mtime
     config.cfg.clear()
     config.cfg["model"] = {}
+    # Pin the loaded-config path too: a stale _cfg_path left by an earlier test makes the next config
+    # read reload config.yaml over this in-memory seed (order-dependent CI flake, #8226).
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path())
     try:
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
     except Exception:
@@ -581,6 +587,9 @@ def test_fallback_path_resolves_alias_when_load_pool_unavailable(monkeypatch, tm
     old_mtime = config._cfg_mtime
     config.cfg.clear()
     config.cfg["model"] = {}
+    # Pin the loaded-config path too: a stale _cfg_path left by an earlier test makes the next config
+    # read reload config.yaml over this in-memory seed (order-dependent CI flake, #8226).
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path())
     try:
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
     except Exception:
@@ -720,6 +729,9 @@ def test_custom_provider_detected_by_get_providers(monkeypatch, tmp_path):
             "display_name": "Bothub",
         },
     ]
+    # Pin the loaded-config path too: a stale _cfg_path left by an earlier test makes the next config
+    # read reload config.yaml over this in-memory seed (order-dependent CI flake, #8226).
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path())
     try:
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
     except Exception:
@@ -784,6 +796,9 @@ def test_custom_provider_detected_by_get_available_models(monkeypatch, tmp_path)
             "display_name": "Bothub",
         },
     ]
+    # Pin the loaded-config path too: a stale _cfg_path left by an earlier test makes the next config
+    # read reload config.yaml over this in-memory seed (order-dependent CI flake, #8226).
+    monkeypatch.setattr(config, "_cfg_path", config._get_config_path())
     try:
         config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
     except Exception:
@@ -951,3 +966,10 @@ def test_has_explicit_pool_credentials_import_error_is_false(monkeypatch, tmp_pa
     from api.config import _has_explicit_pool_credentials
 
     assert _has_explicit_pool_credentials("copilot") is False
+
+def test_seeded_config_survives_a_stale_loaded_config_path(monkeypatch, tmp_path):
+    """#8226: an earlier test can leave config._cfg_path pointing at another file. The in-memory
+    seeds above must still win; before the fix, get_available_models() reloaded config.yaml over
+    the seed and only the auth.json provider survived ("got ['OpenAI Codex']")."""
+    monkeypatch.setattr(config, "_cfg_path", config.Path("/nonexistent/elsewhere/config.yaml"))
+    test_custom_provider_detected_by_get_available_models(monkeypatch, tmp_path)
