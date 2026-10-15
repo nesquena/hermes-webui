@@ -8359,6 +8359,18 @@ def _pool_entry_payloads(provider_id: str) -> list[dict[str, Any]]:
                 _all_entries = _cp_pool.entries() if _cp_pool is not None and hasattr(_cp_pool, "entries") else []
         else:
             _cp_pool = _load_pool(_pid)
+            # Fallback: custom providers defined in config.yaml's
+            # custom_providers[] resolve to a bare slug (``bothub``), but their
+            # pool entries are keyed with the ``custom:`` prefix
+            # (``custom:bothub``) — the same keying the models screen and
+            # provider tests use. A bare-slug lookup misses those entries, so
+            # a fully configured provider reports "no credentials". Retry once
+            # under the canonical key before caching the empty result.
+            if not _cp_pool.has_credentials() and not _pid.startswith("custom:"):
+                _cp_pool_custom = _load_pool(f"custom:{_pid}")
+                if _cp_pool_custom.has_credentials():
+                    _cp_pool = _cp_pool_custom
+                    _ck = (_credential_pool_profile_tag(), _pid)
             _CREDENTIAL_POOL_CACHE[_ck] = (time.time(), _cp_pool)
             _all_entries = _cp_pool.entries() if _cp_pool is not None and hasattr(_cp_pool, "entries") else []
     except ImportError:
