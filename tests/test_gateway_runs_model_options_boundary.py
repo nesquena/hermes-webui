@@ -440,6 +440,7 @@ def _capture_gateway_wire_body(
     effort,
     *,
     use_runs_api=True,
+    expect_path=None,
     service_tier=None,
     session_profile=None,
     profile_effort=None,
@@ -453,6 +454,9 @@ def _capture_gateway_wire_body(
     ``real_profile_scope`` keeps ``api.profiles.profile_scope_for_request_read``
     in the loop, so the request's Gateway credential comes from the profile
     directory the worker resolves instead of the process environment.
+    ``use_runs_api=None`` leaves ``HERMES_WEBUI_GATEWAY_USE_RUNS_API`` unset, so
+    the owner's config-only value is the only source for the lane; pass
+    ``expect_path`` to assert which lane the worker picked.
     ``real_config`` leaves ``api.config.get_config_snapshot`` unpatched so the
     session's snapshot comes from the real producer reading the on-disk
     profile ``config.yaml`` (pair it with ``_pin_scoped_config_read``); the
@@ -534,10 +538,13 @@ def _capture_gateway_wire_body(
 
     gateway_environ = {
         "HERMES_WEBUI_CHAT_BACKEND": "gateway",
-        "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1" if use_runs_api else "0",
         "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw:8642",
         "HERMES_WEBUI_GATEWAY_API_KEY": "secret",
     }
+    if use_runs_api is not None:
+        gateway_environ["HERMES_WEBUI_GATEWAY_USE_RUNS_API"] = (
+            "1" if use_runs_api else "0"
+        )
     if gateway_env:
         gateway_environ.update(gateway_env)
 
@@ -604,7 +611,7 @@ def _capture_gateway_wire_body(
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
 
-    target = "/v1/runs" if use_runs_api else "/v1/chat/completions"
+    target = expect_path or ("/v1/runs" if use_runs_api else "/v1/chat/completions")
     agent_requests = [req for req in requests if req.full_url.endswith(target)]
     assert agent_requests, f"worker never POSTed {target}"
     if captured is not None:
@@ -1802,6 +1809,127 @@ def test_config_owner_url_stays_off_a_different_named_profile_receiver(
 
     assert captured["url"] == "http://analyst-gw.test/v1/runs"
     assert "Authorization" not in captured["headers"]
+
+
+def test_config_only_owner_url_routes_a_sparse_named_profile(monkeypatch, tmp_path):
+    """A config-only deployment URL must route a sparse named profile's request.
+
+    Deployment ENV carries only the key; the process-owner ``config.yaml``
+    names the Gateway. The named profile supplies neither an environment URL
+    nor a profile config, so the owner's URL is the deployment authority: the
+    request has to reach that receiver with the deployment credential rather
+    than the built-in localhost default without one (re-gate round 12, item 1).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "http://remote-gw.test")
+    profile_home = tmp_path / "profiles" / "config-only-sparse"
+    profile_home.mkdir(parents=True)
+    (profile_home / ".env").write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert (
+            "HERMES_WEBUI_GATEWAY_BASE_URL"
+            not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        )
+        _capture_gateway_wire_body(
+            None,
+            session_profile="config-only-sparse",
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://remote-gw.test/v1/runs"
+    assert captured["headers"]["Authorization"] == "Bearer deployment-key"
+
+
+@pytest.mark.parametrize(
+    "owner_flag, profile_flag, expected_path",
+    (
+        ("true", None, "/v1/runs"),
+        ("true", "false", "/v1/chat/completions"),
+        ("false", None, "/v1/chat/completions"),
+    ),
+    ids=("profile-omits", "profile-false", "owner-false"),
+)
+def test_config_only_runs_flag_reaches_a_sparse_named_profile(
+    monkeypatch, tmp_path, owner_flag, profile_flag, expected_path
+):
+    """The owner's config-only runs-API flag governs a sparse named profile.
+
+    No environment value exists, so the root ``config.yaml`` is the only
+    source. A sparse named profile that omits the flag inherits the owner's
+    choice — otherwise durable-run recovery silently turns off — while an
+    explicit profile ``false`` and an owner ``false`` both stay on the legacy
+    transport (re-gate round 12, item 3).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    (tmp_path / "config.yaml").write_text(
+        f"webui_gateway_use_runs_api: {owner_flag}\n", encoding="utf-8"
+    )
+    profile_home = tmp_path / "profiles" / "runs-flag-inherit"
+    profile_home.mkdir(parents=True)
+    if profile_flag:
+        (profile_home / "config.yaml").write_text(
+            f"webui_gateway_use_runs_api: {profile_flag}\n", encoding="utf-8"
+        )
+    (profile_home / ".env").write_text("", encoding="utf-8")
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    _pin_scoped_config_read(monkeypatch)
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert (
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API"
+            not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        )
+        _capture_gateway_wire_body(
+            None,
+            session_profile="runs-flag-inherit",
+            use_runs_api=None,
+            expect_path=expected_path,
+            real_profile_scope=True,
+            real_config=True,
+            gateway_env={"HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key"},
+            captured=captured,
+        )
+
+    assert captured["url"].endswith(expected_path)
 
 
 def test_owner_config_placeholders_do_not_expand_from_named_profile_env(

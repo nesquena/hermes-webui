@@ -278,19 +278,17 @@ def _gateway_endpoint_identity(raw_url: str) -> tuple[str, str, int | None, str]
     )
 
 
-def _gateway_deployment_owner_base_url(deployment: dict[str, str]) -> str:
-    """Resolve the deployment owner's effective Gateway URL.
+def _gateway_deployment_owner_config() -> dict:
+    """Read the process owner's config for deployment-level Gateway values.
 
     The deployment's receiver belongs to the process owner, not to whichever
-    named profile is serving this request. Resolve the owner's URL the way the
-    owner's own requests resolve it (``_gateway_base_url``): the launcher
-    environment, then the process-owner profile's ``config.yaml``, then the
-    built-in default. The session's named-profile config must never stand in
-    for the owner's: a config-set deployment URL lives in the owner's file,
-    and reading the session's either treated the deployment as the localhost
-    default (dropping the key on a receiver the owner shares) or borrowed the
-    named profile's own endpoint as if it were the shared receiver (leaking
-    the deployment key to a different receiver).
+    named profile is serving this request: a config-set deployment URL lives in
+    the owner's file, and reading the session's either treated the deployment
+    as the localhost default (dropping the key on a receiver the owner shares)
+    or borrowed the named profile's own endpoint as if it were the shared
+    receiver (leaking the deployment key to a different receiver). The reader
+    resolves the owner's own config path and expands against the owner's
+    environment, never the requesting profile's scope.
     """
     owner_config = None
     try:
@@ -300,6 +298,19 @@ def _gateway_deployment_owner_base_url(deployment: dict[str, str]) -> str:
         owner_config = get_config_for_process_owner(get_process_profile_home())
     except Exception:
         owner_config = None
+    return owner_config if isinstance(owner_config, dict) else {}
+
+
+def _gateway_deployment_owner_base_url(
+    deployment: dict[str, str], owner_config: dict
+) -> str:
+    """Resolve the deployment owner's effective Gateway URL.
+
+    Resolve the owner's URL the way the owner's own requests resolve it
+    (``_gateway_base_url``): the launcher environment, then the process-owner
+    profile's ``config.yaml``, then the built-in default. The session's
+    named-profile config must never stand in for the owner's.
+    """
     return _gateway_base_url(owner_config, environ=deployment)
 
 
@@ -337,8 +348,31 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None, config_data
     # deployment's key to a profile-selected localhost receiver; resolving
     # the deployment from the session's config borrowed the named profile's
     # endpoint as if it were the shared receiver.
-    effective_deployment_url = _gateway_deployment_owner_base_url(deployment)
-    selected_url = _gateway_base_url(config_data, environ=merged)
+    owner_config = _gateway_deployment_owner_config()
+    effective_deployment_url = _gateway_deployment_owner_base_url(
+        deployment, owner_config
+    )
+    session_config = config_data if isinstance(config_data, dict) else {}
+    # Config-only deployment values. The owner's ``config.yaml`` is the
+    # deployment authority whenever the launcher environment and the profile
+    # both omit the setting. Insert it into the request environment before the
+    # comparison and the dispatch: a sparse named profile otherwise falls back
+    # to the built-in localhost default, drops the deployment credential and
+    # loses the runs API while the owner's own requests keep both. An explicit
+    # profile value — environment or the session's own YAML, including
+    # ``false`` — still wins.
+    if (
+        not str(merged.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+        and not str(session_config.get("webui_gateway_base_url") or "").strip()
+    ):
+        merged[_WEBUI_GATEWAY_BASE_URL_ENV] = effective_deployment_url
+    if (
+        "webui_gateway_use_runs_api" not in session_config
+        and not str(merged.get(_WEBUI_GATEWAY_USE_RUNS_API_ENV) or "").strip()
+        and _gateway_use_runs_api_enabled(owner_config, environ={})
+    ):
+        merged[_WEBUI_GATEWAY_USE_RUNS_API_ENV] = "1"
+    selected_url = _gateway_base_url(session_config, environ=merged)
     dedicated_url = (
         _gateway_endpoint_identity(selected_url)
         != _gateway_endpoint_identity(effective_deployment_url)
