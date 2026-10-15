@@ -8316,6 +8316,50 @@ def _credential_pool_profile_tag() -> str:
         return ""
 
 
+def _pool_has_credentials(pool) -> bool:
+    """Tolerant check: test fakes may implement only ``.entries()``."""
+    if pool is None:
+        return False
+    if hasattr(pool, "has_credentials"):
+        return bool(pool.has_credentials())
+    return bool(pool.entries() if hasattr(pool, "entries") else [])
+
+
+def _pid_is_named_custom_provider_slug(pid: str) -> bool:
+    """True when *pid* (bare, no ``custom:`` prefix) matches a named entry
+    in config.yaml's ``custom_providers[]``.
+
+    Built-in provider IDs (``openai``, ``anthropic``) and plugin IDs are
+    deliberately not covered: a bare built-in provider with no credentials
+    of its own must not fall back to ``custom:<pid>`` and borrow a named
+    custom provider's keys under the same name.
+    """
+    pid = (pid or "").strip().lower()
+    if not pid or pid.startswith("custom:"):
+        return False
+    try:
+        return bool(_named_custom_provider_slug_for_provider(pid, None))
+    except Exception:
+        return False
+
+
+def _load_pool_with_custom_fallback(pid: str, load_pool):
+    """``load_pool(pid)`` with a one-shot ``custom:<pid>`` retry.
+
+    A named custom provider's pool entries are keyed with the ``custom:``
+    prefix (the same keying the models screen and the credential-pool tests
+    use); a bare-slug lookup misses them. Fall back to the canonical key
+    when the bare pool is empty AND *pid* is a known named custom slug.
+    """
+    pool = load_pool(pid)
+    if _pool_has_credentials(pool):
+        return pool
+    if not _pid_is_named_custom_provider_slug(pid):
+        return pool
+    candidate = load_pool(f"custom:{pid}")
+    return candidate if _pool_has_credentials(candidate) else pool
+
+
 def _pool_entry_payloads(provider_id: str) -> list[dict[str, Any]]:
     """Return explicit credential-pool entry payloads for the active profile.
 
@@ -8354,23 +8398,11 @@ def _pool_entry_payloads(provider_id: str) -> list[dict[str, Any]]:
             if (time.time() - _cp_ts) < 86400.0:
                 _all_entries = _cp_pool.entries() if _cp_pool is not None and hasattr(_cp_pool, "entries") else []
             else:
-                _cp_pool = _load_pool(_pid)
+                _cp_pool = _load_pool_with_custom_fallback(_pid, _load_pool)
                 _CREDENTIAL_POOL_CACHE[_ck] = (time.time(), _cp_pool)
                 _all_entries = _cp_pool.entries() if _cp_pool is not None and hasattr(_cp_pool, "entries") else []
         else:
-            _cp_pool = _load_pool(_pid)
-            # Fallback: custom providers defined in config.yaml's
-            # custom_providers[] resolve to a bare slug (``bothub``), but their
-            # pool entries are keyed with the ``custom:`` prefix
-            # (``custom:bothub``) — the same keying the models screen and
-            # provider tests use. A bare-slug lookup misses those entries, so
-            # a fully configured provider reports "no credentials". Retry once
-            # under the canonical key before caching the empty result.
-            if not _cp_pool.has_credentials() and not _pid.startswith("custom:"):
-                _cp_pool_custom = _load_pool(f"custom:{_pid}")
-                if _cp_pool_custom.has_credentials():
-                    _cp_pool = _cp_pool_custom
-                    _ck = (_credential_pool_profile_tag(), _pid)
+            _cp_pool = _load_pool_with_custom_fallback(_pid, _load_pool)
             _CREDENTIAL_POOL_CACHE[_ck] = (time.time(), _cp_pool)
             _all_entries = _cp_pool.entries() if _cp_pool is not None and hasattr(_cp_pool, "entries") else []
     except ImportError:
