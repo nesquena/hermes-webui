@@ -1494,7 +1494,7 @@ function _applyUserRowIntrinsicHeight(row, rawText){
   const h=Math.max(remembered, estimate);
   if(h>0) row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
 }
-function _measureMessageVirtualRow(inner, entry){
+function _measureMessageVirtualRow(inner, entry, deferredWrites){
   if(!inner||!entry) return 0;
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
   if(!primary) return 0;
@@ -1515,8 +1515,18 @@ function _measureMessageVirtualRow(inner, entry){
   // extract it without this helper (they stub every collaborator by name).
   if(totalHeight>0 && primary.dataset && primary.dataset.role==='user'
      && typeof _rememberUserRowIntrinsicHeight==='function'){
+    // _rememberUserRowIntrinsicHeight below is a plain JS map write; only the
+    // contain-intrinsic-size assignment invalidates layout. Callers that measure a
+    // whole row set pass a pending buffer (#7677) so every style write lands AFTER
+    // every geometry read — the read/write interleaving this used to do made row N's
+    // getBoundingClientRect() force a fresh full-document layout after row N-1's
+    // write, i.e. N rows cost N layouts on a transcript that can be hundreds of
+    // thousands of pixels tall. No buffer (direct/legacy callers) keeps the
+    // immediate inline write.
     _rememberUserRowIntrinsicHeight(primary.dataset.sessionMsgIdx, totalHeight);
-    primary.style.containIntrinsicSize='auto '+Math.round(totalHeight)+'px';
+    const intrinsic='auto '+Math.round(totalHeight)+'px';
+    if(Array.isArray(deferredWrites)) deferredWrites.push({row:primary,intrinsic:intrinsic});
+    else primary.style.containIntrinsicSize=intrinsic;
   }
   return totalHeight;
 }
@@ -1526,10 +1536,15 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   let changed=false;
   let measuredCount=0;
   let measuredTotal=0;
+  // #7677 read/write separation: the whole measurement pass is READS FIRST
+  // (every row's getBoundingClientRect()), then one WRITE phase that flushes the
+  // deferred contain-intrinsic-size values. All the reads therefore share a
+  // single layout instead of forcing one per row.
+  const deferredWrites=[];
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
     if(!entry) continue;
-    const totalHeight=_measureMessageVirtualRow(inner, entry);
+    const totalHeight=_measureMessageVirtualRow(inner, entry, deferredWrites);
     if(totalHeight<=0) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
@@ -1539,6 +1554,10 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     }
     measuredTotal+=totalHeight;
     measuredCount++;
+  }
+  for(let wi=0;wi<deferredWrites.length;wi++){
+    const pending=deferredWrites[wi];
+    if(pending&&pending.row) pending.row.style.containIntrinsicSize=pending.intrinsic;
   }
   if(measuredCount>0){
     _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
@@ -9286,7 +9305,16 @@ function lockComposerForClarify(placeholderText){
   // card is active (and survives page refresh / syncs across clients).
   const sid = S && S.session && S.session.session_id;
   if (sid && typeof _saveComposerDraftNow === 'function') {
-    _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    const saveText = String(input.value || '');
+    const saveFiles = Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [];
+    try {
+      const saveResult = _saveComposerDraftNow(sid, saveText, saveFiles);
+      if (saveResult && typeof saveResult.catch === 'function') {
+        saveResult.catch((error)=>_handleComposerDraftPostFailure(error,sid,saveText,saveFiles));
+      }
+    } catch (error) {
+      _handleComposerDraftPostFailure(error,sid,saveText,saveFiles);
+    }
   }
   if(!_composerLockState){
     _composerLockState={
@@ -15960,6 +15988,15 @@ function _computeTransparentHiddenPrefixCount(rows){
 // renderMessages({preserveScroll:true}) call and cleared after the settled-scene
 // render pass; null at all other times.
 let _keepSettledWorklogOpenForStreamId=null;
+// #7677: PRE-INIT snapshot taken by the keep-open settle render (renderMessages
+// computes `cacheHtml` before highlightCode/addCopyButtons/initTreeViews and
+// deliberately does NOT cache the forced-open DOM, #5260). When the settle chain
+// then skips the unarmed rebuild, _cacheSettledTranscriptHtml() publishes this
+// stash so the session still lands in _sessionHtmlCache. Capturing it here —
+// rather than from the live DOM afterwards — is what keeps restored controls
+// working: innerHTML cannot save onclick handlers, and addCopyButtons() /
+// initTreeViews() skip already-initialized markup on restore.
+let _settleKeepOpenCacheStash=null;
 function _shouldKeepSettledWorklogOpenForStreamSettle(streamId){
   // Round 6 scroll-jump guard: collapsing the JUST-settled live worklog into a
   // compact summary at STREAM_DONE shrinks the transcript by hundreds of px. The
@@ -16006,6 +16043,138 @@ function _assistantTurnHasVisibleRenderedSegment(turn){
   }
   return false;
 }
+// #7677 (terminal settlement). STREAM_DONE renders the just-settled turn with the
+// keep-open token armed, disarms, then collapses that turn in place — or falls back
+// to a SECOND full transcript rebuild. The in-place collapse below keys off the
+// settled-scene OWNER group, which only the NON-transparent settled renderer stamps
+// (_renderSettledAnchorSceneForMessage), so transparent streams never matched a
+// group and ALWAYS paid the second rebuild: the "~11 s of every turn" of this issue,
+// on top of an already multi-second first render.
+//
+// The only armed-keep-open effect the TRANSPARENT settled renderer honors is the
+// per-turn row-cap exemption (`justSettled` in
+// _renderSettledAnchorSceneTransparentForMessage): while the token is armed the
+// just-settled turn renders its activity rows in FULL, and the unarmed rebuild's
+// only job is to re-cap that one turn behind a "Show earlier steps" affordance. So
+// whenever the armed render left the turn within the cap slack — including the
+// common plain reply whose scene has no activity rows at all — the unarmed rebuild
+// would produce exactly the same DOM and there is nothing left to collapse.
+//
+// Fail closed in every other case: non-transparent stream, a worklog-worthy scene
+// whose rows are not in the rendered transcript (windowing / cache divergence), or
+// a turn over the cap that an unarmed rebuild WOULD re-cap. Cost is never traded
+// for correctness — the second render stays the fallback.
+// #7677 (review P1). The UNARMED rebuild's decision to re-cap a turn is taken
+// from the SCENE'S ROW LIST (`_anchorSceneRowsForRendering(...,{settled:true})`)
+// and the turn's revealed state — never from what happens to sit in the DOM.
+// Rows that render no node at all (hidden reasoning) are still in that list, so
+// counting the nodes the ARMED render left behind can read cap+slack while the
+// list is longer, and declare the second render redundant while an unarmed
+// rebuild would still re-cap the turn to its last 30 rows + a "Show earlier
+// steps" affordance. Any row source we cannot read fails CLOSED (pay the second
+// render); correctness is never traded for the saved rebuild.
+function _transparentSettledTurnWouldBeCapped(inner, scene, rawIdx){
+  if(!scene) return false;
+  if(typeof _anchorSceneRowsForRendering!=='function') return true;
+  let rows=null;
+  try{ rows=_anchorSceneRowsForRendering(scene,{settled:true}); }catch(_e){ rows=null; }
+  if(!Array.isArray(rows)) return true;
+  if(rows.length<=_TRANSPARENT_SETTLED_ROW_CAP+_TRANSPARENT_SETTLED_ROW_CAP_SLACK) return false;
+  // #5966 Codex F3: the persistent revealed set is authoritative — an already
+  // revealed turn is never re-capped by a rebuild. The DOM flag
+  // (data-transparent-earlier-revealed) is only the renderer's same-render fast
+  // path; ignoring it here fails toward the second render, i.e. the safe side.
+  if(typeof _transparentRevealKey==='function'
+     &&typeof _transparentRevealedTurns!=='undefined'
+     &&_transparentRevealedTurns&&typeof _transparentRevealedTurns.has==='function'){
+    const session=(typeof S!=='undefined'&&S)?S.session:null;
+    if(_transparentRevealedTurns.has(_transparentRevealKey(session&&session.session_id, rawIdx))) return false;
+  }
+  return true;
+}
+// #7677 (review P2 / r2 P1). STREAM_DONE's unarmed second render was also the
+// pass that wrote the settled transcript into _sessionHtmlCache (the keep-open
+// ARMED render is deliberately uncached, #5260). Skipping that rebuild therefore
+// used to leave the session uncached, so switching away and back paid a full
+// rebuild. Publish the PRE-INIT snapshot the armed render stashed — no rebuild —
+// under exactly the gates renderMessages() applies to its own cache write: the
+// stash must belong to the live session, no in-flight stream, no transient
+// compression/handoff card, and <300 KB of HTML. Reading the LIVE DOM here would
+// be wrong: by settle time it is post-init, and innerHTML cannot carry the copy
+// buttons' / tree views' onclick handlers, so restored controls would be dead.
+function _cacheSettledTranscriptHtml(){
+  try{
+    if(typeof _settleKeepOpenCacheStash==='undefined'||!_settleKeepOpenCacheStash) return false;
+    const stash=_settleKeepOpenCacheStash;
+    const sid=stash.sid;
+    const currentSid=(typeof S!=='undefined'&&S&&S.session)?S.session.session_id:null;
+    if(!sid||sid!==currentSid) return false;
+    if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[sid]) return false;
+    const w=(typeof window!=='undefined')?window:null;
+    const hasTransient=!!(w&&(
+      (w._compressionUi&&(!w._compressionUi.sessionId||w._compressionUi.sessionId===sid))||
+      (w._handoffUi&&(!w._handoffUi.sessionId||w._handoffUi.sessionId===sid))
+    ));
+    if(hasTransient) return false;
+    if(!stash.html||stash.html.length>=300000) return false;
+    if(typeof _sessionHtmlCache==='undefined'||!_sessionHtmlCache||typeof _sessionHtmlCache.set!=='function') return false;
+    if(typeof _sessionHtmlCacheSid!=='undefined') _sessionHtmlCacheSid=sid;
+    _sessionHtmlCache.set(sid,{
+      html:stash.html,
+      msgCount:stash.msgCount,
+      renderWindowKey:stash.renderWindowKey,
+      signature:stash.signature,
+    });
+    if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
+    _settleKeepOpenCacheStash=null;
+    return true;
+  }catch(_e){ return false; }
+}
+function _transparentSettledTurnSecondRenderIsRedundant(streamId){
+  if(!streamId) return false;
+  if(typeof isTransparentStream!=='function'||!isTransparentStream()) return false;
+  const inner=$('msgInner');
+  if(!inner||typeof inner.querySelectorAll!=='function') return false;
+  const messages=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:[];
+  const ownerIdxs=[];
+  const ownerScenes=[];
+  let ownerScene=null;
+  for(let i=0;i<messages.length;i++){
+    const m=messages[i];
+    if(!m||String(m._anchor_stream_id||'')!==String(streamId)) continue;
+    ownerIdxs.push(String(i));
+    ownerScenes.push(m._anchor_activity_scene||null);
+    ownerScene=m._anchor_activity_scene||ownerScene;
+  }
+  if(!ownerIdxs.length) return false;
+  // #7677 (review P1): decide with the renderer's own inputs first — if the
+  // unarmed rebuild would re-cap ANY of this stream's owner turns, the second
+  // render is not redundant no matter what the armed render left in the DOM.
+  if(typeof _transparentSettledTurnWouldBeCapped==='function'){
+    for(let k=0;k<ownerScenes.length;k++){
+      if(!ownerScenes[k]) continue;
+      if(_transparentSettledTurnWouldBeCapped(inner, ownerScenes[k], Number(ownerIdxs[k]))) return false;
+    }
+  }
+  // The transparent settled renderer stamps each row node with the owner message's
+  // RAW index (data-anchor-owner-idx); count only this stream's settled rows.
+  // This stays as the SECOND guard: it catches a turn whose scene rows are not in
+  // the rendered transcript at all (windowing / cache divergence), where the row
+  // list alone cannot prove the two renders match.
+  let renderedRows=0;
+  const nodes=inner.querySelectorAll('[data-anchor-owner-idx][data-anchor-settled-scene-row="1"]');
+  for(let i=0;i<nodes.length;i++){
+    if(ownerIdxs.indexOf(String(nodes[i]&&nodes[i].getAttribute('data-anchor-owner-idx')))>=0) renderedRows++;
+  }
+  if(!renderedRows){
+    // No settled rows rendered for this turn: a rebuild is a no-op unless the scene
+    // is worklog-worthy (its rows would appear — but then they would be here).
+    if(!ownerScene) return true;
+    if(typeof _anchorSceneSceneHasWorklogWorthyRows!=='function') return false;
+    return !_anchorSceneSceneHasWorklogWorthyRows(ownerScene);
+  }
+  return renderedRows<=(_TRANSPARENT_SETTLED_ROW_CAP+_TRANSPARENT_SETTLED_ROW_CAP_SLACK);
+}
 function _collapseJustSettledWorklogInPlace(streamId){
   // #6414: STREAM_DONE used to render the settled turn once with its Worklog
   // forced open, then immediately run a second full render only to collapse it.
@@ -16019,7 +16188,20 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const group=Array.from(inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]'))
     .filter(candidate=>candidate.getAttribute('data-anchor-stream-id')===String(streamId))
     .pop();
-  if(!group) return false;
+  if(!group){
+    // #7677: no settled-scene owner group means either a non-transparent miss
+    // (keep the old fail-closed fallback) or a TRANSPARENT stream, which never
+    // stamps that group at all — in which case the second STREAM_DONE render is
+    // redundant exactly when the armed settle render already matches the unarmed
+    // one. Non-transparent callers still get false from the helper below.
+    const redundant=_transparentSettledTurnSecondRenderIsRedundant(streamId);
+    // #7677 (review P2): skipping the unarmed rebuild also skips the cache write
+    // that rebuild used to perform (the armed render is deliberately uncached,
+    // #5260) — snapshot the already-settled DOM so a later switch-away/switch-back
+    // still hits _sessionHtmlCache instead of a full rebuild.
+    if(redundant&&typeof _cacheSettledTranscriptHtml==='function') _cacheSettledTranscriptHtml();
+    return redundant;
+  }
   const ownerTurn=typeof group.closest==='function'?group.closest('.assistant-turn'):null;
   const ownerHasVisibleSegment=_assistantTurnHasVisibleRenderedSegment(ownerTurn);
   if(ownerHasVisibleSegment===null) return false;
@@ -17181,6 +17363,7 @@ function clearMessageRenderCache(){
   _clearRenderCache();
   _sessionHtmlCache.clear();
   _sessionHtmlCacheSid=null;
+  _settleKeepOpenCacheStash=null;
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
 }
@@ -20359,6 +20542,26 @@ function renderMessages(options){
       _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
+    // #7677: an unarmed render supersedes any pending settle stash.
+    _settleKeepOpenCacheStash=null;
+  }else if(sid&&_keepOpenArmed){
+    // #7677: still no cache WRITE here (#5260 — the forced-open DOM must never be
+    // persisted), but stash the pre-init snapshot this render already computed.
+    // `cacheHtml` is taken BEFORE highlightCode/addCopyButtons/initTreeViews run,
+    // so it is exactly what the normal cache path would have stored. When the
+    // settle chain then skips the unarmed rebuild, _cacheSettledTranscriptHtml()
+    // publishes this stash — reading it back from the live DOM instead would save
+    // copy buttons and JSON/YAML trees WITHOUT their onclick handlers, leaving
+    // dead controls after a session switch (#7677 review r2 P1).
+    _settleKeepOpenCacheStash=(cacheHtml&&cacheHtml.length<300_000)
+      ? {
+        sid,
+        msgCount,
+        renderWindowKey,
+        html:cacheHtml,
+        signature:cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature,
+      }
+      : null;
   }
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
@@ -23778,10 +23981,39 @@ function _showUploadTooLarge(file){
   if(typeof setStatus==='function')setStatus(`\u274c ${message}`);
   else if(typeof showToast==='function')showToast(message,5000,'error');
 }
+// Mobile camera/photo pickers (iOS Safari in particular) hand every photo the
+// same generic name ("image.jpg"). Dropping a file just because its name is
+// taken silently loses the second photo. Only skip a true duplicate (same
+// name, size and mtime); otherwise keep the file under a collision-free name.
+function _pendingFileUniqueName(name){
+  const taken=new Set((S.pendingFiles||[]).map(p=>p&&p.name));
+  if(!taken.has(name))return name;
+  // Keep compound archive extensions whole (.tar.gz etc.) so the renamed copy
+  // still matches _ARCHIVE_EXTS and is extracted rather than uploaded as-is.
+  const compound=/\.tar\.(gz|bz2|xz)$/i.exec(name);
+  const dot=compound?compound.index:name.lastIndexOf('.');
+  const stem=dot>0?name.slice(0,dot):name;
+  const ext=dot>0?name.slice(dot):'';
+  for(let i=2;;i++){
+    const candidate=`${stem}-${i}${ext}`;
+    if(!taken.has(candidate))return candidate;
+  }
+}
+// A pending file's identity is its ORIGINAL name (before any collision rename).
+function _pendingFileOrigName(p){return (p&&p._origName)||(p&&p.name);}
 function addFiles(files){
   for(const f of files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
-    if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);
+    // True duplicate: same original name, size and mtime as ANY pending file,
+    // including one already renamed to a collision-free alias.
+    if(S.pendingFiles.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
+    if(S.pendingFiles.some(p=>p.name===f.name)){
+      const copy=new File([f],_pendingFileUniqueName(f.name),{type:f.type,lastModified:f.lastModified});
+      try{Object.defineProperty(copy,'_origName',{value:f.name});}catch(_){}
+      S.pendingFiles.push(copy);
+      continue;
+    }
+    S.pendingFiles.push(f);
   }
   renderTray();
 }

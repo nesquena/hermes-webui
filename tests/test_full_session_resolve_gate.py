@@ -17,13 +17,19 @@ def _install_lightweight_resolve_stubs(monkeypatch, models) -> None:
 
 
 def _empty_session(models, sid: str):
-    return models.Session(session_id=sid, messages=[])
+    session = models.Session(session_id=sid, messages=[])
+    session.save(touch_updated_at=False, skip_index=True)
+    return session
 
 
 @pytest.fixture(autouse=True)
-def _clear_session_cache():
+def _clear_session_cache(tmp_path, monkeypatch):
     import api.models as models
 
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
     with models.LOCK:
         models.SESSIONS.clear()
     yield

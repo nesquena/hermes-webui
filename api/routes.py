@@ -6785,6 +6785,71 @@ def _check_csrf(handler) -> bool:
 _EXTENSION_SIDECAR_PROXY_RE = _re.compile(
     r"^/api/extensions/(?P<extension_id>[^/]+)/sidecar(?:/(?P<proxy_path>.*))?$"
 )
+_EXTENSION_SIDECAR_PROXY_RE_IC = _re.compile(
+    r"^/api/extensions/(?P<extension_id>[^/]+)/sidecar(?:/(?P<proxy_path>.*))?$",
+    _re.IGNORECASE,
+)
+
+
+def _original_api_path(handler, parsed):
+    """Return the request path exactly as received by the server.
+
+    server.py case-folds ``/api/*`` paths for case-insensitive route matching
+    and retains the original-case path on the handler (``_raw_api_path``).
+    Dynamic path captures — share tokens, MCP server names, sidecar proxy
+    paths, opaque IDs — are case-sensitive and must be extracted from the
+    original path, never from the folded matching path. Falls back to
+    ``parsed.path`` when the request did not pass through server.py's
+    normalization (e.g. direct unit-test calls).
+    """
+    raw = getattr(handler, "_raw_api_path", None)
+    return raw if isinstance(raw, str) else parsed.path
+
+
+def _match_api_segments(handler, parsed, template):
+    """Match a fixed-shape /api/ route case-insensitively and return the
+    dynamic capture sliced from the ORIGINAL-case path (#6589 re-gate).
+
+    ``template`` lists every server-owned segment, with ``None`` marking the
+    single dynamic slot that is a case-sensitive capture (session id, board
+    id, …): e.g. ``("api", "sessions", None, "events")``. Static segments are
+    compared case-insensitively, so ``/API/Sessions/AbC/events`` matches the
+    template while still returning ``AbC`` (never the case-folded ``abc``).
+    Returns None when the path shape does not match.
+    """
+    raw = _original_api_path(handler, parsed) or ""
+    parts = raw.strip("/").split("/")
+    if len(parts) != len(template):
+        return None
+    capture = None
+    for i, expected in enumerate(template):
+        if expected is None:
+            capture = parts[i]
+            continue
+        if parts[i].casefold() != str(expected).casefold():
+            return None
+    return capture or None
+
+
+def fold_api_path(handler, parsed):
+    """Case-fold ``/api/*`` paths for route matching; retain the original on the handler.
+
+    Only the *matching* path is folded (``/API/Settings`` dispatches like
+    ``/api/settings``). The original-case path is kept as ``handler._raw_api_path``
+    so handlers slice case-sensitive dynamic values (share tokens, MCP server
+    names, session ids) via ``_original_api_path`` / ``_match_api_segments``.
+    The handler instance is reused across HTTP/1.1 keep-alive requests, so the
+    retained path is reset for EVERY request: a non-API request must never see
+    a stale ``_raw_api_path`` left by an earlier /api/ request (#6589).
+    """
+    handler._raw_api_path = None
+    raw_path = parsed.path
+    if raw_path.casefold().startswith("/api/"):
+        handler._raw_api_path = raw_path
+        return parsed._replace(path=raw_path.casefold())
+    return parsed
+
+
 _HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -6951,6 +7016,12 @@ def _handle_extension_sidecar_proxy(
     matched = _match_extension_sidecar_proxy_path(parsed.path)
     if matched is None:
         return False
+    # The sidecar extension id and proxy path are case-sensitive dynamic
+    # values: re-extract them from the original-case request path (see
+    # _original_api_path) instead of the case-folded matching path.
+    raw_matched = _EXTENSION_SIDECAR_PROXY_RE_IC.match(_original_api_path(handler, parsed) or "")
+    if raw_matched:
+        matched = (raw_matched.group("extension_id"), raw_matched.group("proxy_path") or "")
     # Require same-origin browser provenance on EVERY proxied method, not just
     # GET. Browser extensions (the only legitimate caller) always send Origin/
     # Referer/Sec-Fetch-Site, so this costs nothing on the real path while
@@ -11816,6 +11887,7 @@ from api.models import (
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
+    _persisted_session_meta_prefix,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
@@ -11826,6 +11898,8 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,
+    _save_session_draft,
+    _delete_session_draft,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -12016,6 +12090,81 @@ def _pre_compression_continuation_session_id(session) -> str | None:
 
     rows.extend(_child_rows_from_sidecars(memory_seen_ids))
     return _resolve_from_rows(rows)
+
+
+def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile) -> bool:
+    """Confirm one bounded compression edge from current on-disk metadata."""
+    snapshot_meta = _persisted_session_meta_prefix(snapshot_sid)
+    continuation_meta = _persisted_session_meta_prefix(continuation_sid)
+    return bool(
+        snapshot_meta
+        and continuation_meta
+        and _profiles_match(snapshot_meta.get("profile"), request_profile)
+        and snapshot_meta.get("pre_compression_snapshot")
+        and _safe_first(snapshot_meta.get("pre_compression_continuation_session_id"))
+        == continuation_sid
+        and _profiles_match(continuation_meta.get("profile"), request_profile)
+        and _safe_first(continuation_meta.get("parent_session_id")) == snapshot_sid
+    )
+
+
+def _draft_pre_compression_continuation_session_authority(
+    session,
+    *,
+    request_profile,
+    seen_authority_sids: set[str],
+    validated_edges: list[tuple[str, str]] | None = None,
+) -> tuple[str | None, str]:
+    """Validate one authoritative compression transition from a snapshot.
+
+    Returns:
+        (next_session, next_sid) when a validated transition exists.
+        (None, best_known_sid) when authority cannot be confirmed.
+    """
+    snapshot_sid = _safe_first(getattr(session, "session_id", None))
+    if not snapshot_sid or not is_safe_session_id(snapshot_sid):
+        return None, snapshot_sid
+
+    continuation_sid = _safe_first(
+        getattr(session, "pre_compression_continuation_session_id", None)
+    )
+    if not continuation_sid or not is_safe_session_id(continuation_sid):
+        return None, snapshot_sid
+    if continuation_sid in seen_authority_sids:
+        return None, continuation_sid
+
+    # Cached session freshness is message-count based and can miss a
+    # profile- or parent-only edit. Check only the bounded metadata prefixes.
+    if not _draft_compression_edge_is_authorized(
+        snapshot_sid, continuation_sid, request_profile
+    ):
+        return None, continuation_sid
+
+    try:
+        continuation_session = get_session(continuation_sid)
+    except KeyError:
+        return None, continuation_sid
+
+    if not _profiles_match(
+        getattr(continuation_session, "profile", None), request_profile
+    ):
+        return None, continuation_sid
+
+    if _safe_first(getattr(continuation_session, "parent_session_id", None)) != snapshot_sid:
+        return None, continuation_sid
+
+    if validated_edges is not None:
+        validated_edges.append((snapshot_sid, continuation_sid))
+
+    return continuation_session, continuation_sid
+
+
+def _draft_compression_edges_still_authorized(edges, request_profile) -> bool:
+    """Recheck each bounded lineage edge after acquiring the final target lock."""
+    return all(
+        _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile)
+        for snapshot_sid, continuation_sid in edges
+    )
 
 from api.workspace import (
     load_workspaces,
@@ -15302,7 +15451,10 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, payload)
 
     if parsed.path.startswith("/api/share/"):
-        token = parsed.path[len("/api/share/"):].strip()
+        # Share tokens are case-sensitive (secrets.token_urlsafe), so the
+        # capture must come from the original-case path, not the folded
+        # matching path (server.py normalizes /api/ paths for matching).
+        token = _original_api_path(handler, parsed)[len("/api/share/"):].strip()
         share = load_share(token)
         if not share:
             return bad(handler, "Shared conversation not found", 404)
@@ -16090,7 +16242,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == '/api/sessions/events':
         return _handle_session_events_stream(handler)
 
-    session_events_session_id = _session_events_path_session_id(parsed.path)
+    session_events_session_id = _match_api_segments(
+        handler, parsed, ("api", "sessions", None, "events")
+    )
     if session_events_session_id is not None:
         return _handle_session_sse_stream_for_session(handler, parsed, session_events_session_id)
 
@@ -16439,6 +16593,12 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Plugin static assets ──
     if parsed.path.startswith("/dashboard-plugins/"):
+        # Plugin names and asset paths are case-sensitive (config keys + disk
+        # paths). This route is NOT API-folded (server.py folds only /api/*),
+        # so parsed.path already carries the original case — and it must come
+        # from the CURRENT request: the handler is reused across keep-alive
+        # requests, so an API-only retained path (_raw_api_path) from an
+        # earlier request would be stale here (#6589 re-gate).
         parts = parsed.path.split("/", 3)
         if len(parts) >= 3:
             plugin_name = parts[2]
@@ -17651,31 +17811,172 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
-        with _get_session_agent_lock(sid):
-            _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
-            else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
-                _draft_mark("after_save")
-                saved_draft = s.composer_draft
+        request_sid = sid
+        request_session = s
+        request_profile = getattr(request_session, "profile", None)
+        authoritative_sid = request_sid
+        _MAX_DRAFT_AUTHORITY_HOPS = 4
+        _seen_authority_sids = {authoritative_sid}
+        _validated_compression_edges = []
+        resolved_once = False
+
+        def _draft_authority_unconfirmed():
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": "Draft authority could not be confirmed",
+                    "code": "draft_authority_unconfirmed",
+                },
+                status=409,
+            )
+
+        for _hop in range(_MAX_DRAFT_AUTHORITY_HOPS):
+            with _get_session_agent_lock(authoritative_sid):
+                _draft_mark("acquired_lock")
+                # A successful parent check releases that lock before this hop
+                # acquires the child lock. Revalidate every traversed edge here
+                # so a cleared/deleted snapshot cannot authorize the write.
+                if _validated_compression_edges and not _draft_compression_edges_still_authorized(
+                    _validated_compression_edges, request_profile
+                ):
+                    return _draft_authority_unconfirmed()
+                try:
+                    request_session = get_session(authoritative_sid)
+                except KeyError:
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "error": "Session no longer active",
+                            "session_id": authoritative_sid,
+                        },
+                        status=409,
+                    )
+
+                resolved_sid = str(getattr(request_session, "session_id", "") or "").strip()
+                if not resolved_sid or not is_safe_session_id(resolved_sid):
+                    return _draft_authority_unconfirmed()
+                if not _profiles_match(getattr(request_session, "profile", None), request_profile):
+                    return _draft_authority_unconfirmed()
+
+                if resolved_sid != authoritative_sid:
+                    if resolved_sid in _seen_authority_sids:
+                        return _draft_authority_unconfirmed()
+                    _seen_authority_sids.add(resolved_sid)
+                    authoritative_sid = resolved_sid
+                    continue
+
+                continuation_sid = None
+                if getattr(request_session, "pre_compression_snapshot", False):
+                    continuation_session, continuation_sid = (
+                        _draft_pre_compression_continuation_session_authority(
+                            request_session,
+                            request_profile=request_profile,
+                            seen_authority_sids=_seen_authority_sids,
+                            validated_edges=_validated_compression_edges,
+                        )
+                    )
+                    if not continuation_session:
+                        return _draft_authority_unconfirmed()
+                    request_session = continuation_session
+                    _seen_authority_sids.add(continuation_sid)
+                    authoritative_sid = continuation_sid
+                    continue
+
+                if authoritative_sid != request_sid:
+                    if (
+                        not _validated_compression_edges
+                        or not _draft_compression_edges_still_authorized(
+                            _validated_compression_edges, request_profile
+                        )
+                    ):
+                        return _draft_authority_unconfirmed()
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "code": "session_moved",
+                            "session_id": authoritative_sid,
+                            "error": "Session moved",
+                        },
+                        status=409,
+                    )
+
+                current_draft = dict(getattr(request_session, "composer_draft", {}) or {})
+                next_draft = dict(current_draft)
+                if text is not None:
+                    next_draft["text"] = text
+                if files is not None:
+                    next_draft["files"] = files
+                if next_draft == current_draft:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    _draft_text = str(next_draft.get("text", "") or "")
+                    _draft_files = next_draft.get("files", []) or []
+                    _has_meaningful_draft = bool(_draft_text) or bool(_draft_files)
+                    if not (SESSION_DIR / f"{authoritative_sid}.json").exists() and _has_meaningful_draft:
+                        with LOCK:
+                            if SESSIONS.get(authoritative_sid) is not request_session:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if len(getattr(request_session, "messages", []) or []) != 0:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if (SESSION_DIR / f"{authoritative_sid}.json").exists():
+                                # Owner appeared while acquiring the shared lock; skip
+                                # materialization and proceed with sidecar save only.
+                                pass
+                            else:
+                                # Publish the small owner record while cache state is locked
+                                # so deletion cannot race first-draft ownership.
+                                draft_session = copy.copy(request_session)
+                                draft_session.composer_draft = {}
+                                # LOCK is non-reentrant; indexing here would acquire it again.
+                                draft_session.save(
+                                    touch_updated_at=False,
+                                    skip_index=True,
+                                )
+                    # Draft persistence is not conversation activity. Touching updated_at
+                    # here makes the active-session external-refresh poll force-reload the
+                    # current chat every few seconds while the user is typing, and that
+                    # delayed reload can restore an older draft over newer local input.
+                    if _validated_compression_edges and not _draft_compression_edges_still_authorized(
+                        _validated_compression_edges, request_profile
+                    ):
+                        return _draft_authority_unconfirmed()
+                    _draft_mark("before_save")
+                    _save_session_draft(authoritative_sid, next_draft)
+                    _draft_mark("after_save")
+                    request_session.composer_draft = next_draft
+                    saved_draft = request_session.composer_draft
+                sid = authoritative_sid
+                resolved_once = True
+                break
+        if not resolved_once:
+            # A bounded walk can stop on another snapshot whose own continuation
+            # authority has not yet been checked; keep that SID out of client replay.
+            return _draft_authority_unconfirmed()
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
             payload["unchanged"] = True
+        payload["session_id"] = sid
         _draft_mark("before_json")
         j(handler, payload)
         _draft_mark("after_json")
@@ -17797,20 +18098,27 @@ def handle_post(handler, parsed) -> bool:
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
+        draft_delete_failed = False
         try:
-            with LOCK:
-                SESSIONS.pop(sid, None)
             try:
                 p = (SESSION_DIR / f"{sid}.json").resolve()
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
             sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
+            with LOCK:
+                SESSIONS.pop(sid, None)
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            try:
+                draft_deleted = bool(_delete_session_draft(sid))
+            except Exception:
+                logger.debug("Failed to delete draft sidecar for session %s", sid, exc_info=True)
+                draft_deleted = False
+            draft_delete_failed = not draft_deleted
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -17881,14 +18189,18 @@ def handle_post(handler, parsed) -> bool:
                 state_db_cleanup_failed = True
                 logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
-        return j(
-            handler,
-            {
-                "ok": True,
-                "state_db_cleanup_failed": state_db_cleanup_failed,
-                **worktree_retained,
-            },
-        )
+        response = {
+            "state_db_cleanup_failed": state_db_cleanup_failed,
+            **worktree_retained,
+        }
+        if draft_delete_failed:
+            response["draft_delete_failed"] = True
+            response.update(
+                {"ok": False, "error": "Failed to delete session draft"}
+            )
+            return j(handler, response, status=500)
+        response["ok"] = True
+        return j(handler, response)
 
     if parsed.path == "/api/session/clear":
         try:
@@ -19948,7 +20260,9 @@ def handle_patch(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PATCH"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_toggle(handler, name, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
@@ -19980,7 +20294,9 @@ def handle_delete(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="DELETE"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
@@ -20020,7 +20336,9 @@ def handle_put(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
     return False
 
@@ -20065,8 +20383,13 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 def _serve_static(handler, parsed):
     static_root = api_config.get_static_root().resolve()
-    # Strip the leading '/static/' prefix, then resolve and sandbox
-    rel = parsed.path[len("/static/") :]
+    # Strip the leading '/static/' prefix, then resolve and sandbox. The
+    # server-owned prefix is matched case-insensitively upstream, but the file
+    # path is case-sensitive on disk. This route is NOT API-folded (server.py
+    # folds only /api/*), so parsed.path is the CURRENT request's original-case
+    # path — never an API-only retained path left behind by an earlier
+    # keep-alive request (#6589 re-gate).
+    rel = parsed.path[len("/static/"):]
     static_file = (static_root / rel).resolve()
     try:
         static_file.relative_to(static_root)
@@ -24806,25 +25129,76 @@ def _handle_memory_read(handler, parsed=None):
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
     phase1_removed_ids = set()
+    draft_delete_failed = False
 
     # Phase 1: Clean orphan session files (existing behavior).
     for p in SESSION_DIR.glob("*.json"):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            session_lock = _get_session_agent_lock(p.stem)
+            if not session_lock.acquire(timeout=5):
+                logger.debug("Session %s is busy; leaving it for later cleanup", p.stem)
+                continue
+            try:
+                s = Session.load(p.stem)
+                if zero_only:
+                    should_delete = s and len(s.messages) == 0
+                else:
+                    should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                if should_delete:
+                    with LOCK:
+                        SESSIONS.pop(p.stem, None)
+                        p.unlink(missing_ok=True)
+                    session_deleted = not p.exists()
+                    if session_deleted:
+                        phase1_removed_ids.add(p.stem)
+                    try:
+                        draft_deleted = bool(_delete_session_draft(p.stem))
+                    except Exception:
+                        logger.debug("Failed to delete draft sidecar during cleanup for %s", p.stem, exc_info=True)
+                        draft_delete_failed = True
+                        draft_deleted = False
+                    if not draft_deleted:
+                        draft_delete_failed = True
+                    if session_deleted:
+                        cleaned += 1
+            finally:
+                session_lock.release()
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
+
+    # Retry dedicated drafts whose owner sidecar was removed by an earlier
+    # cleanup attempt. Coordinate with draft writes before checking ownership.
+    try:
+        for draft_path in (SESSION_DIR / ".drafts").glob("*.json"):
+            sid = draft_path.stem
+            if not is_safe_session_id(sid) or sid in phase1_removed_ids:
+                continue
+            if (SESSION_DIR / f"{sid}.json").exists():
+                continue
+            try:
+                session_lock = _get_session_agent_lock(sid)
+                acquired = session_lock.acquire(timeout=5)
+            except Exception:
+                logger.debug("Failed to acquire session lock during draft cleanup for %s", sid, exc_info=True)
+                draft_delete_failed = True
+                continue
+            if not acquired:
+                logger.debug("Session %s is busy; leaving its orphan draft for retry", sid)
+                draft_delete_failed = True
+                continue
+            try:
+                if not (SESSION_DIR / f"{sid}.json").exists() and not _delete_session_draft(sid):
+                    draft_delete_failed = True
+            except Exception:
+                logger.debug("Failed to retry draft cleanup for %s", sid, exc_info=True)
+                draft_delete_failed = True
+            finally:
+                session_lock.release()
+    except Exception:
+        logger.debug("Failed to scan dedicated session drafts during cleanup", exc_info=True)
+        draft_delete_failed = True
 
     phase1_touched = bool(cleaned)
     phase2_rewrote_index = False
@@ -24903,6 +25277,17 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
 
+    if draft_delete_failed:
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": "Failed to delete one or more session drafts",
+                "cleaned": cleaned,
+                "draft_delete_failed": True,
+            },
+            status=500,
+        )
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
@@ -25129,6 +25514,8 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
     )
     existing = list(getattr(s, "messages", None) or [])
+    from api.process_event_utils import build_active_turn_token, stamp_message_source
+
     if existing:
         latest = existing[-1]
         if isinstance(latest, dict) and latest.get("role") == "user":
@@ -25136,11 +25523,25 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             msg_text = " ".join(str(msg or "").split())
             if latest_text == msg_text:
                 if _checkpoint_source == "fork" or _fork_owned_wakeup:
+                    # Fork turns keep the copied-row identity: the branch
+                    # route copies transcript rows up to the fork point and
+                    # the re-sent prompt rides the copied row; the
+                    # `_fork_child_turn` marker stamps it (unchanged).
                     latest["_fork_child_turn"] = s.session_id
-                return
+                    return
+                # Text alone is not turn ownership (re-gate 2026-10-06 item
+                # 3): a second interrupt of the same prompt inside one second
+                # carries a DIFFERENT stream token and must checkpoint its
+                # own row instead of collapsing into the previous turn's.
+                # Token-less rows (legacy data) keep the established
+                # content check.
+                current_token = build_active_turn_token(
+                    getattr(s, "active_stream_id", None), started_at,
+                )
+                latest_token = latest.get("_active_turn_token")
+                if not (latest_token and current_token and latest_token != current_token):
+                    return
     user_msg = {"role": "user", "content": msg}
-    from api.process_event_utils import build_active_turn_token, stamp_message_source
-
     stamp_message_source(
         user_msg,
         source,

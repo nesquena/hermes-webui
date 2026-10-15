@@ -383,6 +383,25 @@ parent's workspace binding. Clients without this handling must reload the
 session before retrying. Server wakeups, regeneration semantics and Gateway
 routing are not silently retargeted by this recovery path.
 
+Composer draft writes follow a marked compression snapshot only when the child
+profile and `parent_session_id` confirm the complete transition chain. A stale
+parent write receives HTTP 409 `session_moved` with the validated child SID;
+the browser replays that exact payload once to the child. The server does not
+write to the child during the parent request. Unconfirmed, cyclic or over-limit
+lineage returns a non-redirecting draft-authority error without a child target.
+A failed pre-switch draft save reports the captured text and files while the
+current, generation-guarded session navigation continues. Unsent local drafts
+retain their browser File references by session ID until saved or cleared;
+this fallback lasts only for the current page. Draft POSTs to the same target
+are serialized, including continuation replays and clears, while different
+session targets can save concurrently.
+
+In-process session cleanup checks eligibility under the session's agent lock
+and retains it through cache eviction and owner and dedicated-draft deletion.
+A concurrent writer cannot publish a new draft between those deletions.
+Busy sessions are left for a later cleanup. The session lock is released before
+index maintenance.
+
 ## Goals
 
 - Define the state layers involved in active and recovered WebUI turns.
