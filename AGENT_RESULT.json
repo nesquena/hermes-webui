@@ -1,0 +1,21 @@
+{
+  "status": "fixed",
+  "summary": "Restored the launcher Gateway key precedence over a profile API_SERVER_KEY alias in the dotenv reload and the request overlay, per the round-9 fix shape.",
+  "commit_message": "fix(reasoning): keep the launcher gateway key over a profile alias",
+  "tests": "tests/test_gateway_runs_model_options_boundary.py",
+  "commands_run": [
+    "./scripts/test.sh tests/test_gateway_runs_model_options_boundary.py -k \"launcher_gateway_key or alias_only_gateway_key or inherit_operator_defaults\" (RED before the fix: 5 failed, 4 passed)",
+    "git stash push -- api/gateway_chat.py api/profiles.py; ./scripts/test.sh tests/test_gateway_runs_model_options_boundary.py -k launcher_gateway_key_wins (request-layer RED: cloned profile sent 'Bearer root-copied-key')",
+    "./scripts/test.sh tests/test_gateway_runs_model_options_boundary.py (52 passed, 1 skipped)",
+    "./scripts/test.sh tests/test_gateway_runs_model_options_boundary.py tests/test_issue1879_cross_container_gateway_liveness.py tests/test_issue716_agent_heartbeat.py tests/test_issue5139_gateway_approval_offline_notice.py (87 passed, 1 skipped)",
+    "./scripts/test.sh $(ls tests/test_gateway*.py tests/test_*profile*.py tests/test_webui_provider_routing_parity.py tests/test_visible_session_limit_env.py tests/test_agent_health_remote.py) (975 passed, 74 skipped)",
+    ".venv/bin/python scripts/ruff_lint.py --diff origin/master (6 findings, all pre-existing outside the touched files; identical with the fix stashed)",
+    "git diff --check (clean)"
+  ],
+  "files_changed": [
+    "api/gateway_chat.py",
+    "api/profiles.py",
+    "tests/test_gateway_runs_model_options_boundary.py"
+  ],
+  "risks": "1) The request-layer ladder has no URL condition, as specified: a profile that sets its own Gateway URL and only an API_SERVER_KEY alias now uses the launcher canonical key on that URL. Worth confirming that is intended for profile-owned Gateways. 2) tests/test_gateway_approval_runs_api.py followed by tests/test_issue7940_skill_stats_survive_profile_switch.py fails with 'Cannot switch profiles while an agent is running' (leaked STREAMS entry); it also fails with this change stashed, so it is pre-existing and unrelated. 3) The maintainer's review asks whether #8241 should narrow to effort delivery only and move the Gateway credential work to the #7983/#8153/#8129 family; this change implements the stated round-9 fix shape, so it would be superseded if that call goes the other way. 4) The guard's repos.json is not present in this workspace, so an AI-disclosure requirement for the PR description could not be checked."
+}
