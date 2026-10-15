@@ -1309,20 +1309,33 @@ def test_owner_alias_only_gateway_key_owns_the_group_without_a_launcher_canonica
 
 
 @pytest.mark.parametrize(
-    ("profile_name", "profile_env_body"),
+    ("profile_name", "profile_env_body", "deployment_url"),
     (
-        (None, None),
-        ("sparse", ""),
-        ("cloned", "API_SERVER_KEY=root-copied-key\n"),
+        (None, None, "http://shared-gw.test"),
+        ("sparse", "", "http://shared-gw.test"),
+        ("cloned", "API_SERVER_KEY=root-copied-key\n", "http://shared-gw.test"),
         (
             "cloned-slash",
             "HERMES_WEBUI_GATEWAY_BASE_URL=http://shared-gw.test/\n"
             "API_SERVER_KEY=root-copied-key\n",
+            "http://shared-gw.test",
+        ),
+        (
+            "cloned-host-case",
+            "HERMES_WEBUI_GATEWAY_BASE_URL=http://SHARED-GW.TEST:8642\n"
+            "API_SERVER_KEY=root-copied-key\n",
+            "http://shared-gw.test:8642",
+        ),
+        (
+            "cloned-default-port",
+            "HERMES_WEBUI_GATEWAY_BASE_URL=http://SHARED-GW.TEST:80/\n"
+            "API_SERVER_KEY=root-copied-key\n",
+            "http://shared-gw.test",
         ),
     ),
 )
 def test_launcher_gateway_key_wins_on_the_shared_url(
-    monkeypatch, tmp_path, profile_name, profile_env_body
+    monkeypatch, tmp_path, profile_name, profile_env_body, deployment_url
 ):
     """The launcher credential survives an owner alias and a cloned profile .env.
 
@@ -1341,9 +1354,8 @@ def test_launcher_gateway_key_wins_on_the_shared_url(
     (tmp_path / ".env").write_text(
         "API_SERVER_KEY=root-copied-key\n", encoding="utf-8"
     )
-    for name in ("sparse", "cloned", "cloned-slash"):
-        (tmp_path / "profiles" / name).mkdir(parents=True)
     if profile_env_body is not None:
+        (tmp_path / "profiles" / profile_name).mkdir(parents=True)
         (tmp_path / "profiles" / profile_name / ".env").write_text(
             profile_env_body, encoding="utf-8"
         )
@@ -1354,7 +1366,7 @@ def test_launcher_gateway_key_wins_on_the_shared_url(
         profiles,
         "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
         {
-            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://shared-gw.test",
+            "HERMES_WEBUI_GATEWAY_BASE_URL": deployment_url,
             "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
             "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
         },
@@ -1374,7 +1386,7 @@ def test_launcher_gateway_key_wins_on_the_shared_url(
             session_profile=profile_name,
             real_profile_scope=True,
             gateway_env={
-                "HERMES_WEBUI_GATEWAY_BASE_URL": "http://shared-gw.test",
+                "HERMES_WEBUI_GATEWAY_BASE_URL": deployment_url,
                 "HERMES_WEBUI_GATEWAY_API_KEY": "launcher-key",
             },
             captured=captured,
@@ -1439,6 +1451,54 @@ def test_dedicated_profile_url_keeps_the_profile_alias_credential(monkeypatch, t
 
     assert captured["url"] == "http://analyst-gw.test/v1/runs"
     assert captured["headers"]["Authorization"] == "Bearer analyst-key"
+
+
+def test_dedicated_profile_url_without_profile_key_sends_no_credential(
+    monkeypatch, tmp_path
+):
+    """A dedicated receiver must not receive the deployment Gateway secret."""
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://deployment-gw.test/analyst\n",
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    captured = {}
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        _capture_gateway_wire_body(
+            None,
+            session_profile="analyst",
+            real_profile_scope=True,
+            gateway_env={
+                "HERMES_WEBUI_GATEWAY_BASE_URL": "http://deployment-gw.test",
+                "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+            },
+            captured=captured,
+        )
+
+    assert captured["url"] == "http://deployment-gw.test/analyst/v1/runs"
+    assert "Authorization" not in captured["headers"]
 
 
 @pytest.mark.parametrize(

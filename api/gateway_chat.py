@@ -246,6 +246,27 @@ def refresh_gateway_deployment_env(environ: dict[str, str] | None = None) -> Non
     }
 
 
+def _gateway_endpoint_identity(raw_url: str) -> tuple[str, str, int | None, str]:
+    """Return the normalized network endpoint and path for a Gateway URL."""
+    value = str(raw_url or "").strip()
+    parsed = urllib.parse.urlsplit(value)
+    scheme = parsed.scheme.lower()
+    try:
+        port = parsed.port
+    except ValueError:
+        # Keep malformed ports distinct without turning profile resolution into
+        # a new failure point; the eventual request path reports the bad URL.
+        return scheme, (parsed.hostname or "").lower(), None, value.rstrip("/")
+    if port is None:
+        port = {"http": 80, "https": 443}.get(scheme)
+    return (
+        scheme,
+        (parsed.hostname or "").lower(),
+        port,
+        (parsed.path or "").rstrip("/"),
+    )
+
+
 def _gateway_request_environ(profile_environ: dict[str, str] | None):
     """Return deployment Gateway settings overlaid by one named profile."""
     if profile_environ is None:
@@ -267,19 +288,26 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None):
     launcher_canonical = str(deployment.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
     profile_alias = str(profile_environ.get("API_SERVER_KEY") or "").strip()
     shared_alias = str(deployment.get("API_SERVER_KEY") or "").strip()
-    profile_url = (
-        str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip().rstrip("/")
+    profile_url = str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    deployment_url = str(deployment.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    dedicated_url = bool(
+        profile_url
+        and _gateway_endpoint_identity(profile_url)
+        != _gateway_endpoint_identity(deployment_url)
     )
-    deployment_url = (
-        str(deployment.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip().rstrip("/")
-    )
-    if profile_url and profile_url != deployment_url:
-        resolved_key = profile_canonical or profile_alias or launcher_canonical or shared_alias
+    if dedicated_url:
+        # A profile-selected endpoint must never inherit the deployment
+        # receiver's secret. It gets a profile-owned key or no Authorization
+        # header at all.
+        resolved_key = profile_canonical or profile_alias
     else:
         resolved_key = profile_canonical or launcher_canonical or profile_alias or shared_alias
     if resolved_key:
         merged[_WEBUI_GATEWAY_API_KEY_ENV] = resolved_key
         merged["API_SERVER_KEY"] = resolved_key
+    elif dedicated_url:
+        merged.pop(_WEBUI_GATEWAY_API_KEY_ENV, None)
+        merged.pop("API_SERVER_KEY", None)
     return merged
 
 
