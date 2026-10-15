@@ -1121,6 +1121,17 @@ def test_worker_mirrors_never_rewrite_the_deployment_snapshot(monkeypatch, tmp_p
     assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
 
 
+@contextmanager
+def _restored_process_env():
+    """Keep os.environ intact: _reload_dotenv writes it directly."""
+    saved = dict(os.environ)
+    try:
+        yield
+    finally:
+        os.environ.clear()
+        os.environ.update(saved)
+
+
 def test_owner_dotenv_removal_restores_launcher_gateway_fallback(monkeypatch, tmp_path):
     """Removing an owner override reveals the stable launcher value again."""
     from api import gateway_chat
@@ -1139,17 +1150,18 @@ def test_owner_dotenv_removal_restores_launcher_gateway_fallback(monkeypatch, tm
         "HERMES_WEBUI_GATEWAY_API_KEY=dotenv-key\n", encoding="utf-8"
     )
 
-    profiles._reload_dotenv(tmp_path)
-    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
-        "HERMES_WEBUI_GATEWAY_API_KEY"
-    ] == "dotenv-key"
+    with _restored_process_env():
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "dotenv-key"
 
-    (tmp_path / ".env").write_text("", encoding="utf-8")
-    profiles._reload_dotenv(tmp_path)
-    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
-        "HERMES_WEBUI_GATEWAY_API_KEY"
-    ] == "launcher-key"
-    assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "launcher-key"
+        (tmp_path / ".env").write_text("", encoding="utf-8")
+        profiles._reload_dotenv(tmp_path)
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV[
+            "HERMES_WEBUI_GATEWAY_API_KEY"
+        ] == "launcher-key"
+        assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "launcher-key"
 
 
 @pytest.mark.parametrize(
@@ -1206,7 +1218,8 @@ def test_named_profile_onboarding_cannot_replace_deployment_gateway(
     monkeypatch.setattr(onboarding, "invalidate_models_cache", lambda: None)
     monkeypatch.setattr(onboarding, "get_onboarding_status", lambda: {"ok": True})
 
-    getattr(onboarding, apply_name)(body)
+    with _restored_process_env():
+        getattr(onboarding, apply_name)(body)
 
     assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == deployment
 
@@ -1232,15 +1245,16 @@ def test_owner_reload_during_worker_mirror_excludes_temporary_gateway_key(
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
     monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
 
-    with profiles.profile_env_for_background_worker("analyst", "test mirror"):
-        assert os.environ.get("API_SERVER_KEY") == "temporary-worker-key"
-        profiles._reload_dotenv(tmp_path)
-        assert "API_SERVER_KEY" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+    with _restored_process_env():
+        with profiles.profile_env_for_background_worker("analyst", "test mirror"):
+            assert os.environ.get("API_SERVER_KEY") == "temporary-worker-key"
+            profiles._reload_dotenv(tmp_path)
+            assert "API_SERVER_KEY" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
 
-    assert "API_SERVER_KEY" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
-    assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == {
-        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://owner-gw.test"
-    }
+        assert "API_SERVER_KEY" not in gateway_chat._GATEWAY_DEPLOYMENT_ENV
+        assert gateway_chat._GATEWAY_DEPLOYMENT_ENV == {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://owner-gw.test"
+        }
 
 
 def test_named_profile_snapshot_expands_key_from_profile_env(monkeypatch, tmp_path):
