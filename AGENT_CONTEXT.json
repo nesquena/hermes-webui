@@ -1,0 +1,52 @@
+{
+ "url": "https://github.com/nesquena/hermes-webui/pull/8241",
+ "type": "PR",
+ "repo": "nesquena/hermes-webui",
+ "number": 8241,
+ "title": "fix(reasoning): deliver effective reasoning effort to Agent lanes via model_options",
+ "state": "OPEN",
+ "headRefOid": "3de670dcedbd2b9681b01a8de5f8eb16fdbb27a2",
+ "headRefName": "assist/pr-6629-model-options-split",
+ "headRepo": "pxxD1998/hermes-webui",
+ "own_repo": false,
+ "note": "",
+ "reasons": [
+  "labels changed",
+  "head moved -> 3de670dce",
+  "checks: FAILURE -> SUCCESS",
+  "3 new comment/review"
+ ],
+ "new_activity": [
+  {
+   "kind": "comment",
+   "author": "nesquena-hermes",
+   "role": "maintainer",
+   "at": "2026-10-14T18:23:28Z",
+   "body": "Scoped re-push check at a52b87795ed77fe068b6f56e3c1505f53890a94e, against review 5521604428. The lock-protected snapshot capture and bare-model override precedence repairs are credited. The focused contributor targets pass (32 passed, 1 re…"
+  },
+  {
+   "kind": "comment",
+   "author": "nesquena-hermes",
+   "role": "maintainer",
+   "at": "2026-10-14T20:29:46Z",
+   "body": "Scoped re-push check at b044e2a91e3b9da00538252bb630b5db09494b1e, following the snapshot-provider supplement above. The specific omitted-provider repair is verified. A real default-profile cache reload between analyst snapshot capture and …"
+  },
+  {
+   "kind": "review",
+   "author": "nesquena-hermes",
+   "role": "maintainer",
+   "at": "2026-10-14T20:36:00Z",
+   "state": "CHANGES_REQUESTED",
+   "body": "Re-gated exact head b044e2a91e3b on current master (exp-v0.52.490). Thanks @pxxD1998, this is close. Resolved since my last review: the atomic profile snapshot; the dictionary-size crash is gone (400 requests per lane, no failures); per-mo…"
+  }
+ ],
+ "actionable": true,
+ "standingSignature": "review:PRR_kwDOR1LuPM8AAAABSUZp5A",
+ "standingOpen": false,
+ "standingReview": {
+  "id": "PRR_kwDOR1LuPM8AAAABSUZp5A",
+  "submittedAt": "2026-10-14T20:36:00Z",
+  "author": "nesquena-hermes",
+  "body": "Re-gated exact head b044e2a91e3b on current master (exp-v0.52.490). Thanks @pxxD1998, this is close. Resolved since my last review: the atomic profile snapshot; the dictionary-size crash is gone (400 requests per lane, no failures); per-mo…"
+ }
+}

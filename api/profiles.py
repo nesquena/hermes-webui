@@ -1443,6 +1443,51 @@ def profile_env_for_thread_readonly(
 
 
 @contextmanager
+def profile_scope_for_request_read(
+    profile_name,
+    purpose: str = "request read",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Bind a profile's TLS and thread-local env for a read, leaving ``os.environ`` alone.
+
+    ``profile_scope_for_detached_worker`` binds the same TLS but ALSO mirrors
+    the profile env into the process-wide ``os.environ`` through
+    ``profile_env_for_background_worker``, which detached agent bodies need
+    because some Hermes readers still call ``os.getenv()``. A request-time read
+    must not do that: while any thread is inside the mirrored scope, every other
+    thread that reads ``os.environ`` sees this profile's values — e.g. a
+    default-profile request resolving ``_gateway_base_url()`` /
+    ``_gateway_api_key()`` picks up the named profile's Gateway endpoint and key.
+
+    Yields the profile-owned environment for callers to pass explicitly to those
+    readers, or ``None`` for an empty/root profile name, where the process env
+    still applies. Values must come from this mapping, never from ``os.environ``.
+    """
+    name = (profile_name or "").strip()
+    if not name:
+        yield None
+        return
+    previous_profile = getattr(_tls, "profile", None)
+    set_request_profile(name)
+    try:
+        if _is_root_profile(name):
+            yield None
+        else:
+            with profile_env_for_thread_readonly(
+                name, purpose, logger_override=logger_override
+            ):
+                from api.config import _thread_ctx
+
+                bound_env = getattr(_thread_ctx, "env", {})
+                yield dict(bound_env) if isinstance(bound_env, dict) else {}
+    finally:
+        if previous_profile is None:
+            clear_request_profile()
+        else:
+            set_request_profile(previous_profile)
+
+
+@contextmanager
 def profile_env_for_active_request_readonly(
     purpose: str = "provider/model read",
     logger_override: Optional[logging.Logger] = None,

@@ -426,7 +426,7 @@ def _gateway_request_settings_for_session(
     """Resolve Agent-facing request settings in the session's profile scope."""
     from api.config import _main_model_request_overrides, get_config_snapshot
 
-    def _resolve():
+    def _resolve(environ):
         # get_config_snapshot() copies under the cache lock. get_config()
         # returns the one process-global mutable _cfg_cache, which a
         # concurrent cross-profile read clears and refills in place — a bare
@@ -440,8 +440,8 @@ def _gateway_request_settings_for_session(
             model_provider=model_provider,
         )
         base_url, api_key = reattach_endpoint or (
-            _gateway_base_url(cfg),
-            _gateway_api_key(),
+            _gateway_base_url(cfg, environ=environ),
+            _gateway_api_key(environ=environ),
         )
         try:
             overrides = _main_model_request_overrides(
@@ -457,21 +457,21 @@ def _gateway_request_settings_for_session(
             base_url,
             api_key,
             overrides,
-            _gateway_use_runs_api_enabled(cfg),
+            _gateway_use_runs_api_enabled(cfg, environ=environ),
         )
 
+    # Read-only profile scope: the endpoint/key lookups must take the
+    # profile-owned env yielded here, never a mirror another request thread
+    # pushed into os.environ (see profile_scope_for_request_read).
+    from api.profiles import profile_scope_for_request_read
+
     profile_name = str(getattr(session, "profile", "") or "").strip()
-    if not profile_name:
-        return _resolve()
-
-    from api.profiles import profile_scope_for_detached_worker
-
-    with profile_scope_for_detached_worker(
+    with profile_scope_for_request_read(
         profile_name,
         "gateway chat request settings",
         logger_override=logger,
-    ):
-        return _resolve()
+    ) as environ:
+        return _resolve(environ)
 
 
 def _gateway_session_yolo_enabled(session_id: str) -> bool:

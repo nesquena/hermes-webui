@@ -486,6 +486,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     get_active_hermes_home,
     list_profiles_api,
     profile_scope_for_detached_worker,
+    profile_scope_for_request_read,
 )
 
 
@@ -26649,9 +26650,10 @@ def _runner_reasoning_effort_for_session(session, *, model=None, model_provider=
         )
 
     profile_name = str(getattr(session, "profile", "") or "").strip()
-    if not profile_name:
-        return _resolve()
-    with profile_scope_for_detached_worker(
+    # Read-only scope: this resolver runs on the request thread, so it must not
+    # mirror the profile env into os.environ for other threads (see
+    # profile_scope_for_request_read).
+    with profile_scope_for_request_read(
         profile_name,
         "runner reasoning request settings",
         logger_override=logger,

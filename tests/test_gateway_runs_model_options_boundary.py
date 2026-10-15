@@ -522,7 +522,7 @@ def _capture_gateway_wire_body(
                  patch("api.gateway_chat.gateway_approval_unavailable_reason", lambda *_a, **_k: None), \
                  patch("api.config.get_config", fake_get_config), \
                  patch("api.config.get_config_snapshot", fake_get_config_snapshot), \
-                 patch("api.profiles.profile_scope_for_detached_worker", fake_profile_scope), \
+                 patch("api.profiles.profile_scope_for_request_read", fake_profile_scope), \
                  patch("api.config.get_gateway_caps", lambda *_a, **_k: {"reasoning_efforts": None}), \
                  patch(
                      "api.config._main_model_request_overrides",
@@ -599,7 +599,7 @@ def test_runner_request_resolves_effort_inside_session_profile_scope(monkeypatch
         finally:
             active_profile["name"] = previous
 
-    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
     monkeypatch.setattr(
         routes,
         "get_config",
@@ -646,8 +646,8 @@ def test_profile_request_settings_use_deep_config_snapshots(monkeypatch):
     def live_cache_must_not_be_read():
         raise AssertionError("request settings must use get_config_snapshot()")
 
-    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
-    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
     monkeypatch.setattr(config, "get_config", live_cache_must_not_be_read)
     monkeypatch.setattr(routes, "get_config", live_cache_must_not_be_read)
     monkeypatch.setattr(config, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
@@ -720,8 +720,8 @@ def test_profile_settings_survive_a_concurrent_default_profile_read(monkeypatch)
         # progress between reads.
         time.sleep(0.0005)
 
-    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
-    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
     monkeypatch.setattr(config, "get_config", fake_get_config)
     monkeypatch.setattr(routes, "get_config", fake_get_config)
     monkeypatch.setattr(config, "get_config_snapshot", fake_get_config_snapshot)
@@ -802,6 +802,146 @@ def test_reasoning_coercion_uses_the_captured_snapshot(monkeypatch):
     ) == "high"
 
 
+@pytest.mark.parametrize("analyst_lane", ["gateway", "runner"])
+def test_named_profile_request_leaves_the_process_env_alone(monkeypatch, tmp_path, analyst_lane):
+    """A named-profile request must not re-route a default-profile one.
+
+    ``profile_scope_for_detached_worker`` mirrors the profile env into the
+    process-wide ``os.environ`` for detached agent bodies. Running it on a
+    request thread let a default-profile request that resolved
+    ``_gateway_base_url()`` / ``_gateway_api_key()`` in between use the named
+    profile's Gateway endpoint and key (re-gate round 7). The read-only profile
+    scope must keep both lanes on their own ``.env``, and must not touch
+    ``os.environ`` while a named-profile request is being resolved.
+    """
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://analyst-gw.test\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=analyst-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://root-gw.test")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "root-key")
+    monkeypatch.setattr(
+        config,
+        "resolve_model_reasoning_efforts",
+        lambda *a, **k: list(config.VALID_REASONING_EFFORTS),
+    )
+
+    analyst_thread = threading.current_thread()
+    analyst_in_scope = threading.Event()
+    default_resolved = threading.Event()
+    resolved = {}
+
+    def gated_snapshot():
+        snapshot = {"agent": {"reasoning_effort": "high"}}
+        if threading.current_thread() is analyst_thread:
+            # This call is made from inside the profile scope: hold the analyst
+            # lane there until the default-profile lane has resolved.
+            analyst_in_scope.set()
+            assert default_resolved.wait(timeout=5), "default-profile lane never resolved"
+        return snapshot
+
+    monkeypatch.setattr(config, "get_config_snapshot", gated_snapshot)
+    monkeypatch.setattr(routes, "get_config_snapshot", gated_snapshot)
+
+    def default_profile_lane():
+        assert analyst_in_scope.wait(timeout=5), "named-profile lane never entered its scope"
+        settings = gateway_chat._gateway_request_settings_for_session(
+            SimpleNamespace(profile="default"),
+            model="test-model",
+            model_provider="openai",
+        )
+        resolved["default"] = (settings[2], settings[3])
+        resolved["default_environ"] = os.environ.get("HERMES_WEBUI_GATEWAY_BASE_URL")
+        default_resolved.set()
+
+    reader = threading.Thread(target=default_profile_lane)
+    reader.start()
+    try:
+        if analyst_lane == "gateway":
+            settings = gateway_chat._gateway_request_settings_for_session(
+                SimpleNamespace(profile="analyst"),
+                model="test-model",
+                model_provider="openai",
+            )
+            resolved["analyst"] = (settings[2], settings[3])
+        else:
+            routes._runner_reasoning_effort_for_session(
+                SimpleNamespace(profile="analyst"),
+                model="test-model",
+                model_provider="openai",
+            )
+    finally:
+        default_resolved.set()
+        reader.join(timeout=5)
+
+    assert not reader.is_alive()
+    assert resolved["default_environ"] == "http://root-gw.test"
+    assert resolved["default"] == ("http://root-gw.test", "root-key")
+    if analyst_lane == "gateway":
+        assert resolved["analyst"] == ("http://analyst-gw.test", "analyst-key")
+    assert os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"] == "http://root-gw.test"
+
+
+@pytest.mark.parametrize("analyst_lane", ["gateway", "runner"])
+def test_named_profile_lane_keeps_lmstudio_env_key_on_its_own_snapshot(
+    monkeypatch, tmp_path, analyst_lane
+):
+    """An LM Studio key that only the profile's ``.env`` holds must still be sent.
+
+    The read-only scope binds the profile env per thread instead of mirroring it
+    into ``os.environ``, so the probe key has to come from that binding
+    (``_thread_local_env_value``). Otherwise the process env's key — the wrong
+    profile's credential — would be forwarded to this profile's endpoint.
+    """
+    from api import config, gateway_chat, routes
+    import api.profiles as profiles
+
+    analyst_home = tmp_path / "profiles" / "analyst"
+    analyst_home.mkdir(parents=True)
+    (analyst_home / ".env").write_text("LM_API_KEY=analyst-env-key\n", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setenv("LM_API_KEY", "process-env-key")
+
+    analyst_cfg = {
+        "agent": {"reasoning_effort": "high"},
+        "model": {"provider": "lmstudio", "base_url": "http://analyst-lm.test/v1"},
+    }
+    monkeypatch.setattr(config, "cfg", copy.deepcopy(analyst_cfg))
+    monkeypatch.setattr(config, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
+    monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
+
+    probes = []
+
+    def fake_probe(_model, base_url, *, api_key=None, timeout=5.0):
+        probes.append((base_url, api_key))
+        return ["off", "low", "high"]
+
+    monkeypatch.setattr(config, "_lmstudio_model_reasoning_options", fake_probe)
+
+    if analyst_lane == "gateway":
+        settings = gateway_chat._gateway_request_settings_for_session(
+            SimpleNamespace(profile="analyst"),
+            model="test-model",
+            model_provider="lmstudio",
+        )
+        assert settings[1] == "high"
+    else:
+        assert routes._runner_reasoning_effort_for_session(
+            SimpleNamespace(profile="analyst"),
+            model="test-model",
+            model_provider="lmstudio",
+        ) == "high"
+
+    assert probes == [("http://analyst-lm.test/v1", "analyst-env-key")]
+
+
 def _snapshot_and_raced_cache():
     """An analyst snapshot whose provider differs from the raced global cache."""
     snapshot = {
@@ -849,8 +989,8 @@ def test_omitted_provider_coercion_resolves_from_the_captured_snapshot(monkeypat
     def fake_scope(*_args, **_kwargs):
         yield
 
-    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
-    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
     assert routes._runner_reasoning_effort_for_session(
         SimpleNamespace(profile="analyst"), model="test-model"
@@ -878,8 +1018,8 @@ def test_explicit_provider_coercion_resolves_from_the_captured_snapshot(monkeypa
     def fake_scope(*_args, **_kwargs):
         yield
 
-    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
-    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(snapshot))
     assert routes._runner_reasoning_effort_for_session(
         SimpleNamespace(profile="analyst"), model="test-model", model_provider="openai"
@@ -911,8 +1051,8 @@ def _lmstudio_lanes_under_default_profile_reload(
     def fake_scope(*_args, **_kwargs):
         yield
 
-    monkeypatch.setattr(profiles, "profile_scope_for_detached_worker", fake_scope)
-    monkeypatch.setattr(routes, "profile_scope_for_detached_worker", fake_scope)
+    monkeypatch.setattr(profiles, "profile_scope_for_request_read", fake_scope)
+    monkeypatch.setattr(routes, "profile_scope_for_request_read", fake_scope)
     monkeypatch.setattr(config, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
     monkeypatch.setattr(routes, "get_config_snapshot", lambda: copy.deepcopy(analyst_cfg))
 

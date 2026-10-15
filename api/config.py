@@ -5606,11 +5606,15 @@ def _get_lmstudio_reasoning_probe_api_key(
             if config_key:
                 return config_key
 
-    env_key = str(os.getenv("LM_API_KEY") or "").strip()
+    # Thread-local first: request lanes bind the profile env with a read-only
+    # thread scope instead of mirroring it into os.environ, so a key that only
+    # the profile's .env defines must come from that binding. Outside a
+    # named-profile scope this is still the process env.
+    env_key = str(_thread_local_env_value("LM_API_KEY")).strip()
     if env_key:
         return env_key
 
-    legacy_env_key = str(os.getenv("LMSTUDIO_API_KEY") or "").strip()
+    legacy_env_key = str(_thread_local_env_value("LMSTUDIO_API_KEY")).strip()
     if legacy_env_key:
         return legacy_env_key
 
