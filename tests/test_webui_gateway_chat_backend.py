@@ -1990,6 +1990,14 @@ def test_gateway_endpoint_keeps_the_shared_pair_for_a_profile_with_no_transport_
     _profile_homes(tmp_path, monkeypatch, {"beta": {"TERMINAL_CWD": "/work"}}, config_url=None)
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gw.local:8642")
     monkeypatch.setenv("API_SERVER_KEY", "shared-root-key")
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw.local:8642",
+            "API_SERVER_KEY": "shared-root-key",
+        },
+    )
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY"})
 
     assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "shared-root-key")
@@ -2058,6 +2066,13 @@ def _shared_gateway(monkeypatch, url="http://gw.local:8642", key="shared-root-ke
     monkeypatch.setenv("API_SERVER_KEY", key)
     if launcher_key:
         monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", launcher_key)
+    deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": url,
+        "API_SERVER_KEY": key,
+    }
+    if launcher_key:
+        deployment["HERMES_WEBUI_GATEWAY_API_KEY"] = launcher_key
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", deployment)
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY", "GW_ROUTE"})
 
 
@@ -2139,6 +2154,16 @@ def test_gateway_endpoint_an_alias_mirrored_from_a_named_active_profile_is_not_s
     _shared_gateway(monkeypatch, launcher_key="alpha-alias")
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY", "HERMES_WEBUI_GATEWAY_API_KEY"})
     _root_is_the_process_profile(monkeypatch, homes, process="alpha")
+    # The canonical value belongs to the active named profile, so the stable
+    # deployment snapshot must not publish it as a launcher credential.
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw.local:8642",
+            "API_SERVER_KEY": "shared-root-key",
+        },
+    )
 
     assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "beta-local-key")
 
