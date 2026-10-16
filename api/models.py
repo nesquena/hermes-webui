@@ -6334,6 +6334,47 @@ def _session_sidecar_exists(sid) -> bool | None:
 _UNSAVED_SHELL_GRACE_S = 1800
 
 
+def _session_has_live_metadata_writer(session_id) -> bool:
+    """True while some thread holds (or waits for) this session's agent lock.
+
+    The SESSIONS LRU is mutated by the idle reaper's sweep (#6351) from a
+    thread that holds no session lock, so eviction can interleave with any
+    request mid-write. A writer's contract is: resolve the object, take the
+    per-session agent lock, merge/refresh, persist, release. The resolve
+    happens BEFORE the lock is taken, so a tick landing in that window
+    invalidates the object the writer is about to write through.
+
+    ``threading.Lock.locked()`` is the only non-blocking, non-reentrant way to
+    ask "is anybody in this critical section?" — acquiring the lock here would
+    deadlock against the very writer we are trying to protect. A waiter counts
+    as live too, since that waiter already resolved its object and is about to
+    write through it, so the ownership check covers holders AND waiters.
+
+    Conservative by construction: if the registry cannot be consulted (import
+    error, unexpected type) we report True and keep the session resident.
+    Over-residency only costs RAM for one entry; under-residency rolls back
+    acknowledged text.
+    """
+    try:
+        from api.config import SESSION_AGENT_LOCKS, SESSION_AGENT_LOCKS_LOCK
+    except Exception:
+        return True
+    try:
+        # Only read the registry — never hold SESSION_AGENT_LOCKS_LOCK across
+        # the locked() probe or any other call that could re-enter it.
+        with SESSION_AGENT_LOCKS_LOCK:
+            lock = SESSION_AGENT_LOCKS.get(session_id)
+    except Exception:
+        return True
+    if lock is None:
+        # No lock has ever been minted for this id, so no writer can hold it.
+        return False
+    try:
+        return bool(lock.locked())
+    except Exception:
+        return True
+
+
 def _session_is_evictable(s) -> bool:
     """Return True only when *s* can be safely dropped from the LRU (#4765).
 
@@ -6382,6 +6423,21 @@ def _session_is_evictable(s) -> bool:
         return False
     sid = getattr(s, 'session_id', None)
     if not sid:
+        return False
+    if _session_has_live_metadata_writer(sid):
+        # A writer holds this session's agent lock right now. Writers resolve
+        # their object BEFORE taking that lock and persist it after releasing
+        # nothing else in between, so dropping the cache entry mid-request
+        # splits one session id across two objects: the second resolve returns a
+        # cold copy of the PREVIOUS state, and the writer's partial-field merge
+        # then writes that older state back over what was already persisted.
+        # ``/api/session/draft`` is the concrete case — a files-only draft that
+        # merges onto an evicted copy restores the previous composer text, so a
+        # text the client was already told was acknowledged silently reverts.
+        # The hazard class is the one _adopt_session_state documents
+        # (api/routes.py): replacing the cached entry with a different object
+        # leaves a writer holding the pre-refresh copy. Unlocking is the only
+        # point at which eviction is safe again, so keep this resident.
         return False
     # Metadata-only stubs never carry unsaved messages (messages=[] by design),
     # so they are always disk-backed and safe to drop.
@@ -8447,7 +8503,15 @@ def all_sessions(
         except Exception:
             logger.debug("Failed to load session from %s", p)
     _diag_stage(diag, "all_sessions.full_scan_overlay")
-    for s in SESSIONS.values():
+    # Snapshot the resident values under LOCK before iterating (#6351). The
+    # SessionChannel reaper's idle tick calls sweep_sessions_cache_over_cap()
+    # from its own thread, which pops entries out of this same dict; a live
+    # iterator raises "RuntimeError: OrderedDict mutated during iteration" when
+    # a tick lands between two steps. The index path above already snapshots its
+    # resident values under LOCK for the same reason — match that house style.
+    with LOCK:
+        resident_values = list(SESSIONS.values())
+    for s in resident_values:
         if all(s.session_id != x.session_id for x in out): out.append(s)
     _diag_stage(diag, "all_sessions.full_scan_sort_filter")
     out.sort(key=lambda s: (getattr(s, 'pinned', False), _session_sort_timestamp(s)), reverse=True)
