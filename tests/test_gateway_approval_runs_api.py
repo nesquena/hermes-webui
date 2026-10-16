@@ -2331,7 +2331,12 @@ def test_gateway_worker_prelude_exception_retires_failed_start_after_waiter_cons
         assert int((lifecycle.get(stream_id) or {}).get("waiters") or 0) == 1
         with patch("api.gateway_chat.RunJournalWriter", return_value=SimpleNamespace(append_sse_event=lambda *_a, **_k: None)), \
              patch("api.gateway_chat.get_session", return_value=session), \
-             patch("api.config.get_config", side_effect=RuntimeError("prelude boom")):
+             patch(
+                 # #8152: the prelude reads the session's own profile config
+                 # through this helper, no longer the ambient get_config().
+                 "api.gateway_chat._gateway_config_for_profile",
+                 side_effect=RuntimeError("prelude boom"),
+             ):
             worker_thread.start()
             worker_thread.join(timeout=5)
             assert not worker_thread.is_alive()
