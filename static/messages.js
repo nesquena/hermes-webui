@@ -9322,14 +9322,48 @@ function _syncClarifyTranscriptSpace(card, opts) {
 const CLARIFY_INPUT_MAX_HEIGHT = 160;
 const CLARIFY_INPUT_MIN_HEIGHT = 42;
 
+// A collapsed card hides `.clarify-response` with `display:none`
+// (style.css `.clarify-card.collapsed .clarify-response`), so the textarea
+// inside it has no layout box and `scrollHeight` reads 0. Writing the 42px
+// floor from that measurement is destructive: it silently discards the height a
+// long answer already grew the field to. Only a DOM that can positively report
+// "laid out" is asked; a harness without getClientRects is assumed visible so
+// this stays a no-op outside a browser.
+function _clarifyFieldIsHidden(input) {
+  if (!input) return true;
+  if (typeof input.getClientRects === "function") return input.getClientRects().length === 0;
+  return false;
+}
+
 function _autoResizeClarifyInput() {
   const input = $("clarifyInput");
   if (!input) return;
+  // #7616 gate: never measure a hidden field. Defer to the expand path, which
+  // re-measures once the layout box is back.
+  if (_clarifyFieldIsHidden(input)) {
+    input.dataset.clarifyRemeasure = "1";
+    return;
+  }
+  delete input.dataset.clarifyRemeasure;
+  const previous = input.style.height;
   input.style.height = "auto";
   // +2 absorbs the textarea's inner border so a single line does not clip.
   const content = input.scrollHeight + 2;
-  input.style.height = Math.max(CLARIFY_INPUT_MIN_HEIGHT, Math.min(content, CLARIFY_INPUT_MAX_HEIGHT)) + "px";
+  const next = Math.max(CLARIFY_INPUT_MIN_HEIGHT, Math.min(content, CLARIFY_INPUT_MAX_HEIGHT)) + "px";
+  input.style.height = next;
   input.style.overflowY = content > CLARIFY_INPUT_MAX_HEIGHT ? "auto" : "hidden";
+  // #7616 gate: typing changed the effective height, so the transcript
+  // reservation must follow it now. Without this the card keeps a stale
+  // `--clarify-card-height` until some later poll or window resize happens to
+  // repair it, and the absolute-positioned card grows over the transcript.
+  // `_syncClarifyTranscriptSpace` measures immediately, on the next frame and
+  // once settled, which covers both the height transition and the shrink case.
+  if (next !== previous) {
+    const card = $("clarifyCard");
+    if (card && card.classList.contains("visible")) {
+      _syncClarifyTranscriptSpace(card, {immediate: true});
+    }
+  }
 }
 
 // Bind once per element rather than on every showClarifyCard() poll — the
@@ -9358,6 +9392,15 @@ function toggleClarifyCardCollapsed(forceCollapsed) {
   const collapsed = typeof forceCollapsed === "boolean" ? forceCollapsed : !card.classList.contains("collapsed");
   card.classList.toggle("collapsed", collapsed);
   _syncClarifyCollapseButton(card);
+  // #7616 gate: expanding restores the field's layout box, so re-measure the
+  // height the answer grew to BEFORE reserving transcript space. A same-prompt
+  // poll while collapsed used to write the 42px floor (scrollHeight 0 from the
+  // hidden row), and nothing here ever remeasured — so the long field came back
+  // one line tall with its draft intact. Reading the rects after the class
+  // change forces the reflow that makes the measurement valid again.
+  if (!collapsed) {
+    _autoResizeClarifyInput();
+  }
   _syncClarifyTranscriptSpace(card, {immediate: true});
 }
 
