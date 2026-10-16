@@ -1149,6 +1149,12 @@ def forget_env_mirror(keys) -> None:
     """The worker has put these names back. Call it under
     ``api.streaming._ENV_LOCK``, after the last restore.
 
+    When the last mirror of a name ends, the name gets the value it had before
+    the first one began (or is removed if it was unset). Each worker restores
+    what it saw when it started, and when workers end out of order that is
+    another worker's value, which would otherwise stay in ``os.environ``
+    looking like the process's own.
+
     A name counts once however often ``keys`` holds it, as it was noted once:
     a worker's list repeats a credential its profile sets that is also one of
     the secrets the scope removes.
@@ -1161,6 +1167,10 @@ def forget_env_mirror(keys) -> None:
             held[1] -= 1
             if held[1] <= 0:
                 del _env_mirrors[key]
+                if held[0] is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = held[0]
 
 
 def process_env_without_mirrors() -> dict[str, str]:

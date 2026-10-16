@@ -511,7 +511,7 @@ def test_gateway_chat_worker_uses_session_profile_endpoint_not_process_profile(t
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "process-profile-key")
     resolved_for = []
 
-    def fake_endpoint_for_profile(profile_name):
+    def fake_endpoint_for_profile(profile_name, home=None):
         resolved_for.append(profile_name)
         return "http://gateway.local/p/coder", "coder-key"
 
@@ -1884,7 +1884,7 @@ def test_gateway_chat_401_hint_reports_the_session_profile_key_not_the_process_k
     monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)     # the suite may set one; tests that need it set it themselves
     monkeypatch.setattr(
         gateway_chat, "_gateway_endpoint_for_profile",
-        lambda profile_name: ("http://gateway.local/p/coder", "coder-key"),
+        lambda profile_name, home=None: ("http://gateway.local/p/coder", "coder-key"),
     )
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
