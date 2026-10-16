@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import threading
+from pathlib import Path
 import time
 import uuid
 import urllib.error
@@ -1717,15 +1718,105 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
     return ids
 
 
-def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
-    """URL and key of the session's own profile, root included, never the process-active profile."""
+def _profile_config_path(home):
+    """config.yaml of a profile home. For the ACTIVE profile that is the authoritative ambient config file
+    (HERMES_CONFIG_PATH may point outside the profile home), the same rule get_config_for_profile_home() uses;
+    any other profile reads its own home, so a divergent profile never inherits the active custom config."""
     from api import profiles as _profiles
-    from api.config import get_config_for_profile_home
+    from api.config import _get_config_path
+    from api.workspace import _safe_resolve
 
-    home = _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
-    environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
-    environ.update(_profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home)))
-    return _gateway_base_url(get_config_for_profile_home(home), environ), _gateway_api_key(environ)
+    target = _safe_resolve(Path(home).expanduser())
+    try:
+        if _safe_resolve(Path(_profiles.get_active_hermes_home()).expanduser()) == target:
+            return _get_config_path()
+    except Exception:
+        pass
+    try:
+        ambient = _get_config_path()
+        if _safe_resolve(ambient.parent) == target:
+            return ambient
+    except Exception:
+        pass
+    return Path(home) / "config.yaml"
+
+
+def _process_profile_is_root() -> bool:
+    """True when the .env the process mirrored into os.environ is the default profile's (~/.hermes/.env)."""
+    from api import profiles as _profiles
+    from api.workspace import _safe_resolve
+
+    try:
+        return (_safe_resolve(Path(_profiles.get_process_profile_home()).expanduser())
+                == _safe_resolve(Path(_profiles.get_hermes_home_for_profile("")).expanduser()))
+    except Exception:
+        return False  # fail closed: treat the mirrored alias as per-profile
+
+
+def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
+    """URL and key for a session's profile, never those of the process-active profile.
+
+    The shared pair is what the WebUI process was given (launcher environment, default profile's .env, ambient
+    config): exactly what a single-profile deployment sends. A profile may override each half on its own:
+
+    - URL: its own HERMES_WEBUI_GATEWAY_BASE_URL in its .env, or webui_gateway_base_url in its config.yaml
+      (${VAR} expanded from that profile's .env, read fresh from the file, never from the process environment or
+      the cached ambient config); without one it keeps the shared URL.
+    - Key, on a URL that is not the shared one: the profile's own HERMES_WEBUI_GATEWAY_API_KEY or API_SERVER_KEY,
+      or none; the launcher's and the shared key are never sent to another Gateway.
+    - Key, on the shared URL: the profile's own HERMES_WEBUI_GATEWAY_API_KEY, then the shared alias (the
+      launcher's export, or the root profile's .env), then the profile's API_SERVER_KEY (the key of its own
+      Gateway), then the shared key.
+    """
+    from api import profiles as _profiles
+    from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx, get_config
+
+    shared_url, shared_key = _gateway_base_url(get_config(), os.environ), _gateway_api_key(os.environ)
+
+    home = Path(_profiles.get_hermes_home_for_profile(str(profile_name or "").strip()))
+    own_env = _profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home))
+    raw_cfg = _load_yaml_config_file_raw(_profile_config_path(home), _copy=False)
+    own_url_cfg = raw_cfg.get("webui_gateway_base_url") if isinstance(raw_cfg, dict) else None
+    own_url_env = str(own_env.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    own_alias = str(own_env.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    own_key = own_alias or str(own_env.get("API_SERVER_KEY") or "").strip()
+    # The launcher's explicit WebUI alias (an export, not a value mirrored from a profile's .env) is the key
+    # for the shared URL: there it keeps outranking a profile's API_SERVER_KEY, which is the key of that
+    # profile's OWN Gateway (docs: HERMES_WEBUI_GATEWAY_API_KEY first, API_SERVER_KEY as the fallback).
+    # An alias the profile loader mirrored from a NAMED active profile's .env is that profile's, not shared; one
+    # mirrored from the root profile's ~/.hermes/.env is the shared alias.
+    shared_alias = str(os.environ.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    if _WEBUI_GATEWAY_API_KEY_ENV in _profiles._loaded_profile_env_keys and not _process_profile_is_root():
+        shared_alias = ""
+
+    if not (own_url_env or own_url_cfg or own_key):
+        return shared_url, shared_key
+
+    url = shared_url
+    if own_url_env or own_url_cfg:
+        environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
+        environ.update(own_env)
+        previous_env = getattr(_thread_ctx, "env", {})
+        previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+        _thread_ctx.env = dict(environ)
+        _thread_ctx.block_process_env_fallback = True
+        try:
+            expanded_url = _expand_env_vars(own_url_cfg)
+        finally:
+            _thread_ctx.env = previous_env
+            _thread_ctx.block_process_env_fallback = previous_block
+        # a launcher-exported URL still outranks config.yaml, as everywhere else
+        url_env = own_url_env or str(environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+        url = _gateway_base_url({"webui_gateway_base_url": expanded_url} if expanded_url else {},
+                                {_WEBUI_GATEWAY_BASE_URL_ENV: url_env} if url_env else {})
+        if "${" in url:
+            raise RuntimeError(
+                f"gateway URL for profile {profile_name or 'default'!r} still contains an unresolved variable "
+                f"({url}); set it in that profile's .env"
+            )
+    if url != shared_url:
+        return url, own_key  # the profile's own Gateway: its own key or none, never the shared one
+    return url, (own_alias or shared_alias or own_key or shared_key)
 
 
 def _resume_gateway_run_for_session(session) -> bool:
@@ -2525,7 +2616,10 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
-        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
+        # The session's own profile, not the process-active one: this worker thread has no
+        # thread-local profile, so get_config()/os.environ describe whichever profile the
+        # process loaded. Same resolver the restart-reattach path already uses.
+        base_url, api_key = reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None))
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:
@@ -3049,7 +3143,7 @@ def _run_gateway_chat_streaming(
             err_body = ""
         put_gateway_event(
             "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+            _gateway_http_error_event(exc, err_body, api_key_configured=bool(api_key)),
         )
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]
