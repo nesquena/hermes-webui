@@ -73,6 +73,21 @@
 
 ### Fixed
 
+- **Update status line wraps and names the latest release.** The Settings > System update line no longer runs off the
+  screen on phones and tablets (it was cut mid-word and could push **Check now** out of view); it wraps, and adds
+  "Latest tag: …" when the line doesn't already name that tag. Docker/pip installs get the same tag. Thanks
+  @lucas-albers-lz4. (#6859)
+
+- **Local providers with a saved address show as configured.** Ollama, LM Studio and other keyless self-hosted
+  providers that have an endpoint now read "N models · host:port" with a green **Configured** pill on Settings >
+  Providers, instead of "Not configured". Long LAN/Tailscale hosts wrap, and the card's status strings are translated in
+  Spanish, German and Korean. Thanks @rodboev. (#7246)
+
+- **Provider usage tiles name the right window.** On Settings > Providers, a ChatGPT account whose usage probe reports a
+  24-hour and a 5-hour window showed two tiles both called "5-hour limit", and a weekly-only window was also called
+  "5-hour limit". Tiles are now labelled by their real duration ("Usage limit" + "5-hour limit", "Weekly limit"); normal
+  accounts look the same. Thanks @mvanhorn. (#6893, fixes #6825)
+
 - **A delegated task's result is retried again after a stuck delivery.** With a current Agent, a finished delegated
   task whose delivery was claimed by a process that then died stayed pending until WebUI restarted: WebUI scheduled the
   retry but never handed the completion back to the Agent, which now offers each restored result only once per process.

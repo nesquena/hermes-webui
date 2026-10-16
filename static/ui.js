@@ -12007,6 +12007,11 @@ function _formatUpdateTargetStatus(label,info){
   const noun=info.release_based?'release':'update';
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
 }
+function _updateTargetArrowNamesTag(info,tag){
+  // True only when THIS target's own status renders "(current -> tag)", so a "Latest tag" suffix would repeat it
+  // (#6859). Never search the combined status text: another target's version or branch can contain the tag string.
+  return !!(tag&&info&&info.release_based&&info.latest_version===tag&&_formatUpdateTargetStatus('',info));
+}
 function _formatManualUpdateInstruction(info){
   if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
   const tag=info.channel==='experimental'?'experimental':'latest';

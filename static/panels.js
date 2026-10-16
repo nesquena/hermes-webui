@@ -11528,11 +11528,20 @@ function _formatProviderQuotaReset(value){
 }
 
 function _formatProviderQuotaWindowLabel(accountLimits,w){
-  const raw=((w&&w.label)||t('provider_quota_window_fallback')).trim();
+  const label=String((w&&w.label)||'').trim();
+  const raw=label||t('provider_quota_window_fallback');
   const provider=((accountLimits&&accountLimits.provider)||'').toLowerCase();
   if(provider==='openai-codex'){
-    if(raw.toLowerCase()==='session') return t('provider_quota_session_limit');
-    if(raw.toLowerCase()==='weekly') return t('provider_quota_weekly_limit');
+    const durationValue=w&&w.limit_window_seconds;
+    const absent=durationValue===null||durationValue===undefined||durationValue==='';
+    const duration=Math.trunc(Number(durationValue));
+    if(duration===18000) return t('provider_quota_session_limit');
+    if(duration===604800) return t('provider_quota_weekly_limit');
+    if(absent){
+      const mapped={session:t('provider_quota_session_limit'),weekly:t('provider_quota_weekly_limit')}[label.toLowerCase()];
+      if(mapped) return mapped;
+    }
+    if(!label||label.toLowerCase()==='session'||label.toLowerCase()==='weekly') return t('provider_quota_usage_limit');
   }
   return raw||t('provider_quota_window_fallback');
 }
@@ -11873,11 +11882,25 @@ function _buildProviderCard(p){
   const modelCount=Number.isFinite(p.models_total)
     ? p.models_total
     : (Array.isArray(p.models) ? p.models.length : 0);
-  const sourceLabel=p.key_source==='oauth'
-    ? t('providers_status_oauth')
-    : p.key_source==='config_yaml'
-      ? t('providers_status_configured')||'Configured'
-      : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
+  const isConfigured=p.is_self_hosted===true
+    ? typeof p.base_url==='string' && p.base_url.trim().length>0
+    : p.has_key;
+  // The meta line names the credential source and the pill carries the status: a keyed
+  // card reads "API key" + "API key configured". A configured keyless self-hosted card
+  // names its endpoint (host[:port] only: no path, no userinfo) instead of repeating
+  // "Configured" in both slots.
+  const selfHostedEndpoint=(raw)=>{
+    const value=String(raw||'').trim();
+    try{ const u=new URL(value); if(u.host) return u.host; }catch(_){}
+    return value.replace(/^[a-z][a-z0-9+.-]*:\/\//i,'').replace(/^[^@/]*@/,'').split(/[/?#]/)[0];
+  };
+  const sourceLabel=p.is_self_hosted
+    ? (isConfigured ? (selfHostedEndpoint(p.base_url)||t('providers_status_configured_label')||'Configured') : t('providers_status_not_configured_label'))
+    : p.key_source==='oauth'
+      ? t('providers_status_oauth')
+      : p.key_source==='config_yaml'
+        ? t('providers_status_configured')||'Configured'
+        : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
   const metaParts=[];
   if(modelCount>0) metaParts.push(modelCount+(modelCount===1?' model':' models'));
   metaParts.push(sourceLabel);
@@ -11892,7 +11915,7 @@ function _buildProviderCard(p){
       <div class="provider-card-name">${esc(p.display_name)}</div>
       <div class="provider-card-meta">${esc(metaText)}</div>
     </div>
-    ${p.has_key?`<span class="provider-card-badge">${esc(t('providers_status_configured'))}</span>`:''}
+    ${isConfigured?`<span class="provider-card-badge">${esc(t(p.is_self_hosted?'providers_status_configured_label':'providers_status_configured'))}</span>`:''}
     <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
   `;
   card.appendChild(header);
@@ -12699,10 +12722,21 @@ async function checkUpdatesNow(channelOverride){
       const noGitParts=[];
       if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
+      // Release-tag context for the status line (display-only; update
+      // decisions are made by the per-target checks above).  WebUI-first so
+      // the suffix matches the panel's own version line order. No fallback to
+      // the release-path version field: on the stable up-to-date payload it
+      // holds the CURRENT tag, which would mislabel it as "Latest". Both
+      // payload shapes carry latest_tag from the backend (#6859 review S1).
+      const tagInfo=(data.webui&&data.webui.latest_tag)
+        ||(data.agent&&data.agent.latest_tag)||'';
+      // The target whose tag is shown. Its own release arrow may already name the tag (#6859 Fable r1).
+      const tagOwner=(data.webui&&data.webui.latest_tag)?data.webui:data.agent;
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
+        if(tagInfo&&!_updateTargetArrowNamesTag(tagOwner,tagInfo)) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
@@ -12711,7 +12745,9 @@ async function checkUpdatesNow(channelOverride){
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
-        if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
+        let txt=t('settings_up_to_date');
+        if(tagInfo) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
+        if(status){status.textContent=txt;status.style.color='var(--success)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       }
     }
