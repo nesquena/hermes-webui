@@ -842,6 +842,62 @@ class TestMediaEndpointUnit(unittest.TestCase):
             self.assertIn("sandbox", handler.headers.get("content-security-policy", ""))
             self.assertIn(b"Report", handler.body)
 
+
+    def test_handle_media_session_authorizes_xlsx_artifact_outside_roots(self):
+        """An xlsx produced outside the media roots must be served when the owning
+        session emitted an exact MEDIA: token for it (Office types are artifacts)."""
+        from api import routes
+
+        class _Handler:
+            def __init__(self):
+                self.status = None
+                self.headers = {}
+                self.body = b""
+            def send_response(self, code):
+                self.status = code
+            def send_header(self, k, v):
+                self.headers[k.lower()] = v
+            def end_headers(self):
+                pass
+            class _W:
+                def __init__(self, owner):
+                    self.owner = owner
+                def write(self, b):
+                    self.owner.body += b
+                def flush(self):
+                    pass
+            @property
+            def wfile(self):
+                return self._W(self)
+
+        with tempfile.TemporaryDirectory() as home, _outside_allowed_roots_dir() as outside:
+            hermes_home = pathlib.Path(home) / ".hermes"
+            hermes_home.mkdir(parents=True)
+            ws = hermes_home / "workspace"
+            ws.mkdir()
+            xlsx = pathlib.Path(outside) / "report.xlsx"
+            xlsx.write_bytes(b"PK\x03\x04fake-xlsx")
+            session = SimpleNamespace(messages=[{"role": "assistant", "content": f"**MEDIA:{xlsx}**"}])
+            with mock.patch.dict(os.environ, {"HERMES_HOME": str(hermes_home), "MEDIA_ALLOWED_ROOTS": ""}), \
+                 mock.patch.object(routes, "get_last_workspace", lambda: str(ws)), \
+                 mock.patch.object(routes, "get_session", return_value=session), \
+                 mock.patch("api.auth.is_auth_enabled", lambda: False):
+                handler = _Handler()
+                routes._handle_media(
+                    handler,
+                    SimpleNamespace(
+                        query=(
+                            f"path={urllib.parse.quote(str(xlsx.resolve()))}"
+                            "&session_id=s-media&download=1"
+                        ),
+                        path="/api/media",
+                    ),
+                )
+
+            self.assertEqual(handler.status, 200)
+            self.assertIn("spreadsheetml", handler.headers.get("content-type", ""))
+            self.assertIn(b"fake-xlsx", handler.body)
+
     def test_handle_media_session_authorizes_safe_text_artifacts_outside_roots(self):
         from api import routes
 
