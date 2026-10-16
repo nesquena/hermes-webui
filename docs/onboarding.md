@@ -118,12 +118,15 @@ The setup step groups providers by how much information they usually need.
 
 | Group | Examples | What you usually enter |
 |---|---|---|
-| Easy start | OpenRouter, Anthropic, OpenAI | API key and model. |
+| Easy start | OpenRouter, Anthropic, OpenAI, OpenCode Free | API key and model; OpenCode Free uses six curated models without a key. |
 | Open / self-hosted | Ollama, LM Studio, custom OpenAI-compatible, AIML API | Base URL, model, optional API key. |
 | Specialized | Gemini, DeepSeek, Xiaomi MiMo, Z.AI / GLM, NVIDIA NIM, Mistral, xAI | Provider API key and default model. |
 
 For API-key providers, the wizard writes the key to the active Hermes `.env`
 file and writes the default model/provider to `config.yaml`.
+
+OpenCode Free requires a Hermes Agent version that supports it. Upgrade Hermes
+Agent if the wizard says this provider is unsupported.
 
 For local providers, the API key field can be blank when the server is keyless.
 Most LM Studio, Ollama, vLLM, llama-server, and TabbyAPI installs run this way.

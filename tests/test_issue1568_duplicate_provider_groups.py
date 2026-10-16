@@ -177,8 +177,7 @@ class TestProviderGroupDedup:
             data = config.get_available_models()
             opencode_groups = [
                 g for g in data["groups"]
-                if "opencode" in (g.get("provider_id") or "").lower()
-                or "opencode" in (g.get("provider") or "").lower()
+                if g.get("provider_id") == "opencode-go"
             ]
             assert len(opencode_groups) == 1, (
                 f"Expected exactly ONE OpenCode Go group, got {len(opencode_groups)}: "
