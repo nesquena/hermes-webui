@@ -1699,7 +1699,25 @@ async function send(){
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   let uploaded=[];
   try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
-  catch(e){if(!text){setComposerStatus(`Upload error: ${e.message}`);return;}}
+  catch(e){
+    // Total failure: never start the agent with no attachments. Restore the
+    // draft + staged files so a one-key resend keeps them.
+    _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise);
+    setComposerStatus(`Upload error: ${e.message}`);
+    return;
+  }
+  // Partial failure: uploadPendingFiles returns the files that DID upload and
+  // only throws when every one failed. Starting the agent here would silently
+  // send the message with a subset of the staged attachments, so abort and
+  // restore the draft instead. Reuse the existing localized prefix so no new
+  // translation keys are needed.
+  if(_submittedFiles.length && uploaded.length<_submittedFiles.length){
+    const _partialMsg=`${t('upload_failed')}${uploaded.length}/${_submittedFiles.length}`;
+    setComposerStatus(_partialMsg);
+    if(typeof showToast==='function') showToast(_partialMsg, 4000, 'error');
+    _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise);
+    return;
+  }
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
   // setComposerStatus('') is only called in setBusy(false), not setBusy(true).
