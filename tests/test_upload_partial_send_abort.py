@@ -28,22 +28,35 @@ def _send_upload_block() -> str:
     return MESSAGES_JS[start:end]
 
 
-def test_send_aborts_on_partial_upload():
+def _partial_upload_branch() -> str:
     block = _send_upload_block()
-    # The guard must compare the uploaded count against the submitted snapshot.
-    assert "uploaded.length<_submittedFiles.length" in block, (
-        "send() must detect a partial upload (uploaded < submitted)"
-    )
-    # And it must restore the draft + staged files instead of continuing.
-    assert "_restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles," in block
+    marker = "if(_submittedFiles.length && uploaded.length<_submittedFiles.length)"
+    start = block.find(marker)
+    assert start != -1, "send() must detect a partial upload (uploaded < submitted)"
+    return block[start:]
+
+
+def _total_upload_catch() -> str:
+    block = _send_upload_block()
+    start = block.find("catch(e){")
+    assert start != -1, "the upload await must keep its try/catch"
+    end = block.find("if(_submittedFiles.length && uploaded.length<_submittedFiles.length)", start)
+    assert end != -1
+    return block[start:end]
+
+
+def test_send_aborts_on_partial_upload():
+    branch = _partial_upload_branch()
+    assert "_restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles," in branch
+    assert "return;" in branch
 
 
 def test_send_restores_draft_on_total_upload_failure_with_text():
     """The old code only surfaced a total failure when there was no text; with
     text present it fell through and sent a text-only message. Now it restores."""
-    block = _send_upload_block()
-    assert "catch(e){" in block, "the upload await must keep its try/catch"
-    assert "_restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles," in block
+    catch = _total_upload_catch()
+    assert "_restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles," in catch
+    assert "return;" in catch
 
 
 def test_upload_pending_files_only_throws_on_total_failure():
