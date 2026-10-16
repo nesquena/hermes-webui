@@ -8546,6 +8546,72 @@ def _is_loadable_disk_cache(cache: object) -> bool:
     return True
 
 
+# --- Durable-cache read memo (#7723 follow-up) ---------------------------
+# Since #7932 the models-cache freshness clock lives INSIDE the payload
+# (``_built_at``), so reading it costs a full parse of the whole catalog file.
+# A session visit needs that stamp AND the catalog groups, which meant parsing
+# the same file twice per visit — ~10 ms of redundant JSON parsing on a
+# 675 KB / 5000-model catalog, doubling session-open disk I/O.
+#
+# This one-slot memo lets the first reader parse the file once and hand the
+# result to the readers that immediately follow on the same visit. It changes
+# NO public or private signatures and no call sites, so every existing stub of
+# these loaders keeps working.
+#
+# Correctness: the entry is keyed on (path, st_mtime_ns, st_size) and
+# re-validated by a fresh stat() before use, so a cache rewritten between the
+# two reads is never served from a stale memo. This is the same file-identity
+# axis the rest of the cache layer already uses. A miss (no entry, different
+# path, or changed stat) simply falls through to a normal read.
+#
+# ``None`` in the 4th slot means "this read failed" (missing/corrupt file);
+# that is a real answer, distinct from "no memo entry", so it does not cause
+# the consumer to retry the same failing read.
+_MODELS_DISK_PAYLOAD_UNSET = object()
+_models_disk_payload_memo: tuple[str, int, int, dict | None] | None = None
+
+
+def _read_models_cache_disk_payload(cache_path: Path) -> dict | None:
+    """Read + parse the durable models cache, memoising it for immediate reuse.
+
+    Returns the raw on-disk payload, or None when the file is missing or
+    unreadable/unparseable (which also clears the memo).
+    """
+    global _models_disk_payload_memo
+    try:
+        st = cache_path.stat()
+        with open(cache_path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except Exception:
+        _models_disk_payload_memo = None
+        return None
+    if not isinstance(payload, dict):
+        payload = None
+    _models_disk_payload_memo = (str(cache_path), st.st_mtime_ns, st.st_size, payload)
+    return payload
+
+
+def _memoized_models_cache_disk_payload(cache_path: Path):
+    """Return the memoised payload if it still matches the file on disk.
+
+    Returns ``_MODELS_DISK_PAYLOAD_UNSET`` when there is no usable entry, in
+    which case the caller must read the file itself.
+    """
+    memo = _models_disk_payload_memo
+    if memo is None:
+        return _MODELS_DISK_PAYLOAD_UNSET
+    path_str, mtime_ns, size, payload = memo
+    if path_str != str(cache_path):
+        return _MODELS_DISK_PAYLOAD_UNSET
+    try:
+        st = cache_path.stat()
+    except OSError:
+        return _MODELS_DISK_PAYLOAD_UNSET
+    if (st.st_mtime_ns, st.st_size) != (mtime_ns, size):
+        return _MODELS_DISK_PAYLOAD_UNSET
+    return payload
+
+
 def _load_models_cache_from_disk() -> dict | None:
     """Load /api/models cache from disk if it exists and has current metadata.
 
@@ -8560,10 +8626,16 @@ def _load_models_cache_from_disk() -> dict | None:
         import json as _j
 
         cache_path = _get_models_cache_path()
-        if not cache_path.exists():
+        cache = _memoized_models_cache_disk_payload(cache_path)
+        if cache is _MODELS_DISK_PAYLOAD_UNSET:
+            if not cache_path.exists():
+                return None
+            with open(cache_path, encoding="utf-8") as f:
+                cache = _j.load(f)
+        elif cache is None:
+            # The memo records an already-failed read of this exact file; do not
+            # pay a second identical failing read.
             return None
-        with open(cache_path, encoding="utf-8") as f:
-            cache = _j.load(f)
         if not _is_loadable_disk_cache(cache):
             return None
         # Strip the disk-only metadata before returning, so the in-memory
@@ -8961,10 +9033,15 @@ def _load_stale_models_cache_from_disk() -> dict | None:
         import json as _j
 
         cache_path = _get_models_cache_path()
-        if not cache_path.exists():
+        cache = _memoized_models_cache_disk_payload(cache_path)
+        if cache is _MODELS_DISK_PAYLOAD_UNSET:
+            if not cache_path.exists():
+                return None
+            with open(cache_path, encoding="utf-8") as f:
+                cache = _j.load(f)
+        elif cache is None:
+            # The memo records an already-failed read of this exact file.
             return None
-        with open(cache_path, encoding="utf-8") as f:
-            cache = _j.load(f)
         if not _is_valid_models_cache(cache):
             return None
         if cache.get("_schema_version") != _MODELS_CACHE_SCHEMA_VERSION:
@@ -11920,10 +11997,15 @@ def _models_disk_cache_built_at(cache_path: Path) -> float | None:
     Returns None for caches written before the stamp existed (their freshness
     falls back to file mtime), future-stamped caches, and any unreadable/unparseable
     payload, so the freshness decision never hard-fails on a malformed cache.
+
+    Goes through ``_read_models_cache_disk_payload`` so the parse is memoised:
+    this is the first reader on the session-visit path, and the loaders that
+    follow it in the same call reuse the parse rather than re-reading the file.
     """
     try:
-        with open(cache_path, encoding="utf-8") as f:
-            payload = json.load(f)
+        payload = _read_models_cache_disk_payload(cache_path)
+        if not isinstance(payload, dict):
+            return None
         built_at = payload.get("_built_at")
         if isinstance(built_at, (int, float)) and math.isfinite(built_at) and 0 < built_at <= time.time():
             return float(built_at)
