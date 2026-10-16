@@ -29,12 +29,12 @@ const COMMANDS=[
   // /reasoning below, has no per-option slot for that; see getSlashAutocompleteMatches).
   {name:'skills',    desc:t('cmd_skills'),   fn:cmdSkills,   arg:'query',
    subArgs:[
-     {value:'pending', desc:'List staged skill writes awaiting approval'},
-     {value:'approve', desc:'Apply a staged skill write by id'},
-     {value:'reject', desc:'Discard a staged skill write by id'},
-     {value:'diff', desc:'Show the diff for a staged skill write by id'},
-     {value:'approval', desc:'Turn the write-approval gate on or off'},
-     {value:'mode', desc:'Alias for approval on|off'},
+     {value:'pending', desc:t('cmd_sub_skills_pending')},
+     {value:'approve', desc:t('cmd_sub_skills_approve')},
+     {value:'reject', desc:t('cmd_sub_skills_reject')},
+     {value:'diff', desc:t('cmd_sub_skills_diff')},
+     {value:'approval', desc:t('cmd_sub_approval')},
+     {value:'mode', desc:t('cmd_sub_mode')},
    ]},
   {name:'use',       desc:t('cmd_use'),      fn:cmdUse,      arg:'skill-name', subArgs:'skills', noEcho:true},
   {name:'stop',      desc:t('cmd_stop'),     fn:cmdStop,      noEcho:true},
@@ -62,11 +62,11 @@ const SLASH_SUBARG_SOURCES={
   // wired up here instead. No 'diff' -- memory entries are small enough to review inline
   // (api/commands.py's _run_memory_write_approval_command has no diff subcommand either).
   memory:{desc:t('cmd_memory'), subArgs:[
-    {value:'pending', desc:'List staged memory writes awaiting approval'},
-    {value:'approve', desc:'Apply a staged memory write by id'},
-    {value:'reject', desc:'Discard a staged memory write by id'},
-    {value:'approval', desc:'Turn the write-approval gate on or off'},
-    {value:'mode', desc:'Alias for approval on|off'},
+    {value:'pending', desc:t('cmd_sub_memory_pending')},
+    {value:'approve', desc:t('cmd_sub_memory_approve')},
+    {value:'reject', desc:t('cmd_sub_memory_reject')},
+    {value:'approval', desc:t('cmd_sub_approval')},
+    {value:'mode', desc:t('cmd_sub_mode')},
   ]},
 };
 

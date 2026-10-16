@@ -138,12 +138,23 @@ def test_skill_approval_after_deleting_startup_profile_writes_to_request_profile
     monkeypatch, request, tmp_path
 ):
     """A stale Agent SKILLS_DIR after profile deletion must not redirect approval writes."""
+    import hermes_constants
     from api import config, commands, profiles
     from hermes_constants import get_hermes_home
     from hermes_cli import profiles as agent_profiles
     from tools import write_approval
     import tools.skills_tool as skills_tool
     import tools.skill_manager_tool as skill_manager
+
+    # delete_profile_api() switches the active profile, and _pin_process_profile_home
+    # pins the Agent's process home to this test's tmp root. Restore that pin too,
+    # or every later test resolves get_hermes_home() to the deleted tmp tree.
+    monkeypatch.setattr(
+        hermes_constants,
+        "_PINNED_PROCESS_HERMES_HOME",
+        getattr(hermes_constants, "_PINNED_PROCESS_HERMES_HOME", None),
+        raising=False,
+    )
 
     skill_module_snapshot = profiles.snapshot_skill_home_modules()
     request.addfinalizer(lambda: profiles.restore_skill_home_modules(skill_module_snapshot))

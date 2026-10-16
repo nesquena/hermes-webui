@@ -85,17 +85,84 @@ def snapshot_skill_home_modules() -> dict[str, dict[str, object]]:
 def _skill_modules_support_profile_home(profile_home: Path) -> bool:
     """Return ``True`` when both skill modules resolve to this profile home.
 
-    Deliberately lock-free: streaming calls this per turn to choose the dynamic
-    (concurrent) path, and a legacy turn may hold ``_SKILL_HOME_MODULE_PATCH_LOCK``
-    for its whole duration. Callers that must keep the answer valid while they act
-    on it (write-approval apply/diff) hold the lock themselves and call
+    Deliberately lock-free and unchanged from master: streaming calls this per
+    turn to choose the dynamic (concurrent) path, and a legacy turn may hold
+    ``_SKILL_HOME_MODULE_PATCH_LOCK`` for its whole duration. It keeps master's
+    lexical comparison, so a profile whose ``skills/`` is a symlink stays on the
+    concurrent path. Write-approval apply/diff need the stricter containment
+    check; they hold the lock themselves and call
     ``_skill_modules_support_profile_home_locked``.
     """
-    return _skill_modules_support_profile_home_locked(profile_home)
+    expected_dir = (Path(profile_home) / 'skills').expanduser()
+
+    for module_name in _SKILL_HOME_MODULES:
+        module = sys.modules.get(module_name)
+        if module is None:
+            logger.debug("Skill capability check: %s not pre-imported in sys.modules", module_name)
+            return False
+
+        if not hasattr(module, 'SKILLS_DIR'):
+            logger.debug("Skill capability check: %s missing SKILLS_DIR", module_name)
+            return False
+
+        if not hasattr(module, '_SKILLS_DIR_AT_IMPORT'):
+            logger.debug("Skill capability check: %s missing _SKILLS_DIR_AT_IMPORT", module_name)
+            return False
+
+        try:
+            current_skills_dir = Path(module.SKILLS_DIR).expanduser()
+            import_skills_dir = Path(module._SKILLS_DIR_AT_IMPORT).expanduser()
+        except Exception:
+            logger.debug(
+                "Skill capability check: %s has invalid SKILLS_DIR or _SKILLS_DIR_AT_IMPORT",
+                module_name,
+                exc_info=True,
+            )
+            return False
+
+        if current_skills_dir != import_skills_dir:
+            logger.debug(
+                "Skill capability check: %s.SKILLS_DIR %r does not match imported baseline %r",
+                module_name,
+                current_skills_dir,
+                import_skills_dir,
+            )
+            return False
+
+        skills_dir = getattr(module, '_skills_dir', None)
+        if not callable(skills_dir):
+            logger.debug("Skill capability check: %s._skills_dir is not callable", module_name)
+            return False
+
+        try:
+            resolved = Path(skills_dir()).expanduser()
+        except Exception:
+            logger.debug(
+                "Skill capability check: %s._skills_dir() failed",
+                module_name,
+                exc_info=True,
+            )
+            return False
+
+        if resolved != expected_dir:
+            logger.debug(
+                "Skill capability check: %s resolves %r instead of %r",
+                module_name,
+                str(resolved),
+                str(expected_dir),
+            )
+            return False
+
+    return True
 
 
 def _skill_modules_support_profile_home_locked(profile_home: Path) -> bool:
-    """Check skill module paths; hold the patch lock to keep the result valid."""
+    """Strict check for write-approval apply/diff; hold the patch lock to keep it valid.
+
+    Unlike the lock-free streaming helper above, this also resolves symlinks and
+    refuses any skills directory that resolves outside the profile home, so an
+    approval can never write through a link into another profile.
+    """
     expected_home = Path(profile_home).expanduser()
     expected_home_resolved = expected_home.resolve(strict=False)
     expected_dir = Path(os.path.abspath(expected_home / "skills"))
