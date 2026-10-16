@@ -25953,7 +25953,15 @@ def _restore_chat_start_entry_sidecar(provenance) -> None:
     if sidecar_bytes is None:
         sidecar_path.unlink(missing_ok=True)
     else:
-        _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
+        from api.models import _note_sidecar_write
+
+        # Count this replace like Session.save does (#8267), so a concurrent
+        # cold get_session() does not publish the pre-restore object.
+        _note_sidecar_write(sidecar_path.stem)
+        try:
+            _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
+        finally:
+            _note_sidecar_write(sidecar_path.stem)
 
 
 def _cleanup_chat_start_launch_failure(

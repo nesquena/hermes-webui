@@ -68,6 +68,12 @@
 
 ### Fixed
 
+- **A rename or archive is no longer silently undone by a concurrent session load.** When a session was loaded from
+  disk at the same moment another request saved it, the cache could keep the copy read before the save. A metadata-only
+  change (a new title, the archive flag, a model pick) then went unnoticed, and the next save of the session wrote the
+  old value back. Saves now bump a per-session write counter, and a cold load re-reads instead of caching a copy that
+  overlapped a save. Thanks @TowardInfinity. (#8269, fixes #8267)
+
 - **A second attachment with the same filename is kept.** Adding two different files with the same name (for example
   two phone photos both called `image.jpg`) silently dropped the second one from the composer. Pending files are now
   identified by more than their name, so both are kept and sent, and re-adding the same file still doesn't create a
