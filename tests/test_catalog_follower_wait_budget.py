@@ -104,3 +104,23 @@ def test_session_new_uses_cached_catalog():
     end = src.find('if parsed.path == "/api/session/compression-recovery/start":', start)
     body = src[start:end]
     assert "prefer_cached_catalog=True" in body
+
+
+def test_session_model_state_forwards_prefer_cached_catalog(monkeypatch):
+    """The new-session flag must reach the resolver, not stop at the helper."""
+    import api.routes as routes
+
+    seen = {}
+
+    def _resolve(model, provider, prefer_cached_catalog=False):
+        seen["prefer_cached_catalog"] = prefer_cached_catalog
+        return model, provider, False
+
+    monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", _resolve)
+    model, provider = routes._session_model_state_from_request(
+        "cached-model",
+        None,
+        prefer_cached_catalog=True,
+    )
+    assert (model, provider) == ("cached-model", None)
+    assert seen.get("prefer_cached_catalog") is True
