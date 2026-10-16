@@ -80,6 +80,10 @@
 
 ### Fixed
 
+- **Composer stays above the keyboard on Android Chrome and Edge.** The page now asks Chromium browsers on Android to
+  resize the layout when the on-screen keyboard opens, the same setting Gemini, Open WebUI and LibreChat use. iPhone,
+  iPad and desktop are unchanged. Thanks @qxxaa. (#6475)
+
 - **Update status line wraps and names the latest release.** The Settings > System update line no longer runs off the
   screen on phones and tablets (it was cut mid-word and could push **Check now** out of view); it wraps, and adds
   "Latest tag: …" when the line doesn't already name that tag. Docker/pip installs get the same tag. Thanks
