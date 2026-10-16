@@ -315,6 +315,18 @@ def schedule_async_delegation_claim_retry(
         return False
     if not isinstance(durable, dict) or durable.get("delivery_state") != "pending":
         return False
+    # Current Agent cores offer each restored row once per process
+    # (tools.async_delegation._offered). This drain discarded its copy, so hand the
+    # offer back or the restore sweep below skips the still-pending row.
+    try:
+        from tools.async_delegation import return_completion_offer
+    except (ImportError, AttributeError):
+        return_completion_offer = None
+    if callable(return_completion_offer):
+        try:
+            return_completion_offer(evt)
+        except Exception:
+            logger.debug("Failed to return async delegation offer %s", delegation_id, exc_info=True)
 
     retry_delay = (
         ASYNC_DELIVERY_CLAIM_RETRY_SECONDS if delay is None else max(0.0, float(delay))

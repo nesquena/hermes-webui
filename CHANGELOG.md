@@ -73,6 +73,11 @@
 
 ### Fixed
 
+- **A delegated task's result is retried again after a stuck delivery.** With a current Agent, a finished delegated
+  task whose delivery was claimed by a process that then died stayed pending until WebUI restarted: WebUI scheduled the
+  retry but never handed the completion back to the Agent, which now offers each restored result only once per process.
+  WebUI now hands it back before the retry, and older Agents are unaffected. (#8278)
+
 - **A rename or archive is no longer silently undone by a concurrent session load.** When a session was loaded from
   disk at the same moment another request saved it, the cache could keep the copy read before the save. A metadata-only
   change (a new title, the archive flag, a model pick) then went unnoticed, and the next save of the session wrote the
