@@ -18,8 +18,10 @@ from types import SimpleNamespace
 
 import api.config as config
 import api.profiles as profiles
+from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
 
 ROOT = Path(__file__).resolve().parents[1]
+ENGLISH_FALLBACK_OWNED_KEYS = frozenset(PROFILE_CONCEPT_KEYS)
 
 
 class _FakeResponse:
@@ -1271,21 +1273,55 @@ def test_provider_quota_i18n_keys_exist_for_all_locales():
         assert len(re.findall(rf"^\s+{re.escape(key)}:", i18n, re.MULTILINE)) == locale_count, key
 
 
-def test_settings_label_and_description_i18n_keys_exist_for_all_locales():
-    """Settings labels/descriptions referenced by the page need every locale."""
-    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
-    index_html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+def _settings_i18n_coverage_errors(i18n: str, index_html: str):
+    """Return settings keys whose locale count violates their ownership contract."""
     locale_count = len(
         re.findall(r"^  (?:[A-Za-z_][A-Za-z0-9_]*|'[^']+'):\s*\{", i18n, re.MULTILINE)
     )
     keys = sorted(
         set(re.findall(r'data-i18n="(settings_(?:label|desc)_[a-z0-9_]+)"', index_html))
     )
+    errors = {}
+    for key in keys:
+        actual = len(re.findall(rf"^\s+{re.escape(key)}:", i18n, re.MULTILINE))
+        expected = 1 if key in ENGLISH_FALLBACK_OWNED_KEYS else locale_count
+        if actual != expected:
+            errors[key] = (actual, expected)
+    return locale_count, keys, errors
+
+
+def test_settings_label_and_description_i18n_keys_follow_locale_ownership():
+    """Settings copy is translated everywhere or explicitly owned by en fallback."""
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    index_html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    locale_count, keys, errors = _settings_i18n_coverage_errors(i18n, index_html)
+
+    # Contract Change: data-i18n settings keys registered in the shared fallback
+    # chokepoint intentionally live only in `en`; every unregistered key remains
+    # subject to strict all-locale coverage. This aligns the static gate with the
+    # runtime `_locale[key] ?? LOCALES.en[key]` contract and AGENTS.md guideline 8.
     assert locale_count >= 1
     assert "settings_label_fade_text_effect" in keys
     assert "settings_desc_fade_text_effect" in keys
-    for key in keys:
-        assert len(re.findall(rf"^\s+{re.escape(key)}:", i18n, re.MULTILINE)) == locale_count, key
+    assert errors == {}
+
+
+def test_settings_i18n_gate_rejects_unregistered_english_only_key():
+    """The fallback exemption must not weaken coverage for ordinary settings copy."""
+    i18n = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
+    index_html = (ROOT / "static" / "index.html").read_text(encoding="utf-8")
+    key = "settings_label_fade_text_effect"
+    assert key not in ENGLISH_FALLBACK_OWNED_KEYS
+
+    pattern = re.compile(rf"^\s+{re.escape(key)}:.*(?:\n|$)", re.MULTILINE)
+    matches = list(pattern.finditer(i18n))
+    assert len(matches) > 1
+    broken_i18n = i18n
+    for match in reversed(matches[1:]):
+        broken_i18n = broken_i18n[: match.start()] + broken_i18n[match.end() :]
+
+    locale_count, _keys, errors = _settings_i18n_coverage_errors(broken_i18n, index_html)
+    assert errors[key] == (1, locale_count)
 
 
 def test_provider_quota_styles_exist():
