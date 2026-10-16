@@ -11,6 +11,42 @@ function assistantDisplayName(){
   if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
   return window._botName||'Hermes';
 }
+
+// #7611: optional deployment label for multi-instance setups (e.g. "Production").
+// Operators running several WebUI deployments side by side had no way to tell
+// their tabs apart, because every instance rendered the same generic title.
+// Empty by default, so a single-instance deployment is byte-identical to before.
+//
+// Every document.title owner calls _applyInstanceTitle() after writing its own
+// base title; it owns the decoration for all of them. The Tauri desktop wrapper
+// mirrors document.title, so the window title follows for free.
+let _lastInstanceTitleSuffix='';
+function instanceDisplayName(){
+  let raw=(typeof window!=='undefined'&&window._instanceName!=null)?String(window._instanceName):'';
+  // Whitespace-ish controls (\t \n \v \f \r) become spaces so words don't run
+  // together; every other control char — NUL especially, which would truncate
+  // the value in C-level consumers — is dropped outright.
+  raw=raw.replace(/[\t\n\v\f\r]+/g,' ');
+  raw=raw.replace(/[\u0000-\u0008\u000e-\u001f\u007f]/g,'');
+  raw=raw.replace(/\s+/g,' ').trim();
+  return raw.length>80?raw.slice(0,80).trim():raw;
+}
+function _instanceTitleSuffix(){
+  const name=instanceDisplayName();
+  return name?' \u2022 '+name:'';
+}
+function _applyInstanceTitle(){
+  const suffix=_instanceTitleSuffix();
+  let title=String(document.title||'');
+  // Withdraw the suffix this function applied last time before re-applying it.
+  // That keeps repeated calls idempotent (syncTopbar fires on every stream
+  // tick), stops a stale suffix riding along on a NEW base title, and means
+  // clearing the setting actually removes the decoration instead of stranding it.
+  if(_lastInstanceTitleSuffix&&title.slice(-_lastInstanceTitleSuffix.length)===_lastInstanceTitleSuffix)
+    title=title.slice(0,-_lastInstanceTitleSuffix.length);
+  _lastInstanceTitleSuffix=suffix;
+  document.title=title+suffix;
+}
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
 const MAX_UPLOAD_BYTES=(window.__HERMES_CONFIG__&&window.__HERMES_CONFIG__.maxUploadBytes)||20*1024*1024;
@@ -15390,6 +15426,7 @@ function _topbarMessageMetaText(){
 function syncTopbar(){
   if(!S.session){
     document.title=assistantDisplayName();
+    if(typeof _applyInstanceTitle==='function') _applyInstanceTitle();  // #7611
     if(typeof syncWorkspaceDisplays==='function') syncWorkspaceDisplays();
     if(typeof _syncWorkspaceHeadingState==='function') _syncWorkspaceHeadingState();
     if(typeof syncModelChip==='function') syncModelChip();
@@ -15416,6 +15453,9 @@ function syncTopbar(){
   if(typeof activeSessionHasPendingPromptAttention==='function'&&activeSessionHasPendingPromptAttention()){
     document.title='● '+document.title;
   }
+  // #7611: decorate AFTER the attention dot so the dot stays leading and the
+  // instance label stays last (most scannable at the right edge of a tab).
+  if(typeof _applyInstanceTitle==='function') _applyInstanceTitle();
   const _topbarMeta=$('topbarMeta');
   if(_topbarMeta){
     let sourceLabel=(S.session&&(S.session.source_label||S.session.source_tag||S.session.raw_source))||'';
