@@ -5,6 +5,11 @@
 
 ### Added
 
+- **Task list in the chat (optional).** Settings > Appearance > **Show task list in chat** shows the session's to-do
+  list as a collapsible strip above the conversation. Collapsed it's a single band; expanded it's capped so the
+  conversation keeps most of the height, with a fade marking more items. While it's on, the workspace Todos tab is
+  disabled with a note. Off by default. Thanks @silent-reader-cn. (#6978)
+
 - **Project bindings: pin workspaces and a model to a sidebar project.** Right-click a project chip and choose
   **Project settings…** to bind one or more workspaces (one marked default) and a model, so the project's quick-create
   (+) button opens a new session already set up for that project. Thanks @silent-reader-cn.
