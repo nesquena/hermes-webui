@@ -9244,7 +9244,7 @@ function _ensureClarifyCardDom() {
       <div class="clarify-question" id="clarifyQuestion"></div>
       <div class="clarify-choices" id="clarifyChoices"></div>
       <div class="clarify-response">
-        <input class="clarify-input" id="clarifyInput" type="text" autocomplete="off" readonly onfocus="this.removeAttribute('readonly')" data-i18n-placeholder="clarify_input_placeholder" placeholder="Type your response…">
+        <textarea class="clarify-input" id="clarifyInput" rows="1" autocomplete="off" data-1p-ignore data-lpignore="true" data-form-type="other" spellcheck="false" data-i18n-placeholder="clarify_input_placeholder" placeholder="Type your response…"></textarea>
         <button class="clarify-submit" id="clarifySubmit" data-i18n="clarify_send">Send</button>
       </div>
       <div class="clarify-hint" id="clarifyHint" data-i18n="clarify_hint">Please choose one option, or type your own response below.</div>
@@ -9309,6 +9309,36 @@ function _syncClarifyTranscriptSpace(card, opts) {
   if (opts.immediate) measure();
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(measure);
   setTimeout(measure, 420);
+}
+
+// #7616: the clarify card's free-text field is a <textarea> so a long or
+// multiline answer actually fits. It used to be a single-line <input> that was
+// also marked `readonly` until focus — a password-manager opt-out hack that
+// made click-drag selection and Ctrl/Cmd+A impossible, which is what made
+// replacing existing text with a long answer unusable.
+//
+// Grow the field with its content up to a bounded cap; past the cap it scrolls
+// inside the field instead of pushing the card past the viewport.
+const CLARIFY_INPUT_MAX_HEIGHT = 160;
+const CLARIFY_INPUT_MIN_HEIGHT = 42;
+
+function _autoResizeClarifyInput() {
+  const input = $("clarifyInput");
+  if (!input) return;
+  input.style.height = "auto";
+  // +2 absorbs the textarea's inner border so a single line does not clip.
+  const content = input.scrollHeight + 2;
+  input.style.height = Math.max(CLARIFY_INPUT_MIN_HEIGHT, Math.min(content, CLARIFY_INPUT_MAX_HEIGHT)) + "px";
+  input.style.overflowY = content > CLARIFY_INPUT_MAX_HEIGHT ? "auto" : "hidden";
+}
+
+// Bind once per element rather than on every showClarifyCard() poll — the
+// poll re-renders repeatedly and addEventListener would stack duplicates.
+function _bindClarifyInputAutoResize() {
+  const input = $("clarifyInput");
+  if (!input || input.dataset.autoResizeBound === "1") return;
+  input.dataset.autoResizeBound = "1";
+  input.addEventListener("input", _autoResizeClarifyInput);
 }
 
 function _ensureClarifyResizeListener() {
@@ -9453,6 +9483,9 @@ function hideClarifyCard(force=false, reason="dismissed") {
   $("clarifyInput").value = "";
   $("clarifyInput").disabled = false;
   $("clarifyInput").onkeydown = null;
+  // #7616: collapse the grown height so the next prompt starts one line tall
+  // instead of inheriting this answer's box size.
+  _autoResizeClarifyInput();
   const submit = $("clarifySubmit");
   if (submit) { submit.disabled = false; submit.classList.remove("loading"); }
 }
@@ -9556,13 +9589,21 @@ function showClarifyCard(pending) {
   if (input) {
     if (!sameClarify) input.value = '';
     input.disabled = false;
-    input.removeAttribute('readonly');
+    _bindClarifyInputAutoResize();
+    // #7616: Enter keeps sending (existing behavior); Shift+Enter is the
+    // newline path the now-multiline field needs. Re-measure on a timer so the
+    // box grows with the newline the browser inserts.
     input.onkeydown = (e) => {
-      if (e.key === 'Enter') {
+      if (e.key === 'Enter' && e.shiftKey) {
+        setTimeout(_autoResizeClarifyInput, 0);
+        return;
+      }
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         respondClarify();
       }
     };
+    _autoResizeClarifyInput();
   }
   if (typeof lockComposerForClarify === "function") {
     lockComposerForClarify(question ? `Clarification needed: ${question}` : "Clarification needed");

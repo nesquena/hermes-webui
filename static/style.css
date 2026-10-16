@@ -2079,7 +2079,7 @@
   .clarify-choice.other{border-color:var(--accent-bg-strong);color:var(--accent-text);background:var(--accent-bg);}
   .clarify-choice.other:hover{background:var(--accent-bg-strong);border-color:var(--accent);}
   .clarify-response{display:flex;gap:8px;align-items:center;flex-wrap:wrap;}
-  .clarify-input{flex:1;min-width:220px;padding:10px 12px;border-radius:8px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font:inherit;outline:none;transition:all .15s;}
+  .clarify-input{flex:1;min-width:220px;resize:none;min-height:42px;max-height:160px;overflow-y:auto;padding:10px 12px;border-radius:8px;border:1px solid var(--border2);background:var(--input-bg);color:var(--text);font:inherit;line-height:1.5;outline:none;transition:all .15s;}
   .clarify-input:focus{border-color:var(--accent-bg);box-shadow:0 0 0 3px var(--accent-bg);background:var(--hover-bg);}
   .clarify-submit{display:inline-flex;align-items:center;justify-content:center;min-width:92px;padding:10px 14px;border-radius:8px;border:1px solid var(--accent-bg-strong);background:var(--accent-bg);color:var(--accent-text);font-size:12px;font-weight:700;cursor:pointer;transition:all .15s;white-space:nowrap;}
   .clarify-submit:hover{background:var(--accent-bg-strong);transform:translateY(-1px);}
