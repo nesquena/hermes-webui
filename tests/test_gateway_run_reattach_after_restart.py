@@ -256,6 +256,69 @@ def test_restart_reattach_uses_the_live_request_endpoint_resolver(
     assert _saved(sid)["messages"][-1]["content"] == "reattached"
 
 
+def test_restart_reattach_uses_the_env_override_over_an_unresolved_config_placeholder(
+    isolated_sessions, tmp_path, monkeypatch
+):
+    """An explicit environment URL wins over an unresolved config placeholder.
+
+    The profile's config spells its Gateway URL as ``${GATEWAY_URL}`` with that
+    variable unset, while its ``.env`` supplies a valid explicit URL — the same
+    pair new turns already use.  Recovery must apply that precedence before it
+    rejects an unresolved variable, so the saved run is reconnected instead of
+    being skipped by the placeholder check.
+    """
+    sid, stream_id = _orphaned_gateway_turn(run_id="run_env_override")
+    session = models.Session.load(sid)
+    session.profile = "beta"
+    session.save()
+
+    beta_home = tmp_path / "profiles" / "beta"
+    beta_home.mkdir(parents=True)
+    (beta_home / "config.yaml").write_text(
+        'webui_gateway_base_url: "${GATEWAY_URL}"\n', encoding="utf-8"
+    )
+    (beta_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://env-override.test:8642\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=profile-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda profile_name: beta_home if profile_name == "beta" else tmp_path,
+    )
+    monkeypatch.setattr(gateway_chat, "_gateway_deployment_owner_config", lambda: {})
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://shared.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+        },
+    )
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://shared.test")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "deployment-key")
+    monkeypatch.delenv("GATEWAY_URL", raising=False)
+
+    captured = {}
+
+    def fake_status(base_url, api_key, run_id):
+        captured.update(base_url=base_url, api_key=api_key, run_id=run_id)
+        return {"run_id": run_id, "status": "completed", "output": "reattached"}
+
+    monkeypatch.setattr(gateway_chat, "_get_gateway_run_status", fake_status)
+
+    assert gateway_chat.resume_gateway_runs_after_restart() == [sid]
+    _wait_for_reattach_threads()
+
+    assert captured == {
+        "base_url": "http://env-override.test:8642",
+        "api_key": "profile-key",
+        "run_id": "run_env_override",
+    }
+    assert _saved(sid)["messages"][-1]["content"] == "reattached"
+
+
 def test_reattach_surfaces_pending_approval_once(isolated_sessions, monkeypatch):
     sid, stream_id = _orphaned_gateway_turn(run_id="run_parked")
     relayed = []

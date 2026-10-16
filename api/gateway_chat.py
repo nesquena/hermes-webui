@@ -2186,14 +2186,19 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
         finally:
             _thread_ctx.env = previous_env
             _thread_ctx.block_process_env_fallback = previous_block
-        if "${" in str(expanded_url or ""):
-            raise RuntimeError(
-                f"gateway URL for profile {profile_name or 'default'!r} still contains an unresolved variable "
-                f"({expanded_url}); set it in that profile's .env"
-            )
         raw_cfg["webui_gateway_base_url"] = expanded_url
 
     _, base_url, api_key = _gateway_profile_endpoint(own_env, config_data=raw_cfg)
+    # The check runs on the URL this profile would actually dial, after the
+    # environment overlay: an unresolved config placeholder that the profile's
+    # own explicit environment URL overrides is unused and must not fail
+    # recovery (Greptile P1, 2026-10-16). Only a final URL that is still
+    # unresolved is an error.
+    if "${" in str(base_url or ""):
+        raise RuntimeError(
+            f"gateway URL for profile {profile_name or 'default'!r} still contains an unresolved variable "
+            f"({base_url}); set it in that profile's .env"
+        )
     return base_url, api_key
 
 
