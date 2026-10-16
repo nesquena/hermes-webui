@@ -5,6 +5,13 @@
 
 ### Added
 
+- **Kanban Scheduled column.** Scheduled tasks get their own board column, and the task editor, task detail and bulk
+  status menu can set and show the Scheduled status (the sidebar count used to show the raw key). Thanks @webtecnica.
+  (#7906, fixes #7900)
+
+- **Take a photo straight from the composer on phones and tablets.** On touch devices the Attach button now offers
+  **Take photo** (opens the camera) or **Choose files**. Desktop is unchanged. Thanks @rodboev. (#7069, fixes #6942)
+
 - **Task list in the chat (optional).** Settings > Appearance > **Show task list in chat** shows the session's to-do
   list as a collapsible strip above the conversation. Collapsed it's a single band; expanded it's capped so the
   conversation keeps most of the height, with a fade marking more items. While it's on, the workspace Todos tab is

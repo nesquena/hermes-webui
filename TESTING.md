@@ -2139,6 +2139,12 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 - Send message → button disappears after textarea clears.
 - While agent is responding → send button hidden.
 
+### Touch attachment chooser
+- On a touch phone or tablet, Attach opens Take photo and Choose files with icons in portrait and landscape.
+- Tab out of the chooser, tap outside it, or press Escape to dismiss it. Selecting either option returns focus to Attach.
+- On a desktop or a tablet with a fine pointer, Attach opens the file picker directly and has no menu ARIA attributes.
+- Run `./scripts/test.sh tests/test_issue6942_mobile_camera_choice.py tests/test_issue6942_mobile_camera_choice_render.py -q` for the focused keyboard, capability, and localized render matrix.
+
 ### Sprint 21: Mobile Responsive + Docker
 - Open on mobile viewport (<640px): hamburger icon visible in topbar.
 - Tap hamburger → sidebar slides in from left with backdrop overlay.
