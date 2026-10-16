@@ -4240,20 +4240,66 @@ function _remoteImagePlaceholderHtml(raw, altText){
   return `<a class="msg-media-link" href="${esc(String(raw||''))}" target="_blank" rel="noopener" title="${esc(tip)}">🖼 ${esc(label)}${host?` · ${esc(host)}`:''}</a>`;
 }
 
+// #7634: Hermes image generation hands back a bare local filesystem path
+// (e.g. /home/u/.hermes/cache/images/mai_20260918_101400_2248f18b.png) rather
+// than a URL, so `![alt](/abs/path.png)` never matched the image regex and the
+// alt text plus the raw path leaked into the chat as visible text. Recognise an
+// image under a `/cache/images/` segment and hand it to the same
+// session-authorized /api/media route every other local artifact already uses.
+// Returns the accepted absolute path, or '' when the reference is not one.
+//
+// Scope is deliberately narrow. Ordinary root-relative web assets such as
+// /images/logo.png must stay inert (rewriting them into a local media request
+// would be wrong), as must protocol-relative URLs and the ~/ tilde form, which
+// URL parsing resolves to the wrong location because it drops `~` as a host.
+//
+// Validation runs on the candidate that will actually be requested. The media
+// route percent-decodes the path it is handed, so an encoded separator or
+// traversal segment must be refused here — checking the raw string would let it
+// pass and become a different path afterwards. Percent-encoding and backslashes
+// are therefore rejected outright rather than normalised, which leaves the
+// accepted value in its final decoded form.
+function _mdLocalImagePathRef(raw){
+  const ref=String(raw||'').trim();
+  if(!ref) return '';
+  if(/[\\%]/.test(ref)) return '';
+  // Absolute POSIX path only.
+  if(ref.charAt(0)!=='/') return '';
+  // `//host/...` is a protocol-relative URL, not a local path.
+  if(ref.charAt(1)==='/') return '';
+  if(ref.split('/').includes('..')) return '';
+  if(!/(?:^|\/)cache\/images\//.test(ref)) return '';
+  // Image extension required, so /cache/files/a.txt stays inert.
+  if(!_IMAGE_EXTS.test(ref)) return '';
+  return ref;
+}
+
 // Markdown image syntax ![alt](url) → HTML. https:// keeps the historical direct
 // <img>; file:// and bare data:image/ URIs route through the same helpers the
 // MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
 // of the broken "!<a>" anchor it used to produce, and ![x](data:image/...) stops
 // dumping raw base64 text into the chat.
 function _mdImageHtml(alt, url){
-  if(/^data:/i.test(url)){
-    const img=_dataImageHtml(url, alt);
+  const raw=String(url==null?'':url);
+  if(/^data:/i.test(raw)){
+    const img=_dataImageHtml(raw, alt);
     if(img) return img;
-    return esc(`![${alt}](${String(url).slice(0,64)}…)`);
+    return esc(`![${alt}](${String(raw).slice(0,64)}…)`);
   }
-  if(/^file:\/\//i.test(url)) return _inlineMediaHtmlForRef(url,undefined,alt);
-  if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(url)) return _remoteImagePlaceholderHtml(url, alt);
-  return `<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
+  if(/^file:\/\//i.test(raw)) return _inlineMediaHtmlForRef(raw,undefined,alt);
+  // #7634: bare local cache image path → the same /api/media route as every
+  // other local artifact, never a bare <img src="/abs/path"> the browser cannot
+  // load.
+  if(typeof _mdLocalImagePathRef==='function' && /^(?:~|\/)/.test(raw)){
+    const local=_mdLocalImagePathRef(raw);
+    if(local) return _inlineMediaHtmlForRef(local,undefined,alt);
+    // Looked like a local path but was refused (traversal, encoded separator,
+    // non-image extension). Keep the original markdown as inert text rather
+    // than dropping it or emitting an <img> the sanitizer would strip anyway.
+    return esc(`![${alt}](${raw})`);
+  }
+  if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(raw)) return _remoteImagePlaceholderHtml(raw, alt);
+  return `<img src="${raw.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
 }
 
 function _mediaTokenParts(source, matchOffset, rawRef){
@@ -10890,7 +10936,11 @@ function renderMd(raw){
     // backticks stays protected as a \x00C token and is never rendered as <img>.
     // Must run before _code_stash restore and before _link_stash so the image
     // is not consumed by the [label](url) link regex.
-    t=t.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    // #7634: the gap between ] and ( tolerates inline whitespace or a single
+    // line break, so a model that wraps the target onto its own line still
+    // renders. Two newlines are NOT accepted — that is a paragraph break. Keep
+    // this regex in sync with the outer image pass below.
+    t=t.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+)[ \t]*\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -11079,7 +11129,11 @@ function renderMd(raw){
   // #487: Outer image pass — handles ![alt](url) in plain paragraphs (outside tables/lists).
   // Runs AFTER the table pass (images in table cells are handled by inlineMd() above).
   // Runs BEFORE the outer [label](url) link pass so the image is not consumed as a plain link.
-  s=s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+)\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  // #7634: gap + bare-local-path tolerance; must stay in sync with the inlineMd()
+  // image pass above. The bare-path branch matches any root-relative target and
+  // hands it to _mdImageHtml(), which is the single place that decides whether it
+  // is an acceptable local artifact.
+  s=s.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+)[ \t]*\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
