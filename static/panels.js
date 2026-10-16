@@ -6721,7 +6721,11 @@ async function _profileSwitchPanelLoad(){
 }
 
 function _refreshProfileSwitchBackground(gen){
-  window._modelDropdownReady=null;
+  if (typeof window !== 'undefined' && typeof window._trackModelCatalogHydration === 'function') {
+    window._trackModelCatalogHydration(null);
+  } else {
+    window._modelDropdownReady = null;
+  }
   if (typeof window._ensureModelDropdownReady === 'function') {
     Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
   }
@@ -7190,6 +7194,11 @@ async function switchToProfile(name) {
     if (_switchGen !== _profileSwitchGeneration) return false;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if (typeof bumpModelDropdownRequestSeq === 'function') {
+      bumpModelDropdownRequestSeq();
+    } else if (typeof window !== 'undefined' && typeof window.bumpModelDropdownRequestSeq === 'function') {
+      window.bumpModelDropdownRequestSeq();
+    }
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -12145,7 +12154,8 @@ function _refreshModelDropdownsAfterProviderChange(){
     // dropdown rebuild. The composer/Settings dropdowns will catch up
     // on the very next paint frame.
     if(typeof window._ensureModelDropdownReady==='function'){
-      window._modelDropdownReady=null;
+      if(typeof window!=='undefined'&&typeof window._trackModelCatalogHydration==='function') window._trackModelCatalogHydration(null);
+      else window._modelDropdownReady=null;
       Promise.resolve(window._ensureModelDropdownReady()).catch(()=>{});
     }else if(typeof populateModelDropdown==='function'){
       Promise.resolve(populateModelDropdown()).catch(()=>{});
