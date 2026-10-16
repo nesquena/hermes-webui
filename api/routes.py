@@ -18153,6 +18153,22 @@ def handle_post(handler, parsed) -> bool:
         enabled = body.get("enabled")
         if not isinstance(enabled, bool):
             return bad(handler, "vision-capability-first: 'enabled' must be a boolean")
+        # #7503 profile ownership: the browser retries a failed POST with a
+        # fresh cookie read (static/workspace.js api()), so a save started on
+        # profile A can be replayed after the user switched to profile B. The
+        # client binds the initiating profile to the request; reject a
+        # mismatch with 409 BEFORE writing, so a retried save can never
+        # persist A's choice into B's config.
+        claimed_profile = body.get("profile")
+        if not isinstance(claimed_profile, str) or not claimed_profile.strip():
+            return bad(handler, "vision-capability-first: 'profile' is required")
+        from api.profiles import get_active_profile_name
+        if not _profiles_match(claimed_profile.strip(), get_active_profile_name()):
+            return bad(
+                handler,
+                "vision-capability-first: profile changed since the save started; reload the setting",
+                409,
+            )
         from api.config import set_vision_capability_first
         return j(handler, set_vision_capability_first(enabled))
 

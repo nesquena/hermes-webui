@@ -13445,13 +13445,24 @@ async function _loadVisionCapabilityFirst(){
    cb.disabled=true;
    cb._vcfPending=(async()=>{
     try{
-     const result=await api('/api/vision-capability-first',{method:'POST',body:JSON.stringify({enabled:desired})});
+     const result=await api('/api/vision-capability-first',{method:'POST',body:JSON.stringify({enabled:desired,profile:saveProfile})});
      if(!result||typeof result.vision_capability_first!=='boolean') throw new Error('Invalid vision setting');
      if(!_ownsVisionCapabilityFirst(cb,saveProfile,token)) return;
      cb._vcfConfirmed=result.vision_capability_first;
      cb.checked=cb._vcfConfirmed;
      showToast(t(cb.checked?'settings_vcf_on':'settings_vcf_off'));
     }catch(err){
+     if(err&&err.status===409){
+      // #7503: the server rejected the save because the initiating profile no
+      // longer matches the request's resolved profile — a retried POST after a
+      // profile switch. Nothing was written (the route 409s before persisting).
+      // Drop the stale operation and reload whichever profile is active NOW,
+      // so the checkbox reflects the profile the user is actually looking at.
+      cb._vcfPending=null;cb._vcfToken=null;
+      if((S.activeProfile||'default')===saveProfile) cb.disabled=false;
+      _loadVisionCapabilityFirst();
+      return;
+     }
      if(!_ownsVisionCapabilityFirst(cb,saveProfile,token)) return;
      cb.checked=cb._vcfConfirmed;
      showToast(t('settings_aux_save_failed')||'Failed to save setting');
