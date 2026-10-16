@@ -207,10 +207,48 @@ def run(pw, base, state_settings, virt, expanded, idle_probe, history_len):
     sid = 'settle-session'
     history = make_history(history_len)
     session = session_payload(sid, base, history)
+    # The idle-reconcile reload path re-fetches /api/session, so the fixture has
+    # to be able to answer with the SETTLED transcript (history + the final
+    # reply). Serving the pre-settle payload would make a successful reload
+    # delete the settled answer — the exact way these variants could pass while
+    # idle recovery made the reply disappear.
+    settled_session = dict(session)
+    settled_session['messages'] = history + [
+        {'role': 'user', 'content': 'Do the work'},
+        {'role': 'assistant', 'content': FINAL_TEXT},
+    ]
+    settled_session['active_stream_id'] = None
+    settled_session['pending_user_message'] = None
+    settled_session['pending_started_at'] = None
+    # `mode` flips to 'settled' once `done` has been emitted; `count_override`
+    # pins the message_count the fixture reports for the idle probe. `fetches`
+    # counts sid /api/session reads so the probe can prove whether the
+    # reload path actually ran.
+    fixture = {'mode': 'live', 'count': 0, 'count_override': False,
+               'fetches': 0, 'loads': 0}
+
+    def _serve_session(r):
+        query = parse_qs(urlsplit(r.request.url).query)
+        want = query.get('session_id', [''])[0]
+        if want != sid:
+            r.fulfill(json=dict(session_id='idle-fixture', messages=[],
+                                message_count=0, tool_calls=[], workspace=base))
+            return
+        payload = settled_session if fixture['mode'] == 'settled' else session
+        if fixture['count_override']:
+            payload = dict(payload)
+            payload['message_count'] = fixture['count']
+        # The idle-reconcile probe asks for metadata only (messages=0); a real
+        # reload re-fetches the whole transcript. Counting them apart is what
+        # lets the probe tell "reconciled, nothing to reload" from "reloaded".
+        if query.get('messages', [''])[0] == '0':
+            fixture['fetches'] += 1
+        else:
+            fixture['loads'] += 1
+        r.fulfill(json={'session': payload})
+
     page.route('**/api/settings', lambda r: r.fulfill(json=state_settings))
-    page.route('**/api/session?*', lambda r: r.fulfill(
-        json={'session': session if parse_qs(urlsplit(r.request.url).query).get('session_id', [''])[0] == sid
-              else dict(session_id='idle-fixture', messages=[], message_count=0, tool_calls=[], workspace=base)}))
+    page.route('**/api/session?*', _serve_session)
     page.route('**/api/chat/stream/status?*', lambda r: r.fulfill(json={'active': True}))
     page.goto(base, wait_until='load')
     deadline = time.monotonic() + 30
@@ -276,18 +314,62 @@ def run(pw, base, state_settings, virt, expanded, idle_probe, history_len):
     else:
         after_wait = None
 
+    # From here every /api/session read is the idle-recovery path, so the
+    # fixture must answer with the SETTLED transcript (history + final reply).
+    fixture['mode'] = 'settled'
+
     idle_result = None
+    idle_detail = None
     after_idle = None
     if idle_probe != 'none':
-        # 'equal'    → the sidebar row reports the same message count (no reload)
-        # 'changed'  → the count moved (reload path) — both were in the report
-        count = len(history) + 1 if idle_probe == 'equal' else len(history) + 2
+        # `done` already cleared S.busy/S.activeStreamId/INFLIGHT, so the reconcile
+        # used to find nothing to clear: changed stayed false, nothing reloaded,
+        # message_count went unread — both variants ran the same no-op path.
+        # Re-create the race it exists for (#4354): sidebar idle metadata ahead
+        # of the terminal frame, transport already orphaned, client still
+        # believing it streams. (An OPEN owned stream is deliberately handed to
+        # its own handoff and returns false.)
+        page.evaluate("""sid=>{
+          const live=(typeof LIVE_STREAMS!=='undefined'&&LIVE_STREAMS)?LIVE_STREAMS[sid]:null;
+          if(live&&live.source&&typeof live.source.close==='function') live.source.close();
+          S.busy=true;
+          S.activeStreamId='run-settle';
+          if(typeof INFLIGHT!=='undefined'&&INFLIGHT) INFLIGHT[sid]={streamId:'run-settle'};
+          if(typeof _messageUserUnpinned!=='undefined') _messageUserUnpinned=false;
+        }""", sid)
+        # The reload hinges on server message_count vs the client's real local
+        # count, so drive the fixture off the latter, not off history length.
+        local_count = page.evaluate(
+            "()=>Number((S.session&&S.session.message_count)"
+            "||(Array.isArray(S.messages)?S.messages.length:0)||0)")
+        fixture['count_override'] = True
+        # 'equal' → server agrees → reconcile only. 'changed' → count moved → reload.
+        fixture['count'] = local_count + (idle_probe == 'changed')
+        probes_before, loads_before = fixture['fetches'], fixture['loads']
         row = dict(session_id=sid, is_streaming=False, active_stream_id=None,
                    pending_user_message=None, has_pending_user_message=False,
-                   pending_started_at=None, message_count=count)
+                   pending_started_at=None, message_count=fixture['count'])
         idle_result = page.evaluate("""row=>{try{return _reconcileActiveSessionIdleStateFromList([row]);}catch(e){return 'ERR:'+e.message;}}""", row)
+        # Reload rides a 0ms timeout behind a metadata probe, then a full
+        # loadSession. Wait for what each variant promises: the reload landing
+        # for 'changed', a clean idle reconcile for 'equal'.
+        def _idle_settled():
+            if idle_probe == 'changed':
+                return fixture['loads'] > loads_before
+            return not page.evaluate("()=>!!S.busy")
+        for _ in range(80):
+            page.wait_for_timeout(50)
+            if _idle_settled():
+                break
         page.wait_for_timeout(1200)
         after_idle = page.evaluate(ASSERTIONS)
+        idle_detail = {
+            'localCount': local_count,
+            'servedCount': fixture['count'],
+            'reconcileChanged': idle_result is True,
+            'metadataProbes': fixture['fetches'] - probes_before,
+            'fullLoads': fixture['loads'] - loads_before,
+        }
 
     context.close()
     browser.close()
@@ -299,6 +381,7 @@ def run(pw, base, state_settings, virt, expanded, idle_probe, history_len):
         'next_frame': next_frame,
         'after_wait': after_wait,
         'idle_result': idle_result,
+        'idle_detail': idle_detail,
         'after_idle': after_idle,
         'pageerrors': errors,
     }
@@ -327,6 +410,27 @@ def verdict(res):
             bad.append(f"{label}: BLANK transcript (msgCount={r['msgCount']})")
     if res.get('pageerrors'):
         bad.append(f"pageerrors: {res['pageerrors']}")
+    # The idle-recovery variants must prove they exercised the outcome they are
+    # named for. Without this, a variant passes whenever the reconcile does
+    # nothing at all — which is what happened while the probe ran against an
+    # already-settled pane (Greptile P2 on #7833).
+    idle = res.get('idle_detail')
+    if res.get('idle_probe') in ('equal', 'changed'):
+        if not idle:
+            bad.append('idle_probe: no outcome recorded')
+        else:
+            if not idle['reconcileChanged']:
+                bad.append('idle_probe: reconcile reported changed=false, '
+                           'so no idle recovery ran at all')
+            if idle['metadataProbes'] < 1:
+                bad.append('idle_probe: no /api/session metadata probe — the '
+                           'reload path never consulted the server')
+            if res['idle_probe'] == 'changed' and idle['fullLoads'] < 1:
+                bad.append('idle_probe=changed: the count moved but the '
+                           'transcript was never reloaded')
+            if res['idle_probe'] == 'equal' and idle['fullLoads'] > 0:
+                bad.append('idle_probe=equal: server count matched the client '
+                           'but the transcript was reloaded anyway')
     return bad
 
 
@@ -391,6 +495,8 @@ def main() -> int:
                                'liveOwnsSettled', 'transRows', 'settleOwnerAttr', 'msgCount', 'busy') if k in r}))
                     for b in bad:
                         print('   FAIL:', b)
+                    if res.get('idle_detail'):
+                        print('  idle_outcome:', json.dumps(res['idle_detail']))
         finally:
             _terminate_process(proc)
             log.close()
