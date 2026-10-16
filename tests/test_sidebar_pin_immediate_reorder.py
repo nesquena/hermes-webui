@@ -9,12 +9,16 @@ def test_pin_action_updates_local_cache_and_renders_before_refetch():
     """Pin/unpin should move rows immediately, not only after a browser refresh."""
     api_idx = SESSIONS_JS.find("await api('/api/session/pin'")
     assert api_idx != -1, "pin action API call not found"
-    snippet = SESSIONS_JS[api_idx:api_idx + 700]
+    # #6426: touch-cooldown comments above the forced cache render pushed the
+    # calls just past the old 700-char window.
+    snippet = SESSIONS_JS[api_idx:api_idx + 800]
 
     cached_idx = snippet.find("const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);")
     update_idx = snippet.find("if(cached) cached.pinned=newPinned;")
     active_idx = snippet.find("if(S.session&&S.session.session_id===session.session_id) S.session.pinned=newPinned;")
-    cache_render_idx = snippet.find("renderSessionListFromCache();")
+    # #6426: the cache render passes {force:true} so a touch-cooldown cannot
+    # defer the immediate pin/unpin reorder this test protects.
+    cache_render_idx = snippet.find("renderSessionListFromCache({force:true});")
     refetch_idx = snippet.find("void renderSessionList();")
 
     assert cached_idx != -1, "pin action must find the cached sidebar row"
