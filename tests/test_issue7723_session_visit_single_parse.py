@@ -156,6 +156,48 @@ def test_one_session_visit_parses_durable_cache_at_most_once(durable_cache, monk
     )
 
 
+def test_memoised_payload_is_handed_off_once_and_never_leaks_mutations(
+    durable_cache, monkeypatch
+):
+    """Req: a memoised payload must be handed to exactly ONE reader.
+
+    Before the fix every disk read was an independent ``json.load``, so a
+    caller mutating the catalog it got back could never corrupt a LATER read.
+    A memo that outlives its reader silently breaks that invariant:
+
+    ``warm_models_catalog_provenance_if_cold`` assigns the loader's result
+    straight into the process-wide ``_available_models_cache`` with no
+    deepcopy, and ``get_available_models_for_session_visit`` returns the
+    catalog to WebUI callers that mutate it in place. If the memo still held
+    that same payload, a later read would be served catalog objects that a
+    previous caller had already edited — and would hand them back as if they
+    had just been read from disk.
+
+    The memo exists to collapse the precheck+loader double-parse within ONE
+    session visit. It must not survive past the reader it was built for.
+    """
+    # Populate the memo exactly as the session-visit freshness precheck does.
+    assert config._models_disk_cache_built_at(durable_cache) is not None
+
+    first = config._load_models_cache_from_disk()
+    assert first is not None
+    # Mutate in place, the way the real consumers do
+    # (`_annotate_fast_tier_model_groups` writes `supports_fast_tier` into
+    # these very dicts on every call).
+    first["groups"].append({"injected": True})
+    first["groups"][0]["models"][0]["POISON"] = "yes"
+
+    second = config._load_models_cache_from_disk()
+    assert second is not None, "second disk read must still succeed"
+    assert all("injected" not in g for g in second["groups"]), (
+        "a later disk read was served the SAME groups list that a previous "
+        "caller mutated in place — the memo outlived its reader"
+    )
+    assert (
+        "POISON" not in second["groups"][0]["models"][0]
+    ), "a later disk read was served model dicts a previous caller had edited"
+
+
 def test_freshness_decision_semantics_preserved(durable_cache, monkeypatch):
     """Req: the parse-reduction must not change WHICH branch the visit takes.
 

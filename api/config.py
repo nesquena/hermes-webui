@@ -8564,9 +8564,10 @@ def _is_loadable_disk_cache(cache: object) -> bool:
 # axis the rest of the cache layer already uses. A miss (no entry, different
 # path, or changed stat) simply falls through to a normal read.
 #
-# ``None`` in the 4th slot means "this read failed" (missing/corrupt file);
-# that is a real answer, distinct from "no memo entry", so it does not cause
-# the consumer to retry the same failing read.
+# ``None`` in the 4th slot means "the file parsed, but not to a dict" — a real
+# answer, distinct from "no memo entry". An unreadable/unparseable file takes a
+# different route: the read raises, the memo slot is CLEARED, and the next
+# reader retries from scratch.
 _MODELS_DISK_PAYLOAD_UNSET = object()
 _models_disk_payload_memo: tuple[str, int, int, dict | None] | None = None
 
@@ -8592,11 +8593,31 @@ def _read_models_cache_disk_payload(cache_path: Path) -> dict | None:
 
 
 def _memoized_models_cache_disk_payload(cache_path: Path):
-    """Return the memoised payload if it still matches the file on disk.
+    """Consume the memoised payload if it still matches the file on disk.
 
     Returns ``_MODELS_DISK_PAYLOAD_UNSET`` when there is no usable entry, in
     which case the caller must read the file itself.
+
+    The entry is CONSUMED on a hit (the memo slot is cleared before the
+    payload is returned). The memo exists to collapse the precheck+loader
+    double-parse inside a single session visit — never to serve one parse to
+    readers spread across time. A pre-#7932-era read always produced a fresh
+    ``json.load``, so each caller owned its catalog exclusively and could
+    mutate it freely; handing the SAME objects to a second reader would let
+    one caller's in-place edits (e.g. ``_annotate_fast_tier_model_groups``
+    writing ``supports_fast_tier`` into the model dicts, or
+    ``warm_models_catalog_provenance_if_cold`` publishing it into the
+    process-wide ``_available_models_cache`` without a deepcopy) corrupt a
+    later read that would then hand the edited catalog back as if it had just
+    been parsed from disk.
+
+    Consuming the slot restores the pre-existing ownership invariant: the memo
+    hands its payload to exactly one reader, and every later read re-parses.
+    That keeps the single-parse win for the one sequence that matters (the
+    freshness precheck immediately followed by the loader in the same visit)
+    while making aliasing impossible.
     """
+    global _models_disk_payload_memo
     memo = _models_disk_payload_memo
     if memo is None:
         return _MODELS_DISK_PAYLOAD_UNSET
@@ -8609,6 +8630,7 @@ def _memoized_models_cache_disk_payload(cache_path: Path):
         return _MODELS_DISK_PAYLOAD_UNSET
     if (st.st_mtime_ns, st.st_size) != (mtime_ns, size):
         return _MODELS_DISK_PAYLOAD_UNSET
+    _models_disk_payload_memo = None
     return payload
 
 
@@ -8633,8 +8655,8 @@ def _load_models_cache_from_disk() -> dict | None:
             with open(cache_path, encoding="utf-8") as f:
                 cache = _j.load(f)
         elif cache is None:
-            # The memo records an already-failed read of this exact file; do not
-            # pay a second identical failing read.
+            # The memo recorded that this exact file parsed to a non-dict, so
+            # there is no usable catalog in it.
             return None
         if not _is_loadable_disk_cache(cache):
             return None
@@ -9040,7 +9062,7 @@ def _load_stale_models_cache_from_disk() -> dict | None:
             with open(cache_path, encoding="utf-8") as f:
                 cache = _j.load(f)
         elif cache is None:
-            # The memo records an already-failed read of this exact file.
+            # The memo recorded that this exact file parsed to a non-dict.
             return None
         if not _is_valid_models_cache(cache):
             return None
