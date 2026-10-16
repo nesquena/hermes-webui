@@ -3828,6 +3828,7 @@ function applyBotName(){
   // Non-default profiles use their own profile names.
   const name=assistantDisplayName();
   if(!S.session) document.title=name;
+  if(typeof _applyInstanceTitle==='function') _applyInstanceTitle();  // #7611
   const sidebarH1=document.querySelector('.sidebar-header h1');
   if(sidebarH1) sidebarH1.textContent=name;
   const logo=document.querySelector('.sidebar-header .logo');
@@ -4138,6 +4139,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._showTitlebarProfile=!!s.show_titlebar_profile;
     _applyTitlebarProfileVisibility();
     window._botName=s.bot_name||'Hermes';
+    window._instanceName=s.instance_name||'';  // #7611: optional deployment label
     if(s.default_model_provider) window._activeProvider=s.default_model_provider;
     if(s.default_model){
       window._defaultModel=s.default_model;
@@ -4290,6 +4292,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     window._composerControlOrder=[];
     _applyComposerControlOrder(window._composerControlOrder);
     window._botName='Hermes';
+    window._instanceName='';  // #7611: no label until settings arrive
     _bootSettings={check_for_updates:false};
     if(typeof setLocale==='function'){
       const _lang=typeof resolvePreferredLocale==='function'
