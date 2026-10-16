@@ -49,6 +49,15 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+# What workers have mirrored from a profile into os.environ and not yet put
+# back: per name, the value it had before the first mirror still live (None
+# for unset) and how many mirrors hold it. A streaming turn and a background
+# worker each mirror their profile's runtime env for as long as they run, so
+# os.environ read live is partly some other profile's. Kept by name with a
+# count because the mirrors overlap and end in any order: the "before" a
+# second mirror saw is the first mirror's value, not the process's.
+_env_mirrors: dict[str, list] = {}
+_env_mirrors_lock = threading.Lock()
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -1116,6 +1125,62 @@ def _profile_secret_env_names(profile_home_path: Path) -> set[str]:
     return names
 
 
+def note_env_mirror(previous: dict[str, Optional[str]]) -> None:
+    """Record that a worker is about to mirror these names into os.environ.
+
+    ``previous`` is what each holds now. Call it under
+    ``api.streaming._ENV_LOCK``, before the first write, so a reader never
+    sees a mirrored value it cannot undo.
+    """
+    with _env_mirrors_lock:
+        for key, value in previous.items():
+            held = _env_mirrors.get(key)
+            if held is None:
+                _env_mirrors[key] = [value, 1]
+            else:
+                held[1] += 1
+
+
+def forget_env_mirror(keys) -> None:
+    """The worker has put these names back. Call it under
+    ``api.streaming._ENV_LOCK``, after the last restore.
+
+    A name counts once however often ``keys`` holds it, as it was noted once:
+    a worker's list repeats a credential its profile sets that is also one of
+    the secrets the scope removes.
+    """
+    with _env_mirrors_lock:
+        for key in set(keys):
+            held = _env_mirrors.get(key)
+            if held is None:
+                continue
+            held[1] -= 1
+            if held[1] <= 0:
+                del _env_mirrors[key]
+
+
+def process_env_without_mirrors() -> dict[str, str]:
+    """os.environ as it was before any live worker mirrored a profile into it.
+
+    A copy: nothing global changes. With no worker running it is os.environ.
+    Both copies are taken under the lock the workers mirror and restore under
+    (``api.streaming._ENV_LOCK``): a worker that noted and wrote between them
+    would leave its values here with nothing to undo them.
+    """
+    from api.streaming import _ENV_LOCK
+
+    with _ENV_LOCK:
+        with _env_mirrors_lock:
+            held = {key: value for key, (value, _count) in _env_mirrors.items()}
+        stable = dict(os.environ)
+    for key, value in held.items():
+        if value is None:
+            stable.pop(key, None)
+        else:
+            stable[key] = value
+    return stable
+
+
 def _apply_profile_env_to_process(
     process_env,
     safe_runtime_env: dict[str, str],
@@ -1244,6 +1309,7 @@ def profile_env_for_background_worker(
     old_runtime_env: dict[str, Optional[str]] = {}
     old_hermes_home = None
     had_hermes_home = False
+    mirrored_keys: tuple[str, ...] = ()
     previous_thread_env = getattr(_thread_ctx, "env", {}).copy()
     previous_block_process_env = bool(
         getattr(_thread_ctx, "block_process_env_fallback", False)
@@ -1320,6 +1386,9 @@ def profile_env_for_background_worker(
                 skill_home_snapshot = snapshot_skill_home_modules()
                 patch_skill_home_modules(profile_home_path)
 
+            # Before the first write, removals included (#8152).
+            mirrored_keys = (*safe_runtime_env, *secret_env_names, "HERMES_HOME")
+            note_env_mirror({key: os.environ.get(key) for key in mirrored_keys})
             old_runtime_env = _apply_profile_env_to_process(
                 os.environ,
                 safe_runtime_env,
@@ -1342,6 +1411,7 @@ def profile_env_for_background_worker(
                     os.environ["HERMES_HOME"] = old_hermes_home or ""
                 else:
                     os.environ.pop("HERMES_HOME", None)
+                forget_env_mirror(mirrored_keys)
                 if should_restore_skill_modules and skill_home_snapshot is not None:
                     restore_skill_home_modules(skill_home_snapshot)
         finally:

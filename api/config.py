@@ -677,7 +677,26 @@ def _load_yaml_config_file(config_path: Path) -> dict:
     return expanded if isinstance(expanded, dict) else {}
 
 
-def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
+def _ambient_config(expand_in_scope: bool) -> dict:
+    """``get_config()``; for a caller inside a profile environment scope, the
+    same file expanded under that scope instead.
+
+    ``_cfg_cache`` holds the process-environment expansion (see the pin in
+    ``_refresh_config_cache``), so its ``${VAR}`` values are already fixed when
+    a scope is entered. A config set in memory has no file to expand again and
+    is served as it is.
+    """
+    ambient = get_config()
+    if not expand_in_scope or _cfg_has_in_memory_overrides():
+        return ambient
+    scoped = _load_yaml_config_file(_get_config_path())
+    _apply_config_defaults(scoped)
+    return scoped
+
+
+def get_config_for_profile_home(
+    profile_home: "Path | str | None", *, expand_in_scope: bool = False
+) -> dict:
     """Return the config dict for an explicit profile home directory.
 
     The streaming agent runs on a detached worker thread that does NOT inherit
@@ -701,13 +720,18 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     isolated: a nonexistent home returns ``{}`` and an existing home without a
     ``config.yaml`` yields defaults — neither ever falls back to the ambient
     config (profiles-are-islands).
+
+    ``expand_in_scope`` is for a caller that has bound a profile's environment
+    to this thread and needs every ``${VAR}`` expanded from it, also when the
+    home is the ambient one: see ``_ambient_config``. The divergent read below
+    already expands on the calling thread.
     """
     if not profile_home:
-        return get_config()
+        return _ambient_config(expand_in_scope)
     try:
         target = Path(profile_home).expanduser()
     except Exception:
-        return get_config()
+        return _ambient_config(expand_in_scope)
 
     from api.workspace import _safe_resolve as _cfg_safe_resolve
 
@@ -720,7 +744,7 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
         from api.profiles import get_active_hermes_home
 
         if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
-            return get_config()
+            return _ambient_config(expand_in_scope)
     except Exception:
         pass
     # If the ambient resolver already points at this profile home, defer to
@@ -730,7 +754,7 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     # cfg) must still resolve through get_config(), not return {} (#4516 gate).
     try:
         if _cfg_safe_resolve(_get_config_path().parent) == target:
-            return get_config()
+            return _ambient_config(expand_in_scope)
     except Exception:
         pass
     if not target.exists():
