@@ -1349,20 +1349,6 @@ class TestAConfigPathInsideTheProfilesHome:
         assert "helpful" in cfg["agent"]["personalities"]
         assert cfg["experimental"]["unified_session_db"] is False
 
-    def test_a_config_set_in_memory_is_still_what_is_served(
-        self, config_in_the_home, monkeypatch
-    ):
-        """A caller that rebound ``cfg`` has no file to expand again."""
-        import api.config as config
-
-        home, point_at = config_in_the_home
-        point_at(home / "config.yaml")
-        monkeypatch.setattr(config, "cfg", {"webui_gateway_base_url": "http://in-memory.test"})
-
-        assert gateway_chat._gateway_endpoint_for_profile(PROFILE) == (
-            "http://in-memory.test", "owned-key",
-        )
-
     def test_the_shared_cache_is_left_as_the_process_expanded_it(self, config_in_the_home):
         import api.config as config
 
@@ -1395,12 +1381,20 @@ class TestAConfigPathInsideTheProfilesHome:
         point_at(elsewhere / "config.yaml")
         # The default home of the test environment has no .env file, so hand
         # over what reading a real one would give.
-        real = gateway_chat._gateway_runtime_env_for_profile
+        from pathlib import Path
 
-        def with_its_own_env_file(profile_name, home=None):
-            return {**real(profile_name, home), "ROUND5_GATEWAY_URL": "http://default-own.test"}
+        import api.profiles as profiles
 
-        monkeypatch.setattr(gateway_chat, "_gateway_runtime_env_for_profile", with_its_own_env_file)
+        real = profiles.get_profile_runtime_env
+        default_home = gateway_chat._gateway_home_for_profile(None)
+
+        def with_its_own_env_file(profile_home, *args, **kwargs):
+            env = dict(real(profile_home, *args, **kwargs))
+            if Path(profile_home).expanduser().resolve() == default_home:
+                env["ROUND5_GATEWAY_URL"] = "http://default-own.test"
+            return env
+
+        monkeypatch.setattr(profiles, "get_profile_runtime_env", with_its_own_env_file)
 
         assert gateway_chat._gateway_endpoint_for_profile(None)[0] == "http://default-own.test"
 
@@ -1701,7 +1695,91 @@ class TestTheProcessEnvironmentWithoutMirrors:
 
         env.forget_env_mirror(["ROUND6_SET"])
         assert env._env_mirrors == {}
-        assert env.process_env_without_mirrors()["ROUND6_SET"] == "second worker"
+        # The last one out puts back the value from before the first mirror,
+        # not the value its own worker saw when it started (review round 7).
+        assert os.environ["ROUND6_SET"] == "process"
+        assert env.process_env_without_mirrors()["ROUND6_SET"] == "process"
+
+    def test_the_last_mirror_out_removes_a_name_that_was_unset(self, env, monkeypatch):
+        env.note_env_mirror({"ROUND6_UNSET": None})
+        monkeypatch.setenv("ROUND6_UNSET", "first worker")
+        env.note_env_mirror({"ROUND6_UNSET": "first worker"})
+        monkeypatch.setenv("ROUND6_UNSET", "second worker")
+
+        env.forget_env_mirror(["ROUND6_UNSET"])
+        assert os.environ["ROUND6_UNSET"] == "second worker"  # one is still running
+        env.forget_env_mirror(["ROUND6_UNSET"])
+
+        assert "ROUND6_UNSET" not in os.environ
+
+    def test_overlapping_workers_leave_no_foreign_gateway_behind(self, env, profiles_on_disk):
+        """Review round 7, item 3: C starts, D starts, C ends, D ends. D's
+        restore put back the value it saw when it started, C's, and with no
+        mirror left that value read as the launcher's: the next fresh chat of
+        a profile without a Gateway of its own went to C's Gateway."""
+        from api import gateway_chat
+
+        for name, url in ((PROFILE, "http://c-gateway.test"), (OTHER_PROFILE, "http://d-gateway.test")):
+            (profiles_on_disk[name] / ".env").write_text(
+                f"HERMES_WEBUI_GATEWAY_BASE_URL={url}\nAPI_SERVER_KEY={name}-key\n", encoding="utf-8"
+            )
+        shared = gateway_chat._gateway_endpoint_for_profile("default")
+        seen = {}
+
+        def worker(name, started, finish):
+            # Each worker on its own thread, as in the app: the scope's
+            # thread-local state is per thread.
+            with env.profile_env_for_background_worker(name, scope_skill_modules=False):
+                started.set()
+                assert finish.wait(10)
+
+        c_started, c_finish, d_started, d_finish = (threading.Event() for _ in range(4))
+        c = threading.Thread(target=worker, args=(PROFILE, c_started, c_finish))
+        d = threading.Thread(target=worker, args=(OTHER_PROFILE, d_started, d_finish))
+        c.start()
+        assert c_started.wait(10)
+        d.start()
+        assert d_started.wait(10)
+        seen["both running"] = os.environ.get("HERMES_WEBUI_GATEWAY_BASE_URL")
+        c_finish.set()
+        c.join(10)
+        d_finish.set()
+        d.join(10)
+
+        assert seen["both running"] == "http://d-gateway.test"  # the premise
+        assert "HERMES_WEBUI_GATEWAY_BASE_URL" not in os.environ
+        assert "API_SERVER_KEY" not in os.environ
+        assert gateway_chat._gateway_endpoint_for_profile("default") == shared
+
+    def test_a_running_workers_alias_is_not_the_shared_alias(self, env, profiles_on_disk):
+        """On the shared Gateway the launcher's alias outranks a profile's own
+        API_SERVER_KEY. While another profile's worker holds its own alias in
+        ``os.environ``, that alias is not the launcher's: the profile sends its
+        own key."""
+        from api import gateway_chat
+
+        (profiles_on_disk[PROFILE] / "config.yaml").write_text("{}\n", encoding="utf-8")
+        (profiles_on_disk[OTHER_PROFILE] / ".env").write_text(
+            "HERMES_WEBUI_GATEWAY_API_KEY=play-alias\n", encoding="utf-8"
+        )
+        started, finish = threading.Event(), threading.Event()
+
+        def worker():
+            with env.profile_env_for_background_worker(OTHER_PROFILE, scope_skill_modules=False):
+                started.set()
+                assert finish.wait(10)
+
+        thread = threading.Thread(target=worker)
+        thread.start()
+        try:
+            assert started.wait(10)
+            assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "play-alias"  # the premise
+            endpoint = gateway_chat._gateway_endpoint_for_profile(PROFILE)
+        finally:
+            finish.set()
+            thread.join(10)
+
+        assert endpoint == (DEFAULT_GATEWAY, "work-key")
 
     def test_forgetting_a_name_that_was_never_noted_is_harmless(self, env):
         env.forget_env_mirror(["ROUND6_NEVER"])
@@ -1890,3 +1968,60 @@ class TestANameListedTwiceIsCountedOnce:
 
         assert stable[secret] == "the launcher's"
         assert env._env_mirrors == {}
+
+
+class TestReviewRound7TheOneResolver:
+    """A fresh turn takes its Gateway URL and key from the resolver #7983 put
+    on master, the same one the restart-reattach path uses (review round 7)."""
+
+    def test_the_launchers_key_never_reaches_a_profiles_own_gateway(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """Item 1: launcher key A, profile URL B with API_SERVER_KEY=B."""
+        monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "launcher-key")
+
+        _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+
+        chat = _chat(requests)
+        assert chat["url"] == f"{WORK_GATEWAY}/v1/chat/completions"
+        assert chat["authorization"] == "Bearer work-key"
+
+    def test_a_url_only_override_sends_no_key(self, profiles_on_disk, tmp_path, monkeypatch):
+        """Item 1, the URL-only case: the profile's own Gateway gets its own key
+        or none, never the launcher's."""
+        (profiles_on_disk[PROFILE] / ".env").write_text("", encoding="utf-8")
+        monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "launcher-key")
+
+        _, requests, _ = _send(PROFILE, tmp_path, monkeypatch)
+
+        chat = _chat(requests)
+        assert chat["url"] == f"{WORK_GATEWAY}/v1/chat/completions"
+        assert chat["authorization"] is None
+
+    def test_a_profile_without_a_gateway_keeps_the_root_configs(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """Item 2: root config sets Gateway A, the named profile sets none."""
+        import api.config as config
+
+        (profiles_on_disk[OTHER_PROFILE] / "config.yaml").write_text("{}\n", encoding="utf-8")
+        (profiles_on_disk[OTHER_PROFILE] / ".env").write_text("", encoding="utf-8")
+        monkeypatch.setitem(config.get_config(), "webui_gateway_base_url", "http://root-gateway.test")
+
+        _, requests, _ = _send(OTHER_PROFILE, tmp_path, monkeypatch)
+
+        assert _chat(requests)["url"] == "http://root-gateway.test/v1/chat/completions"
+
+    def test_the_shared_launcher_pair_reaches_a_profile_without_its_own(
+        self, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        (profiles_on_disk[OTHER_PROFILE] / "config.yaml").write_text("{}\n", encoding="utf-8")
+        (profiles_on_disk[OTHER_PROFILE] / ".env").write_text("", encoding="utf-8")
+        monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://launcher-gateway.test")
+        monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "launcher-key")
+
+        _, requests, _ = _send(OTHER_PROFILE, tmp_path, monkeypatch)
+
+        chat = _chat(requests)
+        assert chat["url"] == "http://launcher-gateway.test/v1/chat/completions"
+        assert chat["authorization"] == "Bearer launcher-key"
