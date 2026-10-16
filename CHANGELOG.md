@@ -495,6 +495,10 @@
 
 ### Changed
 
+- **Open thinking cards follow the reasoning as it streams.** A reasoning card that is open while the model thinks now
+  keeps the newest text in view instead of sitting at the top. Scroll up inside the card to hold your place; scroll back
+  to the bottom to resume following. Thanks @esc247. (#7988)
+
 - **The WAL snapshot refusal test now exercises a real temporary database.** Thanks @tobenot. (#8233)
 
 - **An order-dependent CI test failure is fixed.** `test_custom_provider_detected_by_get_available_models` (and four
