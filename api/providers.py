@@ -2669,7 +2669,11 @@ def _live_custom_provider_models(provider_id: str) -> list[dict[str, str]]:
         if str(group.get("provider_id") or "") != pid:
             continue
         rows: list[dict[str, str]] = []
-        for model in group.get("models") or []:
+        # The picker renders ``models`` (featured) PLUS ``extra_models`` (the
+        # catalog tail); the Providers card must list the same set, or a
+        # freshly discovered model that lands in the tail is invisible on the
+        # card even after "Refresh models" — the card looks like a no-op.
+        for model in [*(group.get("models") or []), *(group.get("extra_models") or [])]:
             if not isinstance(model, dict):
                 continue
             mid = str(model.get("id") or "").strip()
