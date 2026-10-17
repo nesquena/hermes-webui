@@ -174,6 +174,7 @@ self.addEventListener('fetch', (event) => {
 });
 
 
+
 self.addEventListener('notificationclick', (event) => {
   event.notification.close();
   const rawUrl = (event.notification.data && event.notification.data.url) || './';
@@ -260,4 +261,28 @@ self.addEventListener('notificationclick', (event) => {
       return openNotificationWindow();
     })
   );
+});
+
+// Web Push (closed-app notifications, incl. iOS/iPadOS home-screen PWAs).
+// The server sends {title, options}. Every push MUST end in showNotification:
+// Safari revokes the subscription for pushes that show nothing
+// (userVisibleOnly), so malformed payloads fall back to a generic alert.
+self.addEventListener('push', (event) => {
+  let title = 'Hermes';
+  let options = { tag: 'hermes-webui', data: { url: './' } };
+  try {
+    const payload = event.data ? event.data.json() : null;
+    if (payload && typeof payload === 'object') {
+      if (typeof payload.title === 'string' && payload.title) title = payload.title;
+      if (payload.options && typeof payload.options === 'object') {
+        options = Object.assign({}, options, payload.options);
+      }
+    }
+  } catch (_e) {
+    try {
+      const text = event.data && event.data.text();
+      if (text) options.body = String(text).slice(0, 240);
+    } catch (_e2) { /* keep generic */ }
+  }
+  event.waitUntil(self.registration.showNotification(title, options));
 });
