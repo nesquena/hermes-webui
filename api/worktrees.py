@@ -341,24 +341,12 @@ def find_git_repo_root(workspace: str | Path) -> Path:
     return Path(root).expanduser().resolve()
 
 
-def find_main_worktree_root(workspace: str | Path) -> Path | None:
-    """Return the *main* working-tree root, resolving linked worktrees.
-
-    ``find_git_repo_root`` returns ``git rev-parse --show-toplevel``, which for
-    a session started inside a linked worktree (e.g. ``<repo>/.worktrees/x``)
-    is that worktree itself.  Passing it to the agent's ``_setup_worktree``
-    nests the new tree *inside* the current one, and no pruner ever reclaims a
-    nest.  Ask git for the common git dir instead: it always points at the
-    main tree's ``.git``, so its parent is the root every session should branch
-    from.  Returns ``None`` when the workspace is not in a git repo.
-    """
-    ws = Path(workspace).expanduser().resolve()
-    if not ws.is_dir():
-        return None
+def _git_toplevel(cwd: str | Path) -> Path | None:
+    """``git rev-parse --show-toplevel`` for *cwd*, or None when it is not a checkout."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            cwd=ws,
+            ["git", "rev-parse", "--path-format=absolute", "--show-toplevel"],
+            cwd=str(cwd),
             text=True,
             capture_output=True,
             timeout=5,
@@ -369,13 +357,159 @@ def find_main_worktree_root(workspace: str | Path) -> Path | None:
         return None
     if result.returncode != 0:
         return None
-    common = result.stdout.strip()
-    if not common:
+    out = result.stdout.strip()
+    if not out:
         return None
-    common_path = Path(common).expanduser()
-    # ``<main>/.git`` -> ``<main>``.  A bare repo's common dir *is* its root.
-    root = common_path.parent if common_path.name == ".git" else common_path
-    return root.resolve() if root.is_dir() else None
+    path = Path(out).expanduser()
+    return path.resolve() if path.is_dir() else None
+
+
+def _common_git_dir(cwd: str | Path) -> Path | None:
+    """``git rev-parse --git-common-dir`` as an absolute path, or None."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=str(cwd),
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+            creationflags=windows_hide_flags(),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    out = result.stdout.strip()
+    return Path(out).expanduser() if out else None
+
+
+def find_main_worktree_root(workspace: str | Path) -> Path | None:
+    """Return the *main* working-tree root, resolving linked worktrees.
+
+    ``find_git_repo_root`` returns ``git rev-parse --show-toplevel``, which for
+    a session started inside a linked worktree (e.g. ``<repo>/.worktrees/x``)
+    is that worktree itself.  Passing it to the agent's ``_setup_worktree``
+    nests the new tree *inside* the current one, and no pruner ever reclaims a
+    nest.
+
+    The main tree is resolved from the **common git dir**, but that dir is not
+    always ``<main>/.git``: ``git init --separate-git-dir=X`` puts the metadata
+    in ``X``, and a submodule's common dir is
+    ``super/.git/modules/<name>``.  Treating either as a checkout created the
+    session trees *inside the metadata* and reported that path as ``repo_root``
+    (the reviewer's P2).  So: take the common dir, ask git for the working tree
+    that owns it, and only fall back to the parent-of-``.git`` shape when the
+    checkout cannot be recovered.  Returns ``None`` when the workspace is not in
+    a git repo, letting the caller use ``find_git_repo_root``.
+    """
+    ws = Path(workspace).expanduser().resolve()
+    if not ws.is_dir():
+        return None
+
+    common_path = _common_git_dir(ws)
+    if common_path is None:
+        return None
+
+    # 1. A common dir shaped ``<main>/.git`` names its checkout directly.
+    if common_path.name == ".git":
+        root = common_path.parent
+        if root.is_dir():
+            return _git_toplevel(root) or root.resolve()
+
+    # 2. separate-git-dir / submodule: the metadata dir is NOT a checkout, and
+    #    ``--show-toplevel`` run *in* the metadata answers with the cwd's repo
+    #    (a separate-git-dir checkout sets no core.worktree), so it cannot be
+    #    trusted. The reliable source is the gitfile that points at this
+    #    metadata: ``<checkout>/.git`` containing ``gitdir: <common dir>``.
+    found = _checkout_owning_gitdir(common_path)
+    if found is not None:
+        return found
+
+    # 3. Resolve a separate-git-dir checkout through ``core.worktree`` when set
+    #    (git uses it for the same purpose in other layouts).
+    try:
+        result = subprocess.run(
+            ["git", "--git-dir", str(common_path), "config", "--get", "core.worktree"],
+            text=True,
+            capture_output=True,
+            timeout=5,
+            check=False,
+            creationflags=windows_hide_flags(),
+        )
+        raw = result.stdout.strip() if result.returncode == 0 else ""
+    except (OSError, subprocess.TimeoutExpired):
+        raw = ""
+    if raw:
+        wt = Path(raw).expanduser()
+        if not wt.is_absolute():
+            wt = common_path / wt
+        wt = wt.resolve()
+        if wt.is_dir() and _git_toplevel(wt) is not None:
+            return wt
+
+    # 4. Conservative fallback: unnest to the parent of the metadata dir only
+    #    when that parent is itself a real checkout. Otherwise None -> the
+    #    caller keeps the workspace's own toplevel (no worse than today).
+    parent = common_path.parent
+    if parent.is_dir():
+        toplevel = _git_toplevel(parent)
+        if toplevel is not None and toplevel == parent.resolve():
+            return toplevel
+    return None
+
+
+def _checkout_owning_gitdir(common_path: Path) -> Path | None:
+    """Find a checkout whose ``.git`` gitfile points at *common_path*.
+
+    ``git init --separate-git-dir=X`` leaves ``<checkout>/.git`` holding a single
+    line ``gitdir: X``. Searching the metadata dir's siblings (the usual layout:
+    ``<parent>/checkout`` + ``<parent>/metadata``) finds the real working tree
+    without guessing, and the resolved path is validated as a checkout. Submodule
+    metadata (``<super>/.git/modules/<name>``) is matched the same way when the
+    submodule is checked out under ``<super>/<name>``.
+    """
+    target = common_path.resolve()
+    parent = common_path.parent
+    candidates = []
+
+    # Siblings of the metadata dir (separate-git-dir), then the superproject's
+    # own working tree (submodule: <super>/.git/modules/<name> -> <super>/<name>).
+    if parent.is_dir():
+        try:
+            candidates.extend(sorted(p for p in parent.iterdir() if p.is_dir()))
+        except OSError:
+            pass
+    if parent.name == "modules":
+        super_git = parent.parent
+        if super_git.name == ".git" and super_git.parent.is_dir():
+            candidates.extend(sorted(p for p in super_git.parent.iterdir() if p.is_dir()))
+
+    for candidate in candidates:
+        gitfile = candidate / ".git"
+        if not gitfile.is_file():
+            continue
+        try:
+            text = gitfile.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if not text.startswith("gitdir:"):
+            continue
+        raw = text.split(":", 1)[1].strip()
+        pointed = Path(raw)
+        if not pointed.is_absolute():
+            pointed = (candidate / pointed)
+        try:
+            if pointed.resolve() != target:
+                continue
+        except OSError:
+            continue
+        toplevel = _git_toplevel(candidate)
+        if toplevel is not None:
+            return toplevel
+        return candidate.resolve()
+    return None
+
 
 
 def _setup_agent_worktree(repo_root: str) -> dict:
