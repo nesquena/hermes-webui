@@ -1100,7 +1100,39 @@ function _micToastKeyForRecognitionError(error){
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
-  const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);
+  const _micForceMediaRecorderExpiryKey='mic_force_mediarecorder_expires';
+  const _MIC_FORCE_MR_TTL_MS=24*60*60*1000;
+  // A persisted SR failure auto-expires after 24h: a transient outage (or a
+  // browser update that fixes SR) should not pin this device to MediaRecorder
+  // forever.
+  function _getMicForceMediaRecorderStored(){
+    try{
+      const exp=localStorage.getItem(_micForceMediaRecorderExpiryKey);
+      const stored=localStorage.getItem(_micForceMediaRecorderKey);
+      if(exp){
+        const expMs=parseInt(exp,10);
+        if(Number.isFinite(expMs)&&Date.now()>expMs){
+          localStorage.removeItem(_micForceMediaRecorderKey);
+          localStorage.removeItem(_micForceMediaRecorderExpiryKey);
+          return null;
+        }
+      }else if(stored==='0'||stored==='1'){
+        // Values saved before the expiry key existed would otherwise pin this
+        // device forever. Start the 24h window on the first read after upgrade.
+        localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+      }
+      return stored;
+    }catch(_){
+      return null;
+    }
+  }
+  function _setMicForceMediaRecorder(value){
+    try{
+      localStorage.setItem(_micForceMediaRecorderKey,String(value));
+      localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+    }catch(_){}
+  }
+  const _micForceMediaRecorderStored=_getMicForceMediaRecorderStored();
   // Prefer Hermes server-side STT (MediaRecorder -> /api/transcribe) only
   // after the server confirms an STT provider is available. No stored key must
   // keep browser SpeechRecognition as the first-click default until then; that
@@ -1264,7 +1296,7 @@ function _micToastKeyForRecognitionError(error){
   }
 
   function _allowBrowserSttFallback(){
-    return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
+    return !!(SpeechRecognition&&_getMicForceMediaRecorderStored()!=='1');
   }
 
   async function _transcribeBlob(blob, prefixSnapshot){
@@ -1286,7 +1318,7 @@ function _micToastKeyForRecognitionError(error){
     }catch(err){
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
-        localStorage.setItem(_micForceMediaRecorderKey,'0');
+        _setMicForceMediaRecorder('0');
         _forceMediaRecorder=false;
         recognition=_ensureSpeechRecognition();
         showToast(err.message||t('mic_network'));
@@ -1490,7 +1522,7 @@ function _micToastKeyForRecognitionError(error){
       if(event.error==='network'||event.error==='not-allowed'
           ||event.error==='service-not-allowed'||event.error==='audio-capture'){
         // Persist SR failure: next reload will skip SpeechRecognition
-        localStorage.setItem(_micForceMediaRecorderKey,'1');
+        _setMicForceMediaRecorder('1');
         _forceMediaRecorder=true;
         recognition=null;
       }
@@ -1530,7 +1562,7 @@ function _micToastKeyForRecognitionError(error){
   // persisted '0' is respected and not re-flipped.
   function _applyDeferredServerSttFlip(){
     if(_serverSttAvailable&&!_forceMediaRecorder&&!window._micActive
-        &&localStorage.getItem(_micForceMediaRecorderKey)===null){
+        &&_getMicForceMediaRecorderStored()===null){
       _forceMediaRecorder=true;
       recognition=null;
     }

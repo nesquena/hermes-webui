@@ -350,7 +350,7 @@ def test_boot_js_media_recorder_fallback_posts_to_transcribe_api():
 def test_boot_js_prefers_server_side_stt_by_default():
     """Default mic capture should prefer server STT only after the server confirms support."""
     js, _ = get_text("/static/boot.js")
-    assert "const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);" in js
+    assert "const _micForceMediaRecorderStored=_getMicForceMediaRecorderStored();" in js
     assert "let _serverSttAvailable=false" in js
     assert "_micForceMediaRecorderStored===null?(_serverSttAvailable&&_canRecordAudio):" in js
     assert "fetch('api/transcribe/capability'" in js
@@ -372,7 +372,7 @@ def test_boot_js_falls_back_to_browser_stt_when_server_transcribe_unavailable():
     js, _ = get_text("/static/boot.js")
     assert "function _isServerSttUnavailable(err)" in js
     assert "function _allowBrowserSttFallback()" in js
-    assert "localStorage.setItem(_micForceMediaRecorderKey,'0')" in js
+    assert "_setMicForceMediaRecorder('0')" in js
     assert "_forceMediaRecorder=false" in js
     assert "recognition=_ensureSpeechRecognition()" in js
 
@@ -380,7 +380,78 @@ def test_boot_js_falls_back_to_browser_stt_when_server_transcribe_unavailable():
 def test_boot_js_keeps_explicit_server_stt_preference_on_transcribe_failure():
     """An explicit mic_force_mediarecorder='1' preference must not be silently overwritten."""
     js, _ = get_text("/static/boot.js")
-    assert "localStorage.getItem(_micForceMediaRecorderKey)!=='1'" in js
+    assert "_getMicForceMediaRecorderStored()!=='1'" in js
+
+
+def test_boot_js_mic_force_mediarecorder_ttl():
+    """A persisted mic_force_mediarecorder preference expires after 24h.
+
+    Runs the real helpers: a fresh value expires, and a legacy ``'0'``/``'1'``
+    saved before the expiry key existed gets a 24h window on first read.
+    """
+    import json
+    import subprocess
+
+    js, _ = get_text("/static/boot.js")
+    start = js.index("  const _micForceMediaRecorderKey=")
+    end = js.index("  const _micForceMediaRecorderStored=")
+    snippet = js[start:end]
+    script = r"""
+const store = new Map();
+const localStorage = {
+  getItem: (k) => (store.has(k) ? store.get(k) : null),
+  setItem: (k, v) => store.set(k, String(v)),
+  removeItem: (k) => store.delete(k),
+};
+let now = 1000000;
+const Date = { now: () => now };
+""" + snippet + r"""
+const out = [];
+function snap(label) {
+  out.push({
+    label,
+    got: _getMicForceMediaRecorderStored(),
+    value: localStorage.getItem('mic_force_mediarecorder'),
+    exp: localStorage.getItem('mic_force_mediarecorder_expires'),
+  });
+}
+_setMicForceMediaRecorder('1');
+snap('fresh-1');
+_setMicForceMediaRecorder('0');
+snap('fresh-0');
+now += 24 * 60 * 60 * 1000 + 1;
+snap('expired');
+localStorage.setItem('mic_force_mediarecorder', '0');
+localStorage.removeItem('mic_force_mediarecorder_expires');
+snap('legacy-0');
+localStorage.setItem('mic_force_mediarecorder', '1');
+localStorage.removeItem('mic_force_mediarecorder_expires');
+snap('legacy-1');
+now = Number(localStorage.getItem('mic_force_mediarecorder_expires')) + 1;
+snap('legacy-expired');
+console.log(JSON.stringify(out));
+"""
+    proc = subprocess.run(
+        ["node", "-e", script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr
+    rows = {row["label"]: row for row in json.loads(proc.stdout)}
+    ttl = 24 * 60 * 60 * 1000
+    fresh_exp = int(rows["fresh-1"]["exp"])
+    assert rows["fresh-1"]["got"] == "1"
+    assert fresh_exp == 1000000 + ttl
+    assert rows["fresh-0"]["got"] == "0"
+    assert rows["expired"]["got"] is None
+    assert rows["expired"]["value"] is None
+    assert rows["legacy-0"]["got"] == "0"
+    legacy_exp = int(rows["legacy-0"]["exp"])
+    assert legacy_exp == 1000000 + ttl + 1 + ttl
+    assert rows["legacy-1"]["got"] == "1"
+    assert rows["legacy-expired"]["got"] is None
+    assert rows["legacy-expired"]["value"] is None
 
 
 def test_routes_define_transcribe_endpoint():

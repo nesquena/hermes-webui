@@ -259,6 +259,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Auto-stops after ~2s of silence
 - Appends to existing textarea content (doesn't replace)
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
+- A saved fallback from browser speech recognition to server-side recording expires after 24 hours, including preferences stored by older versions. After that the mic tries browser speech recognition again.
 
 ### Profiles
 - Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
