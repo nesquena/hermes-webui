@@ -729,6 +729,18 @@ def retry_spooled(
     return filed
 
 
+def spool_has_records() -> bool:
+    """Cheap check: does the spool hold at least one pending record?"""
+    try:
+        with SPOOL_PATH.open("r", encoding="utf-8") as fh:
+            for line in fh:
+                if line.strip():
+                    return True
+    except (OSError, ValueError):
+        return False
+    return False
+
+
 def _read_spool() -> list[dict]:
     records: list[dict] = []
     try:

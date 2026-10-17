@@ -594,3 +594,228 @@ def re_search(haystack: str, key: str) -> bool:
     import re
 
     return re.search(rf"\b{re.escape(key)}\s*:", haystack) is not None
+
+
+# ── Regression tests: verification findings F1/F2/F4 (t_eca1e3cd) ─────────
+
+
+def test_mode_off_client_shape_stays_off(monkeypatch):
+    """F1: the client sends {"session_id", "on": false} for /idea off —
+    the mode must go (and stay) OFF, never flip ON."""
+    m = _fresh_store(monkeypatch)
+
+    handler = FakeHandler(*_json_body({"session_id": "s-off", "on": False}))
+    m.handle_idea_mode(handler, json.loads(handler.rfile.read().decode()))
+    assert handler.status == 200
+    payload = handler.payload()
+    assert payload["idea_mode"] is False
+    assert m.is_idea_mode("s-off") is False
+    assert "on" not in payload["text"].lower() or "off" in payload["text"].lower()
+
+    # mode ON first, then the same off payload must turn it back off
+    m.set_idea_mode("s-off2", True)
+    handler = FakeHandler(*_json_body({"session_id": "s-off2", "on": False}))
+    m.handle_idea_mode(handler, json.loads(handler.rfile.read().decode()))
+    assert handler.status == 200
+    assert handler.payload()["idea_mode"] is False
+    assert m.is_idea_mode("s-off2") is False
+
+
+def test_mode_off_legacy_off_key_still_works(monkeypatch):
+    """The {"off": true} shape (verified working live pre-fix) must survive."""
+    m = _fresh_store(monkeypatch)
+    m.set_idea_mode("s-legacy", True)
+    handler = FakeHandler(*_json_body({"session_id": "s-legacy", "off": True}))
+    m.handle_idea_mode(handler, json.loads(handler.rfile.read().decode()))
+    assert handler.status == 200
+    assert handler.payload()["idea_mode"] is False
+
+
+def test_voice_clip_temp_file_keeps_upload_extension(monkeypatch):
+    """F2: the clip's temp file must carry the upload's extension —
+    transcribe_audio validates by extension and rejects an empty suffix
+    with 400 "Unsupported format: ." for EVERY clip."""
+    m = _fresh_store(monkeypatch)
+    m.set_idea_mode("s-clip", True)
+    seen_paths: list[str] = []
+
+    def fake_transcribe(path):
+        seen_paths.append(path)
+        return {"success": True, "transcript": "keep my suffix please"}
+
+    fake_tt = types.ModuleType("tools.transcription_tools")
+    fake_tt.transcribe_audio = fake_transcribe
+    fake_vmt = types.ModuleType("tools.voice_mode_transcript")
+    fake_vmt.is_whisper_hallucination = lambda s: False
+    tools_parent = sys.modules.get("tools") or types.ModuleType("tools")
+    monkeypatch.setitem(sys.modules, "tools", tools_parent)
+    monkeypatch.setitem(sys.modules, "tools.transcription_tools", fake_tt)
+    monkeypatch.setitem(sys.modules, "tools.voice_mode_transcript", fake_vmt)
+    monkeypatch.setattr(tools_parent, "transcription_tools", fake_tt, raising=False)
+    monkeypatch.setattr(tools_parent, "voice_mode_transcript", fake_vmt, raising=False)
+    _install_fake_filing(monkeypatch)
+
+    result = m.capture_idea("s-clip", audio_bytes=b"RIFFfake-opus-bytes",
+                            audio_name="voice-2026-10-17.webm")
+    assert result["ok"] is True
+    assert result["kind"] == "filed"
+    assert seen_paths and seen_paths[0].endswith(".webm")
+
+    # extensionless uploads fall back to .webm (upload.py's own pattern)
+    seen_paths.clear()
+    result = m.capture_idea("s-clip", audio_bytes=b"RIFFfake-opus-bytes",
+                            audio_name="no-extension")
+    assert result["ok"] is True
+    assert seen_paths[0].endswith(".webm")
+
+
+def test_multipart_capture_propagates_upload_extension(monkeypatch):
+    """F2 (handler level): multipart filename flows through to the temp file
+    so the real extension validator would accept the clip."""
+    m = _fresh_store(monkeypatch)
+    m.set_idea_mode("sess-voice2", True)
+    seen_paths: list[str] = []
+
+    def fake_transcribe(path):
+        seen_paths.append(path)
+        return {"success": True, "transcript": "multipart suffix survives"}
+
+    fake_tt = types.ModuleType("tools.transcription_tools")
+    fake_tt.transcribe_audio = fake_transcribe
+    fake_vmt = types.ModuleType("tools.voice_mode_transcript")
+    fake_vmt.is_whisper_hallucination = lambda s: False
+    tools_parent = sys.modules.get("tools") or types.ModuleType("tools")
+    monkeypatch.setitem(sys.modules, "tools", tools_parent)
+    monkeypatch.setitem(sys.modules, "tools.transcription_tools", fake_tt)
+    monkeypatch.setitem(sys.modules, "tools.voice_mode_transcript", fake_vmt)
+    monkeypatch.setattr(tools_parent, "transcription_tools", fake_tt, raising=False)
+    monkeypatch.setattr(tools_parent, "voice_mode_transcript", fake_vmt, raising=False)
+    _install_fake_filing(monkeypatch)
+    _fake_get_session(monkeypatch)
+
+    body, ct = _multipart_body(
+        fields={"session_id": "sess-voice2"},
+        files={"file": ("voice-clip.ogg", b"OggS-fake-opus", "audio/ogg")},
+    )
+    handler = FakeHandler(body, ct)
+    m.handle_idea_capture(handler)
+    assert handler.status == 200
+    assert handler.payload()["ok"] is True
+    assert seen_paths and seen_paths[0].endswith(".ogg")
+
+
+def test_capture_after_restore_drains_spool(monkeypatch, tmp_path):
+    """F4: a capture after the board is restored must drain the spool —
+    retry_spooled is wired via _schedule_spool_retry (daemon thread)."""
+    m = _fresh_store(monkeypatch)
+    m.set_idea_mode("s-spool", True)
+    _install_fake_stt(monkeypatch, transcript="typed while spool holds one")
+    _install_fake_filing(monkeypatch)  # installs sys.modules["api.idea_filing"]
+    # extend the installed fake with the spool-retry surface _schedule_
+    # spool_retry imports (installing a fresh module AFTER _install_fake_
+    # filing would be overwritten by it — order matters here)
+    fake_filing = sys.modules["api.idea_filing"]
+    spool_calls: list[dict] = []
+
+    def fake_spool_has_records():
+        return len(spool_calls) == 0  # pretend one pending record, once
+
+    def fake_retry_spooled():
+        spool_calls.append({"at": time.time()})
+        m._SPOOL_RETRY_ARMED = False
+
+    fake_filing.spool_has_records = fake_spool_has_records
+    fake_filing.retry_spooled = fake_retry_spooled
+    result = m.capture_idea("s-spool", "typed while spool holds one")
+    assert result["ok"] is True
+
+    # the daemon thread fires async — wait (bounded) for the drain
+    deadline = time.time() + 5
+    while not spool_calls and time.time() < deadline:
+        time.sleep(0.02)
+    assert spool_calls, "retry_spooled was never called from a capture"
+    assert len(spool_calls) == 1  # exactly one runner despite two arm points
+
+    # second capture with an empty spool: no second runner
+    result = m.capture_idea("s-spool", "typed again with spool empty")
+    assert result["ok"] is True
+    deadline = time.time() + 1
+    while time.time() < deadline:
+        time.sleep(0.02)
+    assert len(spool_calls) == 1
+
+
+def test_schedule_spool_retry_no_spool_no_thread(monkeypatch):
+    """F4 (guard): empty spool → retry never scheduled, capture still OK."""
+    m = _fresh_store(monkeypatch)
+    m.set_idea_mode("s-guard", True)
+    calls: list[str] = []
+    fake_filing = types.ModuleType("api.idea_filing")
+    fake_filing.file_ideas = FakeFiler()
+    fake_filing.spool_has_records = lambda: False
+    fake_filing.retry_spooled = lambda: calls.append("ran")
+    monkeypatch.setitem(sys.modules, "api.idea_filing", fake_filing)
+    monkeypatch.setattr(idea_mode, "_FILING_MODULE", "api.idea_filing")
+    monkeypatch.setattr(idea_mode, "_SPOOL_RETRY_ARMED", False)
+
+    result = m.capture_idea("s-guard", "guard idea with empty spool")
+    assert result["ok"] is True
+    time.sleep(0.2)
+    assert calls == []  # empty spool → no runner ever started
+
+
+def test_capture_after_restore_drains_real_spool_into_card(monkeypatch, tmp_path):
+    """F4 (end-to-end): real filing module, real spool file, real
+    retry_spooled on the daemon thread — a capture after the restore files
+    the spooled record into a card and drains the spool."""
+    import importlib
+
+    import api.idea_filing as filing_mod
+    monkeypatch.setenv("HERMES_IDEAS_DIR", str(tmp_path))
+    monkeypatch.delenv("HERMES_IDEAS_LEDGER", raising=False)
+    filing = importlib.reload(filing_mod)
+    filing.LEDGER_PATH = tmp_path / "ledger.json"
+    filing.SPOOL_PATH = tmp_path / "pending_cards.jsonl"
+    filing.LOCK_PATH = tmp_path / ".ledger.lock"
+    filing.IDEAS_DIR = tmp_path
+    # retry rounds run immediately (the schedule itself is unit-tested in
+    # test_idea_filing.py::test_retry_spooled_full_schedule)
+    class _FastTime:
+        def __getattr__(self, name):
+            return getattr(time, name)
+
+        def sleep(self, _s):
+            return None
+
+    monkeypatch.setattr(filing, "time", _FastTime())
+
+    created: list[tuple[str, str]] = []
+
+    def fake_create(title, body, hash16):
+        created.append((title, hash16))
+        return "t_spool01", None
+
+    monkeypatch.setattr(filing, "create_card", fake_create)
+    # the capture's own filing result stays faked; only the spool retry
+    # path runs for real
+    monkeypatch.setattr(filing, "file_ideas", FakeFiler())
+
+    filing.spool_pending({
+        "hash": "a" * 16, "title": "IDEA: spooled while board down",
+        "body": "PROBLEM: p", "session_id": "s-spool-real",
+        "date": "2026-10-17", "quote": "spooled while board down",
+    })
+    assert filing.spool_has_records() is True
+
+    m = _fresh_store(monkeypatch)
+    m.set_idea_mode("s-spool-real", True)
+    monkeypatch.setattr(idea_mode, "_SPOOL_RETRY_ARMED", False)
+    result = m.capture_idea("s-spool-real", "typed after the board came back")
+    assert result["ok"] is True
+
+    deadline = time.time() + 5
+    while not created and time.time() < deadline:
+        time.sleep(0.02)
+    assert created, "spooled record was never filed after restore"
+    assert created[0][0] == "IDEA: spooled while board down"
+    assert not filing.SPOOL_PATH.exists()  # drained

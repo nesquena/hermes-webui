@@ -29,7 +29,6 @@ import hashlib
 import tempfile
 import threading
 import time
-import traceback
 from pathlib import Path
 
 from api.helpers import bad, j, read_body
@@ -195,6 +194,20 @@ def _is_hallucination(transcript: str) -> bool:
         return False
 
 
+def _clip_suffix(audio_name: str | None) -> str:
+    """Temp-file suffix for a voice clip (spec §3.2).
+
+    ``transcribe_audio`` dispatches on the file EXTENSION (its validator
+    rejects an empty one), so the clip must keep its upload suffix —
+    same pattern as the /api/transcribe handler (upload.py).
+    """
+    try:
+        safe_name = _sanitize_upload_name(str(audio_name or ""))
+    except ValueError:
+        return ".webm"
+    return Path(safe_name).suffix or ".webm"
+
+
 def _transcribe_file(temp_path: str) -> tuple[str, str | None]:
     """Transcribe one audio file. Returns ``(transcript, error)``; a
     hallucination match on silence yields ``("", None)`` — i.e. an EMPTY
@@ -248,6 +261,7 @@ def _stat_for_kind(kind: str, card_count: int) -> tuple[str, int] | None:
 
 def capture_idea(session_id: str, transcript: str | None = None, *,
                  audio_bytes: bytes | None = None, audio_sha16: str | None = None,
+                 audio_name: str | None = None,
                  attempts: int = 0, ts: float | None = None) -> dict:
     """Capture one utterance end-to-end. Never starts an agent turn.
 
@@ -263,10 +277,10 @@ def capture_idea(session_id: str, transcript: str | None = None, *,
     if audio_bytes is not None and not transcript:
         digest = hashlib.sha256(audio_bytes).hexdigest()[:16]
         audio_sha16 = audio_sha16 or digest
-        suffix = ""
         temp_path = None
         try:
-            with tempfile.NamedTemporaryFile(prefix="webui-idea-", suffix=suffix,
+            with tempfile.NamedTemporaryFile(prefix="webui-idea-",
+                                             suffix=_clip_suffix(audio_name),
                                              delete=False) as tmp:
                 temp_path = tmp.name
                 tmp.write(audio_bytes)
@@ -301,6 +315,12 @@ def capture_idea(session_id: str, transcript: str | None = None, *,
     else:
         _bump(session_id, "filed", 0)  # touch last_active only
 
+    # Spec §0/§6.6: a spooled result arms the in-session retry loop. The
+    # precheck is cheap (one cached import + spool stat), so arming it on
+    # EVERY capture also gives the lazy drain: the first capture after a
+    # board restore retries what earlier rounds left spooled.
+    _schedule_spool_retry()
+
     return {
         "ok": bool(getattr(result, "ok", False)),
         "kind": kind,
@@ -313,6 +333,49 @@ def capture_idea(session_id: str, transcript: str | None = None, *,
 
 
 # ── HTTP handlers ───────────────────────────────────────────────────────────
+
+_SPOOL_RETRY_LOCK = threading.Lock()
+_SPOOL_RETRY_ARMED = False
+
+
+def _schedule_spool_retry() -> None:
+    """Arm the in-session spool retry (spec §0, §6.6) — at most one runner.
+
+    ``retry_spooled`` lives in the filing stage and runs its own 5 s/30 s/2 m
+    schedule on a DAEMON thread (never on the request thread — the first
+    round sleeps before it tries the board); anything still spooled after
+    the last round stays queued for the external batch intake lane (never
+    dropped). Cheap enough to call from every capture: a runner is only
+    started while records sit in the spool, and never two at once — so the
+    first capture after a board restore also drains what earlier rounds
+    left spooled.
+    """
+    global _SPOOL_RETRY_ARMED
+    try:
+        from api.idea_filing import retry_spooled, spool_has_records
+    except ImportError:
+        return  # filing stage absent — the batch intake lane owns the spool
+
+    try:
+        with _SPOOL_RETRY_LOCK:
+            if _SPOOL_RETRY_ARMED or not spool_has_records():
+                return
+            _SPOOL_RETRY_ARMED = True
+    except Exception:  # spool unreadable — treat as empty, never 500 a capture
+        return
+
+    def _run() -> None:
+        global _SPOOL_RETRY_ARMED
+        try:
+            retry_spooled()
+        except Exception as exc:  # never let the retry loop kill the session
+            print(f"[webui] idea spool retry error: {exc}", flush=True)
+        finally:
+            with _SPOOL_RETRY_LOCK:
+                _SPOOL_RETRY_ARMED = False
+
+    threading.Thread(target=_run, name="webui-idea-spool-retry",
+                     daemon=True).start()
 
 
 def handle_idea_capture(handler):
@@ -346,7 +409,7 @@ def handle_idea_capture(handler):
             if not file_bytes:
                 return bad(handler, "Empty audio clip")
             result = capture_idea(session_id, audio_bytes=file_bytes,
-                                  audio_sha16=None)
+                                  audio_sha16=None, audio_name=filename)
         else:
             body = read_body(handler)
             session_id = str(body.get("session_id") or "")
@@ -388,7 +451,12 @@ def handle_idea_mode(handler, body):
     body = body or {}
     if "on" not in body and "off" not in body:
         return bad(handler, "on or off is required")
-    on = bool(body.get("on")) or not bool(body.get("off"))
+    # "on" is authoritative when present: the client sends {"on": false} for
+    # `/idea off`, so a truthy-coalescing read would flip the mode ON.
+    if "on" in body:
+        on = bool(body.get("on"))
+    else:
+        on = not bool(body.get("off"))
     state = set_idea_mode(session_id, on)
     text = (f"💡 Idea mode on — speak or type ideas. Board: {IDEA_BOARD}." if on
             else summary_line(state))
