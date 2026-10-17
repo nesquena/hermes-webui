@@ -9182,9 +9182,47 @@ AIDER_MAX_CONTENT_CHARS = 200_000
 # contain vendored trees), so cap directory depth and visited directories.
 AIDER_MAX_SCAN_DEPTH = 8
 AIDER_MAX_SCAN_DIRS = 2000
+# Bound a single directory read. ``sorted(current.iterdir())`` materializes and
+# sorts EVERY entry before the file limit is consulted, so one directory holding
+# a million vendored files cost a million-entry sort on the sidebar path and let
+# a very wide directory escape the scan limit entirely. Read at most this many
+# entries per directory.
+AIDER_MAX_DIR_ENTRIES = 2000
+# Synthetic tool name for aider's blockquoted ask/confirm prompts.
+AIDER_CONFIRM_TOOL = 'aider_confirm'
 
 
-def _default_aider_scan_dir(workspace: str | None = None) -> Path | None:
+def _aider_profile_workspace(profile: str | None = None) -> str:
+    """Resolve the workspace bound to *profile* (active profile by default).
+
+    One authority for "which last_workspace does this profile use", shared by
+    the sidebar list build and the detail load. The list resolves
+    ``get_last_workspace(profile=_cli_profile)`` while the detail load used a
+    bare ``get_last_workspace()``; with multiple profiles those can return
+    different git roots, so a listed conversation would not open. Resolving the
+    active profile explicitly keeps both sides on the same binding.
+
+    Falls back to the ambient resolve for a ``get_last_workspace`` that does
+    not accept the ``profile`` keyword (the compat shim the callers already use).
+    """
+    if profile is None:
+        try:
+            from api.profiles import get_active_profile_name
+
+            profile = get_active_profile_name()
+        except Exception:
+            profile = None
+    if profile is None:
+        return str(get_last_workspace())
+    try:
+        return str(get_last_workspace(profile=profile))
+    except TypeError:
+        return str(get_last_workspace())
+
+
+def _default_aider_scan_dir(
+    workspace: str | None = None, *, profile: str | None = None
+) -> Path | None:
     """Resolve the single git root scanned for aider chat history.
 
     There is no global aider store to scan, so the bridge stays bounded to one
@@ -9196,6 +9234,11 @@ def _default_aider_scan_dir(workspace: str | None = None) -> Path | None:
     ``workspace`` lets the caller pass the workspace it already resolved for the
     build; otherwise this would pay a second ``get_last_workspace()`` and
     regress the #4718 one-resolve-per-build invariant.
+
+    ``profile`` scopes that fallback resolve to the same profile the sidebar
+    list used. Without it a listed conversation is located through one
+    profile's ``last_workspace`` but opened through another's, so the detail
+    load scans a different git root and the session does not open.
     """
     override = os.getenv('HERMES_WEBUI_AIDER_SCAN_DIR')
     if override:
@@ -9203,7 +9246,16 @@ def _default_aider_scan_dir(workspace: str | None = None) -> Path | None:
     if os.getenv('HERMES_WEBUI_TEST_STATE_DIR'):
         return None
     try:
-        resolved = workspace if workspace is not None else str(get_last_workspace())
+        if workspace is not None:
+            resolved = workspace
+        else:
+            # Default to the ACTIVE profile rather than the ambient resolve, so
+            # the detail load hits the same last_workspace.txt the sidebar list
+            # used. Ambient is already active-profile aware for the state dir,
+            # but naming the profile explicitly keeps both call sites on one
+            # code path and keeps a named profile from silently falling back to
+            # the root profile's binding (#7168 identity rule).
+            resolved = _aider_profile_workspace(profile)
     except Exception:
         return None
     base = Path(resolved).expanduser()
@@ -9250,12 +9302,23 @@ def _join_aider_lines(lines: list[str]) -> str:
     lines at either end of a block. Aider's own reader keeps those blanks (it
     feeds the model a prompt, not a transcript), but rendering them would show
     a stray empty message in the WebUI.
+
+    The end-trim walks inward from both ends WITHOUT popping. The previous
+    ``lines.pop(0)`` loop was O(n) per line, so a blank/degenerate history (all
+    padding-only lines, or a file that is empty apart from line-break padding)
+    was O(n^2): 64k padding lines took 0.53s and scaled ~4x per doubling, which
+    is long enough to stall the sidebar build on a large transcript. Index-based
+    trimming is O(n) and returns '' promptly for an all-blank block.
     """
-    while lines and not lines[0].strip():
-        lines.pop(0)
-    while lines and not lines[-1].strip():
-        lines.pop()
-    return '\n'.join(line.rstrip() for line in lines)
+    start = 0
+    end = len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    if start >= end:
+        return ''
+    return '\n'.join(line.rstrip() for line in lines[start:end])
 
 
 def _parse_aider_chat_history(
@@ -9287,7 +9350,37 @@ def _parse_aider_chat_history(
             return
         if len(content) > AIDER_MAX_CONTENT_CHARS:
             content = content[:AIDER_MAX_CONTENT_CHARS]
-        messages.append({'role': role, 'content': content})
+        if role != 'tool':
+            messages.append({'role': role, 'content': content})
+            return
+        # A blockquoted ask/confirm prompt is a tool turn, but a bare role=tool
+        # row is NOT renderable: _messageIsRenderable() drops every role=tool
+        # message, so the confirmation vanished from the transcript entirely.
+        # The frontend builds tool cards from the CALL side (an assistant row
+        # carrying tool_calls) and joins the result back by tool_call_id
+        # (static/ui.js: _legacySettledFallbackHasToolMetadata + resultsByTid),
+        # so emit a matching synthetic assistant call ahead of the result --
+        # the same shape the state.db CLI importer produces.
+        call_id = f'{AIDER_SOURCE}_{len(messages)}'
+        messages.append({
+            'role': 'assistant',
+            'content': '',
+            'tool_calls': [{
+                'id': call_id,
+                'type': 'function',
+                'function': {
+                    'name': AIDER_CONFIRM_TOOL,
+                    'arguments': json.dumps({'confirmation': content}),
+                },
+            }],
+        })
+        messages.append({
+            'role': 'tool',
+            'content': content,
+            'tool_call_id': call_id,
+            'tool_name': AIDER_CONFIRM_TOOL,
+            'name': AIDER_CONFIRM_TOOL,
+        })
 
     for line in text.splitlines():
         if len(messages) >= max_messages:
@@ -9350,6 +9443,32 @@ def clear_aider_parse_cache() -> None:
         _AIDER_PARSE_CACHE.clear()
 
 
+def _sorted_dir_entries(directory: Path, limit: int) -> list[Path] | None:
+    """Return up to ``limit`` entries of *directory*, sorted, or None on error.
+
+    ``Path.iterdir()`` materializes the whole directory, so calling
+    ``sorted(current.iterdir())`` on a very wide directory (a vendored tree, a
+    build output dir) read and sorted every entry before the scan's file limit
+    was ever consulted -- work that escaped the limit entirely. ``os.scandir``
+    is lazy, so stop reading at ``limit`` and sort only what was collected.
+
+    The sort key and ``reverse=True`` match the previous ``iterdir()`` sort so
+    a normal-width directory yields exactly the same order (and therefore the
+    same deterministic cold scan) as before.
+    """
+    collected: list[Path] = []
+    try:
+        with os.scandir(directory) as scan:
+            for entry in scan:
+                if len(collected) >= max(0, int(limit)):
+                    break
+                collected.append(Path(entry.path))
+    except OSError:
+        return None
+    collected.sort(key=lambda p: p.name, reverse=True)
+    return collected
+
+
 def _iter_aider_chat_history_files(
     scan_dir: Path | str | None = None,
     *,
@@ -9357,16 +9476,25 @@ def _iter_aider_chat_history_files(
     max_file_bytes: int = AIDER_MAX_FILE_BYTES,
     max_depth: int = AIDER_MAX_SCAN_DEPTH,
     workspace: str | None = None,
+    profile: str | None = None,
 ):
     """Yield `.aider.chat.history.md` files under one bounded root.
 
     Defensive by construction (matching ``_iter_claude_code_jsonl_files``): a
     symlinked root is refused outright, symlinked entries are never traversed
     or yielded, oversized files are skipped, and the walk is bounded by depth,
-    directory count, and file count so a pathological tree can never stall the
-    sidebar.
+    directory count, per-directory entry count, and file count so a pathological
+    tree can never stall the sidebar.
+
+    ``profile`` scopes the fallback scan-root resolve to the same profile the
+    sidebar list used, so a listed conversation resolves to the same git root
+    when it is opened.
     """
-    root = Path(scan_dir).expanduser() if scan_dir is not None else _default_aider_scan_dir(workspace)
+    root = (
+        Path(scan_dir).expanduser()
+        if scan_dir is not None
+        else _default_aider_scan_dir(workspace, profile=profile)
+    )
     if root is None:
         return
     try:
@@ -9389,9 +9517,8 @@ def _iter_aider_chat_history_files(
         try:
             if current.is_symlink() or not current.is_dir():
                 continue
-            try:
-                entries = sorted(current.iterdir(), key=lambda p: p.name, reverse=True)
-            except OSError:
+            entries = _sorted_dir_entries(current, AIDER_MAX_DIR_ENTRIES)
+            if entries is None:
                 continue
             for entry in entries:
                 if yielded >= max_files:
@@ -9400,7 +9527,15 @@ def _iter_aider_chat_history_files(
                     if entry.is_symlink():
                         continue
                     if entry.is_dir():
-                        if depth < max_depth and entry.name not in ('.git', 'node_modules'):
+                        # A wide directory must not queue unbounded work either:
+                        # cap `pending` at the same directory budget the walk
+                        # already enforces, so the frontier cannot grow past the
+                        # scan limit while `visited` is still climbing.
+                        if (
+                            depth < max_depth
+                            and entry.name not in ('.git', 'node_modules')
+                            and len(pending) < AIDER_MAX_SCAN_DIRS
+                        ):
                             pending.append((entry, depth + 1))
                         continue
                     if not entry.is_file() or entry.name != AIDER_CHAT_HISTORY_FILENAME:
@@ -9433,6 +9568,7 @@ def get_aider_sessions(
     max_files: int = AIDER_MAX_FILES,
     max_file_bytes: int = AIDER_MAX_FILE_BYTES,
     workspace: str | None = None,
+    profile: str | None = None,
 ) -> list:
     """Read aider chat-history files as read-only external-agent rows.
 
@@ -9443,18 +9579,22 @@ def get_aider_sessions(
 
     ``workspace`` accepts the workspace already resolved by the caller so that
     adding a second external-agent source cannot regress the #4718 invariant of
-    one ``get_last_workspace()`` resolve per sidebar build.
+    one ``get_last_workspace()`` resolve per sidebar build. ``profile`` scopes
+    the fallback resolve when the caller does not supply a workspace.
     """
     sessions = []
     # Loop-invariant (one active workspace for every aider row) and internally
     # stats config.yaml + probes terminal cwd -- the caller resolves it once
     # and shares it with the other external-agent scanners (#4718).
-    aider_workspace = workspace if workspace is not None else str(get_last_workspace())
+    aider_workspace = (
+        workspace if workspace is not None else _aider_profile_workspace(profile)
+    )
     for path in _iter_aider_chat_history_files(
         scan_dir,
         max_files=max_files,
         max_file_bytes=max_file_bytes,
         workspace=aider_workspace,
+        profile=profile,
     ) or []:
         messages, started_at = _parse_aider_chat_history_cached(path)
         if not messages:
@@ -9491,12 +9631,23 @@ def get_aider_sessions(
     return sessions
 
 
-def get_aider_session_messages(sid, scan_dir: Path | str | None = None) -> list:
-    """Return messages for one read-only aider chat-history session."""
+def get_aider_session_messages(
+    sid,
+    scan_dir: Path | str | None = None,
+    *,
+    profile: str | None = None,
+) -> list:
+    """Return messages for one read-only aider chat-history session.
+
+    ``profile`` must match the profile the sidebar list was built for: the
+    default scan root is that profile's ``last_workspace`` git root, so a
+    mismatch here scans a different root and the listed conversation does not
+    open.
+    """
     sid = str(sid or '')
     if not sid.startswith(f'{AIDER_SOURCE}_'):
         return []
-    for path in _iter_aider_chat_history_files(scan_dir) or []:
+    for path in _iter_aider_chat_history_files(scan_dir, profile=profile) or []:
         if _aider_session_id(path) != sid:
             continue
         messages, _started_at = _parse_aider_chat_history_cached(path)
@@ -15632,7 +15783,11 @@ def get_cli_session_messages(sid, *, profile=None) -> list:
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
     if str(sid or '').startswith(f'{AIDER_SOURCE}_'):
-        return get_aider_session_messages(sid)
+        # Aider rows are profile-agnostic (they live in a git root, not a
+        # profile tree), but their SCAN ROOT is the profile's last_workspace.
+        # Forward the profile so the detail load resolves the same git root the
+        # sidebar list did; otherwise a listed conversation does not open.
+        return get_aider_session_messages(sid, profile=profile)
     return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)
 
 

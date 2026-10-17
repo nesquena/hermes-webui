@@ -22,7 +22,20 @@ AIDER_FIXTURE = (
     "\nSecond assistant paragraph.\n\n"
 )
 AIDER_STARTED_AT = datetime.datetime(2026, 4, 18, 12, 0, 0).timestamp()
-AIDER_ROLES = ["user", "assistant", "tool", "user", "assistant"]
+# Each blockquoted ask/confirm prompt becomes an assistant row carrying the
+# synthetic `tool_calls` metadata plus the matching `tool` result row, because
+# _messageIsRenderable() hides bare role=tool rows (see the tool-card contract
+# test below) -- so a confirmation would otherwise vanish from the transcript.
+AIDER_ROLES = [
+    "user",
+    "assistant",
+    "assistant",
+    "tool",
+    "user",
+    "assistant",
+]
+# Index of the `tool` result row for the confirmation.
+AIDER_TOOL_INDEX = 3
 
 
 def _write_history(path: Path, text: str = AIDER_FIXTURE) -> Path:
@@ -94,11 +107,74 @@ def test_aider_parser_matches_role_split_of_aider_split_chat_history_markdown(tm
     assert [m["role"] for m in messages] == AIDER_ROLES
     assert messages[0]["content"] == "Can Hermes show Aider history read-only?"
     assert messages[1]["content"] == "Yes — it appears with an Aider source badge."
-    assert messages[2]["content"] == "y"
+    assert messages[AIDER_TOOL_INDEX]["content"] == "y"
     # Multi-line user input: every line carries its own "#### " prefix on disk,
     # so the real turns are stitched back into one message.
-    assert messages[3]["content"] == "Follow-up question\nsecond line of user input"
-    assert messages[4]["content"] == "Second assistant paragraph."
+    assert messages[4]["content"] == "Follow-up question\nsecond line of user input"
+    assert messages[5]["content"] == "Second assistant paragraph."
+
+
+def test_aider_confirmation_entries_carry_matching_tool_call_metadata(tmp_path):
+    """A blockquoted confirm prompt must survive the renderable filter.
+
+    _messageIsRenderable() (static/ui.js) returns false for every role=tool
+    row, and the frontend builds tool cards from the CALL side: an assistant
+    row carrying tool_calls, joined to its result by tool_call_id. A bare tool
+    row therefore renders nothing, so the confirmation disappeared from the
+    transcript. Assert the pairing the frontend actually joins on.
+    """
+    import api.models as models
+
+    scan_dir = tmp_path / "repo"
+    _write_history(scan_dir / ".aider.chat.history.md")
+
+    sessions = models.get_aider_sessions(scan_dir=scan_dir)
+    messages = models.get_aider_session_messages(
+        sessions[0]["session_id"], scan_dir=scan_dir
+    )
+
+    call = messages[AIDER_TOOL_INDEX - 1]
+    result = messages[AIDER_TOOL_INDEX]
+    assert call["role"] == "assistant"
+    assert call["content"] == ""
+    assert len(call["tool_calls"]) == 1
+    declaration = call["tool_calls"][0]
+    assert declaration["type"] == "function"
+    assert declaration["function"]["name"] == models.AIDER_CONFIRM_TOOL
+    # The result joins back to the declaration by tool_call_id -- the key the
+    # renderer indexes (resultsByTid in static/ui.js).
+    assert result["role"] == "tool"
+    assert result["tool_call_id"] == declaration["id"]
+    assert result["tool_name"] == declaration["function"]["name"]
+    assert result["name"] == declaration["function"]["name"]
+
+
+def test_aider_blank_history_parses_promptly(tmp_path):
+    """A blank/degenerate history must return promptly, not stall the sidebar.
+
+    _join_aider_lines() previously trimmed the padding-only leading lines with
+    list.pop(0) -- O(n) per line, so a history that is nothing but aider's
+    line-break padding was O(n^2) (64k lines took 0.53s and scaled ~4x per
+    doubling). Bound the cost so the scan cannot stall the sidebar.
+    """
+    import time
+
+    import api.models as models
+
+    blank = "".join("  \n" for _ in range(200_000))
+    scan_dir = tmp_path / "repo"
+    _write_history(scan_dir / ".aider.chat.history.md", blank)
+
+    started = time.perf_counter()
+    sessions = models.get_aider_sessions(scan_dir=scan_dir)
+    elapsed = time.perf_counter() - started
+
+    # A history with no real turn yields no row at all...
+    assert sessions == []
+    # ...and it returns promptly. The old quadratic trim needed many seconds
+    # here; 5s leaves generous headroom on slow CI while still failing loudly
+    # if the O(n^2) pop(0) trim ever comes back.
+    assert elapsed < 5.0, f"blank history parse took {elapsed:.2f}s"
 
 
 def test_aider_scan_skips_symlinks_oversized_files_and_missing_root(tmp_path):
@@ -167,6 +243,14 @@ def test_aider_session_messages_rejects_foreign_and_unknown_ids(tmp_path):
 
 
 def test_aider_parse_cache_invalidates_on_content_change(tmp_path):
+    """The stat-keyed cache must self-invalidate; no explicit cache clear.
+
+    This test used to call clear_aider_parse_cache() immediately after rewriting
+    the file, which forced the second read cold and never exercised the
+    automatic-invalidation path at all. Drop the clear so the second read is
+    genuinely warm-then-invalidated, and prove the warm read is served from the
+    cache (not just re-parsed to the same answer).
+    """
     import api.models as models
 
     scan_dir = tmp_path / "repo"
@@ -176,12 +260,142 @@ def test_aider_parse_cache_invalidates_on_content_change(tmp_path):
 
     before = models.get_aider_sessions(scan_dir=scan_dir)[0]["message_count"]
 
+    # Warm read with the file UNCHANGED must be served from the cache: count
+    # the real parses to prove the memo is doing something.
+    parse_calls = []
+    real_parse = models._parse_aider_chat_history
+
+    def counting_parse(path, **kwargs):
+        parse_calls.append(path)
+        return real_parse(path, **kwargs)
+
+    models._parse_aider_chat_history = counting_parse
+    try:
+        cached = models.get_aider_sessions(scan_dir=scan_dir)[0]["message_count"]
+    finally:
+        models._parse_aider_chat_history = real_parse
+
+    assert cached == before
+    assert parse_calls == [], "unchanged file should be served from the parse cache"
+
+    # Now change the content and read again WITHOUT clearing the cache. The
+    # (mtime_ns, size, ctime_ns) key must miss so the new turn count is picked
+    # up automatically.
     _write_history(fixture, "\n#### first turn\n\n#### second turn\n\n#### third turn\n")
-    models.clear_aider_parse_cache()
     after = models.get_aider_sessions(scan_dir=scan_dir)[0]["message_count"]
 
     assert before == 1
     assert after == 3
+
+
+def test_aider_scan_bounds_wide_directory_entries(tmp_path, monkeypatch):
+    """A very wide directory must not escape the per-directory scan bound.
+
+    sorted(current.iterdir()) read and sorted EVERY entry of a directory before
+    the scan's file limit was consulted, so one directory holding a huge number
+    of vendored files could do unbounded work on the sidebar path.
+    """
+    import api.models as models
+
+    scan_dir = tmp_path / "repo"
+    scan_dir.mkdir(parents=True)
+    limit = 5
+    total_entries = 41
+    _write_history(scan_dir / ".aider.chat.history.md", "\n#### wide dir turn\n")
+    for i in range(total_entries - 1):
+        (scan_dir / f"f{i:03d}.txt").write_text("x", encoding="utf-8")
+
+    consumed = []
+
+    class _CountingScandir:
+        """Wraps a real ScandirIterator and records every entry handed out."""
+
+        def __init__(self, iterator):
+            self._iterator = iterator
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            self._iterator.close()
+            return False
+
+        def __iter__(self):
+            for entry in self._iterator:
+                consumed.append(entry.name)
+                yield entry
+
+    real_scandir = models.os.scandir
+    real_limit = models.AIDER_MAX_DIR_ENTRIES
+
+    def counting_scandir(path):
+        return _CountingScandir(real_scandir(path))
+
+    monkeypatch.setattr(models, "AIDER_MAX_DIR_ENTRIES", limit)
+    monkeypatch.setattr(models.os, "scandir", counting_scandir)
+
+    models.get_aider_sessions(scan_dir=scan_dir)
+
+    # The bound is enforced while reading, not by sorting everything and
+    # discarding it afterwards: the walk stopped at the cap instead of
+    # enumerating all 41 entries as sorted(iterdir()) did.
+    assert len(consumed) <= limit + 1, f"read {len(consumed)} entries, bound was {limit}"
+    assert len(consumed) < total_entries
+
+    # A directory narrower than the bound must still be read in full, so the
+    # real history is found -- bounding must not hide ordinary repos.
+    monkeypatch.setattr(models, "AIDER_MAX_DIR_ENTRIES", real_limit)
+    titles = [s["title"] for s in models.get_aider_sessions(scan_dir=scan_dir)]
+    assert titles == ["wide dir turn"]
+
+
+def test_aider_detail_load_resolves_same_workspace_as_list(monkeypatch, tmp_path):
+    """List and detail load must resolve the same profile's workspace.
+
+    The list build resolves get_last_workspace(profile=_cli_profile) while the
+    detail load used a bare get_last_workspace(); with multiple profiles those
+    return different git roots, so a listed conversation would not open. Both
+    sides must go through the one profile-scoped resolver.
+    """
+    import api.models as models
+
+    repo_a = tmp_path / "repo-a"
+    repo_b = tmp_path / "repo-b"
+    _write_history(repo_a / ".aider.chat.history.md", "\n#### profile a turn\n")
+    _write_history(repo_b / ".aider.chat.history.md", "\n#### profile b turn\n")
+    (repo_a / ".git").mkdir()
+    (repo_b / ".git").mkdir()
+
+    monkeypatch.delenv("HERMES_WEBUI_AIDER_SCAN_DIR", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_TEST_STATE_DIR", raising=False)
+
+    workspaces = {"default": str(repo_a), "work": str(repo_b)}
+    seen_profiles = []
+
+    def fake_get_last_workspace(profile=None):
+        seen_profiles.append(profile)
+        return workspaces.get(str(profile), workspaces["default"])
+
+    monkeypatch.setattr(models, "get_last_workspace", fake_get_last_workspace)
+    monkeypatch.setattr(
+        "api.profiles.get_active_profile_name", lambda: "default", raising=False
+    )
+
+    # List for the named profile, then open that conversation with the same
+    # profile: the conversation must resolve and load.
+    listed = models.get_aider_sessions(profile="work")
+    assert [s["title"] for s in listed] == ["profile b turn"]
+    sid = listed[0]["session_id"]
+
+    # The profile was actually threaded into the resolve.
+    assert "work" in seen_profiles
+
+    detail = models.get_cli_session_messages(sid, profile="work")
+    assert [m["content"] for m in detail] == ["profile b turn"]
+
+    # A detail load for a DIFFERENT profile resolves that profile's own root,
+    # so it must not silently return another profile's conversation.
+    assert models.get_cli_session_messages(sid, profile="default") == []
 
 
 def test_aider_rows_are_profile_agnostic_for_detail_load(tmp_path):
