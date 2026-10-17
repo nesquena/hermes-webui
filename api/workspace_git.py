@@ -149,6 +149,11 @@ def _classify_git_error(message: str, args: list[str] | None = None) -> str:
         or "permission denied" in text
         or "could not read username" in text
         or "unable to get password from user" in text
+        # Git Credential Manager on Windows refuses to prompt when interaction is
+        # disabled (GCM_INTERACTIVE=never / credential.interactive=false): git then
+        # reports "Cannot prompt because user interactivity has been disabled."
+        # That is still an authentication failure, not a generic git failure.
+        or "cannot prompt because user interactivity has been disabled" in text
     ):
         return "auth_failed"
     if "no upstream" in text or "no configured push destination" in text or "has no upstream branch" in text:

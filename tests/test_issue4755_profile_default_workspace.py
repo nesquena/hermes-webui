@@ -79,8 +79,17 @@ def _run_node(script: str) -> dict:
     return json.loads(result.stdout)
 
 
-def _new_session_driver(session_workspace: str, default_workspace: str, switch_workspace: str | None) -> str:
+def _new_session_driver(
+    session_workspace: str,
+    default_workspace: str,
+    switch_workspace: str | None,
+    options_js: str = "undefined",
+    extra_setup: str = "",
+) -> str:
     new_session = _extract_async_function(SESSIONS_JS.read_text(encoding="utf-8"), "newSession")
+    # options_js='undefined' keeps the historical bare newSession() call exactly
+    # as it was; anything else is passed as the explicit `options` argument.
+    call = "newSession()" if options_js == "undefined" else f"newSession(null, {options_js})"
     return textwrap.dedent(
         f"""
         let captured=null;
@@ -97,6 +106,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
           activeProfile:'default',
           toolCalls:[],
         }};
+        {extra_setup}
         global.window={{}};
         global.document={{createElement:()=>({{dataset:{{}},appendChild:()=>{{}}}})}};
         global.localStorage={{setItem:()=>{{}}}};
@@ -119,7 +129,7 @@ def _new_session_driver(session_workspace: str, default_workspace: str, switch_w
         function renderMessages(){{}}
         function loadDir(){{return Promise.resolve();}}
         {new_session}
-        newSession().then(()=>{{
+        {call}.then(()=>{{
           process.stdout.write(JSON.stringify({{
             captured,
             switchWorkspace:S._profileSwitchWorkspace,
@@ -248,3 +258,72 @@ def test_busy_workspace_switch_returns_before_session_update():
     payload = _run_node(script)
 
     assert payload["calls"] == [["toast", "workspace_busy_switch"]]
+
+
+# --- Greptile P1 2026-10-10T05:08:54Z: only a path that CAME FROM the previous
+# session may carry the inherited-provenance flag. The server uses that flag to
+# recover a DELETED inherited path by falling back to the last workspace
+# (api/routes.py::_resolve_new_session_workspace), so flagging an explicit
+# project-bound workspace let a project chat silently open in another directory.
+@node_test
+def test_bound_workspace_is_not_flagged_as_inherited():
+    """An explicit options.workspace (project quick-create) must stay strict."""
+    payload = _run_node(
+        _new_session_driver(
+            session_workspace="/current-workspace",
+            default_workspace="/profile-default",
+            switch_workspace=None,
+            options_js="{workspace:'/project-bound'}",
+        )
+    )
+
+    body = payload["captured"]["body"]
+    assert body["workspace"] == "/project-bound"
+    assert body["prev_session_id"] == "previous-session"
+    assert "workspace_inherited_from_prev_session" not in body
+
+
+@node_test
+def test_bound_workspace_equal_to_current_session_is_still_not_inherited():
+    """The reported same-path case: bound == the previous session's workspace. The
+    path did NOT come from the previous session, so it must stay strict (this is
+    exactly the head Greptile reproduced the silent re-file on)."""
+    payload = _run_node(
+        _new_session_driver(
+            session_workspace="/current-workspace",
+            default_workspace="/profile-default",
+            switch_workspace=None,
+            options_js="{workspace:'/current-workspace'}",
+        )
+    )
+
+    body = payload["captured"]["body"]
+    assert body["workspace"] == "/current-workspace"
+    assert "workspace_inherited_from_prev_session" not in body
+
+
+@node_test
+def test_project_bindings_merge_does_not_flag_the_bound_workspace_as_inherited():
+    """The reported repro end to end: an active project filter merges the project's
+    pinned workspace into `options`; that merge must not make the path look
+    inherited. (Control lives in
+    test_new_session_prefers_current_session_workspace_over_profile_default,
+    which still asserts the flag IS sent when the path really was inherited.)"""
+    payload = _run_node(
+        _new_session_driver(
+            session_workspace="/current-workspace",
+            default_workspace="/profile-default",
+            switch_workspace=None,
+            extra_setup=textwrap.dedent(
+                """
+                var _activeProject='proj-1';
+                var _allProjects=[{project_id:'proj-1',profile:'default',workspace:'/project-bound'}];
+                function _projectBindingsForNewSession(p){return {workspace:p.workspace,model:null,model_provider:null};}
+                """
+            ),
+        )
+    )
+
+    body = payload["captured"]["body"]
+    assert body["workspace"] == "/project-bound"
+    assert "workspace_inherited_from_prev_session" not in body
