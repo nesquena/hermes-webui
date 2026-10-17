@@ -1396,6 +1396,33 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+// ── Idea-mode capture (spec t_14ad8e89 §3.2–§3.4) ──
+// POST one utterance to /api/idea/capture and render the single confirmation
+// line (✅/🔁/🤷/💾) the server returns. This path never touches
+// /api/chat/start, so no agent turn (and no read-back) can exist.
+async function captureIdea(text){
+  const sid=S.session&&S.session.session_id;
+  if(!sid){showToast(t('yolo_no_session'));return;}
+  const display=String(text||'').trim();
+  if(!display)return;
+  S.messages.push({role:'user',content:display,_ts:Date.now()/1000,_idea:true});
+  renderMessages();
+  setComposerStatus(t('idea_capturing'));
+  try{
+    const res=await api('/api/idea/capture',{method:'POST',body:JSON.stringify({session_id:sid,transcript:display}),timeoutMs:20000,retries:0});
+    if(res&&res.text)_pushIdeaLine(res.text);
+    else _pushIdeaLine(t('idea_capture_failed'));
+  }catch(e){
+    // Surface the failure in-chat (NOT to the agent) and keep the text
+    // recoverable: put the utterance back in the composer so nothing is lost.
+    _pushIdeaLine(t('idea_capture_failed'));
+    if(typeof showToast==='function')showToast((e&&e.message)||t('idea_capture_failed'),4000);
+    $('msg').value=display;autoResize();
+  }finally{
+    setComposerStatus('');
+  }
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1663,6 +1690,31 @@ async function send(){
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+    }
+  }
+  // ── Idea-mode capture intercept (spec t_14ad8e89 §3.2) ──
+  // chat turn: POST it to /api/idea/capture and render the one confirmation
+  // line. No /api/chat/start call happens on this path — read-back
+  // suppression is structural (there is no agent turn to speak). Slash
+  // commands (e.g. /idea off) still route through the block above, so the
+  // escape hatch always works. Queued messages drained by setBusy() re-enter
+  // send() and land here too, so queued ideas are captured, not chatted.
+  // The flag lives server-side (survives reloads); the client caches it per
+  // session id and resyncs once per session switch — same pattern as the
+  // per-send _fetchYoloState below.
+  if(!text.startsWith('/')&&!literalSlash&&S.session&&S.session.session_id){
+    if(window._ideaModeSid!==S.session.session_id){
+      try{
+        const st=await api('/api/idea/status?session_id='+encodeURIComponent(S.session.session_id),{retries:1});
+        window._ideaModeOn=!!(st&&st.idea_mode);
+      }catch(_){ window._ideaModeOn=false; }
+      window._ideaModeSid=S.session.session_id;
+    }
+    if(window._ideaModeOn){
+      const _ideaText=text;
+      $('msg').value='';autoResize();
+      await captureIdea(_ideaText);
+      return;
     }
   }
   if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}

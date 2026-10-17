@@ -15890,6 +15890,11 @@ def handle_get(handler, parsed) -> bool:
         if result is False:
             return _kanban_unknown_endpoint(handler, parsed, "GET")
         return True
+    if parsed.path == "/api/idea/status":
+        from api.idea_mode import handle_idea_status
+
+        return handle_idea_status(handler, parsed)
+
     if parsed.path == "/api/wiki/status":
         return _handle_llm_wiki_status(handler, parsed)
     if parsed.path == "/api/wiki/browse":
@@ -17300,6 +17305,13 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/transcribe":
         return handle_transcribe(handler)
 
+    # Idea mode (spec t_14ad8e89 §3): dispatched BEFORE read_body because the
+    # capture route accepts multipart voice clips, exactly like /api/transcribe.
+    if parsed.path == "/api/idea/capture":
+        from api.idea_mode import handle_idea_capture
+
+        return handle_idea_capture(handler)
+
     if parsed.path == "/api/tts":
         return _handle_tts(handler, parsed)
 
@@ -17328,6 +17340,12 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/escape/authorize":
         return _handle_escape_authorize(handler, parsed, body)
+
+    # Idea mode toggle (JSON body) + per-session status — spec t_14ad8e89 §3.
+    if parsed.path == "/api/idea/mode":
+        from api.idea_mode import handle_idea_mode
+
+        return handle_idea_mode(handler, body)
 
     if parsed.path == "/api/updates/check":
         settings = load_settings()
