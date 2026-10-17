@@ -1672,6 +1672,19 @@ function _micToastKeyForRecognitionError(error){
   }
   window._toggleMicCapture=_toggleMicCapture;
 
+  // Start-only mic entry for the wake word: a wake detection is a START
+  // signal and must never stop/cancel a capture that is starting or already
+  // active (_startMicCapture's toggle guard would treat it as a stop).
+  function _isMicCaptureStarting(){ return _isRecording && !window._micActive; }
+  async function _startMicCaptureFromWake(){
+    if(!_micButtonAvailable()) return;
+    if(window._micActive) return;
+    if(_isRecording) return; // already starting — let it settle
+    await _startMicCapture();
+  }
+  window._isMicCaptureStarting=_isMicCaptureStarting;
+  window._startMicCaptureFromWake=_startMicCaptureFromWake;
+
   btn.addEventListener('pointerdown',e=>{
     if(e.button!==0) return;
     if(!_micButtonAvailable()) return;
@@ -1741,6 +1754,132 @@ function _micToastKeyForRecognitionError(error){
     });
   }
   _updateMicTooltip();
+})();
+
+// ── Wake word (hands-free dictation start) ─────────────────────────────────
+// OPT-IN, fully client-side. When the user enables Settings → Wake word we
+// lazily load static/wakeword.js + vendored onnxruntime-web and start an
+// always-on AudioWorklet tap. The openWakeWord ONNX models run in the page;
+// a detection calls the same window._toggleMicCapture() path as the mic
+// button. Nothing is fetched or listened to while the setting is off.
+(function(){
+  const KEY='hermes-wake-word-enabled';
+  const SCORE_KEY='hermes-wake-word-score';     // 0-100 calibration knob
+  const PHRASE_KEY='hermes-wake-word-phrase';   // info only; model file is fixed for now
+  let _wakeDetector=null;
+  let _wakeBootSeq=0; // bumped by _wakeStop(): cancels in-flight _wakeStart()
+
+  function _wakeEnabled(){
+    try{ return localStorage.getItem(KEY)==='true'; }catch(_){ return false; }
+  }
+  function _wakeThreshold(){
+    // stored as 0-100; default 55 → 0.55 raw score. Higher = fewer false hits.
+    let v=55;
+    try{ v=parseInt(localStorage.getItem(SCORE_KEY),10); }catch(_){}
+    if(isNaN(v)) v=55;
+    return Math.min(95,Math.max(20,v))/100;
+  }
+
+  function _wakeTrigger(score){
+    // Wake word is a START word only: never fire while dictating or while a
+    // wake-triggered session is cooling down (the model hears its own echo).
+    if(window._micActive) return;
+    if(window._isMicCaptureStarting && window._isMicCaptureStarting()) return;
+    if(window._wakeWordArmedAt && performance.now()-window._wakeWordArmedAt<1000) return;
+    window._wakeWordArmedAt=performance.now();
+    try{ showToast(t('wake_word_toast')); }catch(_){}
+    // Start-only entry point: a wake detection must never STOP dictation,
+    // even if it lands mid-startup of a previous trigger (toggle semantics
+    // would cancel the pending capture — Greptile finding #1).
+    try{ window._startMicCaptureFromWake && window._startMicCaptureFromWake(); }catch(err){
+      try{ console.debug('[wakeword] trigger failed', err); }catch(_){}
+    }
+  }
+
+  async function _wakeStart(){
+    if(_wakeDetector&&(_wakeDetector.state==='running'||_wakeDetector.state==='loading')) return;
+    const boot=++_wakeBootSeq; // _wakeStop() bumps this: cancel pending startup
+    try{
+      if(!window.HermesWakeWord){
+        // onnxruntime-web first, then the detector module. Both vendored,
+        // no CDN. Served by the same origin as the page.
+        await new Promise((res,rej)=>{
+          const s=document.createElement('script');
+          s.src='static/vendor/onnxruntime-web/ort.min.js';
+          s.onload=res; s.onerror=()=>rej(new Error('ort.min.js load failed'));
+          document.head.appendChild(s);
+        });
+        await new Promise((res,rej)=>{
+          const s=document.createElement('script');
+          s.src='static/wakeword.js';
+          s.onload=res; s.onerror=()=>rej(new Error('wakeword.js load failed'));
+          document.head.appendChild(s);
+        });
+      }
+      // Recheck after every await: the user may have turned the setting OFF
+      // while scripts/models were loading (Greptile finding #2).
+      if(boot!==_wakeBootSeq||!_wakeEnabled()) return;
+      if(!window.HermesWakeWord) throw new Error('wakeword module unavailable');
+      _wakeDetector=new window.HermesWakeWord.WakeWordDetector({
+        threshold:_wakeThreshold(),
+        consecutive:3,
+        refractoryMs:2000,
+        onTrigger:_wakeTrigger
+      });
+      await _wakeDetector.start();
+      if(boot!==_wakeBootSeq){ // disabled while start() was in flight
+        try{ _wakeDetector.stop(); }catch(_){}
+        _wakeDetector=null;
+        window._wakeWordDetector=null;
+        return;
+      }
+      window._wakeWordDetector=_wakeDetector; // test/observability hook
+    }catch(err){
+      if(boot!==_wakeBootSeq) return; // disabled meanwhile; not an error worth surfacing
+      _wakeDetector=null;
+      window._wakeWordDetector=null;
+      try{ showToast(t('mic_error')+' wake-word'); }catch(_){}
+      try{ console.warn('[wakeword] start failed', err); }catch(_){}
+      try{ localStorage.setItem(KEY,'false'); }catch(_){}
+      const cb=document.getElementById('settingsWakeWord');
+      if(cb) cb.checked=false;
+    }
+  }
+
+  function _wakeStop(){
+    _wakeBootSeq++; // cancels any in-flight _wakeStart()
+    try{ _wakeDetector&&_wakeDetector.stop(); }catch(_){}
+    _wakeDetector=null;
+    window._wakeWordDetector=null;
+  }
+
+  window._applyWakeWordPreference=function(enabled){
+    try{ localStorage.setItem(KEY,enabled?'true':'false'); }catch(_){}
+    if(enabled){ _wakeStart(); } else { _wakeStop(); }
+  };
+
+  const cb=document.getElementById('settingsWakeWord');
+  if(cb){
+    cb.checked=_wakeEnabled();
+    cb.addEventListener('change',function(){
+      window._applyWakeWordPreference(this.checked);
+    });
+  }
+
+  // Autostart only on user gesture-bearing contexts: a page that reloaded
+  // with the setting ON re-arms without a gesture (mic permission already
+  // granted persists across loads; if it was never granted, start() fails
+  // cleanly and the setting resets — acceptable for an opt-in feature).
+  if(_wakeEnabled()){
+    const arm=()=>{ _wakeStart(); window.removeEventListener('pointerdown',arm,{once:true}); };
+    try{
+      if(document.visibilityState==='visible'&&navigator.userActivation&&navigator.userActivation.hasBeenActive){
+        _wakeStart();
+      } else {
+        window.addEventListener('pointerdown',arm,{once:true});
+      }
+    }catch(_){ _wakeStart(); }
+  }
 })();
 window._micActive=window._micActive||false;
 window._micPendingSend=window._micPendingSend||false;

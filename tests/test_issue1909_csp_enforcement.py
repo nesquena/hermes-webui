@@ -43,7 +43,7 @@ def test_security_helper_sends_enforcing_csp_with_hardening_directives(monkeypat
     assert "base-uri 'self'" in policy
     assert "form-action 'self'" in policy
     assert "manifest-src 'self' https://*.cloudflareaccess.com" in policy
-    assert "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:" in policy
+    assert "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:" in policy
     assert "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com" in policy
     assert "worker-src blob: 'self' https://cdn.jsdelivr.net" in policy
     assert "font-src 'self' data: https://fonts.gstatic.com" in policy

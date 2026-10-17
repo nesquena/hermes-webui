@@ -212,7 +212,9 @@ _CSP_SHARED_POLICY_TEMPLATE = (
     "default-src 'self' https://*.cloudflareaccess.com; "
     "object-src 'none'; "
     "frame-ancestors 'none'; "
-    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
+    # 'wasm-unsafe-eval' — required by onnxruntime-web (wake-word detection
+    # runs in-page): WebAssembly.instantiate() is blocked without it.
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net https://static.cloudflareinsights.com blob:; "
     "worker-src blob: 'self' https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://fonts.googleapis.com; "
     "img-src {img_src}; "
