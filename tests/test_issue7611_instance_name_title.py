@@ -154,8 +154,9 @@ function extractFunc(name) {
 global.document = { title: '' };
 global.window = {};
 
-// Pre-declare the decorator's remembered suffix so the eval'd bodies (each
-// extracted separately) close over one shared binding.
+// Pre-declare the decorator's remembered bindings so the eval'd bodies (each
+// extracted separately) close over one shared set of bindings.
+let _lastInstanceTitleBase = null;
 let _lastInstanceTitleSuffix = '';
 
 eval(extractFunc('instanceDisplayName'));
@@ -163,7 +164,6 @@ eval(extractFunc('_instanceTitleSuffix'));
 eval(extractFunc('_applyInstanceTitle'));
 
 const payload = JSON.parse(process.argv[3]);
-const BULLET = ' \u2022 ';
 
 // Replay what a document.title owner does: write its base title, then let the
 // shared decorator run. This is the real call order in syncTopbar().
@@ -173,20 +173,39 @@ function ownerWrite(base) {
   return document.title;
 }
 
+// Re-run the decorator WITHOUT a preceding owner write — the state syncTopbar()
+// leaves behind on every stream tick, and the only way to observe the decorator
+// actually REMOVING a suffix it previously applied.
+function reapply() {
+  _applyInstanceTitle();
+  return document.title;
+}
+
 window._instanceName = payload.instance_name;
 const out = {};
-out.base = payload.base;
 
 // 1. decorate
 out.decorated = ownerWrite(payload.base);
 // 2. a second owner write on a DIFFERENT title must not leave the old suffix
 //    stuck on, and must decorate the new title exactly once
 out.decoratedOther = ownerWrite(payload.other_base);
-// 3. same title written again (syncTopbar fires constantly) -> idempotent
-out.redecorated = ownerWrite(payload.other_base);
-// 4. clearing the setting must withdraw the suffix, restoring the base title
+// 3. re-apply with the title left as the decorator last wrote it: the suffix
+//    already on screen has to be withdrawn and re-applied once. An append-only
+//    decorator would show up here as a doubled label.
+out.redecorated = reapply();
+// 4. clearing the setting with NO owner write must remove the suffix from the
+//    title that is actually on screen, restoring the owner's base title.
 window._instanceName = '';
-out.withdrawn = ownerWrite(payload.other_base);
+out.withdrawn = reapply();
+
+// 5. A base title that ALREADY ends with the label (bot_name
+//    'Hermes • Production' with instance_name 'Production') must survive
+//    decoration, re-decoration and clearing without being corrupted.
+window._instanceName = payload.matching_instance;
+out.matchingDecorated = ownerWrite(payload.matching_base);
+out.matchingRedecorated = reapply();
+window._instanceName = '';
+out.matchingWithdrawn = reapply();
 
 process.stdout.write(JSON.stringify(out));
 """
@@ -199,9 +218,22 @@ def driver(tmp_path_factory):
     return str(path)
 
 
-def _run_decorator(driver, instance_name, base="Hermes", other_base="Settings \u2014 Hermes"):
+def _run_decorator(
+    driver,
+    instance_name,
+    base="Hermes",
+    other_base="Settings \u2014 Hermes",
+    matching_base="Hermes \u2022 Production",
+    matching_instance="Production",
+):
     payload = json.dumps(
-        {"instance_name": instance_name, "base": base, "other_base": other_base}
+        {
+            "instance_name": instance_name,
+            "base": base,
+            "other_base": other_base,
+            "matching_base": matching_base,
+            "matching_instance": matching_instance,
+        }
     )
     proc = subprocess.run(
         [NODE, driver, str(UI_JS), payload],
@@ -245,10 +277,34 @@ def test_repeated_application_is_idempotent(driver):
 
 
 def test_clearing_the_instance_name_withdraws_the_suffix(driver):
+    """Suffix REMOVAL, observed on the title actually on screen.
+
+    The clear step re-runs the decorator WITHOUT an owner write first, so this
+    fails if the decorator only ever appends: the label is already in
+    ``document.title`` and has to come back off.
+    """
     out = _run_decorator(driver, "Dev")
 
+    assert out["decoratedOther"] == "Settings \u2014 Hermes \u2022 Dev"
     assert out["withdrawn"] == "Settings \u2014 Hermes"
     assert "Dev" not in out["withdrawn"]
+
+
+def test_base_title_ending_with_the_label_is_not_corrupted(driver):
+    """bot_name 'Hermes • Production' + instance 'Production' must survive.
+
+    The old suffix-stripping check cut the label off a freshly written base that
+    happened to end with the same text, which doubled the title on first paint
+    and truncated the operator's own bot name on re-apply.
+    """
+    out = _run_decorator(driver, "Production", matching_base="Hermes \u2022 Production")
+
+    assert out["matchingDecorated"] == "Hermes \u2022 Production"
+    assert out["matchingDecorated"].count("Production") == 1
+    # re-applying must not drop the operator's text either
+    assert out["matchingRedecorated"] == "Hermes \u2022 Production"
+    # and clearing the label must restore the full base, not a truncated prefix
+    assert out["matchingWithdrawn"] == "Hermes \u2022 Production"
 
 
 def test_instance_name_sanitizes_control_chars_and_whitespace(driver):
@@ -271,6 +327,134 @@ def test_attention_prefix_stays_leading(driver):
 
     assert out["decorated"].startswith("\u25cf Session \u2014 Hermes")
     assert out["decorated"].endswith(" \u2022 Prod")
+
+
+# --- settings save round-trip (real saveSettings(), via node) ----------------
+
+_SAVE_DRIVER = r"""
+const fs = require('fs');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+
+function extractFunc(name) {
+  const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') depth--;
+    i++;
+  }
+  return src.slice(start, i);
+}
+
+// saveSettings() reads every control through $('settingsX') with an
+// `||{}` fallback, so a uniform element stub is enough to drive the real
+// function end to end.
+const elStub = () => ({
+  value: '', checked: false, dataset: {}, style: {}, textContent: '',
+  innerHTML: '', hidden: false, children: [],
+  classList: { add() {}, remove() {}, toggle() {}, contains() { return false; } },
+  appendChild() {}, removeChild() {}, setAttribute() {}, removeAttribute() {},
+  getAttribute() { return null; }, focus() {}, blur() {}, click() {},
+  append() {}, remove() {}, addEventListener() {}, removeEventListener() {},
+  querySelector() { return null; }, querySelectorAll() { return []; },
+  insertAdjacentHTML() {},
+  getBoundingClientRect() { return { top: 0, left: 0, width: 0, height: 0 }; },
+});
+
+global.document = {
+  getElementById: () => elStub(), querySelector: () => null,
+  querySelectorAll: () => [], addEventListener() {}, body: elStub(),
+};
+global.window = { _instanceName: process.argv[3] };
+global.localStorage = { getItem: () => null, setItem() {}, removeItem() {} };
+global.navigator = { language: 'en' };
+
+const $ = (id) => document.getElementById(id);
+
+const _speechPreferencesPayloadFromUi = () => ({});
+const _structuredCodeViewFromUi = () => ({});
+const _composerControlVisibilityPayload = () => ({});
+const _getComposerControlOrder = () => [];
+const _resetSettingsPanelState = () => {};
+const _hideSettingsPanel = () => {};
+const _updateCurrentPasswordVisibility = () => {};
+const _applySavedSettingsUi = () => {};
+const showToast = () => {};
+const t = (k) => k;
+const api = async () => ({});
+
+let _settingsPasswordAuthEnabled = false;
+let _settingsHermesDefaultModelOnOpen = '';
+let _settingsHermesDefaultModelProviderOnOpen = null;
+let _settingsDirty = false;
+let _pendingSettingsTargetPanel = null;
+
+let captured = null;
+const _enqueueSettingsPost = async ({ method, body }) => {
+  captured = JSON.parse(body);
+  return captured;
+};
+
+// Parens matter: a bare `async function f(){}` declaration evaluates to
+// undefined as the eval completion value.
+const _saveSettingsFn = eval('(' + extractFunc('saveSettings') + ')');
+
+(async () => {
+  await _saveSettingsFn(false);
+  if (!captured) { process.stdout.write(JSON.stringify({ posted: false })); return; }
+  process.stdout.write(JSON.stringify({
+    posted: true,
+    has_key: Object.prototype.hasOwnProperty.call(captured, 'instance_name'),
+    instance_name: captured.instance_name,
+  }));
+})();
+"""
+
+
+@pytest.fixture(scope="module")
+def save_driver(tmp_path_factory):
+    path = tmp_path_factory.mktemp("instance_name_save_driver") / "save_driver.js"
+    path.write_text(_SAVE_DRIVER, encoding="utf-8")
+    return str(path)
+
+
+def _run_save(save_driver, loaded_instance_name):
+    proc = subprocess.run(
+        [NODE, save_driver, str(PANELS_JS), loaded_instance_name],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        cwd=str(ROOT),
+    )
+    assert proc.returncode == 0, proc.stderr
+    return json.loads(proc.stdout)
+
+
+@pytest.mark.parametrize("loaded", ["Production", "US-East", ""])
+def test_save_settings_round_trips_the_instance_name(save_driver, loaded):
+    """Saving settings must not wipe the loaded deployment label.
+
+    The label is operator/env-supplied, so it has no control in the settings
+    modal. saveSettings() therefore has to echo the loaded mirror back on the
+    payload: _applySavedSettingsUi() re-reads `body.instance_name` after every
+    save, so an omitted key reset the loaded name to '' each time.
+    """
+    out = _run_save(save_driver, loaded)
+
+    assert out["posted"] is True
+    assert out["has_key"] is True
+    assert out["instance_name"] == loaded
+
+
+def test_instance_name_survives_a_settings_save_end_to_end(save_driver):
+    """The value on the wire is what the post-save UI read would restore."""
+    out = _run_save(save_driver, "Production")
+
+    # _applySavedSettingsUi does `window._instanceName = body.instance_name || ''`.
+    assert (out["instance_name"] or "") == "Production"
 
 
 # --- wiring guards: every document.title owner routes through the chokepoint --
