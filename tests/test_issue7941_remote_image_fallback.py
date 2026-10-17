@@ -47,7 +47,7 @@ const _IMAGE_EXTS=/\.(png|jpg|jpeg|gif|webp|bmp|ico|avif)$/i;
 const _SVG_EXTS=/\.svg$/i;
 for (const n of ['_dataImageHtml','_remoteImageReason','_remoteImageSources','_remoteImageSourceMatches','_remoteImageAllowed',
                  '_remoteImagePlaceholderHtml','_mdImageHtml','_inlineMediaHtmlForRef','_mediaTokenParts',
-                 '_matchBacktickFenceLine','_isBacktickFenceClose','renderMd']) eval(extractFunc(n));
+                 '_matchBacktickFenceLine','_isBacktickFenceClose','_htmlTagEnd','renderMd']) eval(extractFunc(n));
 const out = {};
 for (const [k, v] of Object.entries(cfg.allowed || {})) out['allowed:' + k] = _remoteImageAllowed(v);
 for (const [k, v] of Object.entries(cfg.media || {})) out['media:' + k] = _inlineMediaHtmlForRef(v);

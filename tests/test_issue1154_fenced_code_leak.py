@@ -45,6 +45,7 @@ function extractFunc(name) {
 }
 eval(extractFunc('_matchBacktickFenceLine'));
 eval(extractFunc('_isBacktickFenceClose'));
+eval(extractFunc('_htmlTagEnd'));
 eval(extractFunc('renderMd'));
 
 let buf = '';
