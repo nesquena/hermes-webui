@@ -964,8 +964,10 @@ def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
         str(cli_meta.get("raw_source") or "").strip().lower(),
     }
     # Profile-less external-agent rows that live outside the Hermes profile tree.
-    # Claude Code: scanned from ~/.claude/projects; Codex: scanned from ~/.codex/
-    profile_agnostic_sources = {CLAUDE_CODE_SOURCE}
+    # Claude Code: scanned from ~/.claude/projects; Aider: scanned from the
+    # workspace git root. Both are global rather than profile-owned, so the
+    # detail-load profile gate must not 404 them on a named profile.
+    profile_agnostic_sources = {CLAUDE_CODE_SOURCE, AIDER_SOURCE}
     try:
         from api.codex_sessions import CODEX_SOURCE
         profile_agnostic_sources.add(CODEX_SOURCE)
@@ -2418,6 +2420,18 @@ def _callable_accepts_kwarg(callable_obj, kwarg_name: str) -> bool:
     )
 
 
+def _aider_include_kwargs(show_aider_sessions: bool) -> dict:
+    """Thread ``include_aider`` only when the installed models.py understands it.
+
+    Same defensive shape as the ``include_claude_code`` branch above: focused
+    tests monkeypatch ``routes.get_cli_sessions`` with narrower signatures, and a
+    stale/older models module must not break the sidebar route.
+    """
+    if _callable_accepts_kwarg(get_cli_sessions, "include_aider"):
+        return {"include_aider": bool(show_aider_sessions)}
+    return {}
+
+
 def _session_list_cache_key(
     active_profile: str | None,
     all_profiles: bool,
@@ -2434,6 +2448,7 @@ def _session_list_cache_key(
     archived_limit: int | None = None,
     archived_offset: int = 0,
     show_claude_code_sessions: bool = True,
+    show_aider_sessions: bool = True,
 ) -> tuple:
     return _route_session_list_cache_key(
         active_profile=active_profile,
@@ -2450,7 +2465,7 @@ def _session_list_cache_key(
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
         archived_offset=archived_offset,
-    ) + (bool(show_claude_code_sessions),)
+    ) + (bool(show_claude_code_sessions), bool(show_aider_sessions))
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -2687,6 +2702,7 @@ def _build_session_list_cache_payload(
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
     show_claude_code_sessions: bool = True,
+    show_aider_sessions: bool = True,
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
@@ -2755,6 +2771,7 @@ def _build_session_list_cache_payload(
                 source_filter=source_filter,
                 all_profiles=all_profiles,
                 include_claude_code=show_claude_code_sessions,
+                **_aider_include_kwargs(show_aider_sessions),
             )
         else:
             # Focused tests sometimes monkeypatch routes.get_cli_sessions with
@@ -3057,6 +3074,7 @@ def _build_session_list_cache_payload(
             "show_previous_messaging_sessions": show_previous_messaging_sessions,
             "show_cron_sessions": show_cron_sessions,
             "show_claude_code_sessions": show_claude_code_sessions if show_cli_sessions else False,
+            "show_aider_sessions": show_aider_sessions if show_cli_sessions else False,
             "show_webhook_sessions": show_webhook_sessions,
             "show_kanban_sessions": show_kanban_sessions,
         },
@@ -12073,6 +12091,7 @@ from api.models import (
     save_projects,
     import_cli_session,
     CLAUDE_CODE_SOURCE,
+    AIDER_SOURCE,
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
@@ -16469,6 +16488,7 @@ def handle_get(handler, parsed) -> bool:
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
             show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
+            show_aider_sessions = bool(settings.get("show_aider_sessions"))
             show_previous_messaging_sessions = bool(
                 settings.get("show_previous_messaging_sessions")
             )
@@ -16492,6 +16512,7 @@ def handle_get(handler, parsed) -> bool:
                 all_profiles=all_profiles,
                 show_cli_sessions=show_cli_sessions,
                 show_claude_code_sessions=show_claude_code_sessions,
+                show_aider_sessions=show_aider_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
                 include_archived=include_archived,
@@ -16515,6 +16536,7 @@ def handle_get(handler, parsed) -> bool:
                     all_profiles=all_profiles,
                     show_cli_sessions=show_cli_sessions,
                     show_claude_code_sessions=show_claude_code_sessions,
+                    show_aider_sessions=show_aider_sessions,
                     show_previous_messaging_sessions=show_previous_messaging_sessions,
                     show_cron_sessions=show_cron_sessions,
                     include_archived=include_archived,
@@ -19602,6 +19624,7 @@ def handle_post(handler, parsed) -> bool:
             for k in (
                 "show_cli_sessions",
                 "show_claude_code_sessions",
+                "show_aider_sessions",
                 "show_cron_sessions",
                 "show_webhook_sessions",
                 "show_kanban_sessions",

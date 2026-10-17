@@ -180,6 +180,15 @@ _CLAUDE_CODE_PARSE_CACHE_LOCK = threading.Lock()
 _CLAUDE_CODE_PARSE_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
 _CLAUDE_CODE_PARSE_CACHE_MAX = 1000
 
+# Same LRU shape for aider chat-history parses (#674). Aider writes one
+# `.aider.chat.history.md` per git root and re-reads it on every session start,
+# so the same file is parsed repeatedly across sidebar builds; keying on the
+# file's stat signature keeps warm builds to a single stat() per file while a
+# genuine append still misses the cache.
+_AIDER_PARSE_CACHE_LOCK = threading.Lock()
+_AIDER_PARSE_CACHE: "collections.OrderedDict[tuple, tuple]" = collections.OrderedDict()
+_AIDER_PARSE_CACHE_MAX = 1000
+
 # Per-file cache for the UI-owned sidecar metadata (title + archived) that the
 # state.db sidebar projection overlays onto each CLI/cron row (#4842). The
 # projection calls _state_projection_sidecar_metadata() once per row in BOTH
@@ -8842,6 +8851,8 @@ def _normalize_cli_session_source_filter(source_filter) -> str | None:
         return None
     if normalized == 'claude-code':
         return CLAUDE_CODE_SOURCE
+    if normalized in ('aider', 'aider-chat'):
+        return AIDER_SOURCE
     return normalized
 
 
@@ -9140,6 +9151,339 @@ def get_claude_code_session_messages(sid, projects_dir: Path | str | None = None
     return []
 
 
+# ── Aider chat-history bridge (#674) ────────────────────────────────────────
+#
+# Aider persists one `.aider.chat.history.md` per git root (falling back to the
+# process cwd when the project is not a git repo). There is no central store
+# like `~/.claude/projects` or `~/.codex/sessions`, so discovery is deliberately
+# bounded to one configured root -- see _default_aider_scan_dir().
+#
+# On-disk grammar, verified against Aider's own writer and reader:
+#   aider/io.py:336   "\n# aider chat started at %Y-%m-%d %H:%M:%S\n\n"
+#   aider/io.py:775   user_input() -> "\n#### <line>  \n#### <line>  \n"
+#   aider/io.py:793   ai_output()  -> "\n<content>\n\n"
+#   aider/io.py:1118  blockquote=True -> "> " prefix (ask/confirm prompts)
+#   aider/utils.py:148 split_chat_history_markdown() is the authoritative reader.
+
+AIDER_SOURCE = 'aider'
+AIDER_SOURCE_LABEL = 'Aider'
+AIDER_CHAT_HISTORY_FILENAME = '.aider.chat.history.md'
+AIDER_MAX_FILES = 200
+AIDER_MAX_FILE_BYTES = 10 * 1024 * 1024
+AIDER_MAX_MESSAGES_PER_FILE = 1000
+AIDER_MAX_CONTENT_CHARS = 200_000
+# Bound the bounded-root walk itself: aider repos can nest deeply (and can
+# contain vendored trees), so cap directory depth and visited directories.
+AIDER_MAX_SCAN_DEPTH = 8
+AIDER_MAX_SCAN_DIRS = 2000
+
+
+def _default_aider_scan_dir() -> Path | None:
+    """Resolve the single git root scanned for aider chat history.
+
+    There is no global aider store to scan, so the bridge stays bounded to one
+    root: an explicit override, else the git root of the active workspace. This
+    mirrors the maintainer's requirement in #674 ("bounded to a configurable
+    base path ... and not follow symlinks"). Returns None under tests so a
+    developer's real repo is never read.
+    """
+    override = os.getenv('HERMES_WEBUI_AIDER_SCAN_DIR')
+    if override:
+        return Path(override).expanduser()
+    if os.getenv('HERMES_WEBUI_TEST_STATE_DIR'):
+        return None
+    try:
+        workspace = Path(str(get_last_workspace())).expanduser()
+    except Exception:
+        return None
+    for candidate in (workspace, *workspace.parents):
+        try:
+            if (candidate / '.git').exists():
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def _aider_session_id(path: Path) -> str:
+    digest = hashlib.sha256(str(path.expanduser().resolve()).encode('utf-8')).hexdigest()[:24]
+    return f'{AIDER_SOURCE}_{digest}'
+
+
+def _parse_aider_started_at(text: str) -> float | None:
+    """Pull the session start time out of Aider's `# aider chat started at ...` header.
+
+    The markdown format carries no per-message timestamps, so this header is the
+    only real time signal in the file. Unparseable headers yield None and the
+    caller falls back to mtime, exactly like the Claude Code bridge.
+    """
+    for line in str(text or '').splitlines():
+        line = line.strip()
+        if not line.startswith('# aider chat started at'):
+            continue
+        stamp = line[len('# aider chat started at'):].strip()
+        for fmt in ('%Y-%m-%d %H:%M:%S', '%Y-%m-%dT%H:%M:%S'):
+            try:
+                return datetime.datetime.strptime(stamp, fmt).timestamp()
+            except ValueError:
+                continue
+    return None
+
+
+def _join_aider_lines(lines: list[str]) -> str:
+    """Join continuation lines, normalizing aider's markdown line-break padding.
+
+    ``append_chat_history(linebreak=True)`` appends "  \\n" to every written line,
+    so each line carries trailing whitespace that is meaningful to markdown but
+    noise in a chat transcript. Strip it per line and drop the padding-only blank
+    lines at either end of a block. Aider's own reader keeps those blanks (it
+    feeds the model a prompt, not a transcript), but rendering them would show
+    a stray empty message in the WebUI.
+    """
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    while lines and not lines[-1].strip():
+        lines.pop()
+    return '\n'.join(line.rstrip() for line in lines)
+
+
+def _parse_aider_chat_history(
+    path: Path, *, max_messages: int = AIDER_MAX_MESSAGES_PER_FILE
+) -> tuple[list[dict], float | None]:
+    """Parse one `.aider.chat.history.md` into ``(messages, started_at)``.
+
+    Role assignment follows ``aider/utils.py:148``
+    (``split_chat_history_markdown``): a ``#### `` line starts a *user* turn,
+    a ``> `` line is a blockquoted tool/confirm prompt, and any other bare line
+    continues the *assistant* turn. ``# `` header lines are skipped.
+    """
+    messages: list[dict] = []
+    started_at = None
+    user: list[str] = []
+    assistant: list[str] = []
+    tool: list[str] = []
+    try:
+        text = path.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return [], None
+
+    def flush(role: str, lines: list[str]):
+        content = _join_aider_lines(lines)
+        lines.clear()
+        if not content.strip():
+            return
+        if len(messages) >= max_messages:
+            return
+        if len(content) > AIDER_MAX_CONTENT_CHARS:
+            content = content[:AIDER_MAX_CONTENT_CHARS]
+        messages.append({'role': role, 'content': content})
+
+    for line in text.splitlines():
+        if len(messages) >= max_messages:
+            break
+        if started_at is None and line.strip().startswith('# aider chat started at'):
+            started_at = _parse_aider_started_at(line)
+        if line.startswith('# '):
+            continue
+        if line.startswith('> '):
+            flush('assistant', assistant)
+            flush('user', user)
+            tool.append(line[2:])
+            continue
+        if line.startswith('#### '):
+            flush('assistant', assistant)
+            flush('tool', tool)
+            user.append(line[5:])
+            continue
+        flush('user', user)
+        flush('tool', tool)
+        assistant.append(line)
+
+    flush('assistant', assistant)
+    flush('user', user)
+    flush('tool', tool)
+    return messages, started_at
+
+
+def _parse_aider_chat_history_cached(
+    path: Path, *, max_messages: int = AIDER_MAX_MESSAGES_PER_FILE
+) -> tuple[list[dict], float | None]:
+    """``_parse_aider_chat_history`` memoized by (path, mtime_ns, size, ctime_ns)."""
+    try:
+        st = path.stat()
+    except OSError:
+        return _parse_aider_chat_history(path, max_messages=max_messages)
+
+    key = (str(path), st.st_mtime_ns, st.st_size, st.st_ctime_ns, int(max_messages))
+    with _AIDER_PARSE_CACHE_LOCK:
+        hit = _AIDER_PARSE_CACHE.get(key)
+        if hit is not None:
+            _AIDER_PARSE_CACHE.move_to_end(key)
+            messages, started_at = hit
+            return list(messages), started_at
+
+    parsed = _parse_aider_chat_history(path, max_messages=max_messages)
+    with _AIDER_PARSE_CACHE_LOCK:
+        if _AIDER_PARSE_CACHE.get(key) is None:
+            _AIDER_PARSE_CACHE[key] = parsed
+            _AIDER_PARSE_CACHE.move_to_end(key)
+            while len(_AIDER_PARSE_CACHE) > _AIDER_PARSE_CACHE_MAX:
+                _AIDER_PARSE_CACHE.popitem(last=False)
+    messages, started_at = parsed
+    return list(messages), started_at
+
+
+def clear_aider_parse_cache() -> None:
+    """Drop all memoized aider chat-history parses (test/lifecycle hook)."""
+    with _AIDER_PARSE_CACHE_LOCK:
+        _AIDER_PARSE_CACHE.clear()
+
+
+def _iter_aider_chat_history_files(
+    scan_dir: Path | str | None = None,
+    *,
+    max_files: int = AIDER_MAX_FILES,
+    max_file_bytes: int = AIDER_MAX_FILE_BYTES,
+    max_depth: int = AIDER_MAX_SCAN_DEPTH,
+):
+    """Yield `.aider.chat.history.md` files under one bounded root.
+
+    Defensive by construction (matching ``_iter_claude_code_jsonl_files``): a
+    symlinked root is refused outright, symlinked entries are never traversed
+    or yielded, oversized files are skipped, and the walk is bounded by depth,
+    directory count, and file count so a pathological tree can never stall the
+    sidebar.
+    """
+    root = Path(scan_dir).expanduser() if scan_dir is not None else _default_aider_scan_dir()
+    if root is None:
+        return
+    try:
+        if root.is_symlink():
+            return
+        root = root.resolve(strict=False)
+        if not root.exists() or not root.is_dir():
+            return
+    except OSError:
+        return
+
+    yielded = 0
+    visited = 0
+    # (path, depth) pairs; iterate depth-first but sorted so a cold scan is
+    # deterministic across filesystems.
+    pending: list[tuple[Path, int]] = [(root, 0)]
+    while pending and visited < AIDER_MAX_SCAN_DIRS and yielded < max_files:
+        current, depth = pending.pop()
+        visited += 1
+        try:
+            if current.is_symlink() or not current.is_dir():
+                continue
+            try:
+                entries = sorted(current.iterdir(), key=lambda p: p.name, reverse=True)
+            except OSError:
+                continue
+            for entry in entries:
+                if yielded >= max_files:
+                    return
+                try:
+                    if entry.is_symlink():
+                        continue
+                    if entry.is_dir():
+                        if depth < max_depth and entry.name not in ('.git', 'node_modules'):
+                            pending.append((entry, depth + 1))
+                        continue
+                    if not entry.is_file() or entry.name != AIDER_CHAT_HISTORY_FILENAME:
+                        continue
+                    if entry.stat().st_size > max_file_bytes:
+                        continue
+                except OSError:
+                    continue
+                yielded += 1
+                yield entry
+        except OSError:
+            # A directory that vanished or turned unreadable mid-walk must not
+            # abort the whole scan.
+            continue
+
+
+def _aider_title(messages: list[dict]) -> str:
+    """Aider stores no session title; infer it from the first user turn."""
+    for msg in messages:
+        if msg.get('role') == 'user':
+            text = ' '.join(str(msg.get('content') or '').split())
+            if text:
+                return text[:80]
+    return 'Aider Session'
+
+
+def get_aider_sessions(
+    scan_dir: Path | str | None = None,
+    *,
+    max_files: int = AIDER_MAX_FILES,
+    max_file_bytes: int = AIDER_MAX_FILE_BYTES,
+) -> list:
+    """Read aider chat-history files as read-only external-agent rows.
+
+    Mirrors ``get_claude_code_sessions()``: additive and defensive, so a
+    missing root, a malformed transcript, or a permission error never crashes
+    WebUI session listing. Tests pass ``scan_dir`` fixtures, so a developer's
+    real aider repo is never read during test runs.
+    """
+    sessions = []
+    # Loop-invariant (one active workspace for every aider row) and internally
+    # stats config.yaml + probes terminal cwd -- resolve it once, like the
+    # Claude Code bridge does (#4718).
+    aider_workspace = str(get_last_workspace())
+    for path in _iter_aider_chat_history_files(
+        scan_dir, max_files=max_files, max_file_bytes=max_file_bytes
+    ) or []:
+        messages, started_at = _parse_aider_chat_history_cached(path)
+        if not messages:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        # started_at is the only timestamp the markdown carries; mtime tracks
+        # the last append and keeps a transcript ordered correctly.
+        created_at = started_at or mtime
+        updated_at = mtime or created_at
+        sessions.append({
+            'session_id': _aider_session_id(path),
+            'title': _aider_title(messages),
+            'workspace': aider_workspace,
+            'model': AIDER_SOURCE,
+            'message_count': len(messages),
+            'created_at': created_at,
+            'updated_at': updated_at,
+            'last_message_at': updated_at,
+            'pinned': False,
+            'archived': False,
+            'project_id': None,
+            'profile': None,
+            'source_tag': AIDER_SOURCE,
+            'raw_source': AIDER_SOURCE,
+            'session_source': 'external_agent',
+            'source_label': AIDER_SOURCE_LABEL,
+            'is_cli_session': True,
+            'read_only': True,
+        })
+    sessions.sort(key=lambda s: s.get('last_message_at') or s.get('updated_at') or 0, reverse=True)
+    return sessions
+
+
+def get_aider_session_messages(sid, scan_dir: Path | str | None = None) -> list:
+    """Return messages for one read-only aider chat-history session."""
+    sid = str(sid or '')
+    if not sid.startswith(f'{AIDER_SOURCE}_'):
+        return []
+    for path in _iter_aider_chat_history_files(scan_dir) or []:
+        if _aider_session_id(path) != sid:
+            continue
+        messages, _started_at = _parse_aider_chat_history_cached(path)
+        return messages
+    return []
+
+
 def clear_cli_sessions_cache() -> None:
     with _CLI_SESSIONS_CACHE_LOCK:
         global _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
@@ -9413,6 +9757,10 @@ def _callable_accepts_include_claude_code(callable_obj) -> bool:
     return _callable_accepts_keyword(callable_obj, 'include_claude_code')
 
 
+def _callable_accepts_include_aider(callable_obj) -> bool:
+    return _callable_accepts_keyword(callable_obj, 'include_aider')
+
+
 def _callable_accepts_keyword(callable_obj, keyword: str) -> bool:
     try:
         signature = inspect.signature(callable_obj)
@@ -9552,7 +9900,7 @@ def _cli_sessions_streaming_freeze_marker():
         return ("streaming",)
 
 
-def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool = True):
+def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool = True, include_aider: bool = True):
     # Use the active WebUI profile's HERMES_HOME to find state.db.
     # The active profile is determined by what the user has selected in the UI
     # (stored in the server's runtime config). This means:
@@ -9575,6 +9923,7 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
 
     db_path = hermes_home / 'state.db'
     projects_dir = _default_claude_code_projects_dir()
+    aider_dir = _default_aider_scan_dir()
     # #4842: while a turn streams, freeze the volatile state.db component of the
     # key so per-message writes don't bust the CLI cache and re-run the heavy
     # CLI/cron projection on every poll (mirrors the route-level #4808 freeze).
@@ -9592,6 +9941,11 @@ def _resolve_cli_sessions_context(source_filter=None, include_claude_code: bool 
         bool(include_claude_code),
         _path_cache_key(projects_dir),
         _path_stat_cache_key(projects_dir),
+        # Aider chat history is appended in place, so the directory mtime is a
+        # conservative-but-cheap invalidator for a newly created transcript.
+        bool(include_aider),
+        _path_cache_key(aider_dir),
+        _path_stat_cache_key(aider_dir),
         _path_stat_cache_key(SESSION_INDEX_FILE),
     )
     return hermes_home, db_path, cli_profile, cache_key
@@ -9739,6 +10093,7 @@ def _load_cli_sessions_uncached(
     webhook_project_limit: int | None | bool = WEBHOOK_PROJECT_CHIP_LIMIT,
     kanban_project_limit: int | None | bool = KANBAN_PROJECT_CHIP_LIMIT,
     include_claude_code: bool = True,
+    include_aider: bool = True,
     _with_completeness: bool = False,
 ) -> list | _CliSessionsLoadResult:
     cli_sessions = []
@@ -9760,6 +10115,15 @@ def _load_cli_sessions_uncached(
             logger.debug("Claude Code session scan failed", exc_info=True)
 
     if source_filter == CLAUDE_CODE_SOURCE:
+        return _result()
+
+    if source_filter in (None, AIDER_SOURCE) and include_aider:
+        try:
+            cli_sessions.extend(get_aider_sessions())
+        except Exception:
+            logger.debug("Aider session scan failed", exc_info=True)
+
+    if source_filter == AIDER_SOURCE:
         return _result()
 
 
@@ -10800,6 +11164,7 @@ def get_cli_sessions(
     *,
     all_profiles: bool = False,
     include_claude_code: bool = True,
+    include_aider: bool = True,
 ) -> list:
     """Read CLI sessions from the agent's SQLite store and return them as
     dicts in a format the WebUI sidebar can render alongside local sessions.
@@ -10830,6 +11195,9 @@ def get_cli_sessions(
             stable_context_cache_key,
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
+            bool(include_aider),
+            _path_cache_key(_default_aider_scan_dir()),
+            _path_stat_cache_key(_default_aider_scan_dir()),
             _path_stat_cache_key(SESSION_INDEX_FILE),
         )
     else:
@@ -10837,19 +11205,29 @@ def get_cli_sessions(
         resolve_supports_include_claude_code = _callable_accepts_include_claude_code(
             _resolve_cli_sessions_context
         )
+        resolve_supports_include_aider = _callable_accepts_include_aider(
+            _resolve_cli_sessions_context
+        )
         if resolve_supports_include_claude_code:
             resolve_kwargs['include_claude_code'] = include_claude_code
+        if resolve_supports_include_aider:
+            resolve_kwargs['include_aider'] = include_aider
         hermes_home, db_path, cli_profile, cache_key = _resolve_cli_sessions_context(
             source_filter,
             **resolve_kwargs,
         )
         if not resolve_supports_include_claude_code:
             cache_key = cache_key + (bool(include_claude_code),)
+        if not resolve_supports_include_aider:
+            cache_key = cache_key + (bool(include_aider),)
     ttl = _cli_sessions_cache_ttl_seconds()
     now = time.monotonic()
 
     def _load_sessions() -> list | _CliSessionsLoadResult:
         loader_supports_include_claude_code = _callable_accepts_include_claude_code(
+            _load_cli_sessions_uncached
+        )
+        loader_supports_include_aider = _callable_accepts_include_aider(
             _load_cli_sessions_uncached
         )
         loader_supports_completeness = _callable_accepts_keyword(
@@ -10881,6 +11259,10 @@ def get_cli_sessions(
                     # Claude Code is global rather than profile-owned. Scan it
                     # once below so profile 0 availability cannot suppress it.
                     load_kwargs['include_claude_code'] = False
+                if loader_supports_include_aider:
+                    # Same for aider: one bounded workspace-root scan, not one
+                    # per profile.
+                    load_kwargs['include_aider'] = False
                 if loader_supports_completeness:
                     load_kwargs['_with_completeness'] = True
                 try:
@@ -10918,6 +11300,15 @@ def get_cli_sessions(
                         "get_cli_sessions() Claude Code scan failed: %s",
                         _claude_err,
                     )
+            if include_aider and source_filter in (None, AIDER_SOURCE):
+                try:
+                    merged.extend(get_aider_sessions())
+                except Exception as _aider_err:
+                    external_complete = False
+                    logger.warning(
+                        "get_cli_sessions() Aider scan failed: %s",
+                        _aider_err,
+                    )
             return _CliSessionsLoadResult(
                 merged,
                 complete=(
@@ -10936,6 +11327,8 @@ def get_cli_sessions(
         load_kwargs: dict = {'source_filter': source_filter}
         if loader_supports_include_claude_code:
             load_kwargs['include_claude_code'] = include_claude_code
+        if loader_supports_include_aider:
+            load_kwargs['include_aider'] = include_aider
         if loader_supports_completeness:
             load_kwargs['_with_completeness'] = True
         return _load_cli_sessions_uncached(
@@ -15174,6 +15567,8 @@ def get_cli_session_messages(sid, *, profile=None) -> list:
     """
     if str(sid or '').startswith(f'{CLAUDE_CODE_SOURCE}_'):
         return get_claude_code_session_messages(sid)
+    if str(sid or '').startswith(f'{AIDER_SOURCE}_'):
+        return get_aider_session_messages(sid)
     return get_state_db_session_messages(sid, stitch_continuations=True, profile=profile)
 
 
