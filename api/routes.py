@@ -24780,6 +24780,7 @@ def _handle_live_models(handler, parsed):
                                         _base_url = str(getattr(_lm_entry, "base_url", "") or "").strip()
                     except ImportError:
                         pass
+                _custom_live_probe_succeeded = False
                 if _base_url and _api_key:
                     try:
                         import urllib.request
@@ -24810,6 +24811,7 @@ def _handle_live_models(handler, parsed):
                         elif isinstance(_body, list):
                             ids = [m.get("id", m) if isinstance(m, dict) else m for m in _body]
 
+                        _custom_live_probe_succeeded = True
                         if ids:
                             logger.debug("Live-fetched %d models from custom provider %s", len(ids), _base_url)
                         else:
@@ -24851,6 +24853,20 @@ def _handle_live_models(handler, parsed):
                                 ids.append(_aid)
                 else:
                     ids = list(_allowlist_ids or _config_ids)
+
+                # A successful same-owner live probe clears the retained
+                # catalog diagnostic for this provider (#8158); fallbacks do not.
+                if _custom_live_probe_succeeded:
+                    try:
+                        from api.config import _clear_cached_models_endpoint_error
+
+                        _clear_cached_models_endpoint_error(provider, ids)
+                    except Exception:
+                        logger.debug(
+                            "Failed to clear cached models_endpoint_error for %s",
+                            provider,
+                            exc_info=True,
+                        )
 
         # ── OpenAI-compat live fetch fallback ──────────────────────────────────
         # When provider_model_ids() is unavailable or returns [] for a provider

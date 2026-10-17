@@ -9215,6 +9215,288 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     return None
 
 
+# ── Retained models_endpoint_error retry (#8158) ────────────────────────────
+# A transient custom-endpoint failure is retained as a group diagnostic so the
+# picker can explain it, but the diagnostic must not inherit the healthy
+# catalog's 24h TTL: warm reads schedule ONE bounded background re-probe per
+# (profile, provider), failures are suppressed for the retry TTL, and a late
+# result is fenced by the catalog generation + source fingerprint it started
+# from. The warm read itself never probes.
+_MODELS_ENDPOINT_ERROR_RETRY_TTL: float = 30.0
+_models_endpoint_error_retry_next: dict[tuple[str, str], float] = {}
+_models_endpoint_error_retry_inflight: set[tuple[str, str]] = set()
+
+
+def _models_endpoint_error_profile() -> str:
+    try:
+        from api.profiles import get_active_profile_name
+
+        return (get_active_profile_name() or "").strip() or "default"
+    except Exception:
+        return "default"
+
+
+def _probe_errored_custom_provider_models(provider_id: str) -> list[dict] | None:
+    """Probe one errored named custom provider's ``/v1/models`` endpoint.
+
+    Returns the advertised ``{id, label}`` rows on success (possibly empty)
+    and ``None`` on any failure, so a still-down endpoint keeps its retained
+    diagnostic.
+    """
+    slug = str(provider_id or "").strip().lower()
+    entry = None
+    for candidate in _custom_provider_entries():
+        if _custom_provider_slug_from_name(candidate.get("name")) == slug:
+            entry = candidate
+            break
+    if entry is None:
+        return None
+    base = str(entry.get("base_url") or "").strip().rstrip("/")
+    api_key = str(entry.get("api_key") or "").strip()
+    if not api_key:
+        key_env = str(entry.get("key_env") or "").strip()
+        if key_env:
+            api_key = _thread_local_env_value(key_env).strip()
+    # Same credential-pool fallback as the rebuild probe: it can supply both
+    # the key and the base_url when the entry itself declares neither.
+    if (not api_key or not base) and slug:
+        try:
+            if _has_explicit_pool_credentials(slug):
+                from agent.credential_pool import load_pool
+
+                _pool = load_pool(_resolve_provider_alias(slug))
+                if _pool:
+                    _entry = _pool.select()
+                    if _entry:
+                        if not api_key:
+                            api_key = getattr(_entry, "runtime_api_key", "") or ""
+                        if not base:
+                            base = str(getattr(_entry, "base_url", "") or "").strip().rstrip("/")
+        except ImportError:
+            pass
+        except Exception:
+            pass
+    if not base:
+        return None
+    endpoint = base + ("/models" if base.endswith("/v1") else "/v1/models")
+    req = urllib.request.Request(endpoint, method="GET")
+    req.add_header("User-Agent", "OpenAI/Python 1.0")
+    if api_key:
+        req.add_header("Authorization", f"Bearer {api_key}")
+    try:
+        with urllib.request.urlopen(
+            req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS
+        ) as response:  # nosec B310
+            data = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        logger.debug("models endpoint-error re-probe failed for %s", slug)
+        return None
+    raw_models: list = []
+    if isinstance(data, dict):
+        if isinstance(data.get("data"), list):
+            raw_models = data["data"]
+        elif isinstance(data.get("models"), list):
+            raw_models = data["models"]
+    elif isinstance(data, list):
+        raw_models = data
+    models: list[dict] = []
+    seen: set[str] = set()
+    for model in raw_models:
+        if isinstance(model, dict):
+            model_id = str(
+                model.get("id", "") or model.get("name", "") or model.get("model", "")
+            ).strip()
+            label = str(
+                model.get("name", "") or model.get("model", "") or model_id
+            ).strip()
+        else:
+            model_id = str(model or "").strip()
+            label = model_id
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        models.append({"id": model_id, "label": label or model_id})
+    return models
+
+
+def _clear_models_endpoint_error_locked(provider_id: str, models) -> bool:
+    """Clear one group's retained error in the published catalog.
+
+    The caller must hold ``_cache_build_cv``. Probed models are merged ahead
+    of the group's existing rows (configured fallbacks stay selectable); the
+    group itself is kept even when the probe advertised no models.
+    """
+    global _available_models_cache
+    if _available_models_cache is None:
+        return False
+    slug = str(provider_id or "").strip().lower()
+    updated = copy.deepcopy(_available_models_cache)
+    target = None
+    for group in updated.get("groups") or []:
+        if (
+            isinstance(group, dict)
+            and str(group.get("provider_id") or "").strip().lower() == slug
+            and group.get("models_endpoint_error")
+        ):
+            target = group
+            break
+    if target is None:
+        return False
+    target.pop("models_endpoint_error", None)
+    active = str(updated.get("active_provider") or "").strip().lower()
+    existing_ids = {
+        str(m.get("id"))
+        for bucket in ("models", "extra_models")
+        for m in (target.get(bucket) or [])
+        if isinstance(m, dict) and m.get("id")
+    }
+    probed: list[dict] = []
+    for model in models or []:
+        if isinstance(model, dict):
+            bare = str(model.get("id") or "").strip()
+            label = str(model.get("label") or bare).strip()
+        else:
+            bare = str(model or "").strip()
+            label = bare
+        if not bare:
+            continue
+        option_id = (
+            bare
+            if (not slug or active == slug or bare.startswith("@"))
+            else f"@{slug}:{bare}"
+        )
+        if option_id in existing_ids:
+            continue
+        existing_ids.add(option_id)
+        probed.append({"id": option_id, "label": label or bare})
+    if probed:
+        target["models"] = probed + list(target.get("models") or [])
+    _available_models_cache = updated
+    _sync_models_cache_provenance()
+    _cache_build_cv.notify_all()
+    return True
+
+
+def _run_models_endpoint_error_retry(key, provider_id, generation, fingerprint, profile):
+    """Worker for one coalesced re-probe; publishes only if still current."""
+    from contextlib import nullcontext as _nullcontext
+
+    scope = _nullcontext()
+    try:
+        from api.profiles import profile_scope_for_detached_worker
+
+        scope = profile_scope_for_detached_worker(
+            profile, "models endpoint-error retry"
+        )
+    except Exception:
+        scope = _nullcontext()
+    models = None
+    identity_current = False
+    try:
+        with scope:
+            models = _probe_errored_custom_provider_models(provider_id)
+            if models is not None:
+                identity_current = _models_build_identity_current(
+                    fingerprint, profile
+                )
+    except Exception:
+        models = None
+    with _cache_build_cv:
+        _models_endpoint_error_retry_inflight.discard(key)
+        if models is None:
+            _models_endpoint_error_retry_next[key] = (
+                time.monotonic() + _MODELS_ENDPOINT_ERROR_RETRY_TTL
+            )
+            return
+        # Discard late results from an obsolete catalog generation or from
+        # sources that changed while the probe was in flight (#8158).
+        if (
+            not identity_current
+            or generation != _models_rebuild_seq
+            or fingerprint is None
+            or _available_models_cache_source_fingerprint != fingerprint
+        ):
+            return
+        if _clear_models_endpoint_error_locked(provider_id, models):
+            _models_endpoint_error_retry_next.pop(key, None)
+
+
+def _maybe_schedule_models_endpoint_error_retries(catalog, *, profile=None) -> None:
+    """Schedule bounded background re-probes for retained endpoint errors.
+
+    Called on warm catalog serves; it only records coalescing state and
+    starts a daemon worker — the probe never runs on the read path.
+    """
+    if not isinstance(catalog, dict):
+        return
+    provider_ids: list[str] = []
+    for group in catalog.get("groups") or []:
+        if not isinstance(group, dict) or not group.get("models_endpoint_error"):
+            continue
+        provider_id = str(group.get("provider_id") or "").strip().lower()
+        if provider_id and provider_id not in provider_ids:
+            provider_ids.append(provider_id)
+    if not provider_ids:
+        return
+    resolved_profile = (
+        (profile or "").strip()
+        if profile is not None
+        else _models_endpoint_error_profile()
+    ) or "default"
+    now = time.monotonic()
+    with _available_models_cache_lock:
+        generation = _models_rebuild_seq
+        fingerprint = copy.deepcopy(_available_models_cache_source_fingerprint)
+        for provider_id in provider_ids:
+            key = (resolved_profile, provider_id)
+            if key in _models_endpoint_error_retry_inflight:
+                continue
+            if _models_endpoint_error_retry_next.get(key, 0.0) > now:
+                continue
+            _models_endpoint_error_retry_inflight.add(key)
+            _models_endpoint_error_retry_next[key] = (
+                now + _MODELS_ENDPOINT_ERROR_RETRY_TTL
+            )
+            try:
+                threading.Thread(
+                    target=_run_models_endpoint_error_retry,
+                    args=(key, provider_id, generation, fingerprint, resolved_profile),
+                    name="models-endpoint-error-retry",
+                    daemon=True,
+                ).start()
+            except Exception:
+                _models_endpoint_error_retry_inflight.discard(key)
+
+
+def _clear_cached_models_endpoint_error(provider_id: str, models) -> bool:
+    """Clear a retained endpoint error after a successful same-owner live probe.
+
+    Used by ``/api/models/live``: the probe already succeeded for this
+    profile/provider, so only the generation/source fences remain — a
+    catalog that was invalidated or re-sourced since cannot be patched.
+    """
+    slug = str(provider_id or "").strip().lower()
+    if not slug:
+        return False
+    profile = _models_endpoint_error_profile()
+    with _cache_build_cv:
+        generation = _models_rebuild_seq
+        fingerprint = copy.deepcopy(_available_models_cache_source_fingerprint)
+    if fingerprint is None:
+        return False
+    if not _models_build_identity_current(fingerprint, profile):
+        return False
+    with _cache_build_cv:
+        if generation != _models_rebuild_seq:
+            return False
+        if _available_models_cache_source_fingerprint != fingerprint:
+            return False
+        cleared = _clear_models_endpoint_error_locked(slug, models)
+        if cleared:
+            _models_endpoint_error_retry_next.pop((profile, slug), None)
+        return cleared
+
+
 def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: str | None = None) -> None:
     """Revoke readers and workers, then remove the durable snapshot atomically.
 
@@ -9233,6 +9515,7 @@ def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: s
             _available_models_live_rebuild_ts = 0.0
             _available_models_cache_source_fingerprint = None
             _sync_models_cache_provenance()
+            _models_endpoint_error_retry_next.clear()
             # Evict credentials before reopening rebuild admission. Otherwise a
             # new generation can persist an old pool with the new fingerprint.
             if provider_id is None:
@@ -11421,6 +11704,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     )
                 )
             ):
+                _maybe_schedule_models_endpoint_error_retries(cached)
                 return cached
             if force_refresh and _LIVE_REBUILD_BUDGET_SECONDS > 0 and _cache_build_in_progress:
                 if stale_disk_groups is not None:
@@ -11443,11 +11727,13 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         cached = _get_fresh_memory_models_cache(now)
         if cached is not None:
             if not force_refresh:
+                _maybe_schedule_models_endpoint_error_retries(cached)
                 return cached
             if (
                 force_refresh_started_at is not None
                 and _available_models_live_rebuild_ts >= force_refresh_started_at
             ):
+                _maybe_schedule_models_endpoint_error_retries(cached)
                 return cached
 
         # A concurrent forced refresh may have started after this caller sampled
@@ -11474,6 +11760,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     cached is not None
                     and _available_models_live_rebuild_ts >= force_refresh_started_at
                 ):
+                    _maybe_schedule_models_endpoint_error_retries(cached)
                     return cached
             if _cache_build_in_progress and _LIVE_REBUILD_BUDGET_SECONDS > 0:
                 if stale_disk_groups is not None:
@@ -11486,6 +11773,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             _available_models_cache_ts = now
             _available_models_cache_source_fingerprint = _models_cache_source_fingerprint()
             _sync_models_cache_provenance()
+            _maybe_schedule_models_endpoint_error_retries(disk_groups)
             return copy.deepcopy(disk_groups)
 
         # ── prefer_cache: NEVER run the live provider rebuild ────────────────
@@ -12067,6 +12355,7 @@ def get_available_models_for_session_visit() -> dict:
             if cached is not None:
                 _mark("memory_cache_hit")
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                _maybe_schedule_models_endpoint_error_retries(cached)
                 return cached
         _mark("memory_cache_miss_loading_disk")
         disk_epoch = _models_rebuild_seq
@@ -12079,6 +12368,7 @@ def get_available_models_for_session_visit() -> dict:
                 if cached is not None:
                     _mark("disk_then_memory_cache_hit")
                     _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                    _maybe_schedule_models_endpoint_error_retries(cached)
                     return cached
                 if disk_cached is not None:
                     _available_models_cache = copy.deepcopy(disk_cached)
@@ -12088,6 +12378,7 @@ def get_available_models_for_session_visit() -> dict:
             if disk_cached is not None:
                 _mark("disk_cache_returned")
                 _maybe_log_slow_stages(_logger, _stagelog, _slow_threshold_ms, "models.session_visit")
+                _maybe_schedule_models_endpoint_error_retries(disk_cached)
                 return copy.deepcopy(disk_cached)
 
     _mark("cache_age_stale_or_missing")
