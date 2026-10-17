@@ -11392,7 +11392,35 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             disk_groups = None
         # If another thread is already building, wait for its result instead
         # of re-entering the cold path (avoids duplicate 10s zai load_pool calls).
+        def _follower_last_known(*, minimal: bool) -> dict:
+            """Best catalog a follower can serve without waiting on the rebuild.
+
+            Prefer the resident cache (when its fingerprint still matches), then
+            disk/stale disk, then a network-free static catalog.
+            """
+            if (
+                _available_models_cache is not None
+                and _is_valid_models_cache(_available_models_cache)
+                and _available_models_cache_source_fingerprint == _models_cache_source_fingerprint()
+            ):
+                return _annotate_fast_tier_model_groups(copy.deepcopy(_available_models_cache))
+            if disk_groups is not None:
+                return copy.deepcopy(disk_groups)
+            if stale_disk_groups is not None:
+                return copy.deepcopy(stale_disk_groups)
+            stale = _load_stale_models_cache_from_disk()
+            if stale is not None:
+                return copy.deepcopy(stale)
+            if minimal:
+                return copy.deepcopy(_minimal_static_models_catalog())
+            return copy.deepcopy(_static_models_catalog_without_live_probes())
+
         if should_wait:
+            # prefer_cache callers must never wait out someone else's rebuild:
+            # the WebUI calls this from the new-chat path with a 30s browser
+            # abort, so a 60s follower wait leaves "New conversation" hanging.
+            if prefer_cache and _cache_build_in_progress:
+                return _follower_last_known(minimal=True)
             wait_timeout = 60.0
             if force_refresh and force_refresh_started_at is not None:
                 if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
@@ -11406,6 +11434,10 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         0.0,
                         _LIVE_REBUILD_BUDGET_SECONDS - (time.monotonic() - force_refresh_started_at),
                     )
+            elif not force_refresh and _LIVE_REBUILD_BUDGET_SECONDS > 0:
+                # A plain follower should not sit the full 60s either: the
+                # rebuild budget already bounds the live work it is waiting on.
+                wait_timeout = _LIVE_REBUILD_BUDGET_SECONDS
             _cache_build_cv.wait_for(
                 lambda: not _cache_build_in_progress,
                 timeout=wait_timeout
@@ -11426,6 +11458,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if stale_disk_groups is not None:
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
+            # A plain follower that timed out on the rebuild budget serves the
+            # best catalog it can without waiting further, instead of falling
+            # through and re-entering the cold path.
+            if (
+                not force_refresh
+                and _LIVE_REBUILD_BUDGET_SECONDS > 0
+                and _cache_build_in_progress
+            ):
+                return _follower_last_known(minimal=False)
 
         # Reload config if changed
         if _cfg_changed:
