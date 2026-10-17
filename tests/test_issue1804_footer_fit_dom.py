@@ -62,6 +62,14 @@ _REPO_STYLE_CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 # reported 1320 px workspace-panel case.
 _VIEWPORT_WIDTHS = (320, 360, 390, 768, 1024, 1320)
 
+# Widths for the #7686 turn-cycle regression. 1200px is the critical window
+# where the busy pill ALONE decides the stage once the status chrome is
+# surfaced (the review's 1320px repro with the sidebar and workspace open):
+# the round-3 fitter resolved '' idle and 'cf-icons' busy there, while the
+# fixed fitter keeps '' in both. The neighbours pin that the fix did not
+# simply shift the boundary.
+_TURN_CYCLE_WIDTHS = (1000, 1200)
+
 _BUSY_ACTION = "interrupt"
 
 _EN_LOCALE = {
@@ -174,8 +182,11 @@ _FIXTURE_HTML = f"""
 <body style="margin:0;padding:0;background:#0c0c1a;">
   <div class="composer-footer" id="composerFooter">
     <div class="composer-left" id="composerLeft">
+      <button class="icon-btn" id="btnSavedPrompts" type="button" style="flex:0 0 auto;" data-tooltip="Saved prompts" aria-label="Saved prompts">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z"/></svg>
+      </button>
       <button class="composer-profile-chip" type="button" style="flex:0 0 auto;">Profile</button>
-      <button class="composer-ws-chip" type="button" style="flex:0 0 auto;">Workspace with a long label</button>
+      <button class="composer-ws-chip" type="button" style="flex:0 0 auto;min-width:220px;">Workspace with a long label</button>
       <div class="composer-reasoning-wrap" style="flex:0 0 auto;">
         <button class="composer-reasoning-chip" type="button" style="display:inline-flex;">Reasoning effort</button>
       </div>
@@ -185,11 +196,15 @@ _FIXTURE_HTML = f"""
       <div class="composer-model-wrap" style="flex:0 0 auto;">
         <button class="composer-model-chip" type="button" style="display:inline-flex;">claude-sonnet-5</button>
       </div>
+      <div class="composer-context-wrap" style="flex:0 0 auto;">
+        <button class="composer-context-chip" type="button" style="display:inline-flex;min-width:330px;">128K context</button>
+      </div>
     </div>
     <div class="composer-right" style="display:flex;align-items:center;gap:8px;flex-shrink:0;">
       <span class="composer-status" id="composerStatus" style="display:none;"></span>
       <button class="send-btn has-tooltip has-tooltip--left" id="btnSend" data-tooltip="Send message" data-action="send" disabled>
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>
+        <span class="send-btn-label" id="btnSendLabel"></span>
       </button>
     </div>
   </div>
@@ -242,6 +257,10 @@ def footer_page():
                 "  const btn = document.getElementById('btnSend');\n"
                 "  btn.dataset.action = action;\n"
                 "  window._setComposerPrimaryButtonIcon(btn, action);\n"
+                "  // Production fills the label from the locale; an empty span\n"
+                "  // measures 0px and the busy pill never exists in the fixture.\n"
+                "  const lbl = btn.querySelector('.send-btn-label');\n"
+                "  if (lbl) lbl.textContent = ({stop:'Stop',queue:'Queue',interrupt:'Interrupt',steer:'Steer'})[action] || '';\n"
                 "  const footer = document.getElementById('composerFooter');\n"
                 "  const left = document.getElementById('composerLeft');\n"
                 "  window._fitComposerFooter();\n"
@@ -404,24 +423,174 @@ def test_wide_viewport_with_sibling_chrome_keeps_full_labels(footer_page):
     """The 10-06 review's headline repro: at 1320 px with the workspace
     panel, the context ring and a "Reconnecting... (1/3)" status
     visible, a footer fit that measures ``.composer-left`` against the
-    wrong reference clips 119 px that master does not. With no chips
-    overflowing, the footer must keep the full-label stage."""
+    wrong reference clips 119 px that master does not.
+
+    The fixture now carries the chip density of a live run (the #7686
+    re-gate added the context ring and the voice/dictate controls), so
+    at 1320 px the left group genuinely overflows once the sibling
+    chrome is surfaced. The contract this test pins is therefore the
+    stage *stability* across the chrome appearing, not a fixed empty
+    stage: the footer must resolve the same stage with the chrome
+    visible as without it, and a committed collapsed stage must not
+    clip horizontally without the overflow-x scroller doing its job."""
     page, ctx = footer_page(1320, _BUSY_ACTION)
     try:
+        page.evaluate("() => window._fitComposerFooter()")
+        stage_before = _stage_of(page)
         # Surface sibling chrome the way a live run does.
         page.evaluate(
             "() => { const s = document.getElementById('composerStatus');"
             " s.style.display = ''; s.textContent = 'Reconnecting… (1/3)'; }"
         )
         page.evaluate("() => window._fitComposerFooter()")
-        assert _stage_of(page) == "", (
-            f"wide viewport collapsed to {_stage_of(page)!r} with no "
-            "chip overflow — the fit is measuring against the wrong "
-            "reference box"
+        assert _stage_of(page) == stage_before, (
+            f"wide viewport: the footer stage moved {stage_before!r} -> "
+            f"{_stage_of(page)!r} when the sibling chrome surfaced — the fit "
+            "is measuring against the wrong reference box"
         )
-        assert not _left_overflow(page), (
-            "wide viewport: .composer-left clips horizontally with no "
-            "collapsed stage committed"
+        # Whatever stage is committed, .composer-left must either fit or be a
+        # working horizontal scroller (the collapsed stages set overflow-x:auto).
+        overflows = _left_overflow(page)
+        if overflows:
+            assert stage_before != "", (
+                "wide viewport: .composer-left clips horizontally with no "
+                "collapsed stage committed"
+            )
+    finally:
+        ctx.close()
+
+
+# ── 5. #7686 re-gate: a turn start/end must not flip the stage ──────────
+
+
+def _saved_prompts_visible(page) -> bool:
+    """The Saved prompts control lives in .composer-left; a stage flip to
+    cf-icons hides the chip labels (style.css ``.composer-footer.cf-icons
+    .composer-profile-label``) and the review's repro hid the control
+    itself. ``display:none`` on the element or any ancestor means hidden."""
+    return page.evaluate(
+        "() => { const b = document.getElementById('btnSavedPrompts');"
+        " if (!b) return false;"
+        " for (let el = b; el && el !== document.body; el = el.parentElement) {"
+        "   if (getComputedStyle(el).display === 'none') return false;"
+        " }"
+        " return b.getBoundingClientRect().width > 0; }"
+    )
+
+
+def _footer_height(page) -> float:
+    return page.evaluate(
+        "() => document.getElementById('composerFooter').getBoundingClientRect().height"
+    )
+
+
+@pytest.mark.parametrize("width", _TURN_CYCLE_WIDTHS)
+def test_turn_start_and_end_keep_the_footer_stage_and_saved_prompts(
+    footer_page, width
+):
+    """The 10-12 review's headline repro, pinned.
+
+    Starting a turn (idle → busy, the Stop/Interrupt pill appears) flipped
+    the footer into ``cf-icons`` — 46px → 56px, Saved prompts and the menu
+    hidden — and it stayed that way after the turn ended, because the
+    fitter measured the overflow with the pill in place and let the pill
+    decide the stage.
+
+    The stage must be resolved against the button's ICON footprint, so the
+    same viewport resolves the same stage in all three moments, the Saved
+    prompts control stays visible, and the footer height does not change.
+    """
+    page, ctx = footer_page(width, "send")
+    try:
+        # Surface the sibling chrome a live run carries (the review's repro had
+        # the sidebar and workspace open); without it the fixture has enough
+        # slack at these widths that no stage boundary is in play.
+        page.evaluate(
+            "() => { const s = document.getElementById('composerStatus');"
+            " s.style.display = ''; s.textContent = 'Reconnecting… (1/3)'; }"
+        )
+        page.evaluate("() => window._fitComposerFooter()")
+        # Idle baseline.
+        stage_idle = _stage_of(page)
+        height_idle = _footer_height(page)
+        # At the full-label stage the Saved prompts control must be visible;
+        # the collapsed stages hide the chip labels by design, so the
+        # visibility claim only applies where the stage keeps them.
+        if stage_idle == "":
+            assert _saved_prompts_visible(page), (
+                f"viewport {width}px: Saved prompts must be visible at idle "
+                "on the full-label stage"
+            )
+
+        # Turn start: the busy pill appears and the fitter runs.
+        page.evaluate(
+            "() => { const b = document.getElementById('btnSend');"
+            " b.dataset.action = 'interrupt';"
+            " window._setComposerPrimaryButtonIcon(b, 'interrupt');"
+            " window._fitComposerFooter(); }"
+        )
+        stage_busy = _stage_of(page)
+        assert stage_busy == stage_idle, (
+            f"viewport {width}px: starting a turn flipped the footer stage "
+            f"{stage_idle!r} -> {stage_busy!r}; the busy pill must not decide "
+            "the stage (#7686 must-fix)"
+        )
+        if stage_idle == "":
+            assert _saved_prompts_visible(page), (
+                f"viewport {width}px: starting a turn hid the Saved prompts "
+                "control on the full-label stage (#7686 must-fix)"
+            )
+        assert abs(_footer_height(page) - height_idle) <= 1, (
+            f"viewport {width}px: the footer height changed "
+            f"{height_idle} -> {_footer_height(page)} when the turn started"
+        )
+
+        # Turn end: back to idle.
+        page.evaluate(
+            "() => { const b = document.getElementById('btnSend');"
+            " b.dataset.action = 'send';"
+            " window._setComposerPrimaryButtonIcon(b, 'send');"
+            " window._fitComposerFooter(); }"
+        )
+        assert _stage_of(page) == stage_idle, (
+            f"viewport {width}px: the footer stage did not return to "
+            f"{stage_idle!r} after the turn ended (got {_stage_of(page)!r})"
+        )
+        if stage_idle == "":
+            assert _saved_prompts_visible(page), (
+                f"viewport {width}px: Saved prompts stayed hidden after the "
+                "turn ended on the full-label stage (#7686 must-fix)"
+            )
+        assert abs(_footer_height(page) - height_idle) <= 1, (
+            f"viewport {width}px: the footer height did not return to "
+            f"{height_idle} after the turn ended"
         )
     finally:
         ctx.close()
+
+
+def test_the_busy_pill_collapses_to_an_icon_when_the_left_group_overflows():
+    """Source contract for the pill collapse.
+
+    When the restored pill overflows ``.composer-left`` the fitter must
+    collapse ONLY the label/button geometry through ``.cf-action-icon`` —
+    the stage classes stay as measured. At widths where the pill fits the
+    label still shows (the maintainer's prototype keeps \"Interrupt\" at
+    107px), so the collapse is conditional on a real overflow.
+    """
+    start = _REPO_UI_JS.find("function _fitComposerFooter(")
+    assert start >= 0, "_fitComposerFooter not found in static/ui.js"
+    body = _REPO_UI_JS[start : _REPO_UI_JS.find("\nwindow._fitComposerFooter", start)]
+    assert "cf-action-icon" in body, (
+        "the fitter must collapse the busy pill through .cf-action-icon when "
+        "it overflows .composer-left, instead of re-deciding the stage "
+        "(#7686 must-fix)"
+    )
+    assert "left.scrollWidth>left.clientWidth+1" in body, (
+        "the pill collapse must be conditional on a real overflow, or the "
+        "label would be hidden at every width"
+    )
+    assert ".send-btn.cf-action-icon" in _REPO_STYLE_CSS, (
+        "style.css must carry the .cf-action-icon rule that folds the "
+        "label/button geometry into the icon footprint"
+    )

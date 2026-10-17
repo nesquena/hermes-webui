@@ -48,30 +48,40 @@ STYLE_CSS = (REPO_ROOT / "static" / "style.css").read_text(encoding="utf-8")
 
 
 def test_the_fitter_pins_the_label_visible_while_it_measures() -> None:
-    """The fitter must measure with the label VISIBLE.
+    """The fitter must pin the label HIDDEN while it measures.
 
-    The 9/24 fix pinned it to ``display:none`` so the measurement saw the
-    idle button width. That is exactly what clips ``.composer-left``: the
-    stage is committed for the small button, then the wide pill is restored.
+    #7686 re-gate (must fix): the round-3 fix pinned the label VISIBLE so
+    the widest busy footprint was reserved — but that let the pill decide
+    the STAGE. At 1320px with the sidebar and workspace open, a pill that
+    would only fit in ``cf-icons`` pushed the whole footer into it: 46px →
+    56px, Saved prompts and the menu hidden, and it stayed that way after
+    the turn ended (the maintainer's 10-12 repro).
+
+    The stage is now resolved against the button's real ICON footprint,
+    with the label hidden for the measurement only; the pill's overflow is
+    absorbed afterwards by collapsing the label/button geometry through
+    ``.cf-action-icon`` (see test_issue1804_footer_fit_dom.py for the
+    behavioural pin). This test guards the source contract.
     """
     start = UI_JS.find("function _fitComposerFooter(")
     assert start >= 0, "_fitComposerFooter not found in static/ui.js"
     body = UI_JS[start : UI_JS.find("\nwindow._fitComposerFooter", start)]
-    # The old, buggy pin must be gone.
-    assert "sendBtnLabel.style.display='none'" not in body, (
-        "the fitter still pins the label to display:none while measuring; "
-        "the stage is then sized for the idle button and the restored pill "
-        "clips .composer-left (#7686 finding 1)"
-    )
     # The new pin must be present.
-    assert "sendBtnLabel.style.display=''" in body, (
-        "the fitter must pin the label VISIBLE while measuring so the widest "
-        "busy footprint is reserved (#7686 finding 1)"
+    assert "sendBtnLabel.style.display='none'" in body, (
+        "the fitter must pin the label HIDDEN while measuring so the stage "
+        "is resolved against the icon footprint and the busy pill cannot "
+        "flip the footer stage (#7686 must-fix)"
     )
     # And it must restore in the finally block, or the pin leaks.
     assert "sendBtnLabel.style.display=prevLabelDisplay" in body, (
         "the label pin is never released — a leaked display value would "
         "delete the busy-mode pill label"
+    )
+    # The pill's overflow must be absorbed without re-deciding the stage.
+    assert "cf-action-icon" in body, (
+        "the fitter must collapse the restored pill through .cf-action-icon "
+        "when it overflows .composer-left, instead of letting it change the "
+        "stage (#7686 must-fix)"
     )
 
 

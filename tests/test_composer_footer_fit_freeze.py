@@ -173,7 +173,16 @@ function makeFooterDom(opts) {
     },
   });
   const label = { style: labelStyle };
+  // The send button carries the stage-collapse class (.cf-action-icon) the
+  // #7686 re-gate fitter toggles on the button itself, so the stub needs a
+  // classList like the real element (and like the footer stub above).
+  const btnClasses = new Set();
   const sendBtn = {
+    classList: {
+      add(c) { btnClasses.add(c); },
+      remove(c) { btnClasses.delete(c); },
+      contains(c) { return btnClasses.has(c); },
+    },
     querySelector(sel) { return sel === '.send-btn-label' ? label : null; },
   };
   const document = {
@@ -509,29 +518,33 @@ def test_harness_detects_unfrozen_probe(outcome):
 
 
 def test_label_pinned_visible_during_probe(outcome):
-    """Every fit pass must leave the busy-mode label VISIBLE while it
-    measures, so the button is at its widest (busy) footprint *before*
-    any class mutation.
+    """Every fit pass must hide the busy-mode label while it measures.
 
-    #7686 finding 1 (must fix): the 9/24 fix pinned the label to
-    ``display:none`` during the measurement, which sized the stage for the
-    34px idle button; restoring the wider Stop/Interrupt pill in the
-    ``finally`` block then shrank ``.composer-left`` (overflow-x:auto,
-    scrollbar hidden) and clipped its chips with no cue. Measuring with the
-    label visible makes ``overflows()`` see the worst case, so the committed
-    stage has room for the pill that is actually about to be painted.
+    #7686 re-gate (must fix): the round-3 fix pinned the label VISIBLE so
+    the widest busy footprint was reserved — but that let the pill decide
+    the STAGE. At 1320px with the sidebar and workspace open, a pill that
+    would only fit in ``cf-icons`` pushed the whole footer into it: 46px →
+    56px, Saved prompts and the menu hidden, and it stayed that way after
+    the turn ended.
+
+    The stage is now resolved against the button's ICON footprint (label
+    hidden), and the pill's overflow is absorbed afterwards by collapsing
+    only the label/button geometry through ``.cf-action-icon`` — so the
+    stage, the Saved prompts control and the footer height are stable
+    across a turn start/end while the label still shows at widths where
+    the pill fits.
     """
     for run in outcome["runs"]:
         writes = run["labelStyleWrites"]
         assert writes, (
             f"{_label(run)}: fit pass never touched the send-btn-label "
-            "display — the busy-mode pill footprint is not being reserved "
-            "during the measurement (#7686 finding 1)."
+            "display — the icon footprint is not being reserved during the "
+            "measurement (#7686 must-fix)."
         )
-        assert writes[0] == 'display=""', (
+        assert writes[0] == 'display="none"', (
             f"{_label(run)}: the first label write must pin the label "
-            f"visible so the widest busy footprint is reserved before any "
-            f"class mutation; got {writes!r}"
+            f"hidden so the stage is resolved against the icon footprint; "
+            f"got {writes!r}"
         )
         # The final write must restore the prior display — for the
         # default prior of '' (empty) the restore is ``display=""``;
@@ -571,10 +584,10 @@ def test_label_restored_on_measurement_exception(outcome):
         f"behind: got {run['labelDisplay']!r}, expected ''"
     )
     writes = run["labelStyleWrites"]
-    assert writes and writes[0] == 'display=""', (
-        f"the label must be pinned visible at the start of the probe "
-        f"even when the measurement will throw, so the busy footprint is "
-        f"reserved: {writes!r}"
+    assert writes and writes[0] == 'display="none"', (
+        f"the label must be pinned hidden at the start of the probe "
+        f"even when the measurement will throw, so the stage is resolved "
+        f"against the icon footprint: {writes!r}"
     )
     assert writes[-1] == 'display=""', (
         f"the label must be restored after the probe even when the "
@@ -633,7 +646,10 @@ def test_width_sweep_idle_matches_busy(outcome):
             ("busy", row["busy"], "inline"),
         ):
             writes = run["labelStyleWrites"]
-            assert writes and writes[0] == 'display=""', (
+            # #7686 re-gate: the pin is now ``display:none`` (the stage is
+            # resolved against the icon footprint), not the round-3
+            # ``display=""`` that let the pill decide the stage.
+            assert writes and writes[0] == 'display="none"', (
                 f"vw={vw} {state}: label pin write missing: {writes!r}"
             )
             assert writes[-1] == f'display="{prev}"', (

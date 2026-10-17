@@ -3310,6 +3310,15 @@
   .composer-footer.cf-burger .send-btn[data-action="interrupt"],
   .composer-footer.cf-burger .send-btn[data-action="steer"]{width:34px;height:34px;border-radius:50%;padding:0;gap:0;}
 
+  /* #7686 re-gate (must fix): the busy-mode pill can overflow .composer-left
+     after the fitter resolved the stage against the icon footprint. Collapse
+     ONLY the label/button geometry here — the stage classes stay as measured,
+     so Saved prompts and the menu remain visible and the footer height does
+     not change when a turn starts or ends. Same footprint as the burger
+     stage's icon button so no layout shift happens between the two. */
+  .send-btn.cf-action-icon{width:34px;height:34px;border-radius:50%;padding:0;gap:0;}
+  .send-btn.cf-action-icon .send-btn-label{display:none;}
+
   /* Show session-toolsets chip ONLY when the composer-footer container is wide
      enough to comfortably accommodate it (workspace+model+reasoning+profile+
      toolsets+context-ring+send all need room to breathe, see #1431). At

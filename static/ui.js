@@ -7279,26 +7279,34 @@ function _fitComposerFooter(){
   // icon-only (idle) button — the footer would otherwise flicker between
   // stages the moment a turn starts (the #4968 chip-label flicker) and
   // clip the mobile config burger under the pill at narrow widths.
+  // #7686 re-gate (must fix): the fitter must not let the busy-mode pill
+  // decide the STAGE. Measuring with the label visible (the previous round's
+  // fix for the idle clipping) resolves a tighter stage whenever the pill
+  // would only fit in cf-icons, so starting a turn flipped the whole footer
+  // into cf-icons — 46px → 56px, Saved prompts and the menu hidden — and it
+  // stayed that way after the turn ended.
+  //
+  // The stage is now resolved against the button's real ICON footprint
+  // (34px desktop / 44px phone, the shape that is always painted), with the
+  // label hidden during the measurement only. Once the stage is committed,
+  // the pill is restored and any overflow it causes is absorbed by
+  // collapsing only the label/button geometry through .cf-action-icon
+  // (see style.css) instead of re-deciding the stage.
+  //
   // Pin the label hidden so the button is at its idle width during the
   // measurement, the same shape as the existing height/visibility
   // freeze: commit nothing to the screen, restore both in `finally`.
   const sendBtn=document.getElementById('btnSend');
   const sendBtnLabel=sendBtn&&sendBtn.querySelector('.send-btn-label');
-  // #7686 finding 1 (must fix): reserve the WIDEST busy footprint during BOTH
-  // idle and busy fitting. The old code hid the label while measuring, so the
-  // stage was sized for the 34px idle button; restoring the wider Stop/Interrupt
-  // pill in `finally` then shrank .composer-left (overflow-x:auto, scrollbar
-  // hidden) and clipped its chips with no cue. Measuring with the label VISIBLE
-  // makes overflows() see the worst case, so the committed stage has room for
-  // the pill that is actually about to be painted.
   const prevLabelDisplay=sendBtnLabel?sendBtnLabel.style.display:'';
   const _btnStyle=sendBtn&&sendBtn.style?sendBtn.style:null;
   const prevBtnWidth=_btnStyle?_btnStyle.width:'';
   const prevBtnMinWidth=_btnStyle?_btnStyle.minWidth:'';
-  if(sendBtnLabel) sendBtnLabel.style.display='';
+  // Hide the label so the measured footprint is the icon's, not the pill's.
+  if(sendBtnLabel) sendBtnLabel.style.display='none';
   if(_btnStyle){
     // width:auto + a min-width that survives the burger stage's width:34px, so
-    // the measured footprint is the pill's own, never the circle's.
+    // the measured footprint is the real icon button, never the bare 16px SVG.
     _btnStyle.width='auto';
     // #7686 [SILENT]: the idle measurement must keep the button's real
     // minimum. `width:auto; min-width:0` measures the bare 16px SVG, so the
@@ -7348,14 +7356,32 @@ function _fitComposerFooter(){
     // task so no intermediate geometry is ever committed to the screen.
     footer.classList.toggle('cf-icons',next.includes('cf-icons'));
     footer.classList.toggle('cf-burger',next.includes('cf-burger'));
-    if(frozenHeight>0){
-      footer.style.height=prevHeight;
-      footer.style.visibility=prevVisibility;
-    }
+    // Restore the label and the button's own width FIRST, while the footer is
+    // still frozen hidden — the pill that is about to be painted must be the
+    // one the overflow probe below sees.
     if(sendBtnLabel) sendBtnLabel.style.display=prevLabelDisplay;
     if(_btnStyle){
       _btnStyle.width=prevBtnWidth;
       _btnStyle.minWidth=prevBtnMinWidth;
+    }
+    // #7686 re-gate (must fix): the stage was resolved against the ICON
+    // footprint, so restoring the busy pill can now overflow .composer-left.
+    // Absorb that by collapsing only the label/button geometry through
+    // .cf-action-icon — the stage classes stay as measured, so Saved prompts
+    // and the menu remain visible and the footer height does not change.
+    // The label still shows at widths where the pill fits (the maintainer's
+    // prototype keeps "Interrupt" at 107px), so the collapse is conditional
+    // on a real overflow, not unconditional.
+    if(sendBtn&&sendBtn.classList){
+      if(left.scrollWidth>left.clientWidth+1) sendBtn.classList.add('cf-action-icon');
+      else sendBtn.classList.remove('cf-action-icon');
+    }
+    // Releasing the frozen box is the LAST write of the pass: the height and
+    // visibility go back together, so no sample between the probe and the
+    // paint ever shows an expanded footer.
+    if(frozenHeight>0){
+      footer.style.height=prevHeight;
+      footer.style.visibility=prevVisibility;
     }
   }
   // Post-restore transition check: fire the same composer menu cleanup used
