@@ -15052,18 +15052,79 @@ def _saved_prompts_path() -> "Path":
 
 def _load_saved_prompts() -> list:
     p = _saved_prompts_path()
-    if not p.exists():
-        return []
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return []
+    # #7644: a torn/corrupt primary must not present as "you have no prompts" —
+    # fall back to the previous known-good generation kept alongside it.
+    for candidate in (p, Path(str(p) + ".bak")):
+        if not candidate.exists():
+            continue
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, list):
+            return data
+    return []
+
+
+class SavedPromptPersistenceError(RuntimeError):
+    """The saved-prompt generation could not be published.
+
+    Raised *before* the live primary is touched when the recovery generation
+    cannot be published, so a route can return an observable error instead of
+    answering 200 over a mutation that never happened. The recovery copy and
+    the primary are two separate publications of two separate files, not one
+    atomic transaction; a failure of either one leaves the previous generation
+    readable as the primary.
+    """
 
 
 def _save_saved_prompts(prompts: list) -> None:
+    from api.paths import _atomic_write_text
+
     p = _saved_prompts_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(json.dumps(prompts, ensure_ascii=False, indent=2), encoding="utf-8")
+    # #7644: serialize the whole payload first, so neither publication below
+    # can start from a payload that fails to encode.
+    payload = json.dumps(prompts, ensure_ascii=False, indent=2)
+    backup = Path(str(p) + ".bak")
+    # A primary resolving onto its own recovery path makes the two generations
+    # one file: unlinking the backup would drop the primary's referent, and the
+    # replacement below would be published through it into the recovery path.
+    # Refuse the topology before anything is mutated.
+    if p.is_symlink() and p.resolve(strict=False) == backup.resolve(strict=False):
+        raise SavedPromptPersistenceError(
+            "saved_prompts.json symlinks onto its own backup; refusing to publish"
+        )
+    # Only a primary that still parses as a prompt list is worth preserving, so
+    # a torn file can never overwrite the one known-good backup generation.
+    try:
+        current = p.read_text(encoding="utf-8")
+        known_good = isinstance(json.loads(current), list)
+    except (OSError, ValueError):
+        current = None
+        known_good = False
+    if known_good:
+        # Publish an independent snapshot of the live generation while the
+        # primary keeps its mode, owner, links and metadata, so the shared
+        # writer's protections still govern the replacement below.
+        try:
+            primary_mode = _stat.S_IMODE(os.stat(p).st_mode)
+            # Publish on a FRESH inode: unlinking first means no alias parked
+            # at the backup path (a symlink or extra hard link to an unrelated
+            # file, or the primary itself) is ever written through, and the
+            # primary's restrictions reach the temp inode before its bytes do —
+            # never a chmod after the fact.
+            backup.unlink(missing_ok=True)
+            _atomic_write_text(backup, current, mode=primary_mode)
+        except OSError as exc:
+            # Preparation failure: the destructive mutation must not run with
+            # no recoverable copy left behind.
+            raise SavedPromptPersistenceError(
+                f"saved-prompt recovery copy could not be published: {exc}"
+            ) from exc
+    # The primary is replaced in place by the shared writer. If this fails, the
+    # previous generation is still the primary and still the backup.
+    _atomic_write_text(p, payload)
 
 
 # In-process cache for the app-shell template. The `/`, `/index.html`, and
@@ -17670,7 +17731,12 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "saved prompts limit reached (max 200)")
         new_prompt = {"id": uuid.uuid4().hex[:12], "label": label or text[:60], "text": text, "created_at": time.time()}
         prompts.append(new_prompt)
-        _save_saved_prompts(prompts)
+        try:
+            _save_saved_prompts(prompts)
+        except SavedPromptPersistenceError as exc:
+            # The recovery copy could not be published, so nothing was written:
+            # say so instead of handing back a prompt that was never stored.
+            return j(handler, {"error": str(exc)}, status=500)
         return j(handler, {"ok": True, "prompt": new_prompt})
 
     if parsed.path == "/api/share/create":
@@ -20876,8 +20942,18 @@ def handle_delete(handler, parsed) -> bool:
         pid = str(body.get("id") or "").strip()
         if not pid:
             return bad(handler, "id is required")
-        prompts = [p for p in _load_saved_prompts() if p.get("id") != pid]
-        _save_saved_prompts(prompts)
+        prompts = _load_saved_prompts()
+        if not any(str(row.get("id") or "") == pid for row in prompts):
+            # Idempotent success, published nowhere: the request helper may
+            # transparently replay a DELETE after a network error, and saving
+            # the unchanged list here would rotate the known-good recovery
+            # copy down to [] — erasing the only recoverable generation with
+            # a repeat of a deletion that already happened.
+            return j(handler, {"ok": True})
+        try:
+            _save_saved_prompts([row for row in prompts if row.get("id") != pid])
+        except SavedPromptPersistenceError as exc:
+            return j(handler, {"error": str(exc)}, status=500)
         return j(handler, {"ok": True})
 
     if parsed.path.startswith("/api/kanban/"):
