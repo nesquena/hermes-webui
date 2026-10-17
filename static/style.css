@@ -2858,8 +2858,17 @@
   .composer-mobile-context-action.ctx-mid .composer-mobile-config-value{color:var(--warning);}
   .composer-mobile-context-action.ctx-high .composer-mobile-config-value{color:var(--error);}
   .composer-mobile-context-action.ctx-high .composer-mobile-context-compress{border-color:var(--error);color:var(--error);}
-  .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;}
+  .composer-right{display:flex;gap:8px;align-items:center;flex-shrink:0;min-width:0;max-width:100%;}
   .composer-status{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px;}
+  /* The row clips long status text (a prefill context label, for instance) and
+     `title` only reaches mouse users. setComposerStatus() marks the row
+     focusable while it carries text, so focusing it — Tab, or a tap on a touch
+     device — reveals the whole value instead of a cut-off fragment.
+     The disclosure must never win space from the Send control, so the cap is
+     measured against the *composer* (cqw-free: the row is a flex item, and
+     `100%` would resolve against its own grown box, not the available width),
+     and long unbroken tokens break instead of expanding the item. */
+  .composer-status:focus{white-space:normal;overflow-wrap:anywhere;word-break:break-word;text-overflow:clip;max-width:min(52ch,100%);}
   /* Context usage indicator */
   .ctx-indicator-wrap{position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;}
   .ctx-indicator{width:34px;height:34px;padding:0;border:none;background:none;color:var(--muted);cursor:pointer;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;transition:opacity .15s,transform .15s;}
@@ -3380,6 +3389,10 @@
     /* icon-only composer chips continue below mobile widths */
     .composer-divider{display:none;}
     .composer-status{flex:0 1 auto;min-width:0;max-width:96px;font-size:10px;text-align:right;}
+    /* On a phone the focused disclosure must share the row with Send, not
+       displace it: the cap is the composer width minus the Send tap target and
+       the row's gaps, and unbroken labels break rather than expand. */
+    .composer-status:focus{max-width:calc(100% - 120px);overflow-wrap:anywhere;word-break:break-word;}
     .send-btn{width:44px;height:44px;}
     .ctx-indicator-wrap{display:none!important;}
     .ctx-indicator{width:44px;height:44px;}
