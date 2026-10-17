@@ -37,7 +37,7 @@ from api.config import (
     _PROVIDER_MODELS,
     _coerce_provider_cost_budget,
     _configured_model_ids,
-    _custom_provider_slug_from_name,
+    _custom_provider_slug_for_entry,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
@@ -2920,7 +2920,7 @@ def get_providers() -> dict[str, Any]:
             if not isinstance(cp, dict) or not cp.get("name"):
                 continue
             cp_name = str(cp["name"]).strip()
-            cp_id = _custom_provider_slug_from_name(cp_name)
+            cp_id = _custom_provider_slug_for_entry(cp)
             if not cp_id:
                 logger.warning(
                     "Custom provider entry %r produced empty slug; skipping",
