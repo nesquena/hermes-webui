@@ -211,14 +211,59 @@ function _isWebuiDispatchableAgentCommand(cmd){
   return String(cmd&&cmd.category||'').trim()==='Plugin';
 }
 
+// '-' and '_' are equivalent for slash-slug comparison only — the agent-side
+// resolver documents `_` ≡ `-` for bundle/skill command keys (Telegram
+// rewrites hyphens), so a user typing the underscore spelling must still find
+// and resolve the canonical hyphenated command (#8143).
+// Deliberately NOT the full _skillCommandSlug() here: that helper strips
+// trailing separators ('knowledge_' -> 'knowledge') and folds spaces and
+// punctuation, which would blur prefix boundaries and overmatch neighbouring
+// slugs like 'knowledgebase'.
+function _slashCommandSlugVariants(q){
+  const s=String(q||'');
+  const variants=[s];
+  const underscored=s.replace(/-/g,'_');
+  if(underscored!==s)variants.push(underscored);
+  const hyphenated=s.replace(/_/g,'-');
+  if(hyphenated!==s)variants.push(hyphenated);
+  return variants;
+}
+function _slashCommandMatchesPrefix(name,prefix){
+  const q=String(prefix||'').toLowerCase();
+  if(!q)return true;
+  const n=String(name||'').toLowerCase();
+  return _slashCommandSlugVariants(q).some(v=>n.startsWith(v));
+}
+// Skill rows are substring-matched, not prefix-matched, so the name half of
+// that comparison needs its own alias-aware form.
+function _slashCommandNameIncludes(name,q){
+  const n=String(name||'').toLowerCase();
+  return _slashCommandSlugVariants(q).some(v=>n.includes(v));
+}
+// With the `_` ≡ `-` alias active, a typed prefix can match BOTH spellings of
+// a command registered twice (e.g. plugin-review and plugin_review). Row zero
+// is what an Enter dispatches, so the literal as-typed match must rank ahead
+// of the alias-only match — registry order alone would let /plugin_review
+// dispatch /plugin-review (or vice versa once registration order flips).
+// Stable sort keeps original order within each rank.
+function _rankLiteralPrefixMatchesFirst(matches,q){
+  const needle=String(q||'').toLowerCase();
+  if(!needle||matches.length<2)return matches;
+  return matches.slice().sort((a,b)=>{
+    const an=String(a&&a.name||'').toLowerCase();
+    const bn=String(b&&b.name||'').toLowerCase();
+    return (an.startsWith(needle)?0:1)-(bn.startsWith(needle)?0:1);
+  });
+}
+
 function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
-  const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
+  const matches=COMMANDS.filter(c=>_slashCommandMatchesPrefix(c.name,q)).map(c=>({...c,source:'builtin'}));
   const seen=new Set(matches.map(c=>c.name));
   const reserved=_getReservedSlashCommandSlugs();
   const bundleSlugs=new Set(_bundleCommandCache.map(bundle=>bundle.name));
   for(const [name, spec] of Object.entries(SLASH_SUBARG_SOURCES)){
-    if(!name.startsWith(q)||seen.has(name))continue;
+    if(!_slashCommandMatchesPrefix(name,q)||seen.has(name))continue;
     matches.push({
       name,
       desc:spec.desc,
@@ -227,7 +272,7 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
-  if('pet'.startsWith(q)&&!seen.has('pet')){
+  if(_slashCommandMatchesPrefix('pet',q)&&!seen.has('pet')){
     const petMeta=Array.isArray(_agentCommandCache)
       ? _agentCommandCache.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()==='pet')
       : null;
@@ -241,7 +286,7 @@ function getMatchingCommands(prefix){
   // Include agent/plugin commands from /api/commands metadata
   for(const cmd of (_agentCommandCache||[])){
     const name=String(cmd&&cmd.name||'').toLowerCase();
-    if(!name.startsWith(q)||seen.has(name))continue;
+    if(!_slashCommandMatchesPrefix(name,q)||seen.has(name))continue;
     if(cmd.cli_only&&name!=='pet')continue;
     // #6951: only announce commands send() actually dispatches -- anything
     // else would silently fall through to the normal chat path as plain text.
@@ -257,7 +302,7 @@ function getMatchingCommands(prefix){
   }
   if(_agentCommandCacheReady){
     for(const bundle of _bundleCommandCache){
-      if(!bundle.name.startsWith(q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
+      if(!_slashCommandMatchesPrefix(bundle.name,q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
       matches.push(bundle);
       seen.add(bundle.name);
     }
@@ -265,15 +310,15 @@ function getMatchingCommands(prefix){
   // A same-slug bundle owns dispatch. Hold plain skills until the independent
   // bundle metadata request settles so a slow bundle response cannot briefly
   // expose a selectable, shadowed skill.
-  if(!_bundleCommandCacheReady)return matches;
+  if(!_bundleCommandCacheReady)return _rankLiteralPrefixMatchesFirst(matches,q);
   for(const skill of _skillCommandCache){
     const name=String(skill&&skill.name||'').toLowerCase();
     const description=String(skill&&skill.desc||'').toLowerCase();
-    if((!name.includes(q)&&!description.includes(q))||seen.has(name)||reserved.has(name)||bundleSlugs.has(name))continue;
+    if((!_slashCommandNameIncludes(name,q)&&!description.includes(q))||seen.has(name)||reserved.has(name)||bundleSlugs.has(name))continue;
     matches.push(skill);
     seen.add(name);
   }
-  return matches;
+  return _rankLiteralPrefixMatchesFirst(matches,q);
 }
 
 let _forcedSkillDirectivePending=null;
@@ -2327,7 +2372,16 @@ async function getBundleCommandMetadata(name){
   const needle=String(name||'').trim().toLowerCase();
   if(!needle) return null;
   const bundles=await loadBundleCommands();
-  return bundles.find(bundle=>String(bundle&&bundle.name||'').toLowerCase()===needle)||null;
+  // Same `_` ≡ `-` treatment the autocomplete matcher applies: a user typing
+  // the underscore spelling must still resolve the canonical hyphenated
+  // bundle. Without this the literal `===` compare returned null and the send
+  // path posted `/knowledge_loop do X` as plain chat instead of dispatching it
+  // (#8143, #8203 round 2).
+  const needles=_slashCommandSlugVariants(needle);
+  return bundles.find(bundle=>{
+    const n=String(bundle&&bundle.name||'').toLowerCase();
+    return needles.some(v=>n===v);
+  })||null;
 }
 // The composer text the user last closed the list on, by picking a command or pressing
 // Escape. A refresh that was not caused by typing (a slash-command loader landing late,
