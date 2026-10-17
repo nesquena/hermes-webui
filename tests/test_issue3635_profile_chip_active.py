@@ -48,14 +48,15 @@ class TestIssue3635ProfileChipActive:
         """The session-present chip-label update must read S.activeProfile."""
         body = _sync_topbar_body(_ui_js())
         # There are two profileChipLabel updates: the !S.session early-return
-        # block and the session-present block. Both must key on S.activeProfile.
+        # block and the session-present block. Both must key on S.activeProfile
+        # — directly, or through profileChipDisplayLabel() which reads it (#8055).
         updates = re.findall(
             r"profileChipLabel'\);\s*\n\s*if\([^)]*\)\s*[^.]*\.textContent=([^;]+);",
             body,
         )
         assert updates, "no profileChipLabel textContent assignment found in syncTopbar"
         for expr in updates:
-            assert "S.activeProfile" in expr, (
+            assert "S.activeProfile" in expr or "profileChipDisplayLabel()" in expr, (
                 "profile chip label must read S.activeProfile, got: " + expr.strip()
             )
 
@@ -81,10 +82,14 @@ class TestIssue3635ProfileChipActive:
 
         Before the fix the early-return (no session) branch read S.activeProfile
         while the session-present branch read S.session.profile — the
-        inconsistency was the bug. They must now be identical.
+        inconsistency was the bug. They must now be identical (both go through
+        the same profileChipDisplayLabel() helper, #8055).
         """
         body = _sync_topbar_body(_ui_js())
-        setters = re.findall(r"\.textContent=(S\.activeProfile\|\|'default')", body)
+        setters = re.findall(
+            r"\.textContent=(S\.activeProfile\|\|'default'|profileChipDisplayLabel\(\))",
+            body,
+        )
         assert len(setters) >= 2, (
             "expected both syncTopbar chip-label setters to read "
             "S.activeProfile||'default'; found: " + str(setters)
@@ -125,11 +130,14 @@ class TestProfileSwitcherSourceOfTruthInvariant:
 
     def test_chip_keys_on_active_profile(self):
         body = _sync_topbar_body(_ui_js())
-        # Every profileChipLabel.textContent assignment must read S.activeProfile.
+        # Every profileChipLabel.textContent assignment must read S.activeProfile
+        # — directly or via profileChipDisplayLabel(), which reads it (#8055).
         assignments = re.findall(r"profileChipLabel'\);[\s\S]{0,120}?\.textContent=([^;]+);", body)
         assert assignments, "no profileChipLabel assignment found in syncTopbar()"
         for expr in assignments:
-            assert "S.activeProfile" in expr and "S.session.profile" not in expr, (
+            assert (
+                "S.activeProfile" in expr or "profileChipDisplayLabel()" in expr
+            ) and "S.session.profile" not in expr, (
                 "profile chip (switcher trigger) must resolve from S.activeProfile, "
                 "not the loaded session's profile: " + expr.strip()
             )
