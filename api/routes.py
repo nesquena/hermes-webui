@@ -18108,6 +18108,61 @@ def handle_post(handler, parsed) -> bool:
                 p.relative_to(SESSION_DIR.resolve())
             except Exception:
                 return bad(handler, "Invalid session_id", 400)
+            # Evict outside the mutation lock: lifecycle commit may perform
+            # provider I/O and must not hold a per-session Session lock. It runs
+            # before the DB delete because the lifecycle commit writes state.db
+            # and would otherwise recreate the session being deleted.
+            from api.config import _evict_session_agent
+            _evict_session_agent(sid)
+            # Delete state.db rows BEFORE any user-visible file. A refusal (live
+            # gateway work, unfenceable ledger) or a failed commit must leave the
+            # whole session intact instead of stranding an unrecoverable
+            # half-delete: the sidecar, index entry, backups and tombstone are
+            # not restored by the DB rollback.
+            state_db_cleanup_failed = False
+            if not is_messaging_session:
+                try:
+                    from api.models import SessionDeleteRefused, delete_cli_session
+
+                    state_db_cleanup_failed = not delete_cli_session(sid)
+                except SessionDeleteRefused as exc:
+                    return j(
+                        handler,
+                        {"ok": False, "error": exc.code, "action": "session_delete"},
+                        status=409,
+                    )
+                except Exception:
+                    state_db_cleanup_failed = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
+                if state_db_cleanup_failed:
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "error": "state_db_cleanup_failed",
+                            "action": "session_delete",
+                        },
+                        status=500,
+                    )
+            # Runtime cleanup only after the delete is durable: closing the
+            # terminal of a refused delete would kill the very work that made
+            # the Agent refuse it.
+            # Prune the completion-dedup entry too. The reaper sweeps it once the
+            # completion is delivered (drained from PENDING); a session deleted
+            # while a completion is still pending would otherwise keep its entry.
+            try:
+                from api.background_process import forget_bg_task_completion_dedup
+
+                forget_bg_task_completion_dedup(sid)
+            except Exception:
+                logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
+            try:
+                from api.terminal import close_terminal
+                close_terminal(sid)
+            except Exception:
+                logger.debug("Failed to close workspace terminal for deleted session %s", sid)
+            with LOCK:
+                SESSIONS.pop(sid, None)
             sidecar_deleted = False
             with LOCK:
                 SESSIONS.pop(sid, None)
@@ -18137,10 +18192,6 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
-        # Evict outside the mutation lock: lifecycle commit may perform provider
-        # I/O and must not hold a per-session Session lock.
-        from api.config import _evict_session_agent
-        _evict_session_agent(sid)
         try:
             from api.upload import _session_attachment_dir
 
@@ -18166,31 +18217,6 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
-        # Prune the completion-dedup entry too. The reaper sweeps it once the
-        # completion is delivered (drained from PENDING); a session deleted
-        # while a completion is still pending would otherwise keep its entry.
-        try:
-            from api.background_process import forget_bg_task_completion_dedup
-
-            forget_bg_task_completion_dedup(sid)
-        except Exception:
-            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
-        try:
-            from api.terminal import close_terminal
-            close_terminal(sid)
-        except Exception:
-            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
         response = {
             "state_db_cleanup_failed": state_db_cleanup_failed,

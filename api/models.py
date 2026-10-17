@@ -15322,6 +15322,57 @@ def _cleanup_manifest_thread_lock(hermes_home):
         return lock
 
 
+class SessionDeleteRefused(Exception):
+    """The delete would destroy live gateway work, or its ledger cannot be fenced.
+
+    ``code`` is the bounded wire code the API returns: ``session_busy`` /
+    ``unknown_execution`` when the Agent's retirement helper refuses, and
+    ``runtime_ledger_unavailable`` when the helper (or the schema it needs) is
+    missing. Callers must not treat a refusal as an operational failure.
+    """
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+_LEDGER_TABLES = frozenset(
+    {
+        "session_admissions",
+        "worker_executions",
+        "worker_receipts",
+        "state_meta",
+        "gateway_routing",
+    }
+)
+
+
+def _retire_gateway_runtime_ledger(conn, session_ids, tables):
+    """Retire gateway runtime rows with the Agent's own deletion fence.
+
+    Terminal receipts survive as exact-retry evidence; live or unknown work
+    refuses the delete instead of being erased. A schema without the ledger
+    tables has nothing to retire. A partial ledger schema fails closed: deleting
+    only some of the ledger would leave the Agent's guards unsatisfied.
+    """
+    if not tables & {"session_admissions", "worker_executions"}:
+        return
+    if not _LEDGER_TABLES.issubset(tables):
+        raise SessionDeleteRefused("runtime_ledger_unavailable")
+    try:
+        from hermes_state_mutation_retirement import retire_sessions
+    except Exception as exc:
+        raise SessionDeleteRefused("runtime_ledger_unavailable") from exc
+    try:
+        retire_sessions(conn, session_ids)
+    except Exception as exc:
+        # RuntimeStoreError carries the Agent's bounded reason code.
+        reason = getattr(exc, "reason", None)
+        if reason in ("session_busy", "unknown_execution"):
+            raise SessionDeleteRefused(reason) from exc
+        raise
+
+
 def delete_cli_session(sid) -> bool:
     """Delete a CLI session while serializing manifest and DB cleanup."""
     try:
@@ -15334,6 +15385,8 @@ def delete_cli_session(sid) -> bool:
         with _cleanup_manifest_thread_lock(hermes_home):
             with _cleanup_manifest_process_lock(hermes_home):
                 return _delete_cli_session_locked(sid, hermes_home)
+    except SessionDeleteRefused:
+        raise
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
@@ -15363,7 +15416,11 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
 
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
-        return False
+        # No state.db means no DB rows to retire: a WebUI-only session lives
+        # entirely in its sidecars. It is only an error when a retry manifest
+        # still needs the DB to prove a session dead — that case already failed
+        # closed above, and its artifacts must stay.
+        return stale_cleanup_complete
 
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
@@ -15542,6 +15599,24 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
             delegate_ids = sorted(found - {sid})
             all_removed_ids = [sid, *delegate_ids]
             placeholders = ",".join("?" * len(all_removed_ids))
+
+            # Gateway runtime history (session_admissions / worker_executions /
+            # worker_receipts) is ON DELETE RESTRICT and a new-schema trigger
+            # refuses a bare session delete while those rows exist. Retire it
+            # through the Agent's own fence so terminal receipts survive as
+            # retry evidence and live work refuses the delete instead of being
+            # erased.
+            ledger_tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            try:
+                _retire_gateway_runtime_ledger(conn, all_removed_ids, ledger_tables)
+            except SessionDeleteRefused:
+                conn.rollback()
+                raise
 
             # Delete delegate children first (messages, then orphan their
             # children, then the rows themselves).
@@ -15740,6 +15815,8 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                     mp.unlink(missing_ok=True)
 
             return stale_cleanup_complete and not artifact_cleanup_failed
+    except SessionDeleteRefused:
+        raise
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
