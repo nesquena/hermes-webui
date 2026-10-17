@@ -586,3 +586,30 @@ def test_list_commands_degrades_when_agent_missing(monkeypatch):
     # the stubbed-None module, raising ImportError, taking the fallback path.
     from api.commands import list_commands
     assert list_commands() == []
+
+
+def test_commands_exec_profile_gate_matches_master(monkeypatch):
+    """Only the generic POST session guard checks session_id: one check per request, same as master."""
+    import api.commands as commands
+    from api import routes
+    import api.loops as loops
+
+    class _H:
+        def __init__(self, raw):
+            self.rfile, self.wfile = io.BytesIO(raw), self
+            self.headers, self.request, self.status, self.body = {"Content-Length": str(len(raw))}, None, None, bytearray()
+        def send_response(self, s): self.status = s
+        def send_header(self, *a): pass
+        def end_headers(self): pass
+        def write(self, d): self.body.extend(d)
+
+    checked = []
+    monkeypatch.setattr(routes, "_session_id_visible_to_request_profile",
+                        lambda h, sid, **kw: checked.append(sid) or sid != "foreign" or (h.send_response(409), False)[1])
+    monkeypatch.setattr(commands, "execute_agent_command", lambda c: "credits ok")
+    monkeypatch.setattr(loops, "run_loop_command", lambda *a, **kw: "loop ran")
+    for cmd, sid, want in (("/credits", "mine", 200), ("/loop 5m x", "mine", 200), ("/loop 5m x", "foreign", 409)):
+        checked.clear()
+        h = _H(json.dumps({"command": cmd, "session_id": sid}).encode())
+        routes.handle_post(h, SimpleNamespace(path="/api/commands/exec", query=""))
+        assert h.status == want and checked.count(sid) == 1, (cmd, sid, h.status, checked)
