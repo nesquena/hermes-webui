@@ -31,6 +31,7 @@ let _cronOtherProfileCount = 0;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
 let _workspaceMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _workspacePreFormDetail = null;
+let _workspaceUiGen = 0;
 let _currentProfileDetail = null; // full profile object
 let _profileMode = 'empty'; // 'empty' | 'read' | 'create'
 let _profilePreFormDetail = null;
@@ -6395,6 +6396,12 @@ function renderWorkspacesPanel(workspaces){
     const row=document.createElement('div');
     row.className='ws-row';
     row.dataset.path = w.path;
+    // Explicit target identity (#5763 round 3): two picker rows can share a
+    // path spelling (a remote workspace and a native Hermes Project at the
+    // identical path). Actions must carry the row's kind/project_id, never
+    // select by path alone.
+    row.dataset.workspaceKind = w.workspace_kind || '';
+    row.dataset.projectId = w.project_id || '';
     row.draggable=true;
     const isActive = w.path === activePath;
     const activeBadge = isActive ? `<span class="detail-badge active" style="margin-left:6px;font-size:9px;padding:1px 6px">${esc(t('profile_active'))}</span>` : '';
@@ -6406,15 +6413,23 @@ function renderWorkspacesPanel(workspaces){
       </div>`;
     // Click on info area only — not on drag handle
     const info=row.querySelector('.ws-row-info');
-    if(info) info.onclick = (e) => { e.stopPropagation(); openWorkspaceDetail(w.path, row); };
-    if (_currentWorkspaceDetail && _currentWorkspaceDetail.path === w.path) row.classList.add('active');
+    if(info) info.onclick = (e) => { e.stopPropagation(); openWorkspaceDetail(w, row); };
+    // Highlight by IDENTITY, not object reference (greptile P2): reorder/
+    // rename responses are freshly-serialized dicts, so reference equality
+    // loses the highlight after any refresh; and a path-only match would
+    // highlight the wrong row when a remote row and a native mirror share
+    // one spelling (round 3 identity triple, same as the detail refresh).
+    const _cd = _currentWorkspaceDetail;
+    if (_cd && (_cd === w || (w.path === _cd.path
+         && (w.project_id||'') === (_cd.project_id||'')
+         && (w.workspace_kind||'') === (_cd.workspace_kind||'')))) row.classList.add('active');
 
     // ── Drag-and-drop reorder ──
     row.addEventListener('dragstart', (e) => {
       // Only allow drag from the grip handle or the row itself
       row.classList.add('dragging');
       e.dataTransfer.effectAllowed='move';
-      e.dataTransfer.setData('text/plain', w.path);
+      e.dataTransfer.setData('text/plain', JSON.stringify({path:w.path, workspace_kind:w.workspace_kind||'', project_id:w.project_id||''}));
       // Required for Firefox drag ghost
       if(e.dataTransfer.setDragImage) e.dataTransfer.setDragImage(row, 0, 0);
     });
@@ -6435,20 +6450,34 @@ function renderWorkspacesPanel(workspaces){
     row.addEventListener('drop', async (e) => {
       e.preventDefault();
       row.classList.remove('drag-over');
-      const fromPath = e.dataTransfer.getData('text/plain');
-      const toPath = w.path;
-      if(fromPath === toPath) return; // Same item, no-op
-      // Compute new order
-      const currentPaths = workspaces.map(ws => ws.path);
-      const fromIdx = currentPaths.indexOf(fromPath);
-      const toIdx = currentPaths.indexOf(toPath);
+      let fromId;
+      try {
+        const parsed = JSON.parse(e.dataTransfer.getData('text/plain'));
+        // Deep-audit O3: any foreign text that PARSES to a primitive (the
+        // literal 'null', a number, a bare string) must not crash on
+        // .path — only a {path: string} object is a workspace identity.
+        fromId = (parsed && typeof parsed === 'object' && typeof parsed.path === 'string')
+          ? parsed : null;
+      } catch(_) {
+        const raw = e.dataTransfer.getData('text/plain');
+        fromId = raw ? {path: raw} : null;
+      }
+      if (!fromId) return;
+      const toId = {path: w.path, workspace_kind: w.workspace_kind||'', project_id: w.project_id||''};
+      if(fromId.path === toId.path && (fromId.project_id||'') === (toId.project_id||'') && (fromId.workspace_kind||'') === (toId.workspace_kind||'')) return; // Same item, no-op
+      // Compute new order (identity objects: same-spelling remote/native
+      // rows stay distinguishable — #5763 round 3)
+      const currentIds = workspaces.map(ws => ({path: ws.path, workspace_kind: ws.workspace_kind||'', project_id: ws.project_id||''}));
+      const sameId = (a,b) => a.path === b.path && (a.project_id||'') === (b.project_id||'') && (a.workspace_kind||'') === (b.workspace_kind||'');
+      const fromIdx = currentIds.findIndex(x => sameId(x, fromId));
+      const toIdx = currentIds.findIndex(x => sameId(x, toId));
       if(fromIdx < 0 || toIdx < 0) return;
-      currentPaths.splice(fromIdx, 1);
-      currentPaths.splice(toIdx, 0, fromPath);
+      currentIds.splice(fromIdx, 1);
+      currentIds.splice(toIdx, 0, fromId);
       try {
         const res = await api('/api/workspaces/reorder', {
           method: 'POST',
-          body: JSON.stringify({ paths: currentPaths })
+          body: JSON.stringify({ paths: currentIds })
         });
         if(res && res.ok){
           renderWorkspacesPanel(res.workspaces);
@@ -6468,7 +6497,10 @@ function renderWorkspacesPanel(workspaces){
   panel.appendChild(hint);
   // Re-render detail if we have one cached and we're not in a form
   if (_currentWorkspaceDetail && _workspaceMode !== 'create' && _workspaceMode !== 'edit') {
-    const refreshed = workspaces.find(w => w.path === _currentWorkspaceDetail.path);
+    const refreshed = workspaces.find(w => w === _currentWorkspaceDetail)
+      || workspaces.find(w => w.path === _currentWorkspaceDetail.path
+           && (w.project_id||'') === (_currentWorkspaceDetail.project_id||'')
+           && (w.workspace_kind||'') === (_currentWorkspaceDetail.workspace_kind||''));
     if (refreshed) _renderWorkspaceDetail(refreshed);
     else _clearWorkspaceDetail();
   }
@@ -6536,12 +6568,38 @@ function _setWorkspaceHeaderButtons(mode, ws){
   }
 }
 
-function openWorkspaceDetail(path, el){
+function openWorkspaceDetail(pathOrWs, el){
   if (!_workspaceList) return;
-  const ws = _workspaceList.find(w => w.path === path);
+  // Accept the picker row object (preferred — disambiguates same-spelling
+  // remote/native rows) or a legacy path string.
+  let ws = pathOrWs;
+  if (typeof pathOrWs === 'string') {
+    ws = _workspaceList.find(w => w.path === pathOrWs);
+  } else if (pathOrWs && (typeof pathOrWs === 'object')) {
+    ws = _workspaceList.find(w => w === pathOrWs)
+      || _workspaceList.find(w => (w.path === pathOrWs.path || !!pathOrWs.project_id)
+           && (w.project_id||'') === (pathOrWs.project_id||'')
+           && (w.workspace_kind||'') === (pathOrWs.workspace_kind||''));
+    // A native row's project_id is its authoritative identity: after a
+    // reorder the visible row can carry the symlink alias while the
+    // refreshed cache holds the resolved path (same id+kind, different
+    // spelling). Rows without a project_id still require exact path
+    // equality, and a stale id matches nothing because the id equality
+    // above still has to hold.
+  }
   if (!ws) return;
+  _workspaceUiGen++;
   document.querySelectorAll('.ws-row').forEach(e => e.classList.remove('active'));
-  const target = el || document.querySelector(`.ws-row[data-path="${CSS.escape(path)}"]`);
+  // Match by the full identity triple via the row datasets (greptile P2):
+  // a path-only selector highlights the wrong sibling when a remote row
+  // and a native mirror share one spelling.
+  let target = el;
+  if (!target) {
+    target = Array.from(document.querySelectorAll('.ws-row')).find(r =>
+      r.dataset.path === ws.path
+      && (r.dataset.projectId||'') === (ws.project_id||'')
+      && (r.dataset.workspaceKind||'') === (ws.workspace_kind||''));
+  }
   if (target) target.classList.add('active');
   _workspacePreFormDetail = null;
   _renderWorkspaceDetail(ws);
@@ -6549,6 +6607,7 @@ function openWorkspaceDetail(path, el){
 }
 
 function _clearWorkspaceDetail(){
+  _workspaceUiGen++;
   _currentWorkspaceDetail = null;
   _workspaceMode = 'empty';
   const title = $('workspaceDetailTitle');
@@ -6562,20 +6621,42 @@ function _clearWorkspaceDetail(){
 
 async function activateCurrentWorkspace(){
   if (!_currentWorkspaceDetail) return;
+  // Round 11 sibling (omp review): the switch request can outlive the detail
+  // view; a late continuation must not re-render the old detail over a form
+  // the user opened meanwhile (same _workspaceUiGen guard as saveWorkspaceForm).
+  const gen = _workspaceUiGen;
   await switchToWorkspace(_currentWorkspaceDetail.path, _currentWorkspaceDetail.name);
+  if (gen !== _workspaceUiGen) return;
   // Re-render detail after activation so the active badge updates
   _renderWorkspaceDetail(_currentWorkspaceDetail);
 }
 
 async function deleteCurrentWorkspace(){
   if (!_currentWorkspaceDetail) return;
-  const path = _currentWorkspaceDetail.path;
+  // Round 7: capture the COMPLETE target identity at invocation — the detail
+  // may change while the confirm dialog / request is pending, and the
+  // request must still name the row the user confirmed.
+  const target = {path: _currentWorkspaceDetail.path,
+                  workspace_kind: _currentWorkspaceDetail.workspace_kind || '',
+                  project_id: _currentWorkspaceDetail.project_id || ''};
+  const path = target.path;
   const _ok = await showConfirmDialog({title:t('workspace_remove_confirm_title'),message:t('workspace_remove_confirm_message',path),confirmLabel:t('remove'),danger:true,focusCancel:true});
   if(!_ok) return;
   try{
-    const data=await api('/api/workspaces/remove',{method:'POST',body:JSON.stringify({path})});
+    const body={path};
+    if(target.workspace_kind) body.workspace_kind=target.workspace_kind;
+    if(target.project_id) body.project_id=target.project_id;
+    // Round 11 sibling (omp review): a late remove response must not overwrite
+    // _workspaceList with its pre-interruption snapshot (a newer list would
+    // vanish) nor re-render over a form the user opened meanwhile.
+    const gen = _workspaceUiGen;
+    const data=await api('/api/workspaces/remove',{method:'POST',body:JSON.stringify(body)});
+    if (gen !== _workspaceUiGen) return;
     _workspaceList=data.workspaces;
-    _clearWorkspaceDetail();
+    const cd=_currentWorkspaceDetail;
+    // Only clear the detail if it still shows the removed row.
+    if(cd && cd.path===target.path && (cd.workspace_kind||'')===target.workspace_kind
+       && (cd.project_id||'')===target.project_id) _clearWorkspaceDetail();
     renderWorkspacesPanel(data.workspaces);
     showToast(t('workspace_removed'));
   }catch(e){setStatus(t('remove_failed')+e.message);}
@@ -6583,6 +6664,7 @@ async function deleteCurrentWorkspace(){
 
 function openWorkspaceCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'workspaces') switchPanel('workspaces');
+  _workspaceUiGen++;
   _workspacePreFormDetail = _currentWorkspaceDetail ? { ..._currentWorkspaceDetail } : null;
   _workspaceMode = 'create';
   _renderWorkspaceForm({ name:'', path:'', isEdit:false });
@@ -6594,6 +6676,7 @@ function openWorkspaceCreate(){
 
 function editCurrentWorkspace(){
   if (!_currentWorkspaceDetail) return;
+  _workspaceUiGen++;
   _workspacePreFormDetail = { ..._currentWorkspaceDetail };
   _workspaceMode = 'edit';
   _renderWorkspaceForm({ name: _currentWorkspaceDetail.name || '', path: _currentWorkspaceDetail.path || '', isEdit: true });
@@ -6624,6 +6707,13 @@ function _renderWorkspaceForm({ name, path, isEdit }){
           </div>
           ${pathHint}
         </div>
+        ${isEdit ? '' : `
+        <div class="detail-form-row">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+            <input type="checkbox" id="workspaceFormAsProject">
+            <span>${esc(t('workspace_as_hermes_project') || 'Register as Hermes Project (shared with Desktop/CLI)')}</span>
+          </label>
+        </div>`}
         <div id="workspaceFormError" class="detail-form-error" style="display:none"></div>
       </form>
     </div>`;
@@ -6637,6 +6727,7 @@ function _renderWorkspaceForm({ name, path, isEdit }){
 
 function cancelWorkspaceForm(){
   closeWorkspacePathSuggestions();
+  _workspaceUiGen++;
   if (_workspacePreFormDetail) {
     const snap = _workspacePreFormDetail;
     _workspacePreFormDetail = null;
@@ -6657,31 +6748,76 @@ async function saveWorkspaceForm(){
   if (!path) { errEl.textContent = t('workspace_path_required') || 'Path is required'; errEl.style.display = ''; return; }
   try {
     if (_workspaceMode === 'edit' && _currentWorkspaceDetail) {
-      const targetPath = _currentWorkspaceDetail.path;
+      // Round 7: retain the complete invocation identity across the awaits
+      // below instead of re-reading the mutable _currentWorkspaceDetail.
+      const gen = _workspaceUiGen;
+      const target = {path: _currentWorkspaceDetail.path,
+                      workspace_kind: _currentWorkspaceDetail.workspace_kind || '',
+                      project_id: _currentWorkspaceDetail.project_id || ''};
+      const targetPath = target.path;
       const newName = name || _currentWorkspaceDetail.name || '';
-      await api('/api/workspaces/rename', { method:'POST', body: JSON.stringify({ path: targetPath, name: newName }) });
-      // Refresh list and re-render detail
+      const body = { path: targetPath, name: newName };
+      if(target.workspace_kind) body.workspace_kind=target.workspace_kind;
+      if(target.project_id) body.project_id=target.project_id;
+      await api('/api/workspaces/rename', { method:'POST', body: JSON.stringify(body) });
+      if (gen !== _workspaceUiGen) return;
       const data = await api('/api/workspaces');
+      if (gen !== _workspaceUiGen) return;
       _workspaceList = data.workspaces || [];
       _workspacePreFormDetail = null;
       showToast(t('workspace_renamed') || t('workspace_added'));
       renderWorkspacesPanel(_workspaceList);
-      openWorkspaceDetail(targetPath);
+      const still = _currentWorkspaceDetail
+        && _currentWorkspaceDetail.path === target.path
+        && (_currentWorkspaceDetail.workspace_kind||'') === target.workspace_kind
+        && (_currentWorkspaceDetail.project_id||'') === target.project_id;
+      if (still) {
+        openWorkspaceDetail({path: targetPath,
+          workspace_kind: target.workspace_kind,
+          project_id: target.project_id});
+      }
       return;
     }
-    const data = await api('/api/workspaces/add', { method:'POST', body: JSON.stringify({ path }) });
+    const asProjectEl = $('workspaceFormAsProject');
+    const asProject = asProjectEl ? asProjectEl.checked : false;
+    if (asProject) {
+      // Greptile P2 (round 11): the create request can wait seconds on the
+      // subprocess lane; reject a late response once the user has left this
+      // form (same _workspaceUiGen guard the rename branch uses).
+      const gen = _workspaceUiGen;
+      const data = await api('/api/workspaces/create_project', { method:'POST', body: JSON.stringify({ path, name, create: true }) });
+      if (gen !== _workspaceUiGen) return;
+      _workspaceList = data.workspaces || [];
+      _workspacePreFormDetail = null;
+      renderWorkspacesPanel(_workspaceList);
+      const proj = data.project || {};
+      showToast(proj.error ? (t('error_prefix') + proj.error) : (t('workspace_project_created') || 'Hermes Project created'));
+      // Match on the server-normalized path (proj.path): the user may have
+      // typed '~/x' or a trailing slash, which never equals the stored row,
+      // and the last-element fallback would open a DB-only neighbor instead.
+      const want = proj.path || path;
+      const added = _workspaceList.find(w => w.path === want) || _workspaceList.find(w => w.path === path);
+      if (added) openWorkspaceDetail(added);
+      return;
+    }
+    const addBody = { path };
+    if (name) addBody.name = name;
+    // Same stale-response guard as the create_project branch above.
+    const addGen = _workspaceUiGen;
+    const data = await api('/api/workspaces/add', { method:'POST', body: JSON.stringify(addBody) });
+    if (addGen !== _workspaceUiGen) return;
     _workspaceList = data.workspaces || [];
     _workspacePreFormDetail = null;
-    // Apply rename if a friendly name was supplied
-    if (name) {
-      try { await api('/api/workspaces/rename', { method:'POST', body: JSON.stringify({ path, name }) }); } catch(_) {}
-      const refreshed = await api('/api/workspaces');
-      _workspaceList = refreshed.workspaces || _workspaceList;
-    }
     renderWorkspacesPanel(_workspaceList);
     showToast(t('workspace_added'));
-    const added = _workspaceList.find(w => w.path === path) || _workspaceList[_workspaceList.length - 1];
-    if (added) openWorkspaceDetail(added.path);
+    // Match the added row by identity, not first path hit: a native
+    // sibling can share the spelling and sits first in the merged list.
+    const want = data.path || path;
+    const added = _workspaceList.find(w => w.path === want && (w.workspace_kind||'') === 'remote')
+      || _workspaceList.find(w => w.path === want && !w.project_id)
+      || _workspaceList.find(w => w.path === want)
+      || _workspaceList.find(w => w.path === path);
+    if (added) openWorkspaceDetail(added);
   } catch (e) {
     errEl.textContent = t('error_prefix') + e.message;
     errEl.style.display = '';
@@ -6739,11 +6875,16 @@ document.addEventListener('click',e=>{
   if(!e.target.closest('.workspace-form-path-wrap')) closeWorkspacePathSuggestions();
 });
 
-async function removeWorkspace(path){
+async function removeWorkspace(pathOrWs){
+  const path = (typeof pathOrWs === 'string') ? pathOrWs : (pathOrWs && pathOrWs.path) || '';
+  const ws = (typeof pathOrWs === 'object' && pathOrWs) ? pathOrWs : (_workspaceList||[]).find(w => w.path === path);
   const _rmWs=await showConfirmDialog({title:t('workspace_remove_confirm_title'),message:t('workspace_remove_confirm_message',path),confirmLabel:t('remove'),danger:true,focusCancel:true});
   if(!_rmWs) return;
   try{
-    const data=await api('/api/workspaces/remove',{method:'POST',body:JSON.stringify({path})});
+    const body={path};
+    if(ws && ws.workspace_kind) body.workspace_kind=ws.workspace_kind;
+    if(ws && ws.project_id) body.project_id=ws.project_id;
+    const data=await api('/api/workspaces/remove',{method:'POST',body:JSON.stringify(body)});
     _workspaceList=data.workspaces;
     renderWorkspacesPanel(data.workspaces);
     showToast(t('workspace_removed'));
@@ -6775,7 +6916,10 @@ async function promptWorkspacePath(){
   try{
     const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path})});
     _workspaceList=data.workspaces||[];
-    const target=_workspaceList[_workspaceList.length-1];
+    // Find the added row by the server-normalized path (data.path): the
+    // response is the merged projection and may end with DB-only neighbours,
+    // and the typed path ('~/x', trailing slash) never equals the stored row.
+    const target=_workspaceList.find(w=>w.path===(data.path||path));
     if(!target) throw new Error(t('workspace_not_added'));
     await switchToWorkspace(target.path,target.name);
   }catch(e){
