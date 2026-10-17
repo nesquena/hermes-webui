@@ -9655,6 +9655,14 @@ function showClarifyCard(pending) {
   _ensureClarifyResizeListener();
   _setPromptFlyoutHidden(card, false);
   card.classList.add("visible");
+  // #7616: the resize above ran while the flyout was still hidden, so the gate
+  // in `_autoResizeClarifyInput` deferred it and parked a `clarifyRemeasure`
+  // marker instead of measuring. The layout box only comes back here, so drain
+  // the marker now — otherwise a fresh prompt inherits the previous answer's
+  // tall empty field until some later resize or poll happens to repair it.
+  if (input && input.dataset.clarifyRemeasure === "1") {
+    _autoResizeClarifyInput();
+  }
   _syncClarifyCollapseButton(card);
   _syncClarifyTranscriptSpace(card, {immediate: true});
   if (typeof applyLocaleToDOM === "function") applyLocaleToDOM();

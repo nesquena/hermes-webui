@@ -122,6 +122,14 @@ function requestAnimationFrameStub(fn) {{ FRAMES.push(fn); return FRAMES.length;
 function clearTimeoutStub() {{}}
 function runTimers() {{ while (TIMERS.length) TIMERS.shift()(); }}
 function runFrames() {{ while (FRAMES.length) FRAMES.shift()(); }}
+// The production helpers schedule their deferred re-measure through the global
+// `setTimeout` / `requestAnimationFrame` names. Point those at the queues above
+// so `settle()` actually drains them: with Node's real timers the callbacks fire
+// long after the JSON below has been written, and the assertions would only ever
+// read the immediate measurement — the delayed ones were never checked at all.
+globalThis.setTimeout = setTimeoutStub;
+globalThis.requestAnimationFrame = requestAnimationFrameStub;
+globalThis.clearTimeout = clearTimeoutStub;
 
 // Stubs for collaborators outside the extracted set.
 function _clarifyMessagesNearBottom() {{ return true; }}
