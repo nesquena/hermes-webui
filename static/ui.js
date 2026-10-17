@@ -4279,7 +4279,13 @@ function _mdLocalImagePathRef(raw){
 // MEDIA: pipeline uses, so ![x](file:///p.png) renders the artifact card instead
 // of the broken "!<a>" anchor it used to produce, and ![x](data:image/...) stops
 // dumping raw base64 text into the chat.
-function _mdImageHtml(alt, url){
+//
+// `src` is the ORIGINAL matched markdown source. When a local-looking path is
+// refused we must return those exact bytes: by this point the bold/italic and
+// backtick passes have already rewritten the alt text into generated HTML, so
+// re-assembling `![${alt}](${raw})` would print a literal <strong>/<code> to the
+// user (small gate-review fix on #8303).
+function _mdImageHtml(alt, url, src){
   const raw=String(url==null?'':url);
   if(/^data:/i.test(raw)){
     const img=_dataImageHtml(raw, alt);
@@ -4290,13 +4296,26 @@ function _mdImageHtml(alt, url){
   // #7634: bare local cache image path → the same /api/media route as every
   // other local artifact, never a bare <img src="/abs/path"> the browser cannot
   // load.
-  if(typeof _mdLocalImagePathRef==='function' && /^(?:~|\/)/.test(raw)){
+  //
+  // #8303 gate review: the request asks for generated=1, the mode the SERVER
+  // enforces by resolving the path and requiring canonical containment inside
+  // the owning profile's own image-cache root before serving it. A client-side
+  // "contains cache/images" check is not enough — /api/media's plain mode roots
+  // are far broader (the OS temp dir and the workspace are roots), so a sibling
+  // cache/images directory outside HERMES_HOME, or a symlink inside the cache
+  // pointing at HERMES_HOME/secret.png, both used to load and render
+  // automatically from model-emitted text. Keeping the client-side check is still
+  // useful (it keeps ordinary /images/logo.png inert), but it is defence in
+  // depth, never the gate.
+  if(typeof _mdLocalImagePathRef==='function' && /^\//.test(raw)){
     const local=_mdLocalImagePathRef(raw);
-    if(local) return _inlineMediaHtmlForRef(local,undefined,alt);
+    if(local) return _inlineMediaHtmlForRef(local,undefined,alt,/*generated*/true);
     // Looked like a local path but was refused (traversal, encoded separator,
-    // non-image extension). Keep the original markdown as inert text rather
-    // than dropping it or emitting an <img> the sanitizer would strip anyway.
-    return esc(`![${alt}](${raw})`);
+    // non-image extension, or not under cache/images). Keep the original
+    // markdown as inert text rather than dropping it or emitting an <img> the
+    // sanitizer would strip anyway — and return it VERBATIM (escaped here it
+    // would double-escape the HTML the inline passes already produced).
+    return String(src==null?`![${alt}](${raw})`:src);
   }
   if(typeof _remoteImageAllowed==='function'&&!_remoteImageAllowed(raw)) return _remoteImagePlaceholderHtml(raw, alt);
   return `<img src="${raw.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;
@@ -4361,7 +4380,12 @@ function _mediaTokenParts(source, matchOffset, rawRef){
   return [ref,suffix];
 }
 
-function _inlineMediaHtmlForRef(ref, sessionId, altText){
+// `generated` (set only by the markdown renderer for bare local image-cache
+// paths, #8303) asks /api/media for its generated-image mode: the server
+// resolves the path and serves it only when it canonically lands inside the
+// owning profile's image-cache root. Every other caller keeps the plain mode,
+// whose session allow-list / MEDIA: token checks are unchanged.
+function _inlineMediaHtmlForRef(ref, sessionId, altText, generated){
   if(ref==null) return '';
   // data:image/* → inline <img>; any other data: scheme renders as inert
   // truncated text (never routed to api/media, never embedded).
@@ -4427,7 +4451,8 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   const sid=sessionId
     || (typeof S!=='undefined'&&S&&S.session&&S.session.session_id?String(S.session.session_id):'')
     || '';
-  const apiUrl='api/media?path='+encodeURIComponent(ref)+(sid?'&session_id='+encodeURIComponent(sid):'');
+  const generatedFlag=generated?'&generated=1':'';
+  const apiUrl='api/media?path='+encodeURIComponent(ref)+(sid?'&session_id='+encodeURIComponent(sid):'')+generatedFlag;
   const localKind=_mediaKindForName(ref);
   // localArtifactCard(...)
   if(localKind==='image'){
@@ -10920,6 +10945,21 @@ function renderMd(raw){
     }
     return out+run.slice(cursor);
   }
+  // #8303: fragments emitted by the image passes are multi-element block markup
+  // (the artifact card's <span> wrapper plus its download <svg>). The inline
+  // tag escaper in inlineMd() and the final tag sanitizer both rewrite or
+  // delete parts of them, so list items, table cells and headings printed the
+  // card as literal &lt;span&gt;/&lt;svg&gt;. Stash each fragment WHOLE as one
+  // token and restore it at the media-restore stage below, where nothing can
+  // mangle it. Path and alt text stay escaped at construction time inside
+  // _inlineMediaHtmlForRef(); only the generated wrapper is protected.
+  const _imgfrag_stash=[];
+  const _stashImageFrag=html=>{
+    if(typeof html!=='string') return String(html==null?'':html);
+    if(!/<(?:span|svg)\b/i.test(html)) return html;
+    _imgfrag_stash.push(html);
+    return '\x00I'+(_imgfrag_stash.length-1)+'\x00';
+  };
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
@@ -10940,7 +10980,16 @@ function renderMd(raw){
     // line break, so a model that wraps the target onto its own line still
     // renders. Two newlines are NOT accepted — that is a paragraph break. Keep
     // this regex in sync with the outer image pass below.
-    t=t.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+)[ \t]*\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    // #8303: the _code_stash above only holds spans THIS line created. A
+    // <code>...</code> that arrived already rendered (from the bold pre-pass, a
+    // blockquote, or a nested renderMd) is live markup here, so an inline-code
+    // example like `![cat](/.../cache/images/a.png)` was matched and turned
+    // into a live image request, leaving empty code text behind. Stash complete
+    // <code> fragments around the substitution and restore them right after.
+    const _ic_stash=[];
+    t=t.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ic_stash.push(m);return `\x00S${_ic_stash.length-1}\x00`;});
+    t=t.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+)[ \t]*\)/g,(src,alt,url)=>(typeof _mdImageHtml==='function')?_stashImageFrag(_mdImageHtml(alt,url,src)):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    t=t.replace(/\x00S(\d+)\x00/g,(_,i)=>_ic_stash[+i]);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
     t=t.replace(/(<img\b[^>]*>)/g,m=>{_img_stash.push(m);return `\x00G${_img_stash.length-1}\x00`;});
@@ -11133,7 +11182,14 @@ function renderMd(raw){
   // image pass above. The bare-path branch matches any root-relative target and
   // hands it to _mdImageHtml(), which is the single place that decides whether it
   // is an acceptable local artifact.
-  s=s.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+)[ \t]*\)/g,(_,alt,url)=>(typeof _mdImageHtml==='function')?_mdImageHtml(alt,url):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  // #8303: same two protections as the inline pass — complete <code> fragments
+  // are stashed so an inline-code example cannot become a live image, and a
+  // whole artifact-card fragment is stashed so the tag sanitizer below cannot
+  // rewrite its <span> or delete its download <svg>.
+  const _oc_stash=[];
+  s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_oc_stash.push(m);return `\x00S${_oc_stash.length-1}\x00`;});
+  s=s.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+)[ \t]*\)/g,(src,alt,url)=>(typeof _mdImageHtml==='function')?_stashImageFrag(_mdImageHtml(alt,url,src)):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  s=s.replace(/\x00S(\d+)\x00/g,(_,i)=>_oc_stash[+i]);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.
   // Stash existing <a> tags first to avoid re-linking already-linked URLs.
@@ -11378,6 +11434,12 @@ function renderMd(raw){
   s=s.replace(/\x00D(\d+)\x00/g,(_,i)=>_inlineMediaHtmlForRef(media_stash[+i]));
 
   // ── End MEDIA restore ──────────────────────────────────────────────────────
+  // #8303: restore whole artifact-card fragments stashed by the image passes.
+  // This is the LAST step that touches the string, so the generated <span>
+  // wrapper and download <svg> survive intact instead of being rewritten by
+  // the tag sanitizer or escaped by inlineMd(). Path and alt text were escaped
+  // when the fragment was built, so nothing untrusted is reintroduced here.
+  s=s.replace(/\x00I(\d+)\x00/g,(_,i)=>_imgfrag_stash[+i]);
   // Restore blockquote stash. Done last so the inner HTML (already produced
   // by the recursive renderMd in the pre-pass) is dropped into the final
   // string verbatim — no further passes can mangle it.
