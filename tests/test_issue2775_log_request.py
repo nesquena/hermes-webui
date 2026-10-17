@@ -44,11 +44,18 @@ def test_log_request_includes_remote_address(log_output):
     assert "forwarded_for" not in record
 
 
-def test_log_request_includes_first_forwarded_for_address(log_output):
+def test_log_request_never_records_client_writable_forwarded_hop(log_output):
+    """#7863: the first X-Forwarded-For value is written by the client.
+
+    It is no longer logged. This peer is not a trusted proxy (and the operator
+    has not opted in), so the trustworthy value is the raw socket peer.
+    """
     class Headers:
-        def get(self, key):
-            assert key == "X-Forwarded-For"
-            return "203.0.113.7, 198.51.100.9"
+        def get_all(self, key):
+            return ["203.0.113.7, 198.51.100.9"] if key == "X-Forwarded-For" else []
+
+        def get(self, key, default=None):
+            return default
 
     handler = Handler.__new__(Handler)
     handler.command = "POST"
@@ -61,4 +68,5 @@ def test_log_request_includes_first_forwarded_for_address(log_output):
     line = log_output.getvalue().strip()
     record = json.loads(line.removeprefix("[webui] "))
     assert record["remote"] == "192.0.2.10"
-    assert record["forwarded_for"] == "203.0.113.7"
+    assert record["client_ip"] == "192.0.2.10"
+    assert "forwarded_for" not in record
