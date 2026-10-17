@@ -40,7 +40,7 @@ def test_visible_pinned_lineage_ids_dedupes_multiple_pinned_continuations():
         },
     ]
     roots = _visible_pinned_lineage_ids(rows)
-    assert roots == {"gov-root", "other-pin"}
+    assert roots == {("default", "gov-root"), ("default", "other-pin")}
 
 
 def test_visible_pinned_lineage_ids_ignores_hidden_precompression_snapshots():
@@ -62,7 +62,7 @@ def test_visible_pinned_lineage_ids_ignores_hidden_precompression_snapshots():
         },
     ]
     roots = _visible_pinned_lineage_ids(rows)
-    assert roots == {"snap-root"}
+    assert roots == {("default", "snap-root")}
 
 
 def test_session_row_lineage_root_uses_explicit_root_when_present():
@@ -107,6 +107,6 @@ def test_pinned_forks_of_same_parent_count_as_separate_lineages():
     assert _session_row_lineage_root_id(rows[1], {r["session_id"]: r for r in rows}) == "fork-a"
     assert _session_row_lineage_root_id(rows[2], {r["session_id"]: r for r in rows}) == "fork-b"
     roots = _visible_pinned_lineage_ids(rows)
-    assert roots == {"parent-root", "fork-a", "fork-b"}
+    assert roots == {("default", "parent-root"), ("default", "fork-a"), ("default", "fork-b")}
     # Three distinct pinned lineages → would exceed a limit of 2 (no false collapse).
     assert len(roots) == 3
