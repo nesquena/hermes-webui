@@ -13654,10 +13654,20 @@ def _run_agent_streaming(
                 'prefill': _public_prefill_context_status(_prefill_context),
             })
 
-            # Per-profile toolsets — use _resolve_cli_toolsets() so MCP
-            # server toolsets are included, matching native CLI behaviour.
+            # Per-profile toolsets — use _resolve_cli_toolsets() as the base
+            # (so MCP server toolsets are included, matching native CLI
+            # behaviour), then merge the platform_toolsets.webui composite so
+            # WebUI-only tool additions take effect without maintaining a
+            # duplicate list under the cli key.
             from api.config import _resolve_cli_toolsets
-            _toolsets = _resolve_cli_toolsets(_cfg)
+            _toolsets = list(_resolve_cli_toolsets(_cfg))
+            try:
+                from hermes_cli.tools_config import _get_platform_tools
+                _webui_toolsets = _get_platform_tools(_cfg, "webui")
+                if _webui_toolsets:
+                    _toolsets = list(set(_toolsets) | set(_webui_toolsets))
+            except Exception as _pt_err:
+                logger.debug("failed to merge webui platform toolsets: %s", _pt_err)
 
             # Per-session toolset override (#493): if the session has
             # enabled_toolsets set, use that instead of the global config.
