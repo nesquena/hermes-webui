@@ -18,7 +18,9 @@ Usage: ./ctl.sh <command> [args]
 Commands:
   start [bootstrap args...]   Start Hermes WebUI as a background daemon
   stop                        Stop the daemon started by ctl.sh
-  restart [bootstrap args...] Stop, then start again
+  restart [--expected-pid PID] [--delay SECONDS] [bootstrap args...]
+                              Stop this exact managed daemon, then start again
+  verify --expected-pid PID   Exit successfully only for this exact managed daemon
   status                      Show daemon, host/port, log, and health status
   logs [--lines N] [--follow|--no-follow]
                               Show the daemon log (defaults to tail -n 100 -f)
@@ -704,14 +706,29 @@ _warn_if_unmanaged_instance_serving() {
 
 stop_cmd() {
   ensure_home
-  local pid
+  local expected_pid="${1:-}" pid
   if ! pid="$(_pid_from_file 2>/dev/null)"; then
+    if [[ -n "${expected_pid}" ]]; then
+      echo "[ctl] Refusing restart: the expected WebUI PID is no longer recorded." >&2
+      return 3
+    fi
     echo "[ctl] Hermes WebUI is stopped"
     # Warn BEFORE deleting the state file: it carries the saved host/port
     # binding the probe needs when the instance was started off-default.
     _warn_if_unmanaged_instance_serving
     rm -f "${PID_FILE}" "${STATE_FILE}"
     return 0
+  fi
+
+  if [[ -n "${expected_pid}" ]]; then
+    if [[ ! "${expected_pid}" =~ ^[0-9]+$ || "${pid}" != "${expected_pid}" ]]; then
+      echo "[ctl] Refusing restart: PID file no longer names the requesting WebUI process." >&2
+      return 3
+    fi
+    if ! _is_alive "${pid}" || ! _is_owned_webui_pid "${pid}"; then
+      echo "[ctl] Refusing restart: the requesting WebUI process is no longer ctl-managed." >&2
+      return 3
+    fi
   fi
 
   if ! _is_alive "${pid}" || ! _is_owned_webui_pid "${pid}"; then
@@ -846,6 +863,55 @@ logs_cmd() {
   fi
 }
 
+verify_cmd() {
+  local expected_pid=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --expected-pid)
+        shift
+        expected_pid="${1:-}"
+        ;;
+      --expected-pid=*) expected_pid="${1#--expected-pid=}" ;;
+      *) echo "[ctl] Unknown verify option: $1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  [[ "${expected_pid}" =~ ^[0-9]+$ ]] || { echo "[ctl] verify requires --expected-pid PID" >&2; return 2; }
+  local current_pid
+  current_pid="$(_pid_from_file 2>/dev/null)" || return 3
+  [[ "${current_pid}" == "${expected_pid}" ]] || return 3
+  _is_alive "${current_pid}" && _is_owned_webui_pid "${current_pid}"
+}
+
+restart_cmd() {
+  local expected_pid="" delay="0"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --expected-pid)
+        shift
+        expected_pid="${1:-}"
+        ;;
+      --expected-pid=*) expected_pid="${1#--expected-pid=}" ;;
+      --delay)
+        shift
+        delay="${1:-}"
+        ;;
+      --delay=*) delay="${1#--delay=}" ;;
+      *) break ;;
+    esac
+    shift
+  done
+  if [[ -n "${expected_pid}" ]]; then
+    [[ "${expected_pid}" =~ ^[0-9]+$ ]] || { echo "[ctl] --expected-pid requires a numeric PID" >&2; return 2; }
+  fi
+  [[ "${delay}" =~ ^[0-9]+([.][0-9]+)?$ ]] || { echo "[ctl] --delay requires a non-negative number" >&2; return 2; }
+  if [[ "${delay}" != "0" && "${delay}" != "0.0" ]]; then
+    sleep "${delay}"
+  fi
+  stop_cmd "${expected_pid}"
+  start_cmd "$@"
+}
+
 cmd="${1:-}"
 if [[ $# -gt 0 ]]; then
   shift
@@ -854,7 +920,8 @@ fi
 case "${cmd}" in
   start) start_cmd "$@" ;;
   stop) stop_cmd ;;
-  restart) stop_cmd; start_cmd "$@" ;;
+  restart) restart_cmd "$@" ;;
+  verify) verify_cmd "$@" ;;
   status) status_cmd ;;
   logs) logs_cmd "$@" ;;
   -h|--help|help|"") usage ;;
