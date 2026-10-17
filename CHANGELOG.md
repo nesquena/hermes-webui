@@ -80,6 +80,13 @@
 
 ### Fixed
 
+- **Model picker keeps its search box and highlighted row visible, and sorts custom provider lists.** Once the picker is
+  scrolled, the note at the top no longer lets rows show through, the search box stays visible, and the row you move
+  to with the arrow keys is never hidden under the header. Custom and aggregator providers (for example a New-API
+  gateway with 50+ models) are listed in natural alphabetical order (model-2 before model-10); built-in providers keep
+  their curated newest-first order, and models revealed by "Show more" or fetched live are sorted after them. Thanks
+  @happy5318. (#7528)
+
 - **Composer stays above the keyboard on Android Chrome and Edge.** The page now asks Chromium browsers on Android to
   resize the layout when the on-screen keyboard opens, the same setting Gemini, Open WebUI and LibreChat use. iPhone,
   iPad and desktop are unchanged. Thanks @qxxaa. (#6475)
@@ -519,6 +526,10 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **Test suite keeps the Agent on `sys.path`.** The per-test `sys.path` guard restored a snapshot taken before
+  `api.config` added the Agent directory, so after the first test any newly added Agent module could not be imported
+  and 14 `hermes_state` tests skipped or failed on machines with a real Agent. CI was unaffected. (#8277)
 
 - **Hardened `test_tls_support::test_tls_startup_failure_fallback_to_http` against stdout-preamble noise.** The test asserted the server prints "TLS setup failed" by reading only the first 2000 bytes of its stdout. When the test interpreter lacks optional deps (`requests`/`websockets`), startup emits a burst of plugin/tool import warnings plus the startup-config banner *before* the TLS line, pushing the marker past that fixed window → spurious failure (distinct from the agent-package-isolation cause fixed separately below). It now drains all currently-available stdout (bounded by a 5s deadline, short-circuiting once the marker is seen) instead of a single fixed-size read. Verified failing→passing in a fresh venv without the optional deps. Test-only.
 
