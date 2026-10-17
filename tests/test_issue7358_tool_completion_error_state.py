@@ -95,6 +95,35 @@ def test_landed_file_mutation_is_not_reported_as_failed():
     ) is False
 
 
+def test_refusal_stays_non_failure_on_agent_builds_without_a_refusal_branch():
+    """#7358 CI regression: older Agent builds classify a refusal as a failure.
+
+    The canonical classifier gained its refusal branch over time, so an older
+    build reports ``guardrail_refusal: true`` as a failure. The exemption is
+    checked first precisely so it can veto that bit too — otherwise the refusal
+    card silently becomes Failed on exactly the older builds users still run.
+    """
+    refusal = {"guardrail_refusal": True, "success": False, "error": "repeated identical read"}
+    real_failure = {"success": False, "error": "HTTP 433: usage allowance exceeded"}
+
+    def old_agent_detect(name, result):
+        """A pre-refusal-branch classifier: success:false + error => failure."""
+        data = result if isinstance(result, dict) else None
+        if not isinstance(data, dict):
+            return False, ""
+        err = data.get("error") or data.get("message")
+        return (True, " [err]") if err and data.get("success") is False else (False, "")
+
+    with mock.patch.object(streaming, "_agent_detect_tool_failure", return_value=old_agent_detect):
+        assert streaming._tool_result_is_error("browser_exec", refusal) is False
+        assert streaming._tool_result_is_error("browser_exec", real_failure) is True
+
+
+def test_refusal_marker_in_a_json_string_result_is_still_exempt():
+    refusal = json.dumps({"guardrail_refusal": True, "success": False, "error": "no-op"})
+    assert streaming._tool_result_is_error("browser_exec", refusal) is False
+
+
 def test_none_and_non_json_results_are_not_classified_as_error():
     assert streaming._tool_result_is_error("browser_exec", None) is False
     assert streaming._tool_result_is_error("browser_exec", "plain text output") is False
