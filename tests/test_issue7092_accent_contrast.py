@@ -155,16 +155,45 @@ def test_dark_accent_fill_buttons_use_bg_foreground():
         )
 
 
+def _light_base_rules(css: str) -> list[tuple[str, str]]:
+    """Yield (selector, body) of every rule whose selector blob carries NO
+    ``:root.dark`` qualifier — the true light/base rules.
+
+    The previous implementation used a ``(?<!:root\\.dark )`` lookbehind, which
+    only guards the literal ``:root.dark `` prefix. A skin-qualified dark
+    selector such as ``:root.dark[data-skin="ares"] #mainSettings
+    .settings-btn:hover`` has ``] `` (not ``:root.dark ``) immediately before
+    ``#mainSettings``, so the lookbehind lets it through and the dark hover
+    rule gets misclassified as the light base rule — which is exactly what
+    happens once the #7827 hover overrides repeat the ``#mainSettings``
+    ancestor. Filtering on the selector blob instead is unambiguous.
+    """
+    out: list[tuple[str, str]] = []
+    for m in re.finditer(r"([^{}]*?)\{([^{}]*)\}", css):
+        selector_blob, body = m.group(1), m.group(2)
+        if ":root.dark" in selector_blob:
+            continue  # dark-mode rule, not the light base
+        for part in selector_blob.split(","):
+            part = part.strip()
+            if part:
+                out.append((part, body))
+    return out
+
+
 def test_light_mode_buttons_keep_white_foreground():
     """Guard the other half of the contract: the base (light-mode) rules
     keep #fff on the accent fill -- the dark override must not leak."""
-    base = re.search(r"(?<!:root\.dark )\.send-btn\{([^}]*)\}", CSS)
-    assert base and "color:#fff" in base.group(1), (
+    light = _light_base_rules(CSS)
+    send = next((body for sel, body in light if sel == ".send-btn"), None)
+    assert send and "color:#fff" in send, (
         "base .send-btn must keep its light-mode white foreground"
     )
-    settings = re.search(
-        r"(?<!:root\.dark )#mainSettings \.settings-btn[^{]*\{([^}]*)\}", CSS)
-    assert settings and "color:#fff" in settings.group(1)
+    settings = next(
+        (body for sel, body in light if "#mainSettings .settings-btn" in sel), None
+    )
+    assert settings and "color:#fff" in settings, (
+        "base #mainSettings .settings-btn must keep its light-mode white foreground"
+    )
 
 
 def test_mono_dark_palette_contrast_pairs_are_sane():

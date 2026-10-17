@@ -9,19 +9,28 @@ green: the ``color:var(--bg)`` rule added for #7092 is correct against
 (a skin-local ``--hover-bg`` or their own pinned fill), and ``--bg`` is nearly
 black there.
 
-This module resolves the hover state: for each (skin, control) it collects the
-rules whose selector matches the skin, the control, AND the ``:hover`` state,
-applies the same cascade (important -> specificity -> source order), resolves
-``var(--…)`` against the skin's palette, and asserts the effective hover
-foreground clears 3.0:1 against the effective hover background.
+This module resolves the hover state: for each (skin, control) it collects
+EVERY rule whose selector matches the control while it is hovered — the neutral
+rules AND the ``:hover`` rules together — applies the same cascade (important ->
+specificity -> source order), resolves ``var(--…)`` against the skin's palette,
+and asserts the effective hover foreground clears the pre-regression ratio
+against the effective hover background.
+
+A neutral selector still matches a hovered element: the generic
+``:root.dark #mainSettings …`` foreground rules carry the ``#mainSettings`` ID,
+so they beat any ID-free skin hover rule in the browser. Resolving only the
+``:hover`` rules (as the first version of this module did) silently omits the
+winning production rule and lets the regression pass — which is exactly what the
+re-gate reproduced. The resolver therefore considers both kinds together.
 
 Numbers below are the ones the review reproduced, kept in the test so a future
 edit cannot silently re-break them:
 
-    geist-contrast  #000000 on #111111 -> 1.11:1   (was: Save Settings invisible)
-    hepburn         #110a0f on #c6246a -> 3.60:1   (was 5.44:1)
-    ares            #000000 on #CC3333 -> 4.09:1   (was 5.14:1)
-    slate           #000000 on #64748B -> 4.41:1   (was 4.76:1)
+    geist-contrast  Save Settings hovered  #000000 on #111111 -> 1.11:1  (was 18.88:1)
+    ares            Settings hovered       #0D0D1A on #CC3333 -> 3.75:1  (was 5.14:1)
+    slate           Settings hovered       #0D0D1A on #64748B -> 4.05:1  (was 4.76:1)
+    ares            msg-edit/toolsets      #fff    on #FF4444 -> 3.41:1  (was 5.66:1)
+    hepburn         Send/Queue             #fff    on #c6246a -> 5.44:1
 """
 from __future__ import annotations
 
@@ -35,32 +44,45 @@ CSS = CSS_PATH.read_text(encoding="utf-8")
 
 ACCENT_FILL_CONTROLS = (
     ".send-btn",
+    ".send-btn.queue",
     "#mainSettings .settings-btn",
     '#mainSettings .sm-btn[onclick^="saveSettings"]',
     ".toolsets-apply-btn",
     ".msg-edit-send",
 )
 
-# The Appearance "Save Settings" button carries BOTH classes on one element
-# (`class="settings-btn sm-btn"`), so a rule targeting either class paints it.
-# geist-contrast restyles `.sm-btn:hover` with `background:var(--hover-bg)
-# !important` (#111111), which is the hover fill the review measured — not the
-# generic `--accent-hover`. Listing the element's classes lets the resolver see
-# both rules instead of silently picking the generic one.
+# Real markup (static/index.html): the auxiliary buttons (Reset all to auto /
+# Apply changes) carry ONLY the `settings-btn` class, and the Appearance /
+# Preferences "Save Settings" button is `sm-btn` with onclick="saveSettings()".
+# No element carries both classes. The alias list for each control is therefore
+# the class(es) that element actually has — a rule targeting `.sm-btn` must NOT
+# be counted as painting the auxiliary-only `.settings-btn`, and vice versa.
 CONTROL_CLASS_ALIASES = {
-    "#mainSettings .settings-btn": ("settings-btn", "sm-btn"),
-    '#mainSettings .sm-btn[onclick^="saveSettings"]': ("sm-btn", "settings-btn"),
+    "#mainSettings .settings-btn": ("settings-btn",),
+    '#mainSettings .sm-btn[onclick^="saveSettings"]': ("sm-btn",),
     ".send-btn": ("send-btn",),
+    ".send-btn.queue": ("send-btn",),
     ".toolsets-apply-btn": ("toolsets-apply-btn",),
     ".msg-edit-send": ("msg-edit-send",),
 }
 
-# Stop/Interrupt/Steer/Queue are separate chrome with their own hover fills; the
-# review explicitly excluded them, so they are excluded here too.
-_VARIANT_EXCLUDED = (".stop", ".interrupt", ".steer", ".queue")
+# Stop/Interrupt/Steer are separate chrome with their own hover fills (error /
+# purple); the review explicitly excluded them. Queue shares the Send hover
+# fill and IS a variant of the accent-fill control, so it is resolved here.
+_VARIANT_EXCLUDED = (".stop", ".interrupt", ".steer")
 
-# The four skins the review reproduced, with the ratio it measured. Used both as
-# the regression set and as documentation of what "correct" means here.
+# State pseudo-classes that contradict a hovered, enabled element: rules that
+# match :disabled/:active/:focus… do not paint it, so they must not participate
+# even though they are "neutral" (non-:hover) selectors. :not(:disabled) is
+# fine — the element IS enabled — which is why :not(...) wrappers are stripped
+# before this probe runs.
+_STATE_PSEUDOS = re.compile(
+    r":(?:disabled|checked|active|focus|focus-within|focus-visible|"
+    r"placeholder-shown|read-only|indeterminate)\b"
+)
+
+# The four skins the review reproduced, with the ratio it measured as correct
+# on master. Used both as the regression set and as documentation.
 REGRESSION_SKINS = {
     "geist-contrast": 1.11,
     "hepburn": 3.60,
@@ -173,39 +195,6 @@ def _skin_palette(css: str, skin: str) -> dict[str, str]:
     return inherited
 
 
-def _control_tokens(control: str) -> list[str]:
-    """Tokens that must appear in a selector for it to target the control.
-
-    ``#mainSettings .sm-btn[onclick^="saveSettings"]`` must also match a
-    skin rule that targets ``.sm-btn`` generally: the settings modal lives inside
-    ``#mainSettings``, and geist-contrast restyles ``.sm-btn`` wholesale. Emit
-    the class token as well as the attribute token so the broader rule is seen.
-    """
-    toks = []
-    for part in control.split():
-        part = part.strip()
-        if not part:
-            continue
-        if "[" in part:
-            # ``sm-btn[onclick^="saveSettings"]`` -> the class/element AND the
-            # attribute value, so both the exact rule and a broader ``.sm-btn``
-            # rule match.
-            head, _, attr = part.partition("[")
-            head = head.strip().lstrip(".#")
-            if head:
-                toks.append(head)
-            m = re.search(r'[~\^$*]?="([^"]+)"', attr)
-            toks.append(m.group(1) if m else attr.strip("[]"))
-            continue
-        if part.startswith("."):
-            toks.append(part[1:])
-        elif part.startswith("#"):
-            toks.append(part[1:])
-        else:
-            toks.append(part)
-    return [t for t in toks if t]
-
-
 def _specificity(sel: str) -> tuple[int, int, int]:
     ids = len(re.findall(r"#[\w-]+", sel))
     classes = len(re.findall(r"\.[\w-]+", sel)) + len(re.findall(r"\[[^\]]+\]", sel))
@@ -238,18 +227,25 @@ def _declarations(body: str, *, include_custom_props: bool = False):
 
 
 def _matches_hover(sel: str, control: str) -> bool:
-    """Selector targets the HOVER state of this control.
+    """Selector applies to the control while it is hovered.
 
-    The class/id tokens are REQUIRED; the attribute-value token is only a
-    DISCRIMINATOR. ``#mainSettings .sm-btn[onclick^="saveSettings"]`` is one
-    button, but a skin may restyle ``.sm-btn`` wholesale (geist-contrast does,
-    with ``!important``), and that broader rule must still count as targeting
-    this control — requiring the attribute value would hide it and resolve the
-    hover background from the generic ``--accent-hover`` rule instead.
+    A hovered element still matches its neutral rules: the ID-bearing
+    ``:root.dark #mainSettings …`` foreground beats a later, lower-specificity
+    skin hover rule in the browser — the exact production bug this suite exists
+    for. So ``:hover`` is NOT required here. The class/id tokens are REQUIRED;
+    the attribute-value token is only a DISCRIMINATOR (``#mainSettings
+    .sm-btn[onclick^="saveSettings"]`` is one button, but a skin may restyle
+    ``.sm-btn`` wholesale and that broader rule still paints it).
+
+    State pseudo-classes that contradict a hovered-enabled element, and the
+    stop/interrupt/steer chrome variants, are excluded.
     """
-    if ":hover" not in sel:
-        return False
     if any(marker in sel for marker in _VARIANT_EXCLUDED):
+        return False
+    if "::" in sel or re.fullmatch(r"\d+%", sel.strip()):
+        return False  # pseudo-element / keyframe block
+    state_probe = re.sub(r":not\([^)]*\)", "", sel)
+    if _STATE_PSEUDOS.search(state_probe):
         return False
     # The element's classes are alternatives (one element, several classes), so
     # ANY of them matches. An ancestor like #mainSettings is only required when
@@ -263,21 +259,13 @@ def _matches_hover(sel: str, control: str) -> bool:
     return True
 
 
-def _is_attribute_value(control: str, token: str) -> bool:
-    """True when *token* came from an attribute selector's value, not a class."""
-    for m in re.findall(r'\[[^\]]*="([^"]+)"', control):
-        if m == token:
-            return True
-    return False
-
-
 def _matches_skin(sel: str, skin: str) -> bool:
     if ":not(.dark)" in sel:
         return False
     skin_refs = re.findall(r'data-skin="([^"]+)"', sel)
     if skin_refs:
         return skin in skin_refs
-    # A skin-agnostic hover rule still applies.
+    # A skin-agnostic rule still applies.
     return True
 
 
@@ -317,8 +305,12 @@ def _contrast(a: str, b: str) -> float:
 def _effective_hover_fg_bg(css: str, skin: str, control: str):
     """Winning (color, background) for the control's :hover state in this skin.
 
-    Falls back to the NEUTRAL rule's background when no hover rule sets one,
-    because an unset hover background means the neutral fill is still showing.
+    Neutral AND ``:hover`` declarations are resolved TOGETHER in one pass with
+    the full cascade (importance, then specificity, then source order): a
+    neutral foreground with an ID ancestor outranks a later ID-free hover rule,
+    and an ``!important`` neutral background outranks a hover background. When
+    no rule sets a background at all, the neutral fill is inherited — but that
+    rule itself participates here, so nothing extra is needed.
     """
     tokens = _skin_palette(css, skin)
     best_fg = None
@@ -342,54 +334,23 @@ def _effective_hover_fg_bg(css: str, skin: str, control: str):
     if bg is not None:
         # `background` may be a shorthand; keep the colour token only.
         bg = _resolve_var(bg.split()[0] if bg else "", tokens)
-    if bg is None:
-        # No hover background declared: the neutral fill still shows.
-        bg = _neutral_background(css, skin, control, tokens)
     return fg, bg
 
 
-def _neutral_background(css: str, skin: str, control: str, tokens) -> str | None:
-    best = None
-    for order, (sel, body) in enumerate(_css_rules(css)):
-        if ":hover" in sel or not _matches_skin(sel, skin):
-            continue
-        if ":hover" in sel:
-            continue
-        classes = CONTROL_CLASS_ALIASES.get(control, ())
-        if classes and not any(c in sel for c in classes):
-            continue
-        if "mainSettings" in sel and "mainSettings" not in control:
-            continue
-        if any(marker in sel for marker in _VARIANT_EXCLUDED):
-            continue
-        spec = _specificity(sel)
-        for prop, val, important in _declarations(body):
-            if prop in ("background", "background-color"):
-                cand = (1 if important else 0, spec, order, _resolve_var(val, tokens))
-                if best is None or cand[:3] > best[:3]:
-                    best = cand
-    if best is None:
-        return None
-    # `background` may be a shorthand (`background:#fff none`); take the colour.
-    value = best[3].split()[0] if best[3] else ""
-    return _resolve_var(value, tokens)
-
-
 # The minimum hover contrast per (skin, control). These are the ratios the
-# review measured as CORRECT before the regression — NOT a generic AA floor,
-# which would pass the regressed values (4.09 / 4.41) and let the fix be
-# reverted without a single test going red.
-#
-# Controls with no hover background rule of their own keep the skin's `--accent`
-# fill, which is lighter than `--accent-hover`; the review scoped its findings to
-# the controls that DO have a hover fill, and those carry the higher floor.
+# review measured as CORRECT on master — NOT a generic AA floor, which would
+# pass the regressed values (4.09 / 4.41) and let the fix be reverted without a
+# single test going red.
 REGRESSION_MIN_RATIO = {
     "geist-contrast": {
+        ".send-btn": 4.5,
+        ".send-btn.queue": 4.5,
         "#mainSettings .settings-btn": 4.5,
         '#mainSettings .sm-btn[onclick^="saveSettings"]': 4.5,
     },
     "hepburn": {
         ".send-btn": 4.5,
+        ".send-btn.queue": 4.5,
         "#mainSettings .settings-btn": 4.5,
         '#mainSettings .sm-btn[onclick^="saveSettings"]': 4.5,
         ".toolsets-apply-btn": 4.5,
@@ -397,21 +358,27 @@ REGRESSION_MIN_RATIO = {
     },
     "ares": {
         ".send-btn": 5.14,
+        ".send-btn.queue": 5.14,
         "#mainSettings .settings-btn": 5.14,
         '#mainSettings .sm-btn[onclick^="saveSettings"]': 5.14,
+        # No hover background of their own: they keep the #FF4444 accent fill,
+        # where the dark foreground gives 5.66:1 and white drops to 3.41:1.
+        ".toolsets-apply-btn": 4.5,
+        ".msg-edit-send": 4.5,
     },
     "slate": {
         ".send-btn": 4.76,
+        ".send-btn.queue": 4.76,
         "#mainSettings .settings-btn": 4.76,
         '#mainSettings .sm-btn[onclick^="saveSettings"]': 4.76,
         # No hover background rule of their own: these keep the skin's --accent
-        # (#94A3B8), where the generic dark foreground gives 8.19:1 and #fff
+        # (#94A3B8), where the generic dark foreground gives 7.52:1 and #fff
         # drops to 2.56:1. Floor set below the correct value but well above the
         # regression so the fix cannot be flipped back.
         ".toolsets-apply-btn": 4.5,
         ".msg-edit-send": 4.5,
     },
-    }
+}
 
 
 @pytest.mark.parametrize("skin", sorted(REGRESSION_SKINS))
@@ -422,7 +389,7 @@ def test_reviewed_skins_hover_contrast_clears_aa(skin):
     for control, floor in floors.items():
         fg, bg = _effective_hover_fg_bg(CSS, skin, control)
         if not fg or not bg:
-            failures[control] = "no hover rule resolved"
+            failures[control] = "no rule resolved"
             continue
         if not (fg.startswith("#") and bg.startswith("#")):
             continue  # rgba/gradient fills are not decidable here
@@ -435,21 +402,40 @@ def test_reviewed_skins_hover_contrast_clears_aa(skin):
     )
 
 
-def test_geist_contrast_hover_uses_the_skin_text_not_bg():
-    """Finding 1 specifically: geist-contrast's hover fill is ``--hover-bg``
-    (#111111), and its ``--bg`` is #000000 — 1.11:1. The fix must switch the
-    hover foreground to ``--text`` (#ededed -> 16.13:1)."""
+def test_geist_contrast_save_hover_uses_the_skin_text_not_bg():
+    """Finding 1 specifically: geist-contrast's Save hover fill is ``--hover-bg``
+    (#111111), and its ``--bg`` is #000000 — 1.11:1. The Save button's hover
+    foreground must be ``--text`` (#ededed -> 16.13:1), and the auxiliary-only
+    ``.settings-btn`` must NOT be flipped to light text on its own light hover
+    fill (that would be light-on-light)."""
     tokens = _skin_palette(CSS, "geist-contrast")
     assert tokens.get("--hover-bg", "").lower() == "#111111"
-    fg, bg = _effective_hover_fg_bg(CSS, "geist-contrast", "#mainSettings .settings-btn")
-    assert fg is not None and bg is not None, "no hover rule resolved for geist-contrast"
-    assert _resolve_var(fg, tokens).lower() == tokens.get("--text", "").lower(), (
-        f"geist-contrast hover foreground must resolve to --text ({tokens.get('--text')}), "
-        f"got {fg!r} -> {_resolve_var(fg, tokens)!r}"
+    save_fg, save_bg = _effective_hover_fg_bg(
+        CSS, "geist-contrast", '#mainSettings .sm-btn[onclick^="saveSettings"]'
     )
-    assert _contrast(_resolve_var(fg, tokens), _resolve_var(bg, tokens)) >= 4.5, (
-        "geist-contrast hover contrast must clear AA for normal text"
+    assert save_fg is not None and save_bg is not None, (
+        "no hover rule resolved for geist-contrast Save"
     )
+    assert _resolve_var(save_fg, tokens).lower() == tokens.get("--text", "").lower(), (
+        f"geist-contrast Save hover foreground must resolve to --text "
+        f"({tokens.get('--text')}), got {save_fg!r} -> {_resolve_var(save_fg, tokens)!r}"
+    )
+    assert _contrast(_resolve_var(save_fg, tokens), _resolve_var(save_bg, tokens)) >= 4.5, (
+        "geist-contrast Save hover contrast must clear AA for normal text"
+    )
+    # The auxiliary-only control carries no `sm-btn` class, so the ID-bearing
+    # Save override must not paint it: it keeps the dark neutral foreground on
+    # its light hover fill.
+    aux_fg, aux_bg = _effective_hover_fg_bg(CSS, "geist-contrast", "#mainSettings .settings-btn")
+    assert aux_fg is not None and aux_bg is not None, (
+        "no hover rule resolved for geist-contrast auxiliary settings"
+    )
+    resolved_aux_fg = _resolve_var(aux_fg, tokens).lower()
+    assert resolved_aux_fg == tokens.get("--bg", "").lower(), (
+        f"geist-contrast auxiliary settings must keep the dark neutral foreground "
+        f"(--bg {tokens.get('--bg')}), got {resolved_aux_fg}"
+    )
+    assert _contrast(resolved_aux_fg, _resolve_var(aux_bg, tokens)) >= 4.5
 
 
 def test_hepburn_hover_keeps_its_own_white_foreground():
@@ -477,6 +463,65 @@ def test_hepburn_hover_keeps_its_own_white_foreground():
     assert _contrast(resolved_edit_fg, resolved_edit_bg) >= 4.5, (
         f"hepburn composer send hover: {resolved_edit_fg} on {resolved_edit_bg} "
         f"= {_contrast(resolved_edit_fg, resolved_edit_bg):.2f}:1"
+    )
+
+
+def test_queue_variant_resolves_like_send():
+    """Queue is a variant of the accent-fill Send control (the same element with
+    a `.queue` class toggled) and shares its hover fill: it must resolve the
+    same hover foreground/background as `.send-btn` in every reviewed skin."""
+    for skin in sorted(REGRESSION_SKINS):
+        send = _effective_hover_fg_bg(CSS, skin, ".send-btn")
+        queue = _effective_hover_fg_bg(CSS, skin, ".send-btn.queue")
+        assert queue[0] is not None and queue[1] is not None, (
+            f"{skin}: queue hover did not resolve"
+        )
+        assert queue == send, (
+            f"{skin}: .send-btn.queue hover ({queue}) differs from .send-btn ({send})"
+        )
+
+
+def test_id_bearing_neutral_foreground_beats_lower_specificity_hover_rule():
+    """Real-markup shape of the production bug: the ID-bearing NEUTRAL
+    foreground (`:root.dark #mainSettings .settings-btn`, an ID ancestor) still
+    matches the hovered element and beats a later, lower-specificity skin hover
+    rule. The resolver must pick the neutral value — and must therefore flag
+    the dark-on-dark regression instead of reporting the pretty hover rule
+    that loses in the browser."""
+    fixture = """
+:root{--bg:#0D0D1A;--accent-hover:#CC3333;}
+:root.dark #mainSettings .settings-btn{color:var(--bg);}
+#mainSettings .settings-btn{background:var(--accent-hover);}
+:root.dark[data-skin="ares"] .settings-btn:hover{color:#ffffff;}
+"""
+    fg, bg = _effective_hover_fg_bg(fixture, "ares", "#mainSettings .settings-btn")
+    assert fg is not None and bg is not None, "fixture rules must resolve"
+    resolved_fg = _resolve_var(fg, {"--bg": "#0D0D1A"}).lower()
+    resolved_bg = _resolve_var(bg, {"--accent-hover": "#CC3333"}).lower()
+    assert resolved_fg == "#0d0d1a", (
+        f"ID-bearing neutral foreground must win over the later lower-specificity "
+        f"hover rule: expected #0D0D1A (var(--bg)), got {resolved_fg!r}"
+    )
+    assert resolved_fg != "#ffffff", "the ID-free hover rule must NOT win"
+    # Dark on the #CC3333 hover fill — 3.75:1, the regression the resolver
+    # must flag (it cannot, if neutral rules are dropped from the resolution).
+    assert _contrast(resolved_fg, resolved_bg) < 4.5, (
+        f"the ID-neutral-wins shape must resolve below AA, got "
+        f"{resolved_fg} on {resolved_bg} = {_contrast(resolved_fg, resolved_bg):.2f}:1"
+    )
+
+
+def test_important_neutral_background_beats_hover_background():
+    """Cascade control: an ``!important`` NEUTRAL background outranks a later
+    non-important hover background, and the resolver must honor that (a
+    hover-only resolver could not see the neutral rule at all)."""
+    injected = "#mainSettings .settings-btn{background:#0a0a0a!important;}"
+    modified = _strip_comments(CSS) + "\n" + injected
+    fg, bg = _effective_hover_fg_bg(modified, "mono", "#mainSettings .settings-btn")
+    assert fg is not None and bg is not None, "injected rules must resolve"
+    assert _resolve_var(bg, {}).lower() == "#0a0a0a", (
+        f"!important neutral background must beat the later non-important hover "
+        f"background, got {bg!r}"
     )
 
 

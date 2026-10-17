@@ -5198,9 +5198,20 @@ main.main > #mainPlugin{display:none;}
      Scoped per skin on purpose: the generic `color:var(--bg)` above stays
      correct for every other dark palette (mono 7.37:1, catppuccin 10.34:1,
      sienna 6.73:1, graphite 16.32:1), so this must not widen into a blanket
-     override. Stop/Interrupt/Steer keep their own chrome and are excluded. */
-  :root.dark[data-skin="geist-contrast"] .settings-btn:hover,
-  :root.dark[data-skin="geist-contrast"] .sm-btn[onclick^="saveSettings"]:hover{color:var(--text);}
+     override. Stop/Interrupt/Steer keep their own chrome and are excluded;
+     Queue shares the Send hover fill and is covered by the same rules.
+     The #mainSettings Settings controls (Save + auxiliary) sit under an ID
+     ancestor, and the generic `:root.dark #mainSettings …` foreground rule
+     carries that ID — an ID-free skin hover rule can never outrank it. The
+     Settings overrides below therefore repeat the `#mainSettings` ancestor so
+     they WIN the cascade (the re-gate measured dark-on-dark there). */
+  /* Geist-contrast: the hover fill is --hover-bg (#111111), so the Save
+     button needs the light --text. Only the actual Save
+     (`.sm-btn[onclick^="saveSettings"]`) gets the ID-bearing override — the
+     auxiliary-only `.settings-btn` keeps the winning dark neutral foreground
+     on its own light hover fill (19.12:1); painting it light would be
+     light-on-light. */
+  :root.dark[data-skin="geist-contrast"] #mainSettings .sm-btn[onclick^="saveSettings"]:hover{color:var(--text);}
   :root.dark[data-skin="hepburn"] button.send-btn:not(:disabled):hover,
   :root.dark[data-skin="hepburn"] .send-btn:not(:disabled):hover{color:#fff;}
   /* Hepburn's --accent (#f278ad) and --accent-hover (#f5a0c5) are LIGHT fills, so
@@ -5212,15 +5223,19 @@ main.main > #mainPlugin{display:none;}
   :root.dark[data-skin="hepburn"] .msg-edit-send:hover,
   :root.dark[data-skin="hepburn"] .toolsets-apply-btn:hover{color:var(--bg);}
   /* Ares's dark --accent (#FF4444) / --accent-hover (#CC3333) are MID fills:
-     white clears 5.14:1 on the hover fill and 3.41:1 on the accent fill, while
-     var(--bg) (#000000) gives 4.09:1 / 6.30:1. White is the review's requested
-     value and clears AA on both, so use it for the whole family. */
+     white clears 5.14:1 on the hover fill, so the composer Send/Queue and the
+     #mainSettings Save + auxiliary buttons get #fff on hover (the
+     ID-bearing selectors win over the generic var(--bg) rule). But
+     `.msg-edit-send` and `.toolsets-apply-btn` keep the #FF4444 ACCENT fill
+     on hover (they have no hover background of their own), where white is
+     only 3.41:1 — below AA for normal text — so those two keep the dark
+     foreground (5.66:1). */
   :root.dark[data-skin="ares"] button.send-btn:not(:disabled):hover,
   :root.dark[data-skin="ares"] .send-btn:not(:disabled):hover,
-  :root.dark[data-skin="ares"] .settings-btn:hover,
-  :root.dark[data-skin="ares"] .sm-btn[onclick^="saveSettings"]:hover,
+  :root.dark[data-skin="ares"] #mainSettings .settings-btn:hover,
+  :root.dark[data-skin="ares"] #mainSettings .sm-btn[onclick^="saveSettings"]:hover{color:#fff;}
   :root.dark[data-skin="ares"] .toolsets-apply-btn:hover,
-  :root.dark[data-skin="ares"] .msg-edit-send:hover{color:#fff;}
+  :root.dark[data-skin="ares"] .msg-edit-send:hover{color:var(--bg);}
   /* Slate's dark --accent-hover (#64748B) is a MID fill: white gives 4.76:1,
      which is what the review measured as correct. But slate's --accent
      (#94A3B8) is much lighter, and the composer/toolset controls keep the
@@ -5228,8 +5243,8 @@ main.main > #mainPlugin{display:none;}
      white drops to 2.56:1 — so those two keep the generic dark foreground. */
   :root.dark[data-skin="slate"] button.send-btn:not(:disabled):hover,
   :root.dark[data-skin="slate"] .send-btn:not(:disabled):hover,
-  :root.dark[data-skin="slate"] .settings-btn:hover,
-  :root.dark[data-skin="slate"] .sm-btn[onclick^="saveSettings"]:hover{color:#fff;}
+  :root.dark[data-skin="slate"] #mainSettings .settings-btn:hover,
+  :root.dark[data-skin="slate"] #mainSettings .sm-btn[onclick^="saveSettings"]:hover{color:#fff;}
   :root.dark[data-skin="slate"] .toolsets-apply-btn:hover,
   :root.dark[data-skin="slate"] .msg-edit-send:hover{color:var(--bg);}
 
