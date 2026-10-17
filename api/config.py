@@ -9350,6 +9350,20 @@ def _invalidate_models_catalog_epoch(*, delete_disk: bool = True, provider_id: s
     global _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
     global _cache_build_in_progress
+    # Drop the one-slot parse memo BEFORE the disk unlink below. The memo is
+    # keyed on (path, mtime_ns, size, st_ino, st_dev), so a payload parsed
+    # before this call keeps a key that still matches the freshly rebuilt file:
+    # the writer creates a new inode, but the rebuild can land inside the same
+    # coarse-clock mtime tick at an identical size, and on any filesystem that
+    # reuses inodes the st_ino/st_dev pair can match too. A reader that then
+    # consumed the memo would be handed the PRE-invalidation catalog -- and
+    # because the consume step hands out that object without a copy, the
+    # caller's in-place edits would corrupt it for every reader after it.
+    # Invalidating the memory cache while leaving the parse memo populated is
+    # therefore not a no-op: the memo is the one cache that survives here.
+    global _models_disk_payload_memo
+    with _models_disk_payload_memo_lock:
+        _models_disk_payload_memo = None
     with _models_cache_disk_commit_lock:
         with _cache_build_cv:
             _allocate_models_rebuild_seq()

@@ -181,6 +181,45 @@ def test_same_size_rewrite_between_precheck_and_loader_is_not_served(tmp_path):
     )
 
 
+def test_invalidate_models_cache_drops_the_parse_memo(tmp_path, monkeypatch):
+    """``invalidate_models_cache()`` must clear the memo slot too.
+
+    The slot is keyed on (path, mtime_ns, size, st_ino, st_dev), none of which
+    a rebuild is guaranteed to change: the writer can land inside the same
+    coarse-clock mtime tick at an identical size, and a filesystem that reuses
+    inodes can reissue the same st_ino/st_dev pair. So an entry that survives
+    invalidation keeps matching the freshly rebuilt file and is served to the
+    next reader -- handing that reader the PRE-invalidation catalog, which the
+    consume step passes on without a copy.
+
+    This is the cross-test pollution that turned
+    ``tests/test_credential_pool_providers.py::test_seeded_config_survives_a_stale_loaded_config_path``
+    red: an earlier test in the shard memoised its own catalog, this test's
+    ``invalidate_models_cache()`` cleared the memory cache and unlinked the
+    disk file but left the memo populated, and the seeded ``bothub`` provider
+    was then masked by the previous test's ``OpenAI Codex``-only catalog.
+    """
+    cache_path = tmp_path / "models_cache.json"
+    _write(cache_path, _catalog("old"))
+
+    # A previous visit memoises the old generation.
+    assert config._read_models_cache_disk_payload(cache_path) == _catalog("old")
+
+    monkeypatch.setattr(config, "_get_models_cache_path", lambda: cache_path)
+    config.invalidate_models_cache()
+
+    assert config._models_disk_payload_memo is None, (
+        "invalidate_models_cache() must drop the one-slot parse memo; a surviving "
+        f"entry kept a key that still matches the rebuilt file -> {config._models_disk_payload_memo!r}"
+    )
+
+    # And the memoised pre-invalidation catalog is unreachable afterwards.
+    rebuilt = _catalog("new")
+    _write(cache_path, rebuilt)
+    assert config._memoized_models_cache_disk_payload(cache_path) is config._MODELS_DISK_PAYLOAD_UNSET
+    assert config._read_models_cache_disk_payload(cache_path) == rebuilt
+
+
 def test_memo_hit_still_works_for_the_unchanged_file(tmp_path):
     """The single-parse fast path must survive the lock + inode key."""
     cache_path = tmp_path / "models_cache.json"
