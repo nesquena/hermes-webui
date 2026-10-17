@@ -31,9 +31,10 @@ These tests drive the REAL ``_syncToolCallsForLoadedMessages`` out of
 - a reused-id verdict is scoped to its owning assistant index;
 - the map is rebuilt from scratch on every invocation (a settlement that
   drops a failure clears it);
-- paging merges the older page's verdicts with the page's own coordinate
-  offset, so a newer successful occurrence is not repainted by an older
-  page's failure.
+- paging merges the older page's verdicts in combined-transcript coordinates
+  (the server rebases the response; the prepend path merges the RETAINED
+  summaries with their owners shifted by the page length), so a newer
+  successful occurrence is not repainted by an older page's failure.
 """
 
 from __future__ import annotations
@@ -218,14 +219,14 @@ process.stdout.write(JSON.stringify({afterFirst:afterFirst,
 
 
 def test_paging_merge_offsets_the_older_page_owners():
-    """An older page's verdicts must be re-based onto the combined array.
+    """The paging verdict map must use combined-transcript coordinates.
 
-    ``_loadOlderMessages`` prepends rows, so an owner index from the older
-    page's own coordinates names a DIFFERENT row once prepended. The merge
-    must apply the page's offset before combining, or a newer successful
-    occurrence inherits an older page's failure. The two tests below pin the
-    call site and the producer's re-basing behaviour directly; this one keeps
-    the region-level anchor so the paging path itself cannot disappear.
+    The server rebases ``assistant_msg_idx`` into the returned window, so
+    response summaries need no shift in either paging strategy; a prepend
+    must merge the RETAINED transcript's verdicts with their owners shifted
+    by the page length. The two tests below pin the call site and the
+    producer's re-basing behaviour directly; this one keeps the
+    region-level anchor so the paging path itself cannot disappear.
     """
     src = _read("static/sessions.js")
     assert "_loadOlderMessages" in src, "the paging path was not found"
@@ -237,8 +238,9 @@ def test_paging_merge_offsets_the_older_page_owners():
     )
 
 
-def test_the_paging_call_passes_the_page_length_as_the_offset():
-    """The paging call site must hand the producer the page's own offset."""
+def test_the_paging_call_passes_the_page_length_and_the_prepend_merge_flag():
+    """The paging call site must hand the producer the page length and the
+    prepend-only retained-merge gate."""
     src = _read("static/sessions.js")
     region_start = src.index("function _loadOlderMessages(")
     region = src[region_start:region_start + 20000]
@@ -248,18 +250,25 @@ def test_the_paging_call_passes_the_page_length_as_the_offset():
     call_start = region.index("_syncToolCallsForLoadedMessages(", region.index("S.messages = nextMessages"))
     call = region[call_start:call_start + 300]
     assert "olderMsgs.length" in call, (
-        "the paging rebuild must pass the older page's row count as the "
-        f"owner-coordinate offset; got: {call[:200]!r}"
+        "the paging rebuild must pass the page length as the retained-owner "
+        f"shift; got: {call[:200]!r}"
+    )
+    assert "!tailMatches" in call, (
+        "the retained-verdict merge must be gated on the PREPEND path only — "
+        "the cumulative window response already covers every summary"
     )
 
 
-def test_the_producer_shifts_owner_indices_by_the_offset():
-    """Behavioural half: the producer re-bases a paged summary's owners.
+def test_the_producer_keeps_response_owner_indices_unchanged():
+    """Behavioural half: the producer does NOT re-shift a paged summary.
 
-    The older page's summary names the failed occurrence at index 1 in ITS
-    coordinates. With 3 rows prepended ahead of it, the verdict must land on
-    owner 4 of the combined array — not on owner 1, which is a newer
-    successful occurrence in the combined coordinates.
+    The server already rebases ``assistant_msg_idx`` into the returned window
+    (``_tool_calls_for_message_window``, api/routes.py), so the round-11
+    ``ownerOffset`` that shifted every response owner double-shifted it: the
+    failed owner 4 with a 3-row offset moved onto 7 (and the reviewer's
+    cumulative repro moved failed owner 1 onto successful owner 4). The
+    response index must stay exactly as delivered; ``ownerOffset`` now
+    applies only to the RETAINED transcript's merged verdicts.
     """
     out = _build_map(
         [
@@ -275,7 +284,11 @@ def test_the_producer_shifts_owner_indices_by_the_offset():
     assert isinstance(entry, dict), f"the entry must be owner-scoped: {entry!r}"
     owners = set(entry.get("occurrences") or {})
     owners.add(entry.get("assistant_msg_idx"))
-    assert 7 in owners, f"the paged owner must be re-based to 1+3=4+3=7: {entry!r}"
-    assert 4 not in owners, (
-        "an un-rebased paged owner would land on the combined array's owner 4"
+    assert 4 in owners, (
+        "the response summary's owner is already window-relative and must not "
+        f"be re-shifted: {entry!r}"
+    )
+    assert 7 not in owners, (
+        "the round-11 offset moved the failed owner 4 onto owner 7 of the "
+        "combined array"
     )

@@ -20,15 +20,14 @@ def test_sessions_js_resyncs_tool_calls_after_history_window_replacement():
     # the anchor.
     assert "function _syncToolCallsForLoadedMessages(messages, sessionToolCalls" in SESSIONS_JS
     assert "_syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
-    # #7653 re-gate round 11: the paging rebuild now also passes the older
-    # page's row count as the owner-coordinate offset, so the anchor covers
-    # the resync through the offset argument rather than the bare two-arg
-    # call. The intent is unchanged: the paging path must resync the side
-    # data alongside the replaced window.
+    # #7653 re-gate round 11/12: the paging rebuild passes the older page's
+    # row count as the retained-owner shift and gates the retained-verdict
+    # merge on the prepend path. The intent is unchanged: the paging path
+    # must resync the side data alongside the replaced window.
     assert "S.messages = nextMessages;" in SESSIONS_JS
     assert "_syncToolCallsForLoadedMessages(" in SESSIONS_JS
     assert "olderMsgs.length" in SESSIONS_JS, (
-        "the paging resync must pass the older page's length as the owner offset"
+        "the paging resync must pass the page length as the retained-owner shift"
     )
     assert "S.messages = _msgsToAssign;\n    _messagesTruncated = false;\n    _oldestIdx = 0;\n    _syncToolCallsForLoadedMessages(msgs, data.session.tool_calls);" in SESSIONS_JS
 

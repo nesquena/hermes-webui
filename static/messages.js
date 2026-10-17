@@ -4717,6 +4717,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // transfer instead of guessing.
       const idRows=tid?byTid.get(tid):null;
       let idMatchEntry=null;
+      // #7653 re-gate round 12 (finding 4, SILENT): live METADATA (burst /
+      // duration / started_at) is reserved for the explicit id's own rows
+      // before the name fallback. Stream-born live rows (upsertLiveToolCall)
+      // carry no assistant_msg_idx, so occurrence-exact fails even for a
+      // DISTINCT id; without this reservation the row fell through to the
+      // NAME fallback, which could consume an OLDER same-name live row
+      // (marking it used) and hand the current row that older row's
+      // duration/started_at — the recovery metadata swap the reviewer
+      // reproduced. The verdict upgrade below stays gated on the
+      // occurrence-exact ``idMatchEntry``, so the loosened metadata match
+      // never repaints a row failed.
+      let metadataEntry=null;
       // #7653 re-gate round 11 (finding 2): the two rules from the block
       // above. An indexless row inside the trailing-skip window takes
       // NOTHING (not even the name fallback), so the occurrence that owns
@@ -4735,13 +4747,21 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               return (v!==undefined&&v!==null&&v!==''&&Number(v)===_nextOwner);
             });
             if(owned) idMatchEntry=owned;
+            if(!idMatchEntry){
+              // Metadata reservation: the settled row names an index no live
+              // row owns (stream-born rows lack it) — pair metadata with the
+              // id's own next unused live row instead of borrowing a
+              // neighbour's via the name fallback.
+              const nextRow=idRows.find(entry=>!used.has(entry.idx));
+              if(nextRow) metadataEntry={tc:nextRow.tc,idx:nextRow.idx};
+            }
           }else{
             const nextRow=idRows.find(entry=>!used.has(entry.idx));
             if(nextRow) idMatchEntry=nextRow;
           }
         }
       }
-      let matchEntry=idMatchEntry;
+      let matchEntry=metadataEntry||idMatchEntry;
       if(!matchEntry&&!_skipThisRow){
         const name=next.name||((next.function||{}).name)||'';
         const matchIdx=liveCalls.findIndex((tc,i)=>tc&&!used.has(i)&&(!name||tc.name===name));

@@ -3882,19 +3882,27 @@ function _messageReloadLimitForSession(sid){
   return _INITIAL_MSG_LIMIT;
 }
 
-function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, ownerOffset){
+function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, ownerOffset, mergePrevMap){
   const msgs=Array.isArray(messages)?messages:[];
-  // #7653 re-gate round 11 (finding 3, SILENT): the paging path prepends an
-  // OLDER page whose ``session.tool_calls`` summary carries owner indices in
-  // that page's OWN coordinates, while ``messages`` is the COMBINED array
-  // (older page + current transcript). Merging the two without re-basing
-  // compares indices from two different arrays as if they were one, so an
-  // older page's failure lands on a newer successful occurrence — the
-  // reviewer's "older-page prepend" contamination. ``ownerOffset`` is the
-  // number of rows the older page contributed ahead of the combined array;
-  // every owner index read from the summary is shifted by it. Absent (or 0)
-  // for every non-paging caller, which is the combined-array case already.
+  // #7653 re-gate round 12 (finding 1, SILENT): the server already rebases
+  // every ``session.tool_calls`` ``assistant_msg_idx`` into the RETURNED
+  // window's coordinates (``_tool_calls_for_message_window``,
+  // api/routes.py), so the response summaries are used UNCHANGED in both
+  // paging strategies — the round-11 ``ownerOffset`` here double-shifted a
+  // failed owner onto a newer successful occurrence (cumulative paging:
+  // owner 1 -> 4; prepend paging: owner 1 -> 7). ``ownerOffset`` now
+  // applies ONLY to the RETAINED transcript's previous verdict map when
+  // ``mergePrevMap`` is set (the prepend path): a ``msg_before`` response
+  // carries only the OLDER page's summaries, so the current transcript's
+  // verdicts would be dropped by the wholesale replace — merge them back
+  // with their owners shifted by the page length (the retained rows moved
+  // down the combined array). The older page itself sits at the FRONT of
+  // the combined array, so its own page-relative indices are already the
+  // combined ones.
   const _ownerOffset=(ownerOffset!=null&&ownerOffset!==''&&Number.isFinite(Number(ownerOffset)))?Number(ownerOffset):0;
+  // The previous verdict map (the current transcript's), captured BEFORE it
+  // is replaced below; only the prepend path merges it back.
+  const _prevVerdictMap=(mergePrevMap&&S._settledToolIsErrorByTid)||null;
   // #7358 round 9 (re-gate 10/01 finding 2): the persisted verdict map is
   // keyed on the call *occurrence*, never on the tid alone — llama.cpp reuses
   // one id and other providers reuse ``call_0`` every turn, so a tid-only
@@ -3928,10 +3936,12 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, 
       }
       // Reused id: scope the verdict to the owning assistant message index so
       // an earlier successful ``call_0`` is left alone.
-      // #7653 re-gate round 11: the index is re-based by ``_ownerOffset`` so a
-      // paged summary's owner names the row it owns in the COMBINED array.
+      // #7653 re-gate round 12 (finding 1, SILENT): the response summary's
+      // index is ALREADY window-relative (the server rebased it), so it is
+      // used unchanged — the round-11 ``+_ownerOffset`` here double-shifted
+      // every paged owner onto a newer occurrence.
       const _aRaw=tc.assistant_msg_idx;
-      const _aIdx=(_aRaw!=null&&_aRaw!==''&&Number.isFinite(Number(_aRaw)))?Number(_aRaw)+_ownerOffset:null;
+      const _aIdx=(_aRaw!=null&&_aRaw!==''&&Number.isFinite(Number(_aRaw)))?Number(_aRaw):null;
       if(_aIdx==null){
         // #7653 re-gate round 11 (finding 3, SILENT): NO occurrence info for a
         // reused id, so nothing proves which row is the failed one. Writing a
@@ -3954,6 +3964,54 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, 
         if(!slot.occurrences) slot.occurrences={};
         slot.occurrences[_aIdx]=true;
         slot.is_error=true;
+      }
+    }
+  }
+  // #7653 re-gate round 12 (finding 1, SILENT): prepend paging merges the
+  // RETAINED transcript's verdicts back into the map (a ``msg_before``
+  // response carries only the OLDER page's summaries), shifting only THEIR
+  // owners by the prepended page length. Response-derived entries for the
+  // same tid win — they are authoritative for the page's occurrences; a flat
+  // ``true`` retained entry merges only when the tid is absent from the
+  // response (otherwise it would paint the whole combined array red).
+  if(_prevVerdictMap&&_ownerOffset>0){
+    for(const _tid of Object.keys(_prevVerdictMap)){
+      const _prevEntry=_prevVerdictMap[_tid];
+      if(_prevEntry===true){
+        if(_persistedIsErrorByTid[_tid]===undefined) _persistedIsErrorByTid[_tid]=true;
+        continue;
+      }
+      if(!_prevEntry||typeof _prevEntry!=='object') continue;
+      const _shifted={..._prevEntry};
+      const _retainedIdx=_shifted.assistant_msg_idx;
+      if(_retainedIdx!=null&&_retainedIdx!==''&&Number.isFinite(Number(_retainedIdx))){
+        _shifted.assistant_msg_idx=Number(_retainedIdx)+_ownerOffset;
+      }
+      if(_shifted.occurrences&&typeof _shifted.occurrences==='object'){
+        const _shiftedOccurrences={};
+        for(const _k of Object.keys(_shifted.occurrences)){
+          const _n=Number(_k);
+          if(Number.isFinite(_n)) _shiftedOccurrences[_n+_ownerOffset]=true;
+        }
+        _shifted.occurrences=_shiftedOccurrences;
+      }
+      const _existing=_persistedIsErrorByTid[_tid];
+      if(_existing===true){
+        // The response owns a flat verdict for this tid; the retained scoped
+        // entry cannot be reconciled against it — drop it (fail closed, the
+        // row renders from its own data).
+        continue;
+      }
+      if(_existing&&typeof _existing==='object'){
+        if(!_existing.occurrences) _existing.occurrences={};
+        if(_shifted.assistant_msg_idx!=null&&Number.isFinite(Number(_shifted.assistant_msg_idx))){
+          _existing.occurrences[_shifted.assistant_msg_idx]=true;
+        }
+        if(_shifted.occurrences){
+          for(const _k of Object.keys(_shifted.occurrences)) _existing.occurrences[_k]=true;
+        }
+      }else{
+        _persistedIsErrorByTid[_tid]=_shifted;
       }
     }
   }
@@ -4705,17 +4763,24 @@ async function _loadOlderMessages() {
       nextMessages = window._carryForwardEphemeralTurnFields(S.messages || [], nextMessages);
     }
     S.messages = nextMessages;
-    // #7653 re-gate round 11 (finding 3, SILENT): pass the older page's row
-    // count as the owner-coordinate offset. ``responseSession.tool_calls``
-    // describes the OLDER page in its own coordinates, while ``nextMessages``
-    // is the combined array, so the verdict map must be built with every
-    // owner index shifted by the page length — otherwise an older page's
-    // failure lands on a newer successful occurrence of the same reused id.
+    // #7653 re-gate round 12 (finding 1, SILENT): the server rebases
+    // ``session.tool_calls`` into the returned window's coordinates
+    // (``_tool_calls_for_message_window``, api/routes.py), so the response
+    // summaries need NO owner shift in either paging strategy — the round-11
+    // ``olderMsgs.length`` offset here moved a failed owner onto a newer
+    // successful occurrence (cumulative: owner 1 -> 4; prepend: owner 1 ->
+    // 7). For prepends the OLDER page sits at the FRONT of the combined
+    // array, so its page-relative indices are already the combined ones; the
+    // RETAINED transcript's verdicts are the only entries that move (they
+    // shifted down by the page length), and only the prepend path has
+    // retained entries to merge — ``tailMatches`` (the cumulative replace)
+    // merges nothing because the response already covers the whole window.
     _syncToolCallsForLoadedMessages(
       nextMessages,
       responseSession.tool_calls,
       sid,
       olderMsgs.length,
+      !tailMatches,
     );
     // #7882 (greptile round-4 P2): older rows prepended during an in-flight
     // send are server-known rows — advance the send's optimistic-count
