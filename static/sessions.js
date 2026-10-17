@@ -11366,8 +11366,7 @@ function renderSessionListFromCache(){
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    const isDone=s.done_at!==null&&s.done_at!==undefined&&s.done_at!=='';
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(isDone?' done':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+((s.done_at!==null&&s.done_at!==undefined&&s.done_at!=='')?' done':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -11558,8 +11557,11 @@ function renderSessionListFromCache(){
     // scripts through POST /api/session/mark-done, never inferred from the
     // title or from silence. Distinct from `.archived` (storage): both can hold.
     // Presence, not truthiness: a stored 0 is a valid (epoch) timestamp and
-    // must still read as done.
-    if(isDone){
+    // must still read as done. Inlined rather than hoisted into a variable:
+    // this renderer gets sliced by browser tests that extract fragments from
+    // the middle of the function, and a helper declared above the slice would
+    // be out of scope in their page context.
+    if(s.done_at!==null&&s.done_at!==undefined&&s.done_at!==''){
       const doneEl=document.createElement('span');
       doneEl.className='session-done-badge';
       const doneLabel=t('session_done_badge');

@@ -33,9 +33,13 @@ I18N_JS = (REPO_ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node required")
 
 
+DONE_PREDICATE = "s.done_at!==null&&s.done_at!==undefined&&s.done_at!==''"
+
+
 def _done_badge_block() -> str:
-    """The `if(isDone){...}` fragment from the row renderer."""
-    m = re.search(r"^    if\(isDone\)\{.*?^    \}\n", SESSIONS_JS, re.S | re.M)
+    """The `if(<done predicate>){...}` fragment from the row renderer."""
+    pattern = r"^    if\(" + re.escape(DONE_PREDICATE) + r"\)\{.*?^    \}\n"
+    m = re.search(pattern, SESSIONS_JS, re.S | re.M)
     assert m, "done badge block not found in static/sessions.js"
     return m.group(0)
 
@@ -70,9 +74,9 @@ function _formatRelativeSessionTime(ms) {{ return ms ? '2h ago' : 'unknown'; }}
 const out = [];
 for (const s of {json.dumps(rows)}) {{
   const titleRow = new FakeEl('span');
-  // Mirrors the row-class predicate in _renderOneSession, which the block
-  // depends on (presence, not truthiness).
-  const isDone=s.done_at!==null&&s.done_at!==undefined&&s.done_at!=='';
+  // The row-class predicate, verbatim from _renderOneSession (presence, not
+  // truthiness — a stored 0 is a valid timestamp).
+  const isDone = {DONE_PREDICATE};
   {block}
   out.push({{ isDone, children: titleRow.children.map(c => ({{
     className: c.className,
@@ -116,15 +120,12 @@ def test_done_at_zero_still_reads_as_done():
 
 def test_done_row_gets_the_done_class_and_archived_stays_independent():
     """`done` is workflow state, `archived` is storage: both classes can coexist."""
-    assert "const isDone=s.done_at!==null&&s.done_at!==undefined&&s.done_at!=='';" in SESSIONS_JS, (
-        "done predicate must test presence, not truthiness (a 0 timestamp is valid)"
-    )
     # The class is appended next to `archived`, never as a replacement for it.
     m = re.search(r"el\.className='session-item'.*?;(?=\n)", SESSIONS_JS)
     assert m, "session-item className line not found"
     line = m.group(0)
     assert "(s.archived?' archived':'')" in line
-    assert "(isDone?' done':'')" in line
+    assert f"(({DONE_PREDICATE})?' done':'')" in line
     assert "s.archived?s.done_at" not in line and "s.done_at?s.archived" not in line
 
 
