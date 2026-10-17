@@ -16025,6 +16025,27 @@ def _session_get_lineage_token(session, sidecar_sig):
     return tuple(live)
 
 
+def _session_mutation_in_flight(session_id: str) -> bool:
+    """True while some route holds this session's mutation lock.
+
+    A mutating route changes the cached ``Session`` and only then calls
+    ``save()``, so for that entire window every signature a flight key is built
+    from still describes the *previous* state. A reader that coalesced inside
+    that window would match a leader that snapshotted the old session and be
+    handed the pre-mutation projection — which is why the key alone cannot close
+    this race.
+
+    Probe with a non-blocking acquire and release immediately. This never waits
+    on a writer, and a caller that already holds the lock simply reports "in
+    flight", which costs only that reader its chance to coalesce.
+    """
+    lock = _get_session_agent_lock(session_id)
+    if not lock.acquire(blocking=False):
+        return True
+    lock.release()
+    return False
+
+
 def _session_get_flight_key(session, profile, cli_meta, query_shape):
     """Return the identity of one identical concurrent GET /api/session read.
 
@@ -16036,6 +16057,11 @@ def _session_get_flight_key(session, profile, cli_meta, query_shape):
 
     sid = str(getattr(session, "session_id", "") or "")
     if not sid or not is_safe_session_id(sid):
+        return None
+    if _session_mutation_in_flight(sid):
+        # A mutating route owns this session right now. Build our own projection
+        # instead of joining a flight that may have snapshotted the session
+        # before the mutation landed.
         return None
     sidecar_sig = _sidecar_stat_signature(SESSION_DIR / f"{sid}.json")
     if sidecar_sig is None:
@@ -16264,6 +16290,17 @@ def _handle_session_get(handler, parsed) -> bool:
                         _SESSION_GET_FLIGHT_WAIT_SECONDS
                     ):
                         _shared_payload = _session_get_claim["payload"]
+                if _shared_payload is not None:
+                    # Joining the flight only proved the snapshot matched when
+                    # this request *arrived*. While it waited, a mutating route
+                    # may have replaced the very state this key described, so
+                    # re-derive the key and build our own projection unless it
+                    # is still identical. The leader's own response is served
+                    # unchanged — it legitimately observed the older session.
+                    if _session_get_flight_key(
+                        s, _session_profile, cli_meta, _session_get_query_shape
+                    ) != _session_get_key:
+                        _shared_payload = None
                 if _shared_payload is not None:
                     if _diag: _diag.finish()
                     return j(handler, _shared_payload)
