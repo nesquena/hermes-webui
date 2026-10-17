@@ -5839,7 +5839,12 @@ function _renderBatchActionBar(){
       // 1280px and 390px, so one foreign row silently unselected the owned row
       // they wanted. Master retains the selection after a failure; the user can
       // deselect the offending row and retry without rebuilding the selection.
-      showToast(t('session_batch_archive_mixed_profiles'),3500);
+      // #7826 re-gate CORE: an owner outside the ACTIVE profile is a foreign
+      // row — the server 409s its archive, and archiving it individually (the
+      // mixed_profiles copy's suggestion) 409s too. Give that case its own
+      // copy that suggests switching profile or deselecting the row.
+      const _foreignOwner=preflight.reason&&preflight.reason.indexOf('foreign-owner:')===0;
+      showToast(t(_foreignOwner?'session_batch_archive_foreign_owner':'session_batch_archive_mixed_profiles'),3500);
       return;
     }
     const ok=await showConfirmDialog({

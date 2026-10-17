@@ -128,16 +128,31 @@ def test_the_archive_fallback_refuses_a_read_only_row():
 def test_the_archive_fallback_still_archives_a_writable_same_profile_row():
     """Counterpart: the legitimate same-profile CLI archive must keep working.
 
-    Only the rows the lookup cannot describe safely (read-only Gateway/imported)
-    are refused; a writable same-profile row still materializes and archives.
+    Re-gate CORE: the owner-only fallback itself no longer materializes ANY
+    same-profile match (it cannot prove writability — see the provenance
+    guard). A writable same-profile CLI row archives through the NORMAL
+    active-profile lookup: ``cli_meta`` from ``_lookup_cli_session_metadata``
+    skips the fallback entirely, so the materialization path must still be
+    reachable after the fallback's guards.
     """
     src = _routes_source()
     read_only_idx = src.find('if cli_meta.get("read_only"):')
-    # The materialization path must still be reachable after the guard.
+    # The provenance guard sits immediately before the read_only guard.
+    provenance_idx = src.find("if _owner_fallback_used:", read_only_idx - 400)
+    assert provenance_idx >= 0, (
+        "the owner-fallback provenance guard is gone — a same-profile fallback "
+        "match would be materialized again"
+    )
+    assert provenance_idx < read_only_idx, (
+        "the provenance guard must fire BEFORE the read_only guard so every "
+        "same-profile fallback match 404s"
+    )
+    # The materialization path must still be reachable after the guards for
+    # the normal-lookup (non-fallback) path.
     after = src[read_only_idx : read_only_idx + 3000]
     assert "import_cli_session(" in after, (
         "the materialization path is gone — a writable same-profile CLI session "
-        "can no longer be archived through this fallback"
+        "can no longer be archived through the normal lookup"
     )
 
 
@@ -295,3 +310,151 @@ def test_a_successful_archive_still_exits_selection_mode():
     assert "exitSessionSelectMode()" in window, (
         "a successful batch archive no longer leaves selection mode"
     )
+
+
+# ── 4. should-fix: a foreign-owner preflight failure needs its own copy ────
+
+
+def test_foreign_owner_preflight_failure_gets_its_own_toast():
+    """A foreign-owner rejection must NOT reuse the mixed_profiles copy.
+
+    That copy tells the user to archive the conversations one at a time —
+    which for a foreign row hits the server's 409 again. The re-gate wants
+    copy that suggests switching profile or deselecting instead.
+
+    Driven through the REAL ``_renderBatchActionBar`` archive handler: the
+    preflight runs against a foreign row and the toast key is recorded, so a
+    refactor that re-collapses the two cases into one key fails here.
+    """
+    src = _sessions_source()
+    bodies = {
+        "owners": _extract_function(src, "_archiveBatchOwners"),
+        "owner_row": _extract_function(src, "_archiveBatchOwnerForRow"),
+        "match": _extract_function(src, "_archiveBatchOwnersMatch"),
+        "render": _extract_function(src, "_renderBatchActionBar"),
+    }
+    driver = r"""
+const events = [];
+const rows = [
+  { session_id: 'w1', profile: 'work', session_source: 'webui' },
+  { session_id: 'h1', profile: 'home', session_source: 'webui' },
+];
+const sessionsById = new Map(rows.map(r => [r.session_id, r]));
+const _allSessions = rows;
+const _selectedSessions = new Set(['w1', 'h1']);
+const S = { session: { session_id: 'root-chat' }, activeProfile: 'default',
+            activeProfileIsDefault: true };
+const _showArchived = false;
+const _sessionSwipeReturnOffsets = { set() {} };
+let _pendingSessionReflowPositions = null;
+const bar = { style: {}, children: [], appendChild(n) { this.children.push(n); } };
+function $(id) { return id === 'batchActionBar' ? bar : null; }
+const document = { createElement(t) { return { tag: t, style: {}, className: '',
+  textContent: '', appendChild() {}, onclick: null }; } };
+function t(key) { return key; }
+function _worktreeSessionCount() { return 0; }
+function _sessionSnapshotById(sid) { return sessionsById.get(sid) || null; }
+function showConfirmDialog() { events.push('confirm'); return Promise.resolve(true); }
+function exitSessionSelectMode() { events.push('exit'); }
+function showToast(msg) { events.push('toast:' + msg); }
+function renderSessionList() {}
+function _sessionPrefersReducedMotion() { return false; }
+function _sessionResponseRetainsWorktree() { return false; }
+function _profileMatchesActiveProfile(profile, active) { return profile === active; }
+let switchCalls = 0;
+async function _switchProfileForSessionLoad(profile) {
+  switchCalls++; S.activeProfile = profile; S.activeProfileIsDefault = false;
+}
+async function api(path, opts) { events.push('api:' + path); return { worktree_retained: false }; }
+
+%(owners)s
+%(owner_row)s
+%(match)s
+%(render)s
+
+_renderBatchActionBar();
+(async () => {
+  const button = bar.children.find(n => n.textContent === 'session_batch_archive');
+  if (!button) throw new Error('no archive button');
+  await button.onclick();
+  console.log(JSON.stringify({ events, switchCalls }));
+})();
+""" % bodies
+    out = _run_js(driver, {}, _SESSIONS_JS)
+    toasts = [e[len("toast:"):] for e in out["events"] if e.startswith("toast:")]
+    assert toasts == ["session_batch_archive_foreign_owner"], (
+        f"a foreign-owner preflight failure must show the foreign-owner copy, "
+        f"got {toasts!r}"
+    )
+    assert "session_batch_archive_mixed_profiles" not in out["events"], (
+        "the foreign-owner case still shows the mixed_profiles copy, which "
+        "suggests archiving one at a time — that 409s too"
+    )
+    assert "api:/api/session/archive" not in out["events"], (
+        "a rejected batch must send no archive request"
+    )
+    assert out["switchCalls"] == 0, "the batch handler must never switch profiles"
+
+
+def test_unknown_owner_preflight_failure_keeps_the_original_copy():
+    """Counterpart: a row with no derivable owner still gets the original
+    mixed_profiles copy (archiving one at a time is the right advice there).
+    """
+    src = _sessions_source()
+    bodies = {
+        "owners": _extract_function(src, "_archiveBatchOwners"),
+        "owner_row": _extract_function(src, "_archiveBatchOwnerForRow"),
+        "match": _extract_function(src, "_archiveBatchOwnersMatch"),
+        "render": _extract_function(src, "_renderBatchActionBar"),
+    }
+    driver = r"""
+const events = [];
+const rows = [
+  { session_id: 'ok', profile: 'default', session_source: 'webui' },
+  { session_id: 'ghost', profile: null, session_source: 'cli' },
+];
+const sessionsById = new Map(rows.map(r => [r.session_id, r]));
+const _allSessions = rows;
+const _selectedSessions = new Set(['ok', 'ghost']);
+const S = { session: { session_id: 'root-chat' }, activeProfile: 'default',
+            activeProfileIsDefault: true };
+const _showArchived = false;
+const _sessionSwipeReturnOffsets = { set() {} };
+let _pendingSessionReflowPositions = null;
+const bar = { style: {}, children: [], appendChild(n) { this.children.push(n); } };
+function $(id) { return id === 'batchActionBar' ? bar : null; }
+const document = { createElement(t) { return { tag: t, style: {}, className: '',
+  textContent: '', appendChild() {}, onclick: null }; } };
+function t(key) { return key; }
+function _worktreeSessionCount() { return 0; }
+function _sessionSnapshotById(sid) { return sessionsById.get(sid) || null; }
+function showConfirmDialog() { events.push('confirm'); return Promise.resolve(true); }
+function exitSessionSelectMode() { events.push('exit'); }
+function showToast(msg) { events.push('toast:' + msg); }
+function renderSessionList() {}
+function _sessionPrefersReducedMotion() { return false; }
+function _sessionResponseRetainsWorktree() { return false; }
+function _profileMatchesActiveProfile(profile, active) { return profile === active; }
+let switchCalls = 0;
+async function _switchProfileForSessionLoad(profile) { switchCalls++; }
+async function api(path, opts) { events.push('api:' + path); return { worktree_retained: false }; }
+
+%(owners)s
+%(owner_row)s
+%(match)s
+%(render)s
+
+_renderBatchActionBar();
+(async () => {
+  const button = bar.children.find(n => n.textContent === 'session_batch_archive');
+  if (!button) throw new Error('no archive button');
+  await button.onclick();
+  console.log(JSON.stringify({ events, switchCalls }));
+})();
+""" % bodies
+    out = _run_js(driver, {}, _SESSIONS_JS)
+    toasts = [e[len("toast:"):] for e in out["events"] if e.startswith("toast:")]
+    assert toasts == ["session_batch_archive_mixed_profiles"], (
+        f"an unknown-owner rejection must keep the original copy, got {toasts!r}"
+    )
+    assert out["switchCalls"] == 0, "the batch handler must never switch profiles"

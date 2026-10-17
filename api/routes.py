@@ -9934,10 +9934,33 @@ def _lookup_cli_session_owner_readonly(
             continue
         if row is None:
             continue
+        source_value = (row["source"] if "source" in row.keys() else "") or ""
+        # #7826 re-gate CORE: expose read_only so the archive fallback's guard
+        # can actually fire. state.db has no ``read_only`` column (the flag is
+        # derived, never stored), so it is reconstructed here from the row's
+        # source family the same way ``_is_claimable_cli_source`` refuses
+        # foreign-owned rows: gateway / claude_code / messaging /
+        # external_agent / cron / subagent / unknown are read-only views of an
+        # external store and must never be materialized into a writable WebUI
+        # sidecar.
+        read_only_flag = False
+        if source_value:
+            try:
+                read_only_flag = not _is_claimable_cli_source(
+                    {
+                        "source_tag": source_value,
+                        "raw_source": source_value,
+                        "session_source": source_value,
+                    },
+                    state_db_source=source_value,
+                )[0]
+            except Exception:
+                read_only_flag = False
         return {
             "session_id": sid,
             "profile": profile_name,
-            "source": (row["source"] if "source" in row.keys() else "") or "",
+            "source": source_value,
+            "read_only": read_only_flag,
             "started_at": (row["started_at"] if "started_at" in row.keys() else None),
             "ended_at": (row["ended_at"] if "ended_at" in row.keys() else None),
             "message_count": (
@@ -20582,11 +20605,15 @@ def handle_post(handler, parsed) -> bool:
             # and null source identity, and returned 200 where master returns 404
             # without creating a file.
             #
-            # The fallback exists to turn a foreign owner into a 409. A same-profile
-            # match may still be archived, but ONLY when the row is provably
-            # writable: the read-only Gateway/imported rows this lookup cannot
-            # describe safely stay on the 404 self-heal path instead of being
-            # materialized into a writable sidecar with null source identity.
+            # The fallback exists ONLY to turn a foreign owner into a 409 (above).
+            # A same-profile match through it is exactly the shape that must not be
+            # materialized: the row was ALSO invisible to the active-profile CLI
+            # lookup (that is why the fallback ran), so master's behaviour for it is
+            # a bare 404, and re-creating it as a writable sidecar with null source
+            # identity would both change master's outcome and silently re-parent a
+            # read-only foreign session. Provenance-tracking the fallback keeps the
+            # 404 self-heal firing for every same-profile fallback match while the
+            # foreign-owner 409 above is preserved.
             #
             # (This replaces the 400 that used to sit here: a read-only row reaching
             # this fallback is exactly the shape that must not be materialized, and
