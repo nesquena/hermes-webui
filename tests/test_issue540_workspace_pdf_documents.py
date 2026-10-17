@@ -13,6 +13,7 @@ input, optional dependency, and never a 500 escaping to the caller.
 
 from __future__ import annotations
 
+import io
 import re
 from pathlib import Path
 
@@ -32,7 +33,7 @@ from api.pdf_documents import (
 )
 
 
-def _pdf_bytes(*pages: str, encrypt_with: str | None = None) -> bytes:
+def _pdf_bytes(*pages: str) -> bytes:
     """Build a minimal, uncompressed PDF whose pages carry the given text."""
     pages = pages or ("",)
 
@@ -48,9 +49,18 @@ def _pdf_bytes(*pages: str, encrypt_with: str | None = None) -> bytes:
     # /Pages number up front — page objects must /Parent-reference it.
     pages_obj_number = 1 + (2 * len(pages)) + 1
     page_numbers: list[int] = []
-    for text in pages:
-        escaped = text.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
-        stream = f"BT /F1 12 Tf 72 720 Td ({escaped}) Tj ET".encode("ascii")
+    for lines in pages:
+        # One Tj per line at descending positions, so the page really carries
+        # line breaks (a single Tj is one line and cannot exercise the
+        # line-structure preservation).
+        ops = ["BT /F1 12 Tf 72 720 Td"]
+        for index, line in enumerate(pages_text_lines(lines)):
+            escaped = line.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
+            if index:
+                ops.append("0 -14 Td")
+            ops.append(f"({escaped}) Tj")
+        ops.append("ET")
+        stream = " ".join(ops).encode("ascii", errors="replace")
         content_number = add(b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream")
         page_numbers.append(
             add(
@@ -85,13 +95,31 @@ def _pdf_bytes(*pages: str, encrypt_with: str | None = None) -> bytes:
     out += b"0000000000 65535 f \n"
     for offset in offsets:
         out += f"{offset:010d} 00000 n \n".encode("ascii")
-    trailer = b"trailer\n<< /Size " + str(len(objects) + 1).encode("ascii") + b" /Root " + str(catalog_number).encode("ascii") + b" 0 R"
-    if encrypt_with is not None:
-        # A structurally valid trailer naming an /Encrypt entry the reader will
-        # refuse to decrypt without a password — the fail-closed path under test.
-        trailer += b" /Encrypt 1 0 R"
-    out += trailer + b" >>\nstartxref\n" + str(xref_offset).encode("ascii") + b"\n%%EOF\n"
+    out += b"trailer\n<< /Size " + str(len(objects) + 1).encode("ascii") + b" /Root " + str(catalog_number).encode("ascii") + b" 0 R >>\nstartxref\n" + str(xref_offset).encode("ascii") + b"\n%%EOF\n"
     return bytes(out)
+
+
+def pages_text_lines(page_text: str) -> list[str]:
+    """Split a page's text into the lines the PDF will lay out."""
+    return [line for line in str(page_text).split("\n")]
+
+
+def _encrypted_pdf_bytes(*pages: str, user_password: str = "owner-secret") -> bytes:
+    """Return ``raw`` re-saved through pypdf with a REAL standard-security key.
+
+    A hand-written ``/Encrypt 1 0 R`` trailer is not a test of encryption
+    handling: pypdf would reject it as a broken encryption dictionary, so the
+    test passed for a reason unrelated to the code path under test. Cloning
+    through ``PdfWriter.encrypt`` produces a genuine encrypted document, so the
+    fail-closed branch is exercised for the reason it claims to cover.
+    """
+    from pypdf import PdfWriter
+
+    writer = PdfWriter(clone_from=io.BytesIO(_pdf_bytes(*pages)))
+    writer.encrypt(user_password)
+    buffer = io.BytesIO()
+    writer.write(buffer)
+    return buffer.getvalue()
 
 
 def test_pdf_registry_claims_pdf_only():
@@ -140,6 +168,103 @@ def test_extract_pdf_text_is_bounded_by_char_cap(monkeypatch):
     assert pdf_documents.PDF_PREVIEW_TRUNCATED_NOTICE in content
 
 
+def test_extract_pdf_text_stops_walking_at_the_page_cap_without_building_every_page(monkeypatch):
+    """The page cap must bound WORK, not just the returned text.
+
+    ``list(reader.pages)`` builds a page object per page before the cap drops
+    all but the first N, so a document with far more pages than the cap paid to
+    materialize every one of them. Assert the page list is never walked past
+    the cap.
+    """
+    monkeypatch.setattr(pdf_documents, "MAX_PDF_PREVIEW_PAGES", 2)
+    from pypdf._page import _VirtualList
+
+    # Count page materializations at the lazy page-list boundary: that is the
+    # work `list(reader.pages)` used to do for every page before the cap.
+    touched: list[int] = []
+    original_getitem = _VirtualList.__getitem__
+
+    def spy_getitem(self, index):
+        touched.append(int(index))
+        return original_getitem(self, index)
+
+    monkeypatch.setattr(_VirtualList, "__getitem__", spy_getitem)
+
+    extract_pdf_text(_pdf_bytes("one", "two", "three", "four"))
+
+    assert touched, "the fixture did not exercise the real page-list path"
+    assert max(touched) < 2, f"pages past the cap were materialized: {touched}"
+
+
+def test_extract_pdf_text_stops_decoding_at_the_char_cap(monkeypatch):
+    """A page must not be fully decoded before the character cap is applied.
+
+    ``page.extract_text()`` returns the whole page, so clipping afterwards
+    meant a hostile page was parsed in full. Assert on the WORK: the walk must
+    go through pypdf's incremental visitor hook and must stop near the budget
+    instead of decoding all 400 rows.
+    """
+    monkeypatch.setattr(pdf_documents, "MAX_PDF_PREVIEW_CHARS", 500)
+    monkeypatch.setattr(pdf_documents, "MAX_PDF_PAGE_TEXT_LINES", 0)
+    from pypdf._page import PageObject
+
+    decoded_whole: list[bool] = []
+    visitor_chars: list[int] = []
+    original_extract = PageObject.extract_text
+
+    def spy_extract(self, *args, **kwargs):
+        visitor = kwargs.get("visitor_text")
+        if visitor is None:
+            # No incremental hook: the entire page is decoded in one shot.
+            decoded_whole.append(True)
+            return original_extract(self, *args, **kwargs)
+
+        def counting(text, *rest):
+            visitor_chars.append(len(text or ""))
+            return visitor(text, *rest)
+
+        kwargs["visitor_text"] = counting
+        return original_extract(self, *args, **kwargs)
+
+    monkeypatch.setattr(PageObject, "extract_text", spy_extract)
+
+    rows = "\n".join(f"row {index} padding padding" for index in range(400))
+    content, truncated = extract_pdf_text(_pdf_bytes(rows))
+
+    assert visitor_chars, "extraction did not use pypdf's incremental visitor hook"
+    assert not decoded_whole, "a page was decoded whole before the cap was applied"
+    # 400 rows x ~24 chars is ~9.6k; stopping near the 500-char budget must be
+    # a small fraction of that.
+    assert sum(visitor_chars) < 2_000, (
+        f"decoded {sum(visitor_chars)} chars for a 500-char budget — the cap is "
+        "still being applied after the page is parsed"
+    )
+    assert truncated is True
+    assert pdf_documents.PDF_PREVIEW_TRUNCATED_NOTICE in content
+
+
+def test_extract_pdf_text_preserves_line_structure():
+    """Lists/records/code must survive extraction as lines, not one run-on line."""
+    numbered = "\n".join(f"{index}. entry {index}" for index in range(1, 6))
+
+    content, truncated = extract_pdf_text(_pdf_bytes(numbered))
+
+    body = content.split("Page 1\n", 1)[1]
+    lines = [line for line in body.split("\n") if line.strip()]
+    assert lines == [f"{index}. entry {index}" for index in range(1, 6)]
+    assert truncated is False
+
+
+def test_extract_pdf_text_collapses_horizontal_whitespace_but_keeps_lines():
+    """Interior spacing noise collapses; real newlines do not."""
+    content, truncated = extract_pdf_text(_pdf_bytes("alpha   \t  beta\ngamma"))
+
+    assert "alpha beta" in content
+    assert "alpha   \t  beta" not in content
+    assert "alpha beta\ngamma" in content
+    assert truncated is False
+
+
 def test_extract_pdf_text_reports_blank_document_without_crashing():
     content, truncated = extract_pdf_text(_pdf_bytes(""))
 
@@ -147,11 +272,59 @@ def test_extract_pdf_text_reports_blank_document_without_crashing():
     assert truncated is False
 
 
+def test_extract_pdf_text_surfaces_unchecked_pages_instead_of_claiming_empty(monkeypatch):
+    """Text beyond the page cap is unknown — say so rather than claim empty.
+
+    A scanned appendix past the cap used to come back as "Empty document",
+    which the sidecar then saved as if it were the whole file.
+    """
+    monkeypatch.setattr(pdf_documents, "MAX_PDF_PREVIEW_PAGES", 1)
+
+    content, truncated = extract_pdf_text(_pdf_bytes("", "late text"))
+
+    assert content != pdf_documents.PDF_EMPTY_NOTICE
+    assert "not checked" in content
+    assert "1 of 2" in content
+    assert truncated is True
+
+
+def test_extract_pdf_text_fully_checked_blank_document_is_still_empty_notice(monkeypatch):
+    """The unchecked-pages notice must not leak into the fully-checked case."""
+    monkeypatch.setattr(pdf_documents, "MAX_PDF_PREVIEW_PAGES", 500)
+
+    content, truncated = extract_pdf_text(_pdf_bytes("", ""))
+
+    assert content == pdf_documents.PDF_EMPTY_NOTICE
+    assert truncated is False
+
+
 def test_extract_pdf_text_fails_closed_on_encrypted_pdf():
+    raw = _encrypted_pdf_bytes("secret")
+
+    # The fixture must be genuinely encrypted, not merely malformed: this
+    # assert is what stops the test from passing again for the wrong reason
+    # (a broken /Encrypt dictionary that pypdf rejects before the encryption
+    # branch is ever reached).
+    from pypdf import PdfReader
+
+    reader = PdfReader(io.BytesIO(raw), strict=False)
+    assert reader.is_encrypted is True
+
     with pytest.raises(ValueError) as excinfo:
-        extract_pdf_text(_pdf_bytes("secret", encrypt_with="owner"))
+        extract_pdf_text(raw)
 
     assert "PDF" in str(excinfo.value)
+    assert "Encrypted" in str(excinfo.value)
+
+
+def test_extract_pdf_text_reads_empty_password_encrypted_pdf():
+    # The other real encryption shape: an owner password with an empty USER
+    # password. This one IS readable, and the extractor must decrypt it rather
+    # than reject it — the two cases share the is_encrypted branch.
+    content, truncated = extract_pdf_text(_encrypted_pdf_bytes("openable", user_password=""))
+
+    assert "openable" in content
+    assert truncated is False
 
 
 def test_extract_pdf_text_raises_import_error_with_install_hint_when_parser_missing(monkeypatch):
