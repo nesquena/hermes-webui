@@ -87,6 +87,12 @@ const localStorage = {
   setItem(k, v) { store.set(k, String(v)); },
   removeItem(k) { store.delete(k); },
 };
+const sessionStore = new Map();
+const sessionStorage = {
+  getItem(k) { return sessionStore.has(k) ? sessionStore.get(k) : null; },
+  setItem(k, v) { sessionStore.set(k, String(v)); },
+  removeItem(k) { sessionStore.delete(k); },
+};
 const MODEL_STATE_KEY = 'hermes-webui-model-state';
 
 for (const name of [
@@ -94,6 +100,10 @@ for (const name of [
   '_providerFromModelValue',
   '_modelStateForSelect',
   '_readPersistedModelState',
+  '_pickerExplicitPickKey',
+  '_readExplicitPickerPick',
+  '_rememberExplicitPickerPick',
+  '_clearExplicitPickerPick',
   '_modelProviderForSend',
 ]) {
   eval(extractFunc(name));
@@ -102,7 +112,13 @@ for (const name of [
 const args = JSON.parse(process.argv[3]);
 modelSelect = makeSelect(args.options || [], args.initialValue || '');
 if (args.persisted) localStorage.setItem(MODEL_STATE_KEY, JSON.stringify(args.persisted));
-var S = {session: {model_provider: args.sessionProvider || null}};
+var S = {session: {session_id: args.sessionId || 's1', model_provider: args.sessionProvider || null}};
+// #7865 round-2: seed the picker's session-scoped explicit-pick evidence when
+// the scenario declares one (the gate in _modelProviderForSend requires it).
+if (args.explicitPick) {
+  _rememberExplicitPickerPick(args.sessionId || 's1',
+    args.explicitPick.value, args.explicitPick.model_provider);
+}
 
 if (args.mode === 'modelState') {
   process.stdout.write(JSON.stringify(_modelStateForSelect(modelSelect, args.model)));
@@ -147,12 +163,63 @@ def _run_model_state_helper(driver_path, payload):
 
 
 @node_test
-def test_model_provider_for_send_preserves_session_provider(driver_path):
+def test_model_provider_for_send_prefers_dropdown_over_stale_session_provider(driver_path):
+    """#7860: a real picker pick outranks a stale session — with pick evidence.
+
+    This case was previously named ``..._preserves_session_provider`` and
+    asserted the session provider won even though the dropdown had already
+    moved to the very model being sent. That expectation contradicted this
+    module's own docstring (the provider follows when the dropdown describes
+    the same model) and the sibling ``..._falls_back_to_matching_dropdown``
+    test, and it encoded exactly the #7860 defect: ``S.session.model_provider``
+    is only refreshed on apply/pending paths, never on a plain picker change,
+    so treating it as authoritative overrode the picker and pinned the session
+    to the previous provider's model.
+
+    Round 2 (#7865): the dropdown only outranks the session when the picker's
+    session-scoped explicit-pick evidence exists — a bare match is not intent,
+    and a catalog repaint after a session restore can leave another provider's
+    identically-valued option selected. See
+    ``test_restored_session_without_pick_keeps_its_own_provider`` for the
+    complement.
+    """
     provider = _run_helper(driver_path, {
         "model": "grok-4.3",
         "sessionProvider": "session-provider",
         "initialValue": "grok-4.3",
         "options": [{"provider": "xai-oauth", "value": "grok-4.3"}],
+        "explicitPick": {"value": "grok-4.3", "model_provider": "xai-oauth"},
+    })
+
+    assert provider == "xai-oauth"
+
+
+@node_test
+def test_restored_session_without_pick_keeps_its_own_provider(driver_path):
+    """#7865: WITHOUT pick evidence the session's provider stays authoritative.
+
+    The matching dropdown option is not evidence of intent: after a restore the
+    catalog repaint can leave another provider's identically-valued option
+    selected while the session record holds the correct provider.
+    """
+    provider = _run_helper(driver_path, {
+        "model": "grok-4.3",
+        "sessionProvider": "session-provider",
+        "initialValue": "grok-4.3",
+        "options": [{"provider": "xai-oauth", "value": "grok-4.3"}],
+    })
+
+    assert provider == "session-provider"
+
+
+@node_test
+def test_model_provider_for_send_keeps_session_provider_without_dropdown_intent(driver_path):
+    """No dropdown selection / no matching option → the session provider still leads."""
+    provider = _run_helper(driver_path, {
+        "model": "grok-4.3",
+        "sessionProvider": "session-provider",
+        "initialValue": "",
+        "options": [],
     })
 
     assert provider == "session-provider"
@@ -253,3 +320,33 @@ def test_new_session_does_not_fallback_to_stale_named_custom_provider():
     assert "!_familyMismatch" in assignment
     assert "!_fallbackIsNamedCustom" in assignment
     assert "_fallbackProvider||null" in assignment
+
+
+def test_load_session_clears_picker_marker_of_the_session_being_loaded():
+    """#7865 round-3: the explicit-pick marker lives in `sessionStorage`, so it
+    SURVIVES a page reload. `loadSession` must clear the marker of the session
+    being LOADED, not only the one being left (`currentSid`) — on a fresh boot
+    `S.session` is null, so `currentSid` is null and the restored session's
+    marker was never cleared, letting a stale pick override the restored
+    session's own provider.
+    """
+    sessions_src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    start = sessions_src.index("async function loadSession(")
+    body = sessions_src[start:]
+
+    # The pre-existing clear of the session being LEFT must stay.
+    assert "_clearExplicitPickerPick(currentSid)" in body
+    # The reload half: the TARGET sid is cleared too. Anchor on the guard's
+    # own shape (`sid!==currentSid`) rather than the comment text, which is
+    # free to be reworded.
+    assert "if(sid&&sid!==currentSid&&typeof _clearExplicitPickerPick==='function')" in body, (
+        "loadSession must clear the explicit-pick marker for the session being "
+        "loaded (target sid), not only currentSid (session being left)"
+    )
+    # The target-sid clear must sit AFTER the same-session no-op guard, so a
+    # no-op reload cannot wipe a marker the user just wrote in this session.
+    guard = body.index("if(currentSid===sid && !forceReload && (!_loadingSessionId || _loadingSessionId===sid))")
+    target_clear = body.index("if(sid&&sid!==currentSid&&typeof _clearExplicitPickerPick==='function')")
+    assert guard < target_clear, (
+        "target-sid marker clear must come after the same-session no-op guard"
+    )

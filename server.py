@@ -118,7 +118,7 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
+from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers, fold_api_path
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
@@ -333,13 +333,14 @@ class Handler(BaseHTTPRequestHandler):
     _CSP_REPORT_TO = '{"group":"csp-endpoint","max_age":10886400,"endpoints":[{"url":"/api/csp-report"}]}'
 
     @classmethod
-    def csp_report_only_policy(cls, extra_connect_src=None, extra_frame_src=None) -> str:
-        return _build_csp_report_only_policy(extra_connect_src, extra_frame_src)
+    def csp_report_only_policy(cls, extra_connect_src=None, extra_frame_src=None, extra_img_src=None) -> str:
+        return _build_csp_report_only_policy(extra_connect_src, extra_frame_src, extra_img_src)
 
     def end_headers(self) -> None:
         extra_connect_src = getattr(self, "_csp_extra_connect_src", None)
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
-        self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
+        extra_img_src = getattr(self, "_csp_extra_img_src", None)
+        self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src, extra_img_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
         advertise_connection_close(self)  # tell the client when the socket dies
         super().end_headers()
@@ -385,7 +386,7 @@ class Handler(BaseHTTPRequestHandler):
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
-            parsed = urlparse(self.path)
+            parsed = fold_api_path(self, urlparse(self.path))  # case-insensitive /api/ routing (#3943)
             # Body-pending-aware: a body-bearing GET failing auth would poison reuse (#7550).
             if not check_auth_or_close(self, parsed): return
             result = handle_get(self, parsed)
@@ -411,7 +412,7 @@ class Handler(BaseHTTPRequestHandler):
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
-            parsed = urlparse(self.path)
+            parsed = fold_api_path(self, urlparse(self.path))  # case-insensitive /api/ routing (#3943)
             _is_csp_report_post = parsed.path == "/api/csp-report" and self.command == "POST"
             if not _is_csp_report_post and not check_auth_or_close(self, parsed): return
             result = route_func(self, parsed)
@@ -552,7 +553,7 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 
 
 def main() -> None:
-    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND, _AGENT_DIR
 
     _ignore_sigpipe()
 
@@ -624,7 +625,7 @@ def main() -> None:
         for mod, err in errors.items():
             print(f'     {mod}: {err}', flush=True)
         print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
-        auto_install_agent_deps()
+        auto_install_agent_deps(expected_agent_dir=_AGENT_DIR)
         ok, missing, errors = verify_hermes_imports()
         if not ok:
             print(f'[!!] Still missing after install attempt: {missing}', flush=True)

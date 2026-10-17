@@ -1,5 +1,6 @@
 """Regression tests for #6869: failed Gateway worker launch cleanup."""
 
+import copy
 from types import SimpleNamespace
 
 import api.config as config
@@ -115,12 +116,45 @@ def test_gateway_launch_failure_cleanup_does_not_clear_successor_owner(monkeypat
     _register_failed_stream(stale.session_id, "old-stream")
     config.register_session_writeback_owner(stale.session_id, "new-stream")
 
-    routes._cleanup_chat_start_launch_failure(stale, "old-stream")
+    routes._cleanup_chat_start_launch_failure(stale, "old-stream", copy.deepcopy(stale.__dict__))
 
     assert config.session_writeback_owner(stale.session_id) == "new-stream"
     assert canonical.active_stream_id == "new-stream"
     assert canonical.pending_user_message == "new prompt"
     assert "old-stream" not in config.STREAMS
+
+
+def test_gateway_launch_failure_cleanup_restores_snapshot_before_saving(monkeypatch):
+    saved = []
+    canonical = _make_session(
+        "session-launch-restore",
+        save=lambda *args, **kwargs: saved.append(kwargs),
+    )
+    snapshot = copy.deepcopy(canonical.__dict__)
+    canonical.active_stream_id = "old-stream"
+    canonical.pending_user_message = "failed prompt"
+    canonical.pending_attachments = [{"name": "failed.txt"}]
+    canonical.pending_started_at = 9.0
+    canonical.pending_user_source = "webui"
+    canonical.messages.append({"role": "user", "content": "failed prompt"})
+    _register_failed_stream(canonical.session_id, "old-stream")
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid, metadata_only=False: canonical,
+    )
+
+    with routes._get_session_agent_lock(canonical.session_id):
+        routes._cleanup_chat_start_launch_failure(
+            canonical,
+            "old-stream",
+            snapshot,
+            lock_held=True,
+        )
+
+    restored = copy.deepcopy(canonical.__dict__)
+    assert restored == snapshot
+    assert saved == [{"touch_updated_at": False}]
 
 
 def test_gateway_launch_failure_cleanup_does_not_wipe_successor_admitted_during_cleanup(monkeypatch):
@@ -149,7 +183,7 @@ def test_gateway_launch_failure_cleanup_does_not_wipe_successor_admitted_during_
     _register_failed_stream(stale.session_id, "old-stream")
     config.register_session_writeback_owner(stale.session_id, "new-stream")
 
-    routes._cleanup_chat_start_launch_failure(stale, "old-stream")
+    routes._cleanup_chat_start_launch_failure(stale, "old-stream", copy.deepcopy(stale.__dict__))
 
     assert config.session_writeback_owner(stale.session_id) == "new-stream"
     assert canonical.active_stream_id == "new-stream"
@@ -175,7 +209,7 @@ def test_gateway_launch_failure_cleanup_does_not_resurrect_deleted_session(monke
     )
     _register_failed_stream(stale.session_id, "old-stream")
 
-    routes._cleanup_chat_start_launch_failure(stale, "old-stream")
+    routes._cleanup_chat_start_launch_failure(stale, "old-stream", copy.deepcopy(stale.__dict__))
 
     assert config.session_writeback_owner(stale.session_id) is None
     assert "old-stream" not in config.STREAM_SESSION_OWNERS
@@ -208,7 +242,7 @@ def test_gateway_launch_failure_cleanup_never_masks_the_launch_error(monkeypatch
     _register_failed_stream(stale.session_id, "old-stream")
 
     # Must not raise: the caller is already handling the launch failure.
-    routes._cleanup_chat_start_launch_failure(stale, "old-stream")
+    routes._cleanup_chat_start_launch_failure(stale, "old-stream", copy.deepcopy(stale.__dict__))
 
     # The registry half still completed, and nothing was saved.
     assert config.session_writeback_owner(stale.session_id) is None

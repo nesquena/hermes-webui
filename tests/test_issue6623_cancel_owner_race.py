@@ -919,6 +919,60 @@ def test_issue6623_unresolvable_current_session_fails_closed_for_pause_merge(
     assert not (s_old.process_wakeup_pause or {}).get("paused")
 
 
+def _seed_route_layer_stream_state(session_id, stream_id, *, gateway=False):
+    """Seed every registry the route layer owns BEFORE it dispatches a worker.
+
+    A pre-start cancellation leaves these behind when the worker takes its
+    ``q is None`` early return, because no teardown ``finally`` ever runs for
+    that stream (#7302 re-gate). Seeding all of them (not just the writeback
+    owner) is what makes the complete-set assertion below meaningful.
+    """
+    config.register_stream_owner(stream_id, session_id)
+    config.register_session_writeback_owner(session_id, stream_id)
+    config.CANCEL_FLAGS[stream_id] = threading.Event()
+    config.STREAM_PARTIAL_TEXT[stream_id] = ""
+    config.STREAM_REASONING_TEXT[stream_id] = ""
+    config.STREAM_LIVE_TOOL_CALLS[stream_id] = []
+    config.STREAM_LAST_EVENT_ID[stream_id] = "ev-1"
+    # Written by _start_chat_stream_for_session before worker admission.
+    config.STREAM_GOAL_RELATED[stream_id] = True
+    if gateway:
+        import api.gateway_chat as gateway_chat
+
+        gateway_chat._STREAM_RUN_IDS[stream_id] = "run-prestart"
+        gateway_chat._STREAM_RUN_LIFECYCLE[stream_id] = {
+            "phase": "pending",
+            "waiters": 0,
+        }
+        gateway_chat._STREAM_ENDPOINTS[stream_id] = ("http://gateway.local", "key")
+
+
+def _assert_stream_state_released(stream_id, session_id, *, gateway=False):
+    """Assert NO registry still holds this stream after a real worker exits."""
+    for registry in config.stream_owned_registries():
+        assert stream_id not in registry, (
+            "stream registry still holds %s after the worker exited" % stream_id
+        )
+    assert stream_id not in config.STREAM_SESSION_OWNERS, (
+        "STREAM_SESSION_OWNERS still holds the pre-start stream owner"
+    )
+    assert config.session_writeback_owner(session_id) is None, (
+        "SESSION_WRITEBACK_OWNERS still holds the pre-start stream"
+    )
+    if gateway:
+        import api.gateway_chat as gateway_chat
+
+        assert stream_id not in gateway_chat._STREAM_RUN_LIFECYCLE, (
+            "Gateway run lifecycle row leaked on the pre-start path"
+        )
+        assert stream_id not in gateway_chat._STREAM_RUN_IDS, (
+            "Gateway run id leaked on the pre-start path"
+        )
+        assert stream_id not in gateway_chat._STREAM_ENDPOINTS, (
+            "Gateway endpoint mapping leaked on the pre-start path"
+        )
+
+
 def test_issue6636_gateway_prestart_cancel_clears_writeback_owner(tmp_path, monkeypatch):
     """RE-GATE (maintainer fix): the Gateway worker's pre-start cancellation path
     (``q is None`` early return in ``_run_gateway_chat_streaming``) must release
@@ -934,6 +988,9 @@ def test_issue6636_gateway_prestart_cancel_clears_writeback_owner(tmp_path, monk
     # The route layer registered the writeback owner before dispatching the worker.
     config.register_session_writeback_owner(session_id, stream_id)
     assert config.session_writeback_owner(session_id) == stream_id
+    # Everything else the route layer owns for a goal-related turn, plus the
+    # Gateway lifecycle rows a dispatched run would have created.
+    _seed_route_layer_stream_state(session_id, stream_id, gateway=True)
     # Simulate cancel-before-start: the stream map has no queue for this id, so the
     # worker takes its `q is None` early-return teardown path.
     config.STREAMS.pop(stream_id, None)
@@ -950,6 +1007,9 @@ def test_issue6636_gateway_prestart_cancel_clears_writeback_owner(tmp_path, monk
     assert config.session_writeback_owner(session_id) is None, (
         "pre-start Gateway cancellation must clear the writeback owner it registered"
     )
+    # The complete registry set, not just the owners: STREAM_GOAL_RELATED is
+    # written before admission, so an owner-only release strands it forever.
+    _assert_stream_state_released(stream_id, session_id, gateway=True)
 
 
 def test_issue6636_gateway_clear_only_affects_owned_stream(tmp_path, monkeypatch):
@@ -968,3 +1028,60 @@ def test_issue6636_gateway_clear_only_affects_owned_stream(tmp_path, monkeypatch
     assert config.session_writeback_owner(session_id) == new_stream, (
         "old worker teardown must not evict the successor's writeback ownership"
     )
+
+
+def test_issue7302_local_prestart_cancel_releases_complete_registry_set(
+    tmp_path, monkeypatch
+):
+    """#7302 re-gate: the LOCAL worker's pre-start cancellation path must release
+    the complete registry set, not only the stream owner and writeback owner.
+
+    ``_start_chat_stream_for_session`` writes ``STREAM_GOAL_RELATED[stream_id]``
+    before the worker is admitted; ``cancel_stream()`` can then remove the stream
+    rows before admission, so the worker exits through ``q is None`` and no
+    teardown ``finally`` ever runs -- every remaining registry entry stays for the
+    process lifetime (unbounded growth, and a later stream that reuses the id
+    would inherit a stale goal classification).
+    """
+    session_id = "sess_local_prestart"
+    stream_id = "stream-local-prestart"
+    _seed_route_layer_stream_state(session_id, stream_id)
+    # Cancel-before-admission: the stream map entry is already gone.
+    config.STREAMS.pop(stream_id, None)
+
+    streaming._run_agent_streaming(
+        session_id,
+        "hello",
+        "test-model",
+        None,
+        stream_id,
+    )
+
+    _assert_stream_state_released(stream_id, session_id)
+
+
+def test_issue7302_gateway_prestart_cancel_releases_gateway_rows(
+    tmp_path, monkeypatch
+):
+    """#7302 re-gate: the Gateway pre-start exit must also release the
+    Gateway-owned rows (lifecycle row, run id, endpoint mapping) through
+    ``release_gateway_stream_state`` -- the lifecycle/waiter protocol, invoked
+    outside ``STREAMS_LOCK`` -- not only the stream-owned registries.
+    """
+    import api.gateway_chat as gateway_chat
+
+    session_id = "sess_gw_rows_prestart"
+    stream_id = "stream-gw-rows-prestart"
+    _seed_route_layer_stream_state(session_id, stream_id, gateway=True)
+    config.STREAMS.pop(stream_id, None)
+
+    gateway_chat._run_gateway_chat_streaming(
+        session_id,
+        [],
+        "test-model",
+        None,
+        stream_id,
+        None,
+    )
+
+    _assert_stream_state_released(stream_id, session_id, gateway=True)

@@ -323,10 +323,10 @@ class TestToolCallGroupingStatic:
         assert ".thinking-card-body pre" not in thinking_body and "textContent" not in thinking_body, (
             "Thinking-card disclosure keys must not depend on streaming body text."
         )
-        assert "_thinkingActivityNode(clean, false, thinkingKey)" in append_thinking_fn, (
+        assert "_thinkingActivityNode(clean, false, thinkingKey, true)" in append_thinking_fn, (
             "Live streaming Thinking rows must stamp the stable thinking key at creation time."
         )
-        assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in append_step_fn, (
+        assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey, !!(opts&&opts.live))" in append_step_fn, (
             "Settled Worklog Thinking rows must stamp the stable thinking key at creation time."
         )
         assert "thinkingDisclosureKey:thinkingText?`thinking:${entry.key}`:''" in _function_body(UI_JS, "renderMessages"), (
@@ -618,7 +618,7 @@ class TestToolCallGroupingStatic:
         assert "_worklogReasonNodeFromText(thinkingText" not in live_thinking_fn, (
             "Provider reasoning should not render as live Worklog process prose."
         )
-        assert "_thinkingActivityNode(clean, false, thinkingKey)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
+        assert "_thinkingActivityNode(clean, false, thinkingKey, true)" in live_thinking_fn and "data-live-thinking" in live_thinking_fn, (
             "Live provider thinking should render as a collapsed Worklog Thinking Card."
         )
         assert "ensureLiveWorklogContainer" in live_thinking_fn, (
@@ -680,27 +680,32 @@ class TestToolCallGroupingStatic:
         reasoning_fn = reasoning_match.group(1)
         render_live_thinking_fn = _function_body(MESSAGES_JS, "_renderLiveThinking")
 
-        assert reasoning_fn.count("_liveThinkingText()") == 1, (
-            "_liveThinkingText() should be computed once inside the active-session branch."
+        # #8171: the listener coalesces; one renderer path runs per frame.
+        assert "_upsertAnchorReasoning(" not in reasoning_fn and "_updateLiveThinkingCard(" not in reasoning_fn, (
+            "Reasoning SSE updates must not render per event; they schedule the coalesced render."
         )
-        assert "const liveThinkingText=_liveThinkingText();" in reasoning_fn, (
-            "Reasoning SSE updates should cache the live thinking text before routing."
+        assert "_reasoningRenderPending=true;" in reasoning_fn and "_scheduleRender();" in reasoning_fn, (
+            "Reasoning SSE updates should mark a pending render and schedule one frame."
         )
-        primary_call = "_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)"
-        assert primary_call in reasoning_fn, (
+        flush_fn = _function_body(MESSAGES_JS, "_flushPendingReasoningRender")
+        assert flush_fn.count("liveReasoningText") == 1, (
+            "The live thinking text should be computed once per coalesced render."
+        )
+        primary_call = "_upsertAnchorReasoning(text, opts)"
+        assert primary_call in flush_fn, (
             "Anchor reasoning must remain the primary renderer path."
         )
-        fallback_call = "_updateLiveThinkingCard(liveThinkingText,{"
-        assert reasoning_fn.index(primary_call) < reasoning_fn.index(fallback_call), (
+        fallback_call = "_updateLiveThinkingCard(text,{"
+        assert flush_fn.index(primary_call) < flush_fn.index(fallback_call), (
             "The legacy thinking card should only run after anchor upsert fails."
         )
-        assert "if(!_upsertAnchorReasoning(liveThinkingText, anchorReasoningFallback)){" in reasoning_fn, (
+        assert "if(!_upsertAnchorReasoning(text, opts)&&!opts.deferRender){" in flush_fn, (
             "The legacy thinking card should be a falsy-anchor fallback."
         )
-        assert reasoning_fn.count(fallback_call) == 1, (
-            "Reasoning SSE updates should call the live thinking card only in fallback."
+        assert flush_fn.count(fallback_call) == 1, (
+            "The coalesced render should call the live thinking card only in fallback."
         )
-        assert "...anchorReasoningFallback" in reasoning_fn, (
+        assert "...opts" in flush_fn, (
             "The fallback renderer must receive the exact Anchor reasoning identity."
         )
         assert "_updateLiveThinkingCard(" in render_live_thinking_fn, (

@@ -13,9 +13,18 @@ from pathlib import Path
 
 def _isolate_discovery_inputs(config, monkeypatch, tmp_path: Path) -> None:
     """Force `_discover_agent_dir()` to only use test-controlled candidates."""
+    from functools import partial
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(config._startup, "_discover_agent_identity", partial(
+        config._startup._discover_agent_identity,
+        launcher_finder=lambda: None,
+        python_finder=lambda _python: None,
+    ))
     monkeypatch.delenv("HERMES_WEBUI_AGENT_DIR", raising=False)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.setenv("HERMES_WEBUI_PYTHON", str(tmp_path / "missing-python"))
     monkeypatch.setattr(config, "HOME", tmp_path / "home")
     monkeypatch.setattr(config, "_DEFAULT_HERMES_HOME", tmp_path / "default-hermes-home")
     monkeypatch.setattr(config, "REPO_ROOT", tmp_path / "webui-repo")
@@ -162,3 +171,19 @@ def test_routes_shadow_helper_can_recover_once_agent_dir_resolves(monkeypatch, t
     finally:
         _drop_cron_modules()
         _reset_agent_cron_import_path_state(routes)
+
+
+def test_stale_marker_root_does_not_hide_direct_service_xdg_checkout(monkeypatch, tmp_path):
+    import api.config as config
+
+    _isolate_discovery_inputs(config, monkeypatch, tmp_path)
+    _make_pip_style_agent_root(tmp_path / "hermes-home" / "hermes-agent")
+    checkout = _make_legacy_agent_root(tmp_path / "xdg-data" / "hermes-agent")
+    selected = config._discover_agent_dir()
+    assert selected == checkout.resolve()
+    monkeypatch.syspath_prepend(str(selected))
+    monkeypatch.delitem(sys.modules, "run_agent", raising=False)
+    try:
+        assert config.verify_hermes_imports()[0] is True
+    finally:
+        sys.modules.pop("run_agent", None)

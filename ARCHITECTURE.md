@@ -66,7 +66,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
       onboarding.py        First-run onboarding status, real provider config writes, OAuth linking, readiness detection
       routes.py            All GET + POST route handlers (if/elif dispatch, no decorators)
       startup.py           Startup helpers: auto_install_agent_deps()
-      state_sync.py        /insights sync — message_count to the agent's state.db
+      state_sync.py        state.db bridge — opt-in /insights usage/title sync; always mirrors the session workspace into sessions.cwd
       streaming.py         SSE engine, run_agent, cancel, compression, HERMES_HOME save/restore
       updates.py           Self-update check and release notes
       upload.py            Multipart parser, file upload handler
@@ -122,11 +122,30 @@ Log file:
 
 ## 3. Runtime Environment
 
+### Context replay matching
+
+`api/streaming.py::_strip_replayed_context_items` filters replayed model-context
+blocks using longest-match statistics from a suffix automaton over reversed
+replay keys. Its greedy walk still removes only blocks of at least three rows;
+short repeats, row order, and provider-facing `api_content` identity are preserved.
+Long arc-summary identity is normalized once per row and indexed by role, provider
+payload and the existing 1,500-character prefix rule. Malformed unhashable roles
+retain an equality-scan fallback. For ordinary hashable roles/keys, matching uses
+O(existing + candidate) key operations and auxiliary space, in addition to payload
+normalization. All indexes are call-local; no session cache, durable schema, writer
+ownership, or SSE contract changes. Inputs are not mutated and retained rows are
+returned unchanged. All three context-reconciliation branches share this helper.
+
 - Python interpreter: <agent-dir>/venv/bin/python
 - The venv has all Hermes agent dependencies (run_agent, tools/*, cron/*)
 - Server binds to 127.0.0.1:8787 (localhost only, not public internet)
 - Access from Mac: SSH tunnel: ssh -N -L 8787:127.0.0.1:8787 <user>@<your-server>
 - The server imports Hermes modules via sys.path.insert(0, parent_dir)
+
+Suffix/prefix replay matching uses a linear prefix-function scan and constructs
+each comparison key once, preserving the existing replay equality contract.
+Read-side stale-stream maintenance defers when the session writer lock is busy;
+it leaves stream ownership and pending input intact for a later repair pass.
 
 Environment variables controlling behavior:
 
@@ -462,6 +481,7 @@ whose default `SessionDB()` path remains frozen at module import. Keep this fall
 compatibility-only: new goal semantics belong in Hermes Agent's native manager rather
 than a second WebUI implementation.
 
+
 ### 4.9 Hermes Agent Moved-Name Compatibility
 
 Hermes Agent owns its module layout. Its September 2026 decomposition moved names the
@@ -560,6 +580,280 @@ that cache and sending HTTP responses happen after the lock is released.
 This transaction serializes cooperating writes/reloads in one WebUI process.
 It does not lock out other processes or provide Agent status/schema/dispatch
 isolation; those remain the runtime boundary described above.
+
+### 4.11 Model Catalog Rebuild Budget and Probe Scheduling
+
+The model picker's catalog (`GET /api/models`) is produced by one cold rebuild that
+live-probes providers. A probe is a network call to a provider the WebUI may not be able
+to reach — a LAN LM Studio/Ollama host is the usual case, because the probe runs in the
+server process rather than the browser — so the rebuild runs on a daemon worker under a
+wall-clock budget:
+
+| Knob | Default | Meaning |
+| --- | --- | --- |
+| `HERMES_WEBUI_MODELS_REBUILD_BUDGET` | `4` (seconds) | Window a foreground caller waits for a cold rebuild. `0` restores the legacy synchronous unbounded rebuild. |
+| `CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS` | `5.0` | Per-endpoint cap for a custom provider `/v1/models` probe. |
+| `CUSTOM_MODELS_ATTEMPT_ONLY_TIMEOUT_SECONDS` | `0.01` | Attempt-only timeout for a probe reached after the window is already spent while the caller is still waiting. Not a per-probe minimum and not a slice — see below. |
+
+Within the window the rebuild behaves normally; past it the caller is served a fallback
+(last-known disk cache, else a network-free static catalog) while the worker keeps going so
+the refresh lands out-of-band for the next caller.
+
+Custom endpoints are probed **serially**: the active `model.base_url` first, then each
+named `custom_providers` entry in config order, then the LM Studio provider-group
+fallback. `_CustomProbeSchedule` in `api/config.py` hands each of those probes a fair
+slice of the *remaining* window instead of letting one probe take the whole per-endpoint
+cap, so an unreachable endpoint cannot leave the reachable providers behind it with no
+in-band probe at all (#7481).
+
+- Each slice is `min(cap, left / (remaining + 0.1))`, with **no lower bound**. The fractional
+  slot reserves headroom without halving a lone target's window. Unused time is lent to
+  later probes; the matching active/LM Studio target does not reserve a duplicate slot.
+  Wall-clock overhead can still cross the foreground deadline. A floor would make
+  the chain's cumulative spend grow with the endpoint count, and `custom_providers` has no
+  count limit, so a long enough chain of dead endpoints could again outspend the window and
+  push the reachable providers behind it out of the in-band rebuild.
+- The window belongs to the **caller, not to the chain**. One absolute deadline is captured
+  before the worker and the foreground wait start and is handed to `_CustomProbeSchedule`;
+  the foreground waits only `max(0, deadline - now)`. A schedule that minted its own deadline
+  at construction — deep inside the worker, after provider detection, the live id lookups and
+  the profile rebind — charged that discovery work to the caller's wait *and* granted it to
+  the chain again, so the chain could still be probing after the caller had already been
+  served the over-budget fallback, and the reachable provider landed out-of-band at best.
+- The two states that keep the unthrottled per-endpoint cap are stated explicitly rather
+  than inferred from the clock, because a spent window says nothing about whether anyone is
+  still waiting:
+  - the legacy unbounded path (budget `0`), which has no window to share;
+  - the out-of-band continuation — the worker still probing after the foreground caller
+    gave up and served its fallback. It is recognised through an explicit signal (the
+    caller sets the event when it stops waiting) and is the only in-process state allowed
+    to spend past the window. The narrow race where a probe finds the window spent while
+    the caller *is* still waiting is not that state: it gets the attempt-only timeout
+    above, never the cap.
+- A slice can truncate healthy endpoints even in short chains. Such timeouts are not
+  reported as unreachable and the partial catalog is never cached in memory or on disk.
+  The same worker retries truncated targets once at the full endpoint cap after the
+  foreground returns, retaining successful probes and publishing the complete catalog
+  through the existing generation, source-identity, ownership and durable fences.
+- An endpoint is probed **once per rebuild, except for that full-cap retry**. The three live-probe consumers
+  (active `model.base_url`, named `custom_providers`, LM Studio provider-group fallback)
+  share a per-rebuild memo keyed by the complete request URL (path slashes and query
+  preserved) plus the Authorization header sent, so the
+  common config where the active endpoint and `providers.lmstudio.base_url` are the same
+  LAN host no longer pays that host's connect timeout twice, and two named entries on one
+  endpoint probe it once. A different URL — or the same URL with a different key, which can
+  change the outcome — is still its own probe, and the memo is consulted only after the
+  per-endpoint SSRF/authentication checks, so a call that would have been refused still is.
+- Probe order, per-endpoint SSRF and authentication rules, and the per-endpoint cap are
+  preserved.
+
+Publication is ordered by **generation, not by wall clock**. Each cold rebuild takes the
+next sequence number (`_allocate_models_rebuild_seq`), and a result is dropped when it is
+older than the newest *allocated* generation (`_models_rebuild_seq`) — in which case it also
+leaves the build flag alone rather than clearing it, because that flag now belongs to the
+newer rebuild. This matters for the out-of-band publisher, which outlives the
+foreground caller: without the guard it could resurrect a superseded
+catalog over a newer one. A timestamp comparison cannot express the ordering, because an
+older build can publish *after* a newer build has already started.
+
+The fence is the latest **allocated** generation rather than the latest *published* one
+because `invalidate_models_cache()` clears `_cache_build_in_progress` without cancelling an
+in-flight worker: a newer rebuild can be allocated while an older one is still running. If
+the older worker finishes first, a published-sequence comparison would let it publish the
+invalidated catalog and release the flag that now belongs to the newer rebuild. Comparing
+against the allocated generation rejects it, so invalidation is a real freshness boundary,
+and a newer rebuild that then fails leaves the cache empty instead of resurrecting the
+invalidated catalog.
+
+Both `invalidate_models_cache()` and the provider-scoped invalidator used by
+`/api/models/refresh` share one epoch/owner reset. They advance the allocated generation,
+clear memory and provenance, evict the relevant credential pools before admission reopens,
+retire the in-flight owner, and delete the durable cache.
+Every build already running becomes superseded *even when no successor rebuild is ever
+allocated*; otherwise a delayed worker could repopulate the cleared catalog under a
+fresh-looking fingerprint. Disk snapshots read before taking the catalog lock (including
+the session-visit warmer) are published only if their captured epoch still matches: a
+preloaded fresh candidate whose epoch moved is dropped rather than published under the
+current fingerprint. The *degraded* stale fallback is deliberately not fenced — it is
+returned to a caller that already stopped waiting and is never published to memory, so
+discarding it would only swap a stale-but-real answer for a static catalog.
+
+A build's **identity is captured when it starts and re-validated when it publishes**, in
+memory and at the durable commit: the source fingerprint (`_models_cache_source_fingerprint`
+— config, auth store and provider catalog; its `config_yaml` axis is the profile-specific
+config path, so it fences a foreign profile too) plus the profile name. A build that outlives
+a config edit describes sources that no longer exist, so its result is dropped instead of
+being published under the *current* fingerprint. The check fails closed — an identity that
+cannot be read is not a match — and disk publication records the fingerprint the build READ,
+never a recomputed one.
+
+Ownership of the single-flight slot is explicit too: the completion path clears
+`_cache_build_in_progress` only when the completing build is still the newest allocated
+generation, including on the error paths and after the disk I/O. A superseded publisher
+therefore cannot admit a third rebuild beside the newer one it lost to.
+
+The **durable commit is fenced separately from the in-memory one**, because the file write
+runs with the catalog lock released (a disk write must not hold it). Each build writes its
+own temp file — unique per build and thread, in the destination directory so the commit stays
+a same-filesystem atomic rename — and the rename is serialized by
+`_models_cache_disk_commit_lock` after re-checking the accepted generation, the last
+committed generation (`_models_disk_committed_seq`) and the build's source identity.
+The catalog lock remains held from that check **through** rename; invalidation takes the
+same fixed order (disk-commit lock, then catalog lock) through deletion, so an admitted
+writer cannot restore a file after invalidation returns. A superseded or re-sourced
+commit discards its temp file and leaves the durable catalog to the build that won.
+
+**The two locks have one order everywhere: disk-commit then catalog.** The writer and the
+invalidator both take them that way, so a caller that takes them in the opposite order is a
+deadlock, not a latency bug — and both acquisitions are unbounded in production. A foreground
+publisher used to: `get_available_models` owns the catalog lock across its whole cold path,
+and its synchronous, within-budget and budget-boundary winners called
+`_save_models_cache_to_disk` from inside that ownership, i.e. catalog → commit. A publisher
+blocked on the commit mutex an invalidator held, with that invalidator then blocked on the
+catalog lock the publisher owned, waited on each other forever, so a `/api/models` load and a
+config-save/`/api/models/refresh` invalidation could each hang (#7481 review). The foreground
+paths therefore do not commit inline: the catalog lock still spans the whole cold path,
+including the foreground wait and memory publication (owner, source identity and the
+absolute deadline are read there too). Only the durable commit moves outside: it is
+**queued** and run by
+`_DeferredCatalogPublication` on its way out — after the catalog lock has been released — by
+`_commit_models_cache_to_disk_after_lock`. The caller still gets the cache and the durable
+file populated before `get_available_models` returns, and the single-flight release rides
+with the queued commit, so ownership still spans the durable write. The out-of-band worker
+commits directly, which is correct because it holds no catalog lock by then.
+
+### 4.12 Insights Period Endpoint (`/api/insights`)
+
+`GET /api/insights` reports usage analytics for one time window. The window is
+selected by query parameters, and the response echoes the window it actually
+served through `mode` (`"trailing"` or `"custom"`). Totals and the daily series
+are always computed over the same resolved interval. Data comes from the WebUI
+session index plus non-WebUI rows in the active profile's `state.db`, when that
+database exists. The optional `sync_to_insights` setting mirrors WebUI usage
+into `state.db`; it does not control whether this endpoint includes CLI rows.
+
+Window selection:
+
+- `days=N` — trailing window of the last `N` days. This is what the panel's
+  7/30/90/365 presets send, and the fallback when no absolute bound is usable.
+- `start=…` / `end=…` — an absolute window. Each bound is either an exact Unix
+  epoch timestamp in seconds or a `YYYY-MM-DD` calendar date. A supplied
+  `start` with no `end` runs to the server clock. A supplied `end` with no
+  `start` back-steps the start by 30 days using the bound's own arithmetic: a
+  `YYYY-MM-DD` end subtracts 30 calendar days (local midnight to local
+  midnight, DST-safe), while a numeric end subtracts exactly `30 * 86400`
+  seconds — so across a daylight-saving change a numeric end's default start can
+  land on a different local date than the calendar one would.
+- The **Custom range…** selection sends the two `<input type=date>` values as
+  raw `YYYY-MM-DD` strings, not epoch seconds, so the server reads them in its
+  own timezone and a browser in another timezone cannot shift the selected
+  calendar day. The panel defaults the inputs to the last 30 calendar days only
+  when no range has been picked yet, so preset → Custom never erases a chosen
+  range.
+
+Bounds and fallbacks:
+
+- A `YYYY-MM-DD` bound selects a whole local calendar day (start = that day's
+  local midnight; an end date's exclusive stop is the next local midnight,
+  except a date equal to today, which clamps to the server clock because that
+  day is not over). An epoch bound keeps its exact `[start, end)` precision.
+  Bounds are swapped if supplied reversed.
+- The window never extends into the future: an `end` beyond the server clock
+  is clamped to `now`.
+- Windows are clamped to five calendar years so the daily series cannot grow
+  unbounded.
+- The request fails closed to the trailing `days` window (`mode: "trailing"`)
+  when an absolute bound cannot be served faithfully: a supplied bound that is
+  unparseable (e.g. `2026-02-31`) or out of the supported epoch range, a
+  pre-epoch date (Chromium's date input accepts `0001-…`, and no session
+  predates 1970), or a strictly-future start. A supplied-but-invalid bound is
+  never treated as an omitted one, so a rejected request cannot fabricate an
+  interval the caller did not ask for. An explicit zero-length window pinned to
+  the clock itself (`start == now`) stays an empty custom interval rather than
+  silently serving the trailing window.
+
+### 4.12 Project Bindings (`/api/projects/bind`)
+
+A session project can carry **bindings**: a set of workspaces (one of them the
+default), a model, and — API-only since the dialog row is hidden and no session
+applies it yet — a stored reasoning effort. The chip's quick-create (`+`) button, and the top-level New Chat button
+while that project filter is active, open a new session already configured for
+the project's context. Right-click
+a project chip and pick **Project settings…** to edit them: one row in the chip
+menu (no inline summary, no per-axis unbind rows), a dialog built on the shared
+`.app-dialog*` classes (skins, Escape, focus trap) that stays below the shared
+app dialog's z-index so a prompt it opens stacks on top, and a menu clamped to
+the viewport.
+
+`POST /api/projects/bind` updates a single project by `project_id`. Every body
+field is optional and only the supplied ones are touched:
+
+- `workspaces: [str]` — replaces the full bound list. Each entry passes the
+  same trusted-path check as `/api/session/new` (`validate_workspace_to_add`
+  then `resolve_trusted_workspace`) and is auto-registered in the saved
+  workspace list, so a path outside the default root can be bound in one step.
+  Entries are de-duplicated, keeping first-seen order. `null` clears the list
+  (and the default with it).
+- `default_workspace: str` — the workspace a new session starts in. It must be
+  a member of `workspaces`; a value outside the list is auto-added so the
+  invariant "`default_workspace` ∈ `workspaces`" always holds. Removing the
+  workspace that was the default also drops the default.
+- `workspace: str` — the legacy single-workspace field from before
+  multi-workspace bindings. It is still accepted and kept in sync as
+  `workspaces: [w]`, so pre-existing rows that only set `workspace` keep
+  working; `_project_workspaces` reads the list first and falls back to it.
+- `auto_assign: bool` — accepted and **stored but dormant**. The backfill
+  sweep it used to drive, the dialog toggle that set it and the
+  workspace-keyed filing of new sessions were split out into a follow-up PR, so
+  this build reads the stored value nowhere. It is shape-checked (a JSON
+  boolean) in the request pre-flight, like `reasoning_effort`, and `null`/`false`
+  still clears it.
+- `model` / `model_provider` / `reasoning_effort` — single-value bindings per
+  project; `null` clears that axis (the project is then unbound on it). The
+  dialog renders the model row only: it never submits `reasoning_effort`, so
+  saving a binding PRESERVES an existing effort value instead of clearing it —
+  and, since the UX re-gate of 2026-10-08, no session applies that stored value
+  either (see below).
+
+`reasoning_effort` is **stored but dormant**. `/api/projects/bind` still accepts
+it (and `null` still clears it), and the dialog still renders no row for it
+(re-gate 2026-10-07) — but since the UX re-gate of 2026-10-08 nothing forwards
+it into a new session, so creating a project-bound session no longer changes
+anything effort-related. The only mechanism it could use is the **profile-wide**
+preference: `POST /api/reasoning` persists one shared `agent.reasoning_effort`
+value in the active profile's `config.yaml` — the same key the CLI `/reasoning`
+and the composer's effort chip use. The bound `model` / `model_provider` only
+*interpret* that single value (they select which ladder applies); they do not
+get separately stored effort preferences, so two projects bound to different
+models still share one effort setting. Applying a project's stored effort
+therefore moved the effective effort of every other session and project in that
+profile, while the dialog offered no way to see or clear the value — it read as
+a silent profile-wide change behind a chip that says *Default* — so
+`_projectBindingsForNewSession` stopped forwarding it (UX re-gate
+2026-10-08T23:39:33Z, item A). The apply branch in `newSession` stays in place,
+dormant, for per-session effort (#7881), which will re-supply the option; the
+stored binding itself is still what that future mechanism will read.
+
+The endpoint only binds a project its own profile owns (`_profiles_match`,
+otherwise 404), mirroring the `/api/session/new` profile boundary. The stored
+fields ride along in the plain `/api/projects` payload (the raw project rows),
+so the sidebar can render the chip menu row and the dialog without a second
+request.
+
+Where the bindings take effect:
+
+- **Quick-create and New Chat with an active project filter** —
+  `_projectBindingsForNewSession` forwards the default workspace (falling back
+  to the first bound workspace, then the legacy `workspace`) plus `model` and
+  `model_provider` as `newSession` options — deliberately NOT `reasoning_effort`
+  (see above). Only bound
+  axes are forwarded, and only when the caller did not pass an explicit value,
+  so the chip's own `+` click (which passes its own `project_id`) is never
+  double-applied.
+- **Profile boundary** — a NAMED-profile project only claims sessions from its
+  own profile; the root/default project claims default-profile (and unprofiled
+  legacy) rows. `_profiles_match` handles the renamed-root alias for the bind.
+
 
 ---
 
@@ -1498,6 +1792,25 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                metadata. Outline jump and jump-to-start opt in to the
                                full transcript via the explicit `msg_limit=all`
                                escape hatch. See #7310 / #7625 / #7628.
+                               `messages=0` returns metadata without constructing
+                               canonical regeneration state or emitting
+                               `regeneration_revision`. Existing summary reads
+                               still detect external transcript growth. Clients
+                               obtain regeneration authority on the message-load
+                               path before regenerating. Existing read-only,
+                               `_messages_truncated`, and imported-turn ownership
+                               gates remain in force. Cached messages bypass a load
+                               only with current same-session authority. A returning
+                               navigation snapshots resident width and message count
+                               before replacing metadata. If an interrupted forced
+                               refresh temporarily cleared the rows, it retains the
+                               existing same-session hint instead of recapturing an
+                               empty window. Authority refetches reuse the existing
+                               bounded/full reload-width policy, not the initial
+                               tail. Hints remain session-scoped and superseded load
+                               generations cannot overwrite the winning transcript.
+                               Missing authority never creates an automatic refetch
+                               loop.
     /api/sessions              List of all session compact() dicts, sorted by updated_at
     /api/list                  ?session_id=X&path=. -> directory listing for session workspace
     /api/file                  ?session_id=X&path=rel -> file content (text, 200KB limit)

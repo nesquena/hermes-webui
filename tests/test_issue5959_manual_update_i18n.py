@@ -28,7 +28,8 @@ def test_manual_update_instruction_uses_translation_helper():
     assert match
     function_source = match.group(0)
     assert "t('settings_update_manual_docker'" in function_source
-    assert "docker pull ghcr.io/nesquena/hermes-webui:latest" in function_source
+    assert "hermes-webui:${tag}" in function_source
+    assert "'experimental':'latest'" in function_source
     assert "Manual update required" not in function_source
 
 
