@@ -21,7 +21,26 @@ global.window = {{}};
 global._syncMobileCtxDisplay = () => {{}};
 global._setCtxCompressButton = () => {{}};
 global._fmtTokens = value => String(value);
-global.t = key => key;
+global.t = (key, ...args) => {{
+  const V = {{
+    'ctx_label_context_window': 'Context window',
+    'ctx_label_estimated': 'Estimated next model context',
+    'ctx_aria_usage': '{{0}} \u2014 {{1}}',
+    'ctx_tokens_no_prompt': '{{0}} tokens used',
+    'ctx_usage_pct': '{{0}}: {{1}}% used ({{2}}% left)',
+    'ctx_usage_exceeded': '{{0}}: {{1}}% used (context exceeded)',
+    'ctx_tokens_used': '{{0}}: {{1}} / {{2}} tokens used',
+    'ctx_in_out': 'In: {{0}} \u00b7 Out: {{1}}',
+    'ctx_auto_compress': 'Auto-compress at {{0}} ({{1}}%)',
+    'ctx_estimated_cost': 'Estimated cost: ${{0}}',
+    'ctx_compress_action': 'Compress',
+    'ctx_compress_hint': 'Compress',
+    'usage_cache_hit_detail': '{{0}}%'
+  }};
+  let s = V[key] || key;
+  args.forEach((a,i) => {{ s = s.replace('\x7b'+i+'\x7d', a); }});
+  return s;
+}};
 {indicator}
 _syncCtxIndicator({json.dumps(usage)});
 console.log(JSON.stringify({{percent: nodes.ctxPercent.textContent, label: nodes.ctxIndicator['aria-label'], usage: nodes.ctxTooltipUsage.textContent, tokens: nodes.ctxTooltipTokens.textContent}}));
@@ -157,7 +176,7 @@ def test_context_indicator_without_estimate_preserves_current_behavior():
     no_data = _run_context_indicator({"input_tokens": 100_000, "output_tokens": 1})
 
     assert historical["percent"] == "78"
-    assert historical["label"].startswith("Context window 78% used")
+    assert historical["label"].startswith("Context window \u2014 78% used")
     assert no_data["percent"] == "\N{MIDDLE DOT}"
 
 
