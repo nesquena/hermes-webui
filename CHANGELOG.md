@@ -82,6 +82,8 @@
 
 ### Fixed
 
+- **Less CPU while chats are open.** Finding a run's journal file walked every session directory on each lookup, and those lookups sit on per-poll paths (stream reconnect probes, ownership checks). With hundreds of sessions that walk took a large share of the process and slowed even `/health`. Run paths are now cached (bounded, revalidated on use), hundreds of times faster per warm lookup. Thanks @silent-reader-cn. (#8322)
+
 - **Chats on a named custom provider keep their model.** A session pinned to `@custom:<name>:<model>` could silently switch to the catalog default on another provider when the catalog was cold (the provider lives in `custom_providers`, often in a profile config). Valid models are now kept, including server-side wakeup turns, and a model that was really removed from the provider's list moves to the provider's current default, with `${VAR}` defaults expanded in the session's own profile environment. Thanks @MoBluey. (#8256)
 
 - **Scheduled Tasks mark the job that just ran.** When a job finishes in the background, the Tasks list now refreshes on its own and marks the job with a dot, and an open job's Last Output card is marked too, without collapsing output you have open. The marker uses the app's unread colour and sits in the row's gutter so titles don't shift. Thanks @martindell. (#6767)
