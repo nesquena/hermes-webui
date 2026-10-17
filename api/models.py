@@ -7461,6 +7461,33 @@ def _refresh_index_rows_from_sidecar_metadata(
     return out
 
 
+def state_db_session_presence(sid):
+    """True/False when the active state.db can answer for *sid*, None if it cannot.
+
+    ``delete_cli_session`` returns False both for an aborted transaction and for
+    a commit whose transcript cleanup is still pending (the cleanup manifest
+    keeps retrying it). Callers deciding whether user files are still safe to
+    remove need the difference: only a missing row proves the delete already
+    committed, and a missing or unreadable database proves nothing at all.
+    """
+    if not sid:
+        return False
+    try:
+        import sqlite3
+    except ImportError:
+        return None
+    db_path = _active_state_db_path()
+    if not db_path.exists():
+        return None
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),))
+            return cur.fetchone() is not None
+    except Exception:
+        return None
+
+
 def state_db_has_session(sid: str) -> bool:
     """Return True when ``sid`` exists in the active state.db sessions table.
 
@@ -7471,22 +7498,7 @@ def state_db_has_session(sid: str) -> bool:
     path — the workspace is shared across session storage backends and is
     resolved separately via ``get_last_workspace()``.
     """
-    if not sid:
-        return False
-    try:
-        import sqlite3
-    except ImportError:
-        return False
-    db_path = _active_state_db_path()
-    if not db_path.exists():
-        return False
-    try:
-        with closing(open_state_db_readonly(db_path)) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),))
-            return cur.fetchone() is not None
-    except Exception:
-        return False
+    return state_db_session_presence(sid) is True
 
 
 class _ExternalSessionView:
@@ -15371,33 +15383,6 @@ def _retire_gateway_runtime_ledger(conn, session_ids, tables):
         if reason in ("session_busy", "unknown_execution"):
             raise SessionDeleteRefused(reason) from exc
         raise
-
-
-def state_db_has_session(sid):
-    """Return True/False when state.db can answer for *sid*, None when it cannot.
-
-    ``delete_cli_session`` returns False both for an aborted transaction and
-    for a commit whose artifact cleanup is still pending (the cleanup manifest
-    keeps retrying it). Callers that must decide whether user files are still
-    safe to remove need the difference: only a missing row proves the delete
-    already committed.
-    """
-    try:
-        from api.profiles import get_active_hermes_home
-
-        db_path = Path(get_active_hermes_home()).expanduser().resolve() / 'state.db'
-        if not db_path.exists():
-            return False
-        import sqlite3
-
-        with closing(sqlite3.connect(str(db_path))) as conn:
-            row = conn.execute(
-                "SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),)
-            ).fetchone()
-        return row is not None
-    except Exception:
-        logger.debug("Could not query state.db for session %s", sid, exc_info=True)
-        return None
 
 
 def delete_cli_session(sid) -> bool:

@@ -18145,9 +18145,9 @@ def handle_post(handler, parsed) -> bool:
                     # must still run, or the sidecar, index entry and tombstone
                     # would strand a deleted session. An exception proves
                     # nothing either way, so it keeps failing closed.
-                    from api.models import state_db_has_session
+                    from api.models import state_db_session_presence
 
-                    if delete_raised or state_db_has_session(sid) is not False:
+                    if delete_raised or state_db_session_presence(sid) is not False:
                         return j(
                             handler,
                             {

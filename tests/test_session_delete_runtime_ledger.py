@@ -652,6 +652,27 @@ def test_endpoint_finishes_cleanup_when_the_commit_already_landed(tmp_path, monk
     assert closed == ["sid"]
 
 
+def test_endpoint_keeps_files_when_the_database_is_missing(tmp_path, monkeypatch):
+    """A missing state.db is unknown, not proof the delete committed.
+
+    delete_cli_session() fails closed there because a retry manifest may still
+    need the DB; the route must not read that as "already deleted" and drop the
+    sidecar and journals.
+    """
+    import api.models as models
+
+    _install_home(monkeypatch, tmp_path)  # no state.db at all
+    session_dir = _install_routes_env(monkeypatch, tmp_path, OrderedDict())
+    monkeypatch.setattr(models, "delete_cli_session", lambda sid: False)
+    (session_dir / "sid.json").write_text("{}", encoding="utf-8")
+
+    captured = _post_delete(monkeypatch, "sid")
+
+    assert captured["status"] == 500
+    assert captured["payload"]["ok"] is False
+    assert (session_dir / "sid.json").exists()
+
+
 def test_eviction_runs_before_the_session_lock(tmp_path, monkeypatch):
     """The lifecycle commit can wait on a provider; it must not hold the lock."""
     import api.config as config
