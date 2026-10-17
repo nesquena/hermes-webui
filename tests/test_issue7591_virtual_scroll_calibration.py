@@ -223,6 +223,9 @@ let _programmaticScroll = false;
 let _programmaticScrollSetAt = 0;
 let _lastScrollTop = 0;
 let _messageVirtualBlankClampAttempts = 0;
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 const performance = { now: () => 1000 };
 function _freshProgrammaticScrollActive(){ return false; }
 function _deferClearProgrammaticScroll(){}
@@ -281,6 +284,9 @@ let _sessionHtmlCacheSid = 'sid-123';
 const S = { session: { session_id: 'sid-123' } };
 let _messageVirtualWindowKey = 'stale';
 let _messageVirtualBlankClampAttempts = 0;
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 function _messageViewportIntersectsRenderedRow(){ return false; }
 function renderMessages(options){ renderCalls.push(options); }
 const container = {
@@ -313,6 +319,9 @@ let _sessionHtmlCacheSid = 'sid-123';
 const S = { session: { session_id: 'sid-123' } };
 let _messageVirtualWindowKey = 'stale';
 let _messageVirtualBlankClampAttempts = 0;
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 function _messageViewportIntersectsRenderedRow(){ return false; }
 function _freshProgrammaticScrollActive(){ return true; }
 function renderMessages(options){ renderCalls.push(options); }
@@ -356,6 +365,9 @@ let _programmaticScroll = false;
 let _programmaticScrollSetAt = 0;
 let _lastScrollTop = 0;
 let _messageVirtualBlankClampAttempts = 0;
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
 let _messageRenderScrollRestoreDepth = 0;
 const performance = { now: () => 1000 };
 function _freshProgrammaticScrollActive(){ return false; }
@@ -388,9 +400,118 @@ console.log(JSON.stringify({ recovered, scrollTop: container.scrollTop, renderCa
     assert metrics["renderCalls"] == [{"preserveScroll": True}]
 
 
-def test_blank_viewport_recovery_clamps_during_the_render_own_scroll_restore():
-    """renderMessages' own scroll restore re-arms _programmaticScroll right
-    before recovery runs; that write is ours, so it must not disable the clamp."""
+# Shared harness for the two COMPOSED render-path regressions below. It wires the
+# real ownership capture + real clamp + real recovery together and reproduces the
+# one production behaviour that matters: _scrollAfterMessageRender re-arms
+# _programmaticScroll with a fresh timestamp immediately before recovery runs
+# (static/ui.js _restoreMessageScrollSnapshot), so by the time recovery sees the
+# latch it can no longer tell that write apart from a foreign in-flight one.
+# Ownership must therefore be captured BEFORE the restore, at the call site.
+_COMPOSED_RECOVERY_HARNESS = """
+let deletes = [];
+let renderCalls = [];
+let restoreCalls = 0;
+const _sessionHtmlCache = { delete(sid){ deletes.push(sid); } };
+let _sessionHtmlCacheSid = 'sid-123';
+const S = { session: { session_id: 'sid-123' } };
+let _messageVirtualWindowKey = 'stale';
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+let _lastScrollTop = 0;
+let _messageVirtualBlankClampAttempts = 0;
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
+let _messageJumpScrollOwner = null;
+const performance = { now: () => 1000 };
+function _freshProgrammaticScrollActive(){
+  if(!_programmaticScroll) return false;
+  const age = performance.now() - _programmaticScrollSetAt;
+  return Number.isFinite(age) && age >= 0 && age <= 150;
+}
+function _deferClearProgrammaticScroll(){}
+function _messageViewportIntersectsRenderedRow(){ return false; }
+function renderMessages(options){ renderCalls.push(options); }
+// Stand-in for _scrollAfterMessageRender: re-arms the latch exactly the way
+// _restoreMessageScrollSnapshot does for a numeric restore.
+function _scrollAfterMessageRender(){
+  restoreCalls++;
+  _programmaticScroll = true;
+  _programmaticScrollSetAt = performance.now();
+}
+const container = {
+  scrollTop: 800,
+  clientHeight: 600,
+  scrollHeight: 20000,
+  getBoundingClientRect(){ return { top: 0, bottom: 600 }; },
+  querySelectorAll(){ return [
+    { getBoundingClientRect(){ return { top: 4000, bottom: 4500 }; } },
+    { getBoundingClientRect(){ return { top: 4500, bottom: 6000 }; } },
+  ]; },
+};
+function $(id){ return id === 'messages' ? container : null; }
+eval(extractFunc('_captureMessageRecoveryOwnership'));
+eval(extractFunc('_clampVirtualizedBlankViewportToRenderedEdge'));
+eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
+"""
+
+
+def test_render_own_scroll_restore_does_not_disable_the_blank_viewport_clamp():
+    """Composed render path: when the ONLY fresh programmatic write is the one
+    this render made itself, the clamp must still run. Ownership is captured
+    before the restore, so the restore's own latch is not mistaken for a foreign
+    in-flight scroll (the maintainer's rejected depth-counter 'always-false
+    freshness stub' cannot express this case)."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _COMPOSED_RECOVERY_HARNESS + """
+// No write in flight when the render starts -> ownership says "ours".
+const ownership = _captureMessageRecoveryOwnership();
+_scrollAfterMessageRender(true, null);
+const recovered = _maybeRecoverVirtualizedBlankViewport({}, true, { virtualized: true }, ownership);
+console.log(JSON.stringify({
+  ownership, recovered, restoreCalls, scrollTop: container.scrollTop, renderCalls,
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["restoreCalls"] == 1
+    # The restore really did arm the latch before recovery ran.
+    assert metrics["ownership"] == {"programmatic": False, "jumpOwner": False}
+    assert metrics["recovered"] is True
+    # Bounded clamp, not the full-render fallback.
+    assert metrics["renderCalls"] == [{"preserveScroll": True}]
+    assert metrics["scrollTop"] == 4500
+
+
+def test_foreign_programmatic_write_in_flight_falls_back_to_full_render():
+    """The same composed path, but a FOREIGN scroll write was already settling
+    when the render started: recovery must not fight it, so the clamp is skipped
+    and the full render escalates. This is the live contract the dead
+    depth-counter guard failed to express."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _COMPOSED_RECOVERY_HARNESS + """
+// A foreign write was stamped just before the render started.
+_programmaticScroll = true;
+_programmaticScrollSetAt = performance.now();
+const ownership = _captureMessageRecoveryOwnership();
+_scrollAfterMessageRender(true, null);
+const recovered = _maybeRecoverVirtualizedBlankViewport({}, true, { virtualized: true }, ownership);
+console.log(JSON.stringify({
+  ownership, recovered, scrollTop: container.scrollTop, renderCalls,
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["ownership"]["programmatic"] is True
+    assert metrics["recovered"] is True
+    assert metrics["renderCalls"] == [
+        {"preserveScroll": True, "_virtualFallback": True}
+    ]
+    assert metrics["scrollTop"] == 800
+
+
+def test_blank_viewport_recovery_skips_rows_without_client_rects():
+    """assistant-segment-worklog-source / -anchor keep data-msg-idx but are
+    display:none, so their rects are zero. Recovery must skip them before
+    comparing edges, or it scrolls toward an invisible row and stays blank."""
     js = UI_JS_PATH.read_text(encoding="utf-8")
     source = _extract_func_script(js) + """
 let deletes = [];
@@ -403,32 +524,307 @@ let _programmaticScroll = false;
 let _programmaticScrollSetAt = 0;
 let _lastScrollTop = 0;
 let _messageVirtualBlankClampAttempts = 0;
-let _messageRenderScrollRestoreDepth = 1;
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
+let _messageJumpScrollOwner = null;
 const performance = { now: () => 1000 };
-function _freshProgrammaticScrollActive(){ return true; }
+function _freshProgrammaticScrollActive(){ return false; }
 function _deferClearProgrammaticScroll(){}
 function _messageViewportIntersectsRenderedRow(){ return false; }
 function renderMessages(options){ renderCalls.push(options); }
+// Viewport (1000..1600) sits in the head/tail gap. The hidden segment row is
+// NEARER (viewport y=950) than the real rendered row (viewport y=1700).
 const container = {
-  scrollTop: 800,
+  scrollTop: 1000,
   clientHeight: 600,
-  scrollHeight: 20000,
+  scrollHeight: 4000,
   getBoundingClientRect(){ return { top: 0, bottom: 600 }; },
   querySelectorAll(){ return [
-    { getBoundingClientRect(){ return { top: 4000, bottom: 4500 }; } },
-    { getBoundingClientRect(){ return { top: 4500, bottom: 6000 }; } },
+    { getClientRects(){ return []; },
+      getBoundingClientRect(){ return { top: 950, bottom: 950 }; } },
+    { getClientRects(){ return [{ width: 100, height: 300 }]; },
+      getBoundingClientRect(){ return { top: 1700, bottom: 2000 }; } },
   ]; },
 };
 function $(id){ return id === 'messages' ? container : null; }
+eval(extractFunc('_captureMessageRecoveryOwnership'));
 eval(extractFunc('_clampVirtualizedBlankViewportToRenderedEdge'));
 eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
-const recovered = _maybeRecoverVirtualizedBlankViewport({}, true, { virtualized: true });
+const recovered = _maybeRecoverVirtualizedBlankViewport({}, true, { virtualized: true }, null);
 console.log(JSON.stringify({ recovered, scrollTop: container.scrollTop, renderCalls }));
 """
     metrics = json.loads(_run_node(source))
     assert metrics["recovered"] is True
-    assert metrics["scrollTop"] == 4500
+    # Rects are lifted from viewport space into document space (rowTop = rect.top
+    # + scrollTop), so the visible row's top edge is 1700+1000=2700 and the
+    # clamp lands at 2700 - 0.5*600. The hidden row (zero rect, doc y=1950) sits
+    # NEARER to the viewport bottom and would win at 1950-300=1650 if it were not
+    # skipped — that is the regression this pins.
+    assert metrics["scrollTop"] == 2400
     assert metrics["renderCalls"] == [{"preserveScroll": True}]
+
+
+def test_measurement_compensation_preserves_the_blank_viewport_recovery():
+    """The clamp writes scrollTop from INSIDE a render that
+    _compensateScrollForMeasurementDelta wraps. Without a recovery flag the
+    wrapper reads its own deliberate jump as a measurement delta and writes
+    scrollTopBefore + delta over it, putting the reader back in the blank gap."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + """
+let deletes = [];
+const _sessionHtmlCache = { delete(sid){ deletes.push(sid); } };
+let _sessionHtmlCacheSid = 'sid-123';
+const S = { session: { session_id: 'sid-123' } };
+let _messageVirtualWindowKey = 'stale';
+let _programmaticScroll = false;
+let _programmaticScrollSetAt = 0;
+let _lastScrollTop = 0;
+let _messageVirtualBlankClampAttempts = 0;
+// Module state the extracted clamp / compensation wrapper touch.
+let _blankViewportRecoveryToken = 0;
+let _blankViewportRecoveryApplied = 0;
+let _messageJumpScrollOwner = null;
+const performance = { now: () => 1000 };
+function _freshProgrammaticScrollActive(){ return false; }
+function _deferClearProgrammaticScroll(){}
+function _messageViewportIntersectsRenderedRow(){ return false; }
+function renderMessages(){}
+// Rows live at fixed DOCUMENT positions; their rects move with scrollTop, so
+// the anchor delta the wrapper computes reflects the clamp's own jump.
+const ROWS = [
+  { docTop: 4800, docBottom: 5300 },
+  { docTop: 5300, docBottom: 6800 },
+];
+const container = {
+  scrollTop: 800,
+  clientHeight: 600,
+  scrollHeight: 20000,
+  classList: { add(){}, remove(){} },
+  getBoundingClientRect(){ return { top: 0, bottom: 600 }; },
+  querySelectorAll(sel){
+    if(String(sel).indexOf('spacer')>=0) return [];
+    if(String(sel).indexOf('msg-idx')>=0){
+      return ROWS.map(r => ({
+        getClientRects(){ return [{ width: 100, height: 100 }]; },
+        getBoundingClientRect(){
+          return { top: r.docTop - container.scrollTop, bottom: r.docBottom - container.scrollTop };
+        },
+      }));
+    }
+    return [];
+  },
+  querySelector(sel){
+    const m = /data-msg-idx="([0-9]+)"/.exec(String(sel));
+    if(!m) return null;
+    const r = ROWS[Number(m[1])];
+    if(!r) return null;
+    return {
+      getBoundingClientRect(){
+        return { top: r.docTop - container.scrollTop, bottom: r.docBottom - container.scrollTop };
+      },
+    };
+  },
+};
+function $(id){ return id === 'messages' ? container : null; }
+// Faithful stand-in for the real capture: the first row whose rect extends past
+// the container top, with its offset relative to the container.
+function _captureMessageViewportAnchor(){
+  const containerRect = container.getBoundingClientRect();
+  for (let i = 0; i < ROWS.length; i++) {
+    const r = ROWS[i];
+    const top = r.docTop - container.scrollTop;
+    const bottom = r.docBottom - container.scrollTop;
+    if (bottom > containerRect.top + 1) {
+      return {
+        rawIdx: i, sessionIdx: i, key: '', topOffset: top - containerRect.top,
+        topPadBefore: 0, scrollHeightAtCapture: container.scrollHeight, inputGeneration: 0,
+      };
+    }
+  }
+  return null;
+}
+eval(extractFunc('_captureMessageRecoveryOwnership'));
+eval(extractFunc('_clampVirtualizedBlankViewportToRenderedEdge'));
+eval(extractFunc('_maybeRecoverVirtualizedBlankViewport'));
+eval(extractFunc('_compensateScrollForMeasurementDelta'));
+
+const scrollTopBefore = container.scrollTop;
+_compensateScrollForMeasurementDelta(() => {
+  _maybeRecoverVirtualizedBlankViewport({}, true, { virtualized: true }, null);
+});
+// The clamp settled on the nearest rendered edge...
+const recoveredEdge = 4500;
+console.log(JSON.stringify({
+  scrollTopBefore,
+  recoveredEdge,
+  afterFirstRender: container.scrollTop,
+  // A LATER render, unrelated to the recovery, must still compensate normally:
+  // the row above the anchor genuinely grew by 120px during that render.
+  afterSecondRender: (function(){
+    _compensateScrollForMeasurementDelta(() => { ROWS[0].docTop += 120; });
+    return container.scrollTop;
+  })(),
+  // The one-render stamp must not leak: after a render that throws, the next
+  // render still compensates.
+  afterThrowingRender: (function(){
+    try { _compensateScrollForMeasurementDelta(() => { throw new Error('boom'); }); }
+    catch(_){}
+    const before = container.scrollTop;
+    _compensateScrollForMeasurementDelta(() => { ROWS[0].docTop += 90; });
+    return container.scrollTop !== before;
+  })(),
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    # The wrapper must not overwrite the deliberate recovery.
+    assert metrics["afterFirstRender"] == metrics["recoveredEdge"]
+    # Compensation is intact for renders that did not recover.
+    assert metrics["afterSecondRender"] != metrics["afterFirstRender"]
+
+
+def test_role_calibration_samples_shift_keys_when_history_is_prepended():
+    """rawIdx is positional over S.messages, so prepending older history shifts
+    every key. The height cache is shifted for exactly this reason
+    (_syncMessageVirtualHeightCache); the per-role samples must shift with it or
+    the same rows get counted twice toward the freeze."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _calibration_block(js) + """
+eval(extractFunc('_shiftMessageVirtualRoleSamples'));
+eval(extractFunc('_recordMessageVirtualRoleMeasurement'));
+eval(extractFunc('_messageVirtualCalibratedRoleHeight'));
+// Ten distinct tool rows measured at their original rawIdx.
+for (let i = 0; i < 10; i++) _recordMessageVirtualRoleMeasurement('tool_call', i, 150);
+// Two older rows are prepended, so rawIdx 0..9 become 2..11 and the two NEW
+// rows occupy rawIdx 0 and 1 (mirrors nextHeights[prependedCount+i]).
+_shiftMessageVirtualRoleSamples(
+  [{ rawIdx: 0 }, { rawIdx: 1 }, { rawIdx: 2 }, { rawIdx: 3 }, { rawIdx: 4 },
+   { rawIdx: 5 }, { rawIdx: 6 }, { rawIdx: 7 }, { rawIdx: 8 }, { rawIdx: 9 }],
+  [{ rawIdx: 0 }, { rawIdx: 1 }, { rawIdx: 2 }, { rawIdx: 3 }, { rawIdx: 4 },
+   { rawIdx: 5 }, { rawIdx: 6 }, { rawIdx: 7 }, { rawIdx: 8 }, { rawIdx: 9 },
+   { rawIdx: 10 }, { rawIdx: 11 }],
+  2,
+);
+// Re-measuring the SAME ten rows at their NEW indices must be a no-op: the
+// sample count stays 10, so ten more distinct rows are still needed to freeze.
+for (let i = 2; i < 12; i++) _recordMessageVirtualRoleMeasurement('tool_call', i, 150);
+const afterRemeasure = _messageVirtualCalibratedRoleHeight('tool_call');
+const rows = _messageVirtualRoleHeightSamples.tool_call.rows;
+console.log(JSON.stringify({
+  afterRemeasure,
+  distinctRows: rows.size,
+  keys: Array.from(rows.keys()).sort((a, b) => a - b),
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    # 10 distinct samples of 150 shrunk toward the 400px prior, not 20 samples
+    # of the same ten rows (which would have frozen the mean at 150).
+    assert metrics["distinctRows"] == 10
+    assert metrics["keys"] == list(range(2, 12))
+    # Still the 5-prior shrinkage over exactly TEN samples: (10*150 + 5*400)/15
+    # = 233. Had the shift failed and the re-measure added a twelfth row it would
+    # be (12*150 + 5*400)/17 = 223.
+    assert metrics["afterRemeasure"] == 233
+
+
+def test_internal_measurement_render_is_deferred_while_a_jump_owns_the_viewport():
+    """jumpToTurnQuestion smooth-scrolls to an answer row the render window does
+    not contain yet. A queued measurement render replaces that smooth-scroll
+    target with its own anchor restore, stranding the answer above the viewport.
+    The measurement chain must be deferred for the duration of the jump."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _calibration_block(js) + """
+let scheduled = [];
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = 12;
+let _messageVirtualMeasurementCycleKey = '';
+let _messageVirtualMeasurementSeenKeys = [];
+let _messageVirtualMeasurementBurstActive = false;
+let _messageVirtualScrollActive = false;
+let _messageVirtualScrollSettleTimer = 0;
+let _messageVirtualDeferredMeasurement = null;
+let _messageJumpScrollOwner = { generation: 7, container: {}, sessionId: 'sid-123' };
+let _resetBurstCalls = 0;
+function requestAnimationFrame(fn){ fn(); }
+function _resetMessageVirtualMeasurementBurst(){ _resetBurstCalls++; }
+eval(extractFunc('_messageVirtualMeasurementCycleKeyFor'));
+eval(extractFunc('_messageJumpScrollOwnsViewport'));
+eval(extractFunc('_scheduleMessageVirtualMeasurementRefresh'));
+// Stub the render scheduler: the whole point is that NOTHING is scheduled while
+// the jump owns the viewport.
+function _scheduleMessageVirtualizedRender(force, request){ scheduled.push(request); }
+const metrics = { virtualized: true, start: 0, end: 50, tailStart: 0 };
+_scheduleMessageVirtualMeasurementRefresh(metrics);
+console.log(JSON.stringify({
+  scheduled,
+  deferredHeld: _messageVirtualDeferredMeasurement === metrics,
+  burstCalls: _resetBurstCalls,
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    # Nothing scheduled while the jump owns the viewport; the refresh is held.
+    assert metrics["scheduled"] == []
+    assert metrics["deferredHeld"] is True
+
+
+def test_deferred_measurement_resumes_after_jump_settlement():
+    """Deferral must not strand the measurement chain: when the jump finishes
+    (or is cancelled), the held refresh is scheduled."""
+    js = UI_JS_PATH.read_text(encoding="utf-8")
+    source = _extract_func_script(js) + _calibration_block(js) + """
+let scheduled = [];
+const MESSAGE_VIRTUAL_MEASUREMENT_MAX_RERENDERS = 12;
+let _messageVirtualMeasurementCycleKey = '';
+let _messageVirtualMeasurementSeenKeys = [];
+let _messageVirtualMeasurementBurstActive = false;
+let _messageVirtualScrollActive = false;
+// The jump settle timer is a DIFFERENT module variable from the measurement
+// settle timer above (_messageJumpScrollSettleTimer); both settle timers exist.
+let _messageVirtualScrollSettleTimer = 0;
+let _messageJumpScrollSettleTimer = 0;
+let _messageVirtualDeferredMeasurement = null;
+let _messageJumpScrollOwner = { generation: 7, container: {}, sessionId: 'sid-123' };
+let _messageJumpScrollGeneration = 7;
+function requestAnimationFrame(fn){ fn(); }
+function _resetMessageVirtualMeasurementBurst(){ _messageVirtualMeasurementSeenKeys = []; }
+function clearTimeout(){}
+const _scrollPinned = true;
+const _messageUserUnpinned = false;
+const _nearBottomCount = 2;
+const _lastScrollTop = 0;
+const _lastMessageClientHeight = 600;
+const _newMessageCueVisible = false;
+function _syncScrollToBottomCue(){}
+function _updateSessionStartJumpButton(){}
+function _flushDeferredActiveSessionExternalRefresh(){}
+eval(extractFunc('_messageJumpSessionId'));
+eval(extractFunc('_messageVirtualMeasurementCycleKeyFor'));
+eval(extractFunc('_messageJumpScrollOwnsViewport'));
+eval(extractFunc('_resumeDeferredMessageVirtualMeasurement'));
+eval(extractFunc('_scheduleMessageVirtualMeasurementRefresh'));
+eval(extractFunc('_finishMessageJumpScroll'));
+eval(extractFunc('_cancelMessageJumpScroll'));
+// Stub the render scheduler so a flushed refresh is observable.
+function _scheduleMessageVirtualizedRender(force, request){ scheduled.push(request); }
+
+const metrics = { virtualized: true, start: 0, end: 50, tailStart: 0 };
+// Held by the active jump owner.
+_scheduleMessageVirtualMeasurementRefresh(metrics);
+const scheduledDuringJump = scheduled.length;
+// Settlement clears the owner and must flush the held refresh.
+_messageJumpScrollOwner.container = { scrollHeight: 20000, clientHeight: 600, scrollTop: 4500 };
+_finishMessageJumpScroll(7);
+// And a cancelled jump must not strand it either.
+_scheduleMessageVirtualMeasurementRefresh(metrics);
+_cancelMessageJumpScroll();
+console.log(JSON.stringify({
+  scheduledDuringJump,
+  scheduledTotal: scheduled.length,
+}));
+"""
+    metrics = json.loads(_run_node(source))
+    assert metrics["scheduledDuringJump"] == 0
+    # One flush from settlement + one from the cancel path.
+    assert metrics["scheduledTotal"] == 2
 
 
 def test_role_calibration_freeze_requires_distinct_measured_rows():

@@ -610,6 +610,36 @@ function _recordMessageVirtualRoleMeasurement(role,rawIdx,height){
     slot.frozen=sum/slot.rows.size;
   }
 }
+function _shiftMessageVirtualRoleSamples(previousEntries, nextEntries, prependedCount){
+  const count=Math.max(0, Number(prependedCount)||0);
+  if(!(count>0)) return;
+  if(!Array.isArray(previousEntries)||!Array.isArray(nextEntries)) return;
+  // #7591: rawIdx is POSITIONAL over S.messages (see _getVisibleMessagesWithIdx),
+  // so prepending older history moves every key. The height cache is shifted for
+  // exactly this reason in _syncMessageVirtualHeightCache; these per-role samples
+  // must travel with it, or re-measuring the same rows after a prepend lands under
+  // fresh keys and counts them twice toward the freeze.
+  const remap=new Map();
+  for(let i=0;i<previousEntries.length;i++){
+    const previous=previousEntries[i];
+    const next=nextEntries[i+count];
+    if(!previous||!next) continue;
+    const from=Number(previous.rawIdx);
+    const to=Number(next.rawIdx);
+    if(Number.isFinite(from)&&Number.isFinite(to)&&from!==to) remap.set(from,to);
+  }
+  if(!remap.size) return;
+  for(const role in _messageVirtualRoleHeightSamples){
+    const slot=_messageVirtualRoleHeightSamples[role];
+    if(!slot||!slot.rows||!slot.rows.size) continue;
+    // A frozen role already carries its mean and ignores these rows; shifting
+    // them would be inert, so leave the slot untouched.
+    if(slot.frozen>0) continue;
+    const shifted=new Map();
+    for(const [idx,height] of slot.rows) shifted.set(remap.has(idx)?remap.get(idx):idx, height);
+    slot.rows=shifted;
+  }
+}
 function _messageVirtualCalibratedRoleHeight(role){
   const key=(role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role))?role:'default';
   const prior=Number(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[key])||MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS.default;
@@ -683,20 +713,24 @@ let _scrollbarDragActive=false;
 // _clampVirtualizedBlankViewportToRenderedEdge); reset when a render lands on
 // rendered rows and on session switch (_clearMessageVirtualHeightCache).
 let _messageVirtualBlankClampAttempts=0;
-// Depth of an in-progress renderMessages() scroll restore (#7591): the restore
-// re-arms _programmaticScroll just before blank recovery runs, so recovery must
-// not read that flag as a foreign in-flight scroll write and skip its clamp.
-let _messageRenderScrollRestoreDepth=0;
+// #7591: the blank-viewport clamp writes scrollTop from INSIDE a render that
+// _compensateScrollForMeasurementDelta wraps. That wrapper then reads its own
+// deliberate jump as a measurement delta and writes scrollTopBefore+delta over
+// the recovered position, dropping the reader back into the blank gap it just
+// escaped (scrollbar-driven and measurement-driven renders alike). The clamp
+// stamps a FRESH token here; the wrapper compares the token it saw before its
+// render against the stamp, so only a recovery performed by ITS OWN render is
+// recognised — a stale stamp from an unwrapped render (jumpToTurnQuestion calls
+// renderMessages directly) can never suppress a legitimate compensation. The
+// stamp is cleared in the wrapper's finally so a throw cannot leak it.
+let _blankViewportRecoveryToken=0;
+let _blankViewportRecoveryApplied=0;
 function _markMessageVirtualScrollActive(){
   _messageVirtualScrollActive=true;
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=setTimeout(()=>{
     _messageVirtualScrollActive=false;
-    if(_messageVirtualDeferredMeasurement){
-      const deferred=_messageVirtualDeferredMeasurement;
-      _messageVirtualDeferredMeasurement=null;
-      _scheduleMessageVirtualMeasurementRefresh(deferred);
-    }
+    _resumeDeferredMessageVirtualMeasurement();
   },150);
 }
 // Cached visWithIdx array — invalidated when S.messages.length changes.
@@ -896,8 +930,28 @@ function _resetMessageVirtualMeasurementBurst(){
   // an internal marker survive onto a render that fires later (#6717 re-gate).
   _messageVirtualRenderQueuedOrigin=null;
 }
+function _resumeDeferredMessageVirtualMeasurement(){
+  const deferred=_messageVirtualDeferredMeasurement;
+  if(!deferred) return;
+  _messageVirtualDeferredMeasurement=null;
+  _scheduleMessageVirtualMeasurementRefresh(deferred);
+}
+function _messageJumpScrollOwnsViewport(){
+  return typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner;
+}
 function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   if(_messageVirtualScrollActive){
+    _messageVirtualDeferredMeasurement=windowMetrics;
+    return;
+  }
+  // #7591: a jump-to-question is smooth-scrolling toward an answer row the
+  // render window does not contain yet, and it holds ownership of the viewport
+  // while it settles. An internal measurement render fired in that window
+  // re-derives the window from a stale key and restores its own anchor, which
+  // REPLACES the smooth-scroll target — the requested answer then settles above
+  // the viewport. Hold the measurement chain until the jump releases ownership
+  // (_finishMessageJumpScroll / _cancelMessageJumpScroll flush it back).
+  if(typeof _messageJumpScrollOwnsViewport==='function'&&_messageJumpScrollOwnsViewport()){
     _messageVirtualDeferredMeasurement=windowMetrics;
     return;
   }
@@ -948,7 +1002,16 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   // external request coalesces into the queued rAF, EXTERNAL wins and the
   // render that fires degrades to an unmarked (burst-resetting) render
   // (#6717 re-gate).
-  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true,{origin:'internal'}); });
+  requestAnimationFrame(()=>{
+    // Re-check ownership at FIRE time: a jump can begin between this schedule
+    // and the next frame, and rendering then would replace the jump's
+    // smooth-scroll target. Hold it for the jump's own settlement to flush.
+    if(typeof _messageJumpScrollOwnsViewport==='function'&&_messageJumpScrollOwnsViewport()){
+      _messageVirtualDeferredMeasurement=windowMetrics;
+      return;
+    }
+    _scheduleMessageVirtualizedRender(true,{origin:'internal'});
+  });
 }
 function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
@@ -1012,6 +1075,9 @@ function _syncMessageVirtualHeightCache(visWithIdx){
         for(let i=0;i<previousEntries.length;i++){
           nextHeights[prependedCount+i]=previousHeights[i];
         }
+        // #7591: the role calibration samples are keyed by the same positional
+        // rawIdx, so they shift with the heights they were measured for.
+        if(typeof _shiftMessageVirtualRoleSamples==='function') _shiftMessageVirtualRoleSamples(previousEntries, nextEntries, prependedCount);
       }
     }
   }
@@ -1434,8 +1500,29 @@ function _compensateScrollForMeasurementDelta(renderFn){
   if(!container) return renderFn();
   const anchorBefore=_captureMessageViewportAnchor();
   const scrollTopBefore=container.scrollTop;
+  // A stamp left by an earlier, unwrapped render must never be mistaken for a
+  // recovery performed by THIS render (#7591).
+  _blankViewportRecoveryApplied=0;
+  const tokenBefore=_blankViewportRecoveryToken;
   container.classList.add('vscroll-measuring');
-  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
+  let recoveryApplied=false;
+  try{
+    renderFn();
+    recoveryApplied=_blankViewportRecoveryApplied>tokenBefore;
+  }finally{
+    container.classList.remove('vscroll-measuring');
+    // Read-then-clear in one finally, so a throw inside the render cannot leak
+    // the stamp into the next render and suppress a legitimate correction.
+    _blankViewportRecoveryApplied=0;
+  }
+  // #7591: the blank-viewport clamp moved scrollTop ON PURPOSE from inside this
+  // render. That deliberate jump is indistinguishable from a measurement delta,
+  // so the old-anchor compensation below would write scrollTopBefore+delta over
+  // the recovered position and put the reader back in the blank gap. The
+  // recovered position is the settled one for this render: the clamp already put
+  // a rendered row on screen, and the anchor it was captured against is no longer
+  // a reading position worth preserving.
+  if(recoveryApplied) return;
   if(!anchorBefore) return;
   if(scrollTopBefore<1){
     const spacer=container.querySelector('[data-virtual-spacer="before"]');
@@ -7082,6 +7169,10 @@ function _finishMessageJumpScroll(generation){
   _lastMessageClientHeight=container.clientHeight;
   _messageJumpScrollOwner=null;
   _programmaticScroll=false;
+  // The jump no longer owns the viewport, so the measurement chain held during
+  // it can run (#7591). Guarded internally: if the reader is actively scrolling
+  // again the refresh is re-held for the scroll-settle timer instead.
+  if(typeof _resumeDeferredMessageVirtualMeasurement==='function') _resumeDeferredMessageVirtualMeasurement();
   if(typeof _syncScrollToBottomCue==='function'){
     _syncScrollToBottomCue(!_scrollPinned&&bottomDistance>80,{newMessage:_newMessageCueVisible});
   }
@@ -7110,6 +7201,9 @@ function _cancelMessageJumpScroll(){
   }
   _messageJumpScrollOwner=null;
   _programmaticScroll=false;
+  // A cancelled jump releases viewport ownership too, so a measurement refresh
+  // held for it must not be stranded (#7591).
+  if(typeof _resumeDeferredMessageVirtualMeasurement==='function') _resumeDeferredMessageVirtualMeasurement();
 }
 let _nearBottomCount=0;
 let _lastScrollTop=null;
@@ -19706,7 +19800,22 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   scrollToBottom();
 }
 
-function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
+// #7591: blank-viewport recovery runs immediately after the render's OWN scroll
+// restore, and that restore re-arms _programmaticScroll with a fresh timestamp
+// (see _restoreMessageScrollSnapshot). So by the time recovery runs it can no
+// longer tell that write apart from an INDEPENDENT programmatic scroll that was
+// already settling — a depth counter read from inside recovery was therefore
+// always non-zero and the guard never consulted the latch at all. Capture the
+// ownership BEFORE the restore at the render call sites and pass it in, so the
+// render's own write can use the bounded clamp while a genuinely foreign write
+// stays protected. A jump-to-question also holds viewport ownership outright.
+function _captureMessageRecoveryOwnership(){
+  return {
+    programmatic:(typeof _freshProgrammaticScrollActive==='function')?_freshProgrammaticScrollActive():false,
+    jumpOwner:(typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner),
+  };
+}
+function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, ownership){
   if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
   if(_messageViewportIntersectsRenderedRow()){
     _messageVirtualBlankClampAttempts=0;
@@ -19725,7 +19834,7 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
   // that never changes scrollHeight, so nothing fights the input direction. The
   // full render stays as the bounded escalation when the clamp cannot help (no
   // rows, an in-flight programmatic write, or a clamp that did not take).
-  if(_clampVirtualizedBlankViewportToRenderedEdge()){
+  if(_clampVirtualizedBlankViewportToRenderedEdge(ownership)){
     renderMessages({preserveScroll:true});
     return true;
   }
@@ -19736,14 +19845,20 @@ function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualW
 // render intersects a rendered row again (in _maybeRecoverVirtualizedBlankViewport),
 // so a healthy transcript never accumulates budget and a still-blank viewport
 // escalates to the full render after exactly one geometry clamp instead of recursing.
-function _clampVirtualizedBlankViewportToRenderedEdge(){
+function _clampVirtualizedBlankViewportToRenderedEdge(ownership){
   if(_messageVirtualBlankClampAttempts>=1) return false;
-  // A foreign programmatic scroll write may still be settling, and clamping
-  // would fight it. The current render's OWN restore re-arms that flag too (it
-  // runs immediately before recovery), so it is exempt — see
-  // _messageRenderScrollRestoreDepth in renderMessages.
-  const renderRestoreDepth=(typeof _messageRenderScrollRestoreDepth==='number')?_messageRenderScrollRestoreDepth:0;
-  if(typeof _freshProgrammaticScrollActive==='function'&&_freshProgrammaticScrollActive()&&!renderRestoreDepth) return false;
+  // A programmatic scroll write that was ALREADY settling when this render
+  // started is independent of the render's own restore, and a jump-to-question
+  // deliberately owns the viewport while it settles — clamping would fight
+  // either one. `ownership` is captured before _scrollAfterMessageRender at the
+  // render call sites (see _captureMessageRecoveryOwnership), so the restore's
+  // own fresh latch is never mistaken for a foreign write. With no captured
+  // ownership (direct/helper call) fall back to the live latch.
+  if(ownership){
+    if(ownership.programmatic||ownership.jumpOwner) return false;
+  }else if(typeof _freshProgrammaticScrollActive==='function'&&_freshProgrammaticScrollActive()){
+    return false;
+  }
   const container=(typeof $==='function')?$('messages'):null;
   if(!container||!container.querySelectorAll) return false;
   const rows=container.querySelectorAll('[data-msg-idx]');
@@ -19762,6 +19877,13 @@ function _clampVirtualizedBlankViewportToRenderedEdge(){
   let bestEdge=null;
   for(const row of rows){
     if(!row||typeof row.getBoundingClientRect!=='function') continue;
+    // #7591: assistant-segment-worklog-source / assistant-segment-anchor keep
+    // data-msg-idx but are display:none, so their rects are zero. Left in the
+    // comparison they look like nearby edges above the viewport and can beat the
+    // real rows, sending recovery toward an invisible row — it stays blank and
+    // escalates to the full render this clamp exists to avoid. Only rows that
+    // actually generated a client rect are candidates.
+    if(typeof row.getClientRects==='function'&&row.getClientRects().length===0) continue;
     const rect=row.getBoundingClientRect();
     if(!rect||!Number.isFinite(rect.top)||!Number.isFinite(rect.bottom)) continue;
     // Rows are measured in viewport space; lift them into document space.
@@ -19784,6 +19906,10 @@ function _clampVirtualizedBlankViewportToRenderedEdge(){
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
   container.scrollTop=next;
   _lastScrollTop=container.scrollTop;
+  // #7591: tell the enclosing _compensateScrollForMeasurementDelta that this
+  // render moved scrollTop deliberately, so it skips its old-anchor
+  // compensation instead of writing scrollTopBefore+delta over the recovery.
+  _blankViewportRecoveryApplied=++_blankViewportRecoveryToken;
   if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
   return true;
 }
@@ -19945,11 +20071,13 @@ function renderMessages(options){
       if(typeof addCopyButtons==='function') addCopyButtons(inner);
       if(typeof initTreeViews==='function') initTreeViews(inner);
       }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
-      _messageRenderScrollRestoreDepth++;
-      try{
-        _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-        if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
-      }finally{ _messageRenderScrollRestoreDepth--; }
+      // #7591: capture viewport ownership BEFORE the restore. The restore
+      // re-arms the programmatic latch, so recovery can only distinguish an
+      // independent in-flight write from the render's own if the decision is
+      // made here rather than inside recovery.
+      const recoveryOwnership=_captureMessageRecoveryOwnership();
+      _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
@@ -21656,11 +21784,12 @@ function renderMessages(options){
   if(typeof addCopyButtons==='function') addCopyButtons(inner);
   if(typeof initTreeViews==='function') initTreeViews(inner);
   }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
-  _messageRenderScrollRestoreDepth++;
-  try{
-    _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-    if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
-  }finally{ _messageRenderScrollRestoreDepth--; }
+  // #7591: capture viewport ownership BEFORE the restore (see the sibling
+  // cache-branch call site) so recovery can tell an independent in-flight
+  // programmatic write from this render's own.
+  const recoveryOwnership=_captureMessageRecoveryOwnership();
+  _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
+  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
