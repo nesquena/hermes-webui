@@ -148,6 +148,73 @@ def test_status_messages_total_label_is_translated():
     assert "status_messages_total: 'Total messages'" in I18N_JS
 
 
+def _render_labels_in_all_locales(key: str) -> dict:
+    """Render `key` through the REAL i18n.js in every locale that defines it.
+
+    A presence check (`grep -c`, or the substring assert above) only proves the
+    key exists somewhere. This loads the classic script into a vm sandbox,
+    switches each locale's map and calls the real `t()`, so a key that renders
+    undefined, leaves a `{0}` placeholder, or silently falls back to English for
+    a locale that *should* translate it is caught.
+    """
+    probe = """
+const fs = require('fs');
+const vm = require('vm');
+const src = fs.readFileSync(process.argv[2], 'utf8');
+const sandbox = {window:{}, document:{documentElement:{lang:''}, addEventListener(){},
+    querySelectorAll(){return []}},
+  navigator:{language:'en'}, localStorage:{getItem(){return null},setItem(){}}, console};
+sandbox.window.localStorage = sandbox.localStorage;
+vm.createContext(sandbox);
+// `const LOCALES` in a classic script lands in the script's lexical scope, not on
+// the sandbox object. Append an explicit export so the harness can read the maps
+// and call the real t() — no re-implementation of the lookup.
+vm.runInContext(src + ";globalThis.__i18nProbe = {LOCALES, t, setLocale};", sandbox);
+const {LOCALES, t, setLocale} = sandbox.__i18nProbe;
+const out = {};
+for (const code of Object.keys(LOCALES)) {
+  const map = LOCALES[code];
+  if (!Object.prototype.hasOwnProperty.call(map, process.argv[3])) continue;
+  setLocale(code);
+  out[code] = t(process.argv[3]);
+}
+console.log(JSON.stringify(out));
+"""
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".cjs", encoding="utf-8", dir=REPO_ROOT, delete=False
+    ) as script:
+        script.write(probe)
+        script_path = pathlib.Path(script.name)
+    if NODE is None:
+        script_path.unlink(missing_ok=True)
+        pytest.skip("node not on PATH")
+    node_bin = str(NODE)
+    try:
+        result = subprocess.run(
+            [node_bin, str(script_path), str(REPO_ROOT / "static" / "i18n.js"), key],
+            cwd=str(REPO_ROOT), capture_output=True, text=True, timeout=30,
+        )
+    finally:
+        script_path.unlink(missing_ok=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr)
+    return json.loads(result.stdout.strip())
+
+
+def test_status_messages_total_renders_in_every_locale_that_defines_it():
+    rendered = _render_labels_in_all_locales("status_messages_total")
+    assert "en" in rendered, "English must define the key as the fallback"
+    assert rendered["en"] == "Total messages"
+    for code, label in rendered.items():
+        assert label, f"locale {code} rendered an empty label"
+        assert "undefined" not in label, f"locale {code} rendered undefined"
+        assert "{0}" not in label, f"locale {code} left an unresolved placeholder"
+    # The two locales greptile flagged were silently falling back to English.
+    # Pin their own translations so a regression is visible rather than inferred.
+    assert rendered.get("es") == "Mensajes totales"
+    assert rendered.get("de") == "Nachrichten gesamt"
+
+
 def test_status_message_keys_present_in_es_and_de():
     # t() falls back to English when a locale lacks the key, so a missing
     # translation is a silent language mix rather than a crash. Pin the two
