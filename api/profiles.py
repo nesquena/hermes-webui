@@ -179,8 +179,27 @@ def _skill_modules_support_profile_home(profile_home: Path) -> bool:
     return True
 
 
-def patch_skill_home_modules(home: Path) -> None:
-    """Patch imported skill modules that cache HERMES_HOME at import time."""
+def patch_skill_home_modules(home: Path, *, rebaseline: bool = False) -> None:
+    """Patch imported skill modules that cache HERMES_HOME at import time.
+
+    The Agent resolves its skills dir as::
+
+        configured = Path(SKILLS_DIR)
+        return configured if configured != _SKILLS_DIR_AT_IMPORT else get_hermes_home() / "skills"
+
+so a ``SKILLS_DIR`` that no longer equals ``_SKILLS_DIR_AT_IMPORT`` reads as an
+*explicit static override*: the module stops following the context-local profile
+home, and ``_skill_modules_support_profile_home()`` rejects the mismatch. That is
+exactly what a scoped legacy-fallback patch wants, but it is not what a
+permanent home change wants.
+
+``rebaseline`` moves the import-time baseline along with ``SKILLS_DIR`` so the
+new home becomes the module's own default and dynamic resolution survives. Only
+a permanent, process-wide home change may pass it — leaving a stale baseline
+behind silently forces every later turn and model-catalog request onto the
+whole-turn static lock (#7886). A scoped fallback patch must leave the baseline
+alone so the patch stays authoritative for static-global readers.
+    """
     for module_name in _SKILL_HOME_MODULES:
         module = sys.modules.get(module_name)
         if module is None:
@@ -188,6 +207,8 @@ def patch_skill_home_modules(home: Path) -> None:
         try:
             module.HERMES_HOME = home
             module.SKILLS_DIR = home / "skills"
+            if rebaseline:
+                module._SKILLS_DIR_AT_IMPORT = module.SKILLS_DIR
         except AttributeError:
             logger.debug("Failed to patch %s module", module_name)
 
@@ -1778,11 +1799,16 @@ def _set_hermes_home(home: Path):
     Every process-wide home change (startup, ``switch_profile(process_wide=True)``)
     goes through here, so the process-profile pin used for MCP routing decisions
     is updated in the same step and cannot drift from ``HERMES_HOME``.
+
+    ``POST /api/profile/delete`` reaches this via ``switch_profile('default')``,
+    so the rebaseline matters there too: without it the Agent reads the patched
+    ``SKILLS_DIR`` as an explicit static override and every later turn is pushed
+    onto the whole-turn static lock (#7886).
     """
     os.environ['HERMES_HOME'] = str(home)
     _pin_process_profile_home(home)
 
-    patch_skill_home_modules(home)
+    patch_skill_home_modules(home, rebaseline=True)
 
     # Patch cron/jobs module-level cache
     try:
