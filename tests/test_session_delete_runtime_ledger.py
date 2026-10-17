@@ -673,6 +673,24 @@ def test_endpoint_keeps_files_when_the_database_is_missing(tmp_path, monkeypatch
     assert (session_dir / "sid.json").exists()
 
 
+def test_presence_is_unknown_when_profile_resolution_fails(tmp_path, monkeypatch):
+    """Never answer from HERMES_HOME when the active profile cannot resolve."""
+    import api.models as models
+    import api.profiles as profiles
+
+    _make_db(tmp_path)  # a real DB at HERMES_HOME, where the fallback would look
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+    def boom():
+        raise RuntimeError("profile home rejected")
+
+    monkeypatch.setattr(profiles, "get_active_hermes_home", boom)
+
+    assert models.state_db_session_presence("sid") is None
+    # The bool wrapper keeps its old contract for the file-manager callers.
+    assert models.state_db_has_session("sid") is False
+
+
 def test_eviction_runs_before_the_session_lock(tmp_path, monkeypatch):
     """The lifecycle commit can wait on a provider; it must not hold the lock."""
     import api.config as config

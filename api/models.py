@@ -7461,6 +7461,21 @@ def _refresh_index_rows_from_sidecar_metadata(
     return out
 
 
+def _strict_active_state_db_path() -> Path | None:
+    """Return the active profile's state.db, or None when it cannot resolve.
+
+    Unlike _active_state_db_path() this never degrades to HERMES_HOME: a caller
+    that would act destructively on a missing row must not read the wrong
+    database while the real profile is merely unresolved.
+    """
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        return None
+    return hermes_home / 'state.db'
+
+
 def state_db_session_presence(sid):
     """True/False when the active state.db can answer for *sid*, None if it cannot.
 
@@ -7472,12 +7487,8 @@ def state_db_session_presence(sid):
     """
     if not sid:
         return False
-    try:
-        import sqlite3
-    except ImportError:
-        return None
-    db_path = _active_state_db_path()
-    if not db_path.exists():
+    db_path = _strict_active_state_db_path()
+    if db_path is None or not db_path.exists():
         return None
     try:
         with closing(open_state_db_readonly(db_path)) as conn:
