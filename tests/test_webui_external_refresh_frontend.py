@@ -451,13 +451,24 @@ def test_same_session_force_reload_keeps_loaded_transcript_width_hint():
     # ALSO wrong, just more quietly — a 601-row fully-loaded session reloaded
     # by an idle poll then requested msg_limit=500 and rendered the server's
     # window from row 101, silently dropping the 101 rows the client had
-    # already loaded. The reload width is now either satisfiable under the
-    # ceiling (bounded tail + prefix stitch) or it is not, and when it is not
-    # the request is the explicit full-transcript `msg_limit=all` — the shape
-    # the backend documents for exactly this frontend need.
+    # already loaded.
+    # #7925 (re-gate, blocking): resolving the over-ceiling width to
+    # `msg_limit=all` was not a fix either — `all` and master's bare GET are
+    # the same request server-side, so the paged-session refresh in #7899
+    # still re-downloaded the whole transcript. The append-only fast path now
+    # replaces that: the reload asks for only the rows after the last rendered
+    # index (msg_after + anchor fingerprint + transcript_generation) and
+    # appends them; the server falls back to the authoritative full document
+    # on any freshness doubt.
     assert "const _reloadWidthExceedsCeiling = !(reloadLimit && reloadLimit <= _msgLimitMax);" in SESSIONS_JS
     assert "const boundedReloadLimit = _reloadWidthExceedsCeiling ? 'all' : reloadLimit;" in SESSIONS_JS
-    assert "const reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;" in SESSIONS_JS
+    assert "let reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;" in SESSIONS_JS
+    # Over-ceiling reloads switch to the append-only fast path: msg_after +
+    # anchor_fp + transcript_generation, capped msg_limit.
+    assert "const _appendFastPath =" in SESSIONS_JS
+    assert "`&msg_after=${lastRenderedIdx}`" in SESSIONS_JS
+    assert "`&anchor_fp=${encodeURIComponent(anchorFp)}`" in SESSIONS_JS
+    assert "`&transcript_generation=${Number(S.session.transcript_generation)}`" in SESSIONS_JS
     # msg_limit is ALWAYS present, on every reload, whichever branch is taken.
     assert "if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);" in SESSIONS_JS
 
