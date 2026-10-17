@@ -5693,7 +5693,7 @@ function _showBatchProjectPicker(openerEl){
     const item=_projectPickerItem();
     if(p.color){const dot=document.createElement('span');dot.className='color-dot';
       dot.style.cssText='width:6px;height:6px;border-radius:50%;background:'+p.color+';flex-shrink:0;';item.appendChild(dot);}
-    const name=document.createElement('span');name.textContent=p.name;item.appendChild(name);
+    const name=document.createElement('span');name.textContent=p.display_name||p.name;item.appendChild(name);
     item.onclick=async()=>{picker.remove();
       try{await Promise.all(ids.map(sid=>api('/api/session/move',{method:'POST',body:JSON.stringify({session_id:sid,project_id:p.project_id})})));
         showToast('Moved to '+p.name);exitSessionSelectMode();await renderSessionList();
@@ -9414,7 +9414,7 @@ function renderSessionListFromCache(){
         chip.appendChild(dot);
       }
       const nameSpan=document.createElement('span');
-      nameSpan.textContent=p.name;
+      nameSpan.textContent=p.display_name||p.name;
       chip.appendChild(nameSpan);
       let _pClickTimer=null;
       chip.onclick=(e)=>{
@@ -10969,7 +10969,7 @@ function _showProjectPicker(session, anchorEl){
       item.appendChild(dot);
     }
     const name=document.createElement('span');
-    name.textContent=p.name;
+    name.textContent=p.display_name||p.name;
     item.appendChild(name);
     item.onclick=async()=>{
       picker.remove();
