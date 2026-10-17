@@ -10,7 +10,9 @@ Pins:
   * set_vision_capability_first writes the key and preserves unrelated agent keys,
   * get_vision_capability_first reflects the persisted value (bool-coerced),
   * a missing/null ``agent:`` block is created rather than crashing,
-  * round-trip identity across set→get→set cycles.
+  * round-trip identity across set→get→set cycles,
+  * the save is a strict RAW read-modify-write: literal ``${VAR}`` references
+    survive, and unreadable/invalid/non-mapping config fails without changing bytes.
 """
 
 import importlib
@@ -82,3 +84,73 @@ def test_set_coerces_truthiness(isolated_config):
     assert config.get_vision_capability_first()["vision_capability_first"] is True
     config.set_vision_capability_first(0)
     assert config.get_vision_capability_first()["vision_capability_first"] is False
+
+
+def test_set_preserves_literal_env_references(tmp_path, monkeypatch):
+    """Saving the toggle must not materialize ``${VAR}`` references.
+
+    #7503 greptile P1: the previous setter read through the env-expanding
+    ``_load_yaml_config_file()``, so a save wrote the expanded values back into
+    config.yaml and later environment changes stopped updating those settings.
+    """
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        "provider:\n"
+        "  api_key: ${MY_SECRET_TOKEN}\n"
+        "agent:\n"
+        "  image_input_mode: auto\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+    monkeypatch.setenv("MY_SECRET_TOKEN", "sk-live-123")
+
+    config.set_vision_capability_first(True)
+
+    text = cfg_path.read_text(encoding="utf-8")
+    assert "${MY_SECRET_TOKEN}" in text
+    assert "sk-live-123" not in text
+    assert _read_agent(cfg_path)["vision_capability_first"] is True
+    assert _read_agent(cfg_path)["image_input_mode"] == "auto"
+
+
+def test_set_rejects_unreadable_yaml_without_changing_bytes(tmp_path, monkeypatch):
+    """A corrupt config.yaml must fail the save instead of being overwritten.
+
+    #7503 greptile P1: the forgiving reader mapped unparseable YAML to ``{}``,
+    so the setter replaced the whole file with just the new key and reported
+    success.
+    """
+    cfg_path = tmp_path / "config.yaml"
+    original = "agent:\n  image_input_mode: auto\n  broken: [unclosed\n"
+    cfg_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+
+    with pytest.raises(RuntimeError):
+        config.set_vision_capability_first(True)
+
+    assert cfg_path.read_text(encoding="utf-8") == original
+
+
+def test_set_rejects_non_mapping_agent_without_changing_bytes(tmp_path, monkeypatch):
+    """A non-mapping ``agent:`` block is an invalid shape, not an empty config."""
+    cfg_path = tmp_path / "config.yaml"
+    original = "agent: not-a-mapping\nother: 1\n"
+    cfg_path.write_text(original, encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+
+    with pytest.raises(RuntimeError):
+        config.set_vision_capability_first(True)
+
+    assert cfg_path.read_text(encoding="utf-8") == original
+
+
+def test_set_allows_null_agent_block(tmp_path, monkeypatch):
+    # ``agent:`` present but null keeps the historical create-the-block contract.
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text("agent:\nmodel:\n  default: x\n", encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: cfg_path)
+
+    config.set_vision_capability_first(True)
+
+    assert _read_agent(cfg_path)["vision_capability_first"] is True
+    assert yaml.safe_load(cfg_path.read_text(encoding="utf-8"))["model"] == {"default": "x"}

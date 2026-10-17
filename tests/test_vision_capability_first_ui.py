@@ -416,3 +416,86 @@ def test_vision_save_profile_mismatch_rejected_before_write():
     assert status == 400, f"missing profile binding must 400, got {status}: {body}"
     body, status = _post({"enabled": True, "profile": "   "}, a)
     assert status == 400, f"empty profile binding must 400, got {status}: {body}"
+
+
+def test_late_profile_mismatch_409_does_not_clobber_new_profile_operations():
+    """#7503 greptile P1: a LATE 409 from profile A's save arrives after the
+    user switched to B and B already has a save in flight. The 409 handler must
+    react only while it still OWNS the checkbox — clearing _vcfPending/_vcfToken
+    unconditionally drops B's in-flight save token, so B's save reply is ignored
+    and the checkbox is stranded inconsistent with the persisted value.
+
+    Fails on the pre-fix head: the 409 branch cleared the shared pending/token
+    state and fired a replacement load, so this script sees an extra GET and
+    B's confirmed value never paints.
+    """
+    if not shutil.which("node"):
+        pytest.skip("node required")
+    node = shutil.which("node")
+    assert node is not None  # for type-checkers; guarded above
+    source = _vision_source()
+    script = r"""
+const assert=require('node:assert/strict');
+const S={activeProfile:'A'};
+const cb={checked:false,disabled:true,addEventListener(_,fn){this.change=fn;}};
+const $=()=>cb, t=k=>k, toasts=[], showToast=x=>toasts.push(x);
+const requests=[];
+function api(url,opts){return new Promise((resolve,reject)=>requests.push({opts,resolve,reject}));}
+""" + source + r"""
+(async()=>{
+ // 1. A's stored value loads and enables the control.
+ let load=_loadVisionCapabilityFirst();
+ requests[0].resolve({vision_capability_first:false}); await load;
+ assert.equal(cb.disabled,false); assert.equal(cb.checked,false);
+ // 2. The user saves on A; the response is lost in flight (will 409 late).
+ cb.checked=true; cb.change();
+ const saveA=cb._vcfPending;
+ assert.equal(cb.disabled,true);
+ // 3. During A's pending save the user switches to B and B's value loads.
+ S.activeProfile='B'; _invalidateVisionCapabilityFirst();
+ const loadB=_loadVisionCapabilityFirst();
+ assert.equal(requests.length,3); // GET A, POST A, GET B
+ requests[2].resolve({vision_capability_first:false}); await loadB;
+ assert.equal(cb._vcfProfile,'B'); assert.equal(cb.checked,false); assert.equal(cb.disabled,false);
+ // 4. B saves too — this operation now owns the checkbox.
+ cb.checked=true; cb.change();
+ const saveB=cb._vcfPending;
+ assert.equal(cb.disabled,true);
+ // 5. A's LATE 409 arrives (on A's retried POST). It must not clear B's
+ //    pending save or its token (that made B's reply ignored and stranded the
+ //    checkbox), and must not fire a replacement load while B's save is still
+ //    in flight.
+ requests[1].reject(Object.assign(new Error('conflict'),{status:409}));
+ await saveA;
+ assert.equal(requests.length,4, 'a late foreign 409 must not trigger an immediate replacement load');
+ assert.equal(cb._vcfPending,saveB, "B's in-flight save keeps ownership of the control");
+ // 6. B's save completes and its confirmed value paints — the reply was not
+ //    dropped by the late 409.
+ requests[3].resolve({vision_capability_first:true});
+ await saveB;
+ assert.equal(cb.checked,true, "B's confirmed save reply paints despite the late 409");
+ // 6b. The deferred refresh (after B's save settled) reloads B's stored value;
+ //     it starts before this continuation resumes, so just await it.
+ assert.equal(requests.length,5, 'the deferred post-save refresh ran once');
+ const refresh=cb._vcfPending;
+ requests[4].resolve({vision_capability_first:true});
+ await refresh;
+ assert.equal(cb.checked,true); assert.equal(cb.disabled,false);
+ // 7. Positive control: a 409 while STILL on the saving profile reloads that
+ //    profile's stored value (the owned path keeps working).
+ cb.checked=false; cb.change();
+ const saveB2=cb._vcfPending;
+ requests[5].reject(Object.assign(new Error('conflict'),{status:409}));
+ await saveB2;
+ assert.equal(requests.length,7, 'an owned 409 reloads the active profile value');
+ const reload=requests[6];
+ assert.equal(reload.opts,undefined,'the owned 409 replacement is a GET, not a POST');
+ reload.resolve({vision_capability_first:true});
+ await cb._vcfPending;
+ assert.equal(cb.checked,true); assert.equal(cb.disabled,false);
+ console.log('PASS: late foreign 409 leaves B ops intact; owned 409 still reloads');
+})().catch(e=>{console.error(e);process.exitCode=1;});
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PASS: late foreign 409 leaves B ops intact" in result.stdout, result.stdout + result.stderr

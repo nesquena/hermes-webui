@@ -18162,15 +18162,25 @@ def handle_post(handler, parsed) -> bool:
         claimed_profile = body.get("profile")
         if not isinstance(claimed_profile, str) or not claimed_profile.strip():
             return bad(handler, "vision-capability-first: 'profile' is required")
-        from api.profiles import get_active_profile_name
-        if not _profiles_match(claimed_profile.strip(), get_active_profile_name()):
+        # Module-level alias (routes.py re-exports get_active_profile_name as
+        # _get_active_profile_name precisely so call sites inside handle_post
+        # cannot shadow it — a local `from api.profiles import
+        # get_active_profile_name` here made the name function-local for the
+        # WHOLE of handle_post, UnboundLocalError-ing every earlier POST
+        # branch that touches it (#5420 pin test, #7503 CI regression).
+        if not _profiles_match(claimed_profile.strip(), _get_active_profile_name()):
             return bad(
                 handler,
                 "vision-capability-first: profile changed since the save started; reload the setting",
                 409,
             )
         from api.config import set_vision_capability_first
-        return j(handler, set_vision_capability_first(enabled))
+        try:
+            return j(handler, set_vision_capability_first(enabled))
+        except RuntimeError as e:
+            # Strict setter: an unreadable/invalid config.yaml refuses the save
+            # without changing existing bytes; surface why instead of a bare 500.
+            return bad(handler, str(e), 500)
 
     if parsed.path == "/api/admin/reload":
         # Hot-reload api.models module to pick up code changes without restart.

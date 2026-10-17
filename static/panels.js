@@ -13456,11 +13456,22 @@ async function _loadVisionCapabilityFirst(){
       // #7503: the server rejected the save because the initiating profile no
       // longer matches the request's resolved profile — a retried POST after a
       // profile switch. Nothing was written (the route 409s before persisting).
-      // Drop the stale operation and reload whichever profile is active NOW,
-      // so the checkbox reflects the profile the user is actually looking at.
-      cb._vcfPending=null;cb._vcfToken=null;
-      if((S.activeProfile||'default')===saveProfile) cb.disabled=false;
-      _loadVisionCapabilityFirst();
+      // React without clobbering whichever operation owns the checkbox now
+      // (gate 2026-10-15: reload the active profile's value; greptile P1: a
+      // LATE 409 must not clear a newer operation's pending/token state — that
+      // made its reply ignored and stranded the checkbox):
+      //   still owning this op → drop it and reload now;
+      //   a newer op pending → refresh only after it settles;
+      //   nothing pending → reload immediately.
+      if(_ownsVisionCapabilityFirst(cb,saveProfile,token)){
+       cb._vcfPending=null;cb._vcfToken=null;
+       _loadVisionCapabilityFirst();
+      }else if(cb._vcfPending){
+       const pending=cb._vcfPending;
+       pending.then(()=>{ if(!cb._vcfPending) _loadVisionCapabilityFirst(); });
+      }else{
+       _loadVisionCapabilityFirst();
+      }
       return;
      }
      if(!_ownsVisionCapabilityFirst(cb,saveProfile,token)) return;
