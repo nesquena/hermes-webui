@@ -3589,6 +3589,52 @@ def _capture_turn_served_model(s, agent) -> str | None:
     return _used_model
 
 
+def _active_turn_checkpoint_index(messages, identity) -> int | None:
+    """Index of this turn's checkpoint user row in the settled display.
+
+    The token is captured by ``_active_turn_authority`` before pending fields
+    are cleared, and settlement stamps it on the user row. A count of pre-run
+    assistants is not a boundary: history recovery can insert older assistant
+    rows the count never saw. The last matching row wins, matching the
+    reversed lookup in ``_active_turn_authority``.
+    """
+    token = identity.get('token') if isinstance(identity, dict) else None
+    if not token:
+        return None
+    found = None
+    for idx, message in enumerate(messages or []):
+        if (
+            isinstance(message, dict)
+            and message.get('role') == 'user'
+            and message.get('_active_turn_token') == token
+        ):
+            found = idx
+    return found
+
+
+def _backfill_turn_gateway_routing(messages, *, routing, active_turn_identity):
+    """Label every assistant message of a finished turn with the turn routing.
+
+    The finalize loop stamps ``_gatewayRouting`` on the turn's last assistant
+    message only, so mid-turn answers render without a model after reload.
+    Backfill the rest of the turn here. Rows that already carry routing (the
+    authoritative final answer, or an older answer recovered from context)
+    keep it. Assistants before the checkpoint user row are a previous turn.
+    Without a checkpoint the backfill does nothing: guessing from a pre-run
+    count is what wrote the current model onto recovered history.
+    """
+    if not messages or not routing:
+        return
+    checkpoint_at = _active_turn_checkpoint_index(messages, active_turn_identity)
+    if checkpoint_at is None:
+        return
+    for msg in messages[checkpoint_at + 1:]:
+        if not (isinstance(msg, dict) and msg.get('role') == 'assistant'):
+            continue
+        if not msg.get('_gatewayRouting'):
+            msg['_gatewayRouting'] = routing
+
+
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
@@ -4671,7 +4717,7 @@ def _stream_reasoning_owner(msg, is_last, positional_idx, tool_call_segments, op
 
 def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
                            tool_call_segments=None, open_segment=None, interim_segments=None,
-                           tool_start_order=None):
+                           tool_start_order=None, *, active_turn_identity=None):
     """Persist per-step reasoning on this turn's assistant messages in ``s.messages``.
 
     Contract (docs/sse-streams.md, "Reasoning settlement"): non-empty agent
@@ -4690,10 +4736,22 @@ def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
     tool_call_segments = {k: list(v) for k, v in (tool_call_segments or {}).items()}
     interim_segments = list(interim_segments or [])
     _positional = not tool_call_segments and not interim_segments
-    _prev_asst = sum(
-        1 for m in (_previous_messages or [])
-        if isinstance(m, dict) and m.get('role') == 'assistant'
+    # The checkpoint user row is the same boundary the routing backfill uses.
+    # A pre-run assistant count misses historical answers that recovery inserts
+    # before that row, so those answers would inherit this turn's reasoning.
+    _checkpoint_at = _active_turn_checkpoint_index(
+        s.messages, active_turn_identity
     )
+    if _checkpoint_at is not None:
+        _prev_asst = sum(
+            1 for m in s.messages[:_checkpoint_at]
+            if isinstance(m, dict) and m.get('role') == 'assistant'
+        )
+    else:
+        _prev_asst = sum(
+            1 for m in (_previous_messages or [])
+            if isinstance(m, dict) and m.get('role') == 'assistant'
+        )
     _total_asst = sum(1 for m in s.messages if isinstance(m, dict) and m.get('role') == 'assistant')
     _asst_count = 0
     _step_ids = _turn_step_tool_call_ids(s.messages, _prev_asst, list(tool_start_order or []))
@@ -15217,6 +15275,7 @@ def _run_agent_streaming(
                     s, _previous_messages, _reasoning_segments,
                     _tool_call_reasoning_idx, _unbound_reasoning_idx[0], _interim_reasoning_idx,
                     _tool_start_order,
+                    active_turn_identity=_active_turn_identity,
                 )
                 try:
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
@@ -15274,7 +15333,18 @@ def _run_agent_streaming(
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
                 if s.messages:
-                    for _dm in reversed(s.messages):
+                    _checkpoint_at = _active_turn_checkpoint_index(
+                        s.messages, _active_turn_identity
+                    )
+                    # With a checkpoint, only this turn's tail is eligible. The
+                    # last assistant of the whole transcript can be an older
+                    # answer that recovery inserted after the pre-run snapshot.
+                    _label_rows = (
+                        s.messages[_checkpoint_at + 1:]
+                        if _checkpoint_at is not None
+                        else s.messages
+                    )
+                    for _dm in reversed(_label_rows):
                         if isinstance(_dm, dict) and _dm.get('role') == 'assistant':
                             _dm['_turnDuration'] = round(_turn_duration_seconds, 3)
                             if _turn_tps is not None:
@@ -15309,6 +15379,12 @@ def _run_agent_streaming(
                                     'cache_hit_percent': turn_cache_hit_percent,
                                 }
                             break
+                    if _checkpoint_at is not None:
+                        _backfill_turn_gateway_routing(
+                            s.messages,
+                            routing=_gateway_routing,
+                            active_turn_identity=_active_turn_identity,
+                        )
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
                 # s.save() for the same reason as the reasoning trace above.
