@@ -203,9 +203,13 @@ def test_jump_to_start_requests_explicit_full_transcript():
 
 
 def test_outline_jump_requests_explicit_full_transcript():
-    """Outline jump addresses rows by absolute transcript index — it must opt
-    in via msg_limit=all."""
-    assert _ALL_QS in _OUTLINE_JS
+    """Outline jump addresses rows by absolute transcript index. It loads
+    history through the shared loader, which must opt in via msg_limit=all."""
+    jump = _OUTLINE_JS.split('async function _jumpToMessage(', 1)[1].split('// Brief highlight', 1)[0]
+    assert 'await _ensureAllMessagesLoaded()' in jump
+    assert 'api(' not in jump
+    loader = _SESSIONS_JS.split('async function _ensureAllMessagesLoaded()', 1)[1].split('const SESSION_ARCHIVED_PAGE_SIZE', 1)[0]
+    assert _ALL_QS in loader
 
 
 def test_no_bare_session_fetch_remains_in_frontend():
