@@ -24257,7 +24257,68 @@ if(!S._expandedDirs) S._expandedDirs=new Set();
 // Cache of fetched directory contents: path -> entries[]
 if(!S._dirCache) S._dirCache={};
 
+// Foreground ownership token. Async file-tree actions span network round-trips, and
+// every one of these can change underneath them: the user can open another
+// conversation, switch profile, or switch the current session's workspace. An
+// action that resumes after such a change must abandon, not retarget — otherwise it
+// registers a folder under the wrong profile or points the newly selected session
+// at the previous one's directory. Captured before the first await and re-checked
+// after each one. Session identity is compared by value, not object identity,
+// because the same session object is mutated in place on a workspace switch.
+function _foregroundTurnToken(){
+  const s=S.session||null;
+  return {
+    session_id:(s&&s.session_id)||'',
+    workspace:(s&&s.workspace)||'',
+    profile:(s&&s.profile)||'',
+    activeProfile:S.activeProfile||''
+  };
+}
+
+function _foregroundTurnTokenIsCurrent(tok){
+  if(!tok) return false;
+  const now=_foregroundTurnToken();
+  return now.session_id===tok.session_id
+    && now.workspace===tok.workspace
+    && now.profile===tok.profile
+    && now.activeProfile===tok.activeProfile;
+}
+
+// The same question minus the workspace. Used after a step has deliberately
+// rewritten the workspace of the session it owns: from that point on the workspace
+// is expected to differ, but the session and profile must still be the ones the
+// action started against.
+function _foregroundIdentityIsCurrent(tok){
+  if(!tok) return false;
+  const s=S.session||null;
+  return ((s&&s.session_id)||'')===tok.session_id
+    && ((s&&s.profile)||'')===tok.profile
+    && (S.activeProfile||'')===tok.activeProfile;
+}
+
+// Long-press ownership for tree rows. Only one gesture can be pending at a time, so
+// a single module-level handle suffices: a tree re-render cancels it, and the timer
+// callback re-checks that the row is still attached and still belongs to the same
+// foreground session/profile/workspace before opening the menu. Without this, a
+// timer armed on a row in session A fires after the user moved to B, opens A's menu
+// over B, and A's relative path reaches B's handlers.
+let _treeRenderGeneration=0;
+let _treeRowLongPress=null;   // {timer, el, token}
+
+function _cancelTreeRowLongPress(){
+  const pending=_treeRowLongPress;
+  _treeRowLongPress=null;
+  if(!pending) return;
+  if(pending.timer) clearTimeout(pending.timer);
+  if(pending.el&&pending.el.classList) pending.el.classList.remove('long-pressing');
+}
+
 function renderFileTree(){
+  // Every row built by the previous pass is about to be detached by the
+  // innerHTML='' below, so a pending long-press on one of them is stale by
+  // definition: cancel it here rather than letting it fire against a detached row.
+  _treeRenderGeneration++;
+  _cancelTreeRowLongPress();
   const box=$('fileTree');
   // #5657: capture the scroll position before wiping the container. box.innerHTML=''
   // detaches every row, collapsing scrollHeight so the browser clamps scrollTop to 0;
@@ -24454,12 +24515,74 @@ function _renderTreeItems(container, entries, depth){
     el.style.paddingLeft=(8+depth*16)+'px';
     el.setAttribute('draggable','true');
     el.dataset.wsType=item.type;
-    el.oncontextmenu=(e)=>{
+    // Touch long-press state. The timer handle lives in the module-level
+    // _treeRowLongPress slot rather than a per-row closure, so a tree re-render can
+    // cancel a gesture whose row is about to be detached.
+    let _lpHandled=false;
+    let _lpStartX=0,_lpStartY=0;
+    // Right-click on a read-only external grant shows nothing (see el.oncontextmenu
+    // below). The long-press path has to apply the same gate, or touch users get an
+    // empty menu exactly where right-click users correctly get none.
+    const rowSuppressesMenu=()=>{
       const grant=typeof _workspaceEscapeGrantForPath==='function' ? _workspaceEscapeGrantForPath(item.path) : null;
       const isDirRow=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
-      if(grant&&!isDirRow){e.preventDefault();e.stopPropagation();return;}
+      return !!(grant&&!isDirRow);
+    };
+    el.oncontextmenu=(e)=>{
+      _cancelTreeRowLongPress();
+      _lpHandled=true;
+      el.classList.remove('long-pressing');
+      if(rowSuppressesMenu()){e.preventDefault();e.stopPropagation();return;}
       e.preventDefault();e.stopPropagation();_showFileContextMenu(e,item);
     };
+    // Long-press (500ms) → the same context menu as right-click, mirroring the
+    // project-chip handler in sessions.js. iOS Safari never fires `contextmenu`
+    // on non-link rows, so without this the row menu is unreachable on touch
+    // devices. A >10px move or touchcancel cancels; after the menu opens the
+    // touchend swallows the synthetic click so the row does not also toggle.
+    el.addEventListener('touchstart',(te)=>{
+      const tch=te.changedTouches&&te.changedTouches[0];
+      if(!tch) return;
+      _cancelTreeRowLongPress();
+      _lpHandled=false;_lpStartX=tch.clientX;_lpStartY=tch.clientY;
+      el.classList.add('long-pressing');
+      const token=_foregroundTurnToken();
+      const generation=_treeRenderGeneration;
+      _treeRowLongPress={el,token,timer:setTimeout(()=>{
+        _treeRowLongPress=null;
+        el.classList.remove('long-pressing');
+        if(_lpHandled) return;
+        // Stale gesture — open nothing. Any of these means the row the user held no
+        // longer represents what is on screen: the tree was re-rendered, the row was
+        // detached, the foreground session/profile/workspace changed, or the
+        // directory is a read-only external grant that right-click also suppresses.
+        if(generation!==_treeRenderGeneration) return;
+        if(!el.isConnected) return;
+        if(!_foregroundTurnTokenIsCurrent(token)) return;
+        if(rowSuppressesMenu()) return;
+        _lpHandled=true;
+        const syn={clientX:tch.clientX,clientY:tch.clientY,preventDefault:()=>{}};
+        _showFileContextMenu(syn,item);
+      },500)};
+    },{passive:true});
+    el.addEventListener('touchmove',(te)=>{
+      if(!_treeRowLongPress||_treeRowLongPress.el!==el) return;
+      const tch=te.changedTouches&&te.changedTouches[0];
+      if(!tch) return;
+      if(Math.abs(tch.clientX-_lpStartX)>10||Math.abs(tch.clientY-_lpStartY)>10){
+        _cancelTreeRowLongPress();
+      }
+    },{passive:true});
+    el.addEventListener('touchend',(te)=>{
+      if(_treeRowLongPress&&_treeRowLongPress.el===el) _cancelTreeRowLongPress();
+      el.classList.remove('long-pressing');
+      if(_lpHandled){te.preventDefault();te.stopPropagation();}
+    },{passive:false});
+    el.addEventListener('touchcancel',()=>{
+      if(_treeRowLongPress&&_treeRowLongPress.el===el) _cancelTreeRowLongPress();
+      _lpHandled=false;
+      el.classList.remove('long-pressing');
+    },{passive:true});
     el.ondragstart=(e)=>{_setWsDragData(e,item);e.dataTransfer.effectAllowed='copy';el.classList.add('dragging');};
     el.ondragend=()=>{el.classList.remove('dragging');_clearWorkspaceMoveDragOver();_clearWsDragData();};
 
@@ -24710,12 +24833,18 @@ function _showFileContextMenu(e, item){
   document.querySelectorAll('.file-ctx-menu').forEach(el=>el.remove());
   const menu=document.createElement('div');
   menu.className='file-ctx-menu';
-  menu.style.cssText='position:fixed;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
-  // Keep menu within viewport
+  // Positioning is resolved after every entry is appended (see the clamp at the
+  // bottom of this function). It has to be: the height is only known once the menu
+  // is populated, and the previous fixed 100px guess put Delete below the fold on a
+  // 390x680 viewport once this PR added an entry.
+  menu.style.cssText='position:fixed;visibility:hidden;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:6px 0;z-index:9999;min-width:140px;box-shadow:0 4px 16px rgba(0,0,0,.35);';
   const vw=window.innerWidth,vh=window.innerHeight;
-  menu.style.left=(e.clientX+140>vw?e.clientX-150:e.clientX)+'px';
-  menu.style.top=(e.clientY+100>vh?e.clientY-100:e.clientY)+'px';
   const isDirLike=item.type==='dir'||(item.type==='symlink'&&item.is_dir);
+  // External symlink rows (target outside the workspace) are browse-only: the
+  // backend reports them with is_dir=false, and registering their target would
+  // silently authorize a path the user never confirmed. Keep them out of the
+  // "Set as New Workspace" entry below.
+  const isExternalLink=item.type==='symlink'&&!!item.target_outside_workspace;
   const targetDir=isDirLike ? item.path : _workspaceParentDir(item.path);
   const isReadOnlyEscape=typeof _workspaceEscapeGrantForPath==='function' ? !!_workspaceEscapeGrantForPath(item.path) : false;
 
@@ -24812,6 +24941,21 @@ function _showFileContextMenu(e, item){
       }
     };
     menu.appendChild(copyRelPathItem);
+
+    // Set as New Workspace — registers this directory in the workspace list
+    // (resolved to its real on-disk path on the server) and then offers to
+    // switch the current session to it. Directories only: the enclosing
+    // `!isReadOnlyEscape` block already excludes read-only escape rows, and
+    // external symlinks are excluded here because they are browse-only.
+    if(isDirLike && !isExternalLink){
+      const setWsSep=document.createElement('hr');
+      setWsSep.style.cssText='border:none;border-top:1px solid var(--border);margin:4px 0;';
+      menu.appendChild(setWsSep);
+      menu.appendChild(_workspaceContextMenuItem(t('dir_set_as_space_item'),async()=>{
+        menu.remove();
+        await _setDirectoryAsWorkspace(item);
+      }));
+    }
   }
 
   if(isDirLike){
@@ -24843,8 +24987,128 @@ function _showFileContextMenu(e, item){
   }
 
   document.body.appendChild(menu);
+  // Measure the rendered menu and place it so it is fully visible: flip to the
+  // other side of the pointer first (keeping it adjacent to the row), then clamp,
+  // and only as a last resort cap the height and let it scroll. A destructive
+  // entry must never be the one that falls off-screen.
+  {
+    const margin=8;
+    const rect=menu.getBoundingClientRect();
+    let left=e.clientX;
+    if(left+rect.width>vw-margin) left=e.clientX-rect.width;
+    if(left<margin) left=margin;
+    if(left+rect.width>vw-margin) left=Math.max(margin,vw-margin-rect.width);
+    let top=e.clientY;
+    if(top+rect.height>vh-margin) top=e.clientY-rect.height;
+    if(top<margin) top=margin;
+    if(top+rect.height>vh-margin) top=Math.max(margin,vh-margin-rect.height);
+    menu.style.left=left+'px';
+    menu.style.top=top+'px';
+    if(rect.height>vh-2*margin){
+      menu.style.maxHeight=(vh-2*margin)+'px';
+      menu.style.overflowY='auto';
+    }
+    menu.style.visibility='';
+  }
   const dismiss=()=>{menu.remove();document.removeEventListener('click',dismiss);};
   setTimeout(()=>document.addEventListener('click',dismiss),0);
+}
+
+// "Set as New Workspace": register a directory in the workspace list, then offer
+// to switch the current session to it. Both halves reuse the existing plumbing —
+// /api/file/path resolves the absolute on-disk path (symlinks resolve to their
+// real target), /api/workspaces/add writes the list entry against the active
+// profile, and the switch itself is delegated to switchToWorkspace() so the
+// busy guard, the session update and the tree/memory refresh stay in one place.
+// Declining the switch does NOT roll the registration back: the folder simply
+// stays available in the workspace list, which is a coherent state.
+async function _setDirectoryAsWorkspace(item){
+  if(!S.session||!S.session.session_id)return;               // blank page: no tree, nothing to register
+  if(!item||!(item.type==='dir'||(item.type==='symlink'&&item.is_dir)))return;
+  // Ownership token captured before the first await. Every step below spans a
+  // network round-trip or a modal, and the user can open another conversation,
+  // switch profile, or rewire the current session's workspace underneath any of
+  // them. A stale action abandons instead of acting on whatever session happens to
+  // be foreground when the response lands. There is no profile-switch in-flight
+  // flag in this codebase; comparing S.activeProfile (before and after) is the
+  // observable form of the same constraint.
+  const token=_foregroundTurnToken();
+  const stale=()=>!_foregroundTurnTokenIsCurrent(token);
+  // 1) Server-resolved absolute path — never build it client-side. Use the
+  //    captured session id, so the path is resolved against the directory tree of
+  //    the session the user actually invoked this on.
+  let absPath='';
+  try{
+    const r=await api('/api/file/path',{method:'POST',body:JSON.stringify({session_id:token.session_id,path:item.path})});
+    absPath=(r&&r.path)||'';
+    if(!absPath) throw new Error('The server did not return a path for this folder.');
+  }catch(e){
+    if(stale())return;
+    setStatus((t('error_prefix')||'Error: ')+(e&&e.message?e.message:e));
+    return;
+  }
+  if(stale())return;
+  // 2) Register (idempotent). A duplicate answers 400 "Workspace already in
+  //    list", which is the same end state as a client-side dedupe hit.
+  const known=typeof _workspaceList!=='undefined'&&Array.isArray(_workspaceList)&&_workspaceList.some(w=>w&&w.path===absPath);
+  if(known){
+    showToast(t('dir_set_as_space_exists'), 2800);
+  }else{
+    try{
+      const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path:absPath})});
+      // The add is scoped to whichever profile is active server-side and the list
+      // comes back for that profile. If the user moved on, adopting it would
+      // overwrite the newly selected profile's panel with the wrong list — the
+      // registration itself has already landed, which is the intended effect for
+      // the profile the user invoked it from.
+      if(stale())return;
+      if(typeof _workspaceList!=='undefined')_workspaceList=(data&&data.workspaces)||_workspaceList||[];
+      if(typeof renderWorkspacesPanel==='function')renderWorkspacesPanel(_workspaceList);
+      showToast(t('workspace_added'));
+    }catch(e){
+      if(stale())return;
+      if(e&&e.status===400&&/already in list/i.test(e.message||'')){
+        showToast(t('dir_set_as_space_exists'), 2800);
+      }else{
+        // System root / missing or unreadable directory / network: report and
+        // stop here — never fall through to the switch prompt after a failed add.
+        setStatus((t('error_prefix')||'Error: ')+(e&&e.message?e.message:e));
+        return;
+      }
+    }
+  }
+  if(stale())return;
+  // 3) Guard rails — each reports why the switch is not on offer and stops
+  //    (workspace stays registered in every one of these cases).
+  const isReadOnly=typeof _isReadOnlySession==='function'
+    ? _isReadOnlySession(S.session)
+    : !!(S.session.read_only||S.session.is_read_only);
+  if(isReadOnly){showToast(t('read_only_session_ws_hint'), 4000);return;}
+  if(S.busy){showToast(t('workspace_busy_switch'));return;}
+  if(absPath===S.session.workspace){showToast(t('dir_set_as_space_is_current'), 2800);return;}
+  if(S.session.profile&&S.activeProfile&&S.session.profile!==S.activeProfile){
+    // /api/session/update validates the workspace against the *session's* own
+    // profile, so this switch would be rejected server-side.
+    showToast(t('dir_set_as_space_profile_mismatch', S.session.profile), 5000);
+    return;
+  }
+  // 4) Offer the switch. Non-destructive action: default focus on the confirm
+  //    button (showConfirmDialog default), no danger styling.
+  const name=typeof getWorkspaceFriendlyName==='function'
+    ? getWorkspaceFriendlyName(absPath)
+    : (absPath.split('/').filter(Boolean).pop()||absPath);
+  const switchNow=await showConfirmDialog({
+    title:t('switch_session_ws_title'),
+    message:t('switch_session_ws_msg', name),
+    confirmLabel:t('switch_session_ws_btn')
+  });
+  if(!switchNow) return;
+  // The user can change conversation while the dialog is open. Re-check before
+  // dispatching, then hand the token to switchToWorkspace so it keeps the same
+  // constraint across its own awaits — a single check here is not enough, because
+  // that function does its own dirty-preview and /api/session/update round-trips.
+  if(stale())return;
+  await switchToWorkspace(absPath, name, token);
 }
 
 async function _inlineRenameFileItem(item){
