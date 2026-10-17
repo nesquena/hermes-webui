@@ -4,7 +4,7 @@ from api.workspace import dir_signature, list_dir
 def test_directory_signature_is_metadata_only_and_changes_with_entries(tmp_path):
     (tmp_path / "alpha.txt").write_text("one", encoding="utf-8")
 
-    entries = list_dir(tmp_path, ".")
+    entries = list_dir(tmp_path, ".")["entries"]
     sig1 = dir_signature(tmp_path, ".", entries)
 
     assert isinstance(sig1, str)
@@ -12,7 +12,7 @@ def test_directory_signature_is_metadata_only_and_changes_with_entries(tmp_path)
     assert all("mtime_ns" in entry for entry in entries)
 
     (tmp_path / "beta.txt").write_text("two", encoding="utf-8")
-    entries2 = list_dir(tmp_path, ".")
+    entries2 = list_dir(tmp_path, ".")["entries"]
     sig2 = dir_signature(tmp_path, ".", entries2)
 
     assert sig2 != sig1
@@ -21,14 +21,14 @@ def test_directory_signature_is_metadata_only_and_changes_with_entries(tmp_path)
 def test_directory_signature_can_be_computed_from_supplied_entries(tmp_path):
     (tmp_path / "alpha.txt").write_text("one", encoding="utf-8")
 
-    entries = list_dir(tmp_path, ".")
+    entries = list_dir(tmp_path, ".")["entries"]
 
     assert dir_signature(tmp_path, ".", entries) == dir_signature(tmp_path, ".", entries)
 
 
 def test_directory_signature_ignores_workspace_sort_rank(tmp_path):
     (tmp_path / "alpha.txt").write_text("one", encoding="utf-8")
-    entries = list_dir(tmp_path, ".")
+    entries = list_dir(tmp_path, ".")["entries"]
     changed = [dict(entry, workspace_sort_rank=1) for entry in entries]
 
     assert dir_signature(tmp_path, ".", entries) == dir_signature(tmp_path, ".", changed)

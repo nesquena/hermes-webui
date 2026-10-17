@@ -19,7 +19,7 @@ I18N_JS = (ROOT / "static" / "i18n.js").read_text(encoding="utf-8")
 def test_list_dir_emits_birthtime_ns(tmp_path):
     (tmp_path / "file.txt").write_text("x", encoding="utf-8")
     (tmp_path / "folder").mkdir()
-    entries = workspace_api.list_dir(tmp_path, ".")
+    entries = workspace_api.list_dir(tmp_path, ".")["entries"]
     assert {entry["type"] for entry in entries} == {"file", "dir"}
     assert all("birthtime_ns" in entry for entry in entries)
     assert all(isinstance(entry["birthtime_ns"], (int, type(None))) for entry in entries)
@@ -43,7 +43,7 @@ def test_list_dir_emits_server_partition_rank_for_special_entries(tmp_path, monk
         modes.append(True)
     for use_dir_fd in modes:
         monkeypatch.setattr(workspace_api, "_DIR_FD_OK", use_dir_fd)
-        entries = {entry["name"]: entry for entry in workspace_api.list_dir(tmp_path, ".")}
+        entries = {entry["name"]: entry for entry in workspace_api.list_dir(tmp_path, ".")["entries"]}
         assert entries["link"]["workspace_sort_rank"] == 0
         assert entries["directory"]["workspace_sort_rank"] == 1
         assert entries["fifo"]["workspace_sort_rank"] == 1
@@ -81,7 +81,7 @@ def test_escape_symlink_birthtime_is_link_local(tmp_path):
         link.symlink_to(outside)
     except (OSError, NotImplementedError) as exc:
         pytest.skip(f"symlink unavailable: {exc}")
-    entry = next(item for item in workspace_api.list_dir(workspace, ".") if item["name"] == "escape.txt")
+    entry = next(item for item in workspace_api.list_dir(workspace, ".")["entries"] if item["name"] == "escape.txt")
     assert entry["target_outside_workspace"] is True
     assert entry["workspace_sort_rank"] == 0
     birthtime_ns = getattr(workspace_api, "_birthtime_ns", None)
@@ -92,7 +92,7 @@ def test_escape_symlink_birthtime_is_link_local(tmp_path):
 
 def test_dir_signature_unchanged_by_birthtime(tmp_path):
     (tmp_path / "same.txt").write_text("same", encoding="utf-8")
-    entries = workspace_api.list_dir(tmp_path, ".")
+    entries = workspace_api.list_dir(tmp_path, ".")["entries"]
     expected = hashlib.sha256(
         json.dumps(
             [
