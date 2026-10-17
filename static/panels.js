@@ -13954,6 +13954,11 @@ async function saveSettings(andClose){
   body.auto_title_refresh_every=(($('settingsAutoTitleRefresh')||{}).value||'0');
   const botName=(($('settingsBotName')||{}).value||'').trim();
   body.bot_name=botName||'Hermes';
+  // #7611: the instance label is operator/env-supplied (there is no settings
+  // field for it), so echo the loaded mirror back on the payload. Without this
+  // key _applySavedSettingsUi() below read `body.instance_name||''` and wiped
+  // the loaded name to '' after every successful save.
+  body.instance_name=String(window._instanceName||'').trim();
   // Password: only act if the field has content; blank = leave auth unchanged
   if(pw && pw.trim()){
     const currentPwField=$('settingsCurrentPassword');

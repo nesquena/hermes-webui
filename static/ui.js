@@ -20,6 +20,7 @@ function assistantDisplayName(){
 // Every document.title owner calls _applyInstanceTitle() after writing its own
 // base title; it owns the decoration for all of them. The Tauri desktop wrapper
 // mirrors document.title, so the window title follows for free.
+let _lastInstanceTitleBase=null;
 let _lastInstanceTitleSuffix='';
 function instanceDisplayName(){
   let raw=(typeof window!=='undefined'&&window._instanceName!=null)?String(window._instanceName):'';
@@ -38,14 +39,22 @@ function _instanceTitleSuffix(){
 function _applyInstanceTitle(){
   const suffix=_instanceTitleSuffix();
   let title=String(document.title||'');
-  // Withdraw the suffix this function applied last time before re-applying it.
-  // That keeps repeated calls idempotent (syncTopbar fires on every stream
-  // tick), stops a stale suffix riding along on a NEW base title, and means
-  // clearing the setting actually removes the decoration instead of stranding it.
-  if(_lastInstanceTitleSuffix&&title.slice(-_lastInstanceTitleSuffix.length)===_lastInstanceTitleSuffix)
-    title=title.slice(0,-_lastInstanceTitleSuffix.length);
+  // Recover the base this function last decorated only when the title is still
+  // byte-identical to what it wrote, and recover it from the remembered base
+  // rather than by stripping the old suffix off the end. Stripping is
+  // ambiguous: a base title can legitimately already end with the label
+  // (bot_name 'Hermes • Production' with instance 'Production'), and cutting
+  // the suffix there doubled that title on first paint and truncated the
+  // operator's own text whenever the label was renamed or cleared. Keying on
+  // the remembered base keeps repeated calls idempotent without touching text
+  // the decorator did not write.
+  if(_lastInstanceTitleBase!==null&&title===_lastInstanceTitleBase+_lastInstanceTitleSuffix)
+    title=_lastInstanceTitleBase;
+  const base=title;
+  // Never stack the label onto a base that already ends with it.
+  document.title=(suffix&&title.slice(-suffix.length)===suffix)?title:title+suffix;
+  _lastInstanceTitleBase=base;
   _lastInstanceTitleSuffix=suffix;
-  document.title=title+suffix;
 }
 const INFLIGHT={};  // keyed by session_id while request in-flight
 const SESSION_QUEUES={};  // keyed by session_id for queued follow-up turns
