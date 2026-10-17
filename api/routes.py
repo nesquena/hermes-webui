@@ -15082,7 +15082,8 @@ def _handle_session_get(handler, parsed) -> bool:
         # Always log when slow (>2s) so we don't need HERMES_DEBUG_SLOW env var
         # to diagnose latency regressions. Opt-in env var still forces
         # logging on every request for development.
-        if _debug_slow or _total_ms >= 2000:
+        _slow_print = getattr(handler, '_safe_webui_print', None)
+        if callable(_slow_print) and (_debug_slow or _total_ms >= 2000):
             # perf(webui/session-load-latency) tier2c: route the [SLOW] line
             # through handler._safe_webui_print() rather than logger.warning().
             # The WebUI process starts the root logger without any handler, so
@@ -15092,7 +15093,7 @@ def _handle_session_get(handler, parsed) -> bool:
             # _safe_webui_print writes to the systemd journal socket directly,
             # same as the per-request ms line — which is why THAT line keeps
             # working.
-            handler._safe_webui_print(
+            _slow_print(
                 "[SLOW] session_id=%s get_session=%.1fms model_resolve=%.1fms "
                 "compact=%.1fms redact=%.1fms json_write=%.1fms total=%.1fms" % (
                     sid,
@@ -17980,12 +17981,15 @@ def handle_post(handler, parsed) -> bool:
         j(handler, payload)
         _draft_mark("after_json")
         _draft_stages.append(("end", _draft_time.monotonic()))
-        if _draft_stages[-1][1] - _draft_t0 > 0.2:
+        # Diagnostics only, after the response is written: like every other [SLOW]
+        # site, tolerate a handler without _safe_webui_print instead of raising.
+        _slow_print = getattr(handler, '_safe_webui_print', None)
+        if callable(_slow_print) and _draft_stages[-1][1] - _draft_t0 > 0.2:
             parts = " ".join(
                 f"{n}={((t - prev[1]) * 1000):.1f}ms"
                 for (n, t), prev in zip(_draft_stages[1:], _draft_stages[:-1], strict=True)
             )
-            handler._safe_webui_print(
+            _slow_print(
                 "[SLOW] /api/session/draft total=%.1fms stages: %s" % (
                     (_draft_stages[-1][1] - _draft_t0) * 1000,
                     parts,

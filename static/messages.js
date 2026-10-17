@@ -102,7 +102,8 @@ function _markActiveSessionViewedOnReturn() {
   if(!_isDocumentVisibleAndFocused() || !S.session || !S.session.session_id) return;
   _markSessionViewed(S.session.session_id, S.session.message_count || (S.messages&&S.messages.length) || 0);
   if(typeof _clearSessionCompletionUnread==='function') _clearSessionCompletionUnread(S.session.session_id);
-  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  if(typeof _repaintSidebarForBackgroundChurn==='function') _repaintSidebarForBackgroundChurn();
+  else if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
 }
 
 function _chatPayloadModel(){
@@ -1277,7 +1278,7 @@ function applySessionTitleUpdate(sid, titleText, options={}){
   }
   if(row) row.title=newTitle;
   if(options.rememberProvisional) _sessionTitleProvisionalBySid.set(sid,newTitle);
-  if(typeof renderSessionListFromCache==='function') renderSessionListFromCache();
+  if(typeof _repaintSidebarForBackgroundChurn==='function') _repaintSidebarForBackgroundChurn();
   else if(typeof renderSessionList==='function') renderSessionList();
   return true;
 }
@@ -1434,6 +1435,11 @@ async function send(){
     _sendInProgress=false;_sendInProgressSid=null;
     return;
   }
+  // Capture overlay authority at the originating Send action. Bundle/catalog
+  // resolution below can await before it discovers that a session must be
+  // created; recapturing inside newSession() would let that older Send retire a
+  // project picker the user opened during the resolver wait.
+  const _sendProjectPickerClaim=(typeof _projectPickerOpenEpoch==='number')?_projectPickerOpenEpoch:0;
 
   // #5472: snapshot the ORIGINAL user-typed composer state now — before slash
   // rewrites (/moa, bundles) mutate `text` and before uploadPendingFiles()
@@ -1579,7 +1585,7 @@ async function send(){
         ? await getAgentCommandMetadata(_parsedCmd.name)
         : null;
       if(_agentCmd&&_agentCmd.cli_only){
-        if(!S.session){await newSession();}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         S.messages.push({role:'assistant',content:cliOnlyCommandResponse(_parsedCmd.name,_agentCmd),_ts:Date.now()/1000});
         renderMessages();
@@ -1587,7 +1593,7 @@ async function send(){
       }
       const _agentCmdName=String(_agentCmd&&_agentCmd.name||_parsedCmd&&_parsedCmd.name||'').trim().toLowerCase();
       if(_AGENT_COMMANDS_RUN_ON_WEBUI.has(_agentCmdName)){
-        if(!S.session){await newSession();}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _agentOutput='(no output)';
         try{
@@ -1602,7 +1608,7 @@ async function send(){
         $('msg').value='';autoResize();hideCmdDropdown();return;
       }
       if(_agentCmd&&_agentCmd.category==='Plugin'){
-        if(!S.session){await newSession();}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
         S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
         let _pluginOutput='(no output)';
         try{
@@ -1618,7 +1624,7 @@ async function send(){
       }
       if(_agentCmdName==='moa'){
         const _moaArgs=(text.split(/\s+/).slice(1).join(' ')||'').trim();
-        if(!S.session){await newSession();}
+        if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
         if(!_moaArgs){
           let _moaUsage='/moa <prompt>';
           try{const _moaCfgU=await api('/api/commands/moa/resolve');_moaUsage=_moaCfgU.usage||_moaUsage;}catch(_eu){}
@@ -1650,7 +1656,7 @@ async function send(){
           _slashDisplayTextOverride=text;
           text=_bundleMessage;
         }catch(e){
-          if(!S.session){await newSession();}
+          if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
           S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
           S.messages.push({role:'assistant',content:`Bundle command error: ${e&&e.message||e}`,_ts:Date.now()/1000});
           renderMessages();
@@ -1659,7 +1665,7 @@ async function send(){
       }
     }
   }
-  if(!S.session){await newSession();}
+  if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
 
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;

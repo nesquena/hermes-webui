@@ -1,5 +1,30 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Project-picker deferred repaint handoff regression
+
+Expand a parent with fork-child menus, open a picker, defer a list repaint,
+then reopen the parent's action menu. Its own dots must receive active/ARIA
+state and Escape focus, never the child's. On touch layouts, long-press must
+retain the rebuilt row as its anchor through release. Repeat for a fork child
+and the connected topbar title.
+
+## Project-picker gesture deferral and context-point menus
+
+While the picker is open, a choice refresh that arrives between `pointerdown`
+and `pointerup` is deferred: the pressed row and the picker's place survive
+until the gesture settles, so the tap's click — dispatched in a later task than
+`pointerup` on touch — still selects the pressed project. The deferred refresh
+applies right after that click; a gesture that ends without one (pointercancel,
+a release outside the picker) applies it after a short grace period.
+
+A menu or picker anchored on a zero-sized trigger (the ⋮ trigger hidden on
+touch-primary layouts, a repainted trigger) borrows the visible row's geometry;
+when the interaction recorded a context point, it opens like an OS context
+menu — left edge at the pointer, shifted left only to stay inside the viewport.
+`tests/test_project_picker_viewport_position.py` pins both rules in the Node
+fixture; `tests/browser_project_picker_keyboard.py` covers the keyboard, mouse
+and touch flows in real Chromium.
+
 > This document is for manual browser testing by you or by a Claude browser agent.
 > It covers user-facing features of the UI across current releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.
@@ -2080,7 +2105,25 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 ### Sprint 15: Session Projects
 - Click "+" in project bar to create a project. Type name, Enter.
 - Click a project chip to filter sessions.
-- Hover a session → click folder icon → assign to project via picker.
+- Session ⋮ menu → Move to project (long-press the row on touch) → assign via picker.
+- With a long project list, verify the picker stays within the visible viewport
+  at desktop and narrow widths; `+ New project` stays pinned at the bottom edge
+  while the list scrolls inside the picker.
+- Keep the picker open while resizing the window or changing the mobile visual
+  viewport (keyboard/browser chrome/zoom). Verify both horizontal edges and the
+  height cap follow the visible area, including nonzero viewport offsets.
+- Scroll the session list while the picker is open: it must follow its row,
+  then close when the trigger leaves the list's visible rectangle. Scrolling
+  inside the picker must keep it open and preserve access to the final item.
+- Re-render/remove the owning row without resizing or scrolling: the picker
+  must close immediately. Selection, outside click, and opening a replacement
+  must also release its listeners, observer, and queued animation frame.
+- Automated geometry/lifecycle regression:
+  `./scripts/test.sh tests/test_project_picker_viewport_position.py -q`.
+- While the picker is open, trigger a list refresh between press and release
+  (another conversation's pin or title update): the tap/click must still move
+  the session to the pressed project. A remote rename must also paint
+  immediately while the list is hovered or focused, with the picker kept.
 - Verify colored left border appears on assigned session.
 - Double-click project chip to rename. Right-click to delete.
 - Code blocks have a "Copy" button. Click → "Copied!" feedback.

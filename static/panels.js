@@ -339,7 +339,8 @@ function _resyncChatSidebarAfterPanelSwitch() {
     // rebuilds rows, which is correct for normal list refreshes but hostile to
     // this one-shot panel-transition repair.
     if (typeof _sessionActionMenu !== 'undefined' && _sessionActionMenu) return;
-    renderSessionListFromCache();
+    if (typeof _repaintSidebarForBackgroundChurn === 'function') _repaintSidebarForBackgroundChurn();
+    else if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   };
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
   else run();
