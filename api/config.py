@@ -2866,7 +2866,7 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     return bare_model, provider_hint
 
 
-def _get_provider_base_url(provider_id):
+def _get_provider_base_url(provider_id, config_obj: dict | None = None):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
     Checks two locations, in order:
@@ -2877,13 +2877,18 @@ def _get_provider_base_url(provider_id):
          shape (the model block carries both the active provider AND the
          base URL for that provider in a single record).
 
+    ``config_obj`` lets a caller scope the lookup to a specific profile's
+    config snapshot instead of the module-global ``cfg``; when omitted the
+    module-global cache is used (historical behaviour).
+
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    source = config_obj if isinstance(config_obj, dict) else cfg
+    prov_cfg = _get_provider_cfg(provider_id, source)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    model_cfg = cfg.get("model", {}) or {}
+    model_cfg = source.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
@@ -2893,13 +2898,13 @@ def _get_provider_base_url(provider_id):
     return None
 
 
-def _get_providers_cfg() -> dict:
-    providers_cfg = cfg.get("providers")
+def _get_providers_cfg(config_obj: dict | None = None) -> dict:
+    providers_cfg = (config_obj if isinstance(config_obj, dict) else cfg).get("providers")
     return providers_cfg if isinstance(providers_cfg, dict) else {}
 
 
-def _get_provider_cfg(provider_id) -> dict:
-    provider_cfg = _get_providers_cfg().get(provider_id, {})
+def _get_provider_cfg(provider_id, config_obj: dict | None = None) -> dict:
+    provider_cfg = _get_providers_cfg(config_obj).get(provider_id, {})
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
@@ -2982,7 +2987,9 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     return matches[0] if matches else None
 
 
-def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
+def resolve_model_provider(
+    model_id: str, *, explicitly_picked: bool = False, config_obj: dict | None = None
+) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -3012,7 +3019,29 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     leftover, e.g. #433's ``openai/gpt-5.4`` on a bare-only relay) still gets the
     legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
     (endpoint-advertised ids) always takes precedence over this flag.
+
+    ``config_obj`` (when a dict) lets a caller scope the resolution to a
+    specific profile's config snapshot instead of the module-global ``cfg``
+    (issue #7170 round-7: without this, a profile-scoped reasoning lookup
+    reads the ambient process profile's ``model.provider``/``providers``/
+    ``custom_providers`` and probes the wrong endpoint). When omitted the
+    module-global cache is used (historical behaviour, preserved for the
+    25+ in-tree callers that don't carry a profile scope).
     """
+    # Local rebind: every ``cfg.get(...)`` below (and the nested closures
+    # ``_finalize`` / ``_entry_owns_model``) now sees the caller's scoped
+    # snapshot when ``config_obj`` is supplied, falling back to the module
+    # global otherwise. No nested function reads ``cfg`` from its own
+    # closure chain, so this rebind is safe and surgical.
+    #
+    # Resolve the module global via ``globals()`` rather than a module-level
+    # alias so monkeypatched cfg (e.g. ``monkeypatch.setattr(api.config,
+    # "cfg", fake_cfg)``) is observed — the test suite relies on it.
+    cfg: dict = (
+        config_obj
+        if isinstance(config_obj, dict)
+        else globals()["cfg"]
+    )
     config_provider = None
     config_base_url = None
     model_cfg = cfg.get("model", {})
@@ -5670,9 +5699,32 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _get_lmstudio_reasoning_probe_api_key() -> str | None:
-    """Resolve the LM Studio key for reasoning probes with WebUI precedence."""
-    config_data = cfg
+def _get_lmstudio_reasoning_probe_api_key(
+    config_data: dict | None = None,
+    *,
+    environ: dict[str, str] | None = None,
+) -> str | None:
+    """Resolve the LM Studio key for reasoning probes with WebUI precedence.
+
+    ``config_data`` scopes the lookup to the caller's profile config snapshot;
+    when omitted the module-global ``cfg`` is used (historical behaviour).
+
+    ``environ`` scopes the ENV lookup to the caller's captured owner-profile
+    env: when given, the probe reads ONLY that env — the ambient process
+    ``os.environ`` is never consulted (issue #7170 round-2 finding 2: a
+    scoped probe must not leak another profile's ``LM_API_KEY`` into a
+    different profile's endpoint).
+
+    When ``environ`` is omitted the scope of ``config_data`` decides the env
+    source: a caller that handed in a profile snapshot (scoped) reads only
+    the thread-captured owner env (``api.config._thread_ctx.env``, which
+    request/worker scopes populate via ``api.profiles.profile_env_for_*``) —
+    a detached worker thread has none, so the probe goes KEYLESS rather than
+    borrowing the process-active profile's credential. Only historical
+    unscoped callers (no snapshot — ``config_data`` IS the module ``cfg``)
+    keep the ambient ``os.environ`` fallback.
+    """
+    config_data = config_data if isinstance(config_data, dict) else cfg
     model_cfg = config_data.get("model") or {}
     if isinstance(model_cfg, dict):
         active_provider = str(model_cfg.get("provider") or "").strip().lower()
@@ -5688,11 +5740,23 @@ def _get_lmstudio_reasoning_probe_api_key() -> str | None:
             if config_key:
                 return config_key
 
-    env_key = str(os.getenv("LM_API_KEY") or "").strip()
+    if environ is None:
+        if config_data is cfg:
+            # Unscoped historical lookup: ambient process env.
+            environ = dict(os.environ)
+        else:
+            # Scoped: the thread-captured owner env only — never the ambient
+            # process env (round-2 finding 2). A detached worker thread has no
+            # captured env, so the probe goes keyless instead of borrowing the
+            # process-active profile's credential.
+            thread_env = getattr(_thread_ctx, "env", {})
+            environ = thread_env if isinstance(thread_env, dict) else {}
+
+    env_key = str(environ.get("LM_API_KEY") or "").strip()
     if env_key:
         return env_key
 
-    legacy_env_key = str(os.getenv("LMSTUDIO_API_KEY") or "").strip()
+    legacy_env_key = str(environ.get("LMSTUDIO_API_KEY") or "").strip()
     if legacy_env_key:
         return legacy_env_key
 
@@ -5840,6 +5904,7 @@ def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
@@ -5849,8 +5914,14 @@ def resolve_model_reasoning_efforts(
     applied uniformly. The UI dropdown and coercion therefore agree: ``max`` is
     retained for GPT-5.6 and other models whose native ladder includes it, and
     stripped where it would be rejected or mishandled.
+
+    ``config_data`` scopes config-sourced branches (custom-provider metadata,
+    LM Studio endpoint/key) to the caller's profile snapshot; when omitted the
+    module-global ``cfg`` is used (historical behaviour).
     """
-    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    raw = _resolve_model_reasoning_efforts_impl(
+        model_id, provider_id, base_url, config_data=config_data
+    )
     if not raw:
         return raw
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
@@ -5902,19 +5973,34 @@ def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> list[str]:
-    """Return supported reasoning-effort levels for *model_id*, or [] if none."""
+    """Return supported reasoning-effort levels for *model_id*, or [] if none.
+
+    ``config_data`` (when a dict) scopes every config lookup to the caller's
+    profile snapshot so per-profile coercion cannot read another profile's
+    ambient ``cfg``.
+    """
     model = str(model_id or "").strip()
     if not model:
         return []
 
     provider = str(provider_id or "").strip().lower() if provider_id else ""
     resolved_base_url = str(base_url or "").strip() or None
+    _scope_cfg = config_data if isinstance(config_data, dict) else cfg
     if not provider:
         try:
-            _, provider, resolved_base_url = resolve_model_provider(model)
+            # Pass the scoped snapshot through so the model->provider/base_url
+            # resolution reads THIS profile's config, not the ambient process
+            # global (issue #7170 round-7: ``resolve_model_provider`` used to
+            # ignore ``config_data`` and let a profile-A ``model.provider`` leak
+            # into a profile-B /api/reasoning probe).
+            _, provider, resolved_base_url = resolve_model_provider(
+                model, config_obj=_scope_cfg
+            )
         except Exception:
-            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+            provider = str((_scope_cfg.get("model") or {}).get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
 
@@ -5938,14 +6024,14 @@ def _resolve_model_reasoning_efforts_impl(
     _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
-            for _entry in _custom_provider_entries():
+            for _entry in _custom_provider_entries(config_data):
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = (_scope_cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model
@@ -5970,7 +6056,7 @@ def _resolve_model_reasoning_efforts_impl(
         )
 
     if provider == "lmstudio":
-        configured_base = _get_provider_base_url(provider)
+        configured_base = _get_provider_base_url(provider, config_data)
         probe_base = resolved_base_url or configured_base
         # SECURITY: only forward the configured LM Studio credential when the
         # probe target is the configured LM Studio endpoint. /api/reasoning
@@ -5984,7 +6070,7 @@ def _resolve_model_reasoning_efforts_impl(
             and _normalize_base_url_for_match(probe_base)
             == _normalize_base_url_for_match(configured_base)
         ):
-            probe_key = _get_lmstudio_reasoning_probe_api_key()
+            probe_key = _get_lmstudio_reasoning_probe_api_key(config_data)
         opts = _lmstudio_model_reasoning_options(
             hinted_model,
             probe_base,
@@ -6017,8 +6103,15 @@ def coerce_reasoning_effort_for_model(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    *,
+    config_data: dict | None = None,
 ) -> str:
-    """Return the closest supported effort for the target model/provider."""
+    """Return the closest supported effort for the target model/provider.
+
+    ``config_data`` (when a dict) scopes the capability lookup to the caller's
+    profile snapshot so coercion cannot read another profile's ambient ``cfg``
+    (custom-provider metadata, LM Studio endpoint/key).
+    """
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
@@ -6037,6 +6130,7 @@ def coerce_reasoning_effort_for_model(
         model_id,
         provider_id=provider_id,
         base_url=base_url,
+        config_data=config_data,
     )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
@@ -6116,6 +6210,181 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def configured_reasoning_effort_for_model(
+    config_data: dict | None,
+    *,
+    model_id: str | None = None,
+    provider_id: str | None = None,
+    base_url: str | None = None,
+) -> str:
+    """Resolve the configured reasoning effort for one concrete model.
+
+    ``agent.reasoning_overrides`` is a model-scoped override and must win over
+    the global ``agent.reasoning_effort`` value.  The WebUI used to read only
+    the global field in its streaming worker and Gateway bridge, so a global
+    ``max`` leaked into every model even when the core agent would have picked
+    a safer per-model value.  Keep the resolution here so status, native
+    streaming, and Gateway-backed streaming share one decision point.
+    """
+    data = config_data if isinstance(config_data, dict) else {}
+    agent_cfg = data.get("agent")
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+
+    effort = agent_cfg.get("reasoning_effort")
+    overrides = agent_cfg.get("reasoning_overrides")
+    model = str(model_id or "").strip()
+
+    if model:
+        parsed_qualified = _parse_provider_qualified_model_id(model)
+        if parsed_qualified:
+            bare_model, parsed_provider = parsed_qualified
+            model = bare_model
+            if not provider_id:
+                provider_id = parsed_provider
+
+    # Prefer the Hermes core resolver when available; it owns the tolerant
+    # spelling/qualified-model matching rules.  The fallback keeps WebUI
+    # usable in installations where the companion agent tree is unavailable.
+    per_model = None
+    if isinstance(overrides, dict) and model:
+        try:
+            from hermes_constants import resolve_per_model_reasoning_effort
+
+            per_model = resolve_per_model_reasoning_effort(model, overrides)
+        except Exception:
+            per_model = None
+        if per_model is None:
+            # Fallback candidate list.  Mirror the core resolver's shapes so an
+            # install without the companion agent tree resolves the same
+            # overrides.  Exact/full-id candidates come FIRST so a full-id
+            # override always outranks a bare-tail one.
+            candidates = [model, model.lower()]
+            if model.startswith("@") and ":" in model:
+                candidates.append(model.rsplit(":", 1)[-1])
+            # Slash-qualified ids (``openai/gpt-5.4-mini``,
+            # ``openrouter/anthropic/claude-opus-4.5``) must also match a bare
+            # override key.  Without these the override was silently dropped
+            # and the global effort won.  Emit the aggregator-stripped middle
+            # form before the bare tail so the more specific id wins.
+            for _cand in list(candidates):
+                if "/" not in _cand:
+                    continue
+                _parts = _cand.split("/")
+                if len(_parts) >= 3:
+                    candidates.append("/".join(_parts[1:]))
+                candidates.append(_parts[-1])
+
+            # Provider-qualified OVERRIDE KEYS must match an unqualified model id
+            # (and an aggregator-wrapped one), mirroring the core resolver's
+            # "known prefixes added" variants.  A bare model ``gpt-5.4-mini``
+            # with override ``openai/gpt-5.4-mini: low`` previously resolved to
+            # the global ``high`` because only the model side was expanded.
+            _MODEL_PREFIX_PROVIDERS = (
+                "anthropic", "openai", "google", "openrouter", "groq", "mistral",
+                "xai", "cohere", "perplexity", "together", "fireworks", "deepseek",
+            )
+            _MODEL_PREFIX_AGGREGATORS = (
+                "openrouter", "opencode", "fireworks", "groq", "together",
+            )
+
+            def _fallback_provider_prefixes(cand: str) -> list[str]:
+                """Provider-prefixed spellings of one BARE candidate.
+
+                Mirrors the core resolver's "known prefixes added" pass so a
+                no-core install resolves a provider-qualified override key
+                (``openai/gpt-5.4-mini``) for a bare model id the same way core
+                does. Only unqualified candidates are prefixed.
+                """
+                if not cand or "/" in cand:
+                    return []
+                return [f"{_p}/{cand}" for _p in _MODEL_PREFIX_PROVIDERS]
+
+            def _fallback_aggregator_prefixes(cand: str) -> list[str]:
+                """Aggregator-prefixed spellings of one single-slash candidate.
+
+                Covers aggregator-qualified override keys
+                (``openrouter/openai/gpt-5.4-mini``) matched against a model id
+                that lost its aggregator segment. Runs over the provider-prefixed
+                forms too, exactly like the core resolver's two prefix passes.
+                """
+                if not cand or cand.count("/") != 1:
+                    return []
+                return [f"{_agg}/{cand}" for _agg in _MODEL_PREFIX_AGGREGATORS]
+
+            # Pass 1: provider prefixes over the base candidates...
+            _provider_qualified: list[str] = []
+            for _cand in list(candidates):
+                _provider_qualified.extend(_fallback_provider_prefixes(_cand))
+            candidates.extend(_provider_qualified)
+            # Pass 2: aggregator prefixes over every single-slash candidate,
+            # INCLUDING the provider-qualified forms pass 1 just added.
+            _aggregator_qualified: list[str] = []
+            for _cand in list(candidates):
+                _aggregator_qualified.extend(_fallback_aggregator_prefixes(_cand))
+            candidates.extend(_aggregator_qualified)
+
+            def _fallback_parse(raw):
+                """Parse an override value with CORE semantics.
+
+                ``parse_reasoning_effort()`` in this module returns ``None`` for
+                a YAML boolean ``False`` and for the ``"false"``/``"disabled"``
+                spellings, but Hermes core treats all of them as *reasoning
+                disabled*.  Leaving them unparsed made the fallback silently
+                ignore an explicit disable and keep the global effort.
+                """
+                if raw is False:
+                    return {"enabled": False}
+                if raw is None or raw is True:
+                    return None
+                if str(raw).strip().lower() in {"none", "false", "disabled"}:
+                    return {"enabled": False}
+                return parse_reasoning_effort(raw)
+
+            normalized_overrides = {
+                str(key).strip().lower(): value
+                for key, value in overrides.items()
+            }
+            for candidate in candidates:
+                cand_lower = candidate.lower()
+                if cand_lower in normalized_overrides:
+                    per_model = _fallback_parse(
+                        normalized_overrides[cand_lower]
+                    )
+                    if per_model is not None:
+                        break
+
+            if per_model is None:
+                canonical_overrides = {
+                    str(key).strip().lower().replace(".", "-"): value
+                    for key, value in overrides.items()
+                }
+                for candidate in candidates:
+                    cand_canon = candidate.lower().replace(".", "-")
+                    if cand_canon in canonical_overrides:
+                        per_model = _fallback_parse(
+                            canonical_overrides[cand_canon]
+                        )
+                        if per_model is not None:
+                            break
+
+    if per_model is not None:
+        if per_model.get("enabled") is False:
+            effort = "none"
+        else:
+            override_eff = str(per_model.get("effort") or "").strip().lower()
+            if override_eff in VALID_REASONING_EFFORTS:
+                effort = override_eff
+
+    return coerce_reasoning_effort_for_model(
+        effort,
+        model,
+        provider_id=provider_id,
+        base_url=base_url,
+        config_data=data,
+    )
+
+
 def get_reasoning_status(
     *,
     model_id: str | None = None,
@@ -6133,7 +6402,6 @@ def get_reasoning_status(
     display_cfg = config_data.get("display") or {}
     agent_cfg = config_data.get("agent") or {}
     show_raw = display_cfg.get("show_reasoning") if isinstance(display_cfg, dict) else None
-    effort_raw = agent_cfg.get("reasoning_effort") if isinstance(agent_cfg, dict) else None
 
     resolve_model = model_id
     resolve_provider = provider_id
@@ -6168,9 +6436,9 @@ def get_reasoning_status(
         "show_reasoning": bool(show_raw) if isinstance(show_raw, bool) else True,
         # Report the COERCED effort so boot/status/chip read paths agree with
         # what streaming actually sends. (Codex review of the drop-max alignment.)
-        "reasoning_effort": coerce_reasoning_effort_for_model(
-            str(effort_raw or "").strip().lower(),
-            resolve_model,
+        "reasoning_effort": configured_reasoning_effort_for_model(
+            config_data,
+            model_id=resolve_model,
             provider_id=resolve_provider,
             base_url=resolve_base_url,
         ),
@@ -6292,12 +6560,26 @@ def set_reasoning_effort(
     Mirrors CLI ``/reasoning <level>``: same key, same valid values
     (``none`` | ``minimal`` | ``low`` | ``medium`` | ``high`` | ``xhigh`` | ``max``).
 
-    An empty string is accepted as "clear the override" — it removes the
-    ``agent.reasoning_effort`` key so the provider default takes effect. This is
-    the re-enable path for thinking-toggle-only models (GLM-4.5–5.1 on native
-    zai): the dropdown's "Default"/"On" option POSTs ``effort:''`` to switch
-    thinking back on after the user selected "None". Without this, the toggle
-    would be one-way (off-only) for those models. (#6219 round-3)
+    With a model context (``model_id`` given — the composer chip path) the
+    selection is written as the per-model ``agent.reasoning_overrides`` entry
+    in addition to the historical global ``agent.reasoning_effort`` write
+    (issue #7170 round-2 finding 3): the status / chip read
+    ``configured_reasoning_effort_for_model`` prefers the override, so writing
+    only the global key made the chip snap back to the stale override value.
+    The override is what the chip reads back, so its own selection sticks; the
+    global write is kept for master compatibility (the CLI-parity contract
+    pinned by the zai gating tests — an unscoped selection and a model-context
+    selection both persist ``agent.reasoning_effort``). An empty string in a
+    model context clears THAT model's override (``Default``) and the global
+    key, so the provider default applies again.
+
+    An empty string without a model context is accepted as "clear the
+    override" — it removes the ``agent.reasoning_effort`` key so the provider
+    default takes effect. This is the re-enable path for thinking-toggle-only
+    models (GLM-4.5–5.1 on native zai): the dropdown's "Default"/"On" option
+    POSTs ``effort:''`` to switch thinking back on after the user selected
+    "None". Without this, the toggle would be one-way (off-only) for those
+    models. (#6219 round-3)
 
     Raises ``ValueError`` on any other unrecognised level so callers can 400.
     """
@@ -6307,13 +6589,35 @@ def set_reasoning_effort(
             f"Unknown reasoning effort '{effort}'. "
             f"Valid: none, {', '.join(VALID_REASONING_EFFORTS)}."
         )
+    model = str(model_id or "").strip()
     config_path = _get_config_path()
     with _cfg_lock:
         config_data = _load_yaml_config_file(config_path)
         agent_cfg = config_data.get("agent")
         if not isinstance(agent_cfg, dict):
             agent_cfg = {}
-        if raw:
+        if model:
+            # Model-context selection: write the per-model override (and
+            # "Default" clears it) so the chip reads its own selection back
+            # instead of snapping to the stale override (#7170 round-2
+            # finding 3). The historical global write is kept alongside for
+            # master/CLI parity (zai gating contract). Key spelling mirrors
+            # the read-side matchers in
+            # configured_reasoning_effort_for_model (lowercased exact id).
+            overrides = agent_cfg.get("reasoning_overrides")
+            if not isinstance(overrides, dict):
+                overrides = {}
+            override_key = model.lower()
+            if raw:
+                overrides[override_key] = raw
+                agent_cfg["reasoning_effort"] = raw
+            else:
+                overrides.pop(override_key, None)
+                # Default also clears the global key (historical empty-effort
+                # contract, #6219 round-3): the provider default applies.
+                agent_cfg.pop("reasoning_effort", None)
+            agent_cfg["reasoning_overrides"] = overrides
+        elif raw:
             agent_cfg["reasoning_effort"] = raw
         else:
             # Clear the override so the provider default takes effect (the
@@ -6509,7 +6813,17 @@ def _main_model_request_overrides(
     if not gate_provider:
         gate_provider = str(model_cfg.get("provider") or "").strip().lower()
         if not gate_provider:
-            _, gate_provider, _ = resolve_model_provider(gate_model)
+            # #7170 round-7+1: the caller handed us a profile-scoped snapshot
+            # (``config_data`` — the gateway/native streaming workers pass the
+            # session-owning profile's config here). A bare
+            # ``resolve_model_provider(gate_model)`` reads the module-global
+            # AMBIENT ``cfg``, so on a multi-profile instance a session whose
+            # snapshot carries no ``model.provider`` would gate its service
+            # tier against ANOTHER profile's routing. Scope the lookup to the
+            # snapshot we were given.
+            _, gate_provider, _ = resolve_model_provider(
+                gate_model, config_obj=config_data
+            )
     if _main_model_supports_service_tier(gate_model, gate_provider):
         service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
         if service_tier == "priority":
