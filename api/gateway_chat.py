@@ -27,7 +27,7 @@ from api.config import (
     _get_session_agent_lock,
     _parse_provider_qualified_model_id,
     clear_session_writeback_owner_if_owned,
-    coerce_reasoning_effort_for_model,
+    resolve_session_reasoning_effort,
     gateway_approval_unavailable_reason,
     gateway_supports_approval,
     peek_stream,
@@ -362,15 +362,15 @@ def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | No
     return raw in ("1", "true", "yes", "on")
 
 
-def _gateway_reasoning_effort_for_request(cfg, *, model=None, model_provider=None):
-    """Read and coerce user-configured reasoning effort for a gateway request."""
+def _gateway_reasoning_effort_for_request(
+    cfg, *, model=None, model_provider=None, session_effort=None
+):
+    """Resolve and coerce the session effort, falling back to profile config."""
     try:
-        cfg_data = cfg if isinstance(cfg, dict) else {}
-        effort_cfg = cfg_data.get("agent", {}) if isinstance(cfg_data, dict) else {}
-        effort_raw = effort_cfg.get("reasoning_effort") if isinstance(effort_cfg, dict) else None
-        coerced = coerce_reasoning_effort_for_model(
-            effort_raw,
-            model,
+        coerced = resolve_session_reasoning_effort(
+            cfg,
+            session_effort=session_effort,
+            model_id=model,
             provider_id=model_provider,
         )
         # Preserve explicit "none" while still omitting absent or invalid effort.
@@ -2603,18 +2603,25 @@ def _run_gateway_chat_streaming(
             logger.debug("Failed to put gateway event to queue")
 
     s = None
+    api_key = ""
     final_text = ""
     terminal_error = ""
     usage = {"input_tokens": 0, "output_tokens": 0, "estimated_cost": 0}
     try:
         s = get_session(session_id)
-        from api.config import get_config  # imported lazily to avoid config-cycle churn
+        from api.config import get_config_for_profile_home  # imported lazily to avoid config-cycle churn
+        from api.profiles import get_hermes_home_for_profile
 
-        cfg = get_config()
+        # Detached workers have no request-local profile context. Resolve one
+        # session-owned config for reasoning fallback, overrides, and prefill.
+        cfg = get_config_for_profile_home(
+            get_hermes_home_for_profile(s.profile), isolate_config_override=True,
+        )
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
             model_provider=model_provider,
+            session_effort=getattr(s, "reasoning_effort", None),
         )
         # The session's own profile, not the process-active one: this worker thread has no
         # thread-local profile, so get_config()/os.environ describe whichever profile the
