@@ -12130,6 +12130,22 @@ def _decode_state_db_content(value):
     return decoded
 
 
+def _state_db_steer_stored_text(msg):
+    """The stored text ``_unwrap_steer_row_oob_marker`` may rewrite for this row.
+
+    Returns the ``content`` string, the single text part of a list-shaped row,
+    or ``None`` for any other shape (which the helper never rewrites).
+    """
+    content = msg.get('content')
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list) and len(content) == 1 and isinstance(content[0], dict):
+        part = content[0]
+        if part.get('type') == 'text' and isinstance(part.get('text'), str):
+            return part['text']
+    return None
+
+
 def _unwrap_state_db_steer_row(msg, display_kind=None):
     """#7600: strip one validated steer frame from a state.db-sourced message.
 
@@ -12167,11 +12183,28 @@ def _unwrap_state_db_steer_row(msg, display_kind=None):
         return False
     msg.setdefault('display_kind', 'steer')
     raw_content = msg.get('content')
+    raw_text = _state_db_steer_stored_text(msg)
     _unwrap_steer_row_oob_marker(msg)
-    if msg.get('content') is not raw_content:
+    # #7600 (greptile P1): the unwrap helper rewrites a list row's text part
+    # **in place**, so ``content`` keeps its original object identity and an
+    # identity-only test is false on the list path.  ``api_content`` was then
+    # never written and every model-facing reader received the bare instruction
+    # with the trust-boundary frame already stripped — recurring on every read,
+    # because a state.db row is read-only in list order.  Decide on the *stored
+    # text* having changed, not on object replacement.
+    rewrote_stored_text = (
+        msg.get('content') is not raw_content
+        or _state_db_steer_stored_text(msg) != raw_text
+    )
+    if rewrote_stored_text:
         existing_api_content = msg.get('api_content')
         if not (isinstance(existing_api_content, str) and existing_api_content):
-            msg['api_content'] = raw_content
+            # ``api_content`` is a str-only sidecar (helpers._scrub_message_record,
+            # streaming._agent_durable_content, _session_message_api_content_key),
+            # so a list row preserves the framed **text**, not the list object.
+            framed = raw_content if isinstance(raw_content, str) else raw_text
+            if isinstance(framed, str) and framed:
+                msg['api_content'] = framed
     return True
 
 
