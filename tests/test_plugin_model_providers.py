@@ -237,6 +237,54 @@ class TestPluginFallbackModelsInStaticCatalog:
     this cold path.
     """
 
+    def test_static_catalog_surfaces_logged_in_keyless_subscription_plugin(
+        self, monkeypatch, tmp_path
+    ):
+        profile = SimpleNamespace(
+            name="subscription-plugin",
+            display_name="Subscription Plugin",
+            env_vars=(),
+            auth_type="external",
+            aliases=(),
+            fallback_models=("opus-test",),
+        )
+        fake_providers = types.ModuleType("providers")
+        fake_providers.list_providers = lambda: [profile]
+        monkeypatch.setitem(sys.modules, "providers", fake_providers)
+        invalidate_plugin_model_provider_cache()
+        _install_fake_hermes_cli(monkeypatch, authenticated=False, model_ids=[])
+        from hermes_cli import auth as fake_auth
+        auth_state = {"logged_in": True}
+        fake_auth.get_auth_status = lambda pid: auth_state if pid == profile.name else {}
+        monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: tmp_path)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+
+        old_cfg = dict(config.cfg)
+        old_mtime = config._cfg_mtime
+        config.cfg.clear()
+        config.cfg["model"] = {"provider": "gemini", "default": "gemini-2.5-flash"}
+        config.cfg["providers"] = {}
+        try:
+            config._cfg_mtime = config.Path(config._get_config_path()).stat().st_mtime
+        except Exception:
+            config._cfg_mtime = 0.0
+        config.invalidate_models_cache()
+        try:
+            catalog = config._static_models_catalog_without_live_probes()
+            group = next((g for g in catalog["groups"] if g["provider_id"] == profile.name), None)
+            assert group is not None
+            assert any(m["id"] == "@subscription-plugin:opus-test" for m in group["models"])
+
+            auth_state["logged_in"] = False
+            catalog = config._static_models_catalog_without_live_probes()
+            assert all(g["provider_id"] != profile.name for g in catalog["groups"])
+        finally:
+            config.cfg.clear()
+            config.cfg.update(old_cfg)
+            config._cfg_mtime = old_mtime
+            config.invalidate_models_cache()
+            invalidate_plugin_model_provider_cache()
+
     def test_static_catalog_surfaces_plugin_fallback_models(
         self, monkeypatch, tmp_path
     ):
