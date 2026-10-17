@@ -93,7 +93,8 @@ def test_webm_prefers_video_when_audio_and_video_regexes_overlap():
     assert kind_body.index("_VIDEO_EXTS.test(clean)") < kind_body.index("_AUDIO_EXTS.test(clean)"), \
         "_mediaKindForName must check video before audio so .webm renders as video"
     inline_start = src.find("function _inlineMediaHtmlForRef")
-    inline_body = src[inline_start:inline_start + 4500]
+    inline_end = src.find("function _renderAttachmentHtml", inline_start)
+    inline_body = src[inline_start:inline_end]
     assert "const kind=_AUDIO_EXTS.test(ref)?'audio':'video';" not in inline_body, \
         "Local MEDIA rendering must reuse _mediaKindForName instead of reintroducing audio-first .webm ordering"
     assert "if(localKind==='audio'||localKind==='video')" in inline_body

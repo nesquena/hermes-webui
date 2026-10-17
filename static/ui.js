@@ -3076,6 +3076,22 @@ function _mediaTokenParts(source, matchOffset, rawRef){
 }
 
 function _inlineMediaHtmlForRef(ref, sessionId, altText){
+  // Keep this helper local: renderer contract tests intentionally extract and
+  // execute _inlineMediaHtmlForRef without the rest of ui.js.
+  function _localPathFromFileUrl(value){
+    const raw=String(value||'');
+    try{
+      const u=new URL(raw);
+      const host=String(u.hostname||'').toLowerCase();
+      const path=decodeURIComponent(u.pathname||'');
+      if(host==='wsl.localhost'||host==='wsl$') return path.replace(/^\/[^/]+(?=\/)/,'');
+      if(host&&host!=='localhost') return decodeURIComponent(raw.replace(/^file:\/\//i,''));
+      return path;
+    }catch(_){
+      const stripped=raw.replace(/^file:\/\//i,'');
+      try{return decodeURIComponent(stripped);}catch(__){return stripped;}
+    }
+  }
   if(ref==null) return '';
   // data:image/* → inline <img>; any other data: scheme renders as inert
   // truncated text (never routed to api/media, never embedded).
@@ -3090,13 +3106,7 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   // so the variable name is the original `ref` (not `r`) and the file://
   // unwrap keeps the matched identifier visible.
   if(/^file:\/\//i.test(ref)){
-    try{
-      const u=new URL(ref);
-      ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
-    }catch(_){
-      try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
-      catch(__){ref=ref.replace(/^file:\/\//i,'');}
-    }
+    ref=_localPathFromFileUrl(ref);
   }
   if(/^https?:\/\//i.test(ref)){
     let src=ref;
@@ -9428,6 +9438,23 @@ function renderMd(raw){
   function _safeAttrValue(v){
     return String(v||'').replace(/&quot;/g,'"').replace(/&#39;/g,"'").replace(/&amp;/g,'&').trim();
   }
+  // Keep this copy inside renderMd: several regression drivers execute the
+  // renderer as a standalone function.  WSL UNC file URLs contain a Windows
+  // distro routing segment that is not part of the Linux backend path.
+  function _localPathFromFileUrl(value){
+    const raw=String(value||'');
+    try{
+      const u=new URL(raw);
+      const host=String(u.hostname||'').toLowerCase();
+      const path=decodeURIComponent(u.pathname||'');
+      if(host==='wsl.localhost'||host==='wsl$') return path.replace(/^\/[^/]+(?=\/)/,'');
+      if(host&&host!=='localhost') return decodeURIComponent(raw.replace(/^file:\/\//i,''));
+      return path;
+    }catch(_){
+      const stripped=raw.replace(/^file:\/\//i,'');
+      try{return decodeURIComponent(stripped);}catch(__){return stripped;}
+    }
+  }
   function _markdownHref(raw){
     const href=String(raw||'').replace(/"/g,'%22');
     if(/^session:\/\//i.test(href)){
@@ -9449,12 +9476,8 @@ function renderMd(raw){
       }
     }
     if(/^file:\/\//i.test(href)){
-      try{
-        const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
-        return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
-      }catch(_){
-        return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
-      }
+      const path=_localPathFromFileUrl(href);
+      return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
     }
     return href;
   }
