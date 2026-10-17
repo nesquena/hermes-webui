@@ -253,18 +253,29 @@ def _reject_invisible_session(handler, session) -> bool:
 
 
 def _write_office_upload_sidecar(workspace: Path, dest: Path, file_bytes: bytes) -> dict | None:
-    """Write a Markdown preview sidecar for supported Office uploads."""
-    if dest.suffix.lower() not in {'.docx', '.xlsx', '.pptx'}:
+    """Write a Markdown preview sidecar for supported Office/PDF uploads.
+
+    #540: PDFs join the docx/xlsx/pptx branch. A .pdf preview is a client-side
+    iframe, so without this sidecar the agent had no way to read a PDF's text at
+    all. The sidecar carries the server-extracted text only; the browser keeps
+    rendering the real document.
+    """
+    suffix = dest.suffix.lower()
+    if suffix not in {'.docx', '.xlsx', '.pptx', '.pdf'}:
         return None
 
-    error_message = 'Office sidecar extraction failed'
+    is_pdf = suffix == '.pdf'
+    error_message = 'PDF sidecar extraction failed' if is_pdf else 'Office sidecar extraction failed'
     sidecar = dest.with_name(f'{dest.name}.md')
     sidecar_path = sidecar.resolve()
     created_sidecar = False
     try:
-        from api.office_documents import preview_office_document
+        if is_pdf:
+            from api.pdf_documents import preview_pdf_document as build_preview
+        else:
+            from api.office_documents import preview_office_document as build_preview
 
-        preview = preview_office_document(dest.name, file_bytes)
+        preview = build_preview(dest.name, file_bytes)
         if not sidecar_path.is_relative_to(workspace.resolve()):
             raise ValueError('Invalid sidecar destination')
         sidecar_fd = open_anchored_create_fd(workspace, sidecar_path)
@@ -276,7 +287,7 @@ def _write_office_upload_sidecar(workspace: Path, dest: Path, file_bytes: bytes)
             'path': str(sidecar_path),
             'size': sidecar_path.stat().st_size,
             'preview_kind': preview.get('preview_kind'),
-            'office_format': preview.get('office_format'),
+            'office_format': preview.get('office_format') or preview.get('pdf_format'),
         }
     except FileExistsError:
         return {'error': error_message}
