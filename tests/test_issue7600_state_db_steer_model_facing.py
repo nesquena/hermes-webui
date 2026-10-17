@@ -57,6 +57,19 @@ def _contains_oob(value) -> bool:
     return "OUT-OF-BAND USER MESSAGE" in json.dumps(value, default=str)
 
 
+def _encode_state_db_content_list_parts(parts):
+    """Encode structured content the way the Agent stores it in state.db: a
+    ``\\x00json:``-prefixed JSON list, which ``_decode_state_db_content`` decodes
+    back into the list before the steer projection runs."""
+    import api.models as models
+
+    return models._STATE_DB_CONTENT_JSON_PREFIX + json.dumps(parts)
+
+
+def _encode_state_db_content_list(text):
+    return _encode_state_db_content_list_parts([{"type": "text", "text": text}])
+
+
 def _make_state_db(path: Path, sid: str, rows) -> None:
     if path.exists():
         path.unlink()
@@ -409,3 +422,153 @@ def test_projection_never_overwrites_existing_provider_bytes(monkeypatch, tmp_pa
         "projection"
     )
     assert steer["content"] == STEER_TEXT
+
+
+def test_list_steer_keeps_framed_history_for_the_model(monkeypatch, tmp_path):
+    """greptile P1 (discussion_r4295240853): a **list-shaped** steer must not lose
+    the frame for model-facing readers.
+
+    ``_unwrap_steer_row_oob_marker`` rewrites the single text part in place, so
+    ``msg['content']`` keeps its original list identity and the str-path
+    identity test (``content is not raw_content``) is false.  ``api_content``
+    was therefore never written, and every model-facing reader received the
+    bare instruction with the ``[OUT-OF-BAND USER MESSAGE]`` trust-boundary
+    marker stripped.  The state.db row is read-only in list order, so the loss
+    recurred on every read.
+
+    The unwrap must persist the sidecar whenever the **stored text changed**,
+    not only when the content object was replaced.
+    """
+    import api.models as models
+
+    sid = "steer_model_facing_list_001"
+    _install_session(monkeypatch, tmp_path, sid)
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "role": "user",
+                "content": _encode_state_db_content_list(WRAPPED),
+                "display_kind": "steer",
+                "timestamp": 1000.0,
+            }
+        ],
+    )
+
+    rows = models.get_state_db_session_messages(sid)
+    steer = _steer_row_of(rows)
+
+    assert steer is not None, "the list-shaped steer row must survive projection"
+    # Display side: the in-place text-part rewrite still unwrapped the frame.
+    assert isinstance(steer["content"], list), (
+        f"a list-shaped steer must stay list-shaped: {steer['content']!r}"
+    )
+    assert steer["content"][0]["text"] == STEER_TEXT, (
+        f"the display text must be unwrapped: {steer['content']!r}"
+    )
+    # Provider side: the framed bytes must ride the sidecar as a **string** —
+    # every api_content consumer is str-only (helpers._scrub_message_record,
+    # streaming._agent_durable_content, _session_message_api_content_key).
+    assert steer.get("api_content") == WRAPPED, (
+        "list-shaped steer lost the framed history: model-facing readers got a "
+        "bare instruction instead of the marker STEER_CHANNEL_NOTE trusts"
+    )
+    # The documented substitution contract hands the model the frame.
+    sidecar = steer["api_content"]
+    assert isinstance(sidecar, str) and sidecar
+    assert OPEN in sidecar and CLOSE in sidecar
+
+
+def test_list_steer_with_existing_provider_bytes_keeps_them(monkeypatch, tmp_path):
+    """The list path writes the sidecar only when the row owns the frame, exactly
+    like the str path: an existing provider sidecar is never overwritten."""
+    import api.models as models
+
+    sid = "steer_model_facing_list_keep_001"
+    _install_session(monkeypatch, tmp_path, sid)
+    provider_sidecar = "previously sent provider bytes"
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "role": "user",
+                "content": _encode_state_db_content_list(WRAPPED),
+                "display_kind": "steer",
+                "api_content": provider_sidecar,
+                "timestamp": 1000.0,
+            }
+        ],
+    )
+
+    rows = models.get_state_db_session_messages(sid)
+    steer = _steer_row_of(rows)
+
+    assert steer is not None
+    assert steer.get("api_content") == provider_sidecar, (
+        "an existing provider-facing sidecar must never be overwritten, on the "
+        "list path either"
+    )
+
+
+def test_list_steer_without_a_frame_is_untouched(monkeypatch, tmp_path):
+    """Byte-for-byte preservation still holds on the list path: a typed steer
+    with no complete frame keeps no fabricated sidecar."""
+    import api.models as models
+
+    sid = "steer_model_facing_list_unframed_001"
+    _install_session(monkeypatch, tmp_path, sid)
+    unframed = "just a normal steer instruction"
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "role": "user",
+                "content": _encode_state_db_content_list(unframed),
+                "display_kind": "steer",
+                "timestamp": 1000.0,
+            }
+        ],
+    )
+
+    rows = models.get_state_db_session_messages(sid)
+    steer = next(r for r in rows if r.get("display_kind") == "steer")
+
+    assert steer["content"][0]["text"] == unframed
+    assert not steer.get("api_content"), (
+        f"a steer with no frame must not gain a sidecar: {steer.get('api_content')!r}"
+    )
+
+
+def test_multi_text_part_steer_is_untouched(monkeypatch, tmp_path):
+    """``_unwrap_steer_row_oob_marker`` only rewrites a single-text-part list, so
+    a two-part list is preserved byte-for-byte and gains no sidecar."""
+    import api.models as models
+
+    sid = "steer_model_facing_list_multi_001"
+    _install_session(monkeypatch, tmp_path, sid)
+    parts = [{"type": "text", "text": WRAPPED}, {"type": "text", "text": "and hurry"}]
+    _make_state_db(
+        tmp_path / "state.db",
+        sid,
+        [
+            {
+                "role": "user",
+                "content": _encode_state_db_content_list_parts(parts),
+                "display_kind": "steer",
+                "timestamp": 1000.0,
+            }
+        ],
+    )
+
+    rows = models.get_state_db_session_messages(sid)
+    steer = next(r for r in rows if r.get("display_kind") == "steer")
+
+    assert steer["content"] == parts, (
+        f"a multi-part steer list must be preserved byte-for-byte: {steer['content']!r}"
+    )
+    assert not steer.get("api_content"), (
+        f"an unrewritten steer list must not gain a sidecar: {steer.get('api_content')!r}"
+    )
