@@ -12519,6 +12519,12 @@ def _tool_result_snippet(raw, limit: int = _TOOL_RESULT_SNIPPET_MAX) -> str:
 # gateway paths classify the same result identically (issue #7358).
 _TOOL_FAILED_STATUSES = frozenset({'error', 'failed', 'failure'})
 
+# Marker Agent core writes into a result payload when its harness refuses a
+# redundant call. Agent calls that a refusal, NOT a failed call (the executor
+# hands it to the loop guardrail as a refusal), so a refused card must not be
+# relabelled Failed. Mirrors agent.tool_result_classification.GUARDRAIL_REFUSAL_KEY.
+_GUARDRAIL_REFUSAL_KEY = 'guardrail_refusal'
+
 
 def _agent_detect_tool_failure():
     """Return the Agent core failure classifier, or None when unavailable.
@@ -12563,19 +12569,21 @@ def _agent_tool_result_is_exempt(name, function_result) -> bool:
     """True for Agent core's deliberate non-failure cases.
 
     A harness REFUSAL of a redundant call and a file mutation whose write
-    landed are both ``False`` for the canonical classifier on purpose; the
-    supplementary structured rules above must not relabel them as failures.
+    landed are both ``False`` for the canonical classifier on purpose, so the
+    structured rules must never relabel them as failures.
+
+    Checked BEFORE the canonical classifier: on Agent builds that predate the
+    refusal branch the canonical classifier reports a refusal as a failure, and
+    a late veto could not undo it. The refusal marker is read from the result
+    payload itself — a data contract the Agent writes into the result — so this
+    stays stable across Agent versions instead of depending on an internal
+    module staying importable.
     """
+    data = _tool_result_structured_payload(function_result)
+    if isinstance(data, dict) and data.get(_GUARDRAIL_REFUSAL_KEY) is True:
+        return True
     try:
-        from agent.tool_result_classification import (
-            file_mutation_result_landed,
-            is_guardrail_refusal,
-        )
-    except Exception:
-        return False
-    try:
-        if is_guardrail_refusal(function_result):
-            return True
+        from agent.tool_result_classification import file_mutation_result_landed
         return bool(file_mutation_result_landed(str(name or ''), function_result))
     except Exception:
         return False
@@ -12609,6 +12617,11 @@ def _tool_result_is_error(name, function_result) -> bool:
     """
     try:
         name_str = str(name or '')
+        # Exemptions first: a refusal or a landed write is not a failure even
+        # when the Agent build in use has no branch for it, so they must be able
+        # to veto the canonical bit as well as the structured rules.
+        if _agent_tool_result_is_exempt(name_str, function_result):
+            return False
         detect = _agent_detect_tool_failure()
         if detect is not None:
             try:
@@ -12616,8 +12629,6 @@ def _tool_result_is_error(name, function_result) -> bool:
                     return True
             except Exception:
                 logger.debug('Agent tool failure classifier failed; using fallback', exc_info=True)
-        if _agent_tool_result_is_exempt(name_str, function_result):
-            return False
         return _structured_tool_failure(name_str, _tool_result_structured_payload(function_result))
     except Exception:
         logger.debug('Failed to classify tool result failure state', exc_info=True)
