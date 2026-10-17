@@ -9284,12 +9284,32 @@ function _syncClarifyTranscriptSpace(card, opts) {
   const messages = $("messages");
   if (!messages) return;
   const wasNearBottom = _clarifyMessagesNearBottom(messages);
+  // #7616: growing the free-text field must not yank a reader who has scrolled
+  // away back to the bottom. `wasNearBottom` is sampled BEFORE the resize is
+  // applied, so a user who scrolls up inside the settle window (the 420 ms
+  // timer below) is still carrying a stale "they were at the bottom" answer and
+  // gets re-pinned. Capture the scroll-input generation now and require it to be
+  // unchanged at settle time, alongside the live unpinned flag. The reservation
+  // is still updated unconditionally — only the scroll is conditional.
+  const scheduledGeneration = (typeof _messageScrollInputGeneration === "number")
+    ? _messageScrollInputGeneration
+    : null;
+  const stillEligibleToScroll = () => {
+    if (typeof _messageScrollInputGeneration === "number" && scheduledGeneration !== null
+        && _messageScrollInputGeneration !== scheduledGeneration) {
+      return false; // the reader moved between scheduling and settling
+    }
+    if (typeof _messageUserUnpinned !== "undefined" && _messageUserUnpinned) {
+      return false; // the reader has explicitly scrolled up
+    }
+    return true;
+  };
   if (!card || !card.classList.contains("visible")) {
     messages.classList.remove("clarify-open");
     messages.classList.remove("clarify-collapsed");
     messages.style.removeProperty("--clarify-card-height");
     messages.style.removeProperty("--clarify-dock-height");
-    if (wasNearBottom && typeof scrollToBottom === "function" && typeof requestAnimationFrame === "function") {
+    if (wasNearBottom && stillEligibleToScroll() && typeof scrollToBottom === "function" && typeof requestAnimationFrame === "function") {
       requestAnimationFrame(scrollToBottom);
     }
     return;
@@ -9304,7 +9324,7 @@ function _syncClarifyTranscriptSpace(card, opts) {
     if (h > 0) {
       messages.style.setProperty(collapsed ? "--clarify-dock-height" : "--clarify-card-height", Math.ceil(h + 24) + "px");
     }
-    if (wasNearBottom && typeof scrollToBottom === "function") scrollToBottom();
+    if (wasNearBottom && stillEligibleToScroll() && typeof scrollToBottom === "function") scrollToBottom();
   };
   if (opts.immediate) measure();
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(measure);
@@ -9637,6 +9657,13 @@ function showClarifyCard(pending) {
     // newline path the now-multiline field needs. Re-measure on a timer so the
     // box grows with the newline the browser inserts.
     input.onkeydown = (e) => {
+      // #7616: an Enter that is committing an IME composition is not a send.
+      // Chromium's IMEs report key:"Process", but WebKit — including the macOS
+      // app's WKWebView — delivers key:"Enter" with isComposing:true, so
+      // confirming a Japanese or Chinese word would submit a half-typed answer.
+      // keyCode 229 is the legacy signal for the same case. The composer already
+      // carries this guard; the clarify field did not.
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === 'Enter' && e.shiftKey) {
         setTimeout(_autoResizeClarifyInput, 0);
         return;
