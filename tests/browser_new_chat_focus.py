@@ -81,10 +81,15 @@ def _start_fresh_chat(page, trigger):
     if trigger == "button":
         page.click("#btnNewChat")
     elif trigger == "slash":
-        # The first slash command after page load starts the skill, bundle and agent
-        # metadata loaders; each one re-opens the autocomplete when it lands, which can
-        # swallow the second Enter. Warm them first so the typed sequence is
-        # deterministic (the race is in this driver, not in /new).
+        # This agent-free gate checks /new and session focus, not installed skills.
+        # Give the optional skills loader a valid empty result before autocomplete
+        # warms, so a missing skills module cannot reopen the dropdown between Enters.
+        page.route(
+            "**/api/skills",
+            lambda route: route.fulfill(
+                status=200, content_type="application/json", body='{"skills":[]}'
+            ),
+        )
         page.evaluate(
             "() => Promise.all([loadSkillCommands(), loadBundleCommands(),"
             " loadAgentCommandMetadata()])"
