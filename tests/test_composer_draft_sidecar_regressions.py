@@ -4,6 +4,7 @@ import json
 import sqlite3
 import threading
 import copy
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,15 +32,16 @@ def _build_draft_env(tmp_path, monkeypatch):
     return models, routes, session_dir
 
 
-def _post_json(monkeypatch, routes, path, body):
+def _post_json(monkeypatch, routes, path, body, handler=None):
     captured = {}
-    handler = SimpleNamespace(
-        command="POST",
-        wfile=None,
-        send_response=lambda status: None,
-        send_header=lambda key, value: None,
-        end_headers=lambda: None,
-    )
+    if handler is None:
+        handler = SimpleNamespace(
+            command="POST",
+            wfile=None,
+            send_response=lambda status: None,
+            send_header=lambda key, value: None,
+            end_headers=lambda: None,
+        )
 
     monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
     monkeypatch.setattr(routes, "read_body", lambda _handler: body)
@@ -460,6 +462,76 @@ def test_draft_post_for_diskless_session_materializes_main_session_and_sidecar(
     models.SESSIONS.clear()
     loaded = models.Session.load(sid)
     assert loaded.composer_draft == {"text": text, "files": files}
+
+
+def test_slow_draft_post_without_safe_print_attribute_still_saves(tmp_path, monkeypatch):
+    """A handler that lacks ``_safe_webui_print`` must not crash the draft save.
+
+    ``handle_post`` reports its per-stage timing through
+    ``handler._safe_webui_print`` once the save crosses the 0.2s threshold. That
+    is a best-effort diagnostic, so — exactly like the six ``maybe_start()``
+    call sites in ``api/routes.py`` and ``RequestDiagnostics._emit_slow`` — it has
+    to be reached through ``getattr``. This regression used to raise
+    ``AttributeError`` on whichever shard happened to push the save over the
+    threshold, so the timing here is forced deterministically rather than left
+    to the host's speed.
+    """
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = models.new_session().session_id
+    real_save = routes._save_session_draft
+
+    def slow_save(*args, **kwargs):
+        real_save(*args, **kwargs)
+        time.sleep(0.25)  # cross the 0.2s [SLOW] threshold for certain
+
+    monkeypatch.setattr(routes, "_save_session_draft", slow_save)
+
+    status, payload = _post_json(
+        monkeypatch,
+        routes,
+        "/api/session/draft",
+        {"session_id": sid, "text": "non-empty", "files": []},
+    )
+
+    assert status == 200
+    assert payload["draft"] == {"text": "non-empty", "files": []}
+    assert (session_dir / ".drafts" / f"{sid}.json").exists()
+
+
+def test_slow_draft_post_still_reports_the_slow_line_when_supported(tmp_path, monkeypatch):
+    """The guard must not silence the diagnostic on a handler that has it."""
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = models.new_session().session_id
+    real_save = routes._save_session_draft
+    printed = []
+
+    def slow_save(*args, **kwargs):
+        real_save(*args, **kwargs)
+        time.sleep(0.25)
+
+    monkeypatch.setattr(routes, "_save_session_draft", slow_save)
+
+    handler = SimpleNamespace(
+        command="POST",
+        wfile=None,
+        send_response=lambda status: None,
+        send_header=lambda key, value: None,
+        end_headers=lambda: None,
+        _safe_webui_print=printed.append,
+    )
+
+    status, _payload = _post_json(
+        monkeypatch,
+        routes,
+        "/api/session/draft",
+        {"session_id": sid, "text": "non-empty", "files": []},
+        handler=handler,
+    )
+
+    assert status == 200
+    assert any(line.startswith("[SLOW] /api/session/draft") for line in printed)
 
 
 def test_empty_draft_on_diskless_new_chat_does_not_create_draft_file(tmp_path, monkeypatch):
