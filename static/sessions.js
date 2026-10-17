@@ -5653,7 +5653,7 @@ function _renderBatchActionBar(){
       const results=await Promise.all(ids.map(async sid=>{
         const _batchPayload={session_id:sid,archived:true};
         const _snap=sessionsById.get(sid);
-        if(_showAllProfiles&&_snap&&_snap.profile){_batchPayload.all_profiles=true;_batchPayload.profile=_snap.profile;}
+        if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&_snap&&_snap.profile){_batchPayload.all_profiles=true;_batchPayload.profile=_snap.profile;}
         const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(_batchPayload)});
         return {response,session:_snap||null};
       }));
@@ -6287,7 +6287,7 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
     const _archivePayload={session_id:session.session_id,archived};
-    if(_showAllProfiles&&session.profile){_archivePayload.all_profiles=true;_archivePayload.profile=session.profile;}
+    if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&session.profile){_archivePayload.all_profiles=true;_archivePayload.profile=session.profile;}
     const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(_archivePayload)});
     session.archived=archived;
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
@@ -6496,7 +6496,7 @@ function _openSessionActionMenu(session, anchorEl){
         closeSessionActionMenu();
         try{
           const _hidePayload={session_id:session.session_id,archived:true};
-          if(_showAllProfiles&&session.profile){_hidePayload.all_profiles=true;_hidePayload.profile=session.profile;}
+          if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&session.profile){_hidePayload.all_profiles=true;_hidePayload.profile=session.profile;}
           await api('/api/session/archive',{method:'POST',body:JSON.stringify(_hidePayload)});
           _optimisticallyArchiveSessionInList(session.session_id,true);
           session.archived=true;
