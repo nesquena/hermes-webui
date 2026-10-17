@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Insights: pick an exact date range.** The period menu has a Custom range… option with Start and End date pickers (labelled, translated in all 15 languages), so usage, cost and model numbers can cover any window, not just the presets. Today is always selectable, and typing a date no longer clears the field. Thanks @silent-reader-cn. (#6970)
+
 - **Kanban Scheduled column.** Scheduled tasks get their own board column, and the task editor, task detail and bulk
   status menu can set and show the Scheduled status (the sidebar count used to show the raw key). Thanks @webtecnica.
   (#7906, fixes #7900)

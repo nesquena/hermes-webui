@@ -4515,6 +4515,9 @@ async function copyLogsAll() {
 }
 
 // ── Insights panel ──
+// Latest-request generation counter: an older /api/insights response that
+// resolves after a newer request must not overwrite the newer render.
+let _insightsReqToken = 0;
 const STATIC_MODEL_HEALTH_ROWS = [
   {id:'openai/gpt-5.4-mini', provider:'OpenAI', inputCostPerM:0.25, outputCostPerM:2.00, replacement:'Default economical general-purpose model'},
   {id:'openai/gpt-5.4', provider:'OpenAI', inputCostPerM:2.00, outputCostPerM:10.00, replacement:'Use for complex synthesis; fall back to Mini for routine turns'},
@@ -4548,23 +4551,113 @@ async function loadInsights(animate) {
     refreshBtn.disabled = true;
   }
   const period = ($('insightsPeriod') || {}).value || '30';
+  // Re-cap the custom-range pickers on every refresh: a tab left open across
+  // midnight otherwise keeps yesterday as `max` and today stays unselectable
+  // (greptile P2, 2026-10-15T22:36:54Z, static/panels.js:4604).
+  _insightsSyncDateLimits();
+  const qs = new URLSearchParams();
+  if (period === 'custom') {
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    const startVal = startEl && startEl.value;
+    const endVal = endEl && endEl.value;
+    // Send RAW YYYY-MM-DD strings, not browser-local epoch seconds: the
+    // server interprets them in ITS OWN timezone, so a browser in another
+    // timezone can never shift the selected calendar day.
+    if (startVal) qs.set('start', startVal);
+    if (endVal) qs.set('end', endVal);
+  } else {
+    qs.set('days', period);
+  }
+  // Latest-request guard: date inputs fire one load per change; a slower
+  // earlier response must never overwrite a newer range.  Each call takes
+  // its own token; only the newest token may render.
+  const reqToken = ++_insightsReqToken;
   try {
     const [data, wikiStatus, skillUsage] = await Promise.all([
-      api(`/api/insights?days=${period}`),
+      api(`/api/insights?${qs.toString()}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
     ]);
+    if (reqToken !== _insightsReqToken) return;
     _renderInsights(data, box, wikiStatus, skillUsage);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
+    if (reqToken !== _insightsReqToken) return;
     box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
   } finally {
-    if (animate && refreshBtn) {
+    // Restore the refresh button when THIS request is the latest, regardless
+    // of whether it initiated the animation.  A superseding NON-animated
+    // request (e.g. a date change while an animated refresh is in flight)
+    // owns the shared control now; gating restoration on `animate` would
+    // leave the button permanently disabled after A(superseded)->B(latest).
+    if (refreshBtn && reqToken === _insightsReqToken) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
   }
+}
+
+// A future bound is not a servable window: cap both date controls at today so
+// the platform picker cannot offer dates the server will reject (#6970).
+// Lives in one helper because the cap must be recomputed whenever it could have
+// aged: entering Custom, every refresh, and whenever a picker is opened. Writing
+// it only from insightsPeriodChange left a panel that stayed open across
+// midnight with yesterday as the cap, so today was unselectable until the user
+// detoured through a preset (greptile P2, 2026-10-15T22:36:54Z,
+// static/panels.js:4604).
+//
+// Write `max` ONLY when the value actually changes.  Assigning it
+// unconditionally re-set the `<input type="date">` control on every segment
+// edit (the inputs run loadInsights() from onchange, which calls this helper),
+// and Chromium drops the in-progress segment editor when `max` is written -
+// even to the same string - so typing "09012026" into the month/day/year
+// segments ended with both fields empty and the request losing its range
+// (maintainer re-gate, 2026-10-16T01:48:06Z).
+function _insightsSyncDateLimits() {
+  const startEl = $('insightsStart');
+  const endEl = $('insightsEnd');
+  if (!startEl || !endEl) return;
+  const today = _toDateLocal(new Date());
+  if (startEl.max !== today) startEl.max = today;
+  if (endEl.max !== today) endEl.max = today;
+}
+
+function insightsPeriodChange() {
+  const sel = $('insightsPeriod');
+  const customWrap = $('insightsCustomRange');
+  if (!sel || !customWrap) return;
+  const isCustom = sel.value === 'custom';
+  customWrap.style.display = isCustom ? 'flex' : 'none';
+  if (isCustom) {
+    // Default the range to the last 30 calendar days only when the user
+    // hasn't already picked a custom range — so Custom(A/B) → preset →
+    // Custom still shows A/B instead of silently erasing it.
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    _insightsSyncDateLimits();
+    if (startEl && endEl && !startEl.value && !endEl.value) {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 29);  // inclusive: start..today = 30 days
+      endEl.value = _toDateLocal(end);
+      startEl.value = _toDateLocal(start);
+    }
+  }
+  loadInsights();
+}
+
+function insightsRangeInputs() {
+  // Each date change is its own request generation; the guard in
+  // loadInsights() drops any stale in-flight response.
+  _insightsReqToken++;
+  loadInsights();
+}
+
+function _toDateLocal(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function _formatLlmWikiTimestamp(value) {
@@ -4741,7 +4834,8 @@ async function _openWikiBrowser() {
  *   31–90 days → 2-day buckets
  *   91–180 days → 3-day buckets
  *   181–365 days → 8-day buckets
- * Result is always <= ~52 bars.
+ *   >365 days → dynamic (ceil(len/52)) to keep chart bounded
+ * Result is always <= ~52 bars (tested up to 5 calendar years ≈1826 days).
  * Each bucket row has:
  *   - label: short label for axis (e.g. MM-DD or MM-DD–MM-DD)
  *   - title: full tooltip title (e.g. 2026-01-01 – 2026-01-05)
@@ -4753,7 +4847,7 @@ function _bucketDailyTokensForChart(rows) {
   const len = rows.length;
   if (len <= 30) return rows;  // per-day resolution for 7/30-day ranges
 
-  // Target <= 75 bars; derive bucket size
+  // Target <= 52 bars; derive bucket size
   let bucketSize;
   if (len <= 90) {
     bucketSize = 2;
@@ -4762,7 +4856,7 @@ function _bucketDailyTokensForChart(rows) {
   } else if (len <= 365) {
     bucketSize = 8;  // <=52 bars for 365 days (ceil(365/8)=46)
   } else {
-    bucketSize = 8;  // fallback for >365 (shouldn't occur in practice)
+    bucketSize = Math.ceil(len / 52);  // 5-year ≈1826 → 36 → 51 bars, preserves invariant
   }
 
   const result = [];
@@ -4927,23 +5021,57 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
       </div>
     </div>`;
 
-  box.innerHTML = `
-    ${_renderSystemHealthPanel()}
-    ${_renderLlmWikiStatus(wikiStatus)}
-    ${_renderSkillUsage(skillUsage)}
-    <div class="insights-grid">
-      ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
-    </div>
-    ${dailyHtml}
-    ${modelHealthHtml}
-    <div class="insights-row insights-usage-grid">
-      ${tokenCards}
-      ${modelsHtml}
-    </div>
-    ${dowHtml}
-    ${hodHtml}
-    <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(t('insights_footer').replace('{days}', d.period_days))}</div>
-  `;
+  const periodSel = $('insightsPeriod');
+  // The server tells us which window it ACTUALLY served: "custom" means a
+  // real absolute window was queried (after swap/clamp/DST/5yr-cap), while
+  // "trailing" means the request fell back to the trailing days-window (e.g.
+  // an all-future or fully-invalid custom range).  Never trust the raw
+  // selector/inputs for a range that the server rejected and replaced - that
+  // would render a future/invalid range while the cards/chart show the
+  // trailing query (Greptile P1: 'custom range normalizes to trailing').
+  // Selective fall-back disclosure (#6970 UX r1): the selector says "custom"
+  // but the server served a trailing window instead (an all-future or
+  // fully-invalid range).  Say so right next to the inputs - the footer that
+  // carries the served window sits below the fold.
+  const fellBack = !!(periodSel && periodSel.value === 'custom' && d.mode !== 'custom');
+  const rangeNoteEl = $('insightsRangeNote');
+  if (rangeNoteEl) {
+    rangeNoteEl.textContent = fellBack
+      ? t('insights_range_fallback').replace('{days}', d.period_days)
+      : '';
+    rangeNoteEl.classList.toggle('is-visible', fellBack);
+  }
+  for (const dateEl of [$('insightsStart'), $('insightsEnd')]) {
+    if (!dateEl) continue;
+    if (fellBack) dateEl.setAttribute('aria-invalid', 'true');
+    else dateEl.removeAttribute('aria-invalid');
+  }
+  const isCustomRange = periodSel && periodSel.value === 'custom' && d.mode === 'custom';
+  // The server reports the EFFECTIVE calendar window it actually queried
+  // (after swap, DST alignment, and the 5-year cap).  Use it verbatim; the
+  // trailing footer shows the literal day count instead.
+  const effStart = isCustomRange && d.effective_start;
+  const effEnd = isCustomRange && d.effective_end;
+  const rangeLabel = isCustomRange
+    ? (effStart && effEnd ? t('insights_footer_range').replace('{start}', effStart).replace('{end}', effEnd) : t('insights_footer').replace('{days}', d.period_days))
+    : t('insights_footer').replace('{days}', d.period_days);
+    box.innerHTML = `
+      ${_renderSystemHealthPanel()}
+      ${_renderLlmWikiStatus(wikiStatus)}
+      ${_renderSkillUsage(skillUsage)}
+      <div class="insights-grid">
+        ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
+      </div>
+      ${dailyHtml}
+      ${modelHealthHtml}
+      <div class="insights-row insights-usage-grid">
+        ${tokenCards}
+        ${modelsHtml}
+      </div>
+      ${dowHtml}
+      ${hodHtml}
+      <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(rangeLabel)}</div>
+    `;
 }
 
 async function clearConversation() {

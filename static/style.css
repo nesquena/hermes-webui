@@ -6916,6 +6916,21 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-stat-value{font-size:22px;font-weight:700;color:var(--text);}
 .insights-stat-label{font-size:11px;color:var(--muted);margin-top:4px;}
 .insights-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
+/* Insights absolute-range bar (#6970): ALL layout/visual styles live here so the
+   controls carry NO inline styles.  An inline `background` on the period
+   <select> resets the shared select chevron background-image while
+   `appearance:none` remains, which left the control looking like static text. */
+.insights-range-bar{display:flex;flex-direction:column;gap:8px;padding:12px 12px 6px;}
+.insights-range-bar .insights-period-select{width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+#insightsCustomRange{display:none;flex-direction:column;gap:6px;}
+#insightsCustomRange input[type="date"]{width:100%;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;padding:5px 10px;font-size:12px;}
+#insightsCustomRange input[type="date"]:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg);}
+.insights-range-field{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.insights-range-field-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}
+/* Selective-fall-back disclosure (#6970 UX r1): shown only when the selector
+   is "custom" but the server served a trailing window instead. */
+.insights-range-note{display:none;font-size:11px;color:var(--muted);line-height:1.35;}
+.insights-range-note.is-visible{display:block;}
 /* Usage row (Token Breakdown + Models): 25/75 split so the Models table gets
    more of the row and long model IDs (e.g. "vendor/org/model:quant") are
    ellipsized less — allocation, not a full-name guarantee (very long IDs
