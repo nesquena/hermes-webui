@@ -601,6 +601,13 @@ def test_endpoint_db_failure_returns_500_and_keeps_files(tmp_path, monkeypatch):
 
     _install_home(monkeypatch, tmp_path)
     _install_retirement_stub(monkeypatch, lambda _conn, _ids: None)
+    _state_db, conn = _make_db(tmp_path)
+    try:
+        # The session row survives an aborted transaction: nothing committed.
+        _seed_session(conn, "sid")
+        conn.commit()
+    finally:
+        conn.close()
     session_dir = _install_routes_env(monkeypatch, tmp_path, OrderedDict())
     monkeypatch.setattr(models, "delete_cli_session", lambda sid: False)
     (session_dir / "sid.json").write_text("{}", encoding="utf-8")
@@ -611,6 +618,62 @@ def test_endpoint_db_failure_returns_500_and_keeps_files(tmp_path, monkeypatch):
     assert captured["payload"]["ok"] is False
     assert captured["payload"]["error"] == "state_db_cleanup_failed"
     assert (session_dir / "sid.json").exists()
+
+
+def test_endpoint_finishes_cleanup_when_the_commit_already_landed(tmp_path, monkeypatch):
+    """A pending transcript cleanup must not strand a deleted conversation.
+
+    ``delete_cli_session`` returns False after committing the row delete when
+    the transcript unlink failed; the cleanup manifest retries that part. The
+    route still has to drop the sidecar, index entry and terminal, or the
+    session reappears while its DB rows are gone.
+    """
+    import api.models as models
+    import api.terminal as terminal
+
+    sessions = OrderedDict({"sid": object()})
+    _install_home(monkeypatch, tmp_path)
+    _state_db, conn = _make_db(tmp_path)
+    conn.close()  # row-free state.db: the delete already committed
+    session_dir = _install_routes_env(monkeypatch, tmp_path, sessions)
+    closed = []
+    monkeypatch.setattr(
+        terminal, "close_terminal", lambda sid: closed.append(sid), raising=False
+    )
+    monkeypatch.setattr(models, "delete_cli_session", lambda sid: False)
+    (session_dir / "sid.json").write_text("{}", encoding="utf-8")
+
+    captured = _post_delete(monkeypatch, "sid")
+
+    assert captured["status"] == 200
+    assert captured["payload"]["ok"] is True
+    assert not (session_dir / "sid.json").exists()
+    assert "sid" not in sessions
+    assert closed == ["sid"]
+
+
+def test_eviction_runs_before_the_session_lock(tmp_path, monkeypatch):
+    """The lifecycle commit can wait on a provider; it must not hold the lock."""
+    import api.config as config
+    import api.models as models
+    import api.routes as routes
+
+    _install_home(monkeypatch, tmp_path)
+    session_dir = _install_routes_env(monkeypatch, tmp_path, OrderedDict())
+    lock = threading.Lock()
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda sid: lock)
+    seen = {}
+
+    def evict(sid):
+        seen["locked"] = lock.locked()
+
+    monkeypatch.setattr(config, "_evict_session_agent", evict, raising=False)
+    monkeypatch.setattr(models, "delete_cli_session", lambda sid: True)
+    (session_dir / "sid.json").write_text("{}", encoding="utf-8")
+
+    _post_delete(monkeypatch, "sid")
+
+    assert seen == {"locked": False}
 
 
 def test_endpoint_success_clears_db_then_files(tmp_path, monkeypatch):

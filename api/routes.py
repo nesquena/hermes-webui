@@ -18096,6 +18096,17 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
+        try:
+            p = (SESSION_DIR / f"{sid}.json").resolve()
+            p.relative_to(SESSION_DIR.resolve())
+        except Exception:
+            return bad(handler, "Invalid session_id", 400)
+        # Evict outside the mutation lock: the lifecycle commit performs provider
+        # I/O (it can wait on another commit) and must not hold a per-session
+        # lock. It runs before the DB delete because that commit writes state.db
+        # and would otherwise recreate the session being deleted.
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
@@ -18103,23 +18114,13 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
         try:
-            try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            # Evict outside the mutation lock: lifecycle commit may perform
-            # provider I/O and must not hold a per-session Session lock. It runs
-            # before the DB delete because the lifecycle commit writes state.db
-            # and would otherwise recreate the session being deleted.
-            from api.config import _evict_session_agent
-            _evict_session_agent(sid)
             # Delete state.db rows BEFORE any user-visible file. A refusal (live
             # gateway work, unfenceable ledger) or a failed commit must leave the
             # whole session intact instead of stranding an unrecoverable
             # half-delete: the sidecar, index entry, backups and tombstone are
             # not restored by the DB rollback.
             state_db_cleanup_failed = False
+            delete_raised = False
             if not is_messaging_session:
                 try:
                     from api.models import SessionDeleteRefused, delete_cli_session
@@ -18133,16 +18134,32 @@ def handle_post(handler, parsed) -> bool:
                     )
                 except Exception:
                     state_db_cleanup_failed = True
+                    delete_raised = True
                     logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
                 if state_db_cleanup_failed:
-                    return j(
-                        handler,
-                        {
-                            "ok": False,
-                            "error": "state_db_cleanup_failed",
-                            "action": "session_delete",
-                        },
-                        status=500,
+                    # A False return covers an aborted transaction and a commit
+                    # whose artifact cleanup is still pending (its manifest
+                    # retries it). Only a surviving row proves nothing was
+                    # committed; then user files must stay. Otherwise the
+                    # conversation is already gone and the remaining cleanup
+                    # must still run, or the sidecar, index entry and tombstone
+                    # would strand a deleted session. An exception proves
+                    # nothing either way, so it keeps failing closed.
+                    from api.models import state_db_has_session
+
+                    if delete_raised or state_db_has_session(sid) is not False:
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "error": "state_db_cleanup_failed",
+                                "action": "session_delete",
+                            },
+                            status=500,
+                        )
+                    logger.warning(
+                        "Session %s committed; transcript cleanup is still pending",
+                        sid,
                     )
             # Runtime cleanup only after the delete is durable: closing the
             # terminal of a refused delete would kill the very work that made

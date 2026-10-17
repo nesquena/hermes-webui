@@ -15373,6 +15373,33 @@ def _retire_gateway_runtime_ledger(conn, session_ids, tables):
         raise
 
 
+def state_db_has_session(sid):
+    """Return True/False when state.db can answer for *sid*, None when it cannot.
+
+    ``delete_cli_session`` returns False both for an aborted transaction and
+    for a commit whose artifact cleanup is still pending (the cleanup manifest
+    keeps retrying it). Callers that must decide whether user files are still
+    safe to remove need the difference: only a missing row proves the delete
+    already committed.
+    """
+    try:
+        from api.profiles import get_active_hermes_home
+
+        db_path = Path(get_active_hermes_home()).expanduser().resolve() / 'state.db'
+        if not db_path.exists():
+            return False
+        import sqlite3
+
+        with closing(sqlite3.connect(str(db_path))) as conn:
+            row = conn.execute(
+                "SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),)
+            ).fetchone()
+        return row is not None
+    except Exception:
+        logger.debug("Could not query state.db for session %s", sid, exc_info=True)
+        return None
+
+
 def delete_cli_session(sid) -> bool:
     """Delete a CLI session while serializing manifest and DB cleanup."""
     try:
