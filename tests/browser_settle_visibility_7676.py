@@ -320,14 +320,27 @@ def run(pw, base, state_settings, virt, expanded, idle_probe, history_len):
       });
     }""", {'sid': sid, 'text': FINAL_TEXT})
 
-    # Wait only for the settle to have HAPPENED; the measurements themselves
-    # were taken in-page at the settle frame and the first animation frame, so
-    # the 25ms poll granularity can no longer hide a transient blank.
+    # Wait for the settle to have HAPPENED *and* for BOTH in-page samples to
+    # exist. The measurements themselves were taken in-page at the settle frame
+    # and the first animation frame, so the 25ms poll granularity can no longer
+    # hide a transient blank -- but `S.busy` clearing is observed by python
+    # BEFORE the sampler has finished: `at_settle` is filled by an awaited
+    # in-page function and `first_frame` one requestAnimationFrame later still.
+    # Reading on the busy->idle edge therefore snapshots `first_frame: null` and
+    # keeps that early snapshot for the whole run. Wait for both slots.
     settled = None
     for _ in range(120):
         page.wait_for_timeout(25)
-        if not page.evaluate("()=>!!S.busy"):
+        if page.evaluate(
+            "()=>!!(window.__settleSamples"
+            "&&window.__settleSamples.at_settle"
+            "&&window.__settleSamples.first_frame)"
+        ):
             break
+        if not page.evaluate("()=>!!S.busy"):
+            # The edge has passed; keep polling for the samples themselves, but
+            # give up on the wait below once they stop arriving.
+            continue
 
     samples = page.evaluate("()=>window.__settleSamples||{}")
     same_frame = samples.get('at_settle')
@@ -412,6 +425,7 @@ def run(pw, base, state_settings, virt, expanded, idle_probe, history_len):
         'virt': virt, 'expanded': expanded, 'idle_probe': idle_probe,
         'runtime_checks': runtime_checks,
         'live_before': live_before,
+        'settled': settled,
         'same_frame': same_frame,
         'first_frame': first_frame,
         'after_wait': after_wait,
@@ -428,9 +442,18 @@ def verdict(res):
     for name in ('normalize', 'finalize'):
         if checks.get(name) != 'ok':
             bad.append(f'runtime:{name}: {checks.get(name)}')
+    # The two in-page samples are REQUIRED: they are the measurements this probe
+    # exists to take, at the settle edge and the frame after it. A sample that
+    # was never captured is not "nothing to check" -- skipping it is how CI
+    # passed without ever having looked at the settle frame
+    # (Greptile P2 discussion_r4302597979). after_wait/after_idle stay optional:
+    # they are conditional on the settle succeeding / the idle probe running.
     for label in ('same_frame', 'first_frame', 'after_wait', 'after_idle'):
         r = res.get(label)
         if not r:
+            if label in ('same_frame', 'first_frame'):
+                bad.append(f'{label}: sample missing — the in-page settle '
+                           'sampler never recorded it')
             continue
         if 'error' in r:
             bad.append(f'{label}: {r}')
@@ -521,7 +544,7 @@ def main() -> int:
                     print(f'VARIANT virt={virt} expanded={expanded} idle={idle_probe} -> '
                           f'{"FAIL" if bad else "ok"}')
                     print('  runtime:', json.dumps(res['runtime_checks']))
-                    for label in ('live_before', 'same_frame', 'next_frame', 'after_wait', 'after_idle'):
+                    for label in ('live_before', 'same_frame', 'first_frame', 'after_wait', 'after_idle'):
                         r = res.get(label)
                         if not r or 'error' in r:
                             continue
