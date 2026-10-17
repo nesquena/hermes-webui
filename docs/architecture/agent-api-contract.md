@@ -34,6 +34,42 @@ The durable target is that multi-container WebUI should not need a direct
 HTTP endpoints and a small versioned client/shared-schema package where pure
 helpers are genuinely shared code.
 
+## Regression gate: the coupling ratchet
+
+The audit above is a report. On its own it does not stop the residual surface
+from growing again — a later PR could add `from tools.registry import registry`
+and every existing test would still pass, because the current coverage only
+asserts that findings *exist*.
+
+So the residual surface is frozen in a committed baseline:
+
+| Artifact | Role |
+| --- | --- |
+| `docs/architecture/agent-source-dependency-baseline.json` | The frozen inventory of today's coupling: 106 sites across the seven dependency classes above. |
+| `scripts/agent_source_dependency_gate.py` | Fails CI when the audit surfaces a coupling site that is not in the baseline. |
+| `.github/workflows/tests.yml` | Runs the gate in the `changes` job, alongside the scope-undef and ESLint runtime gates. |
+
+Two properties matter, and both are pinned by
+`tests/test_agent_source_dependency_gate.py`:
+
+- **Keyed by `path::anchor`, never by line number.** Inserting an unrelated line
+  above an existing import does not fail the gate. Only a genuinely new coupling
+  site does.
+- **Removing coupling never blocks a PR.** A baseline entry with no matching
+  finding is reported as *resolved* and still exits 0. Shrinking the residual
+  surface is the entire goal of this issue, so progress must never be a reason to
+  block a change.
+
+Recording progress (or an intentional, inherent coupling — single-container
+in-process operation is by-design and out of this issue's scope) is explicit:
+
+```powershell
+python scripts/agent_source_dependency_gate.py --update
+```
+
+Reviewing a `--update` diff is therefore the moment to decide whether a new site
+is a real regression or a deliberate, classified exception.
+
 ## Dependency classes
 
 | Audit class | Current surface | Replacement classification |
