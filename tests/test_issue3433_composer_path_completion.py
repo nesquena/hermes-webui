@@ -24,6 +24,10 @@ def _run_commands_js(script_body: str) -> dict:
           console,
           URL,
           URLSearchParams,
+          // The composer path autocomplete debounces through setTimeout/
+          // clearTimeout, so the browser-like env must expose real timers.
+          setTimeout,
+          clearTimeout,
           localStorage: {{ getItem(){{return null;}}, setItem(){{}}, removeItem(){{}} }},
           t: (key) => key,
           api: async (path) => {{
