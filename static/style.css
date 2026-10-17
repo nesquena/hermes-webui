@@ -6117,6 +6117,10 @@ main.main > #mainPlugin{display:none;}
 .session-item.archived{opacity:.5;}
 .session-item.archived .session-title{font-style:italic;}
 
+/* ── Done sessions (structural `done_at`, not a title prefix) ── */
+.session-done-badge{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:color-mix(in srgb,var(--success,#22c55e) 16%,transparent);color:var(--success,#22c55e);margin-left:6px;flex-shrink:0;user-select:none;cursor:default;letter-spacing:.02em;}
+.session-item.active .session-done-badge{background:color-mix(in srgb,var(--success,#22c55e) 26%,transparent);}
+
 /* ── Subagent session tree (#494) ── */
 .session-lineage-count{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:rgba(148,163,184,.14);color:var(--muted);margin-left:6px;flex-shrink:0;user-select:none;cursor:default;}
 .session-lineage-count.expandable{cursor:pointer;}

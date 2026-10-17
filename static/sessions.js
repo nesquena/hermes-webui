@@ -11366,7 +11366,7 @@ function renderSessionListFromCache(){
     const attention=_sessionAttentionState(s)||_sessionAttentionState({_child:true,attention:s._child_session_attention});
     const attentionClass=attention?(attention.kind==='approval'?' attention-approval':(attention.kind==='clarify'?' attention-clarify':' attention-attention')):'';
     const readOnly=_isReadOnlySession(s);
-    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
+    el.className='session-item'+(isActive?' active':'')+(isActive&&S.session&&S.session._flash?' new-flash':'')+(s.archived?' archived':'')+(s.done_at?' done':'')+(ownStreaming?' streaming':'')+(hasUnread?' unread':'')+(attention?' needs-attention':'')+attentionClass;
     const swipeReturnOffset=_sessionSwipeReturnOffsets.get(s.session_id);
     if(swipeReturnOffset!==undefined){
       _sessionSwipeReturnOffsets.delete(s.session_id);
@@ -11553,6 +11553,18 @@ function renderSessionListFromCache(){
       titleRow.appendChild(segmentCountEl);
     }
     const childCount=typeof s._child_session_count==='number'?s._child_session_count:(Array.isArray(s._child_sessions)?s._child_sessions.length:0);
+    // Done marker: `done_at` is workflow state written by the close/checkmark
+    // scripts through POST /api/session/mark-done, never inferred from the
+    // title or from silence. Distinct from `.archived` (storage): both can hold.
+    if(s.done_at){
+      const doneEl=document.createElement('span');
+      doneEl.className='session-done-badge';
+      const doneLabel=t('session_done_badge');
+      doneEl.textContent=doneLabel;
+      const doneMs=Number(s.done_at)*1000;
+      doneEl.title=t('session_done_tooltip', _formatRelativeSessionTime(doneMs));
+      titleRow.appendChild(doneEl);
+    }
     if(childCount>0){
       const childCountEl=document.createElement('span');
       childCountEl.className='session-child-count';
