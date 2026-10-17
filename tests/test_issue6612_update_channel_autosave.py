@@ -318,7 +318,9 @@ def test_dedicated_channel_writer_exists():
 
 def test_settings_panel_posts_use_shared_queue_and_channel_is_single_owner():
     """Every settings-panel writer shares the queue and Save Settings carries no channel."""
-    assert PANELS_JS.count("_enqueueSettingsPost({") == 10
+    # 11 writers: the ten original producers plus the composer width picker's
+    # width-only autosave (#7497), which shares the same serialized queue.
+    assert PANELS_JS.count("_enqueueSettingsPost({") == 11
     direct_settings_calls = re.findall(r"api\(\s*'/api/settings'\s*,", PANELS_JS)
     assert direct_settings_calls == ["api('/api/settings',"], (
         f"only the queue helper may call settings POST/GET with options; got {direct_settings_calls!r}"
@@ -327,6 +329,7 @@ def test_settings_panel_posts_use_shared_queue_and_channel_is_single_owner():
     assert "_settingsPanelPostQueue=Promise.resolve()" in PANELS_JS
     producer_blocks = (
         "_autosaveAppearanceSettings",
+        "_scheduleContentWidthAutosave",
         "_autosavePreferencesSettings",
         "_saveUpdateChannelFromSelector",
         "handlePluginEnableToggle",
