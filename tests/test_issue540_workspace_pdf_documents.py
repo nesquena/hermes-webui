@@ -236,6 +236,28 @@ def test_extract_pdf_text_stops_decoding_at_the_char_cap(monkeypatch):
     assert pdf_documents.PDF_PREVIEW_TRUNCATED_NOTICE in content
 
 
+def test_extract_pdf_text_keeps_the_opening_text_of_a_capped_page(monkeypatch):
+    """A page that hits a cap must still contribute the text it DID extract.
+
+    The cap flag used to be recorded BEFORE the page was appended, and
+    ``_append`` refuses every piece once ``truncated`` is set — so a long first
+    page produced "Page 1" plus the truncation notice and no document text at
+    all. Clipping the page is the point; throwing it away is the bug.
+    """
+    monkeypatch.setattr(pdf_documents, "MAX_PDF_PREVIEW_CHARS", 200)
+    # 0 disables the line cap, so the character budget is the only thing that can
+    # trip here and this test exercises exactly one boundary.
+    monkeypatch.setattr(pdf_documents, "MAX_PDF_PAGE_TEXT_LINES", 0)
+
+    content, truncated = extract_pdf_text(_pdf_bytes("SENTINEL_HEADING " + "filler " * 200))
+
+    assert truncated is True
+    assert "SENTINEL_HEADING" in content, (
+        "a page that hit the character cap contributed none of its own text"
+    )
+    assert pdf_documents.PDF_PREVIEW_TRUNCATED_NOTICE in content
+
+
 def test_extract_pdf_text_preserves_line_structure():
     """Lists/records/code must survive extraction as lines, not one run-on line."""
     numbered = "\n".join(f"{index}. entry {index}" for index in range(1, 6))
