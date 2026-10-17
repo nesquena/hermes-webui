@@ -449,13 +449,23 @@ def find_main_worktree_root(workspace: str | Path) -> Path | None:
             return wt
 
     # 4. Conservative fallback: unnest to the parent of the metadata dir only
-    #    when that parent is itself a real checkout. Otherwise None -> the
-    #    caller keeps the workspace's own toplevel (no worse than today).
+    #    when that parent is itself a real checkout *that owns this common dir*.
+    #    Being a checkout is not enough: a repository can keep its separate Git
+    #    directory inside an unrelated repo's tree while the checkout lives
+    #    elsewhere, and returning that parent would start the session in the
+    #    wrong project. Otherwise None -> the caller keeps the workspace's own
+    #    toplevel (no worse than today).
     parent = common_path.parent
     if parent.is_dir():
         toplevel = _git_toplevel(parent)
         if toplevel is not None and toplevel == parent.resolve():
-            return toplevel
+            owned = _common_git_dir(parent)
+            if owned is not None:
+                try:
+                    if owned.resolve() == common_path.resolve():
+                        return toplevel
+                except OSError:
+                    pass
     return None
 
 

@@ -158,3 +158,21 @@ def test_non_git_directory_returns_none(git_env):
     plain.mkdir()
     find = _import()
     assert find(plain) is None
+
+
+def test_separate_git_dir_inside_unrelated_repo_is_not_mistaken_for_it(git_env):
+    """P1 on #8162: the fallback must verify the parent OWNS the common dir.
+
+    A checkout can keep ``--separate-git-dir`` inside another repository's tree
+    while the checkout itself lives elsewhere. The parent is a valid checkout,
+    so a parent-only check returns it and starts the session in the wrong
+    project. The parent does not own this common dir, so the answer is None.
+    """
+    host = _init_repo(git_env / "host-repo")
+    checkout = git_env / "elsewhere" / "checkout"
+    checkout.mkdir(parents=True)
+    metadata = host / "nested-metadata"
+    _git("init", "-q", "-b", "main", f"--separate-git-dir={metadata}", cwd=checkout)
+
+    find = _import()
+    assert find(checkout) is None

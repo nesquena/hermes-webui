@@ -27,3 +27,13 @@ On hosts such as macOS, local path resolution via `Path.resolve()` or `os.path.r
 3. **Session & Streaming Lifecycle:**
    - `Session.__init__` and `Session.load` normalize session workspace paths through `_resolve_path(..., profile=profile)`, preserving target-side paths for remote profiles and preventing corruption of `session.workspace` or `session.created_workspace`.
    - Streaming execution (`_run_agent_streaming`) and multimodal asset root resolution preserve the remote session workspace when updating runtime run state.
+
+---
+
+## 3. Session Worktree Placement
+
+When a session starts with worktrees enabled, its git worktree is created beneath the **main working tree** of the repository (the primary checkout's `.worktrees/`), never beneath the worktree the session happened to start in.
+
+- **Why:** a workspace that is itself a linked worktree (the common case once `last_workspace.txt` carries a previous session's tree) would otherwise nest the new tree *inside* the current one. A nest is invisible to every pruner — `hermes worktree prune` only audits direct children of `<repo>/.worktrees/` — so it leaks disk permanently.
+- **Resolution:** `find_main_worktree_root()` resolves the working tree that *owns* the common git dir. The ordinary `<main>/.git` and linked-worktree shapes resolve directly; `--separate-git-dir` checkouts and submodules resolve through the `gitdir:` gitfile or `core.worktree`, and are validated as real checkouts. A metadata directory is never treated as a checkout, and the fallback refuses a parent that does not own the common dir — starting a session in the wrong project is worse than leaving the path unresolved.
+- **Existing trees are not moved.** Session trees created before this behaviour keep their location; only new sessions use the main-checkout placement.
