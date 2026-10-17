@@ -1,9 +1,187 @@
 """Initialize a discovered Agent source checkout before importing WebUI modules."""
 
+import contextlib
 import importlib
 import os
 from pathlib import Path
 import sys
+import threading
+
+
+#: hermes-agent's internal bridge variable (hermes_bootstrap -> venv_sync,
+#: pm.install). ``hermes_cli.venv_sync.prepare_launch`` skips the relaunch into
+#: the Agent's managed runtime when the process carries one of
+#: ``_SUPPRESSED_VALUES``, and ``pm.install.lazy_installs_allowed`` reads it as an
+#: override of ``security.allow_lazy_installs``. It belongs to whoever starts the
+#: process -- a service unit, the Agent's Docker bridge, the hermetic test
+#: harness -- so the WebUI only reads it: without it this process keeps the
+#: Agent's own relaunch, the shape the launcher's pre-flight probe validates.
+LAZY_INSTALL_GUARD = "HERMES_DISABLE_LAZY_INSTALLS"
+
+#: The values hermes-agent treats as the opt-out. ``lazy_installs_allowed`` and
+#: ``prepare_launch`` accept these spellings, so the boundary uses the same set.
+_SUPPRESSED_VALUES = ("1", "true", "yes")
+
+#: Module whose import carries that launch layer. Its body runs once -- Python
+#: caches the module afterwards -- so an import that finds it already loaded
+#: cannot relaunch anything and the boundary has nothing to override.
+LAUNCH_LAYER_MODULE = "hermes_bootstrap"
+
+#: os.environ and sys.path are process-global, so the snapshot/yield/restore
+#: sequence needs serializing. Without it two overlapping boundaries capture each
+#: other's rewrites and restore out of order: the first exit puts its snapshot
+#: back while the second is still importing, and the second then reinstates the
+#: paths it read from the first. Re-entrant so one thread may nest boundaries.
+_BOUNDARY_LOCK = threading.RLock()
+
+#: Environment the Agent's ``pm.activate_dependencies`` rewrites in whatever
+#: process imports ``hermes_bootstrap``: it exports the checkout plus the Agent's
+#: own selected venv as ``PYTHONPATH``, drops ``VIRTUAL_ENV`` and prepends the
+#: venv's bin to ``PATH``. That venv runs its own Python when a lazy install is
+#: pending, so anything it leaves here makes this process import dependencies it
+#: cannot load.
+_BOUNDARY_ENV = ("PYTHONPATH", "VIRTUAL_ENV", "PATH")
+
+
+#: How far above an entry to look for the ``pyvenv.cfg`` naming its venv.
+_VENV_CFG_DEPTH = 4
+
+
+def _release_from_dir_name(part: str) -> tuple[int, int] | None:
+    """``python3.11`` -> ``(3, 11)``; None for any other directory name."""
+    if not part.startswith("python"):
+        return None
+    major, _, minor = part[len("python") :].partition(".")
+    if not (major.isdigit() and minor.isdigit()):
+        return None
+    return int(major), int(minor)
+
+
+def _venv_release(entry: str) -> tuple[int, int] | None:
+    """The Python release the ``pyvenv.cfg`` above ``entry`` names, if any.
+
+    A config that cannot be read, or that does not spell a ``major.minor``
+    release, is reported as "no release" instead of raising: this runs while
+    the import boundary puts the process back together, and an exception there
+    would strand the environment rewrites the boundary exists to undo.
+    """
+    for candidate in (Path(entry), *Path(entry).parents)[:_VENV_CFG_DEPTH]:
+        config = candidate / "pyvenv.cfg"
+        try:
+            if not config.is_file():
+                continue
+            for line in config.read_text(
+                encoding="utf-8", errors="replace"
+            ).splitlines():
+                name, _, value = line.partition("=")
+                # ``venv`` writes ``version``; uv writes ``version_info``.
+                if name.strip() in ("version", "version_info"):
+                    parts = value.strip().split(".")
+                    if len(parts) < 2:
+                        return None
+                    return int(parts[0]), int(parts[1])
+        except (OSError, ValueError):
+            return None
+        return None
+    return None
+
+
+def _abi_incompatible(entry: str) -> bool:
+    """True when this interpreter cannot import C-extensions from ``entry``.
+
+    ``pm.activate_dependencies`` front-loads the venv selected for the pending
+    install; for a lazy install that is the Agent's own sandbox Python (a 3.14
+    sandbox under a 3.11 server), while an already-installed Agent's venv is
+    built for this interpreter and stays the running Agent's dependency source.
+    """
+    if not entry:
+        return False
+    release = _venv_release(entry)
+    if release is not None:
+        return release != sys.version_info[:2]
+    for part in Path(entry).parts:
+        found = _release_from_dir_name(part)
+        if found is not None and found != sys.version_info[:2]:
+            return True
+    return False
+
+
+def launch_layer_loaded() -> bool:
+    """True once the Agent launch layer is imported and cannot relaunch again."""
+    return LAUNCH_LAYER_MODULE in sys.modules
+
+
+def relaunch_suppressed() -> bool:
+    """True when this process's owner stopped the Agent from relaunching itself."""
+    return os.environ.get(LAZY_INSTALL_GUARD, "").strip().lower() in _SUPPRESSED_VALUES
+
+
+@contextlib.contextmanager
+def agent_import_boundary():
+    """Keep the Agent's in-process activation from resizing this interpreter.
+
+    hermes_bootstrap relaunches the process into the interpreter the Agent runs
+    from, and on a managed install that relaunch is its normal, working path
+    (#7876/#7875): the launcher's pre-flight probe re-execs the same way, so the
+    interpreter the server ends up on is the one the probe validated. The WebUI
+    therefore does not suppress it, and this boundary stays out of the import
+    while the process owner has left it enabled.
+
+    The owner can suppress it, though -- a service unit or ``.env`` carrying
+    ``HERMES_DISABLE_LAZY_INSTALLS=1``, the Agent's Docker bridge, the hermetic
+    test harness -- and then the import activates the Agent's dependency layer
+    *in this interpreter*. ``harden_import_path`` re-fronts the Agent checkout and
+    ``pm.activate_dependencies`` rewrites ``PYTHONPATH``/``VIRTUAL_ENV``/``PATH``
+    and front-loads the venv selected for the pending install, which can belong
+    to another Python release. Left there, that venv resolves the Agent's
+    C-extensions (``pydantic_core._pydantic_core``) inside an interpreter that
+    cannot load them, so the first ``import openai`` fails and every turn fails
+    with it (#7982).
+
+    A suppressed import is therefore handed back the shape it started in: the
+    three variables return untouched, and the ``sys.path`` the activation
+    front-loaded loses only the entries that belong to another Python release. A
+    later boundary -- the first-chat ``run_agent`` import every request can reach
+    -- finds the launch layer cached, cannot relaunch anything, and applies
+    nothing. The Agent's own ``os.putenv``/``os.unsetenv`` wrappers stay in
+    place: they are what keeps its environ array alive under a concurrent read.
+    """
+    # The lock comes first, the check second: a boundary that read
+    # ``launch_layer_loaded`` while another was still importing would see the
+    # launch layer cached -- Python caches it before its body runs -- and
+    # import its dependencies through the venv that boundary is about to drop.
+    with _BOUNDARY_LOCK:
+        if not relaunch_suppressed() or launch_layer_loaded():
+            yield
+            return
+        saved_env = {key: os.environ.get(key) for key in _BOUNDARY_ENV}
+        saved_path = sys.path[:]
+        try:
+            yield
+        finally:
+            # The owner's environment comes back first: it must return even if
+            # the sys.path rebuild below raises. What ``pm.activate_dependencies``
+            # left stays in the order it set, so the installed Agent's venv keeps
+            # resolving its dependencies ahead of the server's paths -- the
+            # precedence it has without this boundary, so the WebUI's earlier
+            # paths cannot shadow the Agent's own version of a shared dependency.
+            # Entries the activation dropped (the interpreter's own
+            # site-packages, which the server booted with) come back after them,
+            # so nothing the server needs is lost.
+            for key, value in saved_env.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+            kept = [
+                entry for entry in sys.path if entry and not _abi_incompatible(entry)
+            ]
+            dropped = [
+                entry
+                for entry in saved_path
+                if entry not in kept and not _abi_incompatible(entry)
+            ]
+            sys.path[:] = kept + dropped
 
 
 def activate_managed_agent() -> None:
@@ -28,7 +206,10 @@ def activate_managed_agent() -> None:
         if agent_dir not in sys.path:
             sys.path.insert(1, agent_dir)
         try:
-            importlib.import_module("hermes_bootstrap")
+            # Boundary: hermes_bootstrap's module-level launch layer would
+            # otherwise replace this WebUI process with its sandbox.
+            with agent_import_boundary():
+                importlib.import_module("hermes_bootstrap")
         except Exception as exc:  # noqa: BLE001 - SystemExit (relaunch/repair exit) still propagates
             # A broken Agent must not stop WebUI from starting: before this hook the
             # Agent import was lazy and an ImportError only disabled chat, leaving the

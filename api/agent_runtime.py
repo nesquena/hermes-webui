@@ -26,6 +26,7 @@ from api.config import (
     _DEFAULT_STATE_HOME,
 )
 from api.subprocess_utils import windows_hide_flags
+from managed_agent_startup import agent_import_boundary
 
 _RESTART_REQUIRED_MESSAGE = (
     "Hermes Agent was updated while Hermes WebUI was running. "
@@ -439,7 +440,13 @@ def ensure_agent_runtime_current() -> None:
 def require_ai_agent_class():
     """Import ``AIAgent`` after proving the loaded source revision is current."""
     ensure_agent_runtime_current()
-    from run_agent import AIAgent  # noqa: PLC0415
+    # First-chat boundary: run_agent imports hermes_bootstrap, which activates
+    # the Agent's dependency layer in this process when the process owner
+    # suppressed its relaunch. It is a no-op otherwise, and puts the owner's
+    # environment and the running interpreter's own sys.path back afterwards
+    # (#7982).
+    with agent_import_boundary():
+        from run_agent import AIAgent  # noqa: PLC0415
 
     _capture_loaded_agent_revision()
     return AIAgent
