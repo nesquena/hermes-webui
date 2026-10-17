@@ -80,6 +80,57 @@ def result(**over):
     return out
 
 
+class TestProbeImportsWithoutPlaywright:
+    """Importing the probe must not require Playwright (Greptile P1).
+
+    ``verdict()`` and ``variants()`` are pure python and are imported here at
+    module load. ``requirements-dev.txt`` deliberately does NOT install
+    playwright — only the browser workflows do — so a clean
+    ``./scripts/test.sh`` run has no playwright. A module-level
+    ``from playwright.sync_api import sync_playwright`` therefore raised
+    ModuleNotFoundError while *collecting* this file, which stops the whole
+    test run before a single test executes.
+
+    The browser-only import belongs at the browser entry point (``main()``).
+    """
+
+    @staticmethod
+    def _import_without_playwright() -> str:
+        """Import the probe in a subprocess where playwright is unimportable.
+
+        Runs out-of-process on purpose: an import guard installed in-process
+        would poison ``sys.modules`` for every other test in the session.
+        """
+        script = textwrap.dedent(f"""
+            import sys
+            sys.path.insert(0, {json.dumps(os.path.dirname(os.path.abspath(__file__)))})
+
+            class _Block:
+                def find_spec(self, name, path=None, target=None):
+                    if name == 'playwright' or name.startswith('playwright.'):
+                        raise ModuleNotFoundError("No module named 'playwright'")
+                    return None
+
+            sys.meta_path.insert(0, _Block())
+            import browser_settle_visibility_7676 as probe
+            # Pure-python surface still fully usable without a browser: verdict()
+            # is the unit-tested gate, variants() is the matrix it runs over.
+            bad = probe.verdict({{}})
+            assert isinstance(bad, list) and all(isinstance(b, str) for b in bad), bad
+            assert any(b.startswith('runtime:normalize') for b in bad), bad
+            assert len(probe.variants()) == 12, probe.variants()
+            print('OK')
+        """)
+        out = subprocess.run(
+            [sys.executable, '-c', script], capture_output=True, text=True, timeout=120,
+        )
+        assert out.returncode == 0, f'stdout={out.stdout}\nstderr={out.stderr}'
+        return out.stdout
+
+    def test_probe_module_imports_with_playwright_absent(self):
+        assert 'OK' in self._import_without_playwright()
+
+
 class TestVerdictRequiresBothSamples:
     """verdict() must FAIL on a missing sample, not skip it."""
 

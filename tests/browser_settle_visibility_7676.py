@@ -34,8 +34,6 @@ import time
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-from playwright.sync_api import sync_playwright
-
 from browser_conversation_lifecycle import _start_webui_server, _terminate_process
 
 ROOT = Path(os.environ.get('WEBUI_TEST_ROOT', Path(__file__).resolve().parent.parent))
@@ -505,6 +503,14 @@ def variants():
 
 
 def main() -> int:
+    # Playwright is a browser-only dependency and is deliberately NOT in
+    # requirements-dev.txt (only the browser workflows install it). Importing it
+    # here rather than at module scope keeps `verdict()`/`variants()` importable
+    # by tests/test_7676_settle_sample_capture.py in a clean test env — a
+    # module-level import broke collection for the whole run (Greptile P1,
+    # tests/test_7676_settle_sample_capture.py).
+    from playwright.sync_api import sync_playwright
+
     history_len = int(os.environ.get('SETTLE_HISTORY', '40'))
     settings = dict(
         theme='dark', skin='default',
