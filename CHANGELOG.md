@@ -80,6 +80,12 @@
 
 ### Fixed
 
+- **Error toasts stay on screen.** Twenty-one error messages (Kanban unavailable, task dependency, workspace worktree and
+  reorder failures, the MCP server toggle, checkpoint restore, copy failure) passed their type where the duration
+  goes, so the toast vanished the moment it appeared; the Kanban dispatcher result and eight worktree errors had the
+  same problem in two other shapes. `showToast` now reads a type name in that position as the type and treats 0 as the
+  default duration. (#8315)
+
 - **Session menu and Move-to-project picker stay with their row.** On tablets the sidebar menu and project picker
   opened in the top-left corner over the header; they now open at the pressed row and stay inside the screen, keep
   "+ New project" visible with long project lists on phones, and move with their row when the sidebar scrolls. Thanks

@@ -10235,10 +10235,16 @@ function copyToastText(btn){
   _copyText(text).then(done).catch(()=>{});
 }
 function showToast(msg,ms,type){
+  // A type name in the duration slot (showToast(msg,'error') or showToast(msg,'info',6000)) is a type, not a
+  // duration: setTimeout(fn,'error') fires at once, so those toasts vanished as soon as they appeared.
+  if(typeof ms==='string'&&/^(error|success|warning|info)$/.test(ms)&&(type==null||typeof type==='number')){
+    const swapped=type;type=ms;ms=(typeof swapped==='number')?swapped:null;
+  }
   const el=$('toast');if(!el)return;
   const s=String(msg==null?'':msg);let t=type;
   if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}
-  const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
+  // 0 (the old "use default" sentinel) and other non-positive or non-numeric values mean the default, not "hide now".
+  const duration=(ms==null||!(Number(ms)>0))?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
   el.className='toast show '+t;
   el.dataset.toastMessage=s;
   if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button><button class="toast-dismiss" type="button" aria-label="Dismiss error toast" data-toast-dismiss="1" onclick="dismissToast(this);event.stopPropagation()">Dismiss</button>`;
