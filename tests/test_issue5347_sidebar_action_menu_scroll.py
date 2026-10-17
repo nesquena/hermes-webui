@@ -31,3 +31,14 @@ def test_session_list_scroll_repositions_instead_of_closing_action_menu():
         "closeSessionActionMenu();"
     )
     assert "_positionSessionActionMenu(_sessionActionAnchor);" in block
+
+
+def test_pointer_opened_menu_closes_on_sidebar_scroll_instead_of_jumping():
+    """Right-click menus are placed at the pointer. Sidebar scroll must close
+    them instead of re-anchoring to the row, which jumps the menu off the click.
+    """
+    block = _scroll_listener_block()
+    pointer_at = block.index("if(_sessionActionPointer)")
+    reposition_at = block.index("_positionSessionActionMenu(_sessionActionAnchor);")
+    assert pointer_at < reposition_at
+    assert "closeSessionActionMenu();" in block[pointer_at:reposition_at]

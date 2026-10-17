@@ -517,4 +517,4 @@ def test_session_rows_open_action_menu_from_right_click():
     block = SESSIONS_JS[context_idx:SESSIONS_JS.find('};', context_idx) + 2]
     assert 'e.preventDefault();' in block
     assert 'e.stopPropagation();' in block
-    assert '_openSessionActionMenu(s, actions||el);' in block
+    assert '_openSessionActionMenu(s, el, e);' in block

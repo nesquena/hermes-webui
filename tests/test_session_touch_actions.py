@@ -46,7 +46,7 @@ def test_session_action_menu_exposes_popup_state_and_focus_contract():
     assert "menu.setAttribute('aria-label', 'Conversation actions');" in SESSIONS_JS
     assert "opt.setAttribute('role','menuitem');" in SESSIONS_JS
 
-    mount = _sessions_block("function _mountSessionActionMenu(menu, session, anchorEl){", "function _findSessionRenameRow")
+    mount = _sessions_block("function _mountSessionActionMenu(menu, session, anchorEl, pointerEvent){", "function _findSessionRenameRow")
     assert "anchorEl.setAttribute('aria-expanded','true');" in mount
     assert "anchorEl.setAttribute('aria-controls',menu.id);" in mount
     assert "firstAction.focus({preventScroll:true});" in mount
@@ -64,7 +64,7 @@ def test_session_action_menu_exposes_popup_state_and_focus_contract():
 
 
 def test_session_action_menu_supports_arrow_key_navigation():
-    mount = _sessions_block("function _mountSessionActionMenu(menu, session, anchorEl){", "function _findSessionRenameRow")
+    mount = _sessions_block("function _mountSessionActionMenu(menu, session, anchorEl, pointerEvent){", "function _findSessionRenameRow")
     for key in ("'ArrowDown'", "'ArrowUp'", "'Home'", "'End'"):
         assert key in mount
     assert "menu.addEventListener('keydown'" in mount
@@ -99,7 +99,7 @@ def test_open_session_menu_consumes_next_row_activation():
     context_menu = _sessions_block("el.oncontextmenu=(e)=>{", "// Use release events")
     assert SESSIONS_JS.count("el.oncontextmenu=(e)=>{") == 1
     assert "if(e.pointerType==='touch'||e.pointerType==='pen') return;" in context_menu
-    assert "_openSessionActionMenu(s, actions||el);" in context_menu
+    assert "_openSessionActionMenu(s, el, e);" in context_menu
     assert "if(_sessionActionMenu&&!_sessionActionMenu.contains(target)){" in SESSIONS_JS
     assert "closeSessionActionMenu();" in SESSIONS_JS
     assert "e.stopPropagation();" in SESSIONS_JS

@@ -5042,6 +5042,7 @@ _restoreShowAllProfiles();
 _restoreSessionSourceFilter();
 let _sessionActionMenu = null;
 let _sessionActionAnchor = null;
+let _sessionActionPointer = null;
 let _sessionActionSessionId = null;
 let _sessionActionMenuId = 0;
 let _sessionActionPreviousFocus = null;
@@ -5735,6 +5736,7 @@ function closeSessionActionMenu({restoreFocus=false}={}){
     if(row) row.classList.remove('menu-open','long-pressing');
     _sessionActionAnchor = null;
   }
+  _sessionActionPointer = null;
   _sessionActionSessionId = null;
   _sessionActionPreviousFocus = null;
   if(!_focusSessionActionMenuRestoreTarget(focusTarget)) _focusSessionActionMenuRestoreTarget(fallbackFocusTarget);
@@ -5751,37 +5753,54 @@ function _sessionActionMenuShouldRepositionOnScroll(target){
   return Boolean(target.closest('#sessionList, .session-list'));
 }
 
-function _positionSessionActionMenu(anchorEl){
+function _positionSessionActionMenu(anchorEl, pointer){
   if(!_sessionActionMenu || !anchorEl) return;
-  const rect=anchorEl.getBoundingClientRect();
+  const margin=8;
   const menuW=Math.min(280, Math.max(220, _sessionActionMenu.scrollWidth || 220));
-  let left=rect.right-menuW;
-  if(left<8) left=8;
-  if(left+menuW>window.innerWidth-8) left=window.innerWidth-menuW-8;
-  _sessionActionMenu.style.left=left+'px';
-  _sessionActionMenu.style.top='8px';
   // Reset any prior clamp so we measure the menu's natural height.
   _sessionActionMenu.style.maxHeight='';
   const menuH=_sessionActionMenu.offsetHeight || 0;
-  const margin=8;
   const maxAvail=window.innerHeight-margin*2;
-  let top=rect.bottom+6;
-  // Prefer flipping above the row when the menu would overflow the bottom and
-  // there's room above.
-  if(top+menuH>window.innerHeight-margin && rect.top>menuH+12){
-    top=rect.top-menuH-6;
-  }
-  // If the menu is taller than the viewport, or still overflows after the flip
-  // attempt (e.g. a top-anchored row with a tall menu and no room above), cap
-  // its height to the viewport and let it scroll instead of clipping off-screen.
-  if(menuH>maxAvail){
-    _sessionActionMenu.style.maxHeight=maxAvail+'px';
-    top=margin;
-  } else {
-    // Clamp vertically so the whole menu stays on-screen at both edges.
-    if(top+menuH>window.innerHeight-margin) top=window.innerHeight-margin-menuH;
+  let left;
+  let top;
+  if(pointer && Number.isFinite(pointer.clientX) && Number.isFinite(pointer.clientY)){
+    // Right-click / context menu: open at the pointer, clamped to the viewport.
+    left=pointer.clientX;
+    top=pointer.clientY;
+    if(left+menuW>window.innerWidth-margin) left=window.innerWidth-menuW-margin;
+    if(left<margin) left=margin;
+    if(top+menuH>window.innerHeight-margin) top=Math.max(margin, window.innerHeight-margin-menuH);
     if(top<margin) top=margin;
+  } else {
+    let rect=anchorEl.getBoundingClientRect();
+    // A hidden .session-actions trigger (display:none / zero-size) yields a zero
+    // rect — fall back to the visible session row so the menu doesn't land at 0,0.
+    if(!rect.width && !rect.height){
+      const row=anchorEl.closest('.session-item,.session-child-session');
+      if(row && row!==anchorEl) rect=row.getBoundingClientRect();
+    }
+    left=rect.right-menuW;
+    if(left<margin) left=margin;
+    if(left+menuW>window.innerWidth-margin) left=window.innerWidth-menuW-margin;
+    top=rect.bottom+6;
+    // Prefer flipping above the row when the menu would overflow the bottom and
+    // there's room above.
+    if(top+menuH>window.innerHeight-margin && rect.top>menuH+12){
+      top=rect.top-menuH-6;
+    }
+    // If the menu is taller than the viewport, or still overflows after the flip
+    // attempt (e.g. a top-anchored row with a tall menu and no room above), cap
+    // its height to the viewport and let it scroll instead of clipping off-screen.
+    if(menuH>maxAvail){
+      top=margin;
+    } else {
+      // Clamp vertically so the whole menu stays on-screen at both edges.
+      if(top+menuH>window.innerHeight-margin) top=window.innerHeight-margin-menuH;
+      if(top<margin) top=margin;
+    }
   }
+  if(menuH>maxAvail) _sessionActionMenu.style.maxHeight=maxAvail+'px';
+  _sessionActionMenu.style.left=left+'px';
   _sessionActionMenu.style.top=top+'px';
 }
 
@@ -5858,11 +5877,12 @@ async function _copySessionLink(session){
   }
 }
 
-function _mountSessionActionMenu(menu, session, anchorEl){
+function _mountSessionActionMenu(menu, session, anchorEl, pointerEvent){
   _sessionActionPreviousFocus=document.activeElement;
   document.body.appendChild(menu);
   _sessionActionMenu = menu;
   _sessionActionAnchor = anchorEl;
+  _sessionActionPointer = pointerEvent || null;
   _sessionActionSessionId = session.session_id;
   if(anchorEl.classList&&anchorEl.classList.contains('session-actions-trigger')){
     anchorEl.classList.add('active');
@@ -5871,7 +5891,7 @@ function _mountSessionActionMenu(menu, session, anchorEl){
   }
   const row=anchorEl.closest('.session-item,.session-child-session');
   if(row) row.classList.add('menu-open');
-  _positionSessionActionMenu(anchorEl);
+  _positionSessionActionMenu(anchorEl, _sessionActionPointer);
   _playSessionActionMenuEntrance(menu);
   const menuItems=()=>Array.from(menu.querySelectorAll('.session-action-opt:not([disabled])'));
   menu.addEventListener('keydown',e=>{
@@ -6191,9 +6211,9 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   }catch(err){if(renderHold) await renderHold.catch(()=>{});_pendingSessionReflowPositions=null;showToast(t('session_archive_failed')+err.message);return false;}
 }
 
-function _openSessionActionMenu(session, anchorEl){
+function _openSessionActionMenu(session, anchorEl, pointerEvent){
   const isReadOnly = _isReadOnlySession(session);
-  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
+  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl && !_sessionActionPointer && !pointerEvent){
     closeSessionActionMenu();
     return;
   }
@@ -6209,7 +6229,7 @@ function _openSessionActionMenu(session, anchorEl){
   _appendSessionCopyLinkAction(menu, session);
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
-    _mountSessionActionMenu(menu, session, anchorEl);
+    _mountSessionActionMenu(menu, session, anchorEl, pointerEvent);
     return;
   }
   // Rename — first menu item by request (#1764). Double-click rename is
@@ -6372,7 +6392,7 @@ function _openSessionActionMenu(session, anchorEl){
       'danger'
     ));
   }
-  _mountSessionActionMenu(menu, session, anchorEl);
+  _mountSessionActionMenu(menu, session, anchorEl, pointerEvent);
 }
 
 document.addEventListener('click',e=>{
@@ -6390,6 +6410,13 @@ document.addEventListener('scroll',e=>{
       closeSessionActionMenu();
       return;
     }
+    // Right-click menus sit at the pointer. Re-anchoring them to the row on
+    // sidebar scroll jumps the menu off the click, so close those instead.
+    // Button-opened menus stay glued to the row (#5347).
+    if(_sessionActionPointer){
+      closeSessionActionMenu();
+      return;
+    }
     _positionSessionActionMenu(_sessionActionAnchor);
     return;
   }
@@ -6399,7 +6426,7 @@ document.addEventListener('keydown',e=>{
   if(e.key==='Escape' && _sessionActionMenu) closeSessionActionMenu({restoreFocus:true});
 });
 window.addEventListener('resize',()=>{
-  if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor);
+  if(_sessionActionMenu && _sessionActionAnchor) _positionSessionActionMenu(_sessionActionAnchor, _sessionActionPointer);
 });
 
 // Generation counter to discard stale API responses (issue #1430).
@@ -10265,7 +10292,7 @@ function renderSessionListFromCache(){
             e.preventDefault();
             if(e.pointerType==='touch'||e.pointerType==='pen') return;
             e.stopPropagation();
-            _openSessionActionMenu(child, actions||row);
+            _openSessionActionMenu(child, row, e);
           };
           _wireSessionNewTabListeners(row, ()=>child.session_id, ()=>child, {exact:true});
           childList.appendChild(row);
@@ -10366,7 +10393,7 @@ function renderSessionListFromCache(){
       _tapTimer=null;
       _lastTapTime=0;
       _clearPointerDragState();
-      _openSessionActionMenu(s, actions||el);
+      _openSessionActionMenu(s, el, e);
     };
 
     if(!readOnly){
