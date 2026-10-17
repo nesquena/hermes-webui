@@ -33134,7 +33134,7 @@ def _handle_session_import_cli(handler, body):
     # #674: an Aider id is an EXTERNAL read-only conversation. Aider list
     # metadata carries ``profile: None``, so an all-profiles resolve can miss
     # and return {} while the profile-aware message lookup still succeeds --
-    # which previously let a real import_cli_session() run and mint a
+    # which previously let a real CLI import run and mint a
     # writable sidecar. The id prefix is the read-only identity (#674).
     _aider_ro = _is_aider_session_id(sid)
     _read_only_view = cli_read_only or _sa_child or _aider_ro
