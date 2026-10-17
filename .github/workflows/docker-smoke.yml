@@ -60,7 +60,9 @@ jobs:
       - name: Validate every compose file parses
         run: |
           set -euo pipefail
-          for f in docker-compose.yml docker-compose.two-container.yml docker-compose.three-container.yml; do
+          # three-service.yml interpolates REQUIRED vars (:?) — provide CI values.
+          export API_SERVER_KEY="ci-gateway-key-0123456789abcdef" DASHBOARD_PASSWORD="ci-dashboard-pass"
+          for f in docker-compose.yml docker-compose.two-container.yml docker-compose.three-container.yml docker-compose.three-service.yml; do
             echo "::group::compose config: $f"
             docker compose -f "$f" config > /dev/null
             echo "::endgroup::"
@@ -269,6 +271,7 @@ jobs:
           - single
           - two-container
           - three-container
+          - three-service
     steps:
       - uses: actions/checkout@v4
 
@@ -298,6 +301,9 @@ jobs:
               ;;
             three-container)
               echo "compose_file=docker-compose.three-container.yml" >> "$GITHUB_OUTPUT"
+              ;;
+            three-service)
+              echo "compose_file=docker-compose.three-service.yml" >> "$GITHUB_OUTPUT"
               ;;
           esac
           # Per-run project name so concurrent jobs / reruns can't clobber each other.
@@ -341,6 +347,10 @@ jobs:
           PROJECT: ${{ steps.vars.outputs.project }}
           HERMES_HOME: ${{ steps.paths.outputs.state_dir }}
           HERMES_WORKSPACE: ${{ steps.paths.outputs.work_dir }}
+          # three-service.yml interpolates REQUIRED vars (:?) — the other
+          # variants ignore them, so setting them for every matrix cell is safe.
+          API_SERVER_KEY: "ci-gateway-key-0123456789abcdef"
+          DASHBOARD_PASSWORD: "ci-dashboard-pass"
         run: |
           set -euo pipefail
 
@@ -382,6 +392,57 @@ jobs:
           done
           echo "✅ /health = 200 after $attempts attempts"
           echo "::endgroup::"
+
+          # ----- Dashboard probe (three-service only) -----
+          # The whole point of the three-service topology is the built-in
+          # dashboard. It must be UP and AUTH-GATED — but "auth-gated" has two
+          # legitimate shapes: a basic-auth challenge (401/403) or a redirect to
+          # the login page (302/303/307/308 -> /login). Demanding exactly 401 was
+          # wrong: this dashboard answers 302 when no credentials are present, so
+          # the probe waited 3 minutes and failed on a working dashboard.
+          # What must NEVER happen is an unauthenticated 200: that is the exact
+          # #6876 defect (dashboard served without auth).
+          if [ "${{ matrix.variant }}" = "three-service" ]; then
+            echo "::group::Probe dashboard (expect auth challenge or login redirect)"
+            attempts=0
+            max_attempts=90
+            code=""
+            loc=""
+            ok=""
+            while [ -z "$ok" ]; do
+              code="$(curl --silent --max-time 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:9119/ 2>/dev/null || true)"
+              case "$code" in
+                401|403)
+                  ok="basic-auth challenge ($code)"
+                  ;;
+                302|303|307|308)
+                  loc="$(curl --silent --max-time 5 -o /dev/null -w '%{redirect_url}' http://127.0.0.1:9119/ 2>/dev/null || true)"
+                  case "$loc" in
+                    *login*|*auth*|*signin*)
+                      ok="login redirect ($code -> $loc)"
+                      ;;
+                    *)
+                      echo "… HTTP $code but redirect target is not a login page: ${loc:-none}"
+                      ;;
+                  esac
+                  ;;
+                200)
+                  echo "❌ Dashboard served WITHOUT authentication (HTTP 200) — the #6876 defect"
+                  exit 1
+                  ;;
+              esac
+              if [ -z "$ok" ]; then
+                attempts=$((attempts + 1))
+                if [ "$attempts" -ge "$max_attempts" ]; then
+                  echo "❌ Dashboard is not auth-gated (last code: ${code:-none}, redirect: ${loc:-none}) after $max_attempts attempts (~3 min)"
+                  exit 1
+                fi
+                sleep 2
+              fi
+            done
+            echo "✅ Dashboard is up and auth-gated: $ok (after $attempts attempts)"
+            echo "::endgroup::"
+          fi
 
           # ----- Startup log scan: must not contain any known-bad signatures -----
           # These are the exact patterns that would have flagged #2470 in real time.
