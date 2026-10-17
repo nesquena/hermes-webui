@@ -297,15 +297,22 @@ def extract_pdf_text(raw: bytes) -> tuple[str, bool]:
             budget = builder.remaining_chars - 1
             page_text, hit_budget = _extract_page_text(page, budget)
         normalized, dropped_lines = _normalize_page_text(page_text)
-        if hit_budget or dropped_lines:
-            builder.truncated = True
         if normalized:
             extracted_any = True
         else:
             # A per-page placeholder keeps the page numbering meaningful in a
             # mostly-text document that happens to contain an image-only page.
             normalized = "(no extractable text)"
-        if not builder.append_text(f"\n{normalized}"):
+        # ORDER MATTERS: append the bounded text BEFORE recording that a cap was
+        # hit. _append() refuses every subsequent piece once `truncated` is set,
+        # so setting the flag first made the append a no-op and discarded the
+        # whole page — a long first page yielded "Page 1" plus the truncation
+        # notice and no document text at all, which is the opposite of what the
+        # cap is for.
+        keep_going = builder.append_text(f"\n{normalized}")
+        if hit_budget or dropped_lines:
+            builder.truncated = True
+        if not keep_going:
             break
 
     pages_unchecked = total_pages > MAX_PDF_PREVIEW_PAGES
