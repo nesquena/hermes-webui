@@ -3,11 +3,18 @@ from pathlib import Path
 import re
 
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).parent.parent
 # en-only keys by design (#6067): absent from every non-English locale.
 # profile_concept_* keys were filled in for #7579 and are no longer exempted.
+# #7686: the busy-mode action labels (Stop/Queue/Interrupt/Steer) ship
+# English-only in this PR; the per-locale translations follow in the locale
+# PR. They stay exempted until then, exactly like the other en-only keys.
 PROFILE_CONCEPT_FALLBACK_KEYS = {
     "workspace_artifact_source_session",
+    "composer_action_interrupt",
+    "composer_action_queue",
+    "composer_action_steer",
+    "composer_action_stop",
 }
 
 
