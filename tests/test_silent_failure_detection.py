@@ -13,6 +13,7 @@ import pytest
 from api.streaming import (
     _has_new_assistant_reply,
     _should_retry_silent_failure,
+    _silent_retry_enabled,
     _current_turn_tool_activity,
     _current_turn_produced_a_row,
     _turn_produced_reasoning,
@@ -189,9 +190,10 @@ class TestShouldRetrySilentFailure:
     """
 
     def test_silent_empty_turn_retries(self):
+        # With the operator opt-in ON, the silent shape earns one retry.
         assert _should_retry_silent_failure(
             last_err='', assistant_added=False, token_sent=False,
-            error_type='no_response',
+            error_type='no_response', retry_enabled=True,
         ) is True
 
     def test_explicit_error_is_not_silent(self):
@@ -227,6 +229,10 @@ class TestShouldRetrySilentFailure:
         kwargs = dict(
             last_err='', assistant_added=False, token_sent=False,
             error_type='no_response',
+            # These cases test the GUARDS, not the opt-in: enable the retry so a
+            # False below is attributable to the guard under test rather than to
+            # the gate. The gate itself is covered by TestSilentRetryGate.
+            retry_enabled=True,
         )
         kwargs.update(overrides)
         return _should_retry_silent_failure(**kwargs)
@@ -258,6 +264,60 @@ class TestShouldRetrySilentFailure:
     def test_the_new_guards_default_to_permissive(self):
         """The guards are opt-in: the pre-existing gate shape is unchanged."""
         assert self._retry() is True
+
+
+class TestSilentRetryGate:
+    """The whole-turn retry is off unless the operator opts in.
+
+    The Agent already runs its own empty-response ladder with a cost guard; a
+    WebUI retry starts a fresh agent and resets that budget. Defaulting the
+    retry ON would spend provider calls the operator never authorised, so the
+    gate is the thing that must be pinned — not just its truth table.
+    """
+
+    def _gate(self, monkeypatch, env=None, cfg=None):
+        if env is None:
+            monkeypatch.delenv("HERMES_WEBUI_SILENT_FAILURE_RETRY", raising=False)
+        else:
+            monkeypatch.setenv("HERMES_WEBUI_SILENT_FAILURE_RETRY", env)
+        return _silent_retry_enabled(cfg)
+
+    def test_disabled_by_default(self, monkeypatch):
+        assert self._gate(monkeypatch) is False
+
+    def test_an_unconfigured_silent_turn_is_not_retried(self):
+        """End to end: without the opt-in the predicate stays False."""
+        assert _should_retry_silent_failure(
+            last_err='', assistant_added=False, token_sent=False,
+            error_type='no_response',
+        ) is False
+
+    def test_env_enables_it(self, monkeypatch):
+        for value in ("1", "true", "TRUE", "yes", "on"):
+            assert self._gate(monkeypatch, env=value) is True, value
+
+    def test_env_false_values_stay_off(self, monkeypatch):
+        for value in ("0", "false", "no", "off", "banana"):
+            assert self._gate(monkeypatch, env=value) is False, value
+
+    def test_config_enables_it(self, monkeypatch):
+        assert self._gate(monkeypatch, cfg={"webui_silent_failure_retry": True}) is True
+        assert self._gate(monkeypatch, cfg={"webui_silent_failure_retry": "yes"}) is True
+
+    def test_config_absent_or_false_stays_off(self, monkeypatch):
+        assert self._gate(monkeypatch, cfg={}) is False
+        assert self._gate(monkeypatch, cfg={"webui_silent_failure_retry": False}) is False
+
+    def test_whitespace_only_env_does_not_mask_a_valid_config_key(self, monkeypatch):
+        """A blank env value counts as unset; the config key still applies."""
+        assert self._gate(
+            monkeypatch, env="   ", cfg={"webui_silent_failure_retry": True},
+        ) is True
+
+    def test_env_wins_over_config(self, monkeypatch):
+        assert self._gate(
+            monkeypatch, env="0", cfg={"webui_silent_failure_retry": True},
+        ) is False
 
 
 # ── Echoed-context probe ─────────────────────────────────────────────────────

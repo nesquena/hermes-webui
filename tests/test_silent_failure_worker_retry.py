@@ -10,8 +10,23 @@ that truly produced nothing.
 
 import threading
 
+import pytest
+
 from api import streaming
 from tests.test_steer_worker_boundaries import worker_scene as worker_scene
+
+
+@pytest.fixture(autouse=True)
+def _enable_silent_retry(monkeypatch):
+    """These worker cases exercise the retry, so opt in for the module.
+
+    The retry is off by default (see ``_silent_retry_enabled``): the Agent has
+    its own budgeted empty-response ladder and a WebUI whole-turn replay resets
+    that budget, so an operator must enable it. Every test here is about the
+    retry's behaviour once enabled; the default-off shape is pinned separately
+    at the end of this module.
+    """
+    monkeypatch.setenv("HERMES_WEBUI_SILENT_FAILURE_RETRY", "1")
 
 
 def _user_row():
@@ -252,3 +267,25 @@ def test_a_failed_retry_reports_the_retrys_own_error(worker_scene):
     assert "No response from provider" not in errors[0]["content"], (
         "the retry's own failure must replace the silent-first-attempt wording"
     )
+
+
+def test_gate_off_means_a_silent_turn_is_not_retried(worker_scene, monkeypatch):
+    """Default posture: no opt-in, no whole-turn replay.
+
+    The module-wide fixture enables the retry; this case removes the only place
+    it can be enabled, so the worker must settle the silent turn exactly once
+    and let the Agent's own empty-response ladder own recovery. Without this
+    case a regression that hard-codes the retry on would pass every other test
+    in this file.
+    """
+    monkeypatch.delenv("HERMES_WEBUI_SILENT_FAILURE_RETRY", raising=False)
+    monkeypatch.setattr(
+        streaming, "_silent_retry_enabled", lambda *a, **k: False,
+    )
+
+    scene = worker_scene
+    scene.on_run = _silent_then(scene, None)
+
+    scene.run()
+
+    assert _runs(scene) == 1, "the gate is off: no second provider call"

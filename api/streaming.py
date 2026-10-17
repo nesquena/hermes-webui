@@ -1943,6 +1943,36 @@ def _has_new_assistant_reply(all_messages: list, prev_count: int) -> bool:
     )
 
 
+def _silent_retry_enabled(config_data: Optional[dict] = None) -> bool:
+    """Return True when the whole-turn silent-retry is opted in.
+
+    The retry is **off by default**. The installed Agent already runs its own
+    empty-response ladder (``agent/turn_empty_response.py``: post-tool nudge,
+    budgeted empty retries behind a cost guard, the fallback chain, then a
+    visible ``(empty)`` reply). A WebUI whole-turn retry starts a *fresh* agent,
+    which resets that budget — so stacking the two can spend provider calls the
+    Agent's own cost guard was there to prevent. That is an operator decision,
+    not a default.
+
+    Enable with either:
+      - env ``HERMES_WEBUI_SILENT_FAILURE_RETRY=1`` (wins), or
+      - config ``webui_silent_failure_retry: true``.
+
+    The env value is stripped before precedence, so a whitespace-only value
+    counts as unset and cannot shadow a valid config key.
+    """
+    raw_env = os.getenv("HERMES_WEBUI_SILENT_FAILURE_RETRY", "").strip()
+    if raw_env:
+        return raw_env.lower() in {"1", "true", "yes", "on"}
+    cfg = config_data if isinstance(config_data, dict) else get_config()
+    if not isinstance(cfg, dict):
+        return False
+    raw_cfg = cfg.get("webui_silent_failure_retry")
+    if isinstance(raw_cfg, bool):
+        return raw_cfg
+    return str(raw_cfg or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _should_retry_silent_failure(
     *, last_err, assistant_added: bool, token_sent: bool, error_type: str,
     tool_activity: bool = False,
@@ -1950,6 +1980,7 @@ def _should_retry_silent_failure(
     tool_limit_reached: bool = False,
     compression_rotated: bool = False,
     echoed_context: bool = False,
+    retry_enabled: bool = False,
 ) -> bool:
     """Return True when a turn failed *silently* and deserves one retry.
 
@@ -1975,9 +2006,15 @@ def _should_retry_silent_failure(
     ``echoed_context`` covers the attempt that handed the pre-turn context back
     byte-for-byte: re-sending it to the same provider reproduces it, so there is
     nothing to retry.
+
+    ``retry_enabled`` is the operator opt-in (see ``_silent_retry_enabled``).
+    It defaults to False, so an unconfigured install keeps the Agent's own
+    empty-response ladder as the only recovery path — the WebUI retry is a
+    deliberate addition, not a silent default.
     """
     return (
-        not last_err
+        retry_enabled
+        and not last_err
         and not assistant_added
         and not token_sent
         and error_type == 'no_response'
@@ -14842,6 +14879,7 @@ def _run_agent_streaming(
                         echoed_context=not _current_turn_produced_a_row(
                             _previous_context_messages, _all_result_messages,
                         ),
+                        retry_enabled=_silent_retry_enabled(),
                     )
                     if _is_quota:
                         _err_label = _classification['label']
