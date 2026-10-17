@@ -9080,20 +9080,26 @@ def _claude_code_title(messages: list[dict], summary_title: str | None) -> str:
     return 'Claude Code Session'
 
 
-def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_files: int = CLAUDE_CODE_MAX_FILES, max_file_bytes: int = CLAUDE_CODE_MAX_FILE_BYTES) -> list:
+def get_claude_code_sessions(projects_dir: Path | str | None = None, *, max_files: int = CLAUDE_CODE_MAX_FILES, max_file_bytes: int = CLAUDE_CODE_MAX_FILE_BYTES, workspace: str | None = None) -> list:
     """Read Claude Code JSONL sessions as read-only external-agent rows.
 
     The bridge is additive and defensive: it skips symlinks, oversized files,
     malformed lines, and per-file errors rather than crashing WebUI session
     listing. Tests pass ``projects_dir`` fixtures so Michael's real ~/.claude is
     never read during test runs.
+
+    ``workspace`` lets the caller share one already-resolved workspace across
+    every external-agent source in a build: ``get_last_workspace()`` is
+    loop-invariant but internally stats config.yaml and probes terminal cwd, so
+    the #4718 invariant of one resolve per build must hold across sources, not
+    just across rows.
     """
     sessions = []
     # ``get_last_workspace()`` is loop-invariant (the same active workspace for
     # every Claude Code row) but internally stats config.yaml + probes terminal
     # cwd, so calling it once per row was ~200 redundant stat()s on the cold
     # sidebar build (#4718). Resolve it a single time.
-    cc_workspace = str(get_last_workspace())
+    cc_workspace = workspace if workspace is not None else str(get_last_workspace())
     for path in _iter_claude_code_jsonl_files(projects_dir, max_files=max_files, max_file_bytes=max_file_bytes) or []:
         messages, summary_title, first_ts, last_ts = _parse_claude_code_jsonl_cached(path)
         if not messages:
@@ -9178,7 +9184,7 @@ AIDER_MAX_SCAN_DEPTH = 8
 AIDER_MAX_SCAN_DIRS = 2000
 
 
-def _default_aider_scan_dir() -> Path | None:
+def _default_aider_scan_dir(workspace: str | None = None) -> Path | None:
     """Resolve the single git root scanned for aider chat history.
 
     There is no global aider store to scan, so the bridge stays bounded to one
@@ -9186,6 +9192,10 @@ def _default_aider_scan_dir() -> Path | None:
     mirrors the maintainer's requirement in #674 ("bounded to a configurable
     base path ... and not follow symlinks"). Returns None under tests so a
     developer's real repo is never read.
+
+    ``workspace`` lets the caller pass the workspace it already resolved for the
+    build; otherwise this would pay a second ``get_last_workspace()`` and
+    regress the #4718 one-resolve-per-build invariant.
     """
     override = os.getenv('HERMES_WEBUI_AIDER_SCAN_DIR')
     if override:
@@ -9193,10 +9203,11 @@ def _default_aider_scan_dir() -> Path | None:
     if os.getenv('HERMES_WEBUI_TEST_STATE_DIR'):
         return None
     try:
-        workspace = Path(str(get_last_workspace())).expanduser()
+        resolved = workspace if workspace is not None else str(get_last_workspace())
     except Exception:
         return None
-    for candidate in (workspace, *workspace.parents):
+    base = Path(resolved).expanduser()
+    for candidate in (base, *base.parents):
         try:
             if (candidate / '.git').exists():
                 return candidate
@@ -9345,6 +9356,7 @@ def _iter_aider_chat_history_files(
     max_files: int = AIDER_MAX_FILES,
     max_file_bytes: int = AIDER_MAX_FILE_BYTES,
     max_depth: int = AIDER_MAX_SCAN_DEPTH,
+    workspace: str | None = None,
 ):
     """Yield `.aider.chat.history.md` files under one bounded root.
 
@@ -9354,7 +9366,7 @@ def _iter_aider_chat_history_files(
     directory count, and file count so a pathological tree can never stall the
     sidebar.
     """
-    root = Path(scan_dir).expanduser() if scan_dir is not None else _default_aider_scan_dir()
+    root = Path(scan_dir).expanduser() if scan_dir is not None else _default_aider_scan_dir(workspace)
     if root is None:
         return
     try:
@@ -9420,6 +9432,7 @@ def get_aider_sessions(
     *,
     max_files: int = AIDER_MAX_FILES,
     max_file_bytes: int = AIDER_MAX_FILE_BYTES,
+    workspace: str | None = None,
 ) -> list:
     """Read aider chat-history files as read-only external-agent rows.
 
@@ -9427,14 +9440,21 @@ def get_aider_sessions(
     missing root, a malformed transcript, or a permission error never crashes
     WebUI session listing. Tests pass ``scan_dir`` fixtures, so a developer's
     real aider repo is never read during test runs.
+
+    ``workspace`` accepts the workspace already resolved by the caller so that
+    adding a second external-agent source cannot regress the #4718 invariant of
+    one ``get_last_workspace()`` resolve per sidebar build.
     """
     sessions = []
     # Loop-invariant (one active workspace for every aider row) and internally
-    # stats config.yaml + probes terminal cwd -- resolve it once, like the
-    # Claude Code bridge does (#4718).
-    aider_workspace = str(get_last_workspace())
+    # stats config.yaml + probes terminal cwd -- the caller resolves it once
+    # and shares it with the other external-agent scanners (#4718).
+    aider_workspace = workspace if workspace is not None else str(get_last_workspace())
     for path in _iter_aider_chat_history_files(
-        scan_dir, max_files=max_files, max_file_bytes=max_file_bytes
+        scan_dir,
+        max_files=max_files,
+        max_file_bytes=max_file_bytes,
+        workspace=aider_workspace,
     ) or []:
         messages, started_at = _parse_aider_chat_history_cached(path)
         if not messages:
@@ -9751,6 +9771,20 @@ def _path_stat_cache_key(path):
         return (st.st_mtime_ns, st.st_size)
     except OSError:
         return None
+
+
+def _external_scan_kwargs(scanner, workspace):
+    """Build the ``workspace`` kwarg only when ``scanner`` accepts it.
+
+    Both external-agent bridges take an optional pre-resolved ``workspace`` so a
+    build shares one ``get_last_workspace()`` resolve (#4718), but tests
+    monkeypatch these scanners with narrow zero-arg fakes. Passing the kwarg
+    unconditionally would raise TypeError and silently drop the whole source, so
+    probe first -- mirroring the ``_callable_accepts_include_*`` compat checks.
+    """
+    if _callable_accepts_keyword(scanner, 'workspace'):
+        return {'workspace': workspace}
+    return {}
 
 
 def _callable_accepts_include_claude_code(callable_obj) -> bool:
@@ -10108,9 +10142,28 @@ def _load_cli_sessions_uncached(
             )
         return cli_sessions
 
+    # #4718/#4842: get_last_workspace() is loop-invariant for the whole build
+    # and stats config.yaml + probes terminal cwd internally. ONE lazy, memoized
+    # resolve is shared by every projected row and by every external-agent
+    # source, so adding a source must never add another resolve. Hoisted above
+    # the external scans because the Claude Code / aider bridges now receive
+    # this value instead of resolving their own copy.
+    _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
+    def _cli_workspace():
+        if _cli_workspace_cache[0] is None:
+            try:
+                _cli_workspace_cache[0] = str(get_last_workspace(profile=_cli_profile))
+            except TypeError:
+                _cli_workspace_cache[0] = str(get_last_workspace())
+        return _cli_workspace_cache[0]
+
     if source_filter in (None, CLAUDE_CODE_SOURCE) and include_claude_code:
         try:
-            cli_sessions.extend(get_claude_code_sessions())
+            cli_sessions.extend(
+                get_claude_code_sessions(
+                    **_external_scan_kwargs(get_claude_code_sessions, _cli_workspace())
+                )
+            )
         except Exception:
             logger.debug("Claude Code session scan failed", exc_info=True)
 
@@ -10119,7 +10172,11 @@ def _load_cli_sessions_uncached(
 
     if source_filter in (None, AIDER_SOURCE) and include_aider:
         try:
-            cli_sessions.extend(get_aider_sessions())
+            cli_sessions.extend(
+                get_aider_sessions(
+                    **_external_scan_kwargs(get_aider_sessions, _cli_workspace())
+                )
+            )
         except Exception:
             logger.debug("Aider session scan failed", exc_info=True)
 
@@ -10181,17 +10238,9 @@ def _load_cli_sessions_uncached(
 
     # get_last_workspace() reads up to two files + an is_dir()/remote probe and
     # returns the SAME active workspace for every projected row, so calling it
-    # per row was redundant I/O on the cold sidebar build (#4842; mirrors the
-    # #4718 hoist on the Claude Code path). Resolve it once for this scan.
-    _cli_workspace_cache: list = [None]  # list-as-cell; None = not yet resolved
-    def _cli_workspace():
-        if _cli_workspace_cache[0] is None:
-            try:
-                _cli_workspace_cache[0] = str(get_last_workspace(profile=_cli_profile))
-            except TypeError:
-                _cli_workspace_cache[0] = str(get_last_workspace())
-        return _cli_workspace_cache[0]
-
+    # per row was redundant I/O on the cold sidebar build (#4842). It is
+    # resolved once per build by the _cli_workspace() memo hoisted above the
+    # external-agent scans, and shared with those bridges.
     _webhook_pid_cache: list[str | None] = [None]
     def _webhook_pid():
         if _webhook_pid_cache[0] is None:
@@ -11187,6 +11236,9 @@ def get_cli_sessions(
         _streaming_marker = _cli_sessions_streaming_freeze_marker()
         if _streaming_marker is not None:
             context_cache_key = ('streaming-frozen', _streaming_marker)
+        # Resolve the aider scan root once for both cache-key components; every
+        # resolution pays a get_last_workspace() (#4718).
+        _aider_key_dir = _default_aider_scan_dir()
         cache_key = (
             'all_profiles',
             source_filter or '',
@@ -11196,8 +11248,8 @@ def get_cli_sessions(
             _path_cache_key(_default_claude_code_projects_dir()),
             _path_stat_cache_key(_default_claude_code_projects_dir()),
             bool(include_aider),
-            _path_cache_key(_default_aider_scan_dir()),
-            _path_stat_cache_key(_default_aider_scan_dir()),
+            _path_cache_key(_aider_key_dir),
+            _path_stat_cache_key(_aider_key_dir),
             _path_stat_cache_key(SESSION_INDEX_FILE),
         )
     else:
@@ -11291,9 +11343,17 @@ def get_cli_sessions(
                         _profile_err,
                     )
             external_complete = True
+            # One resolve shared by every external-agent source (#4718).
+            _external_ws = str(get_last_workspace()) if (
+                include_claude_code or include_aider
+            ) else None
             if include_claude_code and source_filter in (None, CLAUDE_CODE_SOURCE):
                 try:
-                    merged.extend(get_claude_code_sessions())
+                    merged.extend(
+                        get_claude_code_sessions(
+                            **_external_scan_kwargs(get_claude_code_sessions, _external_ws)
+                        )
+                    )
                 except Exception as _claude_err:
                     external_complete = False
                     logger.warning(
@@ -11302,7 +11362,11 @@ def get_cli_sessions(
                     )
             if include_aider and source_filter in (None, AIDER_SOURCE):
                 try:
-                    merged.extend(get_aider_sessions())
+                    merged.extend(
+                        get_aider_sessions(
+                            **_external_scan_kwargs(get_aider_sessions, _external_ws)
+                        )
+                    )
                 except Exception as _aider_err:
                     external_complete = False
                     logger.warning(
