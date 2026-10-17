@@ -207,7 +207,7 @@ Requirements:
 
 ### Activity display and disclosure addenda
 
-The accepted lifecycle now has three presentation strategies over the same
+The accepted lifecycle now has four presentation strategies over the same
 assistant-turn activity data:
 
 - **Compact Worklog** remains the default. Its top-level Worklog is expanded
@@ -215,6 +215,10 @@ assistant-turn activity data:
   Nested tool/reasoning detail remains progressively disclosed.
 - **Transparent Stream** is opt-in and renders the same ordered activity as
   chronological rows. It does not create a second live or settled owner.
+- **Live → Compact** is opt-in
+  (`transparent_live_compact_settled` in persisted settings). It renders
+  Transparent Stream while the turn is live, then projects the same Anchor scene
+  as Compact Worklog after settlement and reload.
 - **Final answer only** is opt-in (`hide_all_activity` in persisted settings).
   It suppresses activity rows without deleting the persisted Anchor scene or
   changing the final-answer owner.
@@ -239,8 +243,8 @@ leave readable partial Worklog content without a normal final answer.
 
 These are presentation and disclosure rules only. They do not change reply
 ownership, terminal classification, durable transcript truth, or the requirement
-that all three strategies converge across live, settle, reload, session switch,
-and reconnect.
+that all four strategies converge across their applicable live, settle, reload,
+session-switch, and reconnect projections.
 
 ### Recovery and replay
 
