@@ -32885,7 +32885,8 @@ def _handle_skill_toggle(handler, body):
         plugin_skill_md = _plugin_skill_path_for(name)
         if plugin_skill_md is None:
             return bad(handler, f"Skill '{name}' not found", 404)
-        skill_dir, skill_md = plugin_skill_md.parent, plugin_skill_md
+        # Only `skill_md` gates on: `skill_dir` is never read past this point.
+        skill_md = plugin_skill_md
 
     config_path = _active_profile_config_path()
     with _cfg_lock:
