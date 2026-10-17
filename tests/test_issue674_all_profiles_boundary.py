@@ -214,16 +214,23 @@ def import_boundary(monkeypatch, tmp_path):
     root = _git_root(tmp_path, 'import-root')
     row, _path = _aider_row(tmp_path, root)
 
-    session_dir = tmp_path / 'sessions'
-    session_dir.mkdir()
-    monkeypatch.setattr(cfg, 'SESSION_DIR', session_dir)
-    monkeypatch.setattr(models, 'SESSION_DIR', session_dir)
-    monkeypatch.setattr(models, 'SESSION_INDEX_FILE', session_dir / 'index.json')
+    # Use the session store the test suite already isolates for us (conftest
+    # points HERMES_WEBUI_TEST_STATE_DIR at a per-run state dir) instead of
+    # re-pointing the shared SESSION_DIR module global. Patching that global
+    # from two modules is what the repo's own import tests avoid, and it made
+    # the refresh path depend on which module happened to hold the binding.
+    import api.models as _models_mod
+
+    session_dir = _models_mod.SESSION_DIR
+
+    # The shared module-global caches must not leak a view of the store that
+    # predates this test's fixtures.
+    _models_mod.clear_cli_sessions_cache()
+    _models_mod._PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
+
     monkeypatch.setattr(models, 'PROJECTS_FILE', tmp_path / 'projects.json')
     monkeypatch.setattr(cfg, 'PROJECTS_FILE', tmp_path / 'projects.json')
     monkeypatch.setattr(models, '_projects_migrated', True)
-    monkeypatch.setattr(routes, 'SESSION_DIR', session_dir)
-    monkeypatch.setattr(routes, 'SESSION_INDEX_FILE', session_dir / 'index.json')
 
     # A named profile that owns no last_workspace.txt -> its own default root.
     monkeypatch.delenv('HERMES_WEBUI_AIDER_SCAN_DIR', raising=False)
@@ -254,7 +261,24 @@ def import_boundary(monkeypatch, tmp_path):
     monkeypatch.setattr(routes, '_queue_generated_title_for_imported_session', lambda *a, **k: None)
     monkeypatch.setattr(routes, 'get_last_workspace', lambda *a, **k: str(root))
 
-    yield {'routes': routes, 'models': models, 'root': root, 'row': row, 'dir': session_dir}
+    boundary = {
+        'routes': routes,
+        'models': models,
+        'root': root,
+        'row': row,
+        'dir': session_dir,
+    }
+    try:
+        yield boundary
+    finally:
+        # Leave the shared isolated store as we found it.
+        for _sid in (row['session_id'], 'cli_other_profile_0001'):
+            try:
+                (session_dir / f'{_sid}.json').unlink(missing_ok=True)
+            except OSError:
+                pass
+        models.clear_cli_sessions_cache()
+        models._PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
 
 
 def test_all_profiles_import_of_aider_session_is_read_only_on_metadata_miss(
@@ -320,9 +344,24 @@ def test_metadata_miss_refresh_never_mints_a_writable_sidecar(import_boundary):
     )
     stale.save(touch_updated_at=False)
 
+    # Precondition: the refresh path is only exercised if the handler can
+    # actually LOAD the sidecar back. Without this assertion a store-binding
+    # regression silently routes through the fresh-import path instead, and the
+    # test would report a confusing read_only failure rather than the wiring
+    # bug that caused it.
+    assert models.Session.load(sid) is not None, (
+        'the stale sidecar must be loadable from the isolated session store '
+        f'({import_boundary["dir"]}) or this test is not exercising refresh'
+    )
+
     response = routes._handle_session_import_cli(
         object(),
         {'session_id': sid, 'profile': 'work', 'all_profiles': True},
+    )
+
+    assert response.get('imported') is False, (
+        'refreshing an already-imported session must not re-import it; got '
+        f'{response.get("imported")!r}'
     )
 
     sidecar = import_boundary['dir'] / f'{sid}.json'
