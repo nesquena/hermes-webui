@@ -5236,7 +5236,13 @@ def _rehome_interrupted_journal_context(session, context_owner, stream_id: str, 
     session.context_messages = context[:insert_at] + recovered + context[insert_at:]
 
 
-def _rehome_cancel_journal_rows(session, marker_idx: int, stream_id: str) -> None:
+def _rehome_cancel_journal_rows(
+    session,
+    marker_idx: int,
+    stream_id: str,
+    *,
+    proven_owner_index: int | None = None,
+) -> None:
     """Move only this cancelled stream's recovered rows before its marker.
 
     #7167 round-7: an owned marker does not prove its user was materialized.
@@ -5254,7 +5260,13 @@ def _rehome_cancel_journal_rows(session, marker_idx: int, stream_id: str) -> Non
       (``_recovered`` set, no token) is the newly appended current-turn
       prompt whose ownership is exactly what cannot be established —
       hoisting the answer above it reproduces the ordering bug, so FAIL
-      CLOSED and do not hoist at all;
+      CLOSED and do not hoist at all — UNLESS the marker's exact pre-marker
+      owner was already proven: ``proven_owner_index`` (the cancel-hook arm
+      resolves it through ``_cancel_journal_retry_owner_index`` before
+      recovery) proves the cancelled turn's prompt IS materialized before
+      the marker, so a later tokenless ``_recovered`` row is an unrelated
+      recovered successor, not the missing prompt, and must not veto the
+      hoist (2026-10-15 re-gate);
     * a tokenless, non-recovered user row after the marker belongs to a
       LATER turn's ordinary history (it sits there because the cancelled
       turn's rows were tail-appended by a previous pass) — hoist normally
@@ -5296,13 +5308,18 @@ def _rehome_cancel_journal_rows(session, marker_idx: int, stream_id: str) -> Non
             # A recovered user row without a token: when its journal
             # provenance names this stream it rises with the answer;
             # otherwise it is the freshly appended current-turn prompt —
-            # ownership undecidable, fail closed.
+            # ownership undecidable, fail closed — UNLESS the marker's
+            # exact pre-marker owner was already proven by token
+            # (proven_owner_index from _cancel_journal_retry_owner_index),
+            # in which case a later tokenless _recovered row is an
+            # unrelated recovered successor that must not veto the hoist
+            # (2026-10-15 re-gate).
             if (
                 row.get('_recovered_from_run_journal') is True
                 and str(row.get('_recovered_stream_id') or '') == target_stream
             ):
                 owned_user_rows.append(row)
-            elif row.get('_recovered') is True:
+            elif row.get('_recovered') is True and proven_owner_index is None:
                 return
             continue
         # Tokenless, non-recovered user row: ordinary later-turn history —
@@ -5599,6 +5616,7 @@ def _retry_journal_recovery_in_place(
             idx = None
             msg = None
             cancel_hook = False
+            owner_index = None
             if cancel_candidates:
                 # Multiple cancelled turns may remain pending in one transcript.
                 # A newer hook that is still owned by a live worker (or by a
@@ -5877,7 +5895,18 @@ def _retry_journal_recovery_in_place(
                             and str(row.get('_recovered_stream_id') or '') == str(stream_id)
                         ):
                             row['_recovered_from_cancel_journal'] = True
-                    _rehome_cancel_journal_rows(session, idx, str(stream_id))
+                    _rehome_cancel_journal_rows(
+                        session,
+                        idx,
+                        str(stream_id),
+                        # The cancellation retry already proved this
+                        # marker's exact pre-marker user owner by token
+                        # (_cancel_journal_retry_owner_index above), so a
+                        # later tokenless _recovered successor is an
+                        # unrelated turn, never the missing prompt — it
+                        # must not veto the rehome (2026-10-15 re-gate).
+                        proven_owner_index=owner_index,
+                    )
                     _rehome_cancel_journal_context(
                         session,
                         owner_token=owner_token,
@@ -5900,7 +5929,7 @@ def _retry_journal_recovery_in_place(
                     # interrupted wording or replacing it with a specific terminal
                     # error from that same stream.
                     _rehome_cancel_journal_rows(session, idx, str(stream_id))
-                    if context_owner is not None:
+                    if context_owner is not None and owner_index is not None:
                         _rehome_interrupted_journal_context(session, context_owner, str(stream_id), display_owner=messages[owner_index])
                     if terminal_error_recovered:
                         before_removal = session.messages
