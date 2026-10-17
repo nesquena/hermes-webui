@@ -520,6 +520,8 @@
 
 ### Changed
 
+- **German: Scheduled Tasks strings translated.** The cron editor's weekdays, time fields and hints were still English in German. Thanks @solarmaster961. (#8289)
+
 - **Open thinking cards follow the reasoning as it streams.** A reasoning card that is open while the model thinks now
   keeps the newest text in view instead of sitting at the top. Scroll up inside the card to hold your place; scroll back
   to the bottom to resume following. Thanks @esc247. (#7988)
