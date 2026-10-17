@@ -433,11 +433,49 @@ def _validate_outbound_oidc_url(url: str) -> None:
     hostname = str(parsed.hostname or "").strip()
     if not hostname:
         raise OIDCAuthError("OIDC endpoint URL was missing a hostname", status_code=502)
+    if _is_exempt_issuer_origin(parsed):
+        return
     if _is_disallowed_oidc_host(hostname):
         raise OIDCAuthError(
             "OIDC endpoint URLs must not target private or local addresses",
             status_code=502,
         )
+
+
+def _is_exempt_issuer_origin(target: urllib.parse.ParseResult) -> bool:
+    """Return True when target matches the canonical origin of the configured OIDC issuer.
+
+    The issuer is explicitly configured by the administrator (via
+    ``webui_oidc.issuer`` or the ``HERMES_WEBUI_OIDC_ISSUER`` env var) and
+    is already trusted with authentication tokens.
+
+    Exemption is strictly scoped to the exact canonical origin (scheme,
+    normalized hostname, and effective port, defaulting to 443 for HTTPS)
+    to prevent discovery documents from pointing to arbitrary private
+    services on other ports or hosts.
+    """
+    try:
+        cfg = _resolve_oidc_config()
+        issuer_raw = str(cfg.get("issuer") or "").strip()
+        if not issuer_raw:
+            return False
+        issuer = urllib.parse.urlparse(issuer_raw)
+        if not issuer.hostname:
+            return False
+        issuer_origin = (
+            issuer.scheme.lower(),
+            issuer.hostname.lower(),
+            issuer.port or 443,
+        )
+        target_origin = (
+            target.scheme.lower(),
+            (target.hostname or "").lower(),
+            target.port or 443,
+        )
+        return target_origin == issuer_origin
+    except Exception:
+        logger.debug("Failed to resolve OIDC config for issuer origin exemption", exc_info=True)
+        return False
 
 
 def _is_disallowed_oidc_host(hostname: str) -> bool:

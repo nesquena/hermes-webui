@@ -513,6 +513,68 @@ def test_fetch_json_rejects_dns_resolved_private_hosts(monkeypatch):
         auth_oidc._fetch_json("https://issuer.example/.well-known/openid-configuration")
 
 
+def test_validate_outbound_oidc_url_exempts_canonical_issuer_origin(monkeypatch):
+    import api.auth_oidc as auth_oidc
+    from api.auth_oidc import OIDCAuthError
+
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 8443))
+        ],
+    )
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {"issuer": "https://idp.internal:8443/realms/demo"},
+    )
+
+    # 1. Same-origin private issuer is allowed (no exception raised)
+    auth_oidc._validate_outbound_oidc_url("https://idp.internal:8443/.well-known/openid-configuration")
+    auth_oidc._validate_outbound_oidc_url("https://idp.internal:8443/protocol/openid-connect/token")
+
+    # 2. Same host on a different port is rejected
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url("https://idp.internal:9443/token")
+
+    # 3. Another private host is rejected
+    with pytest.raises(OIDCAuthError, match="private or local addresses"):
+        auth_oidc._validate_outbound_oidc_url("https://other.internal:8443/token")
+
+
+def test_validate_outbound_oidc_url_explicit_443_matches_implicit_default(monkeypatch):
+    import api.auth_oidc as auth_oidc
+
+    monkeypatch.setattr(
+        auth_oidc.socket,
+        "getaddrinfo",
+        lambda *_args, **_kwargs: [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.168.1.7", 443))
+        ],
+    )
+    # Configured with implicit default port 443
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {"issuer": "https://idp.internal/realms/demo"},
+    )
+
+    # Both implicit and explicit :443 target URLs match the canonical origin
+    auth_oidc._validate_outbound_oidc_url("https://idp.internal/.well-known/openid-configuration")
+    auth_oidc._validate_outbound_oidc_url("https://idp.internal:443/protocol/openid-connect/token")
+
+    # Configured with explicit :443 matches implicit target URL
+    monkeypatch.setattr(
+        auth_oidc,
+        "_resolve_oidc_config",
+        lambda: {"issuer": "https://idp.internal:443/realms/demo"},
+    )
+    auth_oidc._validate_outbound_oidc_url("https://idp.internal/token")
+    auth_oidc._validate_outbound_oidc_url("https://idp.internal:443/token")
+
+
+
 def test_select_public_key_rejects_wrong_ec_curve_for_alg():
     import api.auth_oidc as auth_oidc
     from api.auth_oidc import OIDCAuthError
