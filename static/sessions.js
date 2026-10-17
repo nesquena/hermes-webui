@@ -9371,8 +9371,71 @@ function _sidebarHasUnprojectedRows(rows, projectIdFor){
   return rows.some(s=>!projectIdFor(s));
 }
 
+// #8141: display-only sidebar-bucket derivation for parent-owned delegated
+// children. A delegated subagent row (raw source 'subagent' linked as a
+// child_session to a resolved parent in the same payload) travels with its
+// parent's bucket so CLI-owned children attach under their CLI parent instead
+// of landing in the WebUI bucket where they inflated the badge but never
+// rendered. Raw source / read_only / ownership flags are untouched — the
+// server derives the same bucket (routes._sidebar_display_is_cli) so the
+// source filter, source counters, and this partition always agree.
+function _isDelegatedSubagentChild(s){
+  if(!s) return false;
+  if(s.relationship_type!=='child_session') return false;
+  const src=String(s.raw_source||s.source_tag||s.session_source||s.source||'').trim().toLowerCase();
+  return src==='subagent';
+}
+function _sidebarDisplayBucketIsCli(s, rowsById, memo){
+  if(!s) return false;
+  if(memo&&s.session_id&&memo.has(s.session_id)) return memo.get(s.session_id);
+  let result=_isCliSession(s);
+  if(_isDelegatedSubagentChild(s)){
+    const seen=new Set();
+    const path=[];
+    let cur=s;
+    let resolved=false;
+    while(_isDelegatedSubagentChild(cur)){
+      path.push(cur);
+      const parentId=String(cur.parent_session_id||'').trim();
+      if(!parentId||seen.has(parentId)) break;
+      seen.add(parentId);
+      if(memo&&parentId&&memo.has(parentId)){
+        result=memo.get(parentId);
+        resolved=true;
+        break;
+      }
+      const parent=rowsById.get(parentId);
+      if(!parent) break;
+      cur=parent;
+    }
+    if(!resolved&&cur!==s){
+      result=_isCliSession(cur);
+      resolved=true;
+    } else if(!resolved){
+      // Rotation/compression fallback: the direct parent row may be gone, but the
+      // lineage root/tip still derives the child's bucket.
+      for(const key of ['_parent_lineage_root_id','_parent_lineage_tip_id']){
+        const lineageId=String(s[key]||'').trim();
+        if(lineageId&&lineageId!==s.session_id&&rowsById.has(lineageId)){
+          result=_isCliSession(rowsById.get(lineageId));
+          resolved=true;
+          break;
+        }
+      }
+    }
+    // Every delegated row on the resolved path shares the ancestor's bucket.
+    if(memo){
+      for(const r of path) if(r&&r.session_id&&!memo.has(r.session_id)) memo.set(r.session_id,result);
+    }
+  }
+  if(memo&&s.session_id&&!memo.has(s.session_id)) memo.set(s.session_id,result);
+  return result;
+}
+
 function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
-  const projectIdFor=_sidebarProjectResolver(_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]));
+  const scopedRowsById=_sidebarRowsById([allMatched, typeof _sidebarReferenceSessions!=='undefined'?_sidebarReferenceSessions:null]);
+  const projectIdFor=_sidebarProjectResolver(scopedRowsById);
+  const displayBucketMemo=new Map();
   let cliSessionCount=0;
   const webuiProfileFiltered=[];
   const cliProfileFiltered=[];
@@ -9384,7 +9447,11 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   let cliArchivedCount=0;
   for(const s of allMatched){
     if(!_sidebarRowHasVisibleMessages(s, activeSidForSidebar)) continue;
-    const isCli=_isCliSession(s);
+    // #8141: display-only bucket — a parent-owned delegated child travels with
+    // its resolved parent/lineage (CLI children attach under CLI parents)
+    // instead of landing in the WebUI bucket where it inflated the badge but
+    // never rendered. Raw source / read_only / ownership flags are untouched.
+    const isCli=_sidebarDisplayBucketIsCli(s, scopedRowsById, displayBucketMemo);
     if(isCli) cliSessionCount++;
     if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) continue;
     const profileFiltered=isCli ? cliProfileFiltered : webuiProfileFiltered;
@@ -9435,10 +9502,14 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
 function _scopedSidebarReferenceRows(isCli, projectIdFor){
   if(typeof _sidebarReferenceSessions==='undefined'||!Array.isArray(_sidebarReferenceSessions)||!_sidebarReferenceSessions.length) return [];
   const resolve=projectIdFor||_sidebarProjectResolver(_sidebarRowsById([_sidebarReferenceSessions, typeof _allSessions!=='undefined'?_allSessions:null]));
+  // #8141: references use the same display-only bucket derivation so an
+  // archived CLI-parent lineage (including archived subagent links) stays in
+  // the CLI render's suppression context.
+  const scopeRowsById=_sidebarRowsById([typeof _allSessions!=='undefined'?_allSessions:null, _sidebarReferenceSessions]);
   return _sidebarReferenceSessions.filter(s=>{
     if(!s) return false;
-    // Source scope: only references in the same webui/cli bucket as this render.
-    if(_isCliSession(s)!==!!isCli) return false;
+    // Source scope: only references in the same webui/cli display bucket as this render.
+    if(_sidebarDisplayBucketIsCli(s, scopeRowsById)!==!!isCli) return false;
     // Project scope: mirror _partitionSidebarSessionRows exactly.
     const projectId=resolve(s);
     if(_activeProject===NO_PROJECT_FILTER){ if(projectId) return false; }

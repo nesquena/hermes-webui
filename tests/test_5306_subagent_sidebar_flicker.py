@@ -96,6 +96,8 @@ eval(extractFunc('_sidebarRowHasVisibleMessages'));
 eval(extractFunc('_isDelegatedSubagentRow'));
 eval(extractFunc('_sidebarProjectResolver'));
 eval(extractFunc('_sidebarRowsById'));
+eval(extractFunc('_isDelegatedSubagentChild'));
+eval(extractFunc('_sidebarDisplayBucketIsCli'));
 eval(extractFunc('_partitionSidebarSessionRows'));
 eval(extractFunc('_scopedSidebarReferenceRows'));
 eval(extractFunc('_renderSidebarRowsFromRawSessions'));
