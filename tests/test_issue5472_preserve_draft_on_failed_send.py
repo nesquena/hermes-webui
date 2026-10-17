@@ -58,7 +58,7 @@ def _helper_body() -> str:
 
 def test_helper_has_new_three_arg_signature_and_guards():
     body = _helper_body()
-    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise)" in body
+    assert "function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, opts)" in body
     # No-op when there is nothing to restore (no text AND no staged files).
     assert "if(!restore&&!files.length) return false;" in body
     # Session-aware: never mutate a different session's visible composer.
