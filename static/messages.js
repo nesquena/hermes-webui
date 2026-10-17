@@ -1418,9 +1418,8 @@ async function captureIdea(text){
     _pushIdeaLine(t('idea_capture_failed'));
     if(typeof showToast==='function')showToast((e&&e.message)||t('idea_capture_failed'),4000);
     $('msg').value=display;autoResize();
-  }finally{
-    setComposerStatus('');
   }
+  setComposerStatus('');
 }
 
 async function send(){

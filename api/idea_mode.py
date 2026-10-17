@@ -39,6 +39,7 @@ from api.upload import (
     _reject_invisible_session,
     _reject_before_read,
     _sanitize_upload_name,
+    _RejectBeforeRead,
 )
 
 # The filing stage lives in api/idea_filing.py (sibling task t_d21da9cd).
