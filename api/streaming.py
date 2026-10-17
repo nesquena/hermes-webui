@@ -7333,12 +7333,26 @@ def _migrate_compression_session_ownership(
                 s.pre_compression_snapshot = False
                 s.pre_compression_continuation_session_id = None
                 s.parent_session_id = old_sid
-                SESSIONS[new_sid] = s
-                SESSIONS.move_to_end(new_sid)
-                _evict_sessions_over_cap()
 
-                if SESSIONS.get(old_sid) is s:
-                    SESSIONS.pop(old_sid, None)
+            # Cache republication and eviction run OUTSIDE SESSION_AGENT_LOCKS_LOCK
+            # (#8240 gate, P1). _evict_sessions_over_cap() walks candidates through
+            # _session_is_evictable() -> _session_has_live_metadata_writer(), which
+            # re-acquires that same non-reentrant registry lock on this thread. Holding
+            # it across the eviction call self-deadlocks a cache that is merely AT cap:
+            # publishing the continuation adds a third key to a cap-two cache, the walk
+            # reaches a clean neighbour, and the turn keeps both the cache lock and the
+            # registry lock forever — stalling unrelated session access, not just this
+            # compression. The old alias is retired first so the temporary third key
+            # cannot manufacture cap pressure on its own.
+            #
+            # Still under LOCK, which is the eviction caller contract, and the ownership
+            # checks above remain atomic against the registry. Metadata-writer protection
+            # in the predicate is untouched.
+            if SESSIONS.get(old_sid) is s:
+                SESSIONS.pop(old_sid, None)
+            SESSIONS[new_sid] = s
+            SESSIONS.move_to_end(new_sid)
+            _evict_sessions_over_cap()
 
     except Exception:
         try:

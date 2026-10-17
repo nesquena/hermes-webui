@@ -769,6 +769,7 @@ def _delete_target_session(sid, active_ids):
         with LOCK:
             SESSIONS[sid] = fresh
             SESSIONS.move_to_end(sid)
+            _evict_sessions_over_cap()  # #6351: this arm INSERTS (no resident entry)
         return fresh
     with LOCK:
         if SESSIONS.get(sid) is not resident:
@@ -28548,6 +28549,11 @@ def _handle_chat_start(handler, body, diag=None):
                 with LOCK:
                     SESSIONS[s.session_id] = s
                     SESSIONS.move_to_end(s.session_id)
+                    # #6351: this arm INSERTS a session that was not resident
+                    # (KeyError above), so it must run the cache-cap pass like
+                    # every other insertion path — otherwise claiming foreign
+                    # sessions grows SESSIONS past its cap for good.
+                    _evict_sessions_over_cap()
             except Exception:
                 # If the in-memory LRU refuses the new session, fall through
                 # with the just-persisted sidecar; _start_run will load it
