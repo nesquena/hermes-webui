@@ -114,6 +114,17 @@ contributor guidance; it does not change runtime behavior or CI gates.
   empty-allowlist-is-not-configured rule, and the probe-failure fallback.
   Start here before changing custom-provider model filtering or
   discovery-vs-allowlist semantics (#7165, #7404).
+- [`docs/architecture/config-write-raw-target.md`](architecture/config-write-raw-target.md):
+  current contract for every `config.yaml` writer: a write transaction must
+  load with `_load_yaml_config_file_raw()` and save through
+  `_save_yaml_config_file()` so env-expanded values are never persisted (no
+  baked secrets, no cross-profile leak), comparisons are made in the reader's
+  resolved-and-stripped vocabulary while the raw form is what gets persisted,
+  and the single documented exception where a scalar `${VAR}` expanding to
+  several skill names cannot survive a partial edit and is rewritten as
+  explicit names plus a log line. Start here before adding a config writer,
+  changing a writer that compares a value it just loaded, or touching the raw
+  loader/saver (#5619).
 - [`docs/architecture/profile-home-resolve-cache.md`](architecture/profile-home-resolve-cache.md):
   current contract for the call-scoped memoization around
   `_resolve_profile_home_param()` in `api/workspace.py`: what it caches, the
