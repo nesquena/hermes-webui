@@ -309,8 +309,11 @@ def test_session_action_menu_focus_lifecycle_in_browser():
     except Exception:  # pragma: no cover - dependency missing path
         pytest.skip("playwright is unavailable; run the session action menu browser test")
 
+    from tests._playwright_utils import launch_chromium_or_skip
+
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
+        browser = launch_chromium_or_skip(
+            playwright,
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )
@@ -341,8 +344,11 @@ def test_session_action_menu_returns_to_prior_focus_for_nonfocusable_opener_in_b
     except Exception:  # pragma: no cover - dependency missing path
         pytest.skip("playwright is unavailable; run the session action menu browser test")
 
+    from tests._playwright_utils import launch_chromium_or_skip
+
     with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
+        browser = launch_chromium_or_skip(
+            playwright,
             headless=True,
             args=["--no-sandbox", "--disable-dev-shm-usage"],
         )

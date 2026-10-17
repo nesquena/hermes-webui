@@ -68,6 +68,16 @@ def test_path_outside_boot_default_and_home_is_rejected(monkeypatch, tmp_path):
 
     monkeypatch.setattr(ws_mod, "_BOOT_DEFAULT_WORKSPACE", str(boot_default))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # api.workspace resolves the user home through ``$HOME`` (via
+    # ``_expanduser_path("~")``), NOT ``Path.home()``.  In a sandbox/CI where
+    # ``$HOME`` points at the tmp root (e.g. ``HOME=/tmp`` and ``tmp_path`` is
+    # ``/tmp/pytest-of-...``), ``outside`` would be seen as *under home* and
+    # wrongly trusted.  Pin every home source to the test's ``home`` dir so the
+    # rejection is exercised regardless of where ``tmp_path`` physically lives.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
 
     with pytest.raises(ValueError, match="outside the user home"):
         resolve_trusted_workspace(str(outside))
@@ -105,6 +115,13 @@ def test_path_traversal_via_dotdot_does_not_escape_boot_default(monkeypatch, tmp
 
     monkeypatch.setattr(ws_mod, "_BOOT_DEFAULT_WORKSPACE", str(boot_default))
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    # Pin every home source (see the sibling test): api.workspace derives home
+    # from ``$HOME``, not ``Path.home()``.  Without this a sandbox ``HOME=/tmp``
+    # makes the resolved escape path look like it is under home.
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("USERPROFILE", raising=False)
+    monkeypatch.delenv("HOMEDRIVE", raising=False)
+    monkeypatch.delenv("HOMEPATH", raising=False)
 
     # `boot_default/../private` resolves to `tmp_path/data/private`, which is
     # NOT a child of boot_default and not under home — must reject.
