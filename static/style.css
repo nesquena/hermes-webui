@@ -6118,6 +6118,11 @@ main.main > #mainPlugin{display:none;}
 .session-item.archived .session-title{font-style:italic;}
 
 /* ── Done sessions (structural `done_at`, not a title prefix) ── */
+/* The row-level `done` class carries one job the badge cannot: a finished
+   conversation's title loses emphasis, so the sidebar reads "settled" at a
+   glance without relying on the pill alone. Deliberately NOT dimmed like
+   `.archived` (storage): a finished row is still normal working history. */
+.session-item.done .session-title{font-weight:400;}
 .session-done-badge{display:inline-flex;align-items:center;justify-content:center;height:16px;font-size:10px;font-weight:600;padding:0 6px;border-radius:999px;background:color-mix(in srgb,var(--success,#22c55e) 16%,transparent);color:var(--success,#22c55e);margin-left:6px;flex-shrink:0;user-select:none;cursor:default;letter-spacing:.02em;}
 .session-item.active .session-done-badge{background:color-mix(in srgb,var(--success,#22c55e) 26%,transparent);}
 

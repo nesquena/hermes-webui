@@ -136,6 +136,12 @@ def test_badge_style_is_defined_once():
     assert ".session-item.active .session-done-badge{" in STYLE_CSS
 
 
+def test_done_row_class_has_a_style_consumer():
+    """A class the renderer emits and a test asserts must actually be styled —
+    otherwise it is dead weight that reads as a feature."""
+    assert ".session-item.done .session-title{" in STYLE_CSS
+
+
 def test_every_locale_defines_both_done_keys():
     # Locale keys are bare (`en: {`) or quoted when they carry a hyphen
     # (`'zh-Hant': {`). An unquoted-only pattern silently skips zh-Hant and the
