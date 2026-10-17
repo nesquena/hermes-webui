@@ -381,6 +381,7 @@ def _payload(
     decision: Dict[str, Any] | None = None,
     message_key: str | None = None,
     message_args: list[Any] | None = None,
+    continuation_id: str = "",
 ) -> Dict[str, Any]:
     body: Dict[str, Any] = {
         "ok": bool(ok),
@@ -398,6 +399,12 @@ def _payload(
         body["message_key"] = message_key
     if message_args is not None:
         body["message_args"] = [a for a in message_args if a is not None]
+    # #7862 re-gate round 3 (finding 1): the pending continuation's identity
+    # token. Only emitted when the action actually has one to offer (a
+    # ``resume`` with a live intent), so the field never appears as a
+    # meaningless empty string elsewhere.
+    if continuation_id:
+        body["continuation_id"] = str(continuation_id)
     return body
 
 
@@ -581,6 +588,29 @@ def goal_command_payload(
                 message="No goal to resume.",
                 message_key="goal_no_goal",
             )
+        # #7862 re-gate round 3 (finding 1): ``/goal resume`` tells the user to
+        # "type continue", but that literal control is a NEW human turn whose
+        # text never matches the recorded continuation prompt. The store can
+        # admit it on identity (round 11) ONLY when the request carries this
+        # continuation's token, so the resume payload hands the pending
+        # intent's token to the browser, which binds it to the session's next
+        # literal ``continue`` send. Without this the goal loop stopped right
+        # after every resume.
+        try:
+            from api.goal_continuation_store import (
+                load_pending_goal_continuations,
+            )
+
+            _pending = load_pending_goal_continuations().get(sid) or {}
+            _resume_continuation_id = str(_pending.get("continuation_id") or "")
+        except Exception:
+            _resume_continuation_id = ""
+            logger.debug(
+                "Failed to read the pending continuation token for the resume "
+                "payload (session %s)",
+                sid,
+                exc_info=True,
+            )
         return _payload(
             action="resume",
             message=(
@@ -590,6 +620,7 @@ def goal_command_payload(
             message_key="goal_resumed",
             message_args=[str(state.goal)],
             state=state,
+            continuation_id=_resume_continuation_id,
         )
 
     if lower in ("clear", "stop", "done"):

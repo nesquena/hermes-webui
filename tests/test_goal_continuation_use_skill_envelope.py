@@ -146,24 +146,27 @@ class TestIdIdentityConsumption:
         assert sid in PENDING_GOAL_CONTINUATION
         assert sid in PENDING_GOAL_CONTINUATION_RECORDS
 
-    def test_token_with_unrelated_text_is_not_consumed(self):
-        """A right token with a human (unrelated) message must not be swallowed.
+    def test_a_token_with_an_unrelated_turn_is_admitted_by_identity(self):
+        """#7862 re-gate round 3 (finding 4): the token IS the admission.
 
-        The browser only echoes the token on the automatic continuation queue
-        entry, so a human turn carrying the token is not a contract the UI
-        produces; the record nevertheless requires the text to stay coherent.
+        Renamed from ``test_token_with_unrelated_text_is_not_consumed``: the
+        browser only echoes the continuation's token on the queued automatic
+        send, and a validated current-generation token now admits the turn
+        independently of the prompt text (an edited or combined queued
+        continuation keeps the token but changes the text). What still guards
+        an unrelated turn is the token itself — see
+        ``test_a_tokenless_edited_text_is_still_rejected`` (round 12) for the
+        tokenless contract.
         """
         from api import goal_continuation_store as store
-        from api.config import PENDING_GOAL_CONTINUATION
 
         sid = self._arm_simulate_restart()
         assert (
             store.consume_pending_goal_continuation(
                 sid, "thanks, also what time is it?", self.TOKEN
             )
-            == store.CONSUME_NOT_MATCHING
+            == store.CONSUME_COMMITTED
         )
-        assert sid in PENDING_GOAL_CONTINUATION
 
     def test_token_survives_disk_reload(self):
         from api import goal_continuation_store as store
@@ -226,7 +229,10 @@ class TestWiringContracts:
         # 2) queue entry keeps it
         assert "goal_continuation_id:_goalNext.continuation_id||''" in src
         # 3) the drained /api/chat/start POST sends it
-        assert "goal_continuation_id:(options&&options.goal_continuation_id)||undefined" in src
+        # #7862 re-gate round 3 (finding 1): the payload also falls back to the
+        # token a ``/goal resume`` bound to the session, so the literal
+        # ``continue`` the resume message asks for is admitted by identity.
+        assert "goal_continuation_id:(options&&options.goal_continuation_id)||_resumeContinuationId||undefined" in src
 
     def test_ui_js_passes_token_from_queue_entry_to_send(self):
         src = self._src("static/ui.js")

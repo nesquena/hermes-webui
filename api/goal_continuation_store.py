@@ -585,6 +585,27 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> bool:
                 # crash between the consume and the pending-start write leaves
                 # durable evidence of the continuations that were already spent
                 # in memory. Internal bookkeeping keys are stripped first.
+                #
+                # #7862 re-gate round 3 (finding 3): the filter is now WHOLE
+                # ENTRY per handoff, keyed by the entry's own adoption marker.
+                # The previous two-level filter suppressed every token of a
+                # session in ``_ADOPTED_HANDOFF_SESSIONS`` AND blanked the
+                # fields of every entry of a suppressed session. Both were
+                # wrong in the same direction:
+                #
+                # * the session-wide set also hid the RETRY's fresh handoff —
+                #   after an adoption, a retry's own crash before its launch
+                #   left nothing durable and the continuation was lost;
+                # * the inner field filter republished an already-adopted
+                #   token as ``{}`` when a later discharge cleared the session
+                #   from the set (``discard_goal_continuation_handoff``
+                #   discards the marker), so an unrelated write restored a
+                #   phantom with an empty prompt and token.
+                #
+                # Filtering the whole entry by its own marker fixes both: a
+                # converted token is withheld for as long as the marker
+                # exists, and every other token (including a retry's) is
+                # published with all of its fields.
                 "continuation_handoffs": {
                     f"{sid}\u0000{attempt}": {
                         k: v
@@ -599,15 +620,22 @@ def _write_registry_unlocked(records: dict, *, context: str = "") -> bool:
                         # swept on the first sweep after a restart — the exact
                         # regression this round closes.
                         and k != "_handoff_attempt_id"
-                        # #7862 re-gate CORE: this session's handoff has already
-                        # been CONVERTED into a restored record. Publishing it again
-                        # would let the next cold restore adopt it a second time.
-                        # The in-memory token stays — the receipt liveness anchor
-                        # needs it — only the durable copy is withheld.
-                        and not rec.get("_handoff_adopted_into_record")
+                        # ``_handoff_stream_id`` IS persisted: it is the durable
+                        # admission of a start that LAUNCHED under that stream
+                        # (#7862 re-gate). Round 3 reconciles it against the
+                        # run/turn journals, so a cold restore must still be
+                        # able to read it.
+                        and k != "_handoff_adopted_into_record"
                     }
                     for (sid, attempt), rec in _CONTINUATION_HANDOFF_TOKENS.items()
-                    if sid not in _ADOPTED_HANDOFF_SESSIONS
+                    # #7862 re-gate round 3 (finding 3): this session's THIS
+                    # handoff has already been CONVERTED into a restored record.
+                    # Publishing it again would let the next cold restore adopt
+                    # it a second time. The in-memory token stays — the receipt
+                    # liveness anchor needs it — only the durable copy of this
+                    # entry is withheld. Note the scope: one entry, not the
+                    # whole session.
+                    if not rec.get("_handoff_adopted_into_record")
                 },
             },
             sort_keys=True,
@@ -1047,8 +1075,33 @@ def consume_pending_goal_continuation(
             and request_id
             and normalize_continuation_text(incoming_text) == _CONTINUE_CONTROL
         )
-        if not continue_admitted and not _continuation_text_matches(
-            record.get("prompt") or "", incoming_text
+        # #7862 re-gate round 3 (finding 4): a request carrying THIS
+        # continuation's token is admitted on identity even when its text was
+        # edited (or the queued entries were combined) while it sat in the
+        # queue. The UI can legitimately produce that: the queue's Combine
+        # action merges the queued texts into one entry, and editing a queued
+        # continuation rewrites the text. Both keep the continuation's token
+        # on the entry, so the turn is still the goal continuation the store
+        # armed — but the recorded prompt no longer matches, the consume
+        # returned NOT_MATCHING, the turn ran as an ordinary turn and the
+        # goal loop stopped.
+        #
+        # The guard is deliberately narrow and does NOT widen the tokenless
+        # contract: the token must be present, must equal the recorded one
+        # (checked above, so a foreign generation is rejected before this
+        # point), and the record must carry a non-empty token of its own.
+        # A tokenless request falls through to the text comparison below.
+        token_admitted = bool(
+            request_id
+            and recorded_id
+            and request_id == recorded_id
+        )
+        if (
+            not continue_admitted
+            and not token_admitted
+            and not _continuation_text_matches(
+                record.get("prompt") or "", incoming_text
+            )
         ):
             return CONSUME_NOT_MATCHING
         _next_generation_unlocked()
@@ -1228,6 +1281,71 @@ def restore_pending_goal_continuation(session_id: str, record: dict) -> bool:
         return True
 
 
+def _stream_executed_durably(session_id: str, stream_id: str) -> bool:
+    """True when durable run/turn state proves this stream's worker ran.
+
+    #7862 re-gate round 3 (finding 5): an allocated stream id on a handoff is
+    NOT proof of execution. The route binds it before ``thr.start()``, so a
+    crash in that window leaves a stream id whose worker never ran — and
+    recovery that treated the id as proof silently dropped the continuation
+    (a forced exit at exactly that boundary restored 0).
+
+    The reconciliation reads what only a WORKER can write:
+
+    * the **turn journal** — the route's ``submitted`` event for the stream
+      (written inside the launch critical section) plus the worker's own
+      ``worker_started`` / ``completed`` / ``interrupted`` rows;
+    * the **run journal** — the SSE rows the worker emits for the stream.
+
+    Either one present means execution happened, so the admission is spent.
+    Neither present means the process died before the worker started, so the
+    admission is still recoverable and the handoff must stay adoptable.
+
+    Never raises: an unreadable or absent journal is simply "no evidence",
+    which is the safe direction for recovery.
+    """
+    sid = str(session_id or "").strip()
+    stream = str(stream_id or "").strip()
+    if not sid or not stream:
+        return False
+    try:
+        from api.models import SESSION_DIR
+        from api.run_journal import _run_path as _run_journal_path
+        from api.turn_journal import read_turn_journal
+
+        session_dir = SESSION_DIR
+        # Turn journal: any event carrying this stream id (the route's own
+        # ``submitted`` event is written after the stream id is allocated, so
+        # it alone is NOT execution evidence — require the worker's rows).
+        journal = read_turn_journal(sid, session_dir=session_dir)
+        for event in journal.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            if str(event.get("stream_id") or "") != stream:
+                continue
+            if str(event.get("event") or "") in (
+                "worker_started",
+                "completed",
+                "interrupted",
+            ):
+                return True
+        # Run journal: any SSE row the worker appended for this stream.
+        path = _run_journal_path(sid, stream, session_dir=session_dir)
+        if path.exists():
+            with open(path, "rb") as fh:
+                if fh.read(1):
+                    return True
+    except Exception:
+        logger.debug(
+            "Goal continuation stream reconciliation failed for session %s "
+            "stream %s; treating it as not-executed",
+            sid,
+            stream,
+            exc_info=True,
+        )
+    return False
+
+
 def restore_goal_continuations() -> int:
     """Startup-only restore: merge durable records into the live marker set.
 
@@ -1301,33 +1419,56 @@ def restore_goal_continuations() -> int:
                 _drop_continuation_handoffs_unlocked(sid)
                 dropped += 1
                 continue
-            # #7862 re-gate CORE (Oct 10, "failed durable discharge is still
-            # ignored after launch"): a handoff carrying a STREAM id is not
-            # evidence of an interrupted start — it is the durable admission
-            # of a start that LAUNCHED under that stream. The reviewer's probe:
-            # a launch succeeded, its discharge write failed, the process
-            # restarted, and the cold restore recovered 1 already-admitted
-            # continuation. Adopting it would restore an intent whose turn
-            # already executed, so the spent admission is dropped instead.
+            # #7862 re-gate round 3 (finding 5): a handoff carrying a STREAM
+            # id is only evidence that an admission RECORDED an identity — the
+            # route binds the stream id before ``thr.start()``. The reviewer's
+            # new crash window sits exactly between the two: a forced exit at
+            # that boundary restored 0 continuations although no worker ever
+            # ran, because recovery treated the allocated id as proof of
+            # execution. So the recorded stream is now RECONCILED against the
+            # durable run/turn state the WORKER writes, and only a stream that
+            # actually executed is treated as a spent admission:
+            #
+            # * the turn journal carries the route's ``submitted`` event plus
+            #   the worker's own lifecycle rows (``worker_started`` /
+            #   ``completed`` / ``interrupted``) for the stream;
+            # * the run journal carries the SSE rows the worker emits.
+            #
+            # Either one proves the worker reached execution. Neither present
+            # means the process died before ``thr.start()`` — the admission is
+            # unrecoverable-by-any-other-means, so the handoff stays
+            # reconcilable and is adopted below.
             if record.get("_handoff_stream_id"):
-                logger.info(
-                    "Goal continuation registry: dropping the handoff for "
-                    "session %s (attempt %s) — its turn already launched "
-                    "under stream %s",
+                _recorded_stream = str(record.get("_handoff_stream_id") or "")
+                if _stream_executed_durably(sid, _recorded_stream):
+                    logger.info(
+                        "Goal continuation registry: dropping the handoff for "
+                        "session %s (attempt %s) — its turn executed under "
+                        "stream %s",
+                        sid,
+                        attempt,
+                        _recorded_stream,
+                    )
+                    _drop_continuation_handoffs_unlocked(sid)
+                    dropped += 1
+                    _RETIRED_LOG.append(
+                        {
+                            "session_id": sid,
+                            "reason": "handoff_admission_already_launched",
+                            "at": time.time(),
+                        }
+                    )
+                    continue
+                logger.warning(
+                    "Goal continuation registry: the handoff for session %s "
+                    "(attempt %s) recorded stream %s, but no durable run/turn "
+                    "evidence exists for it — the worker never launched, so the "
+                    "admission stays recoverable (#7862 re-gate round 3, "
+                    "finding 5)",
                     sid,
                     attempt,
-                    record.get("_handoff_stream_id"),
+                    _recorded_stream,
                 )
-                _drop_continuation_handoffs_unlocked(sid)
-                dropped += 1
-                _RETIRED_LOG.append(
-                    {
-                        "session_id": sid,
-                        "reason": "handoff_admission_already_launched",
-                        "at": time.time(),
-                    }
-                )
-                continue
             if (sid, attempt) in _CONTINUATION_HANDOFF_TOKENS:
                 # This process already owns the admission (a rollback restored
                 # the record and re-armed the handoff, or an earlier pass did).
@@ -1430,7 +1571,15 @@ def restore_goal_continuations() -> int:
                 _CONTINUATION_HANDOFF_TOKENS[key] = value
             _ADOPTED_HANDOFF_SESSIONS.add(sid)
             PENDING_GOAL_CONTINUATION.add(sid)
-            PENDING_GOAL_CONTINUATION_RECORDS[sid] = dict(record)
+            # #7862 re-gate round 3 (finding 5): a handoff that carried a stream
+            # id but never executed (the crash window before ``thr.start()``)
+            # still carries that id here. The restored record must NOT: the id
+            # describes an attempt that did not run, so leaving it on the record
+            # would let the next snapshot treat the adoption as a spent
+            # admission and drop the continuation again.
+            _restored_record = dict(record)
+            _restored_record.pop("_handoff_stream_id", None)
+            PENDING_GOAL_CONTINUATION_RECORDS[sid] = _restored_record
             adopted += 1
             restored += 1
         if adopted:

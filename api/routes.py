@@ -24967,6 +24967,7 @@ def _start_regeneration_stream_locked(
     backend_is_gateway: bool,
     persisted_model=None,
     persisted_model_provider=None,
+    goal_continuation_attempt_id: str = "",
 ):
     """Commit a retained-row regeneration before releasing its real worker."""
     from api.session_ops import (
@@ -25135,6 +25136,26 @@ def _start_regeneration_stream_locked(
         worker_thread = threading.Thread(target=_gated_worker, daemon=True)
         worker_thread.start()
         thread_started = True
+        # #7862 re-gate round 3 (finding 2): the regeneration path never bound
+        # the admission's stream identity at all, so a launch whose discharge
+        # write failed had nothing to reconcile against — a restart restored
+        # the continuation and the admitted turn ran twice. Bind it here, while
+        # the gated worker is still parked at ``release_worker.wait()`` and
+        # BEFORE the worker is released, so the binding is durable before any
+        # execution can happen. A failed binding refuses the launch (the except
+        # below compensates the start and the caller restores the intent).
+        if goal_continuation_attempt_id and not record_goal_continuation_stream(
+            s.session_id, goal_continuation_attempt_id, stream_id
+        ):
+            logger.error(
+                "Session %s: the goal-continuation admission for attempt %s "
+                "launched a regeneration but its stream identity could not be "
+                "bound durably; refusing to release stream %s",
+                s.session_id,
+                goal_continuation_attempt_id,
+                stream_id,
+            )
+            raise _GoalContinuationCommitFailed(session_id=s.session_id)
         save_attempted = True
         s.save()
         accepted = True
@@ -25438,12 +25459,26 @@ def _start_chat_stream_for_session(
             _goal_is_active = False
             if normalize_continuation_text(msg) == _CONTINUE_CONTROL:
                 try:
-                    from api.goals import goal_state_snapshot
+                    # #7862 re-gate round 3 (finding 1): certify the goal the
+                    # profile-scoped way. The previous check read
+                    # ``goal_state_snapshot`` and required a dict with
+                    # ``status == "active"``, but the native snapshot is a
+                    # ``GoalState`` object (``isinstance(snapshot, dict)`` is
+                    # False) and a beta-profile goal resolves to ``None``
+                    # without ``profile_home``. Either way the certification
+                    # failed, the literal ``continue`` after ``/goal resume``
+                    # launched with ``goal_related=false``, and the goal loop
+                    # stopped. ``has_active_goal()`` answers the same question
+                    # through the manager (native or fallback) under the
+                    # session's profile home.
+                    from api.goals import has_active_goal
+                    from api.profiles import get_hermes_home_for_profile
 
-                    _goal_snapshot = goal_state_snapshot(s.session_id)
+                    _goal_home = get_hermes_home_for_profile(
+                        getattr(s, "profile", None)
+                    )
                     _goal_is_active = bool(
-                        isinstance(_goal_snapshot, dict)
-                        and str(_goal_snapshot.get("status") or "") == "active"
+                        has_active_goal(s.session_id, profile_home=_goal_home)
                     )
                     _explicit_continue = _goal_is_active
                 except Exception:
@@ -25587,6 +25622,13 @@ def _start_chat_stream_for_session(
                 needs_stale_cleanup = False
                 if regeneration is not None:
                     consume_continuation_markers()
+                    # #7862 re-gate round 3 (finding 2): mint the attempt
+                    # identity BEFORE the regeneration launch and thread it
+                    # through, so the regeneration path can bind the admission's
+                    # stream identity durably before it releases its worker
+                    # (it previously bound nothing, despite the comment
+                    # claiming the regeneration stream's own launch did it).
+                    goal_continuation_attempt_id = _current_goal_continuation_attempt_id()
                     try:
                         regeneration_response = _start_regeneration_stream_locked(
                             s,
@@ -25602,6 +25644,7 @@ def _start_chat_stream_for_session(
                             source=source,
                             moa_config=moa_config,
                             backend_is_gateway=backend_is_gateway,
+                            goal_continuation_attempt_id=goal_continuation_attempt_id,
                         )
                     except Exception:
                         restore_consumed_continuation_markers()
@@ -25624,9 +25667,11 @@ def _start_chat_stream_for_session(
                         # #7862 re-gate CORE (Oct 10): the outcome is CONSUMED
                         # here too -- the reviewer read this same unchecked
                         # settlement on the regeneration path. The stream
-                        # identity was bound by the regeneration stream's own
-                        # launch, so a failed settlement stays reconcilable;
-                        # report it instead of acknowledging a clean response.
+                        # identity is bound INSIDE
+                        # ``_start_regeneration_stream_locked`` (round 3:
+                        # before its gated worker is released), so a failed
+                        # settlement stays reconcilable; report it instead of
+                        # acknowledging a clean response.
                         _regen_handoff_settled = discard_goal_continuation_handoff(
                             s.session_id, _current_goal_continuation_attempt_id()
                         )
@@ -25759,10 +25804,28 @@ def _start_chat_stream_for_session(
                     # reconcile against it instead of restoring an admitted
                     # turn as pending intent. The handoff already IS the durable
                     # admission; the stream id is what says it LAUNCHED.
+                    #
+                    # #7862 re-gate round 3 (finding 2): the binding RESULT is
+                    # consumed, not dropped. An ENOSPC on the stream-identity
+                    # write used to fall through, the worker still launched
+                    # with a 200, and a restart restored the continuation —
+                    # so the admitted turn ran TWICE. A failure here means the
+                    # admission is not durably tied to this stream, so the
+                    # launch must be refused (the surrounding except compensates
+                    # the start and rolls the intent back for a retry).
                     goal_continuation_attempt_id = _current_goal_continuation_attempt_id()
-                    record_goal_continuation_stream(
+                    if not record_goal_continuation_stream(
                         s.session_id, goal_continuation_attempt_id, stream_id
-                    )
+                    ):
+                        logger.error(
+                            "Session %s: the goal-continuation admission for "
+                            "attempt %s could not durably bind its stream "
+                            "identity; refusing to launch stream %s",
+                            s.session_id,
+                            goal_continuation_attempt_id,
+                            stream_id,
+                        )
+                        raise _GoalContinuationCommitFailed(session_id=s.session_id)
                     thr.start()
                     # #7862 round 5: the launch SUCCEEDED, so this attempt can
                     # no longer be rolled back and its receipt has no consumer.

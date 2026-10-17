@@ -161,7 +161,7 @@ class TestExplicitContinueAfterResume:
         outcome = store.consume_pending_goal_continuation(
             "sid-continue",
             CONTINUE_TEXT,
-            TOKEN,
+            "",
             "att-continue-4",
             explicit_continue=True,
             goal_active=False,
@@ -177,6 +177,14 @@ class TestExplicitContinueAfterResume:
         ``Continue please!!`` and a paraphrase are ordinary turns; only the
         normalised literal ``continue`` (what the resume message tells the
         user to type) takes the explicit path.
+
+        #7862 re-gate round 3 (finding 4): these cases send a TOKEN, because
+        the browser always carries the continuation's identity on the queued
+        automatic send. A validated token now admits the turn independently
+        of its text (an edited or combined queued continuation must not stop
+        the goal loop), so the token is dropped here to keep this test about
+        the TEXT contract alone. ``test_an_unrelated_message_is_still_left_
+        pending`` below pins the same question with no token at all.
         """
         from api import goal_continuation_store as store
         from api.goal_continuation_store import CONSUME_NOT_MATCHING
@@ -186,7 +194,7 @@ class TestExplicitContinueAfterResume:
             outcome = store.consume_pending_goal_continuation(
                 "sid-continue",
                 text,
-                TOKEN,
+                "",
                 f"att-continue-{text[:4]}",
                 explicit_continue=True,
                 goal_active=True,
@@ -203,7 +211,7 @@ class TestExplicitContinueAfterResume:
 
         _arm(store)
         outcome = store.consume_pending_goal_continuation(
-            "sid-continue", "what is the weather", TOKEN, "att-continue-6"
+            "sid-continue", "what is the weather", "", "att-continue-6"
         )
         assert outcome == CONSUME_NOT_MATCHING
         from api.config import PENDING_GOAL_CONTINUATION_RECORDS
@@ -267,11 +275,23 @@ class TestTheRouteWiresTheContinueAdmission:
         # ...and the flags must be DERIVED from the session's goal state, not
         # literals: the admission is only legitimate for an active goal.
         before = scope[: consume_m.start()]
-        assert "goal_state_snapshot(" in before, (
-            "the route must read the session's goal state before admitting a continue"
+        # #7862 re-gate round 3 (finding 1): the certification reads the goal
+        # through the profile-scoped ``has_active_goal()``, not the
+        # ``goal_state_snapshot`` dict-status check this test originally
+        # pinned. The snapshot is a ``GoalState`` object on the native manager
+        # (``isinstance(snapshot, dict)`` is False) and resolves to ``None``
+        # for a beta profile without ``profile_home``, so the dict check never
+        # certified and the goal loop stopped after every resume.
+        assert "has_active_goal(" in before, (
+            "the route must certify the session's goal via has_active_goal() "
+            "before admitting a continue"
         )
-        assert '"active"' in before or "'active'" in before, (
-            "the route must require an active goal for the continue admission"
+        assert "get_hermes_home_for_profile(" in before, (
+            "the route must scope the goal certification to the session's profile"
+        )
+        assert "goal_state_snapshot(" not in before, (
+            "the dict-status snapshot check is still live; it never certifies "
+            "a native GoalState or a beta-profile goal (#7862 re-gate finding 1)"
         )
 
     def test_a_non_continue_message_never_sets_the_flag(self):

@@ -1428,6 +1428,20 @@ async function send(){
     return;
   }
 
+  // #7862 re-gate round 3 (finding 1): a ``/goal resume`` binds the pending
+  // continuation's token to this session's next send. The resume message tells
+  // the user to "type continue", and that literal control is a new human turn
+  // the recorded prompt never matches, so without the token the store refused
+  // the admission and the goal loop stopped. Claim the bound token exactly
+  // once (one-shot) and carry it on the payload below. A token already
+  // supplied by the caller (the automatic queue drain) always wins.
+  let _resumeContinuationId='';
+  if(!(options&&options.goal_continuation_id)){
+    _resumeContinuationId=typeof _claimResumeGoalContinuationToken==='function'
+      ? _claimResumeGoalContinuationToken(activeSid)
+      : '';
+  }
+
   // #5472: snapshot the ORIGINAL user-typed composer state now — before slash
   // rewrites (/moa, bundles) mutate `text` and before uploadPendingFiles()
   // clears S.pendingFiles. If /api/chat/start throws (turn never durably
@@ -1852,7 +1866,10 @@ async function send(){
       moa_config:_pendingMoaConfig?true:undefined,
       // #7862: identity token for a drained goal continuation (survives a
       // `/use` skill directive wrapping the queued text on the wire).
-      goal_continuation_id:(options&&options.goal_continuation_id)||undefined
+      // #7862 re-gate round 3 (finding 1): fall back to the token a
+      // `/goal resume` bound to this session, so the literal ``continue``
+      // the resume message asks for is admitted by identity.
+      goal_continuation_id:(options&&options.goal_continuation_id)||_resumeContinuationId||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;

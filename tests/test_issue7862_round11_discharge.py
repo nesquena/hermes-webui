@@ -152,21 +152,44 @@ class TestTheAdmissionLearnsItsStreamIdentity:
         it would restore a continuation that was already spent, which is
         exactly the resurrection the reviewer reproduced (cold restore
         recovers 1 already-admitted continuation).
+
+        #7862 re-gate round 3 (finding 5): the reconciliation now asks the
+        durable run/turn journals whether the stream's worker actually ran,
+        because an allocated stream id alone is NOT proof of execution (the
+        route binds it before ``thr.start()``). This case therefore leaves the
+        worker-side journal row a real launch would have written.
         """
         from api import goal_continuation_store as store
+        from api.models import SESSION_DIR
+        from api.run_journal import append_run_event
 
         sid, attempt = "sess-stream-3", "att-stream-3"
         _arm_and_consume(store, sid, attempt)
         store.record_goal_continuation_stream(sid, attempt, "stream-ghi")
+        try:
+            # The worker DID run: its run journal carries a row for the stream.
+            append_run_event(
+                sid, "stream-ghi", "start", {"meta": "test"}, session_dir=SESSION_DIR
+            )
 
-        restored = _cold_restore(store)
-        from api.config import PENDING_GOAL_CONTINUATION_RECORDS
+            restored = _cold_restore(store)
+            from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 
-        assert restored == 0
-        assert sid not in PENDING_GOAL_CONTINUATION_RECORDS
-        # ...and the spent handoff must not be left behind either.
-        _records, _tombstones, handoffs = store._load_file_raw()
-        assert (sid, attempt) not in handoffs
+            assert restored == 0
+            assert sid not in PENDING_GOAL_CONTINUATION_RECORDS
+            # ...and the spent handoff must not be left behind either.
+            _records, _tombstones, handoffs = store._load_file_raw()
+            assert (sid, attempt) not in handoffs
+        finally:
+            for sub in ("_run_journal", "_turn_journal"):
+                target = SESSION_DIR / sub / sid
+                try:
+                    for p in target.rglob("*"):
+                        if p.is_file():
+                            p.unlink()
+                    target.rmdir()
+                except (FileNotFoundError, OSError):
+                    pass
 
     def test_an_admission_without_a_stream_is_still_reconcilable(
         self, clean_registry
