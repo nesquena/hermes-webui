@@ -21998,7 +21998,6 @@ const LOCALES = {
     workspace_upload_file: 'Nahrát soubor',
     workspace_close_preview: 'Zavřít náhled',
     workspace_files_tab: 'Soubory',
-    workspace_artifact_source_session: 'relace',
     workspace_artifacts_tab: 'Artefakty',
     workspace_hidden_files_visible: 'skryté viditelné',
     workspace_hidden_files_visible_title: 'Skryté soubory jsou viditelné — klikněte pro možnosti',
