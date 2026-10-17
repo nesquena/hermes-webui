@@ -456,7 +456,12 @@ def _runtime_detail_subset(runtime_status: dict[str, Any] | None) -> dict[str, A
 # cached briefly so a dashboard rerender that fans out to multiple panels does
 # not hammer the gateway.
 
-_REMOTE_PROBE_TIMEOUT_S: float = 2.0
+# A single slow answer (plugin loading at startup, model-cache refresh stalls
+# on NAS-class hardware) routinely exceeds 2s; a 2s cap turned a healthy
+# gateway into a false-positive "not responding" banner (#6730). 5s absorbs
+# those stalls while still bounding a full three-path walk of a dead gateway
+# to ~15s.
+_REMOTE_PROBE_TIMEOUT_S: float = 5.0
 _REMOTE_PROBE_CACHE_TTL_S: float = 5.0
 _REMOTE_PROBE_PATHS: tuple[str, ...] = ("/health/detailed", "/health", "/v1/health")
 # A gateway health payload is small JSON; cap the 2xx body read so a large or
@@ -643,7 +648,7 @@ def _probe_remote_gateway(base_url: str, *, now: float | None = None) -> dict[st
     Result is cached for ``_REMOTE_PROBE_CACHE_TTL_S`` seconds per base_url.
 
     Concurrency (single-flight): when several dashboard panels fan out on a cold
-    cache, only the first "leader" thread runs the ~2s-per-path network probe;
+    cache, only the first "leader" thread runs the ~5s-per-path network probe;
     latecomers wait on ``_remote_probe_cond`` for the leader's cached result
     rather than each hammering the (possibly dead) gateway (#5455, #2476). The
     leader always clears the in-flight marker and wakes waiters — even on error —
@@ -684,7 +689,7 @@ def _probe_remote_gateway(base_url: str, *, now: float | None = None) -> dict[st
                 _remote_probe_cache["url"] = base_url
                 # Expire from the moment the probe COMPLETES, not from the
                 # leader's entry time: walking every path of a hung gateway
-                # takes len(paths) * timeout (~6s) which exceeds the 5s TTL, so
+                # takes len(paths) * timeout (~15s) which exceeds the 5s TTL, so
                 # `current + TTL` would write an already-expired cache line.
                 # Waiters woken right after this would then miss the cache and
                 # each re-probe the dead gateway — collapsing single-flight and
