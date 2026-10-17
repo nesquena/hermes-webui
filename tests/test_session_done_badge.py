@@ -153,8 +153,8 @@ def test_every_locale_defines_both_done_keys():
     missing = [
         loc
         for loc in names
-        if f"session_done_badge:" not in _locale_block(loc)
-        or f"session_done_tooltip:" not in _locale_block(loc)
+        if "session_done_badge:" not in _locale_block(loc)
+        or "session_done_tooltip:" not in _locale_block(loc)
     ]
     assert not missing, f"locales missing done keys: {missing}"
 
