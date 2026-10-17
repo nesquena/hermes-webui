@@ -15,6 +15,35 @@ from api.models import Session
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _looks_like_full_conversation(messages, history):
+    """True when ``messages`` already starts with ``history`` as a prefix.
+
+    Compares only durable identity (role + visible text + tool identifiers) so
+    volatile bookkeeping fields (``id``, ``timestamp``) that every fixture
+    mints differently cannot defeat the check. Used to keep the full-
+    conversation fixture prepend idempotent (#7237 review fixture fix).
+    """
+    def _key(row):
+        if not isinstance(row, dict):
+            return (str(row),)
+        content = row.get("content", "")
+        if not isinstance(content, str):
+            import json as _json
+            try:
+                content = _json.dumps(content, sort_keys=True, ensure_ascii=False)
+            except Exception:
+                content = str(content)
+        return (
+            str(row.get("role") or ""),
+            str(content),
+            str(row.get("tool_call_id") or ""),
+        )
+
+    if len(messages) < len(history):
+        return False
+    return [_key(m) for m in messages[: len(history)]] == [_key(h) for h in history]
+
+
 def _run_streaming_with_fake_agent(
     tmp_path,
     monkeypatch,
@@ -28,6 +57,8 @@ def _run_streaming_with_fake_agent(
     turn_id="turn-current",
     agent_results=None,
     enable_auth_retry=False,
+    full_conversation_fixture=False,
+    prepend_current_user=False,
 ):
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
@@ -91,13 +122,80 @@ def _run_streaming_with_fake_agent(
             self._persist_user_message_idx = current_turn_user_idx
             self._current_turn_id = turn_id if current_turn_user_idx is not None else ""
 
+        @staticmethod
+        def _full_conversation_result(sent_history, result, current_user_message=None,
+                                     prepend_current_user=False):
+            """Production full-conversation result contract (#7237 review).
+
+            ``agent.run_conversation()`` returns the FULL conversation: the
+            exact ``conversation_history`` it was handed (the sanitized
+            projection) followed by the rows the current turn produced. The
+            fixtures must honour that contract — returning only the
+            current-turn rows without the received projection is what forced
+            the dedupe gate to be relaxed (6 regressions in this file,
+            nesquena-hermes 2026-09-27).
+
+            The prepend is IDEMPOTENT: a fixture whose ``messages`` already
+            start with the sent history (either because the fixture author
+            wrote the full conversation, or because this helper already ran
+            for it, or because the test is a projection-less delta-repair
+            case that owns its own shape) is returned untouched. Only a
+            genuine delta-only fixture is extended. A fixture whose messages
+            are empty stays empty (the no-response / empty-agent-result
+            shape), which is a distinct production result the classifier must
+            still see.
+            """
+            if not isinstance(result, dict):
+                return result
+            messages = result.get("messages")
+            if not isinstance(messages, list) or not messages:
+                return result
+            history = list(sent_history or [])
+            if history and _looks_like_full_conversation(messages, history):
+                # Already full-conversation: the fixture author wrote the whole
+                # conversation (a projection-less delta-repair case owns its own
+                # shape) — never double-prepend.
+                return result
+            # The Agent is handed the sanitized history WITHOUT the current
+            # user row; it mints that row itself as part of the turn, so a
+            # full-conversation result is history + the current user row +
+            # whatever the turn produced. Opt in with ``prepend_current_user``
+            # when the fixture's rows are all turn output and no user row is
+            # otherwise implied (the projection already carrying the checkpoint
+            # user row is the normal case, where prepending would duplicate).
+            prefix = list(history)
+            if (prepend_current_user and current_user_message and messages
+                    and (not history
+                         or str(history[-1].get("role") or "") != "user")):
+                prefix = prefix + [
+                    {"role": "user", "content": current_user_message, "_source": "webui"}
+                ]
+            rebuilt = dict(result)
+            rebuilt["messages"] = prefix + list(messages)
+            return rebuilt
+
         def run_conversation(self, **kwargs):
+            _sent_history = kwargs.get("conversation_history")
+            if not full_conversation_fixture:
+                # Legacy delta-repair fixture: the agent returns ONLY the
+                # current-turn rows. maintainer (2026-09-27): keep these
+                # separate instead of weakening production ownership.
+                if result_queue:
+                    next_result = result_queue.pop(0)
+                    if isinstance(next_result, BaseException):
+                        raise next_result
+                    return next_result
+                return agent_result
             if result_queue:
                 next_result = result_queue.pop(0)
                 if isinstance(next_result, BaseException):
                     raise next_result
-                return next_result
-            return agent_result
+                return self._full_conversation_result(
+                    _sent_history, next_result, kwargs.get("user_message"),
+                    prepend_current_user)
+            return self._full_conversation_result(
+                _sent_history, agent_result, kwargs.get("user_message"),
+                prepend_current_user)
 
         def interrupt(self, _message):
             return None
@@ -295,9 +393,26 @@ def test_verification_nudge_is_removed_while_corrective_followup_persists(
     delta_only,
 ):
     corrective = "Verification failed. I fixed the parser and reran the tests."
+    # Provider-shape call row (``tool_calls`` array, not a display content
+    # list): the outbound sanitizer keeps the call/result pair, so the
+    # projected history stays 4 rows == the raw prior turn and the
+    # full-conversation settle can prefix-align without rewriting (#7237
+    # review fixture fix — a display-shape content list would orphan the
+    # tool row, shrink the projection, and force the display merge to
+    # re-append the projected rows).
     prior_turn = [
         {"role": "user", "content": "Fix the failing test."},
-        {"role": "assistant", "content": [{"type": "tool_use", "name": "terminal"}]},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "terminal",
+                    "type": "function",
+                    "function": {"name": "terminal", "arguments": "{}"},
+                }
+            ],
+        },
         {
             "role": "tool",
             "tool_call_id": "terminal",
@@ -317,6 +432,13 @@ def test_verification_nudge_is_removed_while_corrective_followup_persists(
     ]
     if not delta_only:
         result_messages = prior_turn + result_messages
+    # The delta_only variant ships the SAME full-conversation result: the
+    # agent returns the conversation it was handed plus its own rows
+    # (#7237 review 2026-09-27). Returning a bare delta is what previously
+    # forced the dedupe gate to be relaxed; maintainer rejected weakening
+    # production ownership to accommodate those mocks. The parameter now only
+    # documents which shape the fixture author started from, so the sent
+    # result is built ONCE from the full conversation and never re-prefixed.
     result = {"messages": result_messages}
 
     _events, payload = _run_streaming_with_fake_agent(
@@ -327,6 +449,7 @@ def test_verification_nudge_is_removed_while_corrective_followup_persists(
         prior_context_messages=prior_turn,
         msg_text="Fix the failing test.",
         current_turn_user_idx=0,
+        full_conversation_fixture=True,
     )
 
     expected_sequence = [
@@ -464,6 +587,8 @@ def test_eager_exact_checkpoint_does_not_duplicate_repeated_prompt(
         msg_text=prompt,
         pending_started_at=2.0,
         current_turn_user_idx=2,
+        full_conversation_fixture=True,
+        prepend_current_user=True,
     )
 
     expected = [
@@ -512,6 +637,8 @@ def test_eager_checkpoint_reused_by_exact_token(tmp_path, monkeypatch, marker):
         msg_text=prompt,
         pending_started_at=1.9,
         current_turn_user_idx=2,
+        full_conversation_fixture=True,
+        prepend_current_user=True,
     )
 
     expected = [
