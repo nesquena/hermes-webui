@@ -20071,10 +20071,7 @@ function renderMessages(options){
       if(typeof addCopyButtons==='function') addCopyButtons(inner);
       if(typeof initTreeViews==='function') initTreeViews(inner);
       }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
-      // #7591: capture viewport ownership BEFORE the restore. The restore
-      // re-arms the programmatic latch, so recovery can only distinguish an
-      // independent in-flight write from the render's own if the decision is
-      // made here rather than inside recovery.
+      // #7591: capture ownership before the restore re-arms the latch.
       const recoveryOwnership=_captureMessageRecoveryOwnership();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
       if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
