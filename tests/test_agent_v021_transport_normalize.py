@@ -146,7 +146,7 @@ def test_codex_handoff_summary_uses_transport_normalize_response(monkeypatch):
     monkeypatch.setattr(
         cfg,
         'resolve_model_provider',
-        lambda resolved_model=None: (
+        lambda resolved_model=None, **_kwargs: (
             'gpt-test',
             'openai-codex',
             'https://chatgpt.com/backend-api/codex',
