@@ -22977,13 +22977,24 @@ function _buildTreeDOM(val, depth){
   return el;
 }
 
+// #2168 (session-switch latency): every other helper called by
+// postProcessRenderedMessages carries a selector-level idempotence marker so a
+// repeat pass matches zero nodes and returns early. This one alone re-walked
+// every code block in the transcript and then ran a nested querySelector() per
+// block to filter out ones that already had a button — on a cached-transcript
+// switch that is O(code blocks) node visits to add nothing. The data-copy-btn
+// marker makes the repeat pass match nothing; the nested guard stays as the
+// correctness backstop for header-placed buttons (see #1096).
 function addCopyButtons(container){
   const el=container||$('msgInner');
   if(!el) return;
-  el.querySelectorAll('pre > code').forEach(codeEl=>{
+  el.querySelectorAll('pre > code:not([data-copy-btn])').forEach(codeEl=>{
     const pre=codeEl.parentElement;
     const header=pre.previousElementSibling;
-    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))) return;
+    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))){
+      codeEl.dataset.copyBtn='1';  // already has one; mark so the selector stops re-matching it
+      return;
+    }
     const btn=document.createElement('button');
     btn.className='code-copy-btn';
     btn.textContent=t('copy');
@@ -23004,6 +23015,9 @@ function addCopyButtons(container){
       btn.style.cssText='position:absolute;top:6px;right:6px;';
       pre.appendChild(btn);
     }
+    // Marked after BOTH placements so a block whose button was appended to the
+    // sibling .pre-header is skipped by the selector on the next pass too.
+    codeEl.dataset.copyBtn='1';
   });
 }
 
