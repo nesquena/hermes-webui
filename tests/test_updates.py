@@ -210,6 +210,46 @@ def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monk
     assert seen['timeout'] == 3.0
 
 
+def test_published_release_payload_carries_latest_tag(tmp_path, monkeypatch):
+    """No-git/Docker payload (trailing a WebUI release) must carry latest_tag.
+
+    Maintainer fold, PR #6859 round 3: this payload shape had latest_version
+    but no latest_tag, so checkUpdatesNow's tagInfo chain fell through the
+    WebUI payload entirely and labeled the status line with the AGENT's tag
+    (e.g. "Up to date · Latest tag: v2026.9.24" while trailing v0.51.833).
+    """
+
+    class FakeResponse:
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self._body
+
+    payload = [
+        {'name': 'v0.51.833', 'commit': {'sha': 'current-sha'}},
+        {'name': 'v0.51.914', 'commit': {'sha': 'stable-sha'}},
+    ]
+
+    def fake_urlopen(request, timeout=0):
+        return FakeResponse(json.dumps(payload).encode('utf-8'))
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.51.833')
+
+    info = updates._check_webui_published_release_update(channel='stable')
+
+    assert info is not None
+    assert info['latest_version'] == 'v0.51.914'
+    assert info['latest_tag'] == 'v0.51.914'
+
+
 def test_check_repo_webui_no_git_falls_back_to_old_payload_on_tags_failure(tmp_path, monkeypatch):
     """If GitHub tags cannot be read, the Docker path must stay on can't-check."""
 
@@ -784,6 +824,129 @@ def test_check_for_updates_marks_every_cache_return(in_progress, force, monkeypa
     assert result['cached'] is True
 
 
+@pytest.mark.parametrize('packed', [False, True])
+@pytest.mark.parametrize('fetch_flags', [[], ['--quiet', '--tags', '--force']])
+@pytest.mark.parametrize('prune_tag_setting,change_refspec', [
+    (None, False), ('fetch.pruneTags', False), ('remote.origin.pruneTags', False),
+    pytest.param(None, True, id='refspec_changes_after_probe'),
+])
+def test_run_git_recovers_remote_tracking_ref_collision(
+    tmp_path, monkeypatch, packed, fetch_flags, prune_tag_setting, change_refspec,
+):
+    origin = tmp_path / 'origin.git'
+    _git(tmp_path, 'init', '--bare', '-q', str(origin))
+    seed = tmp_path / 'seed'
+    seed.mkdir()
+    _git(seed, 'init', '-q', '-b', 'main')
+    _git(seed, 'config', 'user.email', 't@t.co')
+    _git(seed, 'config', 'user.name', 'Test')
+    (seed / 'tracked.txt').write_text('original\n', encoding='utf-8')
+    _git(seed, 'add', 'tracked.txt')
+    _git(seed, 'commit', '-q', '-m', 'seed')
+    _git(seed, 'branch', 'onboarding')
+    _git(seed, 'remote', 'add', 'origin', str(origin))
+    _git(seed, 'push', '-q', '--all', 'origin')
+    repo = tmp_path / 'repo'
+    _git(tmp_path, 'clone', '-q', '--branch', 'main', str(origin), str(repo))
+    if prune_tag_setting:
+        _git(repo, 'config', prune_tag_setting, 'true')
+    if packed:
+        _git(repo, 'pack-refs', '--all', '--prune')
+
+    # The stale flat ref blocks the replacement branch's directory.
+    head, ok = updates._run_git(['rev-parse', 'HEAD'], repo)
+    assert ok
+    _git(origin, 'update-ref', '-d', 'refs/heads/onboarding')
+    _git(origin, 'update-ref', 'refs/heads/onboarding/next', head)
+    _git(repo, 'branch', 'local-work')
+    _git(repo, 'tag', 'local-only')
+    (repo / 'tracked.txt').write_text('local edit\n', encoding='utf-8')
+    (repo / 'untracked.txt').write_text('keep\n', encoding='utf-8')
+    status_before = updates._run_git(['status', '--porcelain'], repo)
+    if change_refspec:
+        real_run = subprocess.run
+
+        def change_mapping_after_probe(cmd, **kwargs):
+            result = real_run(cmd, **kwargs)
+            if cmd[-3:] == ['config', '--get-all', 'remote.origin.fetch']:
+                _git(repo, 'config', '--add', 'remote.origin.fetch', '+refs/tags/*:refs/tags/*')
+            return result
+
+        monkeypatch.setattr(subprocess, 'run', change_mapping_after_probe)
+
+    output, ok = updates._run_git(['fetch', 'origin', *fetch_flags], repo)
+
+    assert ok, output
+    assert updates._run_git(['rev-parse', 'refs/remotes/origin/onboarding/next'], repo) == (head, True)
+    assert not updates._run_git(['rev-parse', '--verify', 'refs/remotes/origin/onboarding'], repo)[1]
+    for ref in ['HEAD', 'refs/heads/local-work', 'refs/tags/local-only']:
+        assert updates._run_git(['rev-parse', ref], repo) == (head, True)
+    assert updates._run_git(['status', '--porcelain'], repo) == status_before
+    assert (repo / 'tracked.txt').read_text(encoding='utf-8') == 'local edit\n'
+    assert (repo / 'untracked.txt').read_text(encoding='utf-8') == 'keep\n'
+
+
+@pytest.mark.parametrize('args,diagnostic,expected_attempts', [
+    (['fetch', 'origin'], "exists; cannot create 'refs/remotes/origin/onboarding/next'", 2),
+    # Git >= 2.51 wording (batched ref updates): only the summary hint names the conflict.
+    (['fetch', 'origin'], "error: some local refs could not be updated; try running\n 'git remote prune origin' to remove any old, conflicting branches", 2),
+    (['fetch', 'origin'], "error: some local refs could not be updated; try running\n 'git remote prune upstream' to remove any old, conflicting branches", 1),
+    (['fetch', '--prune', 'origin'], "exists; cannot create 'refs/remotes/origin/onboarding/next'", 1),
+    (['pull', 'origin'], "exists; cannot create 'refs/remotes/origin/onboarding/next'", 1),
+    (['fetch', 'origin'], 'network unavailable', 1),
+    (['fetch', 'origin', '+refs/tags/*:refs/tags/*'], "exists; cannot create 'refs/remotes/origin/onboarding/next'", 1),
+])
+def test_run_git_ref_recovery_is_bounded_and_preserves_errors(
+    tmp_path, monkeypatch, args, diagnostic, expected_attempts,
+):
+    _git(tmp_path, 'init', '-q')
+    _git(tmp_path, 'remote', 'add', 'origin', 'https://example.invalid/repo.git')
+    real_run = subprocess.run
+    attempts = []
+
+    def failed_network_command(cmd, **kwargs):
+        if 'fetch' in cmd or 'pull' in cmd:
+            attempts.append(cmd)
+            return subprocess.CompletedProcess(cmd, 1, '', diagnostic)
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, 'run', failed_network_command)
+    assert updates._run_git(args, tmp_path) == (diagnostic, False)
+    assert len(attempts) == expected_attempts
+
+
+@pytest.mark.parametrize('extra_refspec', ['+refs/tags/*:refs/tags/*', '+refs/heads/*:refs/heads/mirror/*'])
+def test_run_git_ref_recovery_preserves_custom_refspec_destinations(tmp_path, extra_refspec):
+    origin = tmp_path / 'origin.git'
+    _git(tmp_path, 'init', '--bare', '-q', str(origin))
+    seed = tmp_path / 'seed'
+    seed.mkdir()
+    _git(seed, 'init', '-q', '-b', 'main')
+    _git(seed, 'config', 'user.email', 't@t.co')
+    _git(seed, 'config', 'user.name', 'Test')
+    _git(seed, 'commit', '-q', '--allow-empty', '-m', 'seed')
+    _git(seed, 'branch', 'onboarding')
+    _git(seed, 'remote', 'add', 'origin', str(origin))
+    _git(seed, 'push', '-q', '--all', 'origin')
+    repo = tmp_path / 'repo'
+    _git(tmp_path, 'clone', '-q', '--branch', 'main', str(origin), str(repo))
+    _git(repo, 'config', '--add', 'remote.origin.fetch', extra_refspec)
+    _git(repo, 'tag', 'local-only')
+    _git(repo, 'branch', 'mirror/local-only')
+    head, ok = updates._run_git(['rev-parse', 'HEAD'], repo)
+    assert ok
+    _git(origin, 'update-ref', '-d', 'refs/heads/onboarding')
+    _git(origin, 'update-ref', 'refs/heads/onboarding/next', head)
+
+    output, ok = updates._run_git(['fetch', 'origin', '--tags', '--force'], repo)
+
+    assert not ok  # Unknown mappings retain the original failure instead of pruning.
+    # Git < 2.51 names the blocking ref; Git >= 2.51 emits only the prune hint.
+    assert updates._REMOTE_REF_COLLISION_RE.search(output), output
+    for ref in ['refs/tags/local-only', 'refs/heads/mirror/local-only']:
+        assert updates._run_git(['rev-parse', ref], repo) == (head, True)
+
+
 def test_run_git_returns_stderr_on_failure(tmp_path):
     """When a git command fails, _run_git should return stderr (not empty string)."""
     with patch.object(updates.shutil, 'which', return_value='C:/Tools/git.exe'), \
@@ -1184,6 +1347,40 @@ def test_check_repo_release_not_affected_when_head_exactly_on_tag(tmp_path):
     assert result['latest_version'] == 'v2026.5.16'
 
 
+def test_check_repo_stable_up_to_date_payload_carries_real_latest_tag(tmp_path):
+    """Stable-channel up-to-date payload must carry the REAL latest tag.
+
+    Review item S1 on PR #6859: on this payload latest_version is the CURRENT
+    tag (HEAD is on it), so a frontend fallback to latest_version rendered
+    "Up to date · Latest tag: vOLD" — wrong label. The frontend now reads
+    latest_tag only, so this payload must emit it (latest_tag != current_tag).
+    """
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v0.52.1\nv0.52.0', True
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+            return 'v0.52.0', True
+        # HEAD contains the latest tag → suppress_stable_fallthrough wins.
+        if args == ['merge-base', '--is-ancestor', 'v0.52.1', 'HEAD']:
+            return '', True
+        if args == ['remote', 'get-url', 'origin']:
+            return 'https://github.com/nesquena/hermes-webui.git', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        result = updates._check_repo_release(tmp_path, 'webui', channel='stable')
+
+    assert result is not None
+    assert result['behind'] == 0
+    # The wrong-label scenario: current_version is v0.52.0 (HEAD's tag) but
+    # the "Latest tag" suffix must show v0.52.1, the newest channel tag.
+    assert result['current_version'] == 'v0.52.0'
+    assert result['latest_version'] == 'v0.52.0'
+    assert result['latest_tag'] == 'v0.52.1'
+
+
 def test_check_repo_branch_check_runs_for_post_tag_commits(tmp_path):
     """End-to-end: when HEAD is past latest tag, _check_repo uses branch check.
 
@@ -1228,6 +1425,51 @@ def test_check_repo_branch_check_runs_for_post_tag_commits(tmp_path):
     assert info.get('release_based') is not True, (
         'post-tag HEAD should use branch check, not release-based check'
     )
+    # Branch-path payload carries the display-only tag context (latest_tag /
+    # current_tag) probed before the branch fallthrough.
+    assert info.get('latest_tag') == 'v2026.5.16', (
+        f"expected latest_tag=v2026.5.16 on branch path, got {info.get('latest_tag')!r}"
+    )
+    assert info.get('current_tag') == 'v2026.5.16', (
+        f"expected current_tag=v2026.5.16 on branch path, got {info.get('current_tag')!r}"
+    )
+
+
+def test_check_repo_branch_path_without_tags_omits_tag_fields(tmp_path):
+    """Branch-path fallthrough on a checkout with zero release tags must not
+    attach latest_tag/current_tag (no-tags install → no tag suffix shown)."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['fetch', 'origin', '--tags', '--force']:
+            return '', True
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return '', True  # no release tags at all
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+            return '', False
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+            return '1d22b9c2d', True
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return '', False
+        if args == ['symbolic-ref', 'refs/remotes/origin/HEAD']:
+            return 'refs/remotes/origin/master', True
+        if args[:2] == ['rev-list', '--count']:
+            return '608', True
+        if args[0] == 'merge-base':
+            return 'abc1234' * 5, True
+        if args[:2] == ['rev-parse', '--short']:
+            return 'abc1234', True
+        if args == ['remote', 'get-url', 'origin']:
+            return 'https://github.com/nesquena/hermes-agent.git', True
+        return '', True
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        info = updates._check_repo(tmp_path, 'agent')
+
+    assert info is not None
+    assert info['behind'] == 608
+    assert 'latest_tag' not in info, 'no-tags checkout must not attach latest_tag'
+    assert 'current_tag' not in info, 'no-tags checkout must not attach current_tag'
 
 
 # ---------------------------------------------------------------------------
@@ -2392,3 +2634,130 @@ def test_run_git_still_authenticates_with_a_cached_credential(
     # path the prompt branch is unreachable and such an assertion could never fail:
     # structure, not evidence. The prompt path is asserted where it can fail, in
     # test_run_git_uses_a_configured_gui_credential_helper_without_prompting.
+
+
+def test_run_git_decodes_timeout_output_bytes(tmp_path):
+    """A timed-out git command that already printed must not leak bytes (#8198).
+
+    ``subprocess.run(text=True)`` only decodes the pipes of a *completed*
+    run; on ``TimeoutExpired`` the partial ``stdout``/``stderr`` still come
+    back as bytes. Returning them unchanged crashed every str-based caller
+    (e.g. the pull-failure diagnosis in apply_update) with TypeError.
+    """
+    with patch('subprocess.run') as mock_run:
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=['git', 'pull', '--ff-only'], timeout=30,
+            output=b'remote: Counting objects:  50% (1/2)\r',
+        )
+        out, ok = updates._run_git(['pull', '--ff-only'], tmp_path, timeout=30)
+
+    assert ok is False
+    assert isinstance(out, str)
+    assert 'Counting objects' in out
+
+
+def test_run_git_timeout_without_output_reports_duration(tmp_path):
+    """Timeout with empty output still yields a readable str message."""
+    with patch('subprocess.run') as mock_run:
+        mock_run.side_effect = subprocess.TimeoutExpired(
+            cmd=['git', 'pull'], timeout=7,
+        )
+        out, ok = updates._run_git(['pull'], tmp_path, timeout=7)
+
+    assert ok is False
+    assert isinstance(out, str)
+    assert 'timed out after 7s' in out
+
+
+def test_apply_update_pull_timeout_returns_error_not_typeerror(tmp_path):
+    """apply_update must answer a pull timeout with a clean 200 payload.
+
+    End-to-end regression for #8198: the pull step times out after having
+    printed partial output, ``subprocess`` hands those bytes back on
+    ``TimeoutExpired``, and the old timeout branch forwarded them as-is.
+    The pull-failure diagnosis then did ``str in bytes`` and raised
+    TypeError, turning the endpoint into a 500 before the stash restore.
+    """
+    repo = tmp_path / 'repo'
+    (repo / '.git').mkdir(parents=True)
+
+    def fake_run(cmd, cwd=None, capture_output=False, text=False,
+                 timeout=10, encoding=None, errors=None, **kwargs):
+        # master's update-path git security probes (core.gitProxy, credential
+        # helpers, ...) read config before fetch/pull; real git exits 1 with
+        # no output when a key is unset.
+        if 'config' in cmd:
+            empty = '' if (text or encoding) else b''
+            return subprocess.CompletedProcess(cmd, 1, stdout=empty, stderr=empty)
+        if 'ls-remote' in cmd and '--get-url' in cmd:
+            url = 'https://github.com/nesquena/hermes-webui.git\n'
+            out = url if (text or encoding) else url.encode()
+            return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr=out[:0])
+        # fetch + status succeed; the pull hangs past its timeout with partial
+        # output already written to the pipe.
+        if 'fetch' in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+        if 'status' in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+        if 'pull' in cmd:
+            raise subprocess.TimeoutExpired(
+                cmd=cmd, timeout=timeout,
+                output=b'remote: Counting objects:  50% (1/2)\r',
+            )
+        raise AssertionError(f'unexpected git cmd: {cmd!r}')
+
+    with patch('subprocess.run', side_effect=fake_run), \
+         patch.object(updates, 'REPO_ROOT', repo), \
+         patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'):
+        result = updates.apply_update('webui')
+
+    assert result['ok'] is False
+    assert isinstance(result['message'], str)
+    assert 'Counting objects' in result['message']
+
+
+def test_apply_update_pull_timeout_does_not_leak_remote_token(tmp_path):
+    """A timed-out pull must not echo a credentialed remote URL to the user.
+
+    git prints the remote it is talking to before a pull dies, and that URL
+    can carry a token (`?token=...`). The timeout branch surfaces its partial
+    output as the update-failure message, so it has to go through the same
+    credential scrub the fetch path uses.
+    """
+    repo = tmp_path / 'repo'
+    (repo / '.git').mkdir(parents=True)
+    secret = 'tok_' + 'A' * 30
+
+    def fake_run(cmd, cwd=None, capture_output=False, text=False,
+                 timeout=10, encoding=None, errors=None, **kwargs):
+        if 'config' in cmd:
+            empty = '' if (text or encoding) else b''
+            return subprocess.CompletedProcess(cmd, 1, stdout=empty, stderr=empty)
+        if 'ls-remote' in cmd and '--get-url' in cmd:
+            url = 'https://github.com/nesquena/hermes-webui.git\n'
+            out = url if (text or encoding) else url.encode()
+            return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr=out[:0])
+        if 'fetch' in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+        if 'status' in cmd:
+            return subprocess.CompletedProcess(cmd, 0, stdout='', stderr='')
+        if 'pull' in cmd:
+            raise subprocess.TimeoutExpired(
+                cmd=cmd, timeout=timeout,
+                output=(
+                    "fatal: unable to access "
+                    f"'https://user:{secret}@github.com/private/repo.git/': "
+                    "Operation timed out\n"
+                ).encode(),
+            )
+        raise AssertionError(f'unexpected git cmd: {cmd!r}')
+
+    with patch('subprocess.run', side_effect=fake_run), \
+         patch.object(updates, 'REPO_ROOT', repo), \
+         patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'):
+        result = updates.apply_update('webui')
+
+    assert result['ok'] is False
+    assert secret not in result['message']
+    assert '<redacted>' in result['message']
+

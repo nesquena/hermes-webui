@@ -156,23 +156,13 @@ $AgentDir = $env:HERMES_WEBUI_AGENT_DIR
 # Set by discovery below. Stays $false for an explicit override, which is the
 # caller's choice and is never second-guessed.
 $selectedIsBareSourceCheckout = $false
+$selectedFromProvenRuntime = $false
 if ($AgentDir -and -not (Test-Path (Join-Path $AgentDir 'hermes_cli') -PathType Container)) {
     Write-Error "HERMES_WEBUI_AGENT_DIR is set to '$AgentDir' but no hermes_cli/ folder exists there. Unset the variable to fall back to auto-discovery, or fix the path."
     exit 1
 }
 if (-not $AgentDir) {
-    # Mirror api/config.py `_discover_agent_dir` for server-equivalent candidates:
-    # HERMES_HOME\hermes-agent → repo sibling → parent (when it looks like an
-    # agent root) → _DEFAULT_HERMES_HOME\hermes-agent → HOME\hermes-agent.
-    # Complete BOTH source (run_agent.py) and pip-style (hermes_cli) passes over
-    # that list BEFORE trying launcher-only roots (legacy .hermes + Program Files).
-    # Folding those into the same candidate list lets a stale Program Files source
-    # outrank a working LOCALAPPDATA pip Agent on the all-source first pass — the
-    # server never searches Program Files (or USERPROFILE\.hermes) at all. Build
-    # Program Files incrementally — ${env:ProgramFiles(x86)} is null on 32-bit
-    # Windows and in some constrained environments, and Join-Path throws on a
-    # null Path. Skip any system-wide root that isn't set so the launcher stays
-    # robust across Windows variants.
+    # Prefer authoritative source roots, then proved runtimes and fallback roots.
     $serverCandidates = @()
     $serverCandidates += (Join-Path $env:HERMES_HOME 'hermes-agent')
     $repoParent = Split-Path -Parent $RepoRoot
@@ -200,45 +190,49 @@ if (-not $AgentDir) {
     $serverCandidates += (Join-Path $env:USERPROFILE 'hermes-agent')
     # De-dup server-equivalent list (HERMES_HOME may coincide with platform default).
     $serverCandidates = $serverCandidates | Select-Object -Unique
-    # Two-pass over server-equivalent candidates first (matches api/config.py).
-    foreach ($c in $serverCandidates) {
-        if (Test-Path (Join-Path $c 'run_agent.py') -PathType Leaf -ErrorAction SilentlyContinue) { $AgentDir = $c; break }
-    }
     if (-not $AgentDir) {
         foreach ($c in $serverCandidates) {
-            if (Test-Path (Join-Path $c 'hermes_cli') -PathType Container -ErrorAction SilentlyContinue) { $AgentDir = $c; break }
+            if (Test-Path (Join-Path $c 'run_agent.py') -PathType Leaf -ErrorAction SilentlyContinue) { $AgentDir = $c; break }
         }
     }
-    # Launcher-only fallbacks — only after both server-equivalent passes.
-    # Master always searched %USERPROFILE%\.hermes\hermes-agent first; the server
-    # never does (its HOME candidate is %USERPROFILE%\hermes-agent). Keep that
-    # legacy path as a launcher-only rescue AFTER the server-equivalent passes so
-    # a legacy-only Agent is still found, then Program Files (POSIX XDG/opt
-    # equivalents have no Windows server twin). Legacy ahead of Program Files
-    # matches master's precedence among these launcher-only roots.
+    if (-not $AgentDir) {
+        try {
+            $runtimeCandidates = @(& $Python -c 'import sys; sys.path.insert(0, sys.argv[1]); from api.startup import _agent_dir_from_hermes_cli, _agent_dir_from_python; root = _agent_dir_from_hermes_cli() or _agent_dir_from_python(sys.executable); print(root or "")' $RepoRoot 2>$null)
+            if ($LASTEXITCODE -eq 0) {
+                foreach ($c in $runtimeCandidates) {
+                    if ($c -and (Test-Path (Join-Path $c 'run_agent.py') -PathType Leaf -ErrorAction SilentlyContinue)) { $AgentDir = $c; $selectedFromProvenRuntime = $true; break }
+                }
+            }
+        } catch { }
+    }
     $launcherOnlyCandidates = @()
     $launcherOnlyCandidates += (Join-Path $env:USERPROFILE '.hermes\hermes-agent')
+    $programFilesCandidates = @()
     foreach ($root in @(${env:ProgramW6432}, ${env:ProgramFiles}, ${env:ProgramFiles(x86)})) {
-        if ($root) { $launcherOnlyCandidates += (Join-Path $root 'hermes\hermes-agent') }
+        if ($root) { $programFilesCandidates += (Join-Path $root 'hermes\hermes-agent') }
     }
+    $launcherOnlyCandidates += $programFilesCandidates
     # De-dup: WOW64 can make ProgramFiles == ProgramFiles(x86); legacy may equal
     # a prior server candidate when HERMES_HOME already points there.
     $launcherOnlyCandidates = $launcherOnlyCandidates | Select-Object -Unique
-    # One interleaved pass, in path order, accepting either kind. The
-    # server-equivalent passes above stay source-first-then-pip because that is
-    # api/config.py's order and the server genuinely searches that list twice.
-    # These roots are not in the server's list at all, so there is no server
-    # order to mirror and splitting them by kind lets a stale Program Files
-    # SOURCE checkout outrank a working legacy pip install that comes first in
-    # the list — and that checkout's hermes_bootstrap.py can SystemExit before
-    # the server binds.
     if (-not $AgentDir) {
         foreach ($c in $launcherOnlyCandidates) {
-            if ((Test-Path (Join-Path $c 'hermes_cli') -PathType Container -ErrorAction SilentlyContinue) -or
-                (Test-Path (Join-Path $c 'run_agent.py') -PathType Leaf -ErrorAction SilentlyContinue)) {
-                $AgentDir = $c
-                break
+            if (-not (Test-Path (Join-Path $c 'run_agent.py') -PathType Leaf -ErrorAction SilentlyContinue)) { continue }
+            if ($programFilesCandidates -contains $c -and (
+                (Test-Path (Join-Path $c 'hermes_cli') -PathType Container -ErrorAction SilentlyContinue) -or
+                -not (Test-Path (Join-Path $c 'hermes_bootstrap.py') -PathType Leaf -ErrorAction SilentlyContinue)
+            )) {
+                # A Program Files checkout without its managed bootstrap is a
+                # stale fallback. Let an installed user Agent win the marker pass.
+                continue
             }
+            $AgentDir = $c
+            break
+        }
+    }
+    if (-not $AgentDir) {
+        foreach ($c in @($serverCandidates) + @($launcherOnlyCandidates)) {
+            if (Test-Path (Join-Path $c 'hermes_cli') -PathType Container -ErrorAction SilentlyContinue) { $AgentDir = $c; break }
         }
     }
     # Combined list for the not-found error message.
@@ -293,7 +287,7 @@ if (-not $AgentDir) {
         $AgentDir -and
         ($AgentDir -eq $repoParent -or
          $AgentDir -eq (Join-Path $env:USERPROFILE 'hermes-agent')))
-    if ($AgentDir -and
+    if ($AgentDir -and -not $selectedFromProvenRuntime -and
         -not (Test-Path (Join-Path $AgentDir 'venv\Scripts\python.exe')) -and
         (
             -not (Test-Path (Join-Path $AgentDir 'hermes_cli') -PathType Container) -or
@@ -367,7 +361,7 @@ if (-not $AgentDir) {
 # means the venv override is unnecessary: its own venv, or the managed
 # bootstrap that activate_managed_agent() imports (hermes_bootstrap.py).
 $agentVenvPython = Join-Path $AgentDir 'venv\Scripts\python.exe'
-if ($selectedIsBareSourceCheckout -and
+if ($selectedIsBareSourceCheckout -and -not $selectedFromProvenRuntime -and
     -not (Test-Path $agentVenvPython) -and
     -not (Test-Path (Join-Path $AgentDir 'hermes_bootstrap.py'))) {
     # Neither, and the selected root is a bare source checkout. Discovery has

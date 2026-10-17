@@ -31,7 +31,7 @@ def test_render_uses_single_pass_partition_helper():
     render_body = _function_block("renderSessionListFromCache")
 
     assert "_partitionSidebarSessionRows(allMatched, activeSidForSidebar)" in render_body
-    assert "_renderSidebarRowsFromRawSessions(sessionsRaw, [...referenceRaw, ..._scopedSidebarReferenceRows(isCliView, projectIdFor)])" in render_body
+    assert "_renderSidebarRowsFromPartition(sidebarPartition)" in render_body
     assert "const renderedWebuiSessionCount=_serverWebuiSessionCount===null" in render_body
     assert "const renderedCliSessionCount=_serverCliSessionCount===null" in render_body
     assert "? _renderSidebarRowsFromRawSessions(webuiSessionsRaw, [...webuiReferenceRaw, ..._scopedSidebarReferenceRows(false, projectIdFor)]).length" in render_body
@@ -77,6 +77,9 @@ def test_partition_helper_keeps_raw_source_counts_while_render_owns_visible_coun
     assert "function _countRenderedSidebarRowsFromRawSessions" not in SESSIONS_JS
     assert "function _renderSidebarRowsFromRawSessions(sessionsRaw, referenceSessionsRaw){" in SESSIONS_JS
     assert "_attachChildSessionsToSidebarRows(_collapseSessionLineageForSidebar(sessionsRaw), sessionsRaw, referenceRows)" in SESSIONS_JS
+    projection = _function_block("_renderSidebarRowsFromPartition")
+    assert "partition.cliReferenceRaw:partition.webuiReferenceRaw" in projection
+    assert "_scopedSidebarReferenceRows(isCliView, partition.projectIdFor)" in projection
 
 
 def test_archive_load_more_uses_source_wide_loaded_count_and_hides_under_filters():

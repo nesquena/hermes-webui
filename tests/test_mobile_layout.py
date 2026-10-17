@@ -278,6 +278,17 @@ def test_settings_system_version_controls_wrap_on_phone_widths():
     assert ".settings-version-badge" in mobile_css and "white-space:nowrap" in mobile_css.replace(" ", ""), (
         "Individual version badges should stay intact while the group wraps."
     )
+    status_rule = _rule_body(mobile_css, "#checkUpdatesStatus")
+    status_decls = _declarations(status_rule)
+    assert status_decls.get("white-space") == "normal", (
+        "Update status text must wrap on phone widths after the latest-tag suffix."
+    )
+    assert status_decls.get("overflow-wrap") == "anywhere", (
+        "Long latest-tag tokens must be allowed to break on phone widths."
+    )
+    assert status_decls.get("min-width") == "0", (
+        "Update status must shrink inside the stacked System header on phones."
+    )
 
 
 def test_rightpanel_mobile_slide_over_css():
@@ -1761,7 +1772,24 @@ def test_100dvh_viewport_height():
 
 def test_viewport_disables_page_zoom_for_native_pwa_shell():
     """Installed PWA launches should not rubber-band into browser-style page zoom."""
-    assert 'name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no"' in HTML
+    m = re.search(r'<meta\s+name="viewport"\s+content="([^"]+)"', HTML)
+    assert m, "viewport meta tag not found in index.html"
+    content = m.group(1)
+    assert 'width=device-width' in content, "viewport must set width=device-width"
+    assert 'initial-scale=1' in content, "viewport must set initial-scale=1"
+    assert 'maximum-scale=1' in content, "viewport must set maximum-scale=1"
+    assert 'user-scalable=no' in content, "viewport must set user-scalable=no"
+
+
+def test_viewport_requests_keyboard_content_resize():
+    """Edge Android does not resize the layout viewport when the virtual keyboard
+    appears unless interactive-widget=resizes-content is set. Without it, 100dvh
+    stays at full-screen height and the composer floats above a dead gap."""
+    m = re.search(r'<meta\s+name="viewport"\s+content="([^"]+)"', HTML)
+    assert m, "viewport meta tag not found in index.html"
+    content = m.group(1)
+    assert 'interactive-widget=resizes-content' in content, \
+        "viewport must include interactive-widget=resizes-content for Edge Android keyboard resize"
 
 
 def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
