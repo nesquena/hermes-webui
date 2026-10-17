@@ -59,7 +59,7 @@ def test_archive_delete_success_copy_prefers_response_worktree_retained():
     assert "const retainedCount=_worktreeResponseCount(results)" in src
     assert "const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;" in src
     assert "if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');" in src
-    assert "showToast(retainedCount?t('session_archived_worktree'):t('session_archived'))" in src
+    assert "showToast(outcome.retainedCount?t('session_archived_worktree'):t('session_archived'))" in src
     assert "showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))" in src
     assert "const cleanupFailed=!!(response&&response.state_db_cleanup_failed);" in src
     assert "if(cleanupFailed) showToast(t('delete_failed'),0,'error');" in src
