@@ -163,7 +163,6 @@ def test_all_profiles_loader_does_not_regress_claude_code_binding(
     shared lookup to a profile would regress that bridge -- this pins it.
     """
     import api.models as models
-    import api.workspace as workspace
 
     _tmp, root_global, root_profile = two_roots
 
