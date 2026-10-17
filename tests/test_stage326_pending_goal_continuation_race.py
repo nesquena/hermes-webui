@@ -87,28 +87,55 @@ def test_stream_teardown_preserves_pending_goal_continuation(tmp_path, monkeypat
 
 
 def test_routes_consumer_discards_atomically_on_read():
-    """The routes.py consumer must discard the marker after consuming it,
-    so the marker is single-use (one continuation = one auto-flag).
+    """The routes.py consumer must consume the marker in one atomic step, so
+    the marker is single-use (one continuation = one auto-flag).
+
+    #7862 moved the check+discard into
+    ``api.goal_continuation_store.consume_pending_goal_continuation``, which
+    performs the match, the ``goal_related`` decision input, and the discard
+    under ONE module-level RLock. That is strictly tighter than the previous
+    "check, set, discard" sequence, so the invariant this guard protects is
+    unchanged -- only its shape moved.
     """
     src = _read_routes()
 
     # Find the consumption check.
     m = re.search(
-        r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?PENDING_GOAL_CONTINUATION\.discard",
+        r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?"
+        r"consume_pending_goal_continuation\(\s*"
+        r"s\.session_id,\s*msg,\s*goal_continuation_id\s*"
+        r",\s*goal_continuation_attempt_id\s*,?"
+        # #7862 round 11: the explicit-continue admission's two flags are
+        # optional in this pin; round 11's own module pins their wiring.
+        r"(?:\s*,\s*explicit_continue\s*=\s*\w+\s*,\s*goal_active\s*=\s*\w+)?"
+        r"\s*,?\s*\)",
         src,
         re.DOTALL,
     )
     assert m is not None, (
-        "routes.py must consume PENDING_GOAL_CONTINUATION atomically: "
-        "check + set goal_related + discard in the same block"
+        "routes.py must consume PENDING_GOAL_CONTINUATION atomically via "
+        "consume_pending_goal_continuation (check + set goal_related + "
+        "discard in the same block)"
     )
-    # The discard must be within ~10 lines of the check (atomic block).
+    # The check→consume seam must stay free of other marker mutations. The
+    # round-11 continue admission reads the session's goal state between the
+    # check and the consume (a local, lock-free read), so the seam is longer
+    # than it used to be; what must NOT appear is a second mutation of the
+    # marker set or a nested consume — that is what the line budget used to
+    # approximate.
     block = m.group(0)
-    line_count = block.count("\n")
-    assert line_count <= 10, (
-        f"PENDING_GOAL_CONTINUATION check + discard span {line_count} lines; "
-        "should be tight atomic block"
+    inner = block[: block.rfind("consume_pending_goal_continuation(")]
+    assert "PENDING_GOAL_CONTINUATION.discard" not in inner, (
+        "no other discard may sit between the marker check and the consume"
     )
+    assert "PENDING_GOAL_CONTINUATION.add" not in inner, (
+        "no re-arm may sit between the marker check and the consume"
+    )
+    assert "consume_pending_goal_continuation(" not in inner, (
+        "the consume must be the first and only consumption in the block"
+    )
+    # The match-gated store is the ONLY place that discards for a chat start.
+    assert "PENDING_GOAL_CONTINUATION.discard(s.session_id)" not in src
 
 
 def test_pending_goal_continuation_is_a_set():
@@ -175,8 +202,9 @@ def test_goal_continue_set_marker_before_emitting_event():
     after_add = src[add_idx:]
     event_idx = after_add.find("goal_continue")
     assert event_idx != -1, "no goal_continue emission after marker add"
-    # Must be within ~500 chars (close to the add).
-    assert event_idx < 500, (
+    # Must be within ~900 chars (close to the add). The window also covers the
+    # #7862 round-3 token mint between the marker add and the SSE emission.
+    assert event_idx < 900, (
         "PENDING_GOAL_CONTINUATION.add must immediately precede the "
         "goal_continue SSE emission"
     )

@@ -1427,7 +1427,14 @@ async function send(){
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
-  _flushSelectionBlocksToComposer();
+  // #7862: a tokenized automatic goal continuation is NOT a human send, so a
+  // pending selected-text reply must not be flushed into its composer. The
+  // queued prompt is the recorded continuation verbatim; prepending the
+  // selection blocks made the store's text match reject it even though the
+  // continuation token was correct, and the intent then stayed pending until
+  // expiry -- the goal loop died on a legitimate automatic turn. Leave the
+  // pending selections alone; they belong to the user's next real message.
+  if(!(options&&options.goal_continuation_id)) _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
@@ -1440,6 +1447,20 @@ async function send(){
   // created; recapturing inside newSession() would let that older Send retire a
   // project picker the user opened during the resolver wait.
   const _sendProjectPickerClaim=(typeof _projectPickerOpenEpoch==='number')?_projectPickerOpenEpoch:0;
+
+  // #7862 re-gate round 3 (finding 1): a ``/goal resume`` binds the pending
+  // continuation's token to this session's next send. The resume message tells
+  // the user to "type continue", and that literal control is a new human turn
+  // the recorded prompt never matches, so without the token the store refused
+  // the admission and the goal loop stopped. Claim the bound token exactly
+  // once (one-shot) and carry it on the payload below. A token already
+  // supplied by the caller (the automatic queue drain) always wins.
+  let _resumeContinuationId='';
+  if(!(options&&options.goal_continuation_id)){
+    _resumeContinuationId=typeof _claimResumeGoalContinuationToken==='function'
+      ? _claimResumeGoalContinuationToken(activeSid)
+      : '';
+  }
 
   // #5472: snapshot the ORIGINAL user-typed composer state now — before slash
   // rewrites (/moa, bundles) mutate `text` and before uploadPendingFiles()
@@ -1869,7 +1890,13 @@ async function send(){
       profile:S.activeProfile||S.session.profile||'default',
       explicit_model_pick:_explicitPick||undefined,
       attachments:uploaded.length?uploaded:undefined,
-      moa_config:_pendingMoaConfig?true:undefined
+      moa_config:_pendingMoaConfig?true:undefined,
+      // #7862: identity token for a drained goal continuation (survives a
+      // `/use` skill directive wrapping the queued text on the wire).
+      // #7862 re-gate round 3 (finding 1): fall back to the token a
+      // `/goal resume` bound to this session, so the literal ``continue``
+      // the resume message asks for is admitted by identity.
+      goal_continuation_id:(options&&options.goal_continuation_id)||_resumeContinuationId||undefined
     })});
     _pendingMoaConfig=null;
     postStartData = startData;
@@ -6485,6 +6512,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _pendingGoalContinuation={
           sid,
           text:continuation_prompt,
+          // #7862: carry the continuation token so this queued automatic
+          // send is matched by identity, not by text — a `/use` skill
+          // directive wraps the queued text and breaks a text-only match.
+          continuation_id:String(d.continuation_id||''),
           model:_modelState.model,
           model_provider:_modelState.model_provider,
           profile:S.activeProfile||'default',
@@ -6822,6 +6853,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             model:_goalNext.model,
             model_provider:_goalNext.model_provider,
             profile:_goalNext.profile,
+            // #7862: keep the continuation token on the queue entry so the
+            // drained send can prove it is the goal continuation.
+            goal_continuation_id:_goalNext.continuation_id||'',
           });
           if(typeof updateQueueBadge==='function')updateQueueBadge(_goalNext.sid);
         }
