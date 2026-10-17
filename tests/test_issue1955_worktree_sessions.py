@@ -105,6 +105,45 @@ def test_find_git_repo_root_uses_git_from_nested_workspace(tmp_path):
     assert find_git_repo_root(nested) == repo.resolve()
 
 
+def test_find_git_repo_root_redirects_from_linked_worktree(tmp_path):
+    """A workspace inside a linked worktree must resolve to the CANONICAL
+    clone, not the worktree's own root — otherwise new worktrees get created
+    nested inside the existing one, recursively (the nesting bug)."""
+    from api.worktrees import find_git_repo_root
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t", "-c", "user.name=t",
+         "commit", "--allow-empty", "-m", "init"],
+        cwd=repo, check=True, capture_output=True,
+    )
+    # Create a linked worktree the same way a session would: <repo>/.worktrees/hermes-XXXX
+    linked = repo / ".worktrees" / "hermes-abcd1234"
+    subprocess.run(
+        ["git", "worktree", "add", "-b", "hermes/hermes-abcd1234", str(linked)],
+        cwd=repo, check=True, capture_output=True,
+    )
+    assert linked.is_dir()
+
+    # Sanity: --show-toplevel (the OLD behavior) would return the worktree root.
+    tl = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        cwd=linked, text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    assert Path(tl).resolve() == linked.resolve()
+
+    # The fix: resolve to the canonical clone so the next worktree lands at
+    # <repo>/.worktrees/, never <linked>/.worktrees/.
+    assert find_git_repo_root(linked) == repo.resolve()
+
+    # And a subdirectory *inside* the linked worktree resolves the same way.
+    sub = linked / "src" / "pkg"
+    sub.mkdir(parents=True)
+    assert find_git_repo_root(sub) == repo.resolve()
+
+
 def test_find_git_repo_root_rejects_non_git_workspace(tmp_path):
     from api.worktrees import find_git_repo_root
 
