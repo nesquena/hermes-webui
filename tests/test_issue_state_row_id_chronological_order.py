@@ -158,11 +158,9 @@ def test_compression_child_stable_ids_remain_after_restamped_parent(monkeypatch)
             _assistant("child answer", 1200.0, id="child-answer"),
         ],
     )
-    monkeypatch.setattr(
-        routes.Session,
-        "load",
-        lambda session_id: parent if session_id == parent.session_id else None,
-    )
+    parent_loader = lambda session_id: parent if session_id == parent.session_id else None
+    monkeypatch.setattr(routes.Session, "load", parent_loader)
+    monkeypatch.setattr(routes.Session, "load_readonly", parent_loader)
 
     merged = routes._webui_sidecar_lineage_messages_for_display(child)
 

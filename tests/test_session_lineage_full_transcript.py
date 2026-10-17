@@ -37,7 +37,7 @@ def test_session_endpoint_merges_sidecar_and_lineage_messages_for_cli_sessions(m
     monkeypatch.setattr(
         routes,
         "get_cli_session_messages",
-        lambda sid: [
+        lambda sid, profile=None: [
             {"role": "user", "content": "root user", "timestamp": 1.0},
             {"role": "assistant", "content": "tip assistant", "timestamp": 2.0},
         ],
@@ -99,7 +99,7 @@ def test_session_endpoint_preserves_distinct_messages_with_different_ids(monkeyp
     monkeypatch.setattr(
         routes,
         "get_cli_session_messages",
-        lambda sid: [
+        lambda sid, profile=None: [
             {"role": "user", "content": "root user", "timestamp": 1.0},
             {
                 "id": "cli-retry",
@@ -227,7 +227,9 @@ def test_webui_continuation_session_opens_with_snapshot_parent_messages(monkeypa
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {})
     monkeypatch.setattr(routes, "_is_messaging_session_record", lambda s: False)
     monkeypatch.setattr(routes, "get_state_db_session_messages", lambda sid, profile=None, since_timestamp=None, include_inactive=False, limit=None: [])
-    monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent-webui" else None)
+    parent_loader = lambda sid: parent if sid == "parent-webui" else None
+    monkeypatch.setattr(routes.Session, "load", parent_loader)
+    monkeypatch.setattr(routes.Session, "load_readonly", parent_loader)
     monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", lambda s: getattr(s, "model", None))
     monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", lambda s: None)
     monkeypatch.setattr(routes, "_merge_cli_sidebar_metadata", lambda raw, meta: raw)
@@ -269,7 +271,9 @@ def test_webui_fork_session_does_not_stitch_non_snapshot_parent(monkeypatch):
         messages=[{"role": "user", "content": "fork child only", "timestamp": 2.0}],
     )
 
-    monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent-fork" else None)
+    parent_loader = lambda sid: parent if sid == "parent-fork" else None
+    monkeypatch.setattr(routes.Session, "load", parent_loader)
+    monkeypatch.setattr(routes.Session, "load_readonly", parent_loader)
 
     assert [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)] == [
         "fork child only",
@@ -295,7 +299,9 @@ def test_webui_fork_session_does_not_stitch_snapshot_parent(monkeypatch):
         messages=[{"role": "user", "content": "fork child only", "timestamp": 2.0}],
     )
 
-    monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent-snapshot-fork" else None)
+    parent_loader = lambda sid: parent if sid == "parent-snapshot-fork" else None
+    monkeypatch.setattr(routes.Session, "load", parent_loader)
+    monkeypatch.setattr(routes.Session, "load_readonly", parent_loader)
 
     assert [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)] == [
         "fork child only",
@@ -342,6 +348,7 @@ def test_webui_compressed_fork_stitches_fork_snapshots_only(monkeypatch):
     }
 
     monkeypatch.setattr(routes.Session, "load", lambda sid: by_id.get(sid))
+    monkeypatch.setattr(routes.Session, "load_readonly", lambda sid: by_id.get(sid))
 
     assert [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)] == [
         "before first fork compression",
@@ -414,7 +421,9 @@ def test_webui_lineage_display_keeps_child_tail_after_snapshot_watermark(monkeyp
             {"role": "assistant", "content": "child assistant final", "timestamp": 1003.0},
         ],
     )
-    monkeypatch.setattr(routes.Session, "load", lambda sid: parent if sid == "parent-watermark" else None)
+    parent_loader = lambda sid: parent if sid == "parent-watermark" else None
+    monkeypatch.setattr(routes.Session, "load", parent_loader)
+    monkeypatch.setattr(routes.Session, "load_readonly", parent_loader)
 
     contents = [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)]
 
@@ -460,6 +469,7 @@ def test_webui_lineage_display_does_not_restitch_ancestor_when_child_replays_par
     )
     by_id = {"parent-replayed": parent, "grandparent-replayed": grandparent}
     monkeypatch.setattr(routes.Session, "load", lambda sid: by_id.get(sid))
+    monkeypatch.setattr(routes.Session, "load_readonly", lambda sid: by_id.get(sid))
 
     contents = [m["content"] for m in routes._webui_sidecar_lineage_messages_for_display(child)]
 

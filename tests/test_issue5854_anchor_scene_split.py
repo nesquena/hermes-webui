@@ -314,13 +314,20 @@ def test_legacy_large_scene_not_reparsed_on_every_read(session_store, monkeypatc
     # Count real full-loads via a spy on the raw file read inside load().
     calls = {"n": 0}
     real_load = M.Session.load.__func__
+    real_load_readonly = M.Session.load_readonly.__func__
 
     def _counting_load(cls, sid, *a, **k):
         if sid == "legcache":
             calls["n"] += 1
         return real_load(cls, sid, *a, **k)
 
+    def _counting_load_readonly(cls, sid, *a, **k):
+        if sid == "legcache":
+            calls["n"] += 1
+        return real_load_readonly(cls, sid, *a, **k)
+
     monkeypatch.setattr(M.Session, "load", classmethod(_counting_load))
+    monkeypatch.setattr(M.Session, "load_readonly", classmethod(_counting_load_readonly))
     s1 = M.Session.load_metadata_only("legcache")
     s2 = M.Session.load_metadata_only("legcache")
     s3 = M.Session.load_metadata_only("legcache")

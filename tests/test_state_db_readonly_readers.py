@@ -31,7 +31,7 @@ def test_readonly_open_failure_never_retries_writable(tmp_path, monkeypatch):
     with pytest.raises(sqlite3.OperationalError):
         agent_sessions.open_state_db_readonly(path)
     assert len(calls) == 1
-    assert calls[0][1] == {"uri": True}
+    assert calls[0][1] == {"uri": True, "check_same_thread": True}
 
 
 def test_no_subscribers_means_no_database_poll(tmp_path, monkeypatch):

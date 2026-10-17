@@ -119,6 +119,8 @@ def test_messaging_session_metadata_matches_full_display_merge(monkeypatch):
     monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda _session: None)
     monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda sid: {"session_id": sid, "session_source": "messaging", "raw_source": "telegram"})
     monkeypatch.setattr(routes, "get_cli_session_messages", lambda _sid, profile=None: cli)
+    monkeypatch.setattr(Session, "load_readonly", classmethod(lambda _cls, _sid: session))
+    monkeypatch.setattr(routes, "_load_state_db_messages_with_stable_signature", lambda *_a, **_kw: (cli, None))
     monkeypatch.setattr(routes, "redact_session_data", lambda payload: payload)
     monkeypatch.setattr(routes, "j", lambda _handler, payload, status=200, extra_headers=None: payload)
     full = routes.handle_get(object(), urlparse("/api/session?session_id=telegram_resume&messages=1&resolve_model=0"))["session"]
