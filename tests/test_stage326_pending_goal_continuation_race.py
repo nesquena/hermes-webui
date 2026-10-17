@@ -160,16 +160,26 @@ def test_stream_goal_related_release_is_keyed_by_stream_id():
 
 
 def test_goal_continue_set_marker_before_emitting_event():
-    """Source-code ordering check: PENDING_GOAL_CONTINUATION.add must
-    happen BEFORE the goal_continue SSE event is put on the queue, so the
-    marker is observable by the time the frontend reacts."""
+    """Source-code ordering check: the pending goal marker must be recorded
+    BEFORE the goal_continue SSE event is put on the queue, so the marker is
+    observable by the time the frontend reacts.
+
+    #6885 moved the recording into api.config.record_pending_goal_continuation
+    (which persists the marker *and* the prompt it owes, so the admission path can
+    authenticate the continuation turn). The ordering invariant is unchanged; only
+    the call that expresses it moved, so both spellings are accepted.
+    """
     src = _read_streaming()
-    add_idx = src.find("PENDING_GOAL_CONTINUATION.add(session_id)")
-    if add_idx == -1:
-        # Tolerate slight phrasing variations.
-        m = re.search(r"PENDING_GOAL_CONTINUATION\.add\([^)]*\)", src)
-        assert m is not None, "PENDING_GOAL_CONTINUATION.add not found"
-        add_idx = m.start()
+    m = re.search(
+        r"record_pending_goal_continuation\([^)]*\)"
+        r"|PENDING_GOAL_CONTINUATION\.add\([^)]*\)",
+        src,
+    )
+    assert m is not None, (
+        "no pending-goal-continuation recording call found before the goal_continue "
+        "SSE emission"
+    )
+    add_idx = m.start()
 
     # Find the next goal_continue SSE event AFTER the add.
     after_add = src[add_idx:]
@@ -177,6 +187,6 @@ def test_goal_continue_set_marker_before_emitting_event():
     assert event_idx != -1, "no goal_continue emission after marker add"
     # Must be within ~500 chars (close to the add).
     assert event_idx < 500, (
-        "PENDING_GOAL_CONTINUATION.add must immediately precede the "
+        "the pending goal continuation must be recorded immediately before the "
         "goal_continue SSE emission"
     )
