@@ -8371,6 +8371,64 @@ def _catalog_group_owns_exact_model(group: dict, model: str) -> bool:
     return False
 
 
+def _records_naming_provider(
+    profile_config: dict | None,
+    stored_provider: str,
+    canonical_provider: str,
+) -> list[tuple[str, dict]]:
+    """Return ``(config_key, record)`` for every raw ``providers:`` row that names this identity.
+
+    A native ``providers:`` record claims its provider the way the installed
+    Agent's resolver reads it — by its OWN config key OR by its display ``name``
+    — so both identities are consulted through the config-owned matcher
+    (``_custom_record_names_identity`` / ``_custom_provider_alias_set``) rather
+    than a private spelling rule here. Two consequences the inline key comparison
+    missed (#8179 P2): the endpoint may be spelled ``api``/``url``/``base_url``
+    (handled by the caller's normalisation) and a record keyed under a handle
+    (``providers.actual`` naming ``glm``) still owns the ``glm`` lane.
+
+    Identity-OWNED, never "the only row around": a record that names some other
+    provider is not returned, so a generic ``providers['custom']`` entry cannot
+    become the authority for an unrelated lane. Both the raw and the canonical id
+    are tested, matching the dual-lookup the rest of this path keeps for
+    canonically-equivalent spellings (``my_local`` / ``my-local``, ``glm`` /
+    ``zai``). Purely structural: reads the profile dict only, and the caller
+    decides enabled/ambiguity semantics from the same ``api.config`` helpers.
+    """
+    if not isinstance(profile_config, dict) or not stored_provider:
+        return []
+    from api.config import (
+        _canonicalise_provider_id,
+        _custom_provider_slug_key,
+        _custom_record_names_identity,
+    )
+
+    providers_cfg = profile_config.get("providers")
+    if not isinstance(providers_cfg, dict):
+        return []
+    identities = []
+    for pid in (str(stored_provider or "").strip().lower(), canonical_provider):
+        if pid and pid not in identities:
+            identities.append(pid)
+    matched: list[tuple[str, dict]] = []
+    seen: set[str] = set()
+    for pid in identities:
+        slug = _custom_provider_slug_key(pid)
+        for config_key, record in providers_cfg.items():
+            key = str(config_key or "").strip()
+            if not key or not isinstance(record, dict) or not record or key in seen:
+                continue
+            # The record's OWN name claims the identity; an unnamed record is
+            # claimed by its config key alone (canonical, so ``my_local``
+            # declares the lane a session stores as ``my-local``).
+            names = _custom_record_names_identity(record.get("name") or key, key, pid, slug)
+            if not names and _canonicalise_provider_id(key) != canonical_provider:
+                continue
+            seen.add(key)
+            matched.append((key, record))
+    return matched
+
+
 def _stored_provider_can_legitimately_own_model(
     stored_provider: str, profile_config: dict | None = None
 ) -> bool:
@@ -8406,19 +8464,25 @@ def _stored_provider_can_legitimately_own_model(
         return True
     if provider and isinstance(profile_config, dict):
         try:
-            from api.config import _canonicalise_provider_id
+            from api.config import (
+                _normalized_raw_provider_record,
+                _raw_provider_record_enabled,
+                _custom_record_base_url,
+            )
 
-            providers_cfg = profile_config.get("providers")
-            if isinstance(providers_cfg, dict):
-                # Compare canonically: ``providers.my_local.base_url`` declares the
-                # same lane a session stores as ``my-local`` (#7594 gate, CORE).
-                for key, entry in providers_cfg.items():
-                    if not isinstance(entry, dict):
-                        continue
-                    if _canonicalise_provider_id(key) != provider:
-                        continue
-                    if str(entry.get("base_url") or "").strip():
-                        return True
+            # Identity, endpoint spelling, enabled/ambiguity semantics all come
+            # from ``api.config`` — ONE definition shared with the resolver that
+            # actually routes the send, not a second copy here (#8179 P2). The
+            # projection stays a PURE STRUCTURAL ownership check: no ``key_cmd``
+            # subprocess, no socket probe, no credential-pool lookup.
+            for config_key, record in _records_naming_provider(
+                profile_config, stored_provider, provider
+            ):
+                if not _raw_provider_record_enabled(record):
+                    continue
+                normalized = _normalized_raw_provider_record(record, config_key)
+                if _custom_record_base_url(normalized):
+                    return True
         except Exception:
             return True
         # PR #7594 review P1 follow-up: a profile may declare the local endpoint at
