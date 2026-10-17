@@ -277,6 +277,33 @@ def run(pw, base, state_settings, virt, expanded, idle_probe, history_len):
 
     live_before = page.evaluate(ASSERTIONS)
 
+    # Sample INSIDE the page, at the two frames that matter, before the settle
+    # is even emitted. Polling from python (`wait_for_timeout(25)` then a second
+    # `evaluate` to read the reply) races the renderer: the browser can paint a
+    # blank reply and repair it inside that window, so a transient blank — the
+    # exact defect this probe exists to catch — is repaired before it is ever
+    # observed. Recording in-page at the settle frame and on the first
+    # animation frame after it closes that gap.
+    page.evaluate("""() => {
+      window.__settleSamples = {at_settle: null, first_frame: null};
+      const sample = async (slot) => {
+        try { window.__settleSamples[slot] = await (%s)(); }
+        catch (e) { window.__settleSamples[slot] = {error: 'sample:' + e}; }
+      };
+      let captured = false;
+      const tick = () => {
+        if (captured) return;
+        if (!(typeof S !== 'undefined' && S.busy)) {
+          captured = true;
+          sample('at_settle');
+          requestAnimationFrame(() => { sample('first_frame'); });
+          return;
+        }
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+    }""" % ASSERTIONS)
+
     # Terminal `done` — NO network interruption anywhere in this script.
     page.evaluate("""({sid,text})=>{
       const msgs=[
@@ -293,22 +320,30 @@ def run(pw, base, state_settings, virt, expanded, idle_probe, history_len):
       });
     }""", {'sid': sid, 'text': FINAL_TEXT})
 
-    # Sample the SAME frame the settle completes in.
+    # Wait only for the settle to have HAPPENED; the measurements themselves
+    # were taken in-page at the settle frame and the first animation frame, so
+    # the 25ms poll granularity can no longer hide a transient blank.
     settled = None
     for _ in range(120):
         page.wait_for_timeout(25)
         if not page.evaluate("()=>!!S.busy"):
-            settled = page.evaluate(ASSERTIONS)
             break
-    if settled is None:
-        settled = {'error': 'never settled', 'busy': page.evaluate('()=>S.busy')}
 
-    same_frame = settled
-    next_frame = None
+    samples = page.evaluate("()=>window.__settleSamples||{}")
+    same_frame = samples.get('at_settle')
+    first_frame = samples.get('first_frame')
+    if not same_frame:
+        # The in-page sampler never observed the busy->idle edge (or the page
+        # died before it could). Report it rather than silently degrading to
+        # the old post-hoc read, which is the check that had the blind spot.
+        settled = {'error': 'in-page settle sample never captured',
+                   'busy': page.evaluate('()=>S.busy')}
+    else:
+        settled = same_frame
+
+    next_frame = first_frame
     after_wait = None
-    if 'error' not in settled:
-        page.evaluate("()=>new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))")
-        next_frame = page.evaluate(ASSERTIONS)
+    if 'error' not in settled and not (next_frame or {}).get('error'):
         page.wait_for_timeout(1500)
         after_wait = page.evaluate(ASSERTIONS)
     else:
@@ -378,7 +413,7 @@ def run(pw, base, state_settings, virt, expanded, idle_probe, history_len):
         'runtime_checks': runtime_checks,
         'live_before': live_before,
         'same_frame': same_frame,
-        'next_frame': next_frame,
+        'first_frame': first_frame,
         'after_wait': after_wait,
         'idle_result': idle_result,
         'idle_detail': idle_detail,
@@ -393,7 +428,7 @@ def verdict(res):
     for name in ('normalize', 'finalize'):
         if checks.get(name) != 'ok':
             bad.append(f'runtime:{name}: {checks.get(name)}')
-    for label in ('same_frame', 'next_frame', 'after_wait', 'after_idle'):
+    for label in ('same_frame', 'first_frame', 'after_wait', 'after_idle'):
         r = res.get(label)
         if not r:
             continue
