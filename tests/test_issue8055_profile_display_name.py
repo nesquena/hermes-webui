@@ -14,6 +14,12 @@ canonical id stays the identity for switching and every API call.
 
 from pathlib import Path
 
+import json
+import shutil
+import subprocess
+
+import pytest
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 UI_JS = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
@@ -22,6 +28,7 @@ PANELS_JS = (REPO_ROOT / "static" / "panels.js").read_text(encoding="utf-8")
 SESSIONS_JS = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
 ROUTES_PY = (REPO_ROOT / "api" / "routes.py").read_text(encoding="utf-8")
 PROFILES_PY = (REPO_ROOT / "api" / "profiles.py").read_text(encoding="utf-8")
+NODE = shutil.which("node")
 
 
 # ── API surface ────────────────────────────────────────────────────────────
@@ -137,3 +144,176 @@ def test_profile_rows_include_display_name_in_fast_and_slow_paths():
     """Both the fast row builder and the upstream fallback carry the field."""
     assert "'display_name': _profile_display_name(home)," in PROFILES_PY
     assert "'display_name': str(getattr(p, 'display_name', '') or '')," in PROFILES_PY
+
+
+def test_isolated_constructed_fallback_row_carries_display_name(monkeypatch, tmp_path):
+    """The isolated no-matching-upstream-row / error fallback in
+    list_profiles_api() must carry display_name too, resolved from the pinned
+    isolated home (#8055 round-2).
+
+    The fast path, the matched-isolated path and the ordinary upstream path
+    all already emit the key; this test forces the constructed fallback branch
+    (hermes_cli.profiles.list_profiles absent) and pins the key there as well.
+    """
+    import sys
+    import types
+
+    import api.profiles as p
+
+    home = tmp_path / "profiles" / "work"
+    home.mkdir(parents=True)
+    (home / "profile.yaml").write_text("display_name: Client A\n", encoding="utf-8")
+
+    stub = types.ModuleType("hermes_cli.profiles")
+    stub.read_profile_meta = lambda _dir: {"display_name": "Client A"}  # noqa: B010
+    agent_stub = types.ModuleType("hermes_cli")
+    agent_stub.profiles = stub  # noqa: B010
+    monkeypatch.setitem(sys.modules, "hermes_cli", agent_stub)
+    monkeypatch.setitem(sys.modules, "hermes_cli.profiles", stub)
+    # Isolated mode with NO upstream list_profiles -> the constructed fallback row.
+    monkeypatch.setattr(p, "_is_isolated_profile_mode", lambda: True)
+    monkeypatch.setattr(p, "_INITIAL_HERMES_HOME", str(home))
+    monkeypatch.setattr(p, "_get_profile_skills_stats", lambda _h: (0, 0))
+
+    rows = p.list_profiles_api()
+
+    assert [r["name"] for r in rows] == ["work"]
+    row = rows[0]
+    assert "display_name" in row, "isolated fallback row must carry display_name"
+    assert isinstance(row["display_name"], str)
+    assert row["display_name"] == "Client A"
+
+
+def _render_profile_dropdown_body(src: str) -> str:
+    """Return the full source of renderProfileDropdown()."""
+    start = src.find("function renderProfileDropdown(")
+    assert start != -1, "renderProfileDropdown not found in panels.js"
+    i = src.find("{", start)
+    depth = 0
+    for j in range(i, len(src)):
+        if src[j] == "{":
+            depth += 1
+        elif src[j] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : j + 1]
+    raise AssertionError("could not find end of renderProfileDropdown()")
+
+
+def test_render_profile_dropdown_titlebar_write_uses_presentation_helper():
+    """renderProfileDropdown()'s trailing titlebar write must use the same
+    active-profile label resolver (display name), not the canonical id — the
+    mutation observer recorded `Client A -> work` when the dropdown opened and
+    the phone DOM kept `work` (#8055 round-2)."""
+    body = _render_profile_dropdown_body(PANELS_JS)
+    idx = body.find("const tbl = $('titlebarProfileLabel')")
+    assert idx != -1, "titlebar label sync not found in renderProfileDropdown"
+    tail = body[idx:]
+    assert "tbl.textContent = profileChipDisplayLabel()" in tail, (
+        "renderProfileDropdown must write the display-name-aware label, "
+        "not the canonical id"
+    )
+    assert "tbl.textContent = active" not in tail, (
+        "renderProfileDropdown must NOT write the canonical id to the titlebar"
+    )
+
+
+_SWITCH_ROLLBACK_DRIVER = r"""
+const fs = require('fs');
+const uiSrc = fs.readFileSync(process.argv[2], 'utf8');
+const panelsSrc = fs.readFileSync(process.argv[3], 'utf8');
+function extractFunc(src, name) {
+  const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') depth--;
+    i++;
+  }
+  return src.slice(start, i);
+}
+function makeEl() {
+  return {textContent: '', disabled: false, classList: {add(){}, remove(){}, toggle(){}, contains(){return false;}}, style: {}};
+}
+const els = {};
+global.$ = (id) => { if (!els[id]) els[id] = makeEl(); return els[id]; };
+global.S = {activeProfile: 'work', activeProfileIsDefault: false, activeProfileDisplayName: 'Client A', session: null, messages: [], _pendingSessionToolsets: null};
+global.t = (k) => k;
+global.showToast = () => {};
+global.applyBotName = () => {};
+global.syncAppTitlebar = () => {};
+global.syncTopbar = () => {};
+global.startGatewaySSE = () => {};
+global.newSession = async () => {};
+global.renderSessionList = async () => {};
+global.renderSessionListFromCache = () => {};
+global.loadDir = () => {};
+global.clearWorkspaceTreeSkeleton = () => {};
+global.showSessionListSkeleton = () => {};
+global.bumpWorkspaceTreeGen = () => {};
+global.closeSessionActionMenu = () => {};
+global._invalidateSessionListRenders = () => {};
+global._setProfileSwitchListEmbargo = () => {};
+global._maybeReplayChatTodosRailSync = () => {};
+global._profileSwitchPanelLoad = async () => {};
+global._refreshProfileSwitchBackground = () => {};
+global._openProfileSwitchSessionBrowser = () => {};
+global.animateNextSessionListRefresh = () => {};
+global._clearPersistedModelState = () => {};
+global._profileMatchesActiveProfile = () => true;
+global._sessionListSkeletonActive = false;
+var _profileSwitchGeneration = 0;
+var _workspacePanelMode = 'closed';
+eval(extractFunc(uiSrc, 'profileChipDisplayLabel'));
+eval(extractFunc(panelsSrc, 'switchToProfile'));
+global.api = (url) => {
+  if (url === '/api/profile/switch') return Promise.reject(new Error('rejected'));
+  return Promise.resolve({});
+};
+(async () => {
+  const returned = await switchToProfile('vops');
+  console.log(JSON.stringify({
+    returned,
+    activeProfile: S.activeProfile,
+    activeProfileDisplayName: S.activeProfileDisplayName,
+    activeProfileIsDefault: S.activeProfileIsDefault,
+    chipLabel: $('profileChipLabel').textContent,
+    titlebarLabel: $('titlebarProfileLabel').textContent,
+  }));
+})().catch(e => { console.error(e); process.exit(1); });
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_failed_switch_rolls_back_previous_identity_name_pair(tmp_path):
+    """Behavioral: a rejected /api/profile/switch must restore the previous
+    identity/name pair — S.activeProfileDisplayName is cleared before the POST
+    and must come back on failure so the chip/titlebar/assistant keep the
+    friendly name (`Client A`), not the canonical id (`work`) (#8055 round-2)."""
+    driver = tmp_path / "switch_rollback_driver.js"
+    driver.write_text(_SWITCH_ROLLBACK_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(REPO_ROOT / "static" / "ui.js"), str(REPO_ROOT / "static" / "panels.js")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
+    got = json.loads(result.stdout)
+
+    assert got["returned"] is False
+    # The server rejected the POST: the previous profile is still active.
+    assert got["activeProfile"] == "work"
+    # The cleared display name must be restored with the previous identity.
+    assert got["activeProfileDisplayName"] == "Client A", (
+        "failed switch must restore the previous display name, got: "
+        + repr(got["activeProfileDisplayName"])
+    )
+    assert got["activeProfileIsDefault"] is False
+    # The labels resolve through the presentation helper -> friendly name.
+    assert got["chipLabel"] == "Client A", "chip label must show the restored display name"
+    assert got["titlebarLabel"] == "Client A", "titlebar label must show the restored display name"

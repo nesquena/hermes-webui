@@ -2360,6 +2360,7 @@ def list_profiles_api() -> list:
             'provider': None,
             'has_env': (hermes_home / '.env').exists(),
             'visible': _profile_visible_from_meta(hermes_home),
+            'display_name': _profile_display_name(hermes_home),
             'skill_count': enabled_count,
             'enabled_skills': enabled_count,
             'total_skills': total_count,
