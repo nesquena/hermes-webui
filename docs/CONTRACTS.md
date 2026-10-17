@@ -23,6 +23,12 @@ contributor guidance; it does not change runtime behavior or CI gates.
 
 ## Runtime, durability, and state contracts
 
+- [`docs/session-store.md`](session-store.md):
+  session storage backend behavior: SQLite activation markers and fail-closed
+  selection, the staged JSON→SQLite migration (dry run, `--commit`, cutover
+  handoff, sidecar retirement), per-session fallback in a mixed directory,
+  Postgres opt-in, and rollback. Start here before changing a `SessionStore`
+  implementation or anything that selects a backend.
 - [`docs/remote-workspaces.md`](remote-workspaces.md):
   architecture contract for remote terminal workspaces (SSH/Docker), target-side
   POSIX path preservation against macOS synthetic firmlink expansion, and

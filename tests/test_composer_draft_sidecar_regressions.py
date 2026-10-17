@@ -1679,3 +1679,94 @@ def test_draft_path_error_shows_original_input(tmp_path, monkeypatch):
     with pytest.raises(ValueError) as exc:
         models._session_draft_path("../unsafe")
     assert "Unsafe session_id '../unsafe'" in str(exc.value)
+
+
+def test_sessions_cleanup_rechecks_the_condition_under_the_session_lock(tmp_path, monkeypatch):
+    """Collection is deliberately side-effect free, so a user can send the first
+    message (or rename the chat) between being collected and being deleted. The
+    delete must re-read the condition under the sid's own lock — master's inline
+    sweep held the lock across collect-and-delete, and the split lost that.
+
+    Outcome-based on purpose: without the re-check this deletes the chat and the
+    assertions below fail (the wrapper cannot mutate an already-deleted owner)."""
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "sid-cleanup-typed-in-between"
+    models.Session(session_id=sid, title="Untitled").save(
+        touch_updated_at=False,
+        skip_index=True,
+    )
+    owner = session_dir / f"{sid}.json"
+    assert owner.exists()
+
+    real_lock = routes._get_session_agent_lock
+    interposed = {"done": False}
+
+    class _TypingLock:
+        """Delegates to the real lock, but commits the user's first message before
+        the re-check reads the session."""
+
+        def __init__(self, lock):
+            self._lock = lock
+
+        def acquire(self, *args, **kwargs):
+            acquired = self._lock.acquire(*args, **kwargs)
+            if acquired and not interposed["done"] and owner.exists():
+                interposed["done"] = True
+                payload = json.loads(owner.read_text(encoding="utf-8"))
+                payload["messages"] = [{"role": "user", "content": "first message"}]
+                payload["message_count"] = 1
+                owner.write_text(json.dumps(payload), encoding="utf-8")
+            return acquired
+
+        def release(self):
+            self._lock.release()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            self.release()
+
+    monkeypatch.setattr(
+        routes,
+        "_get_session_agent_lock",
+        lambda value: _TypingLock(real_lock(value)) if value == sid else real_lock(value),
+    )
+
+    status, result = _cleanup_route(monkeypatch, routes)
+
+    assert status == 200
+    assert owner.exists(), "cleanup deleted a chat that had received its first message"
+    assert result.get("cleaned", 0) == 0
+    assert interposed["done"] is True, "cleanup never reached the delete window"
+    reloaded = models.Session.load(sid)
+    assert [m.get("content") for m in reloaded.messages] == ["first message"]
+
+
+def test_metadata_draft_write_follows_the_overlay_authority(tmp_path, monkeypatch):
+    """When a sid has a .drafts overlay, every load applies it OVER the embedded
+    composer_draft. A metadata draft write that lands in the sidecar is therefore
+    shadowed by the older overlay on the next read: the autosave reports success
+    and the older typing comes back. The write must follow the read authority."""
+    models, routes, session_dir = _build_draft_env(tmp_path, monkeypatch)
+
+    sid = "sid-authority-follow"
+    models.Session(
+        session_id=sid,
+        title="Authority",
+        messages=[{"role": "user", "content": "hi"}],
+        composer_draft={"text": "older", "files": []},
+    ).save(touch_updated_at=False, skip_index=True)
+    models._save_session_draft(sid, {"text": "older", "files": []})
+
+    owner = models.get_session(sid)
+    owner.save_metadata({"composer_draft": {"text": "newer typing", "files": []}})
+
+    overlay = json.loads(
+        (session_dir / ".drafts" / f"{sid}.json").read_text(encoding="utf-8")
+    )
+    assert overlay["text"] == "newer typing"
+    models.SESSIONS.clear()
+    assert models.Session.load(sid).composer_draft["text"] == "newer typing"

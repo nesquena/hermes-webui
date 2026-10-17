@@ -30,6 +30,7 @@ except ImportError:  # pragma: no cover
     _msvcrt = None
 
 import api.config as _cfg
+from api.webui_session_sqlite import StaleSessionWriteError, WebUISqliteSessionDB
 from api.compression_anchor import is_context_compression_marker
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
@@ -512,7 +513,7 @@ def _cleanup_stale_tmp_files() -> None:
             pass  # SESSION_DIR may not exist yet; that's fine
 
 
-_PERSISTED_SESSION_IDS_CACHE: tuple[Path | None, int | None, frozenset[str]] = (None, None, frozenset())
+_PERSISTED_SESSION_IDS_CACHE: tuple[Path | None, int | None, int | None, frozenset[str]] = (None, None, None, frozenset())
 
 
 def _persisted_session_ids_snapshot() -> frozenset[str]:
@@ -530,27 +531,66 @@ def _persisted_session_ids_snapshot() -> frozenset[str]:
         dir_mtime_ns = SESSION_DIR.stat().st_mtime_ns
     except Exception:
         dir_mtime_ns = None
-    cached_dir, cached_mtime_ns, cached_ids = _PERSISTED_SESSION_IDS_CACHE
-    if cached_dir == SESSION_DIR and cached_mtime_ns == dir_mtime_ns:
+    # This cache is a module global, so an entry written in an older shape (three
+    # fields, before the store-revision key) can still be sitting there — tests
+    # reset it directly, and a long-lived process may have been started by code of
+    # either shape. A shape mismatch must mean "unknown", never "raise": a bare
+    # unpack here raises ValueError, which the caller's broad except turns into a
+    # full-scan fallback on EVERY poll (losing the index backfill).
+    cached = _PERSISTED_SESSION_IDS_CACHE
+    if isinstance(cached, tuple) and len(cached) == 4:
+        cached_dir, cached_mtime_ns, cached_rev, cached_ids = cached
+    else:
+        cached_dir, cached_mtime_ns, cached_rev, cached_ids = (
+            None,
+            None,
+            None,
+            frozenset(),
+        )
+    # SQL-backend commits advance the store revision without moving the
+    # session directory mtime, so mtime alone cannot invalidate this cache
+    # once a store is active — key it on (dir, mtime, store revision).
+    store = get_session_store()
+    try:
+        rev = store.get_revision() if store.supports_revision_counter else None
+    except Exception:
+        rev = None
+    if cached_dir == SESSION_DIR and cached_mtime_ns == dir_mtime_ns and cached_rev == rev:
         return cached_ids
     try:
-        ids = frozenset(
+        ids = {
             p.stem
             for p in SESSION_DIR.glob('*.json')
             if not p.name.startswith('_')
-        )
+        }
     except Exception:
-        ids = frozenset()
-    _PERSISTED_SESSION_IDS_CACHE = (SESSION_DIR, dir_mtime_ns, ids)
+        ids = set()
+    # Include SQL-backed sessions so the sidebar does not prune them.
+    try:
+        if store.supports_revision_counter:
+            ids.update(s.get('session_id') for s in store.list_sessions() if s.get('session_id'))
+    except Exception:
+        pass
+    ids = frozenset(ids)
+    _PERSISTED_SESSION_IDS_CACHE = (SESSION_DIR, dir_mtime_ns, rev, ids)
     return ids
 
 
 def _session_dir_has_persisted_session_files() -> bool:
-    """Return True when the current session dir has at least one session JSON file."""
+    """Return True when the current session dir has at least one persisted session."""
     try:
-        return any(not p.name.startswith('_') for p in SESSION_DIR.glob('*.json'))
+        if any(not p.name.startswith('_') for p in SESSION_DIR.glob('*.json')):
+            return True
     except Exception:
-        return False
+        pass
+    # Also count store-backed sessions with no JSON sidecar.
+    try:
+        store = _active_session_store_if_sidecarless()
+        if store and store.list_sessions():
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _rebuild_session_index_background(expected_session_dir: Path, expected_index_file: Path) -> None:
@@ -616,7 +656,16 @@ def _index_entry_exists(session_id: str, in_memory_ids=None) -> bool:
     if session_id in in_memory_ids:
         return True
     p = SESSION_DIR / f'{session_id}.json'
-    return p.exists()
+    if p.exists():
+        return True
+    # Sidecarless stores (SQLite/Postgres) persist sessions with no JSON sidecar.
+    try:
+        store = _active_session_store_if_sidecarless()
+        if store and store.session_exists(session_id):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def _write_session_index(updates=None, *, session_dir: Path | None = None, session_index_file: Path | None = None):
@@ -662,6 +711,22 @@ def _write_session_index(updates=None, *, session_dir: Path | None = None, sessi
                                 entry_map[sid] = c
                 except Exception:
                     logger.debug("Failed to load session from %s", p)
+            # Include store-backed sessions (no sidecar) in full rebuilds.
+            try:
+                store = _active_session_store_if_sidecarless()
+                if store:
+                    for meta in store.list_sessions():
+                        sid = meta.get('session_id')
+                        if not sid or sid in entry_map:
+                            continue
+                        try:
+                            s = Session.load(sid)
+                            if s:
+                                entry_map[sid] = s.compact()
+                        except Exception:
+                            logger.debug("Failed to load store-backed session %s", sid)
+            except Exception:
+                pass
             entries = list(entry_map.values())
 
             existing_ids = set(entry_map.keys())
@@ -1666,6 +1731,529 @@ def _validated_webui_pending_user_timestamp_identity(session, value):
     return (stream_id, pending_timestamp)
 
 
+# SQLite session store singleton. Activated when sessions.db exists in the
+# session directory, otherwise the code falls back to JSON sidecars.
+_sqlite_session_store_instance = None
+# Stamp (path, mtime_ns, size) the cached NEGATIVE selection was probed
+# against. Probe-produced positive selections carry their stamp on the store
+# itself (``_selector_stamp``). A stamp change re-probes, so a long-lived
+# selector observes a later publish (the migration's atomic os.replace)
+# instead of holding a sticky False.
+_sqlite_session_store_stamp = None
+
+# Sids whose SQLite row failed to read (corrupt payload, DB read error),
+# mapped to a rich mark entry captured at the moment the fallback load
+# succeeded:
+#   {
+#     "composer_draft":       sidecar draft at mark time (demote carry),
+#     "baseline_meta":        deep-copied post-construction payload
+#                             projection snapshot (the dirty-diff base for
+#                             the store-owned reconcile),
+#     "baseline_generation":  durable row generation at mark time, or None
+#                             when the header read also failed (fail closed),
+#     "baseline_incarnation": durable incarnation at mark time, or None,
+#   }
+# While a sid is marked, its JSON sidecar is authoritative for
+# BOTH reads (Session.load / load_metadata_only) and metadata writes
+# (save_metadata) — keeping one store on both sides is what prevents
+# drafts saved during the outage from disappearing behind a flip back to
+# SQLite. The mark clears via demote-on-recovery: when a probe of the row
+# reads healthy again, _demote_marked_if_recovered carries any sidecar
+# draft written during the outage into the row and pops the mark. A full
+# save() alone no longer heals the row (removed in blocker 2); a marked
+# save() onto a recovered row goes through the store-owned
+# reconcile_marked_write contract, which validates the durable
+# generation+incarnation against the baseline before overlaying only the
+# proven-dirty metadata fields.
+
+# Per-sid process-local locks serializing unreadable-mark transitions (the
+# mark-set in Session.load's fallback, the mark-pop in Session.save's SQL
+# write path, and the sidecar-read → carry → mark-pop sequence in
+# _demote_marked_if_recovered) against save_metadata's routing decision +
+# write. The WebUI is single-process, so a threading.Lock per sid fully
+# closes the demote-vs-draft race ("recovery can clobber newer drafts"):
+# without it the demote could read the sidecar draft, a concurrent
+# save_metadata could write a newer draft to the sidecar while the mark is
+# still set, and the demote would then pop the mark — stranding the newer
+# draft behind the flip back to SQLite. NOT _get_session_agent_lock: that
+# one is a non-reentrant threading.Lock already held by some save()
+# callers, so re-entering it from save() would deadlock. Mirrors the
+# _JOURNAL_RETRY_LOCKS pattern. Held only across local file/SQL I/O, never
+# across network.
+_DRAFT_DEMOTE_LOCKS: dict[str, threading.Lock] = {}
+_DRAFT_DEMOTE_LOCKS_GUARD = threading.Lock()
+
+
+def _draft_demote_lock_for_sid(sid: str) -> threading.Lock:
+    with _DRAFT_DEMOTE_LOCKS_GUARD:
+        lock = _DRAFT_DEMOTE_LOCKS.get(sid)
+        if lock is None:
+            lock = threading.Lock()
+            _DRAFT_DEMOTE_LOCKS[sid] = lock
+        return lock
+
+
+def _canon(value):
+    """Canonical JSON form for transcript/metadata comparisons — the same
+    shape as scripts/migrate_sessions_to_sqlite.py::_canon."""
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+# Keys never eligible for the marked-save reconcile overlay: identity,
+# transcript children, store-computed values, and the version fence itself.
+_RECONCILE_BASELINE_EXCLUDED_KEYS = {
+    "session_id", "messages", "tool_calls", "context_messages",
+    "anchor_activity_scenes",           # transcript-derived; never a metadata overlay axis
+    "anchor_scene_index", "anchor_scene_index_hash",  # computed at write time
+    "message_count", "last_message_at",                # computed
+    "generation", "incarnation",         # owned by the store fence, never by metadata
+}
+
+
+def _session_payload_projection(obj, messages=None) -> dict:
+    """The exact flattened payload save() hands to the store: __dict__ minus
+    _-prefixed attrs, extra_session_fields splatted under modeled attrs, with
+    the child-collection defaults materialized. Shared by save() and the
+    fallback-load baseline snapshot so the two views are like-for-like.
+
+    ``messages`` overrides the transcript. save() passes its exact-replay-deduped
+    projection there so the SQL row and the JSON sidecar persist the same bytes
+    for the same save(); the fallback-load baseline omits it (messages is
+    excluded from the reconcile dirty-diff, so both views stay like-for-like).
+    """
+    payload = {k: v for k, v in obj.__dict__.items() if not k.startswith("_")}
+    _extra_bag = payload.pop("extra_session_fields", None)
+    if isinstance(_extra_bag, dict):
+        for _k, _v in _extra_bag.items():
+            payload.setdefault(_k, _v)
+    if messages is not None:
+        payload["messages"] = messages
+    payload.setdefault("messages", [])
+    payload.setdefault("tool_calls", [])
+    payload.setdefault("context_messages", [])
+    payload.setdefault("anchor_activity_scenes", {})
+    # The anchor-scene fingerprint is a COMPUTED persisted field, exactly as the
+    # JSON path writes meta['anchor_scene_index']. The owned attribute is
+    # ``_anchor_scene_index`` (underscore, filtered above), so without this the
+    # store column stays empty and ``_cached_session_lags_disk()`` keeps reading
+    # the cached owner as an older record — reloading the full transcript on
+    # later reads, composer autosaves included.
+    payload.setdefault(
+        "anchor_scene_index",
+        _anchor_scene_index_from_records(
+            getattr(obj, "anchor_activity_scenes", None)
+        ),
+    )
+    return payload
+
+
+def _reconcile_dirty_fields(payload: dict, baseline_meta: dict) -> dict:
+    """Fields proven dirty = in-memory save() payload vs the fallback-load
+    baseline snapshot, under the canonical JSON form. Only these are overlaid
+    onto the recovered row; everything else keeps the row's own value."""
+    _MISSING = object()
+    dirty = {}
+    for k in set(payload) | set(baseline_meta):
+        if k in _RECONCILE_BASELINE_EXCLUDED_KEYS:
+            continue
+        cur, base = payload.get(k, _MISSING), baseline_meta.get(k, _MISSING)
+        if cur is _MISSING and base is _MISSING:
+            continue
+        if cur is _MISSING:
+            dirty[k] = None                      # dropped in memory → null it out
+        elif base is _MISSING or _canon(cur) != _canon(base):
+            dirty[k] = cur
+    return dirty
+
+
+def _demote_marked_if_recovered(store, sid: str):
+    """Probe a marked sid's row; on full-read success, carry any
+    marked-window sidecar draft into the row, pop the mark, and return the
+    row data. Returns None when the row is still unreadable OR the carry
+    failed — in both cases the mark stays so routing remains consistent.
+    """
+    # The SQL probe stays outside the per-sid lock: it does not touch the
+    # mark and must not extend the critical section with DB latency.
+    try:
+        data = store.read_session(sid)
+    except Exception:
+        return None
+    if data is None:
+        return None
+    # The sidecar read → carry → mark-pop sequence must be atomic w.r.t. a
+    # concurrent save_metadata routing on the mark, or a draft written to
+    # the sidecar mid-demote would be stranded the moment the mark pops.
+    with _draft_demote_lock_for_sid(sid):
+        if sid not in store.unreadable_sids:
+            # A concurrent demote already recovered this sid between the
+            # caller's mark check and this lock: return the healthy probe
+            # as-is. Carrying now would be wrong — the sidecar is no longer
+            # the marked authority, and its draft may be older than the
+            # row's (a post-recovery save_metadata already routes to SQL).
+            return data
+        at_mark = store.unreadable_sids.get(sid)
+        # The entry is always the rich mark dict — marks are process-local
+        # and never persist across the schema that created them.
+        at_mark_draft = at_mark.get("composer_draft")
+        try:
+            sc = SESSION_DIR / f'{sid}.json'
+            if sc.exists():
+                live = json.loads(sc.read_text(encoding='utf-8')).get('composer_draft')
+                if live != at_mark_draft:
+                    # The probe (read_session) carries the durable
+                    # (generation, incarnation) token: fence the carry with
+                    # it so an interleaved writer between probe and carry
+                    # raises instead of being silently clobbered (the
+                    # except below keeps the mark for retry). No token →
+                    # fail closed: skip the carry, keep the mark.
+                    if data.get("incarnation") is None:
+                        return None
+                    _carry = store.update_metadata(
+                        sid,
+                        {"composer_draft": live},
+                        expected_generation=int(data["generation"]),
+                        expected_incarnation=int(data["incarnation"]),
+                    )
+                    data['composer_draft'] = live
+                    # The carry bumps the generation fence (metadata writers
+                    # move it too): refresh the probe so the demoted load
+                    # constructs the session at the current generation.
+                    if isinstance(_carry, dict) and _carry.get("generation") is not None:
+                        data["generation"] = _carry["generation"]
+        except Exception:
+            logger.debug("Failed to carry fallback draft for %s", sid, exc_info=True)
+            return None
+        store.unreadable_sids.pop(sid, None)
+    return data
+
+
+
+_pg_session_store_instance = None
+
+
+def get_session_store():
+    """Return the active session store backend (api.session_store.SessionStore).
+
+    Selection order: a configured Postgres DSN (runtime substitution,
+    HERMES_SESSION_STORE_PG_DSN), else an active SQLite cutover, else the
+    JSON sidecar adapter. Callers branch on ``store.backend`` only for
+    JSON-vs-SQL capability differences, never on the concrete class.
+    """
+    global _pg_session_store_instance
+    if _pg_session_store_instance is not None:
+        return _pg_session_store_instance
+    _pg_dsn = os.environ.get("HERMES_SESSION_STORE_PG_DSN")
+    if _pg_dsn:
+        from api.webui_session_postgres import WebUIPostgresSessionDB
+
+        store = WebUIPostgresSessionDB(_pg_dsn)
+        if not store.is_active():
+            # Fail closed: a configured-but-inactive Postgres store must not
+            # silently fall back to SQLite/JSON while PG is believed
+            # configured. Refuse to serve a store at all.
+            try:
+                store.close()
+            except Exception:
+                pass
+            raise RuntimeError(
+                "HERMES_SESSION_STORE_PG_DSN is configured but the Postgres "
+                "session store is inactive (unreadable or unrecognized cutover "
+                "markers); refusing to fall back to another backend"
+            )
+        _pg_session_store_instance = store
+        return _pg_session_store_instance
+    store = _get_sqlite_session_store()
+    if store:
+        return store
+    return _json_session_store()
+
+
+def _json_session_store():
+    """The JSON sidecar store.
+
+    This is the backend a session resolves to when no SQL store holds a row for
+    it (an unmigrated session in a mixed directory). Callers that must write the
+    representation ``Session.load`` would read — rather than "the selected store"
+    — use this to target the fallback explicitly.
+    """
+    from api.webui_session_db import WebUIJsonSessionDB
+
+    return WebUIJsonSessionDB(session_dir=SESSION_DIR)
+
+
+def _active_session_store_if_sidecarless():
+    """Return the active session store iff it persists without JSON sidecars.
+
+    Lifecycle paths (existence checks, index rebuilds, lineage scans) use
+    this to consult the store only when it is the authoritative place a
+    sidecarless session could live (``persists_without_sidecar`` —
+    SQLite/Postgres). Returns None for the JSON backend or when the store
+    cannot be constructed, so callers keep their sidecar-only behavior.
+    """
+    try:
+        store = get_session_store()
+    except Exception:
+        return None
+    return store if getattr(store, "persists_without_sidecar", False) else None
+
+
+def delete_session_record(sid: str, *, owner: str = "delete_route", pending_phases=None) -> bool:
+    """Remove a session's authoritative record via the canonical store.
+
+    Delegates to the store's ``lifecycle_delete`` so a failed delete
+    records a durable retry lease (SQL backends) keyed by ``sid`` with
+    ``owner`` — the retry owner survives a crash instead of silently
+    leaking the row. Raises on ``{"ok": False}`` so the delete route
+    keeps its fail-closed 500 and cleanup callers retain retry ownership
+    instead of reporting a cleanup that silently leaked the record.
+    Returns whether the record existed. Sidecar unlinks for SQL-backed
+    cleanups are left to callers (``missing_ok=True``).
+
+    ``pending_phases`` is passed through to ``lifecycle_delete``: residual
+    -cleanup phase names recorded in the same transaction as the delete
+    (SQL backends; accepted and ignored by the JSON backend).
+    """
+    # Cutover protocol: pick the store INSIDE the shared cutover hold and finish
+    # the authoritative delete before releasing it. The migration holds this same
+    # lock exclusively across its source-identity CAS, publication and sidecar
+    # retirement, so without this a delete can select the JSON store and unlink a
+    # copied sidecar AFTER the final source check but BEFORE sessions.db is
+    # published — reporting success while the published database still contains
+    # the conversation.
+    with _sidecar_write_guard():
+        result = get_session_store().lifecycle_delete(
+            sid, owner=owner, pending_phases=pending_phases
+        )
+    if not result.get("ok"):
+        raise RuntimeError(
+            f"lifecycle_delete failed for session {sid}: {result.get('error')}"
+        )
+    return bool(result.get("existed"))
+
+
+def _sqlite_db_stamp(db_path: Path):
+    """(path, mtime_ns, size) stamp for the selector cache; (path, None, None)
+    when the file does not exist."""
+    try:
+        st = db_path.stat()
+    except OSError:
+        return (db_path, None, None)
+    return (db_path, st.st_mtime_ns, st.st_size)
+
+
+def _probe_sqlite_session_store(db_path: Path, stamp):
+    """Probe sessions.db for cutover authority. Returns the active store or
+    False; False results key the negative cache to ``stamp``."""
+    global _sqlite_session_store_stamp
+    if stamp[1] is None:
+        _sqlite_session_store_stamp = stamp
+        return False
+    store = WebUISqliteSessionDB(session_dir=SESSION_DIR)
+    # Durable cutover: a database left behind by an interrupted migration
+    # carries no authority until migration_complete is stamped.
+    if store.is_active():
+        store._selector_stamp = stamp
+        # Identity of the file this store was opened on, so a later refresh can
+        # tell an ordinary write (same inode) from a replacement (new inode).
+        store._db_inode = _db_file_inode(db_path)
+        return store
+    try:
+        store.close()
+    except Exception:
+        pass
+    _sqlite_session_store_stamp = stamp
+    return False
+
+
+def _db_file_inode(db_path: Path):
+    try:
+        return db_path.stat().st_ino
+    except OSError:
+        return None
+
+
+def _carry_store_recovery_marks(previous, refreshed, db_path: Path) -> None:
+    """Keep process-local unreadable marks across an ORDINARY database write.
+
+    ``unreadable_sids`` guards drafts that were saved to fallback sidecars while a
+    row was unreadable. The selector re-probes whenever the db stamp changes, and
+    a WAL checkpoint moves size and mtime without replacing the file — so the
+    refreshed instance must inherit the marks, or those drafts silently lose
+    their guard. A *replaced* file (a migration publish renames a new database
+    over sessions.db, new inode) starts clean: its rows never went through the
+    outage the marks describe.
+    """
+    try:
+        previous_inode = getattr(previous, "_db_inode", None)
+        current_inode = _db_file_inode(db_path)
+        if (
+            previous_inode is None
+            or current_inode is None
+            or previous_inode != current_inode
+        ):
+            return
+        marks = getattr(previous, "unreadable_sids", None)
+        if marks:
+            refreshed.unreadable_sids.update(marks)
+    except Exception:
+        logger.debug(
+            "Failed to carry session recovery marks across a store refresh",
+            exc_info=True,
+        )
+
+
+def _get_sqlite_session_store():
+    global _sqlite_session_store_instance
+    db_path = SESSION_DIR / "sessions.db"
+    stamp = _sqlite_db_stamp(db_path)
+    cached = _sqlite_session_store_instance
+    if cached is not None and cached is not False:
+        # Positive selection. Probe-produced stores carry their stamp; a
+        # store without one was provided directly (tests) and is honored
+        # as-is.
+        sel_stamp = getattr(cached, "_selector_stamp", None)
+        if sel_stamp is None or sel_stamp == stamp:
+            return cached
+        # The file moved under the cached store (e.g. a published migration
+        # renamed over sessions.db): re-probe.
+    elif cached is False:
+        if stamp == _sqlite_session_store_stamp:
+            return False
+        # Negative cache, but the file now exists with a new stamp (e.g. a
+        # staged migration was published after this selector first looked):
+        # re-probe rather than stick on False.
+    result = _probe_sqlite_session_store(db_path, stamp)
+    if result and cached and cached is not False:
+        # A stamp change is not necessarily a replacement: a WAL checkpoint
+        # rewrites the same file. Keep the recovery marks that protect
+        # fallback-saved drafts across such a refresh.
+        _carry_store_recovery_marks(cached, result, db_path)
+    _sqlite_session_store_instance = result
+    return result
+
+
+# Deadline (seconds) a sidecar writer waits for an in-flight migration
+# publish window before failing the save closed. The window covers hashing
+# the sidecars plus a handful of atomic renames, so it is normally
+# sub-second even on large stores; the bound exists so a wedged migration
+# process cannot wedge the WebUI's saves forever. Kernel flock release on
+# process death covers the crashed-migration case regardless.
+_CUTOVER_LOCK_TIMEOUT_DEFAULT = 120.0
+
+
+def _cutover_lock_timeout() -> float:
+    raw = os.environ.get("HERMES_CUTOVER_LOCK_TIMEOUT")
+    if not raw:
+        return _CUTOVER_LOCK_TIMEOUT_DEFAULT
+    try:
+        return float(raw)
+    except ValueError:
+        return _CUTOVER_LOCK_TIMEOUT_DEFAULT
+
+
+@contextmanager
+def _sidecar_write_guard():
+    """SHARED cross-process hold on the cutover lock around one JSON sidecar
+    write (Session.save / Session.save_metadata's fallback).
+
+    The staged migration's publish window
+    (scripts/migrate_sessions_to_sqlite.py::_publish) holds this same lock
+    EXCLUSIVE across its pre-publish source-identity CAS, the atomic
+    sessions.db publication, and sidecar retirement. A writer holding it
+    shared therefore serializes against that window in exactly one of two
+    ways — both of which keep an acknowledged live save canonical:
+
+    * the write completes its atomic rename before the window's CAS
+      observes the file: the drift refuses the whole migration run (exit 1)
+      and the newer bytes stay authoritative in the sidecar for the next
+      run; or
+    * the write blocks until the window closes, and the store-selector
+      re-probe INSIDE this hold (see save/save_metadata) re-routes the
+      write into the now-authoritative SQL store — cutover adoption — so
+      the newer bytes land durably in the published generation.
+
+    The selector re-probe must happen under the SAME hold as the write: a
+    gap between "probe said JSON" and the rename is precisely the
+    check→publish race window (probe passes, publish completes, the sidecar
+    write lands on a file the next Session.load will never read).
+
+    POSIX uses flock(LOCK_SH) with a bounded wait (the kernel releases the
+    publisher's LOCK_EX if the migration process dies). Windows byte-range
+    locks are exclusive-only, so the writer takes the same byte the publish
+    window holds (LK_NBLCK retry until acquired — writers briefly serialize
+    with each other there) and fails the save closed on timeout rather than
+    racing the window. No lock primitive at all: fail closed, mirroring
+    _cleanup_manifest_process_lock. The lock file is never unlinked
+    (unlinking under contention splits later acquirers across inodes).
+    """
+    from api.session_store import CUTOVER_LOCK_NAME
+
+    lock_path = SESSION_DIR / CUTOVER_LOCK_NAME
+    try:
+        SESSION_DIR.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    except OSError as exc:
+        raise RuntimeError(
+            f"cannot open the session-store cutover lock at {lock_path}: {exc}"
+        ) from exc
+    deadline = time.monotonic() + _cutover_lock_timeout()
+    with os.fdopen(fd, "r+b", buffering=0) as lock_file:
+        if _fcntl is not None:
+            while True:
+                try:
+                    _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_SH | _fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "session-store cutover window still held; refusing "
+                            "the sidecar write (retry the save after the "
+                            "migration completes)"
+                        ) from None
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                _fcntl.flock(lock_file.fileno(), _fcntl.LOCK_UN)
+            return
+
+        if _msvcrt is not None:
+            while True:
+                try:
+                    lock_file.seek(0)
+                    _msvcrt.locking(  # type: ignore[attr-defined]
+                        lock_file.fileno(), _msvcrt.LK_NBLCK, 1  # type: ignore[attr-defined]
+                    )
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError(
+                            "session-store cutover window still held; refusing "
+                            "the sidecar write (retry the save after the "
+                            "migration completes)"
+                        ) from None
+                    time.sleep(0.05)
+            try:
+                yield
+            finally:
+                lock_file.seek(0)
+                _msvcrt.locking(  # type: ignore[attr-defined]
+                    lock_file.fileno(), _msvcrt.LK_UNLCK, 1  # type: ignore[attr-defined]
+                )
+            return
+
+        raise RuntimeError(
+            "cross-process cutover locking is unavailable; refusing an "
+            "uncoordinated sidecar write"
+        )
+
+
 class Session:
     def __init__(self, session_id: str=None, title: str='Untitled',
                  workspace=str(DEFAULT_WORKSPACE), created_workspace=None,
@@ -1851,6 +2439,31 @@ class Session:
         # (often 250-480KB) scene bodies, which serialize AFTER messages. None
         # on legacy sidecars (scenes-before-messages, no fingerprint) — callers
         # fall back to reading keys/updated_at off anchor_activity_scenes.
+        # Forward-compatible retention: top-level session keys we do not
+        # explicitly model (e.g. user_id/chat_id/session_key/platform on
+        # messaging-originated sessions, or fields added by newer versions)
+        # survive load -> save round trips through this bag; save() splats
+        # it back into the persisted payload.
+        _consumed_kwargs = {
+            'model_explicit_pick_signature', 'is_cli_session', 'source_tag',
+            'raw_source', 'session_source', 'source_label', 'read_only',
+            'anchor_scene_index', 'message_count', 'extra_session_fields',
+            'generation', 'incarnation',
+        }
+        # Durable CAS writer token: the (generation, incarnation) the
+        # persisted row had when this object was loaded. save() passes both
+        # to write_session, which compares-and-bumps atomically; a stale
+        # object loaded before a newer writer — or before a delete +
+        # same-SID recreate (generation restarts at 1, so generation alone
+        # cannot discriminate it) — is refused instead of silently rolling
+        # the session back.
+        self._persisted_generation = kwargs.get('generation')
+        self._persisted_incarnation = kwargs.get('incarnation')
+        _bag = kwargs.get('extra_session_fields')
+        self.extra_session_fields = dict(_bag) if isinstance(_bag, dict) else {}
+        for _k, _v in kwargs.items():
+            if _k not in _consumed_kwargs:
+                self.extra_session_fields[_k] = _v
         _raw_scene_index = kwargs.get('anchor_scene_index')
         self._anchor_scene_index = _raw_scene_index if isinstance(_raw_scene_index, dict) else None
         raw_message_count = kwargs.get('message_count')
@@ -1881,7 +2494,154 @@ class Session:
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def _save_metadata_via_store(self, store, fields: dict) -> bool:
+        """Route a metadata-only update through a generation-CAS store.
+
+        Returns True when the write landed in ``store``; False when this
+        store cannot take the write (no generation support, the sid is
+        marked unreadable — its sidecar is the authority — no live row for
+        this sid, or no durable token could be adopted). Shared by the
+        entry-time branch of save_metadata and the cutover re-probe inside
+        its sidecar fallback, so both routes apply the identical fencing.
+        """
+        # The store being active does not mean THIS session has a SQLite row:
+        # sessions.db can exist while an unmigrated session lives only in its
+        # JSON sidecar (Session.load() falls back to the sidecar). Routing
+        # such a session's draft autosave to SQLite updates zero rows and the
+        # follow-up lookup raises KeyError, losing the draft — so only take
+        # the SQLite path when the row is actually there.
+        if (
+            not store.supports_generation
+            or self.session_id in store.unreadable_sids
+            or not store.session_exists(self.session_id)
+        ):
+            return False
+        # The metadata write is a versioned writer: fence it with the
+        # durable (generation, incarnation) token. Normally that is
+        # the load-time token this owner carries. A sidecar-loaded
+        # owner carries no token; with the row healthy and unmarked
+        # (e.g. right after a demote popped the mark, or right after a
+        # migration cutover published authority for this sid) routing its
+        # write to the sidecar would strand it — the next load reads
+        # the row — so take the durable token fresh inside this
+        # locked region and let the store's guarded CAS fence the
+        # write. Only the caller's explicit fields are applied, so no
+        # owner-held state is laundered into a representation it did
+        # not load from; a concurrent writer between the token read
+        # and the write is refused by the store (fail closed). A
+        # vanished/retired row yields no token and falls through to
+        # the sidecar branch.
+        _gen = getattr(self, "_persisted_generation", None)
+        _inc = getattr(self, "_persisted_incarnation", None)
+        if _gen is None or _inc is None:
+            try:
+                _ver = store.read_row_version(self.session_id)
+            except Exception:
+                _ver = None
+            if _ver is not None:
+                _gen = _ver.get("generation")
+                _inc = _ver.get("incarnation")
+        if _gen is None or _inc is None:
+            return False
+        # Persist first; apply in-memory only after the write succeeds.
+        # A failed write must leave the cached Session matching what is
+        # actually persisted — otherwise the draft route's unchanged
+        # fast path sees the requested value already in memory and skips
+        # the retry, losing the draft after the next reload.
+        _result = store.update_metadata(
+            self.session_id,
+            fields,
+            expected_generation=int(_gen),
+            expected_incarnation=int(_inc),
+        )
+        # update_metadata moves the generation fence: reseat the
+        # persisted lineage from the returned row so this (cached,
+        # per-sid) object's next full save() still passes the CAS.
+        if isinstance(_result, dict) and _result.get("generation") is not None:
+            self._persisted_generation = int(_result["generation"])
+        if isinstance(_result, dict) and _result.get("incarnation") is not None:
+            self._persisted_incarnation = int(_result["incarnation"])
+        for k, v in fields.items():
+            setattr(self, k, v)
+        return True
+
+    def save_metadata(self, fields: dict) -> None:
+        # Persist a subset of metadata fields without rewriting messages.
+        # Used by the draft auto-save path so a keystroke only touches the
+        # sessions table row, not the full message/tool history.
+        if not isinstance(fields, dict):
+            raise TypeError("fields must be a dict")
+        if not is_safe_session_id(self.session_id):
+            raise ValueError(f"Unsafe session_id {self.session_id!r}")
+        store = get_session_store()
+        # The routing decision (the mark check below) and the write it
+        # selects must be atomic w.r.t. _demote_marked_if_recovered's
+        # sidecar-read → carry → mark-pop: otherwise a draft written to the
+        # sidecar while still marked can be stranded when the demote pops
+        # the mark mid-write ("recovery can clobber newer drafts"). The
+        # per-sid lock covers BOTH the SQL branch and the JSON sidecar
+        # fallback, and wraps only local file/SQL I/O (never network). The
+        # JSON backend is unaffected beyond taking the lock first.
+        with _draft_demote_lock_for_sid(self.session_id):
+            if self._save_metadata_via_store(store, fields):
+                return
+            # JSON fallback: read, update, write back — under the SHARED
+            # cutover lock with the authority re-probe INSIDE the same
+            # hold. If a staged migration published sessions.db between
+            # this call's entry-time store selection and the sidecar write,
+            # the row copied from this sidecar is now authoritative: a
+            # sidecar write would strand the draft behind a row the next
+            # Session.load prefers. The re-probe re-routes the draft into
+            # the published SQL row instead (fresh durable token — this
+            # owner is sidecar-lineage and carries none), fenced by the
+            # store's CAS against any concurrent writer.
+            with _sidecar_write_guard():
+                _live_store = get_session_store()
+                if _live_store is not store and self._save_metadata_via_store(
+                    _live_store, fields
+                ):
+                    return
+                # Follow the authority that READS already prefer: a sid with a
+                # dedicated .drafts overlay has it applied OVER the embedded
+                # composer_draft on every load, so writing the embedded copy here
+                # would be shadowed by an older overlay on the next read — a
+                # successful autosave that silently reverts to older typing
+                # (Greptile P1). Write the overlay instead and keep the sidecar
+                # read-modify-write for the remaining fields only.
+                _sidecar_fields = dict(fields)
+                if (
+                    "composer_draft" in _sidecar_fields
+                    and _session_draft_path(self.session_id).exists()
+                ):
+                    _save_session_draft(
+                        self.session_id, _sidecar_fields.pop("composer_draft")
+                    )
+                if _sidecar_fields:
+                    data = json.loads(self.path.read_text(encoding="utf-8"))
+                    data.update(_sidecar_fields)
+                    tmp = self.path.with_suffix(f".tmp.{os.getpid()}.{threading.current_thread().ident}")
+                    try:
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            f.write(json.dumps(data, ensure_ascii=False, indent=2))
+                            f.flush()
+                            os.fsync(f.fileno())
+                        _safe_replace(tmp, self.path)
+                    except Exception:
+                        try:
+                            tmp.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        raise
+            # Keep the in-memory object consistent with what was persisted —
+            # but only after the write succeeds. Without this the JSON path
+            # silently relies on the caller having pre-set every field, and a
+            # failed write would leave the cached Session ahead of disk (the
+            # draft route's unchanged fast path would then skip the retry).
+            for k, v in fields.items():
+                setattr(self, k, v)
+
+    def save(self, touch_updated_at: bool = True, skip_index: bool = False,
+             *, _from_cutover_reroute: bool = False) -> None:
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -1901,11 +2661,226 @@ class Session:
                 f"Reload with metadata_only=False before mutating state. "
                 f"See #1558."
             )
+        # A messages-must-be-a-list guard is a pre-flight for BOTH persistence
+        # backends, so it runs before the SQL fast path below. It must also run
+        # before the exact-replay dedupe: _deduplicate_exact_stable_messages()
+        # answers a non-list with "nothing to persist", so a malformed transcript
+        # would otherwise reach a backend as [] instead of failing loudly.
         if not isinstance(self.messages, list):
             raise ValueError(
                 f"Refusing to save session {self.session_id!r}: messages must be a list, "
                 f"got {type(self.messages).__name__}."
             )
+
+        # ── exact-replay dedupe: the persistence projection of the transcript ──
+        # Computed once, before the backend dispatch, because it describes WHAT
+        # save() persists rather than HOW one writer persists it. A SQL row and a
+        # JSON sidecar written from the same in-memory owner therefore carry the
+        # same transcript, message_count and sidebar projection, so a mixed
+        # reader (JSON profile vs SQL profile) can never disagree about a save.
+        # The owner keeps its own array: this is a projection, not a mutation.
+        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
+        if exact_replay_rows_removed:
+            logger.warning(
+                "Removed %d exact stable replay messages from persisted snapshot for session %s",
+                exact_replay_rows_removed,
+                self.session_id,
+            )
+
+        # ── SQL fast path (any SessionStore backend with a generation CAS) ─
+        store = get_session_store()
+        if store.supports_generation:
+            if touch_updated_at:
+                self.updated_at = time.time()
+            payload = _session_payload_projection(self, messages=guarded_messages)
+            # Keep the in-memory fingerprint aligned with what this save persists
+            # (the JSON path rebinds self._anchor_scene_index the same way), so a
+            # later cached read does not treat this owner as an older record and
+            # reload the whole transcript.
+            _payload_scene_index = payload.get("anchor_scene_index")
+            if isinstance(_payload_scene_index, dict):
+                self._anchor_scene_index = dict(_payload_scene_index)
+            # Marked-unreadable fail-closed routing: while a sid is marked, its
+            # in-memory object came from the JSON sidecar, and that sidecar is
+            # the authority. Writing it into SQL with force=True would launder
+            # the (possibly stale) sidecar over the row's child collections, so
+            # save() is never a force caller. The demote helper
+            # (_demote_marked_if_recovered) and the reconcile-on-recovery
+            # branch below own the only mark-clearing writes into SQL.
+            _marked = self.session_id in store.unreadable_sids
+            _skip_sql = False
+            if _marked:
+                try:
+                    _probe = store.read_session(self.session_id)
+                except Exception:
+                    _probe = None
+                if _probe is None:
+                    # Still unreadable: do NOT write SQL and do NOT pop the
+                    # mark — fall through to the JSON sidecar writer below so
+                    # the authoritative sidecar is what gets rewritten.
+                    _skip_sql = True
+                else:
+                    # The row recovered. A sidecar-loaded object carries
+                    # _persisted_generation=None, so the plain CAS write below
+                    # would deterministically refuse (StaleSessionWriteError)
+                    # and the user's mutation could never persist ("recovered
+                    # saves always fail CAS"). The store-owned reconcile
+                    # authorizes the overlay instead: the transcript gate
+                    # (messages / tool_calls / context_messages under the
+                    # load-time partial-collapse normalization and the
+                    # canonical JSON form) proves the in-memory owner is not
+                    # transcript-stale, the fallback-load baseline gates the
+                    # durable version, and reconcile_marked_write validates
+                    # generation+incarnation and overlays ONLY the
+                    # proven-dirty metadata fields in one transaction — the
+                    # row's own metadata and transcript children are never
+                    # rolled back. Any refusal fails closed: either the store
+                    # rejects the version (StaleSessionWriteError, mark
+                    # retained) or the gates fall through to the plain CAS
+                    # write below, which raises for a sidecar-loaded owner.
+                    _entry = store.unreadable_sids.get(self.session_id)
+                    _entry = _entry if isinstance(_entry, dict) else {}
+                    _baseline_meta = _entry.get("baseline_meta")
+                    _base_gen = _entry.get("baseline_generation")
+                    _base_inc = _entry.get("baseline_incarnation")
+                    # Gate 1: transcript equality under load-time
+                    # partial-collapse normalization. messages/tool_calls/
+                    # context_messages only — anchor_activity_scenes is
+                    # transcript-derived and store-owned on this path.
+                    # save() persists the exact-replay-deduped projection, so the
+                    # row must be normalized the same way before comparing:
+                    # otherwise a row written before this projection existed (or
+                    # by another writer) reads as transcript-divergent and a
+                    # legitimate owner fails closed for no real reason.
+                    _payload_messages, _ = _collapse_adjacent_duplicate_partials(
+                        payload.get("messages")
+                    )
+                    _probe_messages, _ = _collapse_adjacent_duplicate_partials(
+                        _deduplicate_exact_stable_messages(_probe.get("messages"))[0]
+                    )
+                    _transcripts_equal = (
+                        _canon(_payload_messages)
+                        == _canon(_probe_messages)
+                        and _canon(payload.get("tool_calls"))
+                        == _canon(_probe.get("tool_calls"))
+                        and _canon(payload.get("context_messages"))
+                        == _canon(_probe.get("context_messages"))
+                    )
+                    if (not isinstance(_baseline_meta, dict) or _base_gen is None
+                            or _base_inc is None or not _transcripts_equal):
+                        # Fail closed: no baseline version (the header read
+                        # failed too) or a divergent transcript → the plain
+                        # CAS write below deterministically raises
+                        # StaleSessionWriteError for a sidecar-loaded owner
+                        # (_persisted_generation is None). Mark retained.
+                        pass
+                    else:
+                        # Gate 2: the store validates the durable
+                        # generation+incarnation against the fallback-load
+                        # baseline inside one transaction and applies only
+                        # the proven-dirty metadata fields.
+                        _dirty = _reconcile_dirty_fields(payload, _baseline_meta)
+                        # The reconcile write and the mark-pop run under the
+                        # same per-sid lock as _demote_marked_if_recovered so
+                        # a concurrent save_metadata cannot route a draft to
+                        # the sidecar just before the pop and strand it. The
+                        # index write below stays OUTSIDE the lock: it takes
+                        # LOCK/_INDEX_WRITE_LOCK, which must never nest under
+                        # the per-sid demote lock.
+                        _row = None
+                        with _draft_demote_lock_for_sid(self.session_id):
+                            _row = store.reconcile_marked_write(
+                                self.session_id,
+                                expected_generation=int(_base_gen),
+                                expected_incarnation=int(_base_inc),
+                                fields=_dirty,
+                            )
+                            if _row is not None:
+                                store.unreadable_sids.pop(self.session_id, None)
+                        if _row is None:
+                            raise StaleSessionWriteError(
+                                f"Refusing to reconcile marked save for "
+                                f"{self.session_id!r}: durable "
+                                f"generation/incarnation moved since the "
+                                f"fallback-load baseline; reload the session "
+                                f"and retry"
+                            )
+                        # Rehydrate the in-memory owner from the authoritative
+                        # row (same construction as Session.load's SQL path):
+                        # metadata, transcript children, anchor scenes, and
+                        # _persisted_generation (the post-bump generation) all
+                        # refresh atomically while __dict__.update preserves
+                        # object identity for cached references.
+                        self.__dict__.update(Session(**_row).__dict__)
+                        # The authoritative row just rehydrated this owner, so
+                        # its transcript is the sidebar authority too.
+                        self._publish_sidebar_projection(
+                            self.messages, skip_index=skip_index
+                        )
+                        self._clear_live_row_tombstones()
+                        return
+            if not _skip_sql:
+                # Cutover adoption — ONLY for a pre-cutover sidecar-lineage
+                # owner (flagged at load time: built while no SQL authority
+                # existed for this sid, e.g. a cached WebUI owner across a
+                # migration publish). Such an owner carries no durable
+                # writer token, so the plain CAS write would deterministically
+                # refuse forever — stranding every subsequent live save behind
+                # a row the next load prefers. With the row healthy and
+                # unmarked, adopt the CURRENT durable (generation,
+                # incarnation) token fresh and let the store's guarded CAS
+                # fence any writer that moved the token in between; the
+                # published row was copied from this owner's own sidecar
+                # chain, so its write is last-writer-wins under the exact
+                # semantics the sidecar store already had — now fenced by
+                # the durable token against concurrent SQL writers.
+                # Every other lineage-None owner (the marked-unreadable
+                # fallback after row recovery) is deliberately NOT adopted:
+                # its sidecar view predates a row that was authoritative
+                # all along, and it keeps failing closed (StaleSessionWriteError).
+                # An absent or retired row adopts nothing, so the store's own
+                # fences (first-create / DeletedSessionWriteError /
+                # RetiredSessionWriteError) keep their exact semantics, and
+                # SQL-loaded owners (real tokens) are held to strict CAS.
+                _expected_gen = getattr(self, "_persisted_generation", None)
+                _expected_inc = getattr(self, "_persisted_incarnation", None)
+                if (
+                    (_expected_gen is None or _expected_inc is None)
+                    and getattr(self, "_cutover_sidecar_lineage", False)
+                ):
+                    try:
+                        _ver = store.read_row_version(self.session_id)
+                    except Exception:
+                        _ver = None
+                    if _ver is not None:
+                        _expected_gen = int(_ver["generation"])
+                        _expected_inc = int(_ver["incarnation"])
+                # The write and the mark-pop must be atomic w.r.t. a
+                # concurrent save_metadata routing on the mark (same
+                # per-sid lock as _demote_marked_if_recovered), or a draft
+                # routed to the sidecar just before the pop would be
+                # stranded behind the flip back to SQL. The index write
+                # below stays OUTSIDE the lock: it takes
+                # LOCK/_INDEX_WRITE_LOCK, which must never nest under the
+                # per-sid demote lock.
+                with _draft_demote_lock_for_sid(self.session_id):
+                    _write_result = store.write_session(
+                        payload,
+                        expected_generation=_expected_gen,
+                        expected_incarnation=_expected_inc,
+                        force=False,
+                    )
+                    store.unreadable_sids.pop(self.session_id, None)
+                if isinstance(_write_result, dict) and _write_result.get("generation") is not None:
+                    self._persisted_generation = _write_result["generation"]
+                if isinstance(_write_result, dict) and _write_result.get("incarnation") is not None:
+                    self._persisted_incarnation = int(_write_result["incarnation"])
+                self._publish_sidebar_projection(
+                    guarded_messages, skip_index=skip_index
+                )
+                self._clear_live_row_tombstones()
+                return
+
         if touch_updated_at:
             self.updated_at = time.time()
         self._webui_pending_user_timestamp_identity = (
@@ -1948,14 +2923,13 @@ class Session:
             'share_token', 'share_created_at',
             'gateway_run',
         ]
-        guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
-        if exact_replay_rows_removed:
-            logger.warning(
-                "Removed %d exact stable replay messages from persisted snapshot for session %s",
-                exact_replay_rows_removed,
-                self.session_id,
-            )
         meta = {k: getattr(self, k, None) for k in METADATA_FIELDS}
+        # Forward-compatible retention: restore unknown top-level keys from
+        # the kwargs bag so JSON round trips stay lossless too. Never nest
+        # the bag itself.
+        for _k, _v in (getattr(self, "extra_session_fields", {}) or {}).items():
+            if _k != "extra_session_fields":
+                meta.setdefault(_k, _v)
         # #5854: message_count and a compact anchor-scene fingerprint go in the
         # metadata prefix (BEFORE messages) so load_metadata_only() and the
         # sidebar-poll freshness check never have to parse the full (250-480KB)
@@ -2007,7 +2981,118 @@ class Session:
             # as the journal writer does, so repeated cold loads can commit.
             payload = json.dumps({**meta, **extra}, ensure_ascii=True, indent=2)
 
-        # ── #1558 backup safeguard ──────────────────────────────────────
+        # ── Cutover protocol: no sidecar rename outside the shared lock ──
+        # The write (and the #1558 backup read it derives from) happens
+        # under the SHARED cutover lock, with the store-selector re-probe
+        # inside the same hold. If a staged migration published sessions.db
+        # after this call selected the JSON backend, the row copied from
+        # this very sidecar is now authoritative: renaming the sidecar
+        # here would strand this acknowledged save behind a row the next
+        # Session.load prefers — the exact check→publish race the
+        # migration's exclusive publish window exists to close. The two
+        # sides serialize so the save either completed before the window's
+        # pre-publish CAS (drift → the migration run refuses, these bytes
+        # stay canonical for the next run) or lands here after publication,
+        # re-routed into the now-authoritative SQL store. The reroute is
+        # bounded to one hop by _from_cutover_reroute so a pathological
+        # publish/unpublish flap can never recurse.
+        _cutover_reroute = False
+        with _sidecar_write_guard():
+            if not store.supports_generation and not _from_cutover_reroute:
+                _live_store = get_session_store()
+                if _live_store.supports_generation:
+                    _cutover_reroute = True
+            if not _cutover_reroute:
+                if not self._write_json_sidecar(
+                    payload, guarded_messages, skip_index=skip_index
+                ):
+                    # The #1558 empty-snapshot guard refused the overwrite;
+                    # stop exactly as the inline writer did.
+                    return
+        if _cutover_reroute:
+            # Outside the shared hold: the SQL path coordinates through the
+            # store's own fences, never through the sidecar lock.
+            return self.save(
+                touch_updated_at=touch_updated_at,
+                skip_index=skip_index,
+                _from_cutover_reroute=True,
+            )
+        # The sidebar projection was already published by _write_json_sidecar()
+        # above — inside the same _INDEX_WRITE_LOCK hold as the sidecar rename,
+        # and built from its guarded transcript. A second write here would both
+        # duplicate the work and publish the RAW in-memory array, letting the
+        # sidebar advertise replay rows the persisted transcript does not hold.
+
+        # #4985 belt-and-suspenders self-heal: see _clear_live_row_tombstones.
+        self._clear_live_row_tombstones()
+
+    def _publish_sidebar_projection(self, guarded_messages, *, skip_index: bool) -> None:
+        """Write this session's sidebar row from the transcript the save persisted.
+
+        ``guarded_messages`` is the exact-replay-deduped array the payload
+        carried. A shallow copy avoids rebinding/mutating the live Session while
+        keeping message count, user count and last-message time aligned with
+        what this save actually persisted — a sidebar may never advertise a
+        message the transcript does not hold, because mixed JSON/SQL readers
+        compare exactly those numbers.
+        """
+        if skip_index:
+            return
+        persisted_index_session = copy.copy(self)
+        persisted_index_session.messages = guarded_messages
+        persisted_index_session._metadata_message_count = len(guarded_messages)
+        _write_session_index(updates=[persisted_index_session])
+
+    def _clear_live_row_tombstones(self) -> None:
+        """Clear the #4985/#4591 tombstones after a SUCCESSFUL save.
+
+        A save that persisted at least one real message is unconditional proof
+        the row is alive (the #4591/#4985 "zero-message orphan" only ever exists
+        when ``len(self.messages) == 0``). Clearing here means the next
+        ``/api/sessions`` poll does not need the prune helper to run before the
+        row re-appears — useful when the message commit happens on a poll that
+        does not yet see state.db.messages rows (e.g. the WebUI's own commit
+        lands before the agent's state.db append, or the helper is skipped via a
+        different code path). The helper's self-healing branch in
+        ``_prune_orphaned_webui_zero_message_sessions`` is the primary fix; this
+        is the belt.
+
+        Both persistence exits call this: the SQL fast path returns early, so an
+        inline copy in the JSON writer's tail would never run for a migrated
+        session. Wrapped because a tombstone failure must never block a save.
+        """
+        if not self.messages:
+            return
+        try:
+            _clear_webui_zero_message_orphan_tombstone(self.session_id)
+            _clear_webui_deleted_session_tombstone(self.session_id)
+        except Exception:
+            logger.debug(
+                "Failed to clear webui tombstone for %s",
+                self.session_id,
+                exc_info=True,
+            )
+
+    def _write_json_sidecar(self, payload: str, guarded_messages, *,
+                            skip_index: bool) -> bool:
+        """Write the JSON sidecar atomically (tmp + os.replace) — the body of
+        save()'s legacy inline writer, extracted so the whole sidecar write
+        (the #1558 backup read included) can run under the SHARED cutover
+        lock in one hold.
+
+        ``guarded_messages`` is save()'s exact-replay-deduped transcript: the
+        #1558 shrink comparison and the sidebar projection must both see the
+        same array the payload carries, never the raw in-memory one (a replay
+        row the payload dropped would otherwise read as a shrink, or a real
+        shrink could hide behind one). Publishing the sidecar and its sidebar
+        projection remains one ordered operation under _INDEX_WRITE_LOCK, as
+        master built it.
+
+        Returns True when the file was written; False when the #1558
+        empty-snapshot guard refused the overwrite (the caller must stop,
+        exactly as the inline writer did).
+        """
+        # ── #1558 backup safeguard ──────────────────────────────────
         # Before overwriting the session file, copy the previous version to
         # ``<sid>.json.bak`` IFF the previous file has more messages than the
         # incoming payload. The asymmetric guard means:
@@ -2084,7 +3169,7 @@ class Session:
                         incoming_msg_count,
                         self.active_stream_id,
                     )
-                    return
+                    return False
                 if existing_msg_count > incoming_msg_count:
                     bak_path = self.path.with_suffix('.json.bak')
                     if existing_text is None:
@@ -2171,44 +3256,19 @@ class Session:
                 with _INDEX_WRITE_LOCK:
                     _replace_session_sidecar(tmp, self.path, self.session_id)
                     # Build the sidebar entry from the same guarded transcript
-                    # snapshot as the JSON payload. A shallow copy avoids
-                    # rebinding/mutating the live Session while keeping message
-                    # count, user count, and last-message time aligned with
-                    # what this save actually persisted.
-                    persisted_index_session = copy.copy(self)
-                    persisted_index_session.messages = guarded_messages
-                    persisted_index_session._metadata_message_count = len(guarded_messages)
-                    _write_session_index(updates=[persisted_index_session])
+                    # snapshot as the JSON payload, inside the same hold as the
+                    # rename, so an older save can never regress only the index
+                    # with its frozen projection.
+                    self._publish_sidebar_projection(
+                        guarded_messages, skip_index=False
+                    )
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
             except Exception:
                 pass
             raise
-
-        # #4985 belt-and-suspenders self-heal: a successful save with at
-        # least one real message on the sidecar is unconditional proof the
-        # row is alive (the #4985 "zero-message orphan" only ever exists
-        # when ``len(self.messages) == 0``). Clear the tombstone so the
-        # next ``/api/sessions`` poll does not need the prune helper to
-        # run before the row re-appears — useful when the message-commit
-        # happens on a poll that does not yet see state.db.messages rows
-        # (e.g. the WebUI's own sidecar commit lands before the agent's
-        # state.db append, or the helper is skipped via a different code
-        # path). Wrapped because a tombstone failure must never block a
-        # save. The helper's self-healing branch in
-        # ``_prune_orphaned_webui_zero_message_sessions`` is the primary
-        # fix; this is the belt.
-        if self.messages:
-            try:
-                _clear_webui_zero_message_orphan_tombstone(self.session_id)
-                _clear_webui_deleted_session_tombstone(self.session_id)
-            except Exception:
-                logger.debug(
-                    "Failed to clear webui tombstone for %s",
-                    self.session_id,
-                    exc_info=True,
-                )
+        return True
 
     @classmethod
     def load(cls, sid):
@@ -2217,8 +3277,52 @@ class Session:
         # ``reachy-voice-*``); allow those but still reject dots/slashes.
         if not is_safe_session_id(sid):
             return None
+        # ── SQL fast path ─────────────────────────────────────────────
+        store = get_session_store()
+        sqlite_read_failed = False
+        if store.supports_generation and sid in store.unreadable_sids:
+            # Marked: the sidecar was authoritative while the row was
+            # unreadable. Probe-and-demote via the shared helper — a full
+            # read success proves recovery, carries any marked-window draft
+            # back, and pops the mark only when the carry works. A
+            # still-unreadable row falls through to the sidecar path below.
+            _demoted = _demote_marked_if_recovered(store, sid)
+            if _demoted is not None:
+                _demoted['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(_demoted.get('messages'))
+                return cls(**_demoted)
+        elif store.supports_generation:
+            try:
+                data = store.read_session(sid)
+            except Exception:
+                # A corrupt row (e.g. unreadable message_json) or a DB read
+                # error must not block the JSON sidecar fallback —
+                # load_metadata_only() already degrades the same way, and
+                # propagating here fails session mutation requests for
+                # sessions that still have a valid sidecar.
+                logger.warning(
+                    "SQLite session read failed for %s; falling back to JSON sidecar",
+                    sid,
+                    exc_info=True,
+                )
+                sqlite_read_failed = True
+                data = None
+            if data is not None:
+                data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
+                return cls(**data)
+            # SQLite is active but this session has not been migrated yet;
+            # fall through to the JSON sidecar below.
+        # ── JSON sidecar fallback ────────────────────────────────────────
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
+            if store.supports_generation and sid in store.unreadable_sids:
+                # Sidecar vanished while marked AND the probe above found
+                # the row still unreadable: the session is unavailable this
+                # request, with the mark kept so routing stays consistent.
+                return None
+            # A migrated (sidecar-less) session whose row hit a *transient*
+            # read error is simply unavailable this request — it was never
+            # marked, so save_metadata() will not route drafts to a
+            # nonexistent sidecar after the database recovers.
             return None
         # #5854: snapshot the stat signature BEFORE reading so a legacy-facts
         # cache write is only committed if the file didn't change under us
@@ -2228,6 +3332,18 @@ class Session:
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
+        if not store.supports_generation:
+            # Pre-cutover sidecar lineage: this owner was built while NO SQL
+            # authority existed for this sid (no active store at all). If a
+            # staged migration publishes sessions.db while this owner is
+            # alive, save()'s cutover adoption may take the durable token
+            # fresh — the published row was copied from this sidecar's own
+            # chain, so the owner's write is the continuation of the
+            # authority it was loaded under. Every OTHER lineage-None owner
+            # (the marked-unreadable fallback) keeps failing closed after
+            # recovery (test_recovery_demotes_mark_and_carries_draft): its
+            # sidecar view predates a row that was authoritative all along.
+            session._cutover_sidecar_lineage = True
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -2269,6 +3385,47 @@ class Session:
                     )
                 except Exception:
                     logger.debug("legacy sidecar facts cache populate failed for %s", sid, exc_info=True)
+        if sqlite_read_failed:
+            # The SQLite row exists but is unreadable and the sidecar just
+            # proved itself the authoritative copy: route future metadata
+            # writes to the sidecar too, or drafts written to SQLite would
+            # never be read back. Capture the rich mark entry: the sidecar
+            # draft (so a later recovery can tell marked-window draft writes
+            # apart from a sidecar that simply predates the row), a
+            # DEEP-COPIED metadata baseline (the dirty-diff base for the
+            # store-owned reconcile — sidecar values are shared with the
+            # loaded Session and nested dicts mutate in place, so a shallow
+            # snapshot would track later edits and the diff would report
+            # nothing), and the durable generation/incarnation version
+            # (best-effort: None when the header read also fails, in which
+            # case the reconcile fails closed). A successful full save() or
+            # read clears the mark. The mark check + set run
+            # under the per-sid demote lock, and an existing mark is never
+            # overwritten: refreshing another loader's at-mark snapshot to
+            # a sidecar draft that already includes marked-window writes
+            # would make the demote's carry compare equal and skip it,
+            # losing those drafts on recovery. While the sid is unmarked
+            # the sidecar's draft is stable (marked-window writes are the
+            # only writers and require the mark), so the snapshot taken
+            # from this load's own sidecar read is exact.
+            try:
+                # BEFORE the lock: read-only and never touches the mark
+                # (same discipline as the demote probe).
+                _ver = store.read_row_version(sid)
+            except Exception:
+                _ver = None
+            with _draft_demote_lock_for_sid(sid):
+                if sid not in store.unreadable_sids:
+                    store.unreadable_sids[sid] = {
+                        "composer_draft": data.get("composer_draft"),
+                        "baseline_meta": {
+                            k: copy.deepcopy(v)
+                            for k, v in _session_payload_projection(session).items()
+                            if k not in _RECONCILE_BASELINE_EXCLUDED_KEYS
+                        },
+                        "baseline_generation": _ver.get("generation") if _ver else None,
+                        "baseline_incarnation": _ver.get("incarnation") if _ver else None,
+                    }
         return session
 
     @classmethod
@@ -2284,6 +3441,35 @@ class Session:
         # path separators and traversal dots are not.
         if not is_safe_session_id(sid):
             return None
+        # SQL fast path: metadata lives in the sessions table.
+        # Marked sids read the sidecar instead (see store.unreadable_sids).
+        try:
+            store = get_session_store()
+            if store.supports_generation:
+                if sid in store.unreadable_sids:
+                    # Marked: only a full read (transcript included) proves
+                    # recovery — a metadata-only probe can succeed while the
+                    # transcript stays corrupt. Demote carries marked-window
+                    # drafts back into the row via the shared helper; use its
+                    # returned row data directly (no second read that could
+                    # race the mark-clearing with a row that vanishes).
+                    data = None
+                    _demoted = _demote_marked_if_recovered(store, sid)
+                    if _demoted is not None:
+                        _demoted['messages'] = []
+                        _demoted['tool_calls'] = []
+                        data = _demoted
+                else:
+                    data = store.read_metadata_only(sid)
+                if data is not None:
+                    data['messages'] = []
+                    data['tool_calls'] = []
+                    session = cls(**data)
+                    session._metadata_message_count = _parse_nonnegative_int(data.get('message_count'))
+                    session._loaded_metadata_only = True
+                    return session
+        except Exception:
+            pass
         p = SESSION_DIR / f'{sid}.json'
         if not p.exists():
             return None
@@ -5313,6 +6499,15 @@ def _has_compression_continuation(session) -> bool:
     except Exception:
         logger.debug("Failed to inspect session index for compression continuation", exc_info=True)
 
+    # Sidecarless stores (SQLite/Postgres) hold compression children that
+    # have no JSON sidecar; scan their metadata rows for the lineage.
+    try:
+        store = _active_session_store_if_sidecarless()
+        if store and any(_row_is_continuation(r) for r in store.list_sessions()):
+            return True
+    except Exception:
+        logger.debug("Failed to scan session store for compression continuation", exc_info=True)
+
     # Index rows can lag behind rapid compression/save races. Fall back to a
     # shallow JSON metadata scan; session files write parent_session_id before
     # the messages array, so this avoids loading multi-MB transcripts.
@@ -5693,6 +6888,18 @@ def _sync_sidecar_from_state_db_if_newer(session) -> bool:
         session.pending_attachments = []
         session.pending_started_at = None
         session.pending_user_source = None
+        # ... and the WRITER TOKEN that save just advanced, plus the recomputed
+        # scene fingerprint. Without the token the cached owner still carries the
+        # pre-save version; its message count now matches the durable record, so
+        # the freshness check keeps it, and every later save from it is refused
+        # as stale (StaleSessionWriteError) — the owner can never write again.
+        session._persisted_generation = getattr(locked, "_persisted_generation", None)
+        session._persisted_incarnation = getattr(
+            locked, "_persisted_incarnation", None
+        )
+        _locked_scene_index = getattr(locked, "_anchor_scene_index", None)
+        if isinstance(_locked_scene_index, dict):
+            session._anchor_scene_index = dict(_locked_scene_index)
         logger.info(
             "Session %s: synced sidecar from newer state.db transcript (%d -> %d messages)",
             sid,
@@ -6228,6 +7435,16 @@ def _persisted_message_count(sid) -> int | None:
         return None
     p = SESSION_DIR / f'{sid}.json'
     if not p.exists():
+        # No sidecar: a sidecarless store (SQLite/Postgres) may still hold
+        # the session's authoritative message count.
+        try:
+            store = _active_session_store_if_sidecarless()
+            if store:
+                meta = store.read_metadata_only(sid)
+                if meta is not None:
+                    return _parse_nonnegative_int(meta.get('message_count'))
+        except Exception:
+            pass
         return None
     try:
         prefix = _read_metadata_json_prefix(p)
@@ -6295,6 +7512,29 @@ def _persisted_session_meta_prefix(sid) -> dict | None:
         return None
     p = SESSION_DIR / f'{sid}.json'
     if not p.exists():
+        # No sidecar: a sidecarless store IS this session's authoritative record,
+        # and its metadata carries the same two signals this probe compares (the
+        # message count and the anchor-scene fingerprint that save() persists).
+        # Returning None here made _cached_session_lags_disk treat every
+        # scene-bearing migrated session as unverifiable and pay for a FULL
+        # metadata load on every cached read — composer autosaves included, which
+        # is most of what the store backend exists to avoid.
+        try:
+            store = _active_session_store_if_sidecarless()
+            if store:
+                meta = store.read_metadata_only(sid)
+                if isinstance(meta, dict):
+                    picked = {'message_count': meta.get('message_count')}
+                    # Carry each signal only when the record actually has it, so
+                    # "absent" keeps meaning "cannot determine" (→ full load)
+                    # rather than being misread as "no scenes".
+                    if 'anchor_scene_index' in meta:
+                        picked['anchor_scene_index'] = meta.get('anchor_scene_index')
+                    if 'updated_at' in meta:
+                        picked['updated_at'] = meta.get('updated_at')
+                    return picked
+        except Exception:
+            pass
         return None
     try:
         prefix = _read_metadata_json_prefix(p)
@@ -6306,10 +7546,11 @@ def _persisted_session_meta_prefix(sid) -> dict | None:
 
 
 def _session_sidecar_exists(sid) -> bool | None:
-    """Return whether *sid*'s sidecar file exists on disk.
+    """Return whether *sid* has confirmed persisted state.
 
-    True  = the sidecar is confirmed present.
-    False = the sidecar is confirmed absent (a truly never-persisted session).
+    True  = persistence confirmed (sidecar present, or the session lives in
+            a sidecarless store — SQLite/Postgres).
+    False = confirmed absent (a truly never-persisted session).
     None  = existence is indeterminate (unsafe id, or the stat raised).
 
     ``_session_is_evictable`` uses this to distinguish a genuinely
@@ -6319,9 +7560,19 @@ def _session_sidecar_exists(sid) -> bool | None:
     if not is_safe_session_id(sid):
         return None
     try:
-        return (SESSION_DIR / f'{sid}.json').exists()
+        if (SESSION_DIR / f'{sid}.json').exists():
+            return True
     except OSError:
         return None
+    # Sidecar absent: a sidecarless store (SQLite/Postgres) decides whether
+    # the session is persisted at all.
+    try:
+        store = _active_session_store_if_sidecarless()
+        if store is not None:
+            return store.session_exists(sid)
+    except Exception:
+        return None
+    return False
 
 
 # Grace window (seconds) during which a never-persisted, empty, draftless session
@@ -6561,6 +7812,27 @@ def _finish_full_session_resolve(session_id: str, event: threading.Event) -> Non
     event.set()
 
 
+def _session_record_exists_for_cache_publish(sid) -> bool:
+    """True when ``sid`` still has a sidecar or a row in the canonical store.
+
+    The store branch matters: after a migration the row is the only record, so a
+    sidecar-only test here rejects every migrated session from the cache with a
+    KeyError (which surfaces as a spurious 404 on the routes that resolve by sid).
+    """
+    if (SESSION_DIR / f"{sid}.json").exists():
+        return True
+    store = _active_session_store_if_sidecarless()
+    if store is None:
+        return False
+    try:
+        return bool(store.session_exists(sid))
+    except Exception:
+        logger.debug(
+            "Store existence check failed for session %s", sid, exc_info=True
+        )
+        return False
+
+
 def _resolve_session_once(
     sid,
     metadata_only=False,
@@ -6655,7 +7927,11 @@ def _resolve_session_once(
             if not s or not cache_on_miss:
                 break
             with LOCK:
-                if not (SESSION_DIR / f"{sid}.json").exists():
+                # Master's cold-publish guard re-checks that the record still
+                # exists before caching what was just read, so a delete landing
+                # mid-read is not cached. A migrated (sidecar-less) session has
+                # no sidecar — its record is the store row — so consult both.
+                if not _session_record_exists_for_cache_publish(sid):
                     raise KeyError(sid)
                 resident = SESSIONS.get(sid)
                 now = _sidecar_write_generation(sid)
@@ -6801,6 +8077,29 @@ def get_session_profile_readonly(sid):
                 raise ValueError('Invalid session profile')
             return profile
     path = SESSION_DIR / f'{sid}.json'
+    if not path.exists():
+        # A migrated session lives in a sidecarless store, whose row carries the
+        # same ownership metadata. Raising KeyError here made the profile
+        # isolation guard read every migrated session as unowned and let it
+        # through — so a request against ANOTHER profile's session got served
+        # instead of 409 session_profile_mismatch. Isolation must not depend on
+        # which storage backend happens to hold the session.
+        try:
+            store = _active_session_store_if_sidecarless()
+        except Exception:
+            store = None
+        if store is None:
+            raise KeyError(sid)
+        try:
+            meta = store.read_metadata_only(sid)
+        except Exception:
+            raise KeyError(sid) from None
+        if not isinstance(meta, dict):
+            raise KeyError(sid)
+        profile = meta.get('profile')
+        if profile is not None and not isinstance(profile, str):
+            raise ValueError('Invalid session profile')
+        return profile
     try:
         prefix = _read_metadata_json_prefix(path)
         data = json.loads(prefix) if prefix else None
@@ -7521,10 +8820,16 @@ def persist_recovered_workspace_binding(
 ):
     """Atomically persist only a recovered session's workspace binding.
 
-    Existing sidecars are patched as raw JSON so metadata-only callers never
-    reserialize (or otherwise clobber) the transcript. Missing sidecars fail
-    closed so recovery cannot resurrect a concurrently deleted session. The
-    per-session mutation lock keeps compare-and-replace ordered with other
+    Store-only for every backend: the canonical store (JSON sidecar adapter,
+    SQLite, or Postgres) owns the compare-and-replace via
+    ``session_exists`` → ``read_metadata_only`` → ``update_metadata``.
+    Sessions the store does not hold fail closed so recovery cannot
+    resurrect a concurrently deleted session — and a leftover sidecar of a
+    migrated (SQL-owned) session is stale and never patched. A sid the
+    selected SQL store does not hold but the sidecar store does is an
+    UNMIGRATED session — the same representation ``Session.load`` serves —
+    so the repair targets that fallback instead of failing the chat.
+    The per-session mutation lock keeps compare-and-replace ordered with other
     compliant session writers.
     """
     sid = str(getattr(session, "session_id", "") or "").strip()
@@ -7539,57 +8844,90 @@ def persist_recovered_workspace_binding(
         else expected_workspace
     )
     expected = str(expected_value or "")
-    path = SESSION_DIR / f"{sid}.json"
     lock = _get_session_agent_lock(sid)
     with lock:
-        if not path.exists():
-            # Recovery only repairs an existing WebUI sidecar. Creating a new
-            # sidecar here can resurrect a session that was deleted after the
-            # recovery decision but before this lock was acquired.
-            raise WorkspaceBindingPersistenceError(
-                "Failed to persist recovered workspace: session sidecar is missing"
-            )
-
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            raise WorkspaceBindingPersistenceError(
-                "Failed to persist recovered workspace: unreadable session sidecar"
-            ) from exc
-        if not isinstance(payload, dict):
-            raise WorkspaceBindingPersistenceError(
-                "Failed to persist recovered workspace: invalid session sidecar"
-            )
-        current = str(payload.get("workspace") or "")
-        if current != resolved:
-            if current != expected:
-                raise WorkspaceBindingPersistenceError(
-                    "Failed to persist recovered workspace: session workspace changed"
-                )
-            payload["workspace"] = resolved
-            tmp = path.with_suffix(
-                f".tmp.{os.getpid()}.{threading.current_thread().ident}"
-            )
-            try:
-                with open(tmp, "w", encoding="utf-8") as handle:
-                    json.dump(payload, handle, ensure_ascii=False, indent=2)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                _replace_session_sidecar(tmp, path, sid)
-            except Exception as exc:
+        # Cutover handoff: select the store INSIDE the shared cutover hold and
+        # finish the compare-and-replace before releasing it. Otherwise a staged
+        # migration can publish between "this sid is JSON-owned" and the JSON
+        # adapter's sidecar replace, and the acknowledged repair lands in a file
+        # the published SQL row ignores — the same check->publish window
+        # Session.save()/save_metadata() already close.
+        with _sidecar_write_guard():
+            store = get_session_store()
+            if not store.session_exists(sid):
+                # Mixed store: sessions.db is active but this session was never
+                # migrated, so Session.load serves its JSON sidecar. Target that
+                # fallback representation instead of failing closed on a SQL store
+                # that has no row for the sid (which turned a valid chat with a
+                # missing workspace into a 500 from /api/list). A sid present in
+                # NEITHER representation still fails closed: recovery must not
+                # resurrect a session that was deleted after the recovery decision
+                # but before this lock was acquired.
+                _fallback_store = _json_session_store()
                 try:
-                    tmp.unlink(missing_ok=True)
+                    _fallback_exists = _fallback_store.session_exists(sid)
                 except Exception:
-                    pass
+                    _fallback_exists = False
+                if not _fallback_exists:
+                    raise WorkspaceBindingPersistenceError(
+                        "Failed to persist recovered workspace: session sidecar is missing"
+                    )
+                store = _fallback_store
+            try:
+                meta = store.read_metadata_only(sid) or {}
+            except Exception as exc:
                 raise WorkspaceBindingPersistenceError(
-                    "Failed to persist recovered workspace"
+                    "Failed to persist recovered workspace: unreadable session record"
                 ) from exc
+            current = str(meta.get("workspace") or "")
+            _new_generation = None
+            _new_incarnation = None
+            if current != resolved:
+                if current != expected:
+                    raise WorkspaceBindingPersistenceError(
+                        "Failed to persist recovered workspace: session workspace changed"
+                    )
+                # Fence the compare-and-replace with the durable
+                # (generation, incarnation) token just read: an interleaved
+                # writer between the read and this write raises (wrapped below)
+                # instead of being silently clobbered. The JSON sidecar store
+                # carries no durable version, so no token is passed there
+                # (last-writer-wins, unchanged).
+                _token_kwargs = {}
+                if meta.get("generation") is not None and meta.get("incarnation") is not None:
+                    _token_kwargs = {
+                        "expected_generation": int(meta["generation"]),
+                        "expected_incarnation": int(meta["incarnation"]),
+                    }
+                try:
+                    _meta_result = store.update_metadata(
+                        sid, {"workspace": resolved}, **_token_kwargs
+                    )
+                except Exception as exc:
+                    raise WorkspaceBindingPersistenceError(
+                        "Failed to persist recovered workspace"
+                    ) from exc
+                # update_metadata moves the generation fence on SQL backends:
+                # reseat the persisted lineage on every in-memory copy of this
+                # session so a later full save() still passes the CAS.
+                if isinstance(_meta_result, dict) and _meta_result.get("generation") is not None:
+                    _new_generation = int(_meta_result["generation"])
+                if isinstance(_meta_result, dict) and _meta_result.get("incarnation") is not None:
+                    _new_incarnation = int(_meta_result["incarnation"])
 
         session.workspace = resolved
+        if _new_generation is not None:
+            session._persisted_generation = _new_generation
+        if _new_incarnation is not None:
+            session._persisted_incarnation = _new_incarnation
         with LOCK:
             cached = SESSIONS.get(sid)
             if cached is not None:
                 cached.workspace = resolved
+                if _new_generation is not None:
+                    cached._persisted_generation = _new_generation
+                if _new_incarnation is not None:
+                    cached._persisted_incarnation = _new_incarnation
         try:
             _write_session_index(updates=[cached or session])
         except Exception:
@@ -9651,6 +10989,26 @@ def clear_sidecar_metadata_cache() -> None:
         _SIDECAR_METADATA_CACHE.clear()
 
 
+def _ui_owned_metadata_from(webui_meta) -> dict:
+    """The UI-owned metadata fields, in the sidebar-projection shape.
+
+    ``title``/``archived``/``project_id`` belong to the WebUI layer (nothing writes
+    them to ``state.db``), so the projection must read them from whichever
+    representation owns the session: a JSON sidecar or a store row. Shared by both
+    branches of ``_state_projection_sidecar_metadata`` so they cannot drift.
+    """
+    metadata = {"title": None, "archived": None, "project_id": None}
+    if webui_meta is None:
+        return metadata
+    title = getattr(webui_meta, 'title', None)
+    if title:
+        metadata["title"] = title
+    metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
+    project_id = str(getattr(webui_meta, 'project_id', None) or '').strip()
+    metadata["project_id"] = project_id or None
+    return metadata
+
+
 def _state_projection_sidecar_metadata(sid: str) -> dict:
     """Return UI-owned metadata (title + archived + project_id) for a state row.
 
@@ -9670,9 +11028,11 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
     Returns a COPY so callers can't mutate the cached dict.
 
     NOTE: this stat-gates on ``SESSION_DIR / f'{sid}.json'`` because that file is
-    ``Session.load_metadata_only``'s sole source for title+archived+project_id. If
-    that ever stops being true (metadata moves to another store), this gate would
-    short-circuit before the real source — update both together.
+    ``Session.load_metadata_only``'s source for title+archived+project_id in the
+    JSON backend. A session with NO sidecar is a migrated, store-backed session;
+    the gate cannot see a row, so that case skips the stat cache and reads the
+    store row through the same call — keep both sources in mind when adding a
+    field here.
     """
     default = {"title": None, "archived": None, "project_id": None}
     if not is_safe_session_id(sid):
@@ -9682,9 +11042,16 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
         st = p.stat()
         key = (str(p), st.st_mtime_ns, st.st_size, st.st_ctime_ns)
     except OSError:
-        # No sidecar file (the common case for a pure state.db row) or it
-        # vanished mid-build — nothing to project, and nothing worth caching.
-        return dict(default)
+        # No sidecar. Returning the empty default here dropped title/archived/
+        # project_id for every MIGRATED session, whose row in the sidecarless
+        # store is the real source for exactly those fields — archived chats
+        # reappeared as active and project assignments vanished from the sidebar.
+        # A row has no cheap stat signature, so this path caches nothing.
+        try:
+            _meta_obj = Session.load_metadata_only(sid)
+        except Exception:
+            _meta_obj = None
+        return _ui_owned_metadata_from(_meta_obj)
 
     with _SIDECAR_METADATA_CACHE_LOCK:
         hit = _SIDECAR_METADATA_CACHE.get(key)
@@ -9692,18 +11059,11 @@ def _state_projection_sidecar_metadata(sid: str) -> dict:
             _SIDECAR_METADATA_CACHE.move_to_end(key)
             return dict(hit)
 
-    metadata = dict(default)
     try:
         webui_meta = Session.load_metadata_only(sid)
     except Exception:
         webui_meta = None
-    if webui_meta:
-        title = getattr(webui_meta, 'title', None)
-        if title:
-            metadata["title"] = title
-        metadata["archived"] = bool(getattr(webui_meta, 'archived', False))
-        project_id = str(getattr(webui_meta, 'project_id', None) or '').strip()
-        metadata["project_id"] = project_id or None
+    metadata = _ui_owned_metadata_from(webui_meta)
 
     with _SIDECAR_METADATA_CACHE_LOCK:
         # Re-check under lock in case a concurrent build populated it; either
