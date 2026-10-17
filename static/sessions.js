@@ -4203,18 +4203,27 @@ function _hasInflightTailUserDuplicate(messages,candidate){
         return false;
       })();
       if(msg._active_turn_user===true||candidate._active_turn_user===true){
-        // A completed answer between the rows means different settled turns.
+        // #6649 greptile P1 (2026-10-14, "Current turn appears twice"):
+        // identity decides FIRST. The server marks the current user with
+        // `_active_turn_user` even when that turn already has saved assistant
+        // output, so a saved answer after the base row is THIS turn's own
+        // answer — never a settled-turn boundary. Vetoing on it before looking
+        // at identity made recovery treat the pair as different turns and
+        // append the user plus the live reply a second time.
+        if(_aTs&&_bTs){
+          const _eps=(typeof _PENDING_ACTIVE_TURN_TS_EPSILON==='number')?_PENDING_ACTIVE_TURN_TS_EPSILON:1e-6;
+          if(Math.abs(_aTs-_bTs)<=_eps) return _sameText(msg,candidate);
+        }
+        // No precision-matched identity: a completed answer between the rows
+        // still means different settled turns (the marker branch must never
+        // pair across it with text equality alone).
         if(_sawCompletedAnswer) return false;
         // The provisional candidate is the client's own speculative row for
         // the active turn: skip the stamp veto, text equality decides.
         if(_provisionalCandidate) return _sameText(msg,candidate);
-        // The marker branch still respects the stamps: a marked pair whose
-        // timestamps are a whole second apart is a different turn.
-        if(_aTs&&_bTs){
-          const _eps=(typeof _PENDING_ACTIVE_TURN_TS_EPSILON==='number')?_PENDING_ACTIVE_TURN_TS_EPSILON:1e-6;
-          if(Math.abs(_aTs-_bTs)<=_eps) return _sameText(msg,candidate);
-          return false;
-        }
+        // A marked pair whose stamps are a whole second apart is a different
+        // turn; with no stamps at all the marker alone keeps the text rule.
+        if(_aTs&&_bTs) return false;
         return _sameText(msg,candidate);
       }
       if(_aTs&&_bTs){
@@ -4729,6 +4738,22 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
   // When the base does NOT contain the current turn's user (deferred save),
   // persistedText describes a PREVIOUS turn: never touch the live content,
   // never drop base rows, and let the merge append the live turn as-is.
+  // #6649 greptile P1 (2026-10-14, "Saved answer disappears"): recompute the
+  // superseded verdict instead of trusting a flag written by an EARLIER
+  // recovery. The first recovery replaces the live text with the persisted
+  // copy and flags the row, so a second recovery over the same INFLIGHT row
+  // sees `live === persisted` and would fall through to `return true`: the
+  // caller then drops the saved assistant while the merge filters the flagged
+  // live row, leaving the turn with no response at all. Only a live row that
+  // has genuinely grown past the persisted snapshot may take over.
+  if(persistedText && settledBelongsToCurrentTurn && live._supersededBySettled===true){
+    if(_messageComparableText(live)===persistedText) return false;
+    if(liveText.startsWith(persistedText)){
+      live._supersededBySettled=false;
+      live._progressBeyondPersisted=true;
+      return true;
+    }
+  }
   if(persistedText && settledBelongsToCurrentTurn && _messageComparableText(live) !== persistedText){
     // A strict live extension of the same turn's persisted text is progress,
     // not staleness: the Agent persists the assistant tool-call row eagerly
