@@ -2192,6 +2192,162 @@ function _dispatchExtensionTurnLifecycle(type,sessionId,streamId,details={}){
     return false;
   }
 }
+function _applyEmbeddedTerminalSession(incoming,currentSession,currentMessages,currentOffset,streamId){
+  if(incoming==null){
+    if(!currentSession||typeof currentSession!=='object') return null;
+    return {...currentSession,messages:Array.isArray(currentMessages)?currentMessages:(Array.isArray(currentSession.messages)?currentSession.messages:[])};
+  }
+  if(typeof incoming!=='object'||Array.isArray(incoming)) return null;
+  const incomingMessages=Array.isArray(incoming.messages)?incoming.messages:null;
+  if(Object.prototype.hasOwnProperty.call(incoming,'tool_calls')&&!Array.isArray(incoming.tool_calls)) return null;
+  if(Object.prototype.hasOwnProperty.call(incoming,'_tool_calls_truncated')&&
+    typeof incoming._tool_calls_truncated!=='boolean') return null;
+  const incomingSid=String(incoming.session_id||'');
+  const incomingParentSid=String(incoming.parent_session_id||'');
+  const currentSid=String(currentSession&&currentSession.session_id||'');
+  if(!incomingSid||!incomingMessages) return null;
+  const directContinuation=incomingSid!==currentSid&&incomingParentSid===currentSid;
+  const sameCoordinateLineage=incomingSid===currentSid||incomingParentSid===currentSid;
+  if(!currentSession||!Array.isArray(currentMessages)||!currentSid||!sameCoordinateLineage){
+    return {...incoming,messages:incomingMessages};
+  }
+  const isOffset=value=>Number.isSafeInteger(value)&&value>=0;
+  const incomingOffset=incoming._messages_offset;
+  const messageCount=incoming.message_count;
+  const hasWindowMetadata=Array.isArray(incomingMessages)&&
+    Object.prototype.hasOwnProperty.call(incoming,'_messages_offset')&&
+    Object.prototype.hasOwnProperty.call(incoming,'message_count');
+  if(!hasWindowMetadata||!isOffset(incomingOffset)||!isOffset(messageCount)) return null;
+  if(Object.prototype.hasOwnProperty.call(incoming,'_messages_truncated')&&
+    (typeof incoming._messages_truncated!=='boolean'||incoming._messages_truncated!==!!incomingOffset)) return null;
+  const directWindow=()=>({...incoming,messages:incomingMessages});
+  const incomingEnd=incomingOffset+incomingMessages.length;
+  if(!isOffset(incomingEnd)||incomingEnd!==messageCount) return null;
+  if(!isOffset(currentOffset)) return directContinuation?directWindow():null;
+  const currentEnd=currentOffset+currentMessages.length;
+  const currentCount=currentSession.message_count;
+  if(!isOffset(currentEnd)) return directContinuation?directWindow():null;
+  if((currentCount!==undefined&&currentCount!==currentEnd)||incomingOffset>currentEnd){
+    if(!Object.prototype.hasOwnProperty.call(incoming,'_messages_truncated')&&!directContinuation) return null;
+    return directWindow();
+  }
+  if(incomingEnd<currentEnd) return directContinuation?directWindow():null;
+  const exactMessageIdentity=message=>{
+    const id=message&&typeof message==='object'&&!Array.isArray(message)?message.id:null;
+    return Number.isSafeInteger(id)&&id>0?id:null;
+  };
+  const uniqueMessageIdentities=messages=>{
+    const identities=messages.map(exactMessageIdentity);
+    const counts=new Map();
+    for(const identity of identities){
+      if(identity!==null) counts.set(identity,(counts.get(identity)||0)+1);
+    }
+    return identities.map(identity=>identity!==null&&counts.get(identity)===1?identity:null);
+  };
+  const sameMessageIdentity=(left,right)=>left!==null&&right!==null&&left===right;
+  const currentIdentities=uniqueMessageIdentities(currentMessages);
+  const incomingIdentities=uniqueMessageIdentities(incomingMessages);
+  if(currentEnd>incomingOffset){
+    // Numeric offsets can shift; stable message IDs must prove every shared row.
+    let provenRows=0;
+    const overlapStart=Math.max(currentOffset,incomingOffset);
+    const overlapEnd=Math.min(currentEnd,incomingEnd);
+    for(let coordinate=overlapStart;coordinate<overlapEnd;coordinate++){
+      const currentMessage=currentMessages[coordinate-currentOffset];
+      const incomingMessage=incomingMessages[coordinate-incomingOffset];
+      const localSubmittedUser=!!(
+        streamId&&String(currentSession.active_stream_id||'')===String(streamId)&&
+        coordinate===currentEnd-1&&currentMessage&&currentMessage.role==='user'&&currentMessage._pending===true&&
+        incomingMessage&&incomingMessage.role==='user'
+      );
+      if(localSubmittedUser){
+        continue;
+      }
+      const currentIdentity=currentIdentities[coordinate-currentOffset];
+      const incomingIdentity=incomingIdentities[coordinate-incomingOffset];
+      if(!sameMessageIdentity(currentIdentity,incomingIdentity)) return directWindow();
+      provenRows+=1;
+    }
+    if(!provenRows) return directWindow();
+  }else if(incomingOffset===currentEnd){
+    return directWindow();
+  }
+  const mergedOffset=Math.min(currentOffset,incomingOffset);
+  const mergedMessages=[];
+  for(let coordinate=mergedOffset;coordinate<incomingEnd;coordinate++){
+    if(coordinate>=incomingOffset) mergedMessages.push(incomingMessages[coordinate-incomingOffset]);
+    else mergedMessages.push(currentMessages[coordinate-currentOffset]);
+  }
+  const translateCalls=(calls,offset,width)=>{
+    const translated=[];
+    for(const call of Array.isArray(calls)?calls:[]){
+      if(!call||typeof call!=='object') continue;
+      const next={...call};
+      if(Object.prototype.hasOwnProperty.call(next,'assistant_msg_idx')){
+        const index=next.assistant_msg_idx;
+        if(index===-1) {
+          next.assistant_msg_idx=-1;
+        } else if(!isOffset(index)||index>=width) {
+          continue;
+        } else {
+          next.assistant_msg_idx=offset+index-mergedOffset;
+        }
+      }
+      translated.push(next);
+    }
+    return translated;
+  };
+  const hasIncomingToolCalls=Object.prototype.hasOwnProperty.call(incoming,'tool_calls');
+  const currentCalls=translateCalls(currentSession.tool_calls,currentOffset,currentMessages.length);
+  const incomingCalls=translateCalls(incoming.tool_calls,incomingOffset,incomingMessages.length);
+  const merged={...currentSession,...incoming,messages:mergedMessages};
+  if(hasIncomingToolCalls){
+    const callIdentity=call=>String(call&&(call.tid||call.id||call.tool_call_id||call.tool_use_id||call.call_id)||'').trim();
+    const callShapeIdentity=call=>{
+      const index=call&&call.assistant_msg_idx;
+      const name=String(call&&call.name||'').trim();
+      return isOffset(index)&&name?`${index}:${name}`:'';
+    };
+    const incomingIds=new Set(incomingCalls.map(callIdentity).filter(Boolean));
+    const toolCallsTruncated=incoming._tool_calls_truncated===true;
+    const incomingShapeCounts=new Map();
+    const currentShapeCounts=new Map();
+    if(toolCallsTruncated){
+      for(const call of incomingCalls){
+        if(callIdentity(call)) continue;
+        const shapeIdentity=callShapeIdentity(call);
+        if(shapeIdentity) incomingShapeCounts.set(shapeIdentity,(incomingShapeCounts.get(shapeIdentity)||0)+1);
+      }
+      for(const call of currentCalls){
+        if(callIdentity(call)) continue;
+        const shapeIdentity=callShapeIdentity(call);
+        if(shapeIdentity) currentShapeCounts.set(shapeIdentity,(currentShapeCounts.get(shapeIdentity)||0)+1);
+      }
+    }
+    merged.tool_calls=[
+      ...currentCalls.filter(call=>{
+        const index=call.assistant_msg_idx;
+        if(!isOffset(index)) return false;
+        const identity=callIdentity(call);
+        if(!toolCallsTruncated){
+          if(index>=incomingOffset-mergedOffset) return false;
+          return !identity||!incomingIds.has(identity);
+        }
+        if(identity) return !incomingIds.has(identity);
+        const shapeIdentity=callShapeIdentity(call);
+        const currentCount=currentShapeCounts.get(shapeIdentity)||0;
+        currentShapeCounts.set(shapeIdentity,currentCount-1);
+        return currentCount>(incomingShapeCounts.get(shapeIdentity)||0);
+      }),
+      ...incomingCalls,
+    ];
+  }
+  else if(Object.prototype.hasOwnProperty.call(currentSession,'tool_calls')) merged.tool_calls=currentCalls;
+  merged._messages_offset=mergedOffset;
+  merged._messages_truncated=!!mergedOffset;
+  merged.messages=mergedMessages;
+  return merged;
+}
 
 function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   if(!activeSid||!streamId) return;
@@ -2366,6 +2522,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _clearOwnerInflightState(){
     if(_isActiveSession() && S.activeStreamId!==streamId) return;
+    const inflight=INFLIGHT[activeSid];
+    if(inflight&&inflight.streamId&&inflight.streamId!==streamId) return;
     delete INFLIGHT[activeSid];
     clearInflightState(activeSid);
     _clearActivePaneInflightIfOwner();
@@ -2389,18 +2547,10 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   function _streamRecoveryControlMessage(m){
     if(!m||m.role==='tool') return false;
     if(m.recovery_control===true) return true;
-    // Backward-compat ONLY for pre-marker persisted sessions: match the two
-    // fully-anchored synthetic recovery strings. Do NOT fall back to
-    // provider_details_label — a genuine "Response interrupted" card the user
-    // SHOULD see also carries the 'Interruption details' label, and filtering
-    // on it would drop a real interruption from the transcript (the inverse
-    // data-loss class flagged on the sibling #3300). Marker + strict text only.
+    // Keep the upstream settle guard's strict legacy recognition. Do not
+    // filter recovery rows from the bounded canonical transcript here.
     const text=String(typeof msgContent==='function'?msgContent(m):(m.content||''));
     return _streamRecoveryControlMessageText(text);
-  }
-  function _filterRecoveryControlMessages(messages){
-    if(!Array.isArray(messages)) return [];
-    return messages.filter((m)=>!_streamRecoveryControlMessage(m));
   }
   function _replaceMarkerOnlyAssistantWithStreamError(messages){
     if(!Array.isArray(messages)) return false;
@@ -6558,7 +6708,93 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _clearAnchorProseIncrementalNode();
         const isActiveSession=_isSessionCurrentPane(activeSid);
         const isSessionViewed=_isSessionActivelyViewed(activeSid);
-        const completedSession=d.session||{session_id:activeSid};
+        const _currentTerminalSession= S.session&&S.session.session_id===activeSid ? S.session : null;
+        const _currentTerminalMessages=_currentTerminalSession&&Array.isArray(S.messages)?S.messages:[];
+        const _hasTerminalSession=!!(d.session&&typeof d.session==='object');
+        const _mergedTerminalSession=_hasTerminalSession&&_applyEmbeddedTerminalSession(
+          d.session,
+          _currentTerminalSession,
+          _currentTerminalMessages,
+          _oldestIdx,
+          streamId,
+        );
+        const _terminalToolCallsProvided=!!(
+          _mergedTerminalSession&&
+          Object.prototype.hasOwnProperty.call(d.session,'tool_calls')
+        );
+        const completedSession=_mergedTerminalSession||(
+          _currentTerminalSession
+            ? {..._currentTerminalSession,messages:_currentTerminalMessages}
+            : {session_id:activeSid}
+        );
+        // A rejected or absent terminal snapshot invalidates the cached
+        // revision. `null` means it must be refreshed; an absent field means
+        // an authoritative full response already established ineligibility.
+        if(!_mergedTerminalSession) completedSession.regeneration_revision=null;
+        const _terminalSessionSameSid=!!(
+          _currentTerminalSession&&completedSession.session_id===_currentTerminalSession.session_id
+        );
+        if(_terminalSessionSameSid){
+          completedSession.messages=_carryForwardEphemeralTurnFields(
+            _currentTerminalMessages,
+            completedSession.messages||[],
+          );
+        }
+        const _currentTerminalInflight=INFLIGHT[activeSid];
+        const _ownsCurrentTerminalStream=!!(
+          isActiveSession&&S.activeStreamId===streamId&&
+          (!_currentTerminalInflight||!_currentTerminalInflight.streamId||_currentTerminalInflight.streamId===streamId)
+        );
+        let _localTerminalAssistantIndex=-1;
+        if(!_mergedTerminalSession&&_ownsCurrentTerminalStream&&Array.isArray(completedSession.messages)){
+          const _liveContent=String(typeof _streamDisplay==='function'?_streamDisplay():assistantText||'');
+          const _liveSplit=typeof _splitThinkFromContent==='function'
+            ? _splitThinkFromContent(_liveContent,reasoningText||'')
+            : {content:_liveContent,reasoning:String(reasoningText||liveReasoningText||'')};
+          const _answer=String(_liveSplit.content||'');
+          const _reasoning=String(_liveSplit.reasoning||reasoningText||'');
+          const _hasCurrentLiveTools=Array.isArray(S.toolCalls)&&S.toolCalls.length>0;
+          if(_answer.trim()||_reasoning.trim()||_hasCurrentLiveTools){
+            let _existingIndex=-1;
+            for(let _index=completedSession.messages.length-1;_index>=0;_index--){
+              const _message=completedSession.messages[_index];
+              if(_message&&_message.role==='assistant'&&_message._anchor_stream_id===streamId){
+                _existingIndex=_index;
+                break;
+              }
+            }
+            let _assistantRow=_existingIndex>=0?completedSession.messages[_existingIndex]:null;
+            if(!_assistantRow){
+              if(_currentTerminalInflight&&typeof _ensureInflightLiveAssistantMessage==='function'){
+                _ensureInflightLiveAssistantMessage(_currentTerminalInflight);
+              }
+              const _liveRows=Array.isArray(_currentTerminalInflight&&_currentTerminalInflight.messages)
+                ?_currentTerminalInflight.messages.filter(m=>m&&m.role==='assistant'&&m._live)
+                :[];
+              _assistantRow=_liveRows.length?{..._liveRows[_liveRows.length-1]}:{role:'assistant'};
+              completedSession.messages.push(_assistantRow);
+              _localTerminalAssistantIndex=completedSession.messages.length-1;
+            }else{
+              _localTerminalAssistantIndex=_existingIndex;
+            }
+            _assistantRow.content=_answer;
+            _assistantRow.reasoning=_reasoning||undefined;
+            _assistantRow._anchor_stream_id=streamId;
+            _assistantRow._ts=_assistantRow._ts||Date.now()/1000;
+            delete _assistantRow._live;
+            const _currentPendingUser=[...completedSession.messages].reverse().find(m=>m&&m.role==='user'&&m._pending===true);
+            if(_currentPendingUser) delete _currentPendingUser._pending;
+            completedSession.message_count=Math.max(
+              Number(completedSession.message_count||0),
+              Number(_oldestIdx||0)+completedSession.messages.length,
+            );
+            completedSession.active_stream_id=null;
+            completedSession.pending_user_message=null;
+            completedSession.pending_attachments=[];
+            completedSession.pending_started_at=null;
+            completedSession.pending_user_source=null;
+          }
+        }
         const completedSid=completedSession.session_id||activeSid;
         const completedMessageCount=completedSession.message_count != null
           ? completedSession.message_count
@@ -6611,17 +6847,37 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           let _doneFinalAnswer='';
           try{ if(typeof _streamDisplay==='function') _doneFinalAnswer=_streamDisplay()||''; }catch(_){}
           const _preSettle=Array.isArray(S.messages)?S.messages:[];
-          S.session=d.session;S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[]);if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!d.session._messages_truncated;
+          S.session=completedSession;
+          // `usage` carries cumulative session totals. The validated embedded
+          // snapshot already owns these values; when it was absent/rejected,
+          // advance only the totals supplied by this done event so the next
+          // turn's delta starts from the correct baseline. Zero is meaningful,
+          // while omitted fields must retain their previous value.
+          if(!_mergedTerminalSession&&d.usage&&S.session){
+            for(const _usageField of ['input_tokens','output_tokens','estimated_cost','cache_read_tokens','cache_write_tokens']){
+              const _usageValue=d.usage[_usageField];
+              if(typeof _usageValue==='number'&&Number.isFinite(_usageValue)) S.session[_usageField]=_usageValue;
+            }
+          }
+          if(_terminalSessionSameSid){
+            S.messages=completedSession.messages;
+          } else if(d.session){
+            S.messages=_carryForwardEphemeralTurnFields(_currentTerminalMessages,completedSession.messages||[]);
+          }
+          if(_mergedTerminalSession){
+            if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!completedSession._messages_truncated;
+            if(typeof _oldestIdx!=='undefined')_oldestIdx=completedSession._messages_offset||0;
+          }
+          completedSession.messages=S.messages;
+          if(_mergedTerminalSession&&typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
           if(_pendingTitleUpdates.has(completedSid)){
             applySessionTitleUpdate(completedSid, _pendingTitleUpdates.get(completedSid), {expectedCurrent:_pendingTitleExpectedCurrent.get(completedSid)});
             _pendingTitleUpdates.delete(completedSid);
             _pendingTitleExpectedCurrent.delete(completedSid);
           }
-          // #4720: reset _oldestIdx (full-load symmetry; keeps the #4613 anchor aligned).
-          if(typeof _oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0;
           // #6112 settle guard.
           S.messages=_adoptDoneSnapshotMessages(_preSettle, S.messages, _doneFinalAnswer).messages;
-          S.messages=_filterRecoveryControlMessages(S.messages || []);
+          completedSession.messages=S.messages;
           if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
           if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
           if(S.session&&S.session.session_id){
@@ -6632,7 +6888,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(
             window._compressionUi&&window._compressionUi.automatic&&
             window._compressionUi.sessionId===activeSid&&
-            d.session&&d.session.session_id
+            completedSession&&completedSession.session_id
           ){
             if(window._compressionUi.phase==='running'){
               // Turn completed (done event) but the compression UI is still in
@@ -6645,11 +6901,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
               if(typeof clearCompressionUi==='function') clearCompressionUi();
               else window._compressionUi=null;
             } else {
-              window._compressionUi={...window._compressionUi, sessionId:d.session.session_id};
+              window._compressionUi={...window._compressionUi, sessionId:completedSession.session_id};
             }
           }
           // Find the last assistant message once for both reasoning persistence and timestamp
-          lastAsst=[...S.messages].reverse().find(m=>m.role==='assistant');
+          lastAsst=_mergedTerminalSession
+            ? [...S.messages].reverse().find(m=>m.role==='assistant')
+            : (_ownsCurrentTerminalStream&&_localTerminalAssistantIndex>=0
+              ? S.messages[_localTerminalAssistantIndex]
+              : null);
           // Persist reasoning trace for Worklog Thinking Cards; normal transcript
           // rendering keeps provider reasoning out of the final answer.
           if(reasoningText&&lastAsst&&!lastAsst.reasoning) lastAsst.reasoning=reasoningText;
@@ -6722,9 +6982,18 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
             const hasTu=Array.isArray(m.content)&&m.content.some(p=>p&&p.type==='tool_use');
             return hasTc||hasPartialTc||hasTu;
           });
-          if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
-            S.toolCalls=d.session.tool_calls.map(tc=>tc);
-            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
+          if(_localTerminalAssistantIndex>=0){
+            S.toolCalls=(Array.isArray(S.toolCalls)?S.toolCalls:[]).map(tc=>({
+              ...tc,
+              assistant_msg_idx:_localTerminalAssistantIndex,
+              done:true,
+            }));
+            S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc}));
+          } else if(_terminalToolCallsProvided){
+            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(completedSession.tool_calls);
+          } else if(!hasMessageToolMetadata&&completedSession.tool_calls&&completedSession.tool_calls.length){
+            S.toolCalls=completedSession.tool_calls.map(tc=>tc);
+            S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(completedSession.tool_calls);
           } else {
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
             S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map(tc=>({...tc,done:true}));
@@ -6806,6 +7075,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         }
         if(!lastAsst&&d.session&&Array.isArray(d.session.messages)){
           lastAsst=[...d.session.messages].reverse().find(m=>m&&m.role==='assistant')||null;
+        }
+        if(!lastAsst&&completedSession&&Array.isArray(completedSession.messages)){
+          lastAsst=[...completedSession.messages].reverse().find(m=>m&&m.role==='assistant')||null;
         }
         if(isActiveSession&&_pendingGoalContinuation&&typeof queueSessionMessage==='function'){
           const _goalNext=_pendingGoalContinuation;
@@ -7013,8 +7285,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const _extensionErrorType=(d.type==='cancelled'||d.type==='interrupted')?'turn:cancel':'turn:error';
       const currentSid=S.session&&S.session.session_id;
       const eventSid=d.old_session_id||d.session_id||'';
-      const continuationSid=(d.session&&d.session.session_id)||d.new_session_id||d.continuation_session_id||'';
-      const eventMatchesCurrent=!!(currentSid&&(eventSid===currentSid||continuationSid===currentSid));
+      const incomingSessionSid=d.session&&typeof d.session==='object' ? String(d.session.session_id||'') : '';
+      const continuationSid=d.new_session_id||d.continuation_session_id||'';
+      const eventMatchesCurrent=!!(currentSid&&(
+        eventSid===currentSid||continuationSid===currentSid||incomingSessionSid===currentSid
+      ));
+      const _currentTerminalSession=S.session;
+      const _currentTerminalMessages=Array.isArray(S.messages)?S.messages:[];
+      const _terminalSessionSameSid=!!(
+        eventMatchesCurrent&&d.session&&_currentTerminalSession&&
+        (!d.session.session_id||_currentTerminalSession.session_id===d.session.session_id)
+      );
+      const _terminalSession=eventMatchesCurrent&&_applyEmbeddedTerminalSession(
+        d.session,
+        _currentTerminalSession,
+        _currentTerminalMessages,
+        _oldestIdx,
+        streamId,
+      );
       if(eventMatchesCurrent){
         _flushReasoningToAnchor();
         _applyToAnchor('apperror',{
@@ -7055,16 +7343,24 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           if(typeof clearCompressionUi==='function') clearCompressionUi();
           if(isRecoveryControlMessage){
             if(typeof showToast==='function') showToast('Stream recovery signal received. Restoring transcript...',3500,'error');
-          } else if(d.session&&typeof d.session==='object'){
-            S.session=d.session;
-            const _nextMsgs3018=(d.session.messages||[]).filter(m=>m&&m.role);
+          } else if(d.session&&typeof d.session==='object'&&_terminalSession){
+            if(_terminalSessionSameSid){
+              _terminalSession.messages=_carryForwardEphemeralTurnFields(
+                _currentTerminalMessages,
+                _terminalSession.messages||[],
+              );
+            }
+            if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!_terminalSession._messages_truncated;
+            if(typeof _oldestIdx!=='undefined')_oldestIdx=_terminalSession._messages_offset||0;
+            S.session=_terminalSession;
             if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(d.session);
-            // Same persist-before-offset trap as settle/cancel: refresh paging
-            // before attaching the projected scene (#7628).
-            if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!d.session._messages_truncated;
-            if(typeof _oldestIdx!=='undefined') _oldestIdx=d.session._messages_offset||0;
-            _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
-            S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+            if(_terminalSessionSameSid){
+              S.messages=_terminalSession.messages;
+            } else {
+              S.messages=_carryForwardEphemeralTurnFields(_currentTerminalMessages,_terminalSession.messages||[]);
+            }
+            _terminalSession.messages=S.messages;
+            _attachProjectedAnchorSceneToLastAssistant(S.messages);
             if(S.session&&S.session.session_id){
               try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
               if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
@@ -7098,13 +7394,16 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           (async()=>{
             if(await _restoreSettledSession(source, {preserveVisibleOnShorterTerminalSnapshot:true})) return;
             if(S.session&&S.session.session_id===activeSid){
-              S.messages=_filterRecoveryControlMessages(S.messages||[]);
-              _markSessionViewed(activeSid, S.messages.length);
+              _markSessionViewed(activeSid, S.session.message_count != null ? S.session.message_count : S.messages.length);
               renderMessages({preserveScroll:true});
             }
           })();
         } else {
-          _markSessionViewed((S.session&&S.session.session_id)||activeSid, S.messages.length);
+          const _apperrorViewedSid=(S.session&&S.session.session_id)||activeSid;
+          const _apperrorViewedCount=S.session&&S.session.message_count != null
+            ? S.session.message_count
+            : S.messages.length;
+          _markSessionViewed(_apperrorViewedSid, _apperrorViewedCount);
           renderMessages({preserveScroll:true});
         }
       }else if(typeof trackBackgroundError==='function'){
@@ -7285,11 +7584,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.activeStreamId=null;
       }
       const _applyCancelSessionPayload=(sessionPayload)=>{
-        if(!sessionPayload||typeof sessionPayload!=='object'||!S.session||S.session.session_id!==activeSid) return false;
-        // Belt-and-suspenders: the embedded cancel snapshot must be for THIS session.
-        // The GET path guarantees it via the URL; the embedded path via the stream→session
-        // binding — but reject a mismatched id so a stray payload can't overwrite the view.
-        if(sessionPayload.session_id&&sessionPayload.session_id!==activeSid) return false;
+        if(!sessionPayload||typeof sessionPayload!=='object'||!S.session) return false;
+        if(!Array.isArray(sessionPayload.messages)) return false;
+        const payloadSid=String(sessionPayload.session_id||'');
+        const activeSessionSid=String(activeSid||'');
+        const currentSessionSid=String(S.session.session_id||'');
+        const directContinuation=String(sessionPayload.parent_session_id||'')===currentSessionSid;
+        if(!payloadSid||(payloadSid!==activeSessionSid&&!directContinuation)||currentSessionSid!==activeSessionSid) return false;
         // Capture follow-intent BEFORE replacing S.messages: a reader who was
         // following the live stream when it got cancelled/reconnected must land at
         // the bottom (where the cancellation notice renders), not be stranded at a
@@ -7301,19 +7602,34 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           && !((typeof _isMessageReaderUnpinned==='function')
             ? _isMessageReaderUnpinned()
             : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
-        S.session=sessionPayload;
-        const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);
+        const _currentTerminalSession=S.session;
+        const _currentTerminalMessages=Array.isArray(S.messages)?S.messages:[];
+        const _terminalSession=_applyEmbeddedTerminalSession(
+          sessionPayload,
+          _currentTerminalSession,
+          _currentTerminalMessages,
+          _oldestIdx,
+          streamId,
+        );
+        if(!_terminalSession) return false;
+        _terminalSession.messages=_carryForwardEphemeralTurnFields(
+          _currentTerminalMessages,
+          _terminalSession.messages||[],
+        );
+        S.session=_terminalSession;
+        S.messages=_terminalSession.messages;
+        _terminalSession.messages=S.messages;
         if(typeof _adoptRegenerationRevision==='function')_adoptRegenerationRevision(sessionPayload);
-        // A bounded cancel-recovery reload returns a tail window: keep the
-        // Load-earlier paging gate honest, and refresh _oldestIdx BEFORE
-        // persisting the projected scene (#7310/#7625/#7628).
-        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!sessionPayload._messages_truncated;
-        if(typeof _oldestIdx!=='undefined') _oldestIdx=sessionPayload._messages_offset||0;
-        _attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);
-        S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);
+        if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!_terminalSession._messages_truncated;
+        if(typeof _oldestIdx!=='undefined')_oldestIdx=_terminalSession._messages_offset||0;
+        if(S.session&&S.session.session_id){
+          try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){ }
+          if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+        }
+        _attachProjectedAnchorSceneToLastAssistant(S.messages);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         clearLiveToolCards();if(!assistantText)removeThinking();
-        _markSessionViewed(activeSid, sessionPayload.message_count ?? S.messages.length);
+        _markSessionViewed(_terminalSession.session_id||activeSid, _terminalSession.message_count ?? S.messages.length);
         renderMessages({preserveScroll:true});
         if(_wasFollowingAtCancel && typeof scrollToBottom==='function') scrollToBottom();
         return true;
@@ -7328,11 +7644,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
-          // Fetch latest session from server to get accurate message list (includes cancel status)
-          // This ensures messages stay in sync with server, fixing race condition where local
-          // "*Task cancelled.*" message gets lost when done event overwrites S.messages.
-          // Bounded tail: a bare reload used to pull and re-redact the whole transcript
-          // on every cancel recovery (#7310/#7625).
+          // Fetch only the bounded tail on recovery; a full reload re-redacts
+          // the entire transcript on every cancel (#7310/#7625).
           const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
           if(data&&data.session) _applyCancelSessionPayload(data.session);
         }catch(_){
@@ -7427,9 +7740,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   //      compression rotates the session at the turn boundary, and the rotated session's
   //      message list is built without the in-flight assistant turn) -> adopted verbatim, and
   //      the answer lives only in the live segment, which the settled rebuild throws away.
-  // Either way `_filterRecoveryControlMessages` does not recover it and the #373 no-reply
-  // guard is suppressed (it is gated on `!assistantText`), so NO "No response received." card
-  // is pushed either: the pane just renders empty, exactly as reported, and a reload — which
+  // The #373 no-reply guard is suppressed (it is gated on `!assistantText`), so NO
+  // "No response received." card is pushed either: the pane just renders empty, exactly as
+  // reported, and a reload — which
   // re-reads the intact server transcript — brings the same answer back.
   //
   // The `stream_end` path has had the matching shorter-snapshot protection since #5224/#3195
@@ -7458,7 +7771,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
     }
     return false;
   }
-  // Settle guard, run right after the #3018 carry-forward assignment in the `done` handler.
+  // Settle guard, run after bounded terminal-session selection in the `done` handler.
   // `preSettleMessages` is the transcript as the reader was looking at it, `settledMessages`
   // is what the snapshot reconciled to. Two rules:
   //   1. an empty settled list may not replace a non-empty transcript — there is nothing in
@@ -7557,9 +7870,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         S.activeStreamId=null;
         clearLiveToolCards();if(!assistantText)removeThinking();
         S.session=session;
-        const _nextMsgs3018=(session.messages||[]).filter(m=>m&&m.role);
+        const _nextMsgs3018=Array.isArray(session.messages)?session.messages:[];
         const _currentMessages=Array.isArray(S.messages)?S.messages:[];
-        const _currentVisibleMessages=_filterRecoveryControlMessages(_currentMessages || []);
+        const _currentVisibleMessages=_currentMessages;
         // Restore paging from the bounded tail BEFORE attaching/persisting the
         // projected scene: _persistSettledAnchorScene reads _oldestIdx to
         // compute the absolute transcript index (#7628).
@@ -7616,7 +7929,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         const _resolvedMessages=_preserveCurrentTranscript
           ? [..._stagedMessages,..._currentVisibleMessages.slice(_truncatedRecovery?_stagedSuffixStart+_stagedMessages.length:_stagedMessages.length)]
           : _stagedMessages;
-        S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);
+        S.messages=_resolvedMessages || [];
+        session.messages=S.messages;
+        const _restoredOffset=Number.isInteger(session._messages_offset)&&session._messages_offset>=0
+          ? session._messages_offset
+          : 0;
+        if(typeof _oldestIdx!=='undefined') _oldestIdx=_restoredOffset;
+        if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!session._messages_truncated;
         _attachProjectedAnchorSceneToLastAssistant(S.messages);
         if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
         const _markerOnlyAssistantError=_replaceMarkerOnlyAssistantWithStreamError(S.messages);
@@ -7651,9 +7970,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       renderSessionList();
       _setActivePaneIdleIfOwner();
       return returnStatus?'restored':true;
-    }catch(_){
-      return returnStatus?'error':false;
-    }
+    }catch(_){ return returnStatus?'error':false; }
   }
 
   function _handleStreamError(source){

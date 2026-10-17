@@ -27,31 +27,28 @@ def _compact(text: str) -> str:
 def test_done_handler_resets_oldest_idx_from_payload_offset():
     """The done handler must reset _oldestIdx alongside _messagesTruncated."""
     compact = _compact(MESSAGES_JS)
-    # The truncated flag and the offset reset must be wired off the SAME done
-    # payload (d.session), mirroring sessions.js / ui.js full-load paths.
-    assert "_messagesTruncated=!!d.session._messages_truncated" in compact, (
+    # Rotated sessions reset both cursors from the installed terminal payload.
+    assert "_messagesTruncated=!!completedSession._messages_truncated" in compact, (
         "done handler should still set _messagesTruncated from the done payload"
     )
-    assert "_oldestIdx=d.session._messages_offset||0" in compact, (
+    assert "_oldestIdx=completedSession._messages_offset||0" in compact, (
         "#4720: done handler must reset _oldestIdx from the done payload offset "
         "so the absolute scroll anchor stays valid after the render-window expansion"
     )
 
 
-def test_done_handler_oldest_idx_reset_is_guarded_and_ordered_before_filter():
-    """Reset must be typeof-guarded and happen before the messages are re-filtered/rendered."""
-    compact = _compact(MESSAGES_JS)
-    assert "if(typeof_oldestIdx!=='undefined')_oldestIdx=d.session._messages_offset||0" in compact, (
+def test_done_handler_oldest_idx_reset_is_guarded_for_terminal_windows():
+    """Terminal window reconciliation updates the raw-coordinate cursor."""
+    done_start = MESSAGES_JS.index("source.addEventListener('done'")
+    done_end = MESSAGES_JS.index("source.addEventListener('stream_end'", done_start)
+    done_block = MESSAGES_JS[done_start:done_end]
+    compact = _compact(done_block)
+    assert "if(typeof_oldestIdx!=='undefined')_oldestIdx=completedSession._messages_offset||0" in compact, (
         "_oldestIdx reset should be typeof-guarded like _messagesTruncated"
     )
-    # The reset must precede _filterRecoveryControlMessages (which precedes the
-    # done-path renderMessages), so the anchor coordinate system is correct when
-    # the transcript is rebuilt.
-    reset_idx = compact.index("_oldestIdx=d.session._messages_offset||0")
-    filter_idx = compact.index("S.messages=_filterRecoveryControlMessages")
-    assert reset_idx < filter_idx, (
-        "_oldestIdx must be reset before the done-path re-filter/render"
-    )
+    cursor_idx = compact.index("_oldestIdx=completedSession._messages_offset||0")
+    assert "_filterRecoveryControlMessages" not in compact
+    assert cursor_idx < compact.index("completedSession.messages=S.messages")
 
 
 def test_oldest_idx_reset_matches_full_load_offset_semantics():

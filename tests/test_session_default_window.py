@@ -106,8 +106,18 @@ def test_settle_and_cancel_paths_use_bounded_tail():
 def test_cancel_payload_restores_truncation_signal():
     """_applyCancelSessionPayload keeps the Load-earlier paging gate honest
     after a bounded cancel reload."""
-    assert "!!sessionPayload._messages_truncated" in _MESSAGES_JS
-    assert "sessionPayload._messages_offset||0" in _MESSAGES_JS
+    cancel = _apply_cancel_session_payload_body()
+    merge_idx = cancel.index("const _terminalSession=_applyEmbeddedTerminalSession(")
+    adopted_idx = cancel.index("S.session=_terminalSession;", merge_idx)
+    truncated_idx = cancel.index(
+        "_messagesTruncated=!!_terminalSession._messages_truncated",
+        merge_idx,
+    )
+    offset_idx = cancel.index("_oldestIdx=_terminalSession._messages_offset||0", merge_idx)
+    assert merge_idx < adopted_idx < truncated_idx < offset_idx
+    assert re.search(r"_applyEmbeddedTerminalSession\(\s*sessionPayload,", cancel)
+    assert "!!sessionPayload._messages_truncated" not in cancel
+    assert "sessionPayload._messages_offset||0" not in cancel
 
 
 def test_settle_restores_truncation_signal():
@@ -140,9 +150,10 @@ def test_settle_refreshes_paging_before_anchor_persist():
 def test_cancel_refreshes_paging_before_anchor_persist():
     """Cancel recovery has the same persist-before-offset trap as settle (#7628)."""
     cancel = _apply_cancel_session_payload_body()
-    offset_idx = cancel.index("_oldestIdx=sessionPayload._messages_offset||0")
-    attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
-    assert offset_idx < attach_idx
+    merge_idx = cancel.index("const _terminalSession=_applyEmbeddedTerminalSession(")
+    offset_idx = cancel.index("_oldestIdx=_terminalSession._messages_offset||0", merge_idx)
+    attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);", merge_idx)
+    assert merge_idx < offset_idx < attach_idx
 
 
 def test_settle_preserves_terminal_marker_against_bounded_suffix():
@@ -169,9 +180,20 @@ def test_apperror_embedded_session_refreshes_paging_before_anchor_persist():
     start = _MESSAGES_JS.index("source.addEventListener('apperror'")
     end = _MESSAGES_JS.index("source.addEventListener('warning'", start)
     block = _MESSAGES_JS[start:end]
-    offset_idx = block.index("_oldestIdx=d.session._messages_offset||0")
-    attach_idx = block.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
-    assert offset_idx < attach_idx
+    merge_idx = block.index(
+        "const _terminalSession=eventMatchesCurrent&&_applyEmbeddedTerminalSession("
+    )
+    truncated_idx = block.index(
+        "_messagesTruncated=!!_terminalSession._messages_truncated",
+        merge_idx,
+    )
+    offset_idx = block.index("_oldestIdx=_terminalSession._messages_offset||0", merge_idx)
+    adopted_idx = block.index("S.session=_terminalSession;", merge_idx)
+    attach_idx = block.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);", merge_idx)
+    assert merge_idx < truncated_idx < offset_idx < adopted_idx < attach_idx
+    assert re.search(r"_applyEmbeddedTerminalSession\(\s*d\.session,", block)
+    assert "_messagesTruncated=!!d.session._messages_truncated" not in block
+    assert "_oldestIdx=d.session._messages_offset||0" not in block
 
 
 def test_compress_preflight_uses_bounded_tail():
@@ -208,7 +230,7 @@ def test_outline_jump_requests_explicit_full_transcript():
     jump = _OUTLINE_JS.split('async function _jumpToMessage(', 1)[1].split('// Brief highlight', 1)[0]
     assert 'await _ensureAllMessagesLoaded()' in jump
     assert 'api(' not in jump
-    loader = _SESSIONS_JS.split('async function _ensureAllMessagesLoaded()', 1)[1].split('const SESSION_ARCHIVED_PAGE_SIZE', 1)[0]
+    loader = _SESSIONS_JS.split('async function _ensureAllMessagesLoaded(options)', 1)[1].split('const SESSION_ARCHIVED_PAGE_SIZE', 1)[0]
     assert _ALL_QS in loader
 
 
