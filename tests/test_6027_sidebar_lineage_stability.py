@@ -80,7 +80,8 @@ global.S = { session: null, busy: false, activeStreamId: null };
 // callback and nothing would be visible to the scenarios below.
 const HELPERS = [
   '_isSessionLocallyStreaming','_hasPendingUserMessageSignal','_isSessionEffectivelyStreaming',
-  '_isChildSession','_isForkWithResolvableParent','_sessionLineageKey','_sidebarLineageKeyForRow',
+  '_isChildSession','_isDelegatedSubagentRow','_sidebarProjectResolver','_sidebarRowsById',
+  '_isForkWithResolvableParent','_sessionLineageKey','_sidebarLineageKeyForRow',
   '_authoritativeLineageTipId','_sessionTimestampMs','_sessionSortTimestampMs',
   '_sessionRunningSortRank','_sessionSidebarSortCompare','_collapseSessionLineageForSidebar',
   '_attachChildSessionsToSidebarRows','_sessionAttentionState','_sidebarRowHasVisibleMessages',
