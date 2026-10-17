@@ -292,6 +292,15 @@ def _is_internal_user_row(message) -> bool:
         return True
     text = _message_search_text(message)
     if not text:
+        # #7681 media-only finding: no extracted TEXT is not the same as no
+        # payload. An image-only row has real content the Agent counts, and
+        # ``_is_blank_user_turn`` already accepts non-text payloads as
+        # non-blank — this classifier must agree instead of condemning every
+        # media-only turn as internal. Only a genuinely blank row (no text and
+        # no non-text payload) is scaffolding here.
+        content = message.get("content")
+        if _content_has_part_type(content, {"image", "input_image", "document", "file"}):
+            return False
         return True  # blank echo — no human ask
     if any(text.startswith(prefix) for prefix in USER_TURN_INTERNAL_PREFIXES):
         # A merged prior-context carrier is reference-only scaffolding in front of
@@ -458,30 +467,72 @@ def _unwrap_carrier_candidate(message: dict):
             payload = content.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
         else:
             return None
-        return _candidate(payload)
+        if payload:
+            return _candidate(payload)
+        # #7681 media-only finding: a string carrier whose text after the
+        # marker is empty can still carry its live payload as non-text blocks
+        # in the sibling ``parts`` field (the agent's reader consults it for
+        # exactly this shape). Keep those blocks instead of returning None.
+        parts = message.get("parts")
+        if isinstance(parts, list):
+            media_blocks = [
+                item
+                for item in parts
+                if isinstance(item, dict)
+                and item.get("type") not in (None, "text", "input_text", "output_text")
+            ]
+            if media_blocks:
+                return _candidate(media_blocks)
+        return None
     if isinstance(content, list):
         # The agent walks the parts, keeps everything before the delimiter part,
         # and stops at the part carrying it. Joining all parts first would fold
         # the summary block back into the pre-delimiter slice and make every
         # standalone carrier look live (#7681 finding 5).
-        before: list[str] = []
+        # #7681 media-only finding: the kept slice must preserve NON-TEXT
+        # blocks, not just their text. Joining text only dropped an image-only
+        # live ask and left an empty payload, which then read as scaffolding.
+        before: list = []
         found_delimiter = False
         for item in content:
-            text = _part_text(item)
-            if _MERGED_SUMMARY_DELIMITER in text:
-                before.append(text.split(_MERGED_SUMMARY_DELIMITER, 1)[0])
+            if _MERGED_SUMMARY_DELIMITER in _part_text(item):
                 found_delimiter = True
                 break
-            before.append(text)
+            before.append(item)
         if found_delimiter:
-            payload = _live_payload_after_prior_context(_join_parts_text(before))
+            payload = _live_payload_after_prior_context(_join_parts(before))
+            # The live payload can be pure media: keep the non-text blocks so
+            # the candidate is not condemned as blank by the classifier.
+            media_blocks = [
+                item
+                for item in before
+                if isinstance(item, dict)
+                and item.get("type") not in (None, "text", "input_text", "output_text")
+            ]
+            if not payload and media_blocks:
+                return _candidate(media_blocks)
         else:
             # Legacy list form: the live ask follows the end marker in whichever
             # part carries it.
             joined = _join_parts(content)
             if _SUMMARY_END_MARKER not in joined:
                 return None
-            payload = joined.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
+            tail: list = []
+            seen_marker = False
+            for item in content:
+                if seen_marker:
+                    tail.append(item)
+                elif _SUMMARY_END_MARKER in _part_text(item):
+                    seen_marker = True
+            payload = _join_parts_text([_part_text(item) for item in tail]).lstrip()
+            media_blocks = [
+                item
+                for item in tail
+                if isinstance(item, dict)
+                and item.get("type") not in (None, "text", "input_text", "output_text")
+            ]
+            if not payload and media_blocks:
+                return _candidate(media_blocks)
         return _candidate(payload)
     return None
 
