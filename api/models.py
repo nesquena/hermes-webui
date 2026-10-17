@@ -11494,10 +11494,15 @@ def get_cli_sessions(
                         _profile_err,
                     )
             external_complete = True
-            # One resolve shared by every external-agent source (#4718).
-            _external_ws = str(get_last_workspace()) if (
-                include_claude_code or include_aider
-            ) else None
+            # One resolve shared by every external-agent source (#4718), paid
+            # only by the bridge that actually consumes it: Claude Code alone
+            # reads `_external_ws`, so an aider-only build must not resolve it.
+            _external_ws = str(get_last_workspace()) if include_claude_code else None
+            # Aider scans the PROFILE's own git root, not the ambient binding:
+            # a bare resolve lists the row from the global root while the detail
+            # load opens it against the profile root and returns []. Claude Code
+            # keeps the ambient resolve -- its history is global.
+            _aider_ws = _aider_profile_workspace() if include_aider else None
             if include_claude_code and source_filter in (None, CLAUDE_CODE_SOURCE):
                 try:
                     merged.extend(
@@ -11515,7 +11520,7 @@ def get_cli_sessions(
                 try:
                     merged.extend(
                         get_aider_sessions(
-                            **_external_scan_kwargs(get_aider_sessions, _external_ws)
+                            **_external_scan_kwargs(get_aider_sessions, _aider_ws)
                         )
                     )
                 except Exception as _aider_err:
