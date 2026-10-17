@@ -6318,6 +6318,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
             title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
             workspace=get_last_workspace(),
             model=cli_meta.get("model") or "unknown",
+            model_provider=cli_meta.get("model_provider"),
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
         )
@@ -6336,6 +6337,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
             profile=cli_meta.get("profile"),
             created_at=cli_meta.get("created_at"),
             updated_at=cli_meta.get("updated_at"),
+            model_provider=cli_meta.get("model_provider"),
         )
         _apply_source_meta(s)
 
@@ -7610,7 +7612,7 @@ def _normalize_provider_id(value: str | None) -> str:
             return normalized
     # Unknown prefix — return empty so callers treat it as "no match" and pass
     # the model through unchanged rather than incorrectly stripping it.
-    return "" 
+    return ""
 
 
 def _catalog_provider_id_sets(catalog: dict) -> tuple[set[str], set[str]]:
@@ -9849,16 +9851,10 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and Path(db_path).exists():
-            import sqlite3 as _sqlite
-            with closing(_sqlite.connect(str(db_path))) as _conn:
-                _conn.row_factory = _sqlite.Row
-                _row = _conn.execute(
-                    "SELECT source, title, model, cwd, started_at, ended_at "
-                    "FROM sessions WHERE id = ?", (sid,)
-                ).fetchone()
-                if _row is not None:
-                    state_db_row = dict(_row)
-                    state_db_source = str(_row["source"] or "").strip().lower()
+            from api.agent_sessions import read_state_db_claim_row
+            state_db_row = read_state_db_claim_row(db_path, sid)
+            if state_db_row is not None:
+                state_db_source = str(state_db_row.get("source") or "").strip().lower()
     except Exception:
         state_db_source = ""
     # Populate source metadata from state.db when cli_meta is empty so the
@@ -9881,6 +9877,8 @@ def _claim_or_synthesize_cli_session(sid: str, cli_meta: dict = None):
             cli_meta["title"] = state_db_row["title"]
         if not cli_meta.get("model") and state_db_row.get("model"):
             cli_meta["model"] = state_db_row["model"]
+        if not cli_meta.get("model_provider") and state_db_row.get("model_provider"):
+            cli_meta["model_provider"] = state_db_row["model_provider"]
         if not cli_meta.get("workspace") and state_db_row.get("cwd"):
             cli_meta["workspace"] = state_db_row["cwd"]
         # Map state.db timestamps to created_at/updated_at on the
@@ -19866,6 +19864,7 @@ def handle_post(handler, parsed) -> bool:
                     workspace=get_last_workspace(profile=_arch_profile),
                     messages=[],
                     model=cli_meta.get("model") or "unknown",
+                    model_provider=cli_meta.get("model_provider"),
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
                     profile=_arch_profile,
@@ -19894,6 +19893,7 @@ def handle_post(handler, parsed) -> bool:
                     profile=cli_meta.get("profile"),
                     created_at=cli_meta.get("created_at"),
                     updated_at=cli_meta.get("updated_at"),
+                    model_provider=cli_meta.get("model_provider"),
                 )
                 s.is_cli_session = is_cli_session_row(cli_meta)
                 s.source_tag = cli_meta.get("source_tag")
@@ -24864,7 +24864,7 @@ def _handle_live_models(handler, parsed):
                         custom_provider_entry = _cp
                     _config_ids.extend(_custom_provider_model_ids(_cp))
                     _allowlist_ids.extend(_custom_provider_allowlist_ids(_cp))
-            
+
             # Always try live fetch for custom providers — config entries are a
             # fallback, not a replacement.  The live endpoint should return ALL
             # models the key has access to, not just what's listed in config.yaml.
@@ -24900,7 +24900,7 @@ def _handle_live_models(handler, parsed):
                     try:
                         import urllib.request
                         import json
-                        
+
                         # Build the models endpoint URL
                         # AxonHub and similar OpenAI-compat endpoints serve /v1/models
                         _ep = _base_url.rstrip("/")
@@ -24909,15 +24909,15 @@ def _handle_live_models(handler, parsed):
                             _models_url = f"{_ep}/models"
                         else:
                             _models_url = f"{_ep}/v1/models"
-                        
+
                         _req = urllib.request.Request(
                             _models_url,
                             headers={"Authorization": f"Bearer {_api_key}"},
                         )
-                        
+
                         with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
                             _body = json.loads(_resp.read())
-                        
+
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
                         if isinstance(_body, dict):
                             _data = _body.get("data", [])
@@ -32976,55 +32976,91 @@ def _handle_session_import_cli(handler, body):
             sid,
             profile=(cli_meta or {}).get("profile") or refresh_profile,
         )
-        changed = False
-        if fresh_msgs and len(fresh_msgs) > len(existing.messages):
-            # Prefix-equality guard: only extend if existing messages are a prefix of
-            # the fresh CLI messages. Prevents silently dropping WebUI-added messages
-            # on hybrid sessions (user sent messages via WebUI while CLI continued).
-            if _is_messages_refresh_prefix_match(existing.messages, fresh_msgs):
-                existing.messages = fresh_msgs
-                changed = True
-        elif fresh_msgs and _is_cli_tool_metadata_enrichment(existing.messages, fresh_msgs):
-            # Same row count, richer payload: rebuild sidecars imported before
-            # CLI tool metadata was preserved (#1772).
-            existing.messages = fresh_msgs
-            changed = True
-        if cli_meta:
-            # A subagent child must never be flipped to CLI-classified /
-            # writable on an existing-session refresh either (#5307).
-            _existing_is_sa = (
-                (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
-                or (cli_meta.get("source_tag") or cli_meta.get("raw_source") or "").strip().lower() == "subagent"
-                or _is_subagent_child_session_id(sid)
-            )
-            updates = {
-                "is_cli_session": (False if _existing_is_sa else True),
-                "source_tag": existing.source_tag or cli_meta.get("source_tag"),
-                "raw_source": existing.raw_source or cli_meta.get("raw_source") or cli_meta.get("source_tag"),
-                "session_source": existing.session_source or cli_meta.get("session_source"),
-                "source_label": existing.source_label or cli_meta.get("source_label"),
-                "parent_session_id": existing.parent_session_id or cli_meta.get("parent_session_id"),
-            }
-            # A subagent child is view-only: also coerce read_only=True on the
-            # persisted sidecar so a stale writable (pre-fix) sidecar can't be
-            # used to start a WebUI turn (#5307).
-            if _existing_is_sa:
-                updates["read_only"] = True
-            for attr, value in updates.items():
-                if getattr(existing, attr, None) != value:
-                    setattr(existing, attr, value)
+        # Reload under the session lock before repair. The pre-lock load is
+        # stale if a model pick lands in between, and saving that object
+        # writes the old model/provider pair back over the pick.
+        with _get_session_agent_lock(sid):
+            current = Session.load(sid)
+            if current is None:
+                return bad(handler, "Session not found in CLI store", 404)
+            changed = False
+            if fresh_msgs and len(fresh_msgs) > len(current.messages):
+                # Prefix-equality guard: only extend if existing messages are a prefix of
+                # the fresh CLI messages. Prevents silently dropping WebUI-added messages
+                # on hybrid sessions (user sent messages via WebUI while CLI continued).
+                if _is_messages_refresh_prefix_match(current.messages, fresh_msgs):
+                    current.messages = fresh_msgs
                     changed = True
-        else:
-            _existing_is_sa = (
-                (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
-                or _is_subagent_child_session_id(sid)
-            )
-        if changed:
-            existing.save(touch_updated_at=False)
-            publish_session_list_changed(
-                "session_import_cli",
-                profile=getattr(existing, "profile", None),
-            )
+            elif fresh_msgs and _is_cli_tool_metadata_enrichment(current.messages, fresh_msgs):
+                # Same row count, richer payload: rebuild sidecars imported before
+                # CLI tool metadata was preserved (#1772).
+                current.messages = fresh_msgs
+                changed = True
+            if cli_meta:
+                # A subagent child must never be flipped to CLI-classified /
+                # writable on an existing-session refresh either (#5307).
+                _existing_is_sa = (
+                    (current.source_tag or current.raw_source or "").strip().lower() == "subagent"
+                    or (cli_meta.get("source_tag") or cli_meta.get("raw_source") or "").strip().lower() == "subagent"
+                    or _is_subagent_child_session_id(sid)
+                )
+                updates = {
+                    "is_cli_session": (False if _existing_is_sa else True),
+                    "source_tag": current.source_tag or cli_meta.get("source_tag"),
+                    "raw_source": current.raw_source or cli_meta.get("raw_source") or cli_meta.get("source_tag"),
+                    "session_source": current.session_source or cli_meta.get("session_source"),
+                    "source_label": current.source_label or cli_meta.get("source_label"),
+                    "parent_session_id": current.parent_session_id or cli_meta.get("parent_session_id"),
+                }
+                from api.agent_sessions import model_provider_backfill
+                # Only fill a missing provider, and only when the stored model
+                # still matches. A later WebUI model change must not inherit the
+                # old Desktop provider (#8249). Recomputed on the locked load.
+                filled_provider = model_provider_backfill(
+                    getattr(current, "model", None),
+                    _clean_session_model_provider(getattr(current, "model_provider", None)),
+                    cli_meta.get("model"),
+                    _clean_session_model_provider(cli_meta.get("model_provider")),
+                )
+                if filled_provider:
+                    updates["model_provider"] = filled_provider
+                # A subagent child is view-only: also coerce read_only=True on the
+                # persisted sidecar so a stale writable (pre-fix) sidecar can't be
+                # used to start a WebUI turn (#5307).
+                if _existing_is_sa:
+                    updates["read_only"] = True
+                for attr, value in updates.items():
+                    if getattr(current, attr, None) != value:
+                        setattr(current, attr, value)
+                        changed = True
+            else:
+                _existing_is_sa = (
+                    (current.source_tag or current.raw_source or "").strip().lower() == "subagent"
+                    or _is_subagent_child_session_id(sid)
+                )
+            if changed:
+                current.save(touch_updated_at=False)
+                publish_session_list_changed(
+                    "session_import_cli",
+                    profile=getattr(current, "profile", None),
+                )
+            # Session.load returns a new object. An already-open session stays
+            # in SESSIONS, and a later draft save of that object would wipe a
+            # disk-only repair. Copy the provider onto the resident object.
+            from api.agent_sessions import model_provider_backfill
+            from api.config import LOCK, SESSIONS
+            with LOCK:
+                resident = SESSIONS.get(sid)
+            if resident is not None and resident is not current:
+                resident_provider = model_provider_backfill(
+                    getattr(resident, "model", None),
+                    _clean_session_model_provider(getattr(resident, "model_provider", None)),
+                    cli_meta.get("model") if cli_meta else getattr(current, "model", None),
+                    getattr(current, "model_provider", None),
+                )
+                if resident_provider:
+                    resident.model_provider = resident_provider
+            existing = current
         return j(
             handler,
             {
@@ -33143,6 +33179,7 @@ def _handle_session_import_cli(handler, body):
         created_at=created_at,
         updated_at=updated_at,
         parent_session_id=cli_parent_session_id,
+        model_provider=(cli_meta or {}).get("model_provider"),
     )
     if cron_project_id:
         s.project_id = cron_project_id

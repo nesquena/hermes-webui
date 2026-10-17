@@ -8790,18 +8790,24 @@ def import_cli_session(
     created_at=None,
     updated_at=None,
     parent_session_id=None,
+    model_provider=None,
 ):
     """Create a new WebUI session populated with CLI/agent messages.
 
     Preserve parent_session_id from state.db so imported continuation segments
     keep their lineage in the WebUI store and sidebar instead of reappearing as
     detached orphan chats.
+
+    Preserve model_provider too. ``model`` is often a bare id shared by more
+    than one provider. Dropping the Desktop/CLI provider makes the next send
+    attach the profile's active provider instead (#8249).
     """
     s = Session(
         session_id=session_id,
         title=title,
         workspace=get_last_workspace(profile=profile),
         model=model,
+        model_provider=model_provider,
         messages=messages,
         profile=profile,
         created_at=created_at,
@@ -10532,6 +10538,7 @@ def _load_cli_sessions_uncached(
             'title': _display_title,
             'workspace': _cli_workspace(),
             'model': row['model'] or None,
+            'model_provider': row.get('model_provider'),
             'message_count': row['message_count'] or row['actual_message_count'] or 0,
             'created_at': row['started_at'],
             'updated_at': raw_ts,
@@ -10622,6 +10629,7 @@ def _load_cli_sessions_uncached(
                     'title': _display_title,
                     'workspace': _cli_workspace(),
                     'model': row['model'] or None,
+                    'model_provider': row.get('model_provider'),
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,
@@ -10691,6 +10699,7 @@ def _load_cli_sessions_uncached(
                     'title': _display_title,
                     'workspace': _cli_workspace(),
                     'model': row['model'] or None,
+                    'model_provider': row.get('model_provider'),
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,
@@ -10758,6 +10767,7 @@ def _load_cli_sessions_uncached(
                     'title': _title or 'Kanban Session',
                     'workspace': _cli_workspace(),
                     'model': row['model'] or None,
+                    'model_provider': row.get('model_provider'),
                     'message_count': row['message_count'] or row['actual_message_count'] or 0,
                     'created_at': row['started_at'],
                     'updated_at': raw_ts,

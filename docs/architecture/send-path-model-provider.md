@@ -91,6 +91,24 @@ so it is scoped to the browser tab and to one session id.
 | No session, matching dropdown option | the option's provider (empty composer) |
 | No session, no dropdown match | persisted state's provider, else `null` |
 
+## Import and materialize
+
+Opening a Desktop/CLI session copies the provider onto the sidecar before the
+send path runs. Lookup order is `model_config.gateway_runtime.provider`, then
+`model_config.provider`, then `billing_provider` when that value is a real
+provider. `auto` and `custom` are billing buckets, not identities, and stay
+unset so chat start still uses the profile provider.
+
+The recent-session list publishes that value as `model_provider`. A saved
+link to an older session is not in that capped list. The single-row claim
+path (`_claim_or_synthesize_cli_session`) reads the same columns, so that
+open does not drop the provider either.
+
+Re-import fills a missing sidecar provider only when the stored model still
+matches the imported model. A provider already set on the sidecar is not
+overwritten, and a later model change does not inherit the old Desktop
+provider.
+
 ## Tests
 
 - `tests/test_7860_model_provider_send_precedence.py` — drives the real

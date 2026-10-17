@@ -202,6 +202,116 @@ def _optional_col(name: str, columns: set[str], fallback: str = "NULL") -> str:
     return f"s.{name}" if name in columns else f"{fallback} AS {name}"
 
 
+def _model_provider_from_agent_row(row: dict) -> str | None:
+    """Return the provider a state.db session was created on.
+
+    ``sessions.model`` is a bare id that can exist on more than one provider.
+    ``model_config.provider`` is the session's selected provider. ``billing_provider``
+    is the standing billing identity on the session row, not a per-call fallback.
+    Prefer the selected provider. Fall back to billing identity only when config
+    has none. An empty result means the row never recorded a provider.
+    """
+    raw = row.get("model_config")
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            raw = None
+    if isinstance(raw, dict):
+        runtime = raw.get("gateway_runtime")
+        if isinstance(runtime, dict):
+            runtime_provider = str(runtime.get("provider") or "").strip().lower()
+            # Newest route, unless it is only a billing bucket. A bare
+            # `custom` here is not an endpoint. A named `custom:my-relay` is.
+            if runtime_provider and runtime_provider not in {"auto", "custom", "default"}:
+                return runtime_provider
+        provider = str(raw.get("provider") or "").strip().lower()
+        if provider and provider != "default":
+            return provider
+    billing = str(row.get("billing_provider") or "").strip().lower()
+    # `auto` and `custom` are billing buckets, not provider identities. The
+    # Agent leaves those unset and uses the profile provider
+    # (hermes_state._BARE_BILLING_PROVIDERS). Pinning the bare bucket drops
+    # a named custom endpoint such as custom:my-relay.
+    if billing and billing not in {"auto", "custom", "default"}:
+        return billing
+    return None
+
+
+def model_provider_backfill(existing_model, existing_provider, incoming_model, incoming_provider) -> str | None:
+    """Provider to write onto a sidecar that has none, or None to leave it.
+
+    A session imported before the provider was preserved can have an empty
+    ``model_provider``. Re-import may fill that only when the stored model
+    still matches the imported model. A later model change must not inherit
+    the old Desktop provider.
+    """
+    incoming = str(incoming_provider or "").strip().lower()
+    # `auto` and `default` are never a route. `custom` is rejected only on the
+    # billing fallback above. An explicit model_config.provider of `custom`
+    # must still backfill, or re-import drops that route.
+    if not incoming or incoming in {"auto", "default"}:
+        return None
+    existing = str(existing_provider or "").strip().lower()
+    if existing and existing != "default":
+        return None
+    stored = str(existing_model or "").strip().lower()
+    imported = str(incoming_model or "").strip().lower()
+    if stored in ("", "unknown") or imported in ("", "unknown"):
+        return incoming
+    if stored != imported:
+        return None
+    return incoming
+
+
+_CLAIM_ROW_COLUMNS = (
+    "source",
+    "title",
+    "model",
+    "cwd",
+    "started_at",
+    "ended_at",
+    "model_config",
+    "billing_provider",
+)
+
+
+def read_state_db_claim_row(db_path, sid: str) -> dict | None:
+    """Read one state.db session for the saved-link claim path.
+
+    The recent-session list is capped, so an older Desktop/CLI session opened
+    by id never reaches that projection. This read must still carry the
+    provider. Columns that an older state.db lacks are omitted rather than
+    failing the whole lookup.
+    """
+    if not db_path or not sid:
+        return None
+    path = Path(db_path)
+    if not path.exists():
+        return None
+    with closing(open_state_db_readonly(path)) as conn:
+        conn.row_factory = sqlite3.Row
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+        selected = [name for name in _CLAIM_ROW_COLUMNS if name in columns]
+        if "id" not in columns or "source" not in selected:
+            return None
+        row = conn.execute(
+            f"SELECT {', '.join(selected)} FROM sessions WHERE id = ?",
+            (sid,),
+        ).fetchone()
+        if row is None:
+            return None
+        data = dict(row)
+    provider = _model_provider_from_agent_row(data)
+    data.pop("model_config", None)
+    data.pop("billing_provider", None)
+    if provider:
+        data["model_provider"] = provider
+    return data
+
+
 def _safe_lower(value) -> str:
     return str(value or "").strip().lower()
 
@@ -650,6 +760,9 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         for key in (
             'id', 'model', 'message_count', 'actual_message_count', 'actual_user_message_count',
             'ended_at', 'end_reason', 'last_activity', 'archived',
+            # The tip's model is copied above. Its provider has to travel with
+            # that model, or a compressed Desktop session imports as a bare id.
+            'model_config', 'billing_provider',
         ):
             if key in tip:
                 merged[key] = tip[key]
@@ -808,6 +921,7 @@ def read_importable_agent_session_rows(
         platform_expr = _optional_col('platform', session_cols)
         archived_expr = _optional_col('archived', session_cols)
         project_id_expr = _optional_col('project_id', session_cols)
+        billing_provider_expr = _optional_col('billing_provider', session_cols)
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
         # or a ``messages`` table without a ``session_id`` / ``timestamp`` column.
         # The projection SQL below joins ``messages`` and aggregates
@@ -1004,6 +1118,7 @@ def read_importable_agent_session_rows(
                    {ended_expr},
                    {end_reason_expr},
                    {archived_expr},
+                   {billing_provider_expr},
                    {actual_count_expr} AS actual_message_count,
                    {user_message_count_expr} AS actual_user_message_count,
                    {last_activity_expr} AS last_activity
@@ -1011,11 +1126,19 @@ def read_importable_agent_session_rows(
 
         def _project(raw_rows: list[dict]) -> list[dict]:
             projected = _project_agent_session_rows(raw_rows)
-            # model_config is selected only so the continuation classifier can
-            # read the real _branched_from/_delegate_from markers; it is internal
+            # model_config is selected so the continuation classifier can read
+            # the real _branched_from/_delegate_from markers, and so import can
+            # recover the session's selected provider. The raw blob is internal
             # agent state and must not leak into the /api/sessions response.
+            # Publish only the provider id. A bare model id is not enough: the
+            # same id can exist on the profile provider and on the provider the
+            # Desktop/CLI session was created on (#8249).
             for row in projected:
+                provider = _model_provider_from_agent_row(row)
+                if provider:
+                    row['model_provider'] = provider
                 row.pop('model_config', None)
+                row.pop('billing_provider', None)
             projected = [_with_normalized_source(row) for row in projected]
             return [row for row in projected if is_cli_session_row_visible(row)]
 
