@@ -14,13 +14,16 @@ profile only:
    profile.
 
 The fix mirrors the detail-load endpoint's cross-profile contract (#7710):
-retry the CLI metadata lookup with ``all_profiles=True``, then emit a
+retry the CLI metadata lookup across every profile, then emit a
 structured ``409 session_profile_mismatch`` carrying the owning profile's
 name for a KNOWN other profile (the frontend's
 ``_sessionProfileMismatchFromError`` already turns that into a profile
 switch), keep the bare 404 for unknown/legacy None-profile rows so the
 browser's stale-URL self-heal still fires, and let same-profile sessions
-archive exactly as before.
+archive exactly as before. Re-gate CORE (#7826): a same-profile match
+through the OWNER-ONLY fallback now returns 404 — the fallback exists
+solely to turn a foreign owner into a 409, and it cannot prove a row is
+writable (see test_same_profile_fallback_match_now_404s_without_materializing).
 
 These tests drive the real ``handle_post`` dispatcher (not source-text
 greps) so the contract is pinned by behaviour, per the #7649 lesson that
@@ -179,11 +182,22 @@ def test_cross_profile_409_does_not_materialize_a_session(
     assert published == [], "409 path must not publish a list-changed event"
 
 
-def test_same_profile_session_still_archives(
+def test_same_profile_fallback_match_now_404s_without_materializing(
     routes_module, archive_env, monkeypatch
 ):
-    """Regression guard: a session whose profile matches the active one must
-    archive exactly as before (the all-profiles retry is transparent)."""
+    """Re-gate CORE: a same-profile match through the OWNER-ONLY fallback must
+    404, not materialize.
+
+    The fallback exists solely to turn a foreign owner into a 409. It opens
+    state.db read-only and carries none of the metadata a write path needs —
+    most visibly ``read_only`` — so a same-profile match through it cannot be
+    proven writable. The row was ALSO invisible to the active-profile CLI
+    lookup (that is why the fallback ran), so master's behaviour for it is a
+    bare 404; materializing it into a writable sidecar would both change
+    master's outcome and silently re-parent a read-only foreign session
+    (the #7826 re-gate CORE finding). Writable same-profile CLI rows archive
+    through the NORMAL active-profile lookup, never through this fallback.
+    """
     same_profile_meta = dict(CLI_META_OTHER, profile="default")
     monkeypatch.setattr(
         routes_module, "_lookup_cli_session_owner_readonly",
@@ -192,38 +206,32 @@ def test_same_profile_session_still_archives(
                 {"role": "assistant", "content": "hello"}]
     monkeypatch.setattr(routes_module, "get_cli_session_messages",
                         lambda _sid: messages)
-    fake_session = SimpleNamespace(
-        session_id="20260925_otherprof_abcd", archived=False,
-        profile="default", messages=[], title="x",
-        compact=lambda: {"session_id": "20260925_otherprof_abcd",
-                         "archived": True, "profile": "default"},
-        save=lambda **kw: saved.append(kw))
-    saved = []
+    side_effects = []
 
-    def fake_import(*args, **kwargs):
-        fake_session.is_cli_session = True
-        # #7738: the archive handler re-resolves the session under the agent
-        # lock (``SESSIONS.get(sid)`` -> ``Session.load(sid)``) before it
-        # mutates ``archived``. The real ``import_cli_session`` persists the
-        # sidecar, so that re-resolve finds it again; this stand-in has no
-        # disk, so it must publish into the LRU the same way. Without this the
-        # handler 404s on its own freshly-imported session — a fake-only
-        # artifact, not a production regression.
-        with routes_module.LOCK:
-            routes_module.SESSIONS[fake_session.session_id] = fake_session
-            routes_module.SESSIONS.move_to_end(fake_session.session_id)
-        return fake_session
-    monkeypatch.setattr(routes_module, "import_cli_session", fake_import)
-    monkeypatch.setattr(routes_module, "is_cli_session_row", lambda _m: True)
+    class _SpySession:
+        def __init__(self, *a, **k):
+            side_effects.append("Session-ctor")
+
+        def save(self, *a, **k):
+            side_effects.append("save")
+
+        def compact(self):
+            return {"session_id": "20260925_otherprof_abcd", "archived": False}
+
+    monkeypatch.setattr(routes_module, "Session", _SpySession)
+    monkeypatch.setattr(routes_module, "import_cli_session",
+                        lambda *a, **k: side_effects.append("import"))
     monkeypatch.setattr(routes_module, "publish_session_list_changed",
-                        lambda *a, **k: None)
+                        lambda *a, **k: side_effects.append("publish"))
 
     status, payload = _post_archive(routes_module, {
         "session_id": "20260925_otherprof_abcd", "archived": True})
 
-    assert status == 200, f"same-profile archive must still succeed: {payload}"
-    assert fake_session.archived is True
-    assert saved and saved[-1].get("touch_updated_at") is False
+    assert status == 404, (
+        f"a same-profile fallback match must 404 (master's behaviour), got "
+        f"{status}: {payload}")
+    assert side_effects == [], (
+        f"a 404 must not construct/save/import/publish: {side_effects}")
 
 
 def test_unknown_sid_keeps_404_even_with_all_profiles_retry(
