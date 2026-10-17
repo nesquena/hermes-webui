@@ -33,7 +33,7 @@ def test_doc_states_the_raw_write_rule_and_both_failure_modes():
     assert "_load_yaml_config_file_raw" in text
     assert "_save_yaml_config_file" in text
     # the two consequences a future writer must not reintroduce
-    assert "bake" in text.lower() or "baked" in text.lower()
+    assert "bake" in text.lower()  # covers "baked"
     assert "cross-profile" in text.lower()
 
 
