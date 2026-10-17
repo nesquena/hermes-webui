@@ -109,7 +109,22 @@ probe is unavailable; with no allowlist, the configured ids (singular +
 plural) are served. A discovered catalog therefore still serves its saved
 models on a transient probe failure instead of emptying the picker.
 
-## Tests
+## Named custom-provider catalog and cards
+
+For named `custom_providers` entries carrying `models_discovered: true`,
+`/api/models` applies the same discovered-catalog predicate: a successful,
+non-empty live probe replaces the saved plural snapshot instead of appending
+retired snapshot IDs. An explicit `discover_models: false` keeps configured
+pins, and an empty or failed probe retains the saved snapshot as a fallback.
+The singular `model:` remains sticky/default metadata.
+
+`/api/providers` derives these discovered provider cards from the canonical
+`get_available_models()` group, including overflow entries, so card IDs and
+`models_total` describe the same catalog as the picker. Provider-qualified
+picker IDs are converted back to provider-local IDs on the card. Several
+discovered cards share one catalog lookup per response.
+
+## Regression coverage
 
 - `tests/test_issue3718_live_models_custom_probe.py` — real-handler
   (`_handle_live_models`) coverage of every signal above: plural list /
@@ -119,5 +134,9 @@ models on a transient probe failure instead of emptying the picker.
   `discover_models: false` pinning, and both fallback branches.
 - `tests/test_issue7404_models_discovered_not_allowlist.py` — the
   `/api/models` side of the discovered-catalog contract.
+- `tests/test_issue8080_custom_discovered_catalog.py` — named discovered
+  snapshots, provider-card agreement, explicit pins, unavailable-probe
+  fallbacks, and refresh of a warm provider-card cache, using a local HTTP
+  catalog server.
 - `tests/test_byok_model_dropdown.py` — picker rendering, profile-scoped
   caching, and current-session model preservation around this endpoint.
