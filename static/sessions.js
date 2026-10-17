@@ -10101,9 +10101,19 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   // of scope (keep it hidden). Mirrors the project-scope check below exactly, and
   // is restored afterwards so a later standalone call cannot read a stale scope.
   const previousRenderScopeIds=(typeof _sidebarRenderScopeSessionIds==='undefined')?null:_sidebarRenderScopeSessionIds;
-  const projectScoped=(s)=>{
-    if(_activeProject===NO_PROJECT_FILTER) return !s.project_id;
-    if(_activeProject) return s.project_id===_activeProject;
+  // Mirrors the per-row admission test in the loop below EXACTLY — including the
+  // project resolver (a delegated subagent with no project_id inherits its
+  // parent's, so a raw s.project_id check here would disagree with what the loop
+  // actually renders) and the raw s.project_id in the default_hidden exception,
+  // which is what the loop compares. Keep these in step: if the loop's scoping
+  // changes, this must change with it, or the scope set stops describing the
+  // render. Loop lines: the default_hidden `continue` and the project filter.
+  const inRenderScope=(s)=>{
+    if(!s) return false;
+    if(s.default_hidden&&!(_activeProject&&_activeProject!==NO_PROJECT_FILTER&&s.project_id===_activeProject)) return false;
+    const projectId=projectIdFor(s);
+    if(_activeProject===NO_PROJECT_FILTER) return !projectId;
+    if(_activeProject) return projectId===_activeProject;
     return true;
   };
   // Guarded on both sides: the binding is a top-level `let` in sessions.js, but
@@ -10112,7 +10122,7 @@ function _partitionSidebarSessionRows(allMatched, activeSidForSidebar){
   // and simply leaves the fix inert rather than throwing ReferenceError.
   if(typeof _sidebarRenderScopeSessionIds!=='undefined'){
     _sidebarRenderScopeSessionIds=new Set((allMatched||[])
-      .filter(s=>s&&s.session_id&&!s.default_hidden&&projectScoped(s))
+      .filter(s=>s&&s.session_id&&inRenderScope(s))
       .map(s=>s.session_id));
   }
   for(const s of allMatched){
