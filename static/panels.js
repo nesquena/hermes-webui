@@ -9377,6 +9377,8 @@ function _preferencesPayloadFromUi(){
   if(showCliCb) payload.show_cli_sessions=showCliCb.checked;
   const showClaudeCodeCb=$('settingsShowClaudeCodeSessions');
   if(showClaudeCodeCb) payload.show_claude_code_sessions=showClaudeCodeCb.checked;
+  const showAiderCb=$('settingsShowAiderSessions');
+  if(showAiderCb) payload.show_aider_sessions=showAiderCb.checked;
   const showCronCb=$('settingsShowCronSessions');
   // Gate cron sessions on CLI sessions (the server short-circuits otherwise),
   // identically to the explicit saveSettings() path, so neither save route can
@@ -10169,10 +10171,17 @@ async function loadSettingsPanel(){
       showClaudeCodeCb.disabled=showCliCb?!showCliCb.checked:true;
       showClaudeCodeCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
     }
+    const showAiderCb=$('settingsShowAiderSessions');
+    if(showAiderCb){
+      showAiderCb.checked=!!settings.show_aider_sessions;
+      showAiderCb.disabled=showCliCb?!showCliCb.checked:true;
+      showAiderCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
     if(showCliCb){showCliCb.addEventListener('change',function(){
       const enabled=!!showCliCb.checked;
       if(showCronCb) showCronCb.disabled=!enabled;
       if(showClaudeCodeCb) showClaudeCodeCb.disabled=!enabled;
+      if(showAiderCb) showAiderCb.disabled=!enabled;
       _schedulePreferencesAutosave();
     },{once:false});}
     const showCronCb=$('settingsShowCronSessions');
@@ -13547,6 +13556,7 @@ async function saveSettings(andClose){
   const fadeTextEffect=!!($('settingsFadeTextEffect')||{}).checked;
   const showCliSessions=!!($('settingsShowCliSessions')||{}).checked;
   const showClaudeCodeSessions=!!($('settingsShowClaudeCodeSessions')||{}).checked;
+  const showAiderSessions=!!($('settingsShowAiderSessions')||{}).checked;
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showWebhookSessions=!!($('settingsShowWebhookSessions')||{}).checked;
   const showKanbanSessions=!!($('settingsShowKanbanSessions')||{}).checked;
@@ -13609,6 +13619,11 @@ async function saveSettings(andClose){
   body.show_kanban_sessions=showCliSessions&&showKanbanSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
+  // Persist the aider opt-out child independently, exactly like claude_code.
+  // Kept below pinned_sessions_limit so the contiguous
+  // show_cli_sessions..pinned_sessions_limit block stays evaluable in isolation
+  // (tests/test_issue4714_claude_code_visibility_toggle.py scrapes and evals it).
+  body.show_aider_sessions=showAiderSessions;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;

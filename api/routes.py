@@ -964,8 +964,10 @@ def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
         str(cli_meta.get("raw_source") or "").strip().lower(),
     }
     # Profile-less external-agent rows that live outside the Hermes profile tree.
-    # Claude Code: scanned from ~/.claude/projects; Codex: scanned from ~/.codex/
-    profile_agnostic_sources = {CLAUDE_CODE_SOURCE}
+    # Claude Code: scanned from ~/.claude/projects; Aider: scanned from the
+    # workspace git root. Both are global rather than profile-owned, so the
+    # detail-load profile gate must not 404 them on a named profile.
+    profile_agnostic_sources = {CLAUDE_CODE_SOURCE, AIDER_SOURCE}
     try:
         from api.codex_sessions import CODEX_SOURCE
         profile_agnostic_sources.add(CODEX_SOURCE)
@@ -2418,6 +2420,18 @@ def _callable_accepts_kwarg(callable_obj, kwarg_name: str) -> bool:
     )
 
 
+def _aider_include_kwargs(show_aider_sessions: bool) -> dict:
+    """Thread ``include_aider`` only when the installed models.py understands it.
+
+    Same defensive shape as the ``include_claude_code`` branch above: focused
+    tests monkeypatch ``routes.get_cli_sessions`` with narrower signatures, and a
+    stale/older models module must not break the sidebar route.
+    """
+    if _callable_accepts_kwarg(get_cli_sessions, "include_aider"):
+        return {"include_aider": bool(show_aider_sessions)}
+    return {}
+
+
 def _session_list_cache_key(
     active_profile: str | None,
     all_profiles: bool,
@@ -2434,6 +2448,7 @@ def _session_list_cache_key(
     archived_limit: int | None = None,
     archived_offset: int = 0,
     show_claude_code_sessions: bool = True,
+    show_aider_sessions: bool = True,
 ) -> tuple:
     return _route_session_list_cache_key(
         active_profile=active_profile,
@@ -2450,7 +2465,7 @@ def _session_list_cache_key(
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
         archived_offset=archived_offset,
-    ) + (bool(show_claude_code_sessions),)
+    ) + (bool(show_claude_code_sessions), bool(show_aider_sessions))
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -2687,6 +2702,7 @@ def _build_session_list_cache_payload(
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
     show_claude_code_sessions: bool = True,
+    show_aider_sessions: bool = True,
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
@@ -2755,6 +2771,7 @@ def _build_session_list_cache_payload(
                 source_filter=source_filter,
                 all_profiles=all_profiles,
                 include_claude_code=show_claude_code_sessions,
+                **_aider_include_kwargs(show_aider_sessions),
             )
         else:
             # Focused tests sometimes monkeypatch routes.get_cli_sessions with
@@ -3057,6 +3074,7 @@ def _build_session_list_cache_payload(
             "show_previous_messaging_sessions": show_previous_messaging_sessions,
             "show_cron_sessions": show_cron_sessions,
             "show_claude_code_sessions": show_claude_code_sessions if show_cli_sessions else False,
+            "show_aider_sessions": show_aider_sessions if show_cli_sessions else False,
             "show_webhook_sessions": show_webhook_sessions,
             "show_kanban_sessions": show_kanban_sessions,
         },
@@ -9614,6 +9632,19 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     return _state_db_session_source(sid) == "subagent"
 
 
+def _is_aider_session_id(sid: str) -> bool:
+    """Return True when ``sid`` is an Aider chat-history import id (#674).
+
+    Aider conversations are bridged READ-ONLY: the WebUI renders a transcript
+    parsed out of a ``.aider.chat.history.md`` file that the user owns
+    independently of this app. Materializing one as a writable WebUI session
+    would let a composer turn take ownership of a conversation that is still
+    live in Aider, so the id prefix is the external read-only identity -- it
+    cannot be laundered by a metadata lookup that happens to miss.
+    """
+    return str(sid or "").startswith(f"{AIDER_SOURCE}_")
+
+
 def _session_is_subagent_view_only(sid: str) -> bool:
     """Return True when ``sid`` is a delegated subagent child by ANY signal —
     state.db source OR a persisted WebUI sidecar tagged subagent.
@@ -12073,6 +12104,7 @@ from api.models import (
     save_projects,
     import_cli_session,
     CLAUDE_CODE_SOURCE,
+    AIDER_SOURCE,
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
@@ -16469,6 +16501,7 @@ def handle_get(handler, parsed) -> bool:
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
             show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
+            show_aider_sessions = bool(settings.get("show_aider_sessions"))
             show_previous_messaging_sessions = bool(
                 settings.get("show_previous_messaging_sessions")
             )
@@ -16492,6 +16525,7 @@ def handle_get(handler, parsed) -> bool:
                 all_profiles=all_profiles,
                 show_cli_sessions=show_cli_sessions,
                 show_claude_code_sessions=show_claude_code_sessions,
+                show_aider_sessions=show_aider_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
                 include_archived=include_archived,
@@ -16515,6 +16549,7 @@ def handle_get(handler, parsed) -> bool:
                     all_profiles=all_profiles,
                     show_cli_sessions=show_cli_sessions,
                     show_claude_code_sessions=show_claude_code_sessions,
+                    show_aider_sessions=show_aider_sessions,
                     show_previous_messaging_sessions=show_previous_messaging_sessions,
                     show_cron_sessions=show_cron_sessions,
                     include_archived=include_archived,
@@ -19602,6 +19637,7 @@ def handle_post(handler, parsed) -> bool:
             for k in (
                 "show_cli_sessions",
                 "show_claude_code_sessions",
+                "show_aider_sessions",
                 "show_cron_sessions",
                 "show_webhook_sessions",
                 "show_kanban_sessions",
@@ -33019,6 +33055,13 @@ def _handle_session_import_cli(handler, body):
                 (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
                 or _is_subagent_child_session_id(sid)
             )
+            # #674: a metadata MISS on the refresh path must not launder an
+            # external Aider conversation back into a writable session either.
+            # Without the coercion below, a stale writable sidecar imported
+            # before the read-only gate survives a refresh unchanged.
+            if _is_aider_session_id(sid) and not getattr(existing, "read_only", False):
+                existing.read_only = True
+                changed = True
         if changed:
             existing.save(touch_updated_at=False)
             publish_session_list_changed(
@@ -33088,7 +33131,13 @@ def _handle_session_import_cli(handler, body):
     # can miss it (#5307 cross-profile edge).
     _cli_sa = (cli_source_tag or cli_raw_source or "").strip().lower() == "subagent"
     _sa_child = _sa_child or _cli_sa
-    _read_only_view = cli_read_only or _sa_child
+    # #674: an Aider id is an EXTERNAL read-only conversation. Aider list
+    # metadata carries ``profile: None``, so an all-profiles resolve can miss
+    # and return {} while the profile-aware message lookup still succeeds --
+    # which previously let a real CLI import run and mint a
+    # writable sidecar. The id prefix is the read-only identity (#674).
+    _aider_ro = _is_aider_session_id(sid)
+    _read_only_view = cli_read_only or _sa_child or _aider_ro
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")
