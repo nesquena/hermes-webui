@@ -49,16 +49,14 @@ def _pdf_bytes(*pages: str) -> bytes:
     # /Pages number up front — page objects must /Parent-reference it.
     pages_obj_number = 1 + (2 * len(pages)) + 1
     page_numbers: list[int] = []
-    for lines in pages:
+    for page_text in pages:
         # One Tj per line at descending positions, so the page really carries
         # line breaks (a single Tj is one line and cannot exercise the
         # line-structure preservation).
         ops = ["BT /F1 12 Tf 72 720 Td"]
-        for index, line in enumerate(pages_text_lines(lines)):
+        for index, line in enumerate(page_text.split("\n")):
             escaped = line.replace("\\", r"\\").replace("(", r"\(").replace(")", r"\)")
-            if index:
-                ops.append("0 -14 Td")
-            ops.append(f"({escaped}) Tj")
+            ops.extend(("0 -14 Td", f"({escaped}) Tj") if index else (f"({escaped}) Tj",))
         ops.append("ET")
         stream = " ".join(ops).encode("ascii", errors="replace")
         content_number = add(b"<< /Length " + str(len(stream)).encode("ascii") + b" >>\nstream\n" + stream + b"\nendstream")
@@ -97,11 +95,6 @@ def _pdf_bytes(*pages: str) -> bytes:
         out += f"{offset:010d} 00000 n \n".encode("ascii")
     out += b"trailer\n<< /Size " + str(len(objects) + 1).encode("ascii") + b" /Root " + str(catalog_number).encode("ascii") + b" 0 R >>\nstartxref\n" + str(xref_offset).encode("ascii") + b"\n%%EOF\n"
     return bytes(out)
-
-
-def pages_text_lines(page_text: str) -> list[str]:
-    """Split a page's text into the lines the PDF will lay out."""
-    return [line for line in str(page_text).split("\n")]
 
 
 def _encrypted_pdf_bytes(*pages: str, user_password: str = "owner-secret") -> bytes:
