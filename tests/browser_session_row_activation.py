@@ -16,7 +16,7 @@ WHY THIS EXISTS
 WHAT IT CHECKS (Chromium, plus Firefox and WebKit when their Playwright
 builds are installed and launch; WebKit needs its system libraries)
   - Tab from the conversation filter reaches a conversation title;
-  - every row title is a focusable link; the open conversation's title carries
+  - every row title is a native button; the open conversation's title carries
     aria-current="page", the others do not;
   - mouse events without pointer events (how Firefox performs an assistive
     technology's activate action) open the conversation, once;
@@ -25,12 +25,12 @@ builds are installed and launch; WebKit needs its system libraries)
     does not open again; with a tool approval card visible, that Enter does
     not answer the approval (document-level Enter shortcut);
   - a right-click on a row does not swallow the next keyboard activation;
-  - a sidebar repaint never moves focus to a title (a screen reader's reading
-    cursor would be pulled back to the list);
+  - a sidebar repaint restores the same focused title and never steals focus
+    from a control outside the list;
   - a real mouse click still opens the conversation exactly once;
   - Enter on a row's actions trigger opens its menu and does not open the
     conversation;
-  - in selection mode the title is not a link (the row checkbox is the control);
+  - in selection mode the title is not a button (the row checkbox is the control);
   - clicking another title during a rename commits and ends the rename, and
     clicking a title during a project rename saves the project name.
   touch (Chromium, 390x844, drawer open)
@@ -156,8 +156,9 @@ TITLES_JS = """() => Array.from(document.querySelectorAll('#sessionList .session
   const title = row.querySelector('.session-title');
   return {
     sid: row.dataset.sid,
+    tag: title && title.tagName,
     role: title && title.getAttribute('role'),
-    tabindex: title && title.getAttribute('tabindex'),
+    tabindex: title && title.tabIndex,
     current: title && title.getAttribute('aria-current'),
   };
 })"""
@@ -314,8 +315,8 @@ def _check_desktop(page, seed, name):
         if not t:
             fail(f"row {sid} missing from the sidebar")
             return failures
-        if t["role"] != "link" or t["tabindex"] != "0":
-            fail(f"title of {sid} is not a focusable link: {t}")
+        if t["tag"] != "BUTTON" or t["role"] is not None or t["tabindex"] != 0:
+            fail(f"title of {sid} is not a native focusable button: {t}")
     if titles[alpha]["current"] != "page":
         fail(f"open conversation's title lacks aria-current=page: {titles[alpha]}")
     if titles[beta]["current"] is not None:
@@ -446,9 +447,7 @@ def _check_desktop(page, seed, name):
     if _opens(page) != [beta]:
         fail(f"Enter after a right-click opened {_opens(page)}, expected exactly [beta]")
 
-    # A screen reader leaves the browser focus on the activated title while its
-    # reading cursor moves through the conversation. A background repaint must
-    # not focus anything: NVDA would pull the reading cursor back to the list.
+    # Preserve the original PR's focus identity across a destructive repaint.
     _title(page, alpha).focus()
     page.evaluate("""() => {
       window.__titleFocusEvents = 0;
@@ -461,8 +460,12 @@ def _check_desktop(page, seed, name):
     }""")
     page.evaluate("() => { renderSessionListFromCache(); renderSessionListFromCache(); }")
     page.wait_for_timeout(SETTLE_MS)
-    if page.evaluate("() => window.__titleFocusEvents"):
-        fail("a background sidebar repaint moved focus to a conversation title")
+    if page.evaluate(FOCUSED_SID_JS) != alpha:
+        fail("a sidebar repaint did not restore the same focused title")
+    page.focus('#msg')
+    page.evaluate("() => { renderSessionListFromCache(); renderSessionListFromCache(); }")
+    if not page.evaluate("() => document.activeElement === document.getElementById('msg')"):
+        fail("a sidebar repaint stole focus from the composer")
 
     page.evaluate("() => document.activeElement && document.activeElement.blur()")
     _open(page, beta)
@@ -647,9 +650,9 @@ def _check_desktop(page, seed, name):
 
     page.evaluate("() => toggleSessionSelectMode()")
     page.wait_for_timeout(300)
-    roles = [t["role"] for t in page.evaluate(TITLES_JS)]
-    if any(roles):
-        fail(f"selection mode still exposes titles as links: {roles}")
+    titles = page.evaluate(TITLES_JS)
+    if any(t['tag'] == 'BUTTON' or t['tabindex'] >= 0 for t in titles):
+        fail(f"selection mode still exposes focusable titles: {titles}")
     page.evaluate("() => exitSessionSelectMode()")
     page.wait_for_timeout(300)
     return failures
@@ -936,7 +939,7 @@ def main():
                     print(f"NOTE {name}: Playwright's {name} build is not installed; skipped")
             for name, engine, launch_args in engines:
                 try:
-                    browser = engine.launch(headless=True, **launch_args)
+                    browser = engine.launch(headless=True, timeout=15000, **launch_args)
                 except Exception as exc:  # e.g. WebKit without its system libraries
                     if name == "chromium":
                         raise
