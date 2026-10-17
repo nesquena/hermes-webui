@@ -1080,3 +1080,114 @@ def test_credential_less_openrouter_still_repaired_when_canonical_group_exists(
         monkeypatch, tmp_path, session=session, catalog=catalog, profile_cfg=profile_cfg
     )
     assert captured["model_provider"] == "nous", captured
+
+
+def _drive_native_record_shape(monkeypatch, tmp_path, *, record):
+    """Drive the ``glm`` identity against the reviewer's catalog, one native record.
+
+    The installed Agent resolves a raw ``providers:`` record through its own
+    alias/endpoint vocabulary, so the probe is scoped to the OWNERSHIP PROJECTION
+    alone: built-in credential and plugin rescue are disabled so neither can mask
+    the record-ownership defect under test. ``record`` is the single
+    ``providers:`` entry declared for the stored ``glm`` identity.
+    """
+    session = _chat_session(tmp_path, model_provider="glm")
+    # ``zai`` is the canonical target of ``glm`` and exists as a catalog group
+    # but does NOT own the model; ``nous`` is the sole owner.
+    catalog = _catalog(
+        _group("zai", "zai-unused-model"),
+        _group("nous", "deepseek/deepseek-v4.1-flash"),
+    )
+    profile_cfg = {"model": {"provider": "nous"}, "providers": record}
+    monkeypatch.setattr(routes, "is_plugin_model_provider", lambda _pid: False, raising=False)
+    monkeypatch.setattr(
+        routes, "provider_has_usable_credential", lambda _pid, **_kw: False, raising=False
+    )
+    return _drive_chat_start(
+        monkeypatch, tmp_path, session=session, catalog=catalog, profile_cfg=profile_cfg
+    )
+
+
+def test_native_record_api_endpoint_spelling_keeps_lane(monkeypatch, tmp_path):
+    """``api`` + ``api_key_env`` is the Agent's endpoint spelling (#8179 P2 shape 1).
+
+    ``_entry_url`` precedence reads ``api`` before ``url`` before ``base_url``,
+    and the credential is declared through ``api_key_env``. The installed
+    Agent's resolver recognizes this record as ``glm`` with its own endpoint;
+    a projection that reads only the mapping key and ``base_url`` misses it and
+    hands ``nous`` off to dispatch.
+    """
+    captured = _drive_native_record_shape(
+        monkeypatch,
+        tmp_path,
+        record={"glm": {"api": "https://glm.example/v1", "api_key_env": "OWN_NATIVE_KEY"}},
+    )
+    assert captured["model_provider"] == "glm", captured
+
+
+def test_native_record_url_endpoint_spelling_keeps_lane(monkeypatch, tmp_path):
+    """``url`` is the second ``_entry_url`` spelling, and keyless is valid (#8179 P2 shape 2).
+
+    A declared-keyless lane is not evidence against ownership: the record
+    names the endpoint it serves, which is exactly the declaration that keeps
+    the lane on master.
+    """
+    captured = _drive_native_record_shape(
+        monkeypatch,
+        tmp_path,
+        record={"glm": {"url": "https://glm.example/v1"}},
+    )
+    assert captured["model_provider"] == "glm", captured
+
+
+def test_native_record_named_by_display_name_keeps_lane(monkeypatch, tmp_path):
+    """A record that names the identity in ``name`` owns it (#8179 P2 shape 3).
+
+    ``providers.actual`` names ``glm`` in its display ``name`` rather than in
+    its config key. The Agent mints its alias set from BOTH, so the record is
+    ``glm``'s authority; a projection that compares the mapping key alone sees
+    only ``actual`` and hands ``nous`` off to dispatch.
+    """
+    captured = _drive_native_record_shape(
+        monkeypatch,
+        tmp_path,
+        record={
+            "actual": {
+                "name": "glm",
+                "base_url": "https://glm.example/v1",
+                "api_key": "dummy-glm",
+            }
+        },
+    )
+    assert captured["model_provider"] == "glm", captured
+
+
+def test_record_naming_another_provider_does_not_protect_the_lane(monkeypatch, tmp_path):
+    """Widening identity must stay identity-OWNED, never "the only row around".
+
+    ``glm``'s lane is repaired unless a record that NAMES ``glm`` declares the
+    endpoint it serves. A ``providers`` row belonging to somebody else — and the
+    generic ``providers['custom']`` entry that owns no slug by itself — is not
+    evidence for ``glm``, so the genuine #7585 stale-lane repair must still fire.
+    """
+    for record in (
+        {"other": {"base_url": "https://other.example/v1", "api_key": "dummy-other"}},
+        {"custom": {"base_url": "https://generic.example/v1", "api_key": "dummy-generic"}},
+    ):
+        captured = _drive_native_record_shape(monkeypatch, tmp_path, record=record)
+        assert captured["model_provider"] == "nous", (record, captured)
+
+
+def test_disabled_record_does_not_protect_the_lane(monkeypatch, tmp_path):
+    """``enabled: false`` is the one spelling that withdraws a record's claim.
+
+    The projection shares ``api.config``'s enabled semantics, so a record the
+    Agent would refuse to route through is not ownership evidence and the stale
+    lane is repaired as on master.
+    """
+    captured = _drive_native_record_shape(
+        monkeypatch,
+        tmp_path,
+        record={"glm": {"base_url": "https://glm.example/v1", "enabled": False}},
+    )
+    assert captured["model_provider"] == "nous", captured
