@@ -214,8 +214,17 @@ def test_image_in_table_cell_split_across_lines_renders(driver_path):
 
 
 def test_image_in_list_item_split_across_lines_renders(driver_path):
-    html = _render(driver_path, "- item\n\n![cat]\n(https://example.com/cat.png)")
+    # #8303 gate review: this test claimed to cover a list item but rendered
+    # "- item" followed by a BLANK LINE and then a paragraph, so the image was
+    # never inside <li>. Indented continuation lines keep the whole image in
+    # the list item — the case the name claims.
+    html = _render(driver_path, "- item\n  ![cat]\n  (https://example.com/cat.png)")
     assert 'src="https://example.com/cat.png"' in html
+    # The image must be INSIDE the list item, not a sibling paragraph.
+    assert "<li>" in html and "</li>" in html
+    li_html = html[html.index("<li>"):html.index("</li>")]
+    assert 'src="https://example.com/cat.png"' in li_html, html
+    assert "<p>" not in html, html
 
 
 # ── Defect 2: bare local cache paths ─────────────────────────────────────────
