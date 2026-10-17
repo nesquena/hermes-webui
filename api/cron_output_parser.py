@@ -154,6 +154,18 @@ def _has_prompt_frame(text: str) -> bool:
     return _PROMPT_FRAME_RE.search(text) is not None
 
 
+def _has_own_prompt_frame(text: str) -> bool:
+    """True when the document's FIRST ``## Prompt`` heading is the one a
+    prompt frame announces, i.e. the frame is the writer's own header and
+    not a framed run document quoted inside a legacy/failed prompt. Mirrors
+    the ``archive.find(_PROMPT_HEADING) == ...`` test in the Agent's
+    ``_archive_answer``: only an own frame is allowed to fail closed; a
+    quoted one falls through to the legacy envelope rule.
+    """
+    frame = _PROMPT_FRAME_RE.search(text)
+    return frame is not None and text.find(_PROMPT_HEADING) == frame.end() - len(_PROMPT_HEADING)
+
+
 def _parse_framed_run_document(text: str) -> CronOutputProjection | None:
     """Parse a writer-framed run document by its LENGTH frames.
 
@@ -235,8 +247,8 @@ def parse_cron_output(text: str) -> CronOutputProjection:
     _framed = _parse_framed_run_document(raw)
     if _framed is not None:
         return _framed
-    if _has_prompt_frame(raw):
-        # A document that CLAIMS to be framed but fails validation is never
+    if _has_own_prompt_frame(raw):
+        # A document whose OWN frame fails validation is never
         # guessed at with the legacy heading rule.
         return CronOutputProjection(
             response="",
@@ -260,19 +272,30 @@ def parse_cron_output(text: str) -> CronOutputProjection:
     # text with has_response_boundary=false).
     #
     # For these envelopes the writer's own delimiter is authoritative and
-    # needs no fence tracking: the LAST canonical ``## Response`` line is
-    # the boundary, exactly as the pre-00bbc5b64fc reader resolved it. The
-    # frame validation above still guards every framed document, so a
-    # truncated or mismatched frame never reaches this branch.
+    # needs no fence tracking. The frame validation above still guards every
+    # framed document, so a truncated or mismatched frame never reaches this
+    # branch.
+    #
+    # #7687 re-gate (finding 1): the boundary is only unambiguous when the
+    # envelope carries EXACTLY ONE canonical ``## Response`` heading. An
+    # answer that legitimately contains its own ``## Response`` section (an
+    # output-format example, a skill documenting its reply shape) makes the
+    # last-heading rule cut the answer at the wrong line — the Agent's reader
+    # cuts the same way, but master's snippet showed the whole answer and the
+    # preview must never get WORSE than master. With more than one candidate
+    # the boundary is ambiguous: keep master's snippet and the raw-primary
+    # view instead of promoting a guessed suffix. A single candidate is the
+    # writer's own delimiter, exactly as the pre-00bbc5b64fc reader resolved
+    # it (the historical response-frame-only writer hits this path too).
     # NOTE: _PROMPT_HEADING_RE has no MULTILINE flag, so it must be applied
     # per line (as the scanner below does) rather than searched over the
     # whole document, where ^ would only match the very first character.
-    if any(_PROMPT_HEADING_RE.match(_line) for _line in lines) and not _has_prompt_frame(raw):
-        _last_response = None
-        for _i, _line in enumerate(lines):
-            if _RESPONSE_HEADING_RE.match(_line):
-                _last_response = _i
-        if _last_response is not None:
+    if any(_PROMPT_HEADING_RE.match(_line) for _line in lines):
+        _response_lines = [
+            _i for _i, _line in enumerate(lines) if _RESPONSE_HEADING_RE.match(_line)
+        ]
+        if len(_response_lines) == 1:
+            _last_response = _response_lines[0]
             return CronOutputProjection(
                 response="\n".join(lines[_last_response + 1:]).strip(),
                 context="\n".join(lines[:_last_response]).strip(),
@@ -280,6 +303,9 @@ def parse_cron_output(text: str) -> CronOutputProjection:
                 has_response_boundary=True,
                 response_line=_last_response + 1,  # 1-indexed for the UI
             )
+        # More than one candidate: the boundary is ambiguous, so do not guess.
+        # Fall through to the fail-closed unframed path below, which keeps the
+        # master snippet and the raw-primary view.
 
     # ---- Legacy unframed path (conservative, fail-closed) ---------------
     in_fence = False

@@ -17,10 +17,23 @@ context instead of the answer — verified over real HTTP: master and
 pre-fix head shows prompt text with ``has_response_boundary=false``.
 
 For these envelopes the writer's delimiter is authoritative, so the
-boundary is the LAST canonical ``## Response``, resolved without fence
-tracking — the same rule the pre-``00bbc5b64fc`` reader used. Framed
+boundary is the canonical ``## Response``, resolved without fence
+tracking — the same rule the pre-``00bbc5b64fc`` reader used, and the
+historical response-frame-only writer hits this path too. Framed
 documents still go through frame validation first and never reach this
 path, so a truncated or mismatched frame is still not promoted.
+
+## Round-4 boundary rule (10-12 review, finding 1)
+
+The delimiter is only unambiguous when the envelope carries EXACTLY ONE
+canonical ``## Response`` heading. An answer may legitimately contain
+its own ``## Response`` section (an output-format example, a skill
+documenting its reply shape), and a prompt may quote one as well. With
+more than one candidate the boundary is ambiguous, so the projection
+does NOT guess: it keeps master's snippet and the raw-primary view
+instead of promoting a guessed suffix, because a wrong guess makes the
+preview worse than master. See
+``test_ambiguous_multiple_response_headings_does_not_guess``.
 """
 from __future__ import annotations
 
@@ -84,10 +97,22 @@ def test_unclosed_prompt_html_block_keeps_the_final_answer_preview():
     )
 
 
-def test_last_response_wins_when_the_prompt_quotes_the_heading():
-    """The prompt half may legitimately quote a literal ``## Response``
-    (a skill documenting its output format). The writer's own reader
-    resolves the LAST one, so the projection must too."""
+def test_ambiguous_multiple_response_headings_does_not_guess():
+    """#7687 re-gate finding 1: an answer that contains its own
+    ``## Response`` section makes the envelope boundary ambiguous.
+
+    The prompt half may legitimately quote a literal ``## Response``
+    (a skill documenting its output format), and the answer half may
+    contain one too (an output-format example). With more than one
+    candidate the envelope path must NOT guess a suffix: promoting the
+    last candidate would cut the answer at the wrong line and make the
+    preview WORSE than master, which is exactly what the 10-12 review
+    reproduced.
+
+    The document then falls through to the fence-aware unframed scan,
+    which resolves the writer's real delimiter here (both headings are
+    outside any fence) — the answer is complete, matching master.
+    """
     text = textwrap.dedent(
         """\
         # Cron Job: report
@@ -107,9 +132,9 @@ def test_last_response_wins_when_the_prompt_quotes_the_heading():
     )
     out = parse_cron_output(text)
     assert out.has_response_boundary is True
-    assert out.response == "Real answer for 7 volumes.", (
-        f"the quoted heading must not win over the real one: {out.response!r}"
-    )
+    assert out.response == (
+        "<example answer placeholder>\n\n## Response\n\nReal answer for 7 volumes."
+    ), f"the envelope path guessed the wrong boundary: {out.response!r}"
 
 
 def test_framed_document_still_goes_through_frame_validation():
