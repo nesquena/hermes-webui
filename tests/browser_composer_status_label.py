@@ -182,14 +182,51 @@ def _check(browser, width, height, label, label_name):
             f" exceeds the {vw}px viewport"
         )
 
-    # An ordinary send still works after the disclosure.
+    # An ordinary send still works after the disclosure. Intercept the POST so
+    # the assertion is agent-free and deterministic: send() catches a rejected
+    # request and shows an error bubble WITHOUT raising a page error, so a bare
+    # Enter press can pass while nothing was ever sent.
+    sent = []
+    page.route(
+        "**/api/chat/start",
+        lambda route: (
+            sent.append(route.request.post_data or ""),
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body='{"stream_id": "probe", "session_id": "probe"}',
+            ),
+        ) and None,
+    )
     try:
         page.click("#msg")
         page.keyboard.type("hello")
-        page.keyboard.press("Enter")
+        # Click the real Send control: this build's composer has no Enter
+        # handler on #msg, and the button only enables once the input event
+        # has run updateSendBtn(), which typing already triggered.
+        page.click("#btnSend")
         page.wait_for_timeout(600)
     except Exception as exc:  # noqa: BLE001
         fails.append(f"  [{width}x{height}/{label_name}] send after reveal failed: {exc}")
+    finally:
+        page.unroute("**/api/chat/start")
+
+    if not sent:
+        fails.append(
+            f"  [{width}x{height}/{label_name}] Send did not send: no POST to"
+            f" /api/chat/start reached the server"
+        )
+    else:
+        import json as _json
+        try:
+            payload = _json.loads(sent[0])
+        except ValueError:
+            payload = {}
+        if payload.get("message") != "hello":
+            fails.append(
+                f"  [{width}x{height}/{label_name}] the sent message was not the typed"
+                f" text: {payload.get('message')!r}"
+            )
 
     if errors:
         fails.append(f"  [{width}x{height}/{label_name}] page errors: {errors[:3]}")
