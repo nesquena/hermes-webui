@@ -290,6 +290,8 @@ passes so a high-volume worker source cannot consume that interactive window:
 - Cron: up to `CRON_PROJECT_CHIP_LIMIT` rows.
 - Webhook: up to `WEBHOOK_PROJECT_CHIP_LIMIT` rows.
 - Kanban: up to `KANBAN_PROJECT_CHIP_LIMIT` rows.
+- One-shot (`hermes -z`): kept out of the interactive window, with no default
+  pass of its own. An explicit `source_filter="oneshot"` still lists them.
 
 Source-specific views still use their dedicated bounds, and the later sidebar
 visibility stage decides whether recovered background rows are shown. In

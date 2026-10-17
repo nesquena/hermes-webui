@@ -126,11 +126,15 @@ WEBHOOK_PROJECT_CHIP_LIMIT = 200
 # higher project-chip cap so project-assigned kanban rows stay addressable when
 # the toggle is on, without letting them dominate the default sidebar window.
 KANBAN_PROJECT_CHIP_LIMIT = 200
-# Sources with their own bounded project-chip pass. They are kept out of the
-# interactive CLI window and out of its recovery passes, and they keep the
-# system-chip answer wherever they are projected, so the same background row can
-# never report two different project chips.
-BACKGROUND_CLI_SOURCES = ("cron", "webhook", "kanban")
+# Background sources. They are kept out of the interactive CLI window and out of
+# its recovery passes, and they keep the system-chip answer wherever they are
+# projected, so the same background row can never report two different project
+# chips. Cron, webhook and kanban also have their own bounded project-chip pass.
+# One-shot runs (`hermes -z`) have no pass of their own: agents that delegate
+# through them can start hundreds a day, which used to push Desktop/TUI/CLI
+# conversations out of the window (#8265). An explicit source filter still
+# reaches them.
+BACKGROUND_CLI_SOURCES = ("cron", "webhook", "kanban", "oneshot")
 _CLI_SESSIONS_CACHE_TTL_SECONDS = 5.0
 # While a turn is actively streaming, hold the CLI/cron projection longer than
 # one poll interval (mirrors the route-level #4808 hold-down). The frontend
@@ -9952,7 +9956,7 @@ def _load_cli_sessions_uncached(
         # Spelled as a literal on purpose: tests/test_issue2841_show_cron_sessions_toggle.py
         # reads this line as source text. Must stay equal to BACKGROUND_CLI_SOURCES
         # (pinned by test_background_source_exclusion_literal_matches_the_constant).
-        exclude_sources=("cron", "webhook", "kanban") if source_filter is None else None,
+        exclude_sources=("cron", "webhook", "kanban", "oneshot") if source_filter is None else None,
         include_sources=None if source_filter is None else (source_filter,),
     )
     if source_filter is None:
