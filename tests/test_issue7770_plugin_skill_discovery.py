@@ -448,3 +448,108 @@ class TestSkillContentLookup:
         )
 
         assert captured["status"] == 404, captured["payload"]
+
+class TestSkillToggleAcceptsPluginSkills:
+    """The Skills panel renders one toggle per /api/skills row (#7770).
+
+    Adding plugin rows therefore hands the frontend a control that 404s unless
+    _handle_skill_toggle can resolve a plugin-qualified name, so the toggle path
+    is pinned here end-to-end rather than only being listed.
+    """
+
+    def _toggle(self, name, enabled, *, manager, skills_dir, config_path):
+        import api.routes as routes
+
+        captured = {}
+
+        def fake_j(handler, payload, status=200, extra_headers=None):
+            captured["payload"] = payload
+            captured["status"] = status
+            return True
+
+        handler = MagicMock()
+        with ExitStack() as stack:
+            stack.enter_context(patch.object(routes, "j", side_effect=fake_j))
+            stack.enter_context(patch.object(routes, "bad", side_effect=fake_j))
+            stack.enter_context(patch.object(routes, "_active_skills_dir", return_value=skills_dir))
+            stack.enter_context(
+                patch.object(routes, "_active_skill_search_dirs", return_value=[skills_dir])
+            )
+            stack.enter_context(
+                patch.object(routes, "_get_plugin_manager_for_visibility", return_value=manager)
+            )
+            stack.enter_context(
+                patch.object(routes, "_active_profile_config_path", return_value=config_path)
+            )
+            stack.enter_context(patch.object(routes, "reload_config", lambda: None))
+            routes._handle_skill_toggle(handler, {"name": name, "enabled": enabled})
+        return captured
+
+    def test_toggle_plugin_skill_persists_qualified_name(self, tmp_path):
+        from api.config import _load_yaml_config_file
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("skills: {}\n", encoding="utf-8")
+        skill_md = _write_plugin_skill(
+            tmp_path / "plugins", qualified_name="superpowers:brainstorming"
+        )
+        manager = _FakePluginManager(find_paths={"superpowers:brainstorming": skill_md})
+
+        captured = self._toggle(
+            "superpowers:brainstorming",
+            False,
+            manager=manager,
+            skills_dir=skills_dir,
+            config_path=config_path,
+        )
+
+        assert captured["status"] == 200, captured["payload"]
+        assert captured["payload"]["ok"] is True
+        disabled = _load_yaml_config_file(config_path)["skills"]["disabled"]
+        assert "superpowers:brainstorming" in disabled
+
+    def test_toggle_reenabling_plugin_skill_removes_it(self, tmp_path):
+        from api.config import _load_yaml_config_file
+
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            "skills:\n  disabled:\n    - superpowers:brainstorming\n", encoding="utf-8"
+        )
+        skill_md = _write_plugin_skill(
+            tmp_path / "plugins", qualified_name="superpowers:brainstorming"
+        )
+        manager = _FakePluginManager(find_paths={"superpowers:brainstorming": skill_md})
+
+        captured = self._toggle(
+            "superpowers:brainstorming",
+            True,
+            manager=manager,
+            skills_dir=skills_dir,
+            config_path=config_path,
+        )
+
+        assert captured["status"] == 200, captured["payload"]
+        disabled = _load_yaml_config_file(config_path)["skills"]["disabled"]
+        assert "superpowers:brainstorming" not in disabled
+
+    def test_toggle_unknown_plugin_skill_still_404s(self, tmp_path):
+        """The fallback must not turn a genuinely missing skill into a success."""
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text("skills: {}\n", encoding="utf-8")
+        manager = _FakePluginManager(find_paths={})
+
+        captured = self._toggle(
+            "superpowers:nonexistent",
+            False,
+            manager=manager,
+            skills_dir=skills_dir,
+            config_path=config_path,
+        )
+
+        assert captured["status"] == 404, captured["payload"]

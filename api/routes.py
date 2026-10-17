@@ -32879,7 +32879,13 @@ def _handle_skill_toggle(handler, body):
     search_dirs = _active_skill_search_dirs(skills_dir)
     skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
     if not skill_md:
-        return bad(handler, f"Skill '{name}' not found", 404)
+        # Plugin-registered skills are served by /api/skills but live outside
+        # the directory search roots (#7770), so without this fallback the
+        # Skills panel toggle 404s on every plugin row.
+        plugin_skill_md = _plugin_skill_path_for(name)
+        if plugin_skill_md is None:
+            return bad(handler, f"Skill '{name}' not found", 404)
+        skill_dir, skill_md = plugin_skill_md.parent, plugin_skill_md
 
     config_path = _active_profile_config_path()
     with _cfg_lock:

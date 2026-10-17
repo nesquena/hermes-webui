@@ -17,13 +17,21 @@ point the composer calls -- for both picker surfaces:
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import tempfile
 import textwrap
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_JS = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
+
+# The harness below drives static/commands.js through `node`, so skip the module
+# rather than failing with FileNotFoundError on a Python-only checkout.
+NODE = shutil.which("node")
+pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 
 # `window` is intentionally absent, so commands.js keeps its module scope local.
 _PRELUDE = """
