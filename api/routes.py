@@ -9632,6 +9632,19 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     return _state_db_session_source(sid) == "subagent"
 
 
+def _is_aider_session_id(sid: str) -> bool:
+    """Return True when ``sid`` is an Aider chat-history import id (#674).
+
+    Aider conversations are bridged READ-ONLY: the WebUI renders a transcript
+    parsed out of a ``.aider.chat.history.md`` file that the user owns
+    independently of this app. Materializing one as a writable WebUI session
+    would let a composer turn take ownership of a conversation that is still
+    live in Aider, so the id prefix is the external read-only identity -- it
+    cannot be laundered by a metadata lookup that happens to miss.
+    """
+    return str(sid or "").startswith(f"{AIDER_SOURCE}_")
+
+
 def _session_is_subagent_view_only(sid: str) -> bool:
     """Return True when ``sid`` is a delegated subagent child by ANY signal —
     state.db source OR a persisted WebUI sidecar tagged subagent.
@@ -33042,6 +33055,13 @@ def _handle_session_import_cli(handler, body):
                 (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
                 or _is_subagent_child_session_id(sid)
             )
+            # #674: a metadata MISS on the refresh path must not launder an
+            # external Aider conversation back into a writable session either.
+            # Without the coercion below, a stale writable sidecar imported
+            # before the read-only gate survives a refresh unchanged.
+            if _is_aider_session_id(sid) and not getattr(existing, "read_only", False):
+                existing.read_only = True
+                changed = True
         if changed:
             existing.save(touch_updated_at=False)
             publish_session_list_changed(
@@ -33111,7 +33131,13 @@ def _handle_session_import_cli(handler, body):
     # can miss it (#5307 cross-profile edge).
     _cli_sa = (cli_source_tag or cli_raw_source or "").strip().lower() == "subagent"
     _sa_child = _sa_child or _cli_sa
-    _read_only_view = cli_read_only or _sa_child
+    # #674: an Aider id is an EXTERNAL read-only conversation. Aider list
+    # metadata carries ``profile: None``, so an all-profiles resolve can miss
+    # and return {} while the profile-aware message lookup still succeeds --
+    # which previously let a real import_cli_session() run and mint a
+    # writable sidecar. The id prefix is the read-only identity (#674).
+    _aider_ro = _is_aider_session_id(sid)
+    _read_only_view = cli_read_only or _sa_child or _aider_ro
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")

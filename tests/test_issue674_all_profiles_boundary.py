@@ -272,7 +272,7 @@ def import_boundary(monkeypatch, tmp_path):
         yield boundary
     finally:
         # Leave the shared isolated store as we found it.
-        for _sid in (row['session_id'], 'cli_other_profile_0001'):
+        for _sid in (row['session_id'], 'cli_other_profile_0001', 'cli_ordinary_session_0001'):
             try:
                 (session_dir / f'{_sid}.json').unlink(missing_ok=True)
             except OSError:
