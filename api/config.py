@@ -12512,6 +12512,63 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+# #6885: the pending continuation prompt each session is owed, keyed by session_id.
+# A bare session_id marker cannot tell the authentic continuation apart from a
+# genuine user follow-up that arrives while the marker is pending; routes.py used
+# to claim the marker for the session's *next* turn, so an unrelated user message
+# was classified goal-related (burning goal budget, #1932) AND consumed the marker,
+# leaving the real continuation unjudged. Recording the prompt the worker actually
+# emitted gives the admission path an identity to match against. Fails closed: a
+# marker with no recorded prompt is treated as unclaimed.
+PENDING_GOAL_CONTINUATION_PROMPTS: dict = {}  # session_id -> continuation_prompt owed
+PENDING_GOAL_CONTINUATION_PROMPTS_LOCK = threading.Lock()
+
+
+def record_pending_goal_continuation(session_id: str, prompt: str) -> bool:
+    """Record the continuation a session is owed, before its SSE event is emitted.
+
+    Returns True when a marker was recorded. An empty prompt cannot identify a
+    continuation turn, so it is not recorded at all — the caller must then not
+    claim a continuation.
+    """
+    normalized = str(prompt or "").strip()
+    if not session_id or not normalized:
+        return False
+    with PENDING_GOAL_CONTINUATION_PROMPTS_LOCK:
+        PENDING_GOAL_CONTINUATION_PROMPTS[session_id] = normalized
+    PENDING_GOAL_CONTINUATION.add(session_id)
+    return True
+
+
+def pending_goal_continuation_matches(session_id: str, message: str) -> bool:
+    """Whether ``message`` is the continuation this session was actually owed.
+
+    Fails closed: no recorded prompt means the turn cannot be authenticated as
+    the continuation, so a bare marker never classifies a turn on its own.
+    """
+    with PENDING_GOAL_CONTINUATION_PROMPTS_LOCK:
+        expected = PENDING_GOAL_CONTINUATION_PROMPTS.get(session_id)
+    if not expected:
+        return False
+    return str(message or "").strip() == expected
+
+
+def pop_pending_goal_continuation_prompt(session_id: str) -> str:
+    """Remove and return the prompt owed to a session ("" when none)."""
+    with PENDING_GOAL_CONTINUATION_PROMPTS_LOCK:
+        return PENDING_GOAL_CONTINUATION_PROMPTS.pop(session_id, "") or ""
+
+
+def restore_pending_goal_continuation(session_id: str, prompt: str = "") -> None:
+    """Re-arm a marker (+ the prompt it still owes) after a rejected admission.
+
+    A marker claimed without a recorded prompt — the pre-#6885 bare flag — is
+    re-armed as a bare marker, so rejected-admission rollback keeps its exact
+    previous behaviour for those sessions.
+    """
+    if record_pending_goal_continuation(session_id, prompt):
+        return
+    PENDING_GOAL_CONTINUATION.add(session_id)
 
 # ── THE list of per-stream registries (#7302 re-gate) ───────────────────────
 # Every registry a stream owns. Both the local worker teardown (api/streaming.py)
