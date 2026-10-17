@@ -36,6 +36,7 @@ class StartRunRequest:
     profile: str | None = None
     provider: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = None
     toolsets: list[str] = field(default_factory=list)
     source: str = "webui"
     metadata: dict[str, Any] = field(default_factory=dict)

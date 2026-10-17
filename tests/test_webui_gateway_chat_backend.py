@@ -12,6 +12,7 @@ import pytest
 
 import api.gateway_chat as gateway_chat
 import api.models as models
+import api.profiles as profiles
 import api.streaming as streaming
 from api.config import PENDING_GOAL_CONTINUATION, STREAMS, create_stream_channel
 from api.models import new_session
@@ -509,13 +510,18 @@ def test_gateway_chat_worker_uses_session_profile_endpoint_not_process_profile(t
     # Process-active profile's endpoint: must NOT be used for a 'coder' session.
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "process-profile-key")
-    resolved_for = []
-
-    def fake_endpoint_for_profile(profile_name):
-        resolved_for.append(profile_name)
-        return "http://gateway.local/p/coder", "coder-key"
-
-    monkeypatch.setattr(gateway_chat, "_gateway_endpoint_for_profile", fake_endpoint_for_profile)
+    coder_home = tmp_path / "profiles" / "coder"
+    coder_home.mkdir(parents=True)
+    (coder_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://gateway.local/p/coder\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=coder-key\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda profile_name: coder_home if profile_name == "coder" else tmp_path,
+    )
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
 
@@ -551,7 +557,6 @@ def test_gateway_chat_worker_uses_session_profile_endpoint_not_process_profile(t
 
     gateway_chat._run_gateway_chat_streaming(s.session_id, "Say hi", "m", str(tmp_path), stream_id, [])
 
-    assert resolved_for == ["coder"]
     assert requests, "the worker made no gateway request"
     assert requests[0].full_url.startswith("http://gateway.local/p/coder/v1/")
     assert requests[0].get_header("Authorization") == "Bearer coder-key"
@@ -1882,9 +1887,17 @@ def test_gateway_chat_401_hint_reports_the_session_profile_key_not_the_process_k
     monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
     monkeypatch.delenv("API_SERVER_KEY", raising=False)
     monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)     # the suite may set one; tests that need it set it themselves
+    coder_home = tmp_path / "profiles" / "coder"
+    coder_home.mkdir(parents=True)
+    (coder_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://gateway.local/p/coder\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=coder-key\n",
+        encoding="utf-8",
+    )
     monkeypatch.setattr(
-        gateway_chat, "_gateway_endpoint_for_profile",
-        lambda profile_name: ("http://gateway.local/p/coder", "coder-key"),
+        profiles,
+        "get_hermes_home_for_profile",
+        lambda profile_name: coder_home if profile_name == "coder" else tmp_path,
     )
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
@@ -1977,6 +1990,14 @@ def test_gateway_endpoint_keeps_the_shared_pair_for_a_profile_with_no_transport_
     _profile_homes(tmp_path, monkeypatch, {"beta": {"TERMINAL_CWD": "/work"}}, config_url=None)
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gw.local:8642")
     monkeypatch.setenv("API_SERVER_KEY", "shared-root-key")
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw.local:8642",
+            "API_SERVER_KEY": "shared-root-key",
+        },
+    )
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY"})
 
     assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "shared-root-key")
@@ -2045,6 +2066,13 @@ def _shared_gateway(monkeypatch, url="http://gw.local:8642", key="shared-root-ke
     monkeypatch.setenv("API_SERVER_KEY", key)
     if launcher_key:
         monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", launcher_key)
+    deployment = {
+        "HERMES_WEBUI_GATEWAY_BASE_URL": url,
+        "API_SERVER_KEY": key,
+    }
+    if launcher_key:
+        deployment["HERMES_WEBUI_GATEWAY_API_KEY"] = launcher_key
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", deployment)
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY", "GW_ROUTE"})
 
 
@@ -2126,6 +2154,16 @@ def test_gateway_endpoint_an_alias_mirrored_from_a_named_active_profile_is_not_s
     _shared_gateway(monkeypatch, launcher_key="alpha-alias")
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY", "HERMES_WEBUI_GATEWAY_API_KEY"})
     _root_is_the_process_profile(monkeypatch, homes, process="alpha")
+    # The canonical value belongs to the active named profile, so the stable
+    # deployment snapshot must not publish it as a launcher credential.
+    monkeypatch.setattr(
+        gateway_chat,
+        "_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw.local:8642",
+            "API_SERVER_KEY": "shared-root-key",
+        },
+    )
 
     assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "beta-local-key")
 

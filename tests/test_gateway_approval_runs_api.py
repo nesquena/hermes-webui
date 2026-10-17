@@ -129,6 +129,28 @@ def test_gateway_capability_detection():
     invalidate_gateway_caps()
 
 
+def test_gateway_capability_reasoning_streaming_implies_full_ladder():
+    from api.config import get_gateway_caps, invalidate_gateway_caps
+
+    invalidate_gateway_caps()
+
+    def fake_urlopen(_req, *, timeout=None):
+        body = json.dumps({"features": {"reasoning_streaming": True}}).encode()
+        resp = MagicMock()
+        resp.read.return_value = body
+        resp.__enter__ = lambda s: s
+        resp.__exit__ = lambda s, *a: None
+        return resp
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        caps = get_gateway_caps("http://streaming-agent:8642")
+
+    assert caps["reasoning_efforts"] == [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ]
+    invalidate_gateway_caps()
+
+
 def test_gateway_capability_detection_marks_probe_failures_unreachable():
     """Probe failures stay non-fatal but remain distinguishable from unsupported gateways."""
     from api.config import (
@@ -1968,6 +1990,7 @@ def test_gateway_worker_marks_run_pending_before_runs_api_prelude():
         with patch("api.gateway_chat.RunJournalWriter", return_value=SimpleNamespace(append_sse_event=lambda *_a, **_k: None)), \
              patch("api.gateway_chat.get_session", return_value=session), \
              patch("api.config.get_config", return_value={}), \
+             patch("api.config.get_config_snapshot", return_value={}), \
              patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
              patch("api.gateway_chat._gateway_api_key", return_value=""), \
              patch("api.gateway_chat._gateway_use_runs_api_enabled", return_value=True), \
@@ -2223,6 +2246,7 @@ def test_chat_cancel_waits_for_worker_published_run_id_before_settlement(
         with patch("api.gateway_chat.RunJournalWriter", return_value=SimpleNamespace(append_sse_event=lambda *_a, **_k: None)), \
              patch("api.gateway_chat.get_session", return_value=session), \
              patch("api.config.get_config", return_value={}), \
+             patch("api.config.get_config_snapshot", return_value={}), \
              patch("api.gateway_chat._gateway_base_url", return_value="http://gw:8642"), \
              patch("api.gateway_chat._gateway_api_key", return_value=""), \
              patch("api.gateway_chat._gateway_use_runs_api_enabled", return_value=True), \
@@ -2331,7 +2355,8 @@ def test_gateway_worker_prelude_exception_retires_failed_start_after_waiter_cons
         assert int((lifecycle.get(stream_id) or {}).get("waiters") or 0) == 1
         with patch("api.gateway_chat.RunJournalWriter", return_value=SimpleNamespace(append_sse_event=lambda *_a, **_k: None)), \
              patch("api.gateway_chat.get_session", return_value=session), \
-             patch("api.config.get_config", side_effect=RuntimeError("prelude boom")):
+             patch("api.config.get_config", side_effect=RuntimeError("prelude boom")), \
+             patch("api.config.get_config_snapshot", side_effect=RuntimeError("prelude boom")):
             worker_thread.start()
             worker_thread.join(timeout=5)
             assert not worker_thread.is_alive()

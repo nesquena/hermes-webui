@@ -495,6 +495,27 @@ def _expand_env_vars(obj):
     return obj
 
 
+def _expand_env_vars_from_mapping(obj, environ: dict[str, str]):
+    """Expand ``${VAR}`` references against one explicit environment.
+
+    This is intentionally separate from ``_expand_env_vars``: the latter is a
+    request/profile-scoped reader, while deployment-owner reads must remain
+    anchored to the process environment even when called from a named-profile
+    request thread.
+    """
+    if isinstance(obj, str):
+        return re.sub(
+            r"\${([^}]+)}",
+            lambda m: str(environ[m.group(1)]) if m.group(1) in environ else m.group(0),
+            obj,
+        )
+    if isinstance(obj, dict):
+        return {k: _expand_env_vars_from_mapping(v, environ) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expand_env_vars_from_mapping(item, environ) for item in obj]
+    return obj
+
+
 _cfg_cache = {}
 _cfg_lock = threading.Lock()
 _cfg_mtime: float = 0.0  # last known mtime of config.yaml; 0 = never loaded
@@ -650,6 +671,11 @@ def get_config_snapshot() -> dict:
     """Return a request-owned config snapshot captured under the cache lock."""
     with _cfg_lock:
         config_path = _get_config_path()
+        # Refresh the process cache for this path FIRST, exactly as the
+        # unscoped read does: module-level ``cfg`` readers reached from the
+        # same scope (resolve_model_alias_runtime -> _configured_model_alias_entries,
+        # resolve_model_provider) rely on that side effect to see the active
+        # profile's config.
         try:
             current_mtime = config_path.stat().st_mtime
         except OSError:
@@ -658,6 +684,23 @@ def get_config_snapshot() -> dict:
         mtime_stale = current_mtime != _cfg_mtime
         if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
             _refresh_config_cache(config_path)
+        scoped_profile_read = bool(
+            getattr(_thread_ctx, "block_process_env_fallback", False)
+        )
+        # The process-global cache is intentionally expanded against the
+        # process env. A named-profile read cannot copy that already-expanded
+        # structure: references such as ``api_key: ${LM_API_KEY}`` would retain
+        # the process profile's secret even though profile_scope_for_request_read
+        # has bound the correct thread env. Read the memoized RAW YAML and expand
+        # a private structure in this scope. Preserve explicit in-memory
+        # overrides used by tests/runtime callers.
+        if scoped_profile_read and not _cfg_has_in_memory_overrides():
+            raw = _load_yaml_config_file_raw(config_path, _copy=False)
+            scoped_cfg = _expand_env_vars(raw) if raw else {}
+            if not isinstance(scoped_cfg, dict):
+                scoped_cfg = {}
+            _apply_config_defaults(scoped_cfg)
+            return copy.deepcopy(scoped_cfg)
         try:
             active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
         except NameError:
@@ -924,6 +967,38 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     profile_cfg = _load_yaml_config_file(target / "config.yaml")
     _apply_config_defaults(profile_cfg)
     return profile_cfg
+
+
+def get_config_for_process_owner(profile_home: "Path | str | None") -> dict:
+    """Return the deployment owner's config without request-profile influence.
+
+    A named-profile request binds its environment to ``_thread_ctx``.  Reusing
+    the ordinary profile-home reader there would expand the owner's YAML with
+    the request profile's values.  That is unsafe for endpoint identity checks:
+    identical placeholder names can make distinct receivers appear shared and
+    extend a deployment credential to the profile receiver.
+
+    Resolve the operator's authoritative ``HERMES_CONFIG_PATH`` first (matching
+    ``_get_config_path``), otherwise read the process owner's ``config.yaml``.
+    Environment expansion is pinned to a snapshot of the actual process env,
+    which is where the owner's dotenv values live; request thread-locals are
+    deliberately excluded.  This is a read-only, cache-safe snapshot.
+    """
+    if not profile_home:
+        return {}
+    try:
+        owner_home = Path(profile_home).expanduser()
+    except Exception:
+        return {}
+
+    owner_environ = dict(os.environ)
+    env_override = str(owner_environ.get("HERMES_CONFIG_PATH") or "").strip()
+    config_path = Path(env_override).expanduser() if env_override else owner_home / "config.yaml"
+    raw = _load_yaml_config_file_raw(config_path, _copy=False)
+    expanded = _expand_env_vars_from_mapping(raw, owner_environ) if raw else {}
+    owner_config = expanded if isinstance(expanded, dict) else {}
+    _apply_config_defaults(owner_config)
+    return owner_config
 
 
 def _config_for_yaml_save(config_data: dict) -> dict:
@@ -2694,7 +2769,9 @@ def _is_local_server_provider(provider_id: str) -> bool:
     return False
 
 
-def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> bool:
+def _model_id_declared_in_config(
+    model_id: str, config_provider: str | None, config_data: dict | None = None
+) -> bool:
     """True when the user's own config declares ``model_id`` verbatim (full form).
 
     This is the COLD-catalog provenance signal for #5979: when the live
@@ -2711,7 +2788,8 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     model = str(model_id or "").strip()
     if not model:
         return False
-    model_cfg = cfg.get("model", {})
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    model_cfg = active_cfg.get("model", {})
     if isinstance(model_cfg, dict):
         if str(model_cfg.get("default") or "").strip() == model:
             return True
@@ -2722,7 +2800,7 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     prov = str(config_provider or "").strip().lower()
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
-        for entry in _custom_provider_entries():
+        for entry in _custom_provider_entries(active_cfg):
             slug = _custom_provider_slug_from_name(entry.get("name"))
             entry_name = str(entry.get("name") or "").strip().lower()
             if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
@@ -2866,7 +2944,7 @@ def _parse_provider_qualified_model_id(model_id: str) -> tuple[str, str] | None:
     return bare_model, provider_hint
 
 
-def _get_provider_base_url(provider_id):
+def _get_provider_base_url(provider_id, config_data: dict | None = None):
     """Look up the configured base_url for a provider (e.g. lmstudio).
 
     Checks two locations, in order:
@@ -2877,13 +2955,17 @@ def _get_provider_base_url(provider_id):
          shape (the model block carries both the active provider AND the
          base URL for that provider in a single record).
 
+    ``config_data`` reads both locations from a caller-captured snapshot
+    instead of the process-global cache; without one, behaviour is unchanged.
+
     Returns the URL stripped of trailing ``/`` if configured, otherwise None.
     """
-    prov_cfg = _get_provider_cfg(provider_id)
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    prov_cfg = _get_provider_cfg(provider_id, config_data)
     explicit = (prov_cfg.get("base_url") or "").strip().rstrip("/")
     if explicit:
         return explicit
-    model_cfg = cfg.get("model", {}) or {}
+    model_cfg = active_cfg.get("model", {}) or {}
     if isinstance(model_cfg, dict):
         model_provider = str(model_cfg.get("provider") or "").strip().lower()
         if model_provider == str(provider_id).strip().lower():
@@ -2893,13 +2975,19 @@ def _get_provider_base_url(provider_id):
     return None
 
 
-def _get_providers_cfg() -> dict:
-    providers_cfg = cfg.get("providers")
+def _get_providers_cfg(config_data: dict | None = None) -> dict:
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    providers_cfg = active_cfg.get("providers")
     return providers_cfg if isinstance(providers_cfg, dict) else {}
 
 
-def _get_provider_cfg(provider_id) -> dict:
-    provider_cfg = _get_providers_cfg().get(provider_id, {})
+def _get_provider_cfg(provider_id, config_data: dict | None = None) -> dict:
+    # Keep the historical zero-arg call shape on the legacy path: tests replace
+    # _get_providers_cfg with strict-signature stand-ins that take no arguments.
+    providers_cfg = (
+        _get_providers_cfg() if config_data is None else _get_providers_cfg(config_data)
+    )
+    provider_cfg = providers_cfg.get(provider_id, {})
     return provider_cfg if isinstance(provider_cfg, dict) else {}
 
 
@@ -2982,7 +3070,12 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     return matches[0] if matches else None
 
 
-def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) -> tuple:
+def resolve_model_provider(
+    model_id: str,
+    *,
+    explicitly_picked: bool = False,
+    config_data: dict | None = None,
+) -> tuple:
     """Resolve model name, provider, and base_url for AIAgent.
 
     Model IDs from the dropdown can be in several formats:
@@ -3012,15 +3105,22 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     leftover, e.g. #433's ``openai/gpt-5.4`` on a bare-only relay) still gets the
     legacy redundant-prefix strip so it keeps routing when cold. Warm provenance
     (endpoint-advertised ids) always takes precedence over this flag.
+
+    ``config_data``: resolve against a caller-captured config snapshot (a
+    profile-scoped request copy) instead of the process-global cache, so every
+    config read below — the default provider, custom_providers[] ownership,
+    providers[] entries, aliases and endpoint lookups — cannot be rerouted by a
+    concurrent cross-profile cache reload. Without one, behaviour is unchanged.
     """
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
     config_provider = None
     config_base_url = None
-    model_cfg = cfg.get("model", {})
+    model_cfg = active_cfg.get("model", {})
     if isinstance(model_cfg, dict):
         config_base_url = model_cfg.get("base_url")
         config_provider = _resolve_configured_provider_id(
             model_cfg.get("provider"),
-            cfg,
+            active_cfg,
             base_url=config_base_url,
             resolve_alias=False,
         )
@@ -3051,7 +3151,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         """
         if isinstance(provider, str) and provider.startswith("custom:"):
             _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
+                active_cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider),
             )
         return model, provider, base_url
@@ -3108,7 +3208,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # own declared models and can't be hijacked by another providers.<slug>
     # entry that happens to list the same bare id earlier in config order (#5511).
     if _canon_config_provider:
-        _providers_cfg_own = cfg.get('providers', {})
+        _providers_cfg_own = active_cfg.get('providers', {})
         if isinstance(_providers_cfg_own, dict):
             for _slug, _pdef in _providers_cfg_own.items():
                 if not isinstance(_pdef, dict):
@@ -3127,7 +3227,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             or model_id in _provider_models_set
         )
     )
-    custom_providers = cfg.get('custom_providers', [])
+    custom_providers = active_cfg.get('custom_providers', [])
     if isinstance(custom_providers, list) and not _skip_custom_providers:
         # Disambiguation guard: when two custom_providers[] entries both list the
         # same bare model id (e.g. dogapi and packyapi both advertise
@@ -3199,7 +3299,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
     # Check user-defined providers (config.yaml → providers:).
     # Mirrors the custom_providers scan above — exact match against each
     # entry's declared models list (case-sensitive to match custom_providers).
-    providers_cfg = cfg.get('providers', {})
+    providers_cfg = active_cfg.get('providers', {})
     if isinstance(providers_cfg, dict):
         target = model_id.strip()
         # Honor the same active/default ownership guard as the custom_providers
@@ -3274,8 +3374,9 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # instead of falling back to the default endpoint (HTTP 400 "Invalid
         # model format or no credentials for provider: <bare-model>").
         #
-        # Match via _unique_custom_provider_entry on the module-level `cfg` list:
-        # it is pure and lock-safe, so it stays callable when resolve_model_provider()
+        # Match via _unique_custom_provider_entry on the caller's
+        # custom_providers list (the module-level `cfg` when no snapshot is
+        # threaded): it is pure and lock-safe, so it stays callable when resolve_model_provider()
         # is invoked while the caller already holds the non-reentrant _cfg_lock —
         # a get_config()-based resolver would self-deadlock there. It also does NOT
         # guess: an unmatched slug (e.g. a host:port-derived one absent from
@@ -3290,15 +3391,15 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # to _get_provider_base_url() when no exact custom_providers[] row exists.
         if provider_hint.startswith("custom:"):
             entry = _unique_custom_provider_entry(
-                cfg.get('custom_providers', []),
+                active_cfg.get('custom_providers', []),
                 _custom_provider_slug_key(provider_hint),
             )
             if entry is not None:
                 base_url = str(entry.get('base_url') or '').strip() or None
             else:
-                base_url = _get_provider_base_url(provider_hint)
+                base_url = _get_provider_base_url(provider_hint, config_data=config_data)
         else:
-            base_url = _get_provider_base_url(provider_hint)
+            base_url = _get_provider_base_url(provider_hint, config_data=config_data)
         return _finalize(bare_model, provider_hint, base_url)
 
     if "/" in model_id:
@@ -3341,7 +3442,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
         # instead of falling back to the default config provider. MUST come BEFORE
         # the config_base_url branch because many providers have a base_url set.
         if prefix and config_provider and prefix != config_provider:
-            _custom_cfg = cfg.get("custom_providers", [])
+            _custom_cfg = active_cfg.get("custom_providers", [])
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
@@ -3408,7 +3509,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 # (1) Config declares the full id verbatim (model.default /
                 #     model.models / custom_providers[].models). Authoritative and
                 #     network-free, so #5979 survives a cold restart — preserve.
-                if _model_id_declared_in_config(model_id, config_provider):
+                if _model_id_declared_in_config(model_id, config_provider, config_data=config_data):
                     return _finalize(model_id, config_provider, config_base_url)
                 # (2) The endpoint's live/cached catalog advertised it.
                 _advertised = _endpoint_advertised_model_ids(config_provider)
@@ -5155,13 +5256,86 @@ def parse_reasoning_effort(effort):
     ``{"enabled": True, "effort": <level>}`` for any of
     ``VALID_REASONING_EFFORTS``.
     """
-    if not effort or not str(effort).strip():
+    if effort is None or effort is True:
         return None
+    if isinstance(effort, dict):
+        if effort.get("enabled", True) is False:
+            return {"enabled": False}
+        level = str(effort.get("effort") or "").strip()
+        return {"enabled": True, "effort": level} if level else None
     eff = str(effort).strip().lower()
-    if eff == "none":
+    if eff in {"none", "false", "disabled"}:
         return {"enabled": False}
-    if eff in VALID_REASONING_EFFORTS:
+    if eff in (*VALID_REASONING_EFFORTS, "ultra"):
         return {"enabled": True, "effort": eff}
+    return None
+
+
+def _reasoning_override_model_variants(model: str) -> list[str]:
+    """Mirror Agent's spelling-tolerant model variants for reasoning overrides."""
+    dash_to_dot = lambda value: re.sub(r"(\d)-(\d)", r"\1.\2", value)
+    dot_to_dash = lambda value: re.sub(r"(\d)\.(\d)", r"\1-\2", value)
+    seen: set[str] = set()
+    variants: list[str] = []
+
+    def add(*values):
+        for value in values:
+            if value and value not in seen:
+                seen.add(value)
+                variants.append(value)
+
+    def add_with_derivatives(value):
+        dashed, dotted = value.replace(".", "-"), value.replace("-", ".")
+        add(
+            value,
+            dashed,
+            dotted,
+            dash_to_dot(value),
+            dot_to_dash(value),
+            dash_to_dot(dashed),
+            dot_to_dash(dotted),
+        )
+
+    add_with_derivatives(model)
+    parts = model.split("/")
+    if len(parts) >= 2:
+        add_with_derivatives(parts[-1])
+    if len(parts) >= 3:
+        add_with_derivatives("/".join(parts[1:]))
+    known_providers = (
+        "anthropic", "openai", "google", "openrouter", "groq", "mistral",
+        "xai", "cohere", "perplexity", "together", "fireworks", "deepseek",
+    )
+    for value in [value for value in variants if "/" not in value]:
+        add(*(f"{provider}/{value}" for provider in known_providers))
+    known_aggregators = ("openrouter", "opencode", "fireworks", "groq", "together")
+    for value in [value for value in variants if value.count("/") == 1]:
+        add(*(f"{aggregator}/{value}" for aggregator in known_aggregators))
+    return variants
+
+
+def resolve_per_model_reasoning_effort(model: str, overrides: dict | None):
+    """Return Agent-compatible per-model reasoning config, or ``None``."""
+    if not overrides or not isinstance(overrides, dict) or not model:
+        return None
+    variants = _reasoning_override_model_variants(model)
+    for variant in variants:
+        if variant in overrides:
+            result = parse_reasoning_effort(overrides[variant])
+            if result is not None:
+                return result
+    variant_set = set(variants)
+    for key, raw in overrides.items():
+        if not isinstance(key, str) or "/" not in key:
+            continue
+        parts = key.split("/")
+        key_forms = _reasoning_override_model_variants(parts[-1])
+        if len(parts) >= 3:
+            key_forms += _reasoning_override_model_variants("/".join(parts[1:]))
+        if any(form in variant_set for form in key_forms):
+            result = parse_reasoning_effort(raw)
+            if result is not None:
+                return result
     return None
 
 
@@ -5670,17 +5844,19 @@ class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def _get_lmstudio_reasoning_probe_api_key() -> str | None:
+def _get_lmstudio_reasoning_probe_api_key(
+    config_data: dict | None = None,
+) -> str | None:
     """Resolve the LM Studio key for reasoning probes with WebUI precedence."""
-    config_data = cfg
-    model_cfg = config_data.get("model") or {}
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
+    model_cfg = active_cfg.get("model") or {}
     if isinstance(model_cfg, dict):
         active_provider = str(model_cfg.get("provider") or "").strip().lower()
         model_key = str(model_cfg.get("api_key") or "").strip()
         if active_provider == "lmstudio" and model_key:
             return model_key
 
-    providers_cfg = config_data.get("providers") or {}
+    providers_cfg = active_cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
         lmstudio_cfg = providers_cfg.get("lmstudio") or {}
         if isinstance(lmstudio_cfg, dict):
@@ -5688,11 +5864,15 @@ def _get_lmstudio_reasoning_probe_api_key() -> str | None:
             if config_key:
                 return config_key
 
-    env_key = str(os.getenv("LM_API_KEY") or "").strip()
+    # Thread-local first: request lanes bind the profile env with a read-only
+    # thread scope instead of mirroring it into os.environ, so a key that only
+    # the profile's .env defines must come from that binding. Outside a
+    # named-profile scope this is still the process env.
+    env_key = str(_thread_local_env_value("LM_API_KEY")).strip()
     if env_key:
         return env_key
 
-    legacy_env_key = str(os.getenv("LMSTUDIO_API_KEY") or "").strip()
+    legacy_env_key = str(_thread_local_env_value("LMSTUDIO_API_KEY")).strip()
     if legacy_env_key:
         return legacy_env_key
 
@@ -5840,6 +6020,7 @@ def resolve_model_reasoning_efforts(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none.
 
@@ -5849,8 +6030,20 @@ def resolve_model_reasoning_efforts(
     applied uniformly. The UI dropdown and coercion therefore agree: ``max`` is
     retained for GPT-5.6 and other models whose native ladder includes it, and
     stripped where it would be rejected or mishandled.
+
+    ``config_data`` lets profile-scoped callers (the Gateway / runner lanes)
+    resolve against the request config snapshot they captured under the cache
+    lock, so the provider-list lookup below never reads the shared cache.
     """
-    raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    if config_data is None:
+        # Keep the historical call shape when no snapshot is threaded:
+        # existing monkeypatches replace this helper with strict-signature
+        # stand-ins that do not accept the extra keyword.
+        raw = _resolve_model_reasoning_efforts_impl(model_id, provider_id, base_url)
+    else:
+        raw = _resolve_model_reasoning_efforts_impl(
+            model_id, provider_id, base_url, config_data=config_data
+        )
     if not raw:
         return raw
     # Forced-thinking models (GLM-4.7 on native zai) cannot have reasoning
@@ -5902,6 +6095,7 @@ def _resolve_model_reasoning_efforts_impl(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    config_data: dict | None = None,
 ) -> list[str]:
     """Return supported reasoning-effort levels for *model_id*, or [] if none."""
     model = str(model_id or "").strip()
@@ -5910,11 +6104,23 @@ def _resolve_model_reasoning_efforts_impl(
 
     provider = str(provider_id or "").strip().lower() if provider_id else ""
     resolved_base_url = str(base_url or "").strip() or None
+    # Profile-scoped callers pass their captured request snapshot; without
+    # one, keep the historical process-global cache behavior.
+    active_cfg = config_data if isinstance(config_data, dict) else cfg
     if not provider:
         try:
-            _, provider, resolved_base_url = resolve_model_provider(model)
+            if config_data is None:
+                _, provider, resolved_base_url = resolve_model_provider(model)
+            else:
+                # Snapshot-supplied callers must not consult the process-global
+                # cache: resolve the provider from the captured config with the
+                # same routing rules (explicit hints, custom ownership, aliases,
+                # endpoints) the send path uses.
+                _, provider, resolved_base_url = resolve_model_provider(
+                    model, config_data=config_data
+                )
         except Exception:
-            provider = str((cfg.get("model") or {}).get("provider") or "").strip().lower()
+            provider = str((active_cfg.get("model") or {}).get("provider") or "").strip().lower()
 
     provider = _resolve_provider_alias(provider)
 
@@ -5938,14 +6144,14 @@ def _resolve_model_reasoning_efforts_impl(
     _re_lists = []
     try:
         if provider and provider.startswith("custom:"):
-            for _entry in _custom_provider_entries():
+            for _entry in _custom_provider_entries(active_cfg):
                 if _custom_provider_slug_from_name(_entry.get("name")) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
                     break
         elif provider:
-            _prov_entry = (cfg.get("providers") or {}).get(provider, {})
+            _prov_entry = (active_cfg.get("providers") or {}).get(provider, {})
             if isinstance(_prov_entry, dict):
                 _re_lists = _configured_reasoning_effort_lists(
                     _prov_entry, hinted_model
@@ -5970,7 +6176,15 @@ def _resolve_model_reasoning_efforts_impl(
         )
 
     if provider == "lmstudio":
-        configured_base = _get_provider_base_url(provider)
+        # Request lanes supply their lock-protected profile snapshot. Keep both
+        # the endpoint and credential lookup on that same snapshot: consulting
+        # the process-global cache here can pair an analyst request with the
+        # default profile after a concurrent profile reload.
+        configured_base = (
+            _get_provider_base_url(provider)
+            if config_data is None
+            else _get_provider_base_url(provider, config_data=config_data)
+        )
         probe_base = resolved_base_url or configured_base
         # SECURITY: only forward the configured LM Studio credential when the
         # probe target is the configured LM Studio endpoint. /api/reasoning
@@ -5984,7 +6198,11 @@ def _resolve_model_reasoning_efforts_impl(
             and _normalize_base_url_for_match(probe_base)
             == _normalize_base_url_for_match(configured_base)
         ):
-            probe_key = _get_lmstudio_reasoning_probe_api_key()
+            probe_key = (
+                _get_lmstudio_reasoning_probe_api_key()
+                if config_data is None
+                else _get_lmstudio_reasoning_probe_api_key(config_data=config_data)
+            )
         opts = _lmstudio_model_reasoning_options(
             hinted_model,
             probe_base,
@@ -6017,8 +6235,14 @@ def coerce_reasoning_effort_for_model(
     model_id: str | None = None,
     provider_id: str | None = None,
     base_url: str | None = None,
+    config_data: dict | None = None,
 ) -> str:
-    """Return the closest supported effort for the target model/provider."""
+    """Return the closest supported effort for the target model/provider.
+
+    ``config_data`` passes a profile-scoped caller's captured config snapshot
+    through to the provider-ladder lookup, keeping coercion off the shared
+    process-global cache.
+    """
     raw = str(effort or "").strip().lower()
     if not raw:
         return ""
@@ -6033,11 +6257,22 @@ def coerce_reasoning_effort_for_model(
         return "none"
     if raw not in VALID_REASONING_EFFORTS:
         return ""
-    supported = resolve_model_reasoning_efforts(
-        model_id,
-        provider_id=provider_id,
-        base_url=base_url,
-    )
+    if config_data is None:
+        # Same legacy-shape rule as resolve_model_reasoning_efforts(): keep
+        # the historical keyword set so strict-signature stand-ins keep
+        # working when no snapshot was threaded.
+        supported = resolve_model_reasoning_efforts(
+            model_id,
+            provider_id=provider_id,
+            base_url=base_url,
+        )
+    else:
+        supported = resolve_model_reasoning_efforts(
+            model_id,
+            provider_id=provider_id,
+            base_url=base_url,
+            config_data=config_data,
+        )
     # Hard provider ceilings must win regardless of what the sourced capability
     # list says. resolve_model_reasoning_efforts() draws from hermes_cli /
     # models.dev / heuristics, and those can (a) return [] for an unrecognized
@@ -6509,7 +6744,9 @@ def _main_model_request_overrides(
     if not gate_provider:
         gate_provider = str(model_cfg.get("provider") or "").strip().lower()
         if not gate_provider:
-            _, gate_provider, _ = resolve_model_provider(gate_model)
+            _, gate_provider, _ = resolve_model_provider(
+                gate_model, config_data=config_data
+            )
     if _main_model_supports_service_tier(gate_model, gate_provider):
         service_tier = str(model_cfg.get("service_tier") or "").strip().lower()
         if service_tier == "priority":
@@ -8699,12 +8936,13 @@ def _public_model_alias_routes() -> dict[str, dict[str, str]]:
 def resolve_model_alias_runtime(
     route_provider: str | None,
     expected_model: str | None = None,
+    config_data: dict | None = None,
 ) -> dict[str, object] | None:
     """Resolve an opaque alias lane to server-side runtime routing material."""
     route_provider = str(route_provider or "").strip().lower()
     if not route_provider.startswith(_MODEL_ALIAS_ROUTE_PREFIX):
         return None
-    aliases = _configured_model_alias_entries()
+    aliases = _configured_model_alias_entries(config_data)
     name = next(
         (alias_name for alias_name in aliases if _model_alias_route_provider(alias_name) == route_provider),
         None,
@@ -12843,6 +13081,10 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         "approval_events": False,
         "run_approval_response": False,
         "approval_identity_v1": False,
+        # Advertised reasoning-effort ladder (features.reasoning_efforts).
+        # None = the gateway predates the advertisement; callers must assume
+        # the legacy six-level model_options contract (no 'max'/'ultra').
+        "reasoning_efforts": None,
         "capabilities_reachable": False,
         "probe_error": None,
         "fetched_at": 0.0,
@@ -12861,6 +13103,15 @@ def get_gateway_caps(base_url: str, api_key: str = "") -> dict:
         caps["approval_events"] = bool(features.get("approval_events"))
         caps["run_approval_response"] = bool(features.get("run_approval_response"))
         caps["approval_identity_v1"] = bool(features.get("approval_identity_v1"))
+        raw_efforts = features.get("reasoning_efforts")
+        if isinstance(raw_efforts, (list, tuple)):
+            caps["reasoning_efforts"] = [
+                str(level).strip().lower()
+                for level in raw_efforts
+                if isinstance(level, str) and str(level).strip()
+            ]
+        elif features.get("reasoning_streaming"):
+            caps["reasoning_efforts"] = ["none", *VALID_REASONING_EFFORTS, "ultra"]
     except urllib.error.HTTPError as exc:
         caps["capabilities_reachable"] = True
         caps["probe_error"] = f"{type(exc).__name__}: {exc}"
