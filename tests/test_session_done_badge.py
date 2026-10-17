@@ -34,8 +34,8 @@ pytestmark = pytest.mark.skipif(not shutil.which("node"), reason="node required"
 
 
 def _done_badge_block() -> str:
-    """The `if(s.done_at){...}` fragment from the row renderer."""
-    m = re.search(r"^    if\(s\.done_at\)\{.*?^    \}\n", SESSIONS_JS, re.S | re.M)
+    """The `if(isDone){...}` fragment from the row renderer."""
+    m = re.search(r"^    if\(isDone\)\{.*?^    \}\n", SESSIONS_JS, re.S | re.M)
     assert m, "done badge block not found in static/sessions.js"
     return m.group(0)
 
@@ -59,6 +59,7 @@ function t(key, ...args) {{
   const table = {{
     session_done_badge: 'Done',
     session_done_tooltip: 'Marked done {{0}}',
+    session_time_unknown: 'unknown',
   }};
   const value = table[key];
   if (value === undefined) return key;
@@ -69,12 +70,15 @@ function _formatRelativeSessionTime(ms) {{ return ms ? '2h ago' : 'unknown'; }}
 const out = [];
 for (const s of {json.dumps(rows)}) {{
   const titleRow = new FakeEl('span');
+  // Mirrors the row-class predicate in _renderOneSession, which the block
+  // depends on (presence, not truthiness).
+  const isDone=s.done_at!==null&&s.done_at!==undefined&&s.done_at!=='';
   {block}
-  out.push(titleRow.children.map(c => ({{
+  out.push({{ isDone, children: titleRow.children.map(c => ({{
     className: c.className,
     textContent: c.textContent,
     title: c.title,
-  }})));
+  }})) }});
 }}
 console.log(JSON.stringify(out));
 """
@@ -87,27 +91,40 @@ console.log(JSON.stringify(out));
 
 def test_row_with_done_at_renders_the_badge():
     out = _run_render([{"session_id": "a", "done_at": 1700000000.0}])
-    assert len(out[0]) == 1, out
-    badge = out[0][0]
+    assert len(out[0]["children"]) == 1, out
+    badge = out[0]["children"][0]
     assert badge["className"] == "session-done-badge"
     assert badge["textContent"] == "Done"
     assert badge["title"] == "Marked done 2h ago"
+    assert out[0]["isDone"] is True
 
 
 def test_row_without_done_at_renders_nothing():
     out = _run_render([{"session_id": "b"}, {"session_id": "c", "done_at": None}])
-    assert out == [[], []], out
+    assert out == [
+        {"isDone": False, "children": []},
+        {"isDone": False, "children": []},
+    ], out
+
+
+def test_done_at_zero_still_reads_as_done():
+    """0 is a valid timestamp: presence, not truthiness, decides (JS `if(0)` is false)."""
+    out = _run_render([{"session_id": "d", "done_at": 0}])
+    assert out[0]["isDone"] is True
+    assert len(out[0]["children"]) == 1, out
 
 
 def test_done_row_gets_the_done_class_and_archived_stays_independent():
     """`done` is workflow state, `archived` is storage: both classes can coexist."""
-    assert "(s.done_at?' done':'')" in SESSIONS_JS, "row class not driven by done_at"
+    assert "const isDone=s.done_at!==null&&s.done_at!==undefined&&s.done_at!=='';" in SESSIONS_JS, (
+        "done predicate must test presence, not truthiness (a 0 timestamp is valid)"
+    )
     # The class is appended next to `archived`, never as a replacement for it.
     m = re.search(r"el\.className='session-item'.*?;(?=\n)", SESSIONS_JS)
     assert m, "session-item className line not found"
     line = m.group(0)
     assert "(s.archived?' archived':'')" in line
-    assert "(s.done_at?' done':'')" in line
+    assert "(isDone?' done':'')" in line
     assert "s.archived?s.done_at" not in line and "s.done_at?s.archived" not in line
 
 
@@ -120,11 +137,16 @@ def test_badge_style_is_defined_once():
 
 
 def test_every_locale_defines_both_done_keys():
-    locales = re.findall(r"^  ([a-z]{2}): \{\s*$", I18N_JS, re.M)
-    assert locales, "no locale blocks found"
+    # Locale keys are bare (`en: {`) or quoted when they carry a hyphen
+    # (`'zh-Hant': {`). An unquoted-only pattern silently skips zh-Hant and the
+    # "every locale" assertion becomes a 14-of-15 claim that still passes.
+    locales = re.findall(r"^  (?:'([A-Za-z-]+)'|([a-z]{2})): \{\s*$", I18N_JS, re.M)
+    names = [a or b for a, b in locales]
+    assert names, "no locale blocks found"
+    assert len(names) >= 15, f"only {len(names)} locales found: {names}"
     missing = [
         loc
-        for loc in locales
+        for loc in names
         if f"session_done_badge:" not in _locale_block(loc)
         or f"session_done_tooltip:" not in _locale_block(loc)
     ]
@@ -132,10 +154,9 @@ def test_every_locale_defines_both_done_keys():
 
 
 def _locale_block(loc: str) -> str:
-    start = I18N_JS.index(f"\n  {loc}: {{")
-    nxt = [
-        m.start()
-        for m in re.finditer(r"^  [a-z]{2}: \{\s*$", I18N_JS[start + 5 :], re.M)
-    ]
-    end = start + 5 + nxt[0] if nxt else len(I18N_JS)
+    m = re.search(rf"^  (?:'{loc}'|{loc}): \{{\s*$", I18N_JS, re.M)
+    assert m, f"locale {loc} not found"
+    start = m.start()
+    nxt = re.search(r"^  (?:'[A-Za-z-]+'|[a-z]{2}): \{\s*$", I18N_JS[start + 5 :], re.M)
+    end = start + 5 + nxt.start() if nxt else len(I18N_JS)
     return I18N_JS[start:end]

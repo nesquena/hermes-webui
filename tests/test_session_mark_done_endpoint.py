@@ -160,3 +160,36 @@ def test_mark_done_rejects_non_boolean_done():
 def test_mark_done_requires_session_id():
     body, status = _post("/api/session/mark-done", {})
     assert status == 400, (status, body)
+
+
+def test_mark_done_rejects_non_finite_timestamp():
+    """nan/inf would be persisted as a bare `NaN`/`Infinity` token: `JSON.parse`
+    rejects it, so one request would break the sidebar fetch for every client,
+    permanently (Python reloads the sidecar fine, so it survives restarts)."""
+    sid = _seed_session()
+    for bad in ("nan", "inf", "-inf", 1e400, -1):
+        body, status = _post("/api/session/mark-done", {"session_id": sid, "done_at": bad})
+        assert status == 400, (bad, status, body)
+    # Untouched: a rejected write must not half-apply.
+    row = _sidebar_row(sid)
+    assert not row.get("done_at")
+
+
+def test_mark_done_accepts_zero_timestamp():
+    """0 is a valid (epoch) timestamp and must be stored, not treated as "clear"."""
+    sid = _seed_session()
+    body, status = _post("/api/session/mark-done", {"session_id": sid, "done_at": 0})
+    assert status == 200, body
+    assert body["session"]["done_at"] == 0
+    assert _sidebar_row(sid).get("done_at") == 0
+
+
+def test_mark_done_does_not_bump_updated_at():
+    """Marking done is not new activity: `updated_at` must not move, or a
+    backfill re-sorts the whole sidebar and resets every row's last-activity."""
+    sid = _seed_session()
+    before = _sidebar_row(sid).get("updated_at")
+    body, status = _post("/api/session/mark-done", {"session_id": sid})
+    assert status == 200, body
+    after = _sidebar_row(sid).get("updated_at")
+    assert after == before, (before, after)

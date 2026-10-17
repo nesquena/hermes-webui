@@ -8542,7 +8542,7 @@ def _refresh_index_rows_from_sidecar_metadata(
         refreshed.pop('_pending_hidden_wakeup_at', None)
         for key in (
             'message_count', 'updated_at', 'last_message_at', 'title', 'workspace',
-            'model', 'model_provider', 'created_at', 'pinned', 'archived', 'project_id',
+            'model', 'model_provider', 'created_at', 'pinned', 'archived', 'done_at', 'project_id',
             'profile', 'pre_compression_snapshot', 'parent_session_id', 'source_tag',
             'raw_source', 'session_source', 'source_label', 'active_stream_id',
             'has_pending_user_message', 'pending_user_message',

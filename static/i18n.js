@@ -14653,6 +14653,8 @@ const LOCALES = {
     workspace_desc: '新增工作區，並為對話切換工作區。',
     session_meta_messages: (n) => `${n} 則訊息`,
     session_meta_children: (n) => `${n} 則子`,
+    session_done_badge: '已完成',
+    session_done_tooltip: '{0} 標記為完成',
     // Softened label: avoids exposing the technical internal term
     // 'segment' in the default visible badge. User-facing copy remains
     // translatable for locales that prefer a different wording. (#2155)

@@ -14,6 +14,7 @@ import gzip
 import json
 from api.sse_chunked import end_sse_headers
 import logging
+import math
 import mimetypes
 import os
 import queue
@@ -21107,12 +21108,24 @@ def handle_post(handler, parsed) -> bool:
                 explicit_ts = float(explicit_ts)
             except (TypeError, ValueError):
                 return bad(handler, "done_at must be a unix timestamp")
+            # `float()` happily accepts nan/inf and 1e400 → inf. `Session.save()`
+            # writes with a default json.dumps, so a non-finite value becomes a
+            # bare `NaN`/`Infinity` token in the sidecar: `JSON.parse` rejects it
+            # and the sidebar fetch breaks for every client, permanently (Python
+            # reloads it fine, so it survives restarts). Reject at the door.
+            if not math.isfinite(explicit_ts) or explicit_ts < 0:
+                return bad(handler, "done_at must be a finite, non-negative unix timestamp")
         try:
             _get_or_materialize_session(sid)
         except KeyError:
             return bad(handler, "Session not found", 404)
         except PermissionError:
             return bad(handler, "Read-only imported sessions cannot be marked done from WebUI", 403)
+        # #7776 Finding 2, same guard as the rename handler: capture the CLI
+        # source identity BEFORE the lock, because the lock-held Session.load(sid)
+        # reload materializes a WebUI session without the pre-lock CLI metadata,
+        # and the save below would then persist stripped provenance.
+        _done_cli_meta = _lookup_cli_session_metadata(sid) or {}
         with _get_session_agent_lock(sid):
             with LOCK:
                 latest = SESSIONS.get(sid)
@@ -21128,8 +21141,14 @@ def handle_post(handler, parsed) -> bool:
             s = _ensure_full_session_before_mutation(sid, latest)
             if getattr(s, "read_only", False):
                 return bad(handler, "Read-only imported sessions cannot be marked done from WebUI", 403)
+            if _done_cli_meta:
+                _apply_cli_source_meta_to_session(s, _done_cli_meta)
             s.done_at = (explicit_ts if explicit_ts is not None else time.time()) if raw_done else None
-            s.save()
+            # `touch_updated_at=False`: marking done is not new activity. Letting
+            # save() bump `updated_at` would re-sort the sidebar and reset every
+            # touched row's displayed last-activity — catastrophic on a backfill
+            # of hundreds of rows.
+            s.save(touch_updated_at=False)
             with LOCK:
                 SESSIONS[sid] = s
                 SESSIONS.move_to_end(sid)
