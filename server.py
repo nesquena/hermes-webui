@@ -370,14 +370,9 @@ class Handler(BaseHTTPRequestHandler):
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         }
-        try:
-            # #7863: client_ip is resolved by the trusted-proxy machinery, so it
-            # is the raw socket peer unless a trusted proxy asserted it. The old
-            # `forwarded_for` field recorded X-Forwarded-For[0] — a value the
-            # client writes — which fail2ban-style tooling could ban on.
+        try:  # #7863: trusted-proxy-resolved client IP, never the raw XFF[0] hop.
             record_data['client_ip'] = request_log_client_ip(self)
-        except Exception:
-            # Logging must never break a response; fall back to the raw peer.
+        except Exception:  # logging must never break a response
             record_data['client_ip'] = remote
         record = _json.dumps(record_data)
         self._safe_webui_print(f'[webui] {record}')
