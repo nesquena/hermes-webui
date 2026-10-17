@@ -13,9 +13,11 @@ and assert how many projections were actually built, plus the identity and
 release rules that keep the coalescing fail-closed.
 """
 
+import json
 import sqlite3
 import threading
 import time
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.parse import urlparse
@@ -381,6 +383,354 @@ def test_parent_sidecar_generation_guards_the_flight_key(isolated_home):
         "provenance_complete": False,
     }
     assert routes._session_get_flight_key(session, None, {}, ("1",)) is None
+
+
+class _GatedRedact:
+    """Parks the FIRST projection build until the test releases it.
+
+    Lets a test overlap other work with a flight that is provably in flight
+    (claimed, past ``compact()``, still building) instead of guessing with
+    sleeps.
+    """
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+        self.calls = 0
+        self._lock = threading.Lock()
+
+    def __call__(self, raw):
+        with self._lock:
+            self.calls += 1
+            is_first = self.calls == 1
+        if is_first:
+            self.entered.set()
+            assert self.release.wait(timeout=30), "leader build was never released"
+        return raw
+
+
+class _UpdatableSession(_FakeSession):
+    """Cached session whose ``save()`` can be held open mid-update.
+
+    ``/api/session/update`` mutates the cached Session under the per-session
+    lock and only then calls ``save()``. Holding ``save()`` open reproduces
+    exactly the window the gate review describes: a GET can observe the
+    already-mutated object while the sidecar still reads as the previous
+    generation.
+    """
+
+    def __init__(self, messages, session_dir, sid=SESSION_ID, block_save=True):
+        super().__init__(messages, sid=sid)
+        self._session_dir = session_dir
+        self.save_entered = threading.Event()
+        self.release_save = threading.Event()
+        self.save_count = 0
+        if not block_save:
+            self.release_save.set()
+
+    def save(self, *args, **kwargs):
+        self.save_entered.set()
+        assert self.release_save.wait(timeout=30), "save() was never released"
+        with self._lock_free():
+            self.save_count += 1
+        (self._session_dir / f"{self.session_id}.json").write_text(
+            json.dumps(
+                {
+                    "session_id": self.session_id,
+                    "model": self.model,
+                    "messages": self.messages,
+                }
+            )
+        )
+
+    class _lock_free:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+
+class _SessionRouteEnv:
+    """Installs every route collaborator stub once, around the whole test.
+
+    ``unittest.mock.patch`` mutates *module globals*, so per-thread patch stacks
+    race one another: the first worker's ``ExitStack`` exit restores the real
+    callable while a second worker is still inside the route. The stubs
+    therefore live in the test body, and the worker threads below only call the
+    real handlers.
+    """
+
+    def __init__(self, session, redact):
+        self.session = session
+        self.redact = redact
+        self.capture = {}
+        self.errors = []
+        self.flight_keys = []
+        self._lock = threading.Lock()
+        self._stack = None
+
+    # -- stubs ---------------------------------------------------------------
+    def fake_j(self, _handler, data, status=200, extra_headers=None):
+        ident = threading.get_ident()
+        with self._lock:
+            self.capture[ident] = (status, data)
+        return data
+
+    def apply_model(self, sess, *, model, provider=None, provider_specified=True,
+                    already_resolved=False):
+        # Stand-in for the real normalizer. The contract under test is
+        # "mutate the cached Session under the lock, then save()".
+        if model is not None:
+            sess.model = model
+        return True
+
+    def record_flight_key(self, *args, **kwargs):
+        key = self._real_key(*args, **kwargs)
+        with self._lock:
+            self.flight_keys.append((threading.get_ident(), key))
+        return key
+
+    # -- optional instrumentation -------------------------------------------
+    def track_claims(self, on_join):
+        """Invoke ``on_join(ident, flight)`` for every non-leader claim."""
+        real = self._real_claim
+
+        def claim(key):
+            is_leader, flight = real(key)
+            if not is_leader:
+                on_join(threading.get_ident(), flight)
+            return is_leader, flight
+
+        self._stack.enter_context(
+            patch("api.routes._claim_session_get_flight", side_effect=claim)
+        )
+
+    def wait_for_flight_keys(self, count, timeout=30):
+        """Block until ``count`` requests have computed their flight key."""
+        deadline = time.time() + timeout
+        while True:
+            with self._lock:
+                if len(self.flight_keys) >= count:
+                    return True
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.005)
+
+    # -- lifecycle -----------------------------------------------------------
+    def __enter__(self):
+        import api.routes as routes
+
+        self._real_key = routes._session_get_flight_key
+        self._real_claim = routes._claim_session_get_flight
+        s = self.session
+        self._stack = ExitStack()
+        self._stack.__enter__()
+        stack = self._stack
+        # GET /api/session collaborators
+        stack.enter_context(patch("api.routes.get_session", return_value=s))
+        stack.enter_context(
+            patch("api.routes._clear_stale_stream_state", return_value=False)
+        )
+        stack.enter_context(
+            patch("api.routes._lookup_cli_session_metadata", return_value={})
+        )
+        stack.enter_context(
+            patch("api.routes.get_state_db_session_messages", return_value=[])
+        )
+        stack.enter_context(
+            patch("api.routes.redact_session_data", side_effect=self.redact)
+        )
+        stack.enter_context(
+            patch("api.routes._session_get_flight_key", side_effect=self.record_flight_key)
+        )
+        stack.enter_context(patch("api.routes.j", side_effect=self.fake_j))
+        # POST /api/session/update collaborators
+        stack.enter_context(patch("api.routes._check_csrf", lambda _h: True))
+        stack.enter_context(
+            patch("api.routes._guard_request_session_visibility", lambda *a, **k: True)
+        )
+        stack.enter_context(
+            patch(
+                "api.routes.read_body",
+                lambda _h: {"session_id": s.session_id, "model": "gpt-new"},
+            )
+        )
+        stack.enter_context(
+            patch("api.routes._get_or_materialize_session", lambda _sid: s)
+        )
+        stack.enter_context(
+            patch("api.routes.resolve_trusted_workspace", lambda ws, profile=None: ws)
+        )
+        stack.enter_context(
+            patch("api.routes._invalidate_session_route_state_if_changed", self.apply_model)
+        )
+        stack.enter_context(
+            patch("api.routes.set_last_workspace", lambda *a, **k: None)
+        )
+        stack.enter_context(
+            patch("api.routes.public_session_projection", lambda raw: raw)
+        )
+        return self
+
+    def __exit__(self, *exc):
+        return self._stack.__exit__(*exc)
+
+
+def _spawn(fn, *args):
+    thread = threading.Thread(target=fn, args=args)
+    thread.start()
+    return thread
+
+
+def _join_all(env, threads):
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not any(t.is_alive() for t in threads), "route call did not finish"
+    assert env.errors == [], env.errors
+
+
+def test_gets_overlapped_by_session_update_never_return_the_old_model(isolated_home):
+    """#7310 gate review (blocking): a GET landing inside /api/session/update's
+    mutation window must not be handed a flight built before the update.
+
+    The route mutates the cached Session and only then saves, so a GET in that
+    window still computes the PRE-save key — identical to the key a leader
+    claimed before the update — and would otherwise receive that leader's
+    payload carrying the old model.
+    """
+    import api.routes as routes
+
+    session = _UpdatableSession([{"role": "user", "content": "hi"}], isolated_home)
+    assert session.model == "gpt-test"
+    redact = _GatedRedact()
+    env = _SessionRouteEnv(session, redact)
+    idents = {}
+
+    with env:
+        def read(tag):
+            ident = threading.get_ident()
+            idents[tag] = ident
+            try:
+                routes.handle_get(SimpleNamespace(), urlparse(f"/api/session?{SAME_WINDOW}"))
+            except BaseException as exc:  # noqa: BLE001 - surfaced via env.errors
+                env.errors.append(exc)
+
+        def update():
+            try:
+                routes.handle_post(SimpleNamespace(), urlparse("/api/session/update"))
+            except BaseException as exc:  # noqa: BLE001
+                env.errors.append(exc)
+
+        # 1. A leader GET claims the pre-update key and parks mid-build.
+        leader = _spawn(read, "leader")
+        assert redact.entered.wait(timeout=30), "leader never started building"
+
+        # 2. The update takes the lock, mutates the cached Session, and parks in
+        #    save(): new model in memory, sidecar still the old generation.
+        updater = _spawn(update)
+        assert session.save_entered.wait(timeout=30), "update never reached save()"
+        assert session.model == "gpt-new"
+
+        # 3. Two reloads arrive inside that window — the reconnect-storm shape.
+        followers = [_spawn(read, f"follower_{i}") for i in range(2)]
+        # Hold the update inside save() until both followers have computed
+        # their flight key, so they provably observe the mutated Session with
+        # the pre-update sidecar generation.
+        assert env.wait_for_flight_keys(3), (
+            "followers never reached the flight key inside the update window: "
+            f"{env.flight_keys!r}"
+        )
+
+        session.release_save.set()
+        redact.release.set()
+        _join_all(env, [leader, updater, *followers])
+
+        assert session.save_count == 1, "the update must have committed"
+        # The leader compacted before the update mutated the cached Session, so
+        # it legitimately holds the pre-update snapshot. The followers arrived
+        # inside the mutation window and must build their own projection rather
+        # than inherit that stale payload.
+        leader_status, leader_data = env.capture[idents["leader"]]
+        assert leader_status == 200, (leader_status, leader_data)
+        assert leader_data["session"]["model"] == "gpt-test", leader_data
+        for name in ("follower_0", "follower_1"):
+            status, data = env.capture[idents[name]]
+            assert status == 200, (name, status, data)
+            assert data["session"]["model"] == "gpt-new", (
+                f"{name} arrived inside the update window and inherited the "
+                f"leader's pre-update model {data['session']['model']!r}"
+            )
+    assert routes._SESSION_GET_FLIGHTS == {}, "flight registry leaked an entry"
+
+
+def test_follower_that_joined_before_an_update_refuses_the_stale_flight(isolated_home):
+    """#7310 gate review, point 2: a follower must re-check the generation
+    before it uses a shared payload.
+
+    This follower joins while the session is still un-updated, so its key is
+    legitimate on arrival; the update then completes during its wait. Using the
+    leader's payload without re-checking is what hands it the old model.
+    """
+    import api.routes as routes
+
+    session = _UpdatableSession(
+        [{"role": "user", "content": "hi"}], isolated_home, block_save=False
+    )
+    redact = _GatedRedact()
+    env = _SessionRouteEnv(session, redact)
+    idents = {}
+    joined = threading.Event()
+
+    with env:
+        def on_join(ident, flight):
+            if idents.get("follower") == ident:
+                joined.set()
+
+        env.track_claims(on_join)
+
+        def read(tag):
+            ident = threading.get_ident()
+            idents[tag] = ident
+            try:
+                routes.handle_get(SimpleNamespace(), urlparse(f"/api/session?{SAME_WINDOW}"))
+            except BaseException as exc:  # noqa: BLE001
+                env.errors.append(exc)
+
+        def update():
+            try:
+                routes.handle_post(SimpleNamespace(), urlparse("/api/session/update"))
+            except BaseException as exc:  # noqa: BLE001
+                env.errors.append(exc)
+
+        # The leader claims the pre-update key and parks mid-build.
+        leader = _spawn(read, "leader")
+        assert redact.entered.wait(timeout=30), "leader never started building"
+
+        # The follower joins that flight while the session is still un-updated.
+        follower = _spawn(read, "follower")
+        assert joined.wait(timeout=30), "follower never joined the in-flight read"
+
+        # The update lands while the follower is still waiting on the flight.
+        updater = _spawn(update)
+        _join_all(env, [updater])
+        assert session.model == "gpt-new"
+        assert session.save_count == 1, "the update must have committed"
+
+        redact.release.set()
+        _join_all(env, [leader, follower])
+
+        leader_status, leader_data = env.capture[idents["leader"]]
+        follower_status, follower_data = env.capture[idents["follower"]]
+        assert leader_status == 200, leader_data
+        assert follower_status == 200, follower_data
+        assert leader_data["session"]["model"] == "gpt-test", (
+            "the leader built before the update, so it legitimately holds the old model"
+        )
+        assert follower_data["session"]["model"] == "gpt-new", (
+            "a follower that waited across the update must not reuse the leader's "
+            f"pre-update payload (got {follower_data['session']['model']!r})"
+        )
 
 
 def test_settings_rewrite_changes_the_flight_key(isolated_home):
