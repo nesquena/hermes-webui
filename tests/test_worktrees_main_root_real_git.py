@@ -10,9 +10,7 @@ These tests build real repositories on disk — no mocks of git — and assert t
 resolved root is the actual checkout, not the metadata dir.
 """
 
-import os
 import subprocess
-import sys
 
 import pytest
 
