@@ -79,7 +79,7 @@ def _extract_function(src: str, name: str, *, required: bool = True) -> str | No
     raise AssertionError(f"{name}() has unbalanced braces")
 
 
-def _harness_source(scenario_js: str) -> str:
+def _harness_source(scenario_js: str, *, extra_functions: tuple = ()) -> str:
     """Build the Node program: real functions + minimal DOM + one scenario."""
     src = MESSAGES_JS_PATH.read_text(encoding="utf-8")
     constants = "\n".join(
@@ -91,7 +91,7 @@ def _harness_source(scenario_js: str) -> str:
         body
         for body in (
             _extract_function(src, name, required=(name != "_clarifyFieldIsHidden"))
-            for name in EXTRACTED_FUNCTIONS
+            for name in (*EXTRACTED_FUNCTIONS, *extra_functions)
         )
         if body is not None
     )
@@ -116,6 +116,10 @@ def _harness_source(scenario_js: str) -> str:
 const TIMERS = [];
 const FRAMES = [];
 let SCROLL_FOLLOW_CALLS = 0;
+// Session switch, as opposed to collapse: the flyout is display:none, so the
+// field has no layout box. Distinct from the collapsed class, which only hides
+// the answer row.
+let HIDDEN = false;
 
 function setTimeoutStub(fn) {{ TIMERS.push(fn); return TIMERS.length; }}
 function requestAnimationFrameStub(fn) {{ FRAMES.push(fn); return FRAMES.length; }}
@@ -161,17 +165,22 @@ const messages = {{
 
 const input = {{
   value: "",
+  disabled: false,
   dataset: {{}},
   style: {{ height: "", overflowY: "" }},
   _listeners: {{}},
   addEventListener(type, fn) {{ this._listeners[type] = fn; }},
   dispatch(type) {{ if (this._listeners[type]) this._listeners[type](); }},
+  removeAttribute() {{}},
+  focus() {{}},
   // A laid-out textarea reports its content height; a display:none one reports 0.
   get scrollHeight() {{
     if (this.getClientRects().length === 0) return 0;
     return Math.max(1, String(this.value).split("\\n").length) * 20;
   }},
-  getClientRects() {{ return card.classList.contains("collapsed") ? [] : [{{}}]; }},
+  getClientRects() {{
+    return (HIDDEN || card.classList.contains("collapsed")) ? [] : [{{}}];
+  }},
 }};
 
 function currentInputHeight() {{
@@ -186,9 +195,37 @@ const card = {{
   getBoundingClientRect: () => ({{ height: 56 }}),
 }};
 
-const REGISTRY = {{ messages, clarifyInput: input, clarifyCard: card }};
+const REGISTRY = {{
+  messages,
+  clarifyInput: input,
+  clarifyCard: card,
+  clarifyQuestion: {{ textContent: "" }},
+  clarifyChoices: {{ innerHTML: "", style: {{}} }},
+  msg: null,
+}};
 function $(id) {{ return REGISTRY[id] || null; }}
 globalThis.$ = $;
+globalThis.document = {{
+  activeElement: null,
+  createElement: () => ({{
+    style: {{}}, dataset: {{}}, classList: makeClassList(),
+    appendChild() {{}}, setAttribute() {{}}, focus() {{}},
+  }}),
+}};
+
+// Collaborators showClarifyCard() reaches for. The flyout toggle is what makes
+// the layout box come back, so it flips HIDDEN rather than being inert.
+function _setPromptFlyoutHidden(_card, hidden) {{ HIDDEN = !!hidden; }}
+function _rememberClarifyPending() {{ return "sid"; }}
+function _clarifyPromptBelongsToActiveSession() {{ return true; }}
+function _ensureClarifyCardDom() {{ return card; }}
+function _startClarifyCountdown() {{}}
+function _clearClarifyCountdownTimer() {{}}
+function _clearClarifyHideTimer() {{}}
+function _clarifySetControlsDisabled() {{}}
+function _ensureClarifyResizeListener() {{}}
+const S = {{ session: {{ session_id: "sess" }} }};
+let _clarifySignature = null, _clarifySessionId = null, _clarifyId = null, _clarifyVisibleSince = 0;
 
 // ── scenario ─────────────────────────────────────────────────────────────────
 const R = {{}};
@@ -205,6 +242,7 @@ function bound() {{ return input.style.height; }}
 function scrollFollow() {{ return SCROLL_FOLLOW_CALLS; }}
 function type(text) {{ input.value = text; input.dispatch("input"); }}
 function settle() {{ runFrames(); runTimers(); }}
+function setHidden(hidden) {{ HIDDEN = !!hidden; }}
 
 {scenario_js}
 
@@ -215,9 +253,9 @@ process.stdout.write(JSON.stringify({{
 """
 
 
-def _run(scenario_js: str) -> dict:
+def _run(scenario_js: str, *, extra_functions: tuple = ()) -> dict:
     result = subprocess.run(
-        ["node", "-e", _harness_source(scenario_js)],
+        ["node", "-e", _harness_source(scenario_js, extra_functions=extra_functions)],
         capture_output=True,
         text=True,
         timeout=60,
@@ -438,3 +476,77 @@ def test_listener_dedup_and_new_prompt_reset_are_preserved():
     assert res["heightReset"] == "42px", (
         f"new-prompt reset must collapse the field to the floor, got {res['heightReset']}"
     )
+
+
+# ── 4. a new prompt must not inherit the previous answer's height ────────────
+
+
+def test_new_prompt_after_session_switch_is_remeasured_not_inherited():
+    """The show path must measure once the flyout is back, not before.
+
+    ``showClarifyCard()`` calls ``_autoResizeClarifyInput()`` *before*
+    ``_setPromptFlyoutHidden(card, false)``, so on every show that call lands on
+    a field with no layout box: the gate parks a ``clarifyRemeasure`` marker and
+    returns without measuring. The layout box only returns a few lines later, by
+    which point nothing measured again — so the marker was write-only and a fresh
+    prompt kept the previous answer's tall empty field until some later resize or
+    poll happened to repair it.
+    """
+    out = _run(
+        """
+        // Session A: a tall answer grows the field.
+        setHidden(false);
+        card.classList.add("visible");
+        _bindClarifyInputAutoResize();
+        type("l1\\nl2\\nl3\\nl4");
+        settle();
+        record("heightTall", height());
+        record("reservationTall", reservation());
+
+        // Session switch hides the flyout, then session B's prompt arrives.
+        setHidden(true);
+        card.classList.remove("visible");
+        showClarifyCard({question: "next?", choices: [], clarify_id: "c2"});
+        settle();
+        record("heightAfterShow", height());
+        record("markerAfterShow", remeasureFlag());
+        record("reservationAfterShow", reservation());
+        """,
+        extra_functions=("showClarifyCard",),
+    )
+    res = out["result"]
+    # 4 lines * 20px + 2px border.
+    assert res["heightTall"] == "82px", res
+    assert res["markerAfterShow"] is None, (
+        f"showClarifyCard left a deferred remeasure parked ({res['markerAfterShow']}): "
+        "nothing consumed the marker after the flyout was unhidden"
+    )
+    assert res["heightAfterShow"] == "42px", (
+        f"the new prompt inherited the previous answer's height "
+        f"(82px -> {res['heightAfterShow']}): the field was never remeasured after "
+        "the card became visible"
+    )
+    # The reservation must follow the remeasured height, not the stale one.
+    assert int(res["reservationAfterShow"].replace("px", "")) == 100 + 42 + 24, (
+        f"reservation {res['reservationAfterShow']} was not resynced to the "
+        f"remeasured 42px field (was {res['reservationTall']})"
+    )
+
+
+def test_show_without_a_pending_marker_does_not_resize_twice():
+    """The drain must be a no-op when the field was already measurable."""
+    out = _run(
+        """
+        setHidden(false);
+        card.classList.add("visible");
+        _bindClarifyInputAutoResize();
+        showClarifyCard({question: "first?", choices: [], clarify_id: "c1"});
+        settle();
+        record("height", height());
+        record("marker", remeasureFlag());
+        """,
+        extra_functions=("showClarifyCard",),
+    )
+    res = out["result"]
+    assert res["height"] == "42px", res
+    assert res["marker"] is None, res
