@@ -3102,8 +3102,22 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
 
     try:
         from api import yaml_compat as _yaml
+        from api.profiles import expand_profile_config, get_active_hermes_home, profile_env_binding
 
         changed = False
+
+        # config.yaml keeps raw ``${VAR}`` references (#8032): compare provider
+        # IDENTITY as the active profile resolves it, but delete from (and save)
+        # the raw document so no secret is expanded to disk. The binding is the
+        # active profile's own env — root's explicitly, never the live process
+        # env a named-profile worker may be mirroring into — and is computed
+        # BEFORE the non-reentrant _cfg_lock, so resolving the profile can't
+        # contend for it; inside, expansion is a pure thread-local read.
+        _home = get_active_hermes_home()
+        _binding = profile_env_binding(_home)
+
+        def _resolved(value):
+            return expand_profile_config(_home, value, env=_binding)
 
         with _cfg_lock:
             raw = config_path.read_text(encoding="utf-8")
@@ -3122,7 +3136,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             # 2. Clean model.api_key — only if this provider is the active one
             model_cfg = cfg.get("model", {})
             if isinstance(model_cfg, dict) and model_cfg.get("api_key"):
-                active_provider = model_cfg.get("provider")
+                active_provider = _resolved(model_cfg.get("provider"))
                 if active_provider and str(active_provider).strip().lower() == provider_id.lower():
                     del model_cfg["api_key"]
                     changed = True
@@ -3132,7 +3146,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             if isinstance(custom_providers, list):
                 for cp in custom_providers:
                     if isinstance(cp, dict):
-                        if _custom_provider_name_matches(provider_id, cp.get("name")):
+                        if _custom_provider_name_matches(provider_id, _resolved(cp.get("name"))):
                             if cp.get("api_key"):
                                 del cp["api_key"]
                                 changed = True
