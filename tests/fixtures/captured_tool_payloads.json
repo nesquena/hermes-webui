@@ -1,0 +1,30 @@
+{
+  "_comment": "Real on_tool_complete payloads captured from the Agent's own terminal tool via `python3 tests/fixtures/capture_tool_payloads.py` (HERMES_WEBUI_AGENT_DIR=<agent checkout>). The structured callback receives `function_result` as a JSON STRING, which is the shape the #7358 round-3 classifier must decode structurally.",
+  "captured_at_source": "tools/terminal_tool.py -> run_agent.py tool_complete_callback(tc.id, name, args, function_result)",
+  "payloads": [
+    {
+      "label": "success",
+      "tool_name": "terminal",
+      "args": {"command": "echo hello-world"},
+      "function_result": "{\"output\": \"hello-world\", \"exit_code\": 0, \"error\": null}",
+      "function_result_type": "str",
+      "expected_is_error": false
+    },
+    {
+      "label": "failure",
+      "tool_name": "terminal",
+      "args": {"command": "exit 3"},
+      "function_result": "{\"output\": \"\", \"exit_code\": 3, \"error\": null}",
+      "function_result_type": "str",
+      "expected_is_error": true
+    },
+    {
+      "label": "grep_no_match",
+      "tool_name": "terminal",
+      "args": {"command": "echo hi | grep zzz-nonexistent-token"},
+      "function_result": "{\"output\": \"\", \"exit_code\": 1, \"error\": null, \"exit_code_meaning\": \"No matches found (not an error)\"}",
+      "function_result_type": "str",
+      "expected_is_error": true
+    }
+  ]
+}
