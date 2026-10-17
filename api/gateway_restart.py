@@ -21,6 +21,29 @@ from api.profiles import (
 logger = logging.getLogger(__name__)
 
 _GATEWAY_RESTART_LOCK = threading.Lock()
+_ACTIVE_RESTART_PROCS: set[subprocess.Popen] = set()
+_ACTIVE_RESTART_LOCK = threading.Lock()
+
+
+def reap_stray_restart_processes() -> int:
+    """Poll and reap any exited gateway restart child processes still in registry.
+
+    Unlike a process-wide SIGCHLD handler with waitpid(-1), this explicitly polls only
+    Popen instances tracked by this module, preserving exit codes for synchronous
+    callers elsewhere in the process.
+    """
+    reaped = 0
+    with _ACTIVE_RESTART_LOCK:
+        procs = list(_ACTIVE_RESTART_PROCS)
+    for p in procs:
+        try:
+            if p.poll() is not None:
+                with _ACTIVE_RESTART_LOCK:
+                    _ACTIVE_RESTART_PROCS.discard(p)
+                reaped += 1
+        except Exception:
+            pass
+    return reaped
 
 
 def _resolve_hermes_command() -> str:
@@ -153,32 +176,40 @@ def restart_active_profile_gateway(
                 quick_timeout_seconds,
             )
 
+            with _ACTIVE_RESTART_LOCK:
+                _ACTIVE_RESTART_PROCS.add(proc)
+
             threading.Thread(target=_consume_stream, args=(proc.stdout,), daemon=True).start()
             threading.Thread(target=_consume_stream, args=(proc.stderr,), daemon=True).start()
 
             def _wait_and_release() -> None:
                 try:
-                    proc.wait(timeout=background_wait_seconds)
-                except subprocess.TimeoutExpired:
-                    logger.error(
-                        "Gateway restart process timed out after %.1fs. Terminating process.",
-                        background_wait_seconds,
-                    )
                     try:
-                        proc.terminate()
+                        proc.wait(timeout=background_wait_seconds)
+                    except subprocess.TimeoutExpired:
+                        logger.error(
+                            "Gateway restart process timed out after %.1fs. Terminating process.",
+                            background_wait_seconds,
+                        )
                         try:
-                            proc.wait(timeout=5.0)
-                        except subprocess.TimeoutExpired:
-                            proc.kill()
+                            proc.terminate()
                             try:
                                 proc.wait(timeout=5.0)
                             except subprocess.TimeoutExpired:
-                                logger.error(
-                                    "Gateway restart process refused to die even after SIGKILL.",
-                                )
+                                proc.kill()
+                                try:
+                                    proc.wait(timeout=5.0)
+                                except subprocess.TimeoutExpired:
+                                    logger.error(
+                                        "Gateway restart process refused to die even after SIGKILL.",
+                                    )
+                        except Exception:
+                            logger.exception("Failed to terminate timed out gateway restart process.")
                     except Exception:
-                        logger.exception("Failed to terminate timed out gateway restart process.")
+                        logger.exception("Unexpected error while waiting for gateway restart process.")
                 finally:
+                    with _ACTIVE_RESTART_LOCK:
+                        _ACTIVE_RESTART_PROCS.discard(proc)
                     _release_lock()
 
             threading.Thread(target=_wait_and_release, daemon=True).start()
