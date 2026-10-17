@@ -1866,6 +1866,7 @@ class Session:
                  reasoning_effort=None,
                  messages=None, created_at=None, updated_at=None,
                  tool_calls=None, pinned: bool=False, archived: bool=False,
+                 done_at: float=None,
                  project_id: str=None, profile=None,
                  input_tokens: int=0, output_tokens: int=0, estimated_cost=None,
                  cache_read_tokens: int=0, cache_write_tokens: int=0,
@@ -1969,6 +1970,12 @@ class Session:
         self.updated_at = updated_at or time.time()
         self.pinned = bool(pinned)
         self.archived = bool(archived)
+        # Workflow state, distinct from `archived` (storage): set by the
+        # /api/session/mark-done endpoint, never inferred from the title.
+        try:
+            self.done_at = float(done_at) if done_at not in (None, '') else None
+        except (TypeError, ValueError):
+            self.done_at = None
         self.project_id = project_id or None
         self.profile = profile
         self.input_tokens = input_tokens or 0
@@ -2233,6 +2240,7 @@ class Session:
         METADATA_FIELDS = [
             'session_id', 'title', 'workspace', 'created_workspace', 'model', 'model_provider', 'reasoning_effort', 'model_explicit_pick_signature', 'created_at', 'updated_at',
             'pinned', 'archived', 'project_id', 'profile',
+            'done_at',
             'input_tokens', 'output_tokens', 'estimated_cost',
             'cache_read_tokens', 'cache_write_tokens',
             'personality', 'active_stream_id',
@@ -2929,6 +2937,7 @@ class Session:
             **({'truncation_boundary': self.truncation_boundary} if self.truncation_boundary else {}),
             'pinned': self.pinned,
             'archived': self.archived,
+            'done_at': self.done_at,
             'project_id': self.project_id,
             'profile': self.profile,
             'input_tokens': self.input_tokens,

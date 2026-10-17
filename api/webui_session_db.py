@@ -64,6 +64,7 @@ _METADATA_FIELDS = frozenset(
         "llm_title_generated",
         "manual_title",
         "parent_session_id",
+        "done_at",
         "worktree_path",
         "worktree_branch",
         "worktree_repo_root",

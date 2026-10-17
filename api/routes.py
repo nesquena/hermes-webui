@@ -21084,6 +21084,63 @@ def handle_post(handler, parsed) -> bool:
     if parsed.path == "/api/session/anchor-scene":
         return _handle_session_anchor_scene(handler, body)
 
+    if parsed.path == "/api/session/mark-done":
+        # Workflow state, not storage: `done_at` says the conversation is
+        # finished (set/cleared here), while `archived` stays a storage flag.
+        # Sibling of /api/session/rename and subject to the same contracts:
+        # 404 for an unknown id, 403 for a read-only imported session, and the
+        # write goes through the server's session object — never a raw sidecar
+        # write (the file has a single writer).
+        try:
+            require(body, "session_id")
+        except ValueError as e:
+            return bad(handler, str(e))
+        sid = body["session_id"]
+        if not isinstance(sid, str) or not sid:
+            return bad(handler, "session_id must be a non-empty string")
+        raw_done = body.get("done", True)
+        if not isinstance(raw_done, bool):
+            return bad(handler, "done must be a boolean")
+        explicit_ts = body.get("done_at")
+        if explicit_ts is not None:
+            try:
+                explicit_ts = float(explicit_ts)
+            except (TypeError, ValueError):
+                return bad(handler, "done_at must be a unix timestamp")
+        try:
+            _get_or_materialize_session(sid)
+        except KeyError:
+            return bad(handler, "Session not found", 404)
+        except PermissionError:
+            return bad(handler, "Read-only imported sessions cannot be marked done from WebUI", 403)
+        with _get_session_agent_lock(sid):
+            with LOCK:
+                latest = SESSIONS.get(sid)
+                if latest is not None and str(getattr(latest, "session_id", "") or "") != sid:
+                    SESSIONS.pop(sid, None)
+                    latest = None
+                elif latest is not None:
+                    SESSIONS.move_to_end(sid)
+            if latest is None:
+                latest = Session.load(sid)
+                if latest is None:
+                    return bad(handler, "Session not found", 404)
+            s = _ensure_full_session_before_mutation(sid, latest)
+            if getattr(s, "read_only", False):
+                return bad(handler, "Read-only imported sessions cannot be marked done from WebUI", 403)
+            s.done_at = (explicit_ts if explicit_ts is not None else time.time()) if raw_done else None
+            s.save()
+            with LOCK:
+                SESSIONS[sid] = s
+                SESSIONS.move_to_end(sid)
+                _evict_sessions_over_cap()
+        publish_session_list_changed(
+            "session_done",
+            profile=getattr(s, "profile", None),
+            session_id=getattr(s, "session_id", sid),
+        )
+        return j(handler, {"session": s.compact()})
+
     if parsed.path == "/api/session/rename":
         try:
             require(body, "session_id", "title")
