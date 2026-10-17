@@ -683,6 +683,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'Disabled while the task list in chat is on.',
     settings_label_session_jump_buttons: 'Show session jump buttons',
     settings_desc_session_jump_buttons: 'Show floating Start and End buttons while reading long session histories.',
+    settings_label_screen_reader_mode: 'Screen reader mode',
+    settings_desc_screen_reader_mode: 'Optimizes parts of the interface for screen readers. Currently makes terminal output readable and announces new output. Off by default.',
     settings_label_terminal_auto_expand: 'Auto-expand terminal on output',
     settings_desc_terminal_auto_expand: 'Expand the collapsed terminal panel automatically when a running command emits new output.',
 
@@ -2616,6 +2618,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'Non attivo mentre la lista attività in chat è abilitata.',
     settings_label_session_jump_buttons: 'Mostra pulsanti salto sessione',
     settings_desc_session_jump_buttons: 'Mostra pulsanti fluttuanti Inizio e Fine durante la lettura di sessioni lunghe.',
+    settings_label_screen_reader_mode: 'Modalità lettore di schermo',
+    settings_desc_screen_reader_mode: 'Ottimizza parti dell\'interfaccia per i lettori di schermo. Attualmente rende leggibile l\'output del terminale e annuncia il nuovo output. Disattivata per impostazione predefinita.',
     settings_label_terminal_auto_expand: 'Espandi automaticamente il terminale sull\'output',
     settings_desc_terminal_auto_expand: 'Espandi automaticamente il pannello terminale compresso quando un comando in esecuzione emette nuovo output.',
 
@@ -4489,6 +4493,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'チャットのタスク一覧が有効な間は無効です。',
     settings_label_session_jump_buttons: 'セッションジャンプボタンを表示',
     settings_desc_session_jump_buttons: '長いセッション履歴を読むときに、浮動表示の「開始」と「末尾」ボタンを表示します。',
+    settings_label_screen_reader_mode: 'スクリーンリーダーモード',
+    settings_desc_screen_reader_mode: 'インターフェースの一部をスクリーンリーダー向けに最適化します。現在はターミナルの出力を読み取り可能にし、新しい出力を読み上げます。既定ではオフです。',
     settings_label_terminal_auto_expand: '出力時にターミナルを自動展開',
     settings_desc_terminal_auto_expand: '実行中のコマンドが新しい出力を生成したときに、折りたたまれたターミナルパネルを自動的に展開します。',
 
@@ -7140,6 +7146,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'Отключено, пока список задач в чате включён.',
     settings_label_session_jump_buttons: 'Показывать кнопки перехода по сессии',
     settings_desc_session_jump_buttons: 'Показывать плавающие кнопки «Начало» и «Конец» при чтении длинных историй сессий.',
+    settings_label_screen_reader_mode: 'Режим экранного диктора',
+    settings_desc_screen_reader_mode: 'Оптимизирует части интерфейса для программ экранного доступа. Сейчас делает вывод терминала читаемым и озвучивает новый вывод. По умолчанию выключен.',
     settings_label_terminal_auto_expand: 'Автораскрытие терминала при выводе',
     settings_desc_terminal_auto_expand: 'Автоматически разворачивать свёрнутую панель терминала, когда запущенная команда выдаёт новый вывод.',
 
@@ -8982,6 +8990,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'Desactivado mientras la lista de tareas del chat está activada.',
     settings_label_session_jump_buttons: 'Mostrar botones de salto de sesión',
     settings_desc_session_jump_buttons: 'Muestra botones flotantes de Inicio y Fin al leer historiales de sesión largos.',
+    settings_label_screen_reader_mode: 'Modo lector de pantalla',
+    settings_desc_screen_reader_mode: 'Optimiza partes de la interfaz para lectores de pantalla. Actualmente hace legible la salida del terminal y anuncia la nueva salida. Desactivado de forma predeterminada.',
     settings_label_terminal_auto_expand: 'Expandir terminal automáticamente al recibir salida',
     settings_desc_terminal_auto_expand: 'Expandir automáticamente el panel de terminal contraído cuando un comando en ejecución emite nueva salida.',
 
@@ -10461,6 +10471,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'Deaktiviert, solange die Aufgabenliste im Chat aktiv ist.',
     settings_label_session_jump_buttons: 'Sitzungs-Sprungtasten anzeigen',
     settings_desc_session_jump_buttons: 'Zeigt beim Lesen langer Sitzungsverläufe schwebende Anfang- und Ende-Tasten an.',
+    settings_label_screen_reader_mode: 'Screenreader-Modus',
+    settings_desc_screen_reader_mode: 'Optimiert Teile der Oberfläche für Screenreader. Macht derzeit die Terminalausgabe lesbar und kündigt neue Ausgaben an. Standardmäßig aus.',
     settings_label_terminal_auto_expand: 'Terminal bei Ausgabe automatisch aufklappen',
     settings_desc_terminal_auto_expand: 'Das eingeklappte Terminal-Panel automatisch aufklappen, wenn ein laufender Befehl neue Ausgaben erzeugt.',
 
@@ -12623,6 +12635,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: '聊天任务列表开启时此项不可用。',
     settings_label_session_jump_buttons: '显示会话跳转按钮',
     settings_desc_session_jump_buttons: '阅读较长会话历史时显示悬浮的开头和结尾按钮。',
+    settings_label_screen_reader_mode: '屏幕阅读器模式',
+    settings_desc_screen_reader_mode: '为屏幕阅读器优化部分界面。目前会让终端输出可被读取，并播报新的输出。默认关闭。',
     settings_label_terminal_auto_expand: '输出时自动展开终端',
     settings_desc_terminal_auto_expand: '当运行中的命令产生新输出时，自动展开已折叠的终端面板。',
 
@@ -13658,6 +13672,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: '聊天任務清單開啟時此項無法使用。',
     settings_label_session_jump_buttons: '顯示對話跳轉按鈕',
     settings_desc_session_jump_buttons: '閱讀較長對話記錄時，顯示浮動的開頭與結尾按鈕。',
+    settings_label_screen_reader_mode: '螢幕閱讀器模式',
+    settings_desc_screen_reader_mode: '為螢幕閱讀器最佳化部分介面。目前會讓終端輸出可被讀取，並播報新的輸出。預設關閉。',
     settings_label_terminal_auto_expand: '輸出時自動展開終端',
     settings_desc_terminal_auto_expand: '當運行中的命令產生新輸出時，自動展開已折疊的終端面板。',
 
@@ -15425,6 +15441,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'Desativado enquanto a lista de tarefas no chat estiver ativa.',
     settings_label_session_jump_buttons: 'Mostrar botões de salto da sessão',
     settings_desc_session_jump_buttons: 'Mostra botões flutuantes Início e Fim ao ler históricos longos de sessão.',
+    settings_label_screen_reader_mode: 'Modo leitor de tela',
+    settings_desc_screen_reader_mode: 'Otimiza partes da interface para leitores de tela. Atualmente torna a saída do terminal legível e anuncia novas saídas. Desativado por padrão.',
     settings_label_terminal_auto_expand: 'Expandir terminal automaticamente na saída',
     settings_desc_terminal_auto_expand: 'Expandir automaticamente o painel de terminal recolhido quando um comando em execução emite nova saída.',
 
@@ -17196,6 +17214,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: '채팅 작업 목록이 켜져 있는 동안에는 사용할 수 없습니다.',
     settings_label_session_jump_buttons: '세션 이동 버튼 표시',
     settings_desc_session_jump_buttons: '긴 세션 기록을 읽을 때 떠 있는 시작 및 끝 버튼을 표시합니다.',
+    settings_label_screen_reader_mode: '스크린 리더 모드',
+    settings_desc_screen_reader_mode: '인터페이스 일부를 스크린 리더에 맞게 최적화합니다. 현재는 터미널 출력을 읽을 수 있게 하고 새 출력을 알려 줍니다. 기본값은 꺼짐입니다.',
     settings_label_terminal_auto_expand: '출력 시 터미널 자동 펼치기',
     settings_desc_terminal_auto_expand: '실행 중인 명령이 새 출력을 생성할 때 접힌 터미널 패널을 자동으로 펼칩니다.',
 
@@ -19083,6 +19103,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'Désactivé tant que la liste des tâches dans le chat est activée.',
     settings_label_session_jump_buttons: 'Afficher les boutons de saut de session',
     settings_desc_session_jump_buttons: 'Afficher les boutons flottants Début et Fin lors de la lecture de longs historiques de session.',
+    settings_label_screen_reader_mode: 'Mode lecteur d\'écran',
+    settings_desc_screen_reader_mode: 'Optimise certaines parties de l\'interface pour les lecteurs d\'écran. Rend actuellement la sortie du terminal lisible et annonce les nouvelles sorties. Désactivé par défaut.',
     settings_label_terminal_auto_expand: 'Développer automatiquement le terminal en cas de sortie',
     settings_desc_terminal_auto_expand: 'Développer automatiquement le panneau de terminal réduit lorsqu\'une commande en cours d\'exécution émet une nouvelle sortie.',
 
@@ -21219,6 +21241,7 @@ const LOCALES = {
     settings_desc_chat_todos_in_chat: 'Zobrazí sbalitelný seznam úkolů v horní části oblasti chatu. Je-li povoleno, postranní panel Todos je skryt, aby se zabránilo duplicitě.',
     todos_tray_summary_active: '{0} aktivních · {1} celkem',
     todos_tray_summary_done: 'Vše hotovo · {0} celkem',
+    settings_desc_screen_reader_mode: 'Optimalizuje části rozhraní pro čtečky obrazovky. Aktuálně zpřístupňuje výstup terminálu a oznamuje nový výstup. Ve výchozím stavu vypnuto.',
     settings_desc_session_jump_buttons: 'Zobrazit plovoucí tlačítka Spustit a Konec při čtení dlouhých historií relací.',
     settings_desc_show_titlebar_profile: 'Když povoleno, přepínač profilů se objeví v levém horním záhlaví aplikace pro změnu profilů z jakékoliv karty. Standardně vypnuto; zápatí kompozitoru vždy obsahuje přepínač profilů bez ohledu na toto nastavení.',
     settings_desc_shutdown_after_cmd: ' nebo nativní aplikace) před tím než je WebUI znovu dosažitelný.',
@@ -21301,6 +21324,7 @@ const LOCALES = {
     settings_label_raw_audio: 'Odesílat surové audio místo přepisu',
     settings_label_render_user_markdown: 'Vykreslovat markdown ve zprávách uživatele',
     settings_label_session_endless_scroll: 'Načítat starší zprávy při posouvání nahoru',
+    settings_label_screen_reader_mode: 'Režim čtečky obrazovky',
     settings_label_session_jump_buttons: 'Zobrazit tlačítka skoku relace',
     settings_label_show_titlebar_profile: 'Zobrazit přepínač profilů v záhlaví',
     settings_label_shutdown: 'Zastavit Hermes WebUI server',
@@ -22756,6 +22780,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'Sohbetteki görev listesi açıkken devre dışıdır.',
     settings_label_session_jump_buttons: 'Oturum atlama düğmelerini göster',
     settings_desc_session_jump_buttons: 'Uzun oturum geçmişlerini okurken kayan Başlat ve Bitir düğmelerini gösterin.',
+    settings_label_screen_reader_mode: 'Ekran okuyucu modu',
+    settings_desc_screen_reader_mode: 'Arayüzün bazı bölümlerini ekran okuyucular için iyileştirir. Şu anda terminal çıktısını okunabilir yapar ve yeni çıktıyı duyurur. Varsayılan olarak kapalıdır.',
     settings_label_terminal_auto_expand: 'Çıktı geldiğinde terminali otomatik genişlet',
     settings_desc_terminal_auto_expand: 'Çalışan bir komut yeni çıktı ürettiğinde daraltılmış terminal panelini otomatik olarak genişletir.',
 
@@ -24642,6 +24668,8 @@ const LOCALES = {
     settings_desc_workspace_panel_open: 'Gdy ta opcja jest włączona, panel obszaru roboczego / przeglądarki plików otwiera się automatycznie przy każdej nowej sesji. Nadal możesz go zamknąć ręcznie w dowolnym momencie.',
     settings_label_session_jump_buttons: 'Pokaż przyciski skoku sesji',
     settings_desc_session_jump_buttons: 'Pokaż pływające przyciski Początek i Koniec podczas czytania długich historii sesji.',
+    settings_label_screen_reader_mode: 'Tryb czytnika ekranu',
+    settings_desc_screen_reader_mode: 'Dostosowuje części interfejsu do czytników ekranu. Obecnie udostępnia czytnikowi wyjście terminala i odczytuje nowe wyjście. Domyślnie wyłączony.',
     settings_label_terminal_auto_expand: 'Automatycznie rozwiń terminal przy wyjściu',
     settings_desc_terminal_auto_expand: 'Automatycznie rozwija zwinięty panel terminala, gdy uruchomione polecenie generuje nowe wyjście.',
 
@@ -27551,6 +27579,8 @@ const LOCALES = {
     settings_note_workspace_todos_tab_disabled: 'Bị vô hiệu hóa khi danh sách công việc trong chat đang bật.',
     settings_label_session_jump_buttons: 'Hiển thị nút nhảy trong phiên',
     settings_desc_session_jump_buttons: 'Hiển thị các nút Đầu và Cuối nổi khi đọc lịch sử phiên dài.',
+    settings_label_screen_reader_mode: 'Chế độ trình đọc màn hình',
+    settings_desc_screen_reader_mode: 'Tối ưu một số phần của giao diện cho trình đọc màn hình. Hiện giúp đọc được output của terminal và thông báo output mới. Tắt theo mặc định.',
     settings_label_terminal_auto_expand: 'Tự mở rộng terminal khi có output',
     settings_desc_terminal_auto_expand: 'Tự động mở rộng panel terminal đang thu gọn khi một lệnh đang chạy phát sinh output mới.',
     settings_label_virtualize_transcript: 'Ảo hóa transcript dài (thử nghiệm)',

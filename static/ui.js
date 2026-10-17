@@ -25145,3 +25145,10 @@ async function uploadPendingFiles(options={}){
   if(extracted.length)showToast(t('archive_extracted',extracted.reduce((s,n)=>s+n.extracted,0),extracted.length));
   return names;
 }
+
+// Screen reader mode is a general opt-in preference. This setter owns the
+// runtime flag and pushes it to every consumer (currently the terminal).
+function setScreenReaderMode(enabled){
+  window._screenReaderMode=!!enabled;
+  if(typeof applyTerminalScreenReaderMode==='function') applyTerminalScreenReaderMode();
+}

@@ -1377,6 +1377,13 @@
             </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsScreenReaderMode" aria-describedby="settingsScreenReaderModeDesc" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_screen_reader_mode">Screen reader mode</span>
+              </label>
+              <div id="settingsScreenReaderModeDesc" style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_screen_reader_mode">Optimizes parts of the interface for screen readers. Currently makes terminal output readable and announces new output. Off by default.</div>
+            </div>
+            <div class="settings-field">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsTerminalAutoExpand" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_terminal_auto_expand">Auto-expand terminal on output</span>
               </label>
