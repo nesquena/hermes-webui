@@ -4343,6 +4343,21 @@ def _unowned_custom_provider_bundle(pid: str, slug: str, status: str) -> dict:
     }
 
 
+def _resolve_custom_record_credential(record: dict, base_url: str | None, pid: str) -> tuple:
+    """Resolve the same pooled, static, or command credential for chat and discovery."""
+    pool_runtime = _custom_record_pool_runtime(base_url, record)
+    api_key = (pool_runtime.get("api_key") or None) if pool_runtime else None
+    if not api_key:
+        api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
+    if not api_key:
+        api_key = _host_gated_env_key(base_url)
+    if not pool_runtime:
+        token_provider = _custom_record_key_cmd_provider(base_url, record, pid)
+        if token_provider is not None:
+            api_key = token_provider
+    return api_key, pool_runtime
+
+
 def resolve_custom_provider_bundle(
     provider_id: str,
     *,
@@ -4452,27 +4467,9 @@ def resolve_custom_provider_bundle(
         owned["api_mode"] = api_mode
     owned.update(_custom_record_acp_transport(record))
 
-    # Pool first, exactly like the runtime's named-custom path: a pooled
-    # endpoint's credential AND its pool object come from the same lookup.
-    api_key = None
-    pool_runtime = _custom_record_pool_runtime(base_url, record)
-    if pool_runtime:
-        api_key = pool_runtime.get("api_key") or None
-        if pool_runtime.get("credential_pool") is not None:
-            owned["credential_pool"] = pool_runtime.get("credential_pool")
-
-    if not api_key:
-        api_key = _resolve_custom_record_key(record.get("api_key"), record.get("key_env"), pid)
-    if not api_key:
-        api_key = _host_gated_env_key(base_url)
-
-    # ``key_cmd`` beats a static api_key / key_env (short-lived bearers go stale
-    # mid-session), but never displaces a pooled credential, which the pool
-    # itself already rotates.
-    if not pool_runtime:
-        token_provider = _custom_record_key_cmd_provider(base_url, record, pid)
-        if token_provider is not None:
-            api_key = token_provider
+    api_key, pool_runtime = _resolve_custom_record_credential(record, base_url, pid)
+    if pool_runtime and pool_runtime.get("credential_pool") is not None:
+        owned["credential_pool"] = pool_runtime.get("credential_pool")
 
     if "credential_pool" not in owned and record.get("credential_pool") is not None:
         owned["credential_pool"] = record.get("credential_pool")
