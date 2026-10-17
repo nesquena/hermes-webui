@@ -223,6 +223,43 @@ load_env() {
   fi
 }
 
+# Inline helper for `find ... -exec sh -c "$_chown_tolerating_vanished" ...
+# OWNER {} +`. Two-container compose shares ~/.hermes with a running agent
+# that replaces files atomically (write temp + rename), so an entry listed by
+# find can be gone before chown reaches it (#8106). Only chown's ENOENT for
+# that vanished entry is tolerated: any other chown failure (EACCES, EROFS
+# outside a pruned path, EIO) still fails the walk.
+_chown_tolerating_vanished='
+  owner=$1; shift
+  chown -h "$owner" "$@" 2>/dev/null && exit 0
+  for f in "$@"; do
+    err=$(LC_ALL=C chown -h "$owner" "$f" 2>&1) && continue
+    case "$err" in *": No such file or directory") continue ;; esac
+    printf "%s\n" "$err" >&2
+    exit 1
+  done
+'
+
+# Run find, tolerating only entries that vanish mid-walk.
+# -ignore_readdir_race covers entries that vanish before find stats them, but
+# find still reports a directory it can no longer open and exits non-zero
+# (#8106). So find's own "No such file or directory" diagnostics for entries
+# below the root are accepted; any other diagnostic, including the chown
+# helper's or one for the root itself, fails the walk.
+find_tolerating_vanished() {
+  local root="$1" err rc=0 line
+  shift
+  err=$(LC_ALL=C find "$root" -ignore_readdir_race "$@" 2>&1 >/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ -n "$err" ] || { echo "find exited with status $rc" >&2; return 1; }
+  while IFS= read -r line; do
+    case "$line" in
+      "find: '$root/"*"': No such file or directory") ;;
+      *) printf "%s\n" "$err" >&2; return 1 ;;
+    esac
+  done <<< "$err"
+}
+
 chown_home_hermeswebui() {
   # macOS Docker bind mounts can expose hermes-agent git object packs as
   # read-only host files. The runtime only needs to read those existing objects;
@@ -236,10 +273,26 @@ chown_home_hermeswebui() {
   # source — prune the entire hermes-agent path from the chown walk so a
   # read-only or partially-read-only mount doesn't break the rest of the home
   # ownership alignment.
-  find /home/hermeswebui \
+  find_tolerating_vanished /home/hermeswebui \
     -path "/home/hermeswebui/.hermes/hermes-agent" -prune \
     -o -name ".git" -prune \
-    -o -exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +
+    -o -exec sh -c "$_chown_tolerating_vanished" chown_home_hermeswebui "${WANTED_UID}:${WANTED_GID}" {} +
+}
+
+# usermod -u used to move the old UID's files to the new UID anywhere under
+# the home. Its walk is skipped (#8106), so this gives the subtrees that
+# chown_home_hermeswebui prunes the same old-UID-only migration: every .git
+# directory (git refuses repositories owned by another user), and the
+# hermes-agent checkout when it is writable (a local development checkout the
+# runtime user keeps working in). Like usermod, only the UID changes. A
+# read-only agent source mount is left untouched.
+migrate_home_old_uid() {
+  local old_uid="$1"
+  local agent="/home/hermeswebui/.hermes/hermes-agent"
+  local skip_agent=()
+  [ -w "$agent" ] || skip_agent=(-path "$agent" -prune -o)
+  find_tolerating_vanished /home/hermeswebui "${skip_agent[@]}" \
+    -uid "$old_uid" -exec sh -c "$_chown_tolerating_vanished" migrate_home_old_uid "${WANTED_UID}" {} +
 }
 
 # The production image does not ship sudo. The entrypoint starts as root only
@@ -267,10 +320,24 @@ if [ "A${whoami}" == "Aroot" ]; then
     fi
   else
     groupmod -o -g "${WANTED_GID}" hermeswebui || error_exit "Failed to set GID of hermeswebui user"
-    usermod -o -u "${WANTED_UID}" hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+    # usermod -u also walks the home directory to chown the old UID's files,
+    # and aborts on the first entry that vanishes mid-walk — which happens
+    # when a running agent replaces files in the shared ~/.hermes (#8106).
+    # Pointing the home at a path that does not exist for that one call skips
+    # usermod's walk; the real home is restored right after, and
+    # chown_home_hermeswebui and migrate_home_old_uid below perform the
+    # ownership walks with race-tolerant error handling.
+    _usermod_nohome="/nonexistent-hermeswebui-home.$$"
+    [ ! -e "$_usermod_nohome" ] || error_exit "Unexpected path $_usermod_nohome exists"
+    _old_hermeswebui_uid=$(id -u hermeswebui)
+    usermod -o -u "${WANTED_UID}" -d "$_usermod_nohome" hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+    usermod -d /home/hermeswebui hermeswebui || error_exit "Failed to restore home directory of hermeswebui user"
   fi
 
   chown_home_hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
+  if [ -n "${_old_hermeswebui_uid:-}" ] && [ "A${_old_hermeswebui_uid}" != "A${WANTED_UID}" ]; then
+    migrate_home_old_uid "$_old_hermeswebui_uid" || error_exit "Failed to move files of UID ${_old_hermeswebui_uid} under /home/hermeswebui to UID ${WANTED_UID}"
+  fi
 
   echo ""; echo "-- Preparing /app for the hermeswebui runtime user"
   mkdir -p /app || error_exit "Failed to create /app directory"
