@@ -118,7 +118,7 @@ from api.helpers import (
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers, fold_api_path
+from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers, fold_api_path, request_log_client_ip
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
@@ -362,11 +362,6 @@ class Handler(BaseHTTPRequestHandler):
                 remote = str(self.client_address[0])
         except Exception:
             remote = '-'
-        forwarded_for = None
-        try:
-            forwarded_for = (self.headers.get('X-Forwarded-For') or '').split(',')[0].strip() or None
-        except Exception:
-            forwarded_for = None
         record_data = {
             'ts': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
             'remote': remote,
@@ -375,8 +370,15 @@ class Handler(BaseHTTPRequestHandler):
             'status': int(code) if str(code).isdigit() else code,
             'ms': duration_ms,
         }
-        if forwarded_for:
-            record_data['forwarded_for'] = forwarded_for
+        try:
+            # #7863: client_ip is resolved by the trusted-proxy machinery, so it
+            # is the raw socket peer unless a trusted proxy asserted it. The old
+            # `forwarded_for` field recorded X-Forwarded-For[0] — a value the
+            # client writes — which fail2ban-style tooling could ban on.
+            record_data['client_ip'] = request_log_client_ip(self)
+        except Exception:
+            # Logging must never break a response; fall back to the raw peer.
+            record_data['client_ip'] = remote
         record = _json.dumps(record_data)
         self._safe_webui_print(f'[webui] {record}')
 
