@@ -23633,6 +23633,43 @@ def _media_deny_reason(target: Path) -> str | None:
     return None
 
 
+# #8033: Windows drive-letter file:/// URIs arrive here as '/C:/Users/me/x' —
+# URL.pathname keeps the file-URI grammar's leading separator before the drive
+# letter, and Path('/C:/x') is root-relative on Windows (resolves to the wrong
+# location). Strip exactly that ONE URI-style separator when it sits
+# immediately before a drive letter — and ONLY on a Windows server. On a POSIX
+# server the conversion must never run: stripping '/C:/report.png' there turns
+# an absolute path into a cwd-relative 'C:/report.png' that can alias a file
+# inside an allowed workspace. Never a generic leading-slash removal: POSIX
+# ('/home/me/x') and UNC ('\\server\share\...') semantics differ and must stay
+# untouched.
+_WINDOWS_DRIVE_URI_LEAD_RE = re.compile(r"^[\\/]([A-Za-z]:[\\/])")
+
+
+def _is_windows_server() -> bool:
+    """True when this server resolves paths with Windows drive semantics."""
+    return os.name == "nt"
+
+
+def _normalize_media_request_path(raw_path: str) -> str:
+    """Return ``raw_path`` with the file-URI leading separator before a drive
+    letter removed (Windows drive-letter file:/// URIs), otherwise unchanged.
+
+    The drive-letter conversion is gated on the server being Windows
+    (``_is_windows_server``). On POSIX the leading separator is preserved so
+    ``/C:/report.png`` stays an absolute path and can never alias a
+    cwd-relative ``C:/report.png`` inside an allowed root.
+
+    Only a leading ``[\\/]`` immediately followed by ``[A-Za-z]:[\\/]``
+    matches; every other path (POSIX absolute, UNC, drive-relative ``C:foo``,
+    already-clean ``C:/x``) passes through untouched. Shape-only: no
+    percent-decoding, no existence checks.
+    """
+    if _is_windows_server() and _WINDOWS_DRIVE_URI_LEAD_RE.match(raw_path):
+        return raw_path[1:]
+    return raw_path
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -23669,7 +23706,13 @@ def _handle_media(handler, parsed):
 
     # Resolve the path and check it is within an allowed root
     try:
-        target = Path(raw_path).resolve()
+        # #8033: Windows drive-letter file:/// URIs carry a URI-style leading
+        # separator ('/C:/Users/...'); the normalizer strips exactly that one
+        # separator, and ONLY on a Windows server. On POSIX it must not strip —
+        # '/C:/...' has to stay absolute so it can never alias a cwd-relative
+        # drive-shaped path inside an allowed workspace. POSIX and UNC paths
+        # are returned unchanged by the normalizer.
+        target = Path(_normalize_media_request_path(raw_path)).resolve()
     except Exception:
         return bad(handler, "Invalid path", 400)
 
