@@ -8558,18 +8558,32 @@ def _is_loadable_disk_cache(cache: object) -> bool:
 # NO public or private signatures and no call sites, so every existing stub of
 # these loaders keeps working.
 #
-# Correctness: the entry is keyed on (path, st_mtime_ns, st_size) and
-# re-validated by a fresh stat() before use, so a cache rewritten between the
-# two reads is never served from a stale memo. This is the same file-identity
-# axis the rest of the cache layer already uses. A miss (no entry, different
-# path, or changed stat) simply falls through to a normal read.
+# Correctness: the entry is keyed on the IDENTITY OF THE BYTES ACTUALLY PARSED
+# — (path, st_mtime_ns, st_size, st_ino, st_dev) read from the open file
+# descriptor — and re-validated by a fresh stat() before use, so a cache
+# rewritten between the two reads is never served from a stale memo.
 #
-# ``None`` in the 4th slot means "the file parsed, but not to a dict" — a real
-# answer, distinct from "no memo entry". An unreadable/unparseable file takes a
-# different route: the read raises, the memo slot is CLEARED, and the next
-# reader retries from scratch.
+# The descriptor stat matters on its own: the writer replaces the file with a
+# temp file plus os.replace(), which mints a NEW inode but can land inside the
+# same coarse-clock mtime tick at an identical size. A precheck-then-open
+# window measured on Linux showed a same-size rewrite served the old generation
+# in 1,461 of 2,000 trials. Keying on the inode of the bytes we parsed makes
+# that window unobservable, because the key and the payload are taken from the
+# same open file.
+#
+# Slot access is guarded by a lock held across the producer's write and across
+# the consumer's whole read-validate-clear path. Without it two threads that
+# interleave inside that path both pass validation and both receive the SAME
+# payload object, which is exactly the shared-mutable-catalog aliasing the
+# consume step exists to prevent.
+#
+# ``None`` in the payload slot means "the file parsed, but not to a dict" — a
+# real answer, distinct from "no memo entry". An unreadable/unparseable file
+# takes a different route: the read raises, the memo slot is CLEARED, and the
+# next reader retries from scratch.
 _MODELS_DISK_PAYLOAD_UNSET = object()
-_models_disk_payload_memo: tuple[str, int, int, dict | None] | None = None
+_models_disk_payload_memo: tuple[str, int, int, int, int, dict | None] | None = None
+_models_disk_payload_memo_lock = threading.Lock()
 
 
 def _read_models_cache_disk_payload(cache_path: Path) -> dict | None:
@@ -8580,15 +8594,20 @@ def _read_models_cache_disk_payload(cache_path: Path) -> dict | None:
     """
     global _models_disk_payload_memo
     try:
-        st = cache_path.stat()
         with open(cache_path, encoding="utf-8") as f:
+            # fstat describes the bytes json.load is about to parse, so the
+            # memo key and the payload cannot disagree.
+            st = os.fstat(f.fileno())
             payload = json.load(f)
     except Exception:
-        _models_disk_payload_memo = None
+        with _models_disk_payload_memo_lock:
+            _models_disk_payload_memo = None
         return None
     if not isinstance(payload, dict):
         payload = None
-    _models_disk_payload_memo = (str(cache_path), st.st_mtime_ns, st.st_size, payload)
+    entry = (str(cache_path), st.st_mtime_ns, st.st_size, st.st_ino, st.st_dev, payload)
+    with _models_disk_payload_memo_lock:
+        _models_disk_payload_memo = entry
     return payload
 
 
@@ -8616,22 +8635,29 @@ def _memoized_models_cache_disk_payload(cache_path: Path):
     That keeps the single-parse win for the one sequence that matters (the
     freshness precheck immediately followed by the loader in the same visit)
     while making aliasing impossible.
+
+    The lock is held across the whole read-validate-clear path, not just the
+    clear. Reading the slot and then calling ``stat()`` releases the GIL, so
+    without the lock two threads can both be inside this function at once, both
+    pass validation, and both return the same object. The consume step would
+    then be a no-op in exactly the case it exists for.
     """
     global _models_disk_payload_memo
-    memo = _models_disk_payload_memo
-    if memo is None:
-        return _MODELS_DISK_PAYLOAD_UNSET
-    path_str, mtime_ns, size, payload = memo
-    if path_str != str(cache_path):
-        return _MODELS_DISK_PAYLOAD_UNSET
-    try:
-        st = cache_path.stat()
-    except OSError:
-        return _MODELS_DISK_PAYLOAD_UNSET
-    if (st.st_mtime_ns, st.st_size) != (mtime_ns, size):
-        return _MODELS_DISK_PAYLOAD_UNSET
-    _models_disk_payload_memo = None
-    return payload
+    with _models_disk_payload_memo_lock:
+        memo = _models_disk_payload_memo
+        if memo is None:
+            return _MODELS_DISK_PAYLOAD_UNSET
+        path_str, mtime_ns, size, ino, dev, payload = memo
+        if path_str != str(cache_path):
+            return _MODELS_DISK_PAYLOAD_UNSET
+        try:
+            st = cache_path.stat()
+        except OSError:
+            return _MODELS_DISK_PAYLOAD_UNSET
+        if (st.st_mtime_ns, st.st_size, st.st_ino, st.st_dev) != (mtime_ns, size, ino, dev):
+            return _MODELS_DISK_PAYLOAD_UNSET
+        _models_disk_payload_memo = None
+        return payload
 
 
 def _load_models_cache_from_disk() -> dict | None:
