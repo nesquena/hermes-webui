@@ -327,3 +327,99 @@ def test_skill_approval_holds_resolver_lock_until_handler_finishes(
         assert results == [True], "approval did not release the path lock after completion"
     finally:
         profiles.clear_request_profile()
+
+
+_PATH_ID_SUBCOMMANDS = {
+    "skills": ("reject", "deny", "drop", "diff", "approve", "apply"),
+    "memory": ("reject", "deny", "drop", "approve", "apply"),
+}
+
+
+@pytest.mark.parametrize("subsystem", ["skills", "memory"])
+def test_path_valued_pending_id_cannot_touch_sibling_profile_record(
+    monkeypatch, tmp_path, subsystem
+):
+    """A pending ID that is a path must not read, apply or delete a sibling's record."""
+    from api import commands, profiles
+    import sys
+    import types
+
+    if "api.streaming" not in sys.modules:
+        streaming_stub = types.ModuleType("api.streaming")
+        streaming_stub.__dict__["_ENV_LOCK"] = threading.Lock()
+        monkeypatch.setitem(sys.modules, "api.streaming", streaming_stub)
+
+    root_home = tmp_path / "root"
+    alpha_home = root_home / "profiles" / "alpha"
+    beta_home = root_home / "profiles" / "beta"
+    alpha_dir = alpha_home / "pending" / subsystem
+    beta_pending = beta_home / "pending" / subsystem / "beta-record.json"
+    record = {
+        "subsystem": subsystem,
+        "action": "add",
+        "summary": "beta-only secret summary",
+        "origin": "foreground",
+        "created_at": 1.0,
+        "payload": {"action": "add", "target": "memory", "content": "beta-only"},
+    }
+    # The source profile's pending directory already exists, so '..' segments
+    # resolve on disk exactly as they would in production.
+    alpha_dir.mkdir(parents=True)
+    beta_pending.parent.mkdir(parents=True)
+    beta_pending.write_text(json.dumps({**record, "id": "beta-record"}), encoding="utf-8")
+
+    def stage_alpha(pending_id):
+        path = alpha_dir / f"{pending_id}.json"
+        path.write_text(
+            json.dumps({**record, "id": pending_id, "summary": "alpha record"}),
+            encoding="utf-8",
+        )
+        return path
+
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", root_home)
+    monkeypatch.setattr(profiles, "_active_profile", "default")
+    monkeypatch.setenv("HERMES_HOME", str(root_home))
+
+    stem = beta_pending.with_suffix("")
+    path_ids = [
+        f"../../../beta/pending/{subsystem}/beta-record",
+        f"..\\..\\..\\beta\\pending\\{subsystem}\\beta-record",
+        str(stem),
+        f"./../../../beta/pending/{subsystem}/beta-record",
+        "..",
+        "beta-record/..",
+        ".hidden",
+    ]
+
+    profiles.set_request_profile("alpha")
+    try:
+        for sub in _PATH_ID_SUBCOMMANDS[subsystem]:
+            for pending_id in path_ids:
+                output = commands.execute_agent_command(f"/{subsystem} {sub} {pending_id}")
+                assert beta_pending.exists(), (
+                    f"/{subsystem} {sub} {pending_id} touched beta's pending record")
+                assert "beta-only secret summary" not in output
+                assert output.startswith("Refused:"), (sub, pending_id, output)
+
+        # Controls: an ordinary generated ID still works ...
+        valid = stage_alpha("a1b2c3d4")
+        output = commands.execute_agent_command(f"/{subsystem} reject a1b2c3d4")
+        assert "Rejected pending" in output
+        assert not valid.exists()
+
+        if subsystem == "skills":
+            shown = stage_alpha("feed1234")
+            output = commands.execute_agent_command("/skills diff feed1234")
+            assert not output.startswith("Refused:")
+            assert "feed1234" in output
+            shown.unlink()
+
+        # ... and 'all' stays scoped to the request profile.
+        first, second = stage_alpha("0badc0de"), stage_alpha("deadbeef")
+        output = commands.execute_agent_command(f"/{subsystem} reject ALL")
+        assert "Rejected 2 pending" in output
+        assert not first.exists() and not second.exists()
+    finally:
+        profiles.clear_request_profile()
+
+    assert beta_pending.exists(), "the sibling profile's pending record must be untouched"

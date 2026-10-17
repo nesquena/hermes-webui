@@ -7,6 +7,7 @@ so the frontend can still load with WEBUI_ONLY commands.
 from __future__ import annotations
 from contextlib import contextmanager, nullcontext
 import logging
+import re
 import threading
 from typing import Any
 
@@ -43,6 +44,33 @@ _CODEX_RUNTIME_LOCK = threading.Lock()
 _SKILLS_WRITE_APPROVAL_SUBCOMMANDS = frozenset({
     'pending', 'approve', 'apply', 'reject', 'deny', 'drop', 'diff', 'approval', 'mode',
 })
+
+# Subcommands whose first argument is a pending-record ID. The installed Agent
+# joins that ID straight into a filename under the bound profile's pending
+# directory (tools/write_approval.py::_pending_path), so a path-valued ID could
+# read, apply or delete another profile's record. Validate it here, before the
+# shared handler runs, so this endpoint stays safe with the current Agent.
+_WRITE_APPROVAL_ID_SUBCOMMANDS = frozenset({
+    'approve', 'apply', 'reject', 'deny', 'drop', 'diff',
+})
+# Generated IDs are 8 hex chars (uuid4().hex[:8]); accept any plain token made of
+# letters, digits, '-' and '_' so older/hand-staged IDs keep working. Anything
+# else -- '/', '\\', '..', absolute paths, NULs, dots -- is refused, never
+# normalized into an accepted ID.
+_PENDING_ID_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,127}')
+
+
+def _invalid_pending_id_message(subsystem: str, args: list[str]) -> str | None:
+    """Return a refusal message when an ID-bearing subcommand has an unsafe ID."""
+    if len(args) < 2 or args[0].lower() not in _WRITE_APPROVAL_ID_SUBCOMMANDS:
+        return None
+    pending_id = args[1]
+    if pending_id.lower() == 'all' or _PENDING_ID_RE.fullmatch(pending_id):
+        return None
+    return (
+        f"Refused: '{pending_id}' is not a valid pending {subsystem} write id. "
+        "Use an id from /" + subsystem + " pending, or 'all'."
+    )
 
 
 def _parse_agent_command(command: str) -> tuple[str, str]:
@@ -516,6 +544,9 @@ def _run_skills_write_approval_command(arg_string: str) -> str:
     sub = args[0].lower() if args else ""
     if sub not in _SKILLS_WRITE_APPROVAL_SUBCOMMANDS:
         raise KeyError('skills')
+    refusal = _invalid_pending_id_message('skills', args)
+    if refusal:
+        return refusal
 
     try:
         from hermes_cli.write_approval_commands import handle_pending_subcommand
@@ -553,6 +584,9 @@ def _run_memory_write_approval_command(arg_string: str) -> str:
     agent session in a WebUI exec call either, and the store persists to the same
     MEMORY.md/USER.md and honors the configured char limits regardless.
     """
+    refusal = _invalid_pending_id_message('memory', arg_string.split())
+    if refusal:
+        return refusal
     try:
         from hermes_cli.write_approval_commands import handle_pending_subcommand
         from tools import write_approval as wa
