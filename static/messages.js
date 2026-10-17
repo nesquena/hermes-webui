@@ -1396,6 +1396,17 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+// #8155: the server refused /api/chat/start because this page's bundle
+// (window.__HERMES_WEBUI_BUNDLE_VERSION__) differs from the build it serves.
+// api() attaches the raw body on the Error; parse the typed marker from it.
+function _isStaleClientBundleError(e){
+  if(!e) return false;
+  try{
+    const body=typeof e.body==='string'?JSON.parse(e.body):(e.body||null);
+    return !!(body&&body.type==='stale_client_bundle');
+  }catch(_){ return false; }
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1875,6 +1886,42 @@ async function send(){
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
+    // #8155: this page runs a bundle from an older WebUI build than the server
+    // (a native shell or long-lived tab that never re-navigated after an
+    // upgrade). The server refused the turn with a typed 409 before touching
+    // session state. Restore the draft and ask the user to refresh.
+    if(e&&e.status===409&&_isStaleClientBundleError(e)){
+      // Do NOT auto-reload: a reload from inside a half-finished send races the
+      // draft clear/save, a follow-up queued for this session, newer typing and
+      // staged File objects (review of #8156). Treat it like every other
+      // pre-start rejection — restore what the user had — and tell them to
+      // refresh. The server rejected the turn before touching session state,
+      // so nothing was lost on that side.
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      if(typeof stopClarifyPollingForSession==='function') stopClarifyPollingForSession(activeSid);
+      removeThinking();
+      // Remove ONLY this send's optimistic turn (optimisticMessages is a copy of
+      // the whole transcript, so filtering it out would blank the conversation),
+      // and only while the rejected session is still the visible one.
+      if((S.session&&S.session.session_id)===activeSid){
+        S.messages=S.messages.filter(m=>m!==userMsg);
+        if(typeof renderMessages==='function') renderMessages();
+      }
+      setBusy(false);
+      // Same recovery as every other pre-start rejection (#5472): the ORIGINAL
+      // draft + attachments go back to the owning session's composer (without
+      // clobbering newer typing) and the text is persisted server-side, ordered
+      // after the send-time draft clear.
+      _restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise);
+      showToast(t('stale_bundle_refresh'),8000);
+      setComposerStatus(t('stale_bundle_refresh'));
+      if(typeof renderSessionList==='function') void renderSessionList();
+      return;
+    }
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
     // the stale /session/<id> URL and clear localStorage so a reload does not
