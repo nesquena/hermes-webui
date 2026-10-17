@@ -69,7 +69,18 @@ def _status_card_cases() -> dict:
 // Stubs for the session globals and the unrelated formatters the card reads.
 // They are NOT under test; only the message-count rows are.
 const t = (key) => key;
-const S = {activeProfile:'default', currentDir:'/ws', busy:false, activeStreamId:null, lastUsage:{}, messages:[]};
+// The loaded transcript for the no-count-fields case: 5 rows total, of which a
+// tool row and a hidden delegation wakeup must NOT be counted. Expected visible
+// count is therefore 3. Non-trivial on purpose: a fallback that always returned
+// 0, or the raw length, would fail the assertion below.
+const _bareTranscript = [
+  {role:'user',     _source:null},
+  {role:'assistant',_source:null},
+  {role:'tool',     _source:null},
+  {role:'assistant',_source:'delegation_wakeup'},
+  {role:'assistant',_source:null},
+];
+const S = {activeProfile:'default', currentDir:'/ws', busy:false, activeStreamId:null, lastUsage:{}, messages:_bareTranscript};
 const window = {};
 const $ = () => ({value:''});
 function _statusProviderForSession(s) { return s.model_provider || ''; }
@@ -121,9 +132,13 @@ def test_status_card_legacy_session_falls_back_to_message_count():
     assert "status_messages_total" not in case
 
 
-def test_status_card_without_count_fields_does_not_crash():
+def test_status_card_without_count_fields_falls_back_to_transcript():
+    # Neither visible_message_count nor message_count on the session: the card
+    # must count the loaded transcript, excluding tool rows and hidden
+    # delegation wakeups. The stub transcript has 5 rows → 3 visible.
+    # A fallback that always returned 0, or the raw row count (5), fails here.
     case = _status_card_cases()["bare"]
-    assert "status_messages" in case
+    assert case["status_messages"] == "3"
     assert "status_messages_total" not in case
 
 
@@ -131,3 +146,13 @@ def test_status_messages_total_label_is_translated():
     # The key must exist in the English locale map so t() has a fallback for
     # every other locale (t() falls back to LOCALES.en).
     assert "status_messages_total: 'Total messages'" in I18N_JS
+
+
+def test_status_message_keys_present_in_es_and_de():
+    # t() falls back to English when a locale lacks the key, so a missing
+    # translation is a silent language mix rather than a crash. Pin the two
+    # locales that shipped without it.
+    assert "status_messages: 'Mensajes'" in I18N_JS
+    assert "status_messages_total: 'Mensajes totales'" in I18N_JS
+    assert "status_messages: 'Nachrichten'" in I18N_JS
+    assert "status_messages_total: 'Nachrichten gesamt'" in I18N_JS
