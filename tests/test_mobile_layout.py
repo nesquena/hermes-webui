@@ -1793,12 +1793,33 @@ def test_viewport_requests_keyboard_content_resize():
 
 
 def test_pwa_safe_area_top_stays_scoped_to_installed_modes():
-    """The PWA shell should not opt into cover-mode geometry for every browser surface."""
+    """The PWA shell should not opt into cover-mode geometry for every browser surface.
+
+    The installed status bar must also stay non-edge-to-edge: iOS 26+ only
+    suppresses the top scroll-pocket blur while the status bar obscures the web
+    view, so `black-translucent` must not come back.
+    """
     assert 'viewport-fit=cover' not in HTML
-    assert 'apple-mobile-web-app-status-bar-style" content="black-translucent"' in HTML
+    assert 'apple-mobile-web-app-status-bar-style" content="default"' in HTML
+    assert 'apple-mobile-web-app-status-bar-style" content="black-translucent"' not in HTML
     assert "@media (display-mode: standalone), (display-mode: fullscreen)" in CSS
     assert "--app-titlebar-safe-top:env(safe-area-inset-top" in CSS
     assert "--app-safe-bottom:" not in CSS
+
+
+def test_installed_ios_titlebar_is_the_status_bar_color_source():
+    """iOS 26/27 draw a wide scroll-pocket blur over the top of an installed web
+    app unless an opaque fixed/sticky box is hit-tested at the top edge. The
+    opaque app titlebar provides that box, paired with status-bar-style=default.
+    """
+    m = re.search(r'(?m)^\s*\.pwa-standalone\.pwa-ios \.app-titlebar\{(?P<body>[^}]*)\}', CSS)
+    assert m, "installed-iOS titlebar rule missing from style.css"
+    rule = m.group("body")
+    assert "position:sticky" in rule, (
+        ".app-titlebar must be sticky in installed iOS web apps so WebKit's "
+        "top colour-extension view exists and the scroll-pocket blur is hidden"
+    )
+    assert "top:0" in rule, ".app-titlebar must be pinned to the top edge"
 
 
 def test_titlebar_safe_area_top_uses_scoped_variable():
