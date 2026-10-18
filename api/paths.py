@@ -274,6 +274,103 @@ def _atomic_write_text(
         raise
 
 
+def _stage_atomic_write(
+    path: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    mode: int | None = None,
+    owner: tuple[int, int] | None = None,
+) -> str:
+    """Write *text* into a fsynced temp file beside *path* and return its path.
+
+    The split half of :func:`_atomic_write_text`: everything up to, but not
+    including, the ``os.replace`` that publishes the result. Callers that must
+    not disturb a pre-existing target until a replacement is completely staged
+    (a backup beside a live primary, say) use this and then
+    :func:`_publish_staged_write` at their own publication boundary.
+
+    ``mode`` pins the staged file's permission bits and ``owner`` its
+    uid/gid; both are applied to the temp descriptor *before* any bytes are
+    written to it, so private content is never staged under a looser mode and
+    never under a group other than the one the source authorized. Ownership is
+    applied before the mode because ``fchown`` clears setuid/setgid bits.
+
+    The caller owns the returned temp file and must either publish it or
+    :func:`_discard_staged_write` it.
+    """
+    path = Path(path)
+    # Always stage on a fresh inode: the caller's target may be a symlink or an
+    # extra hard link belonging to somebody else, and this must never write
+    # through it.
+    fd, tmp = _create_atomic_temp_file(path, existing=False)
+    owns_fd = True
+    try:
+        if owner is not None and hasattr(os, "fchown"):
+            try:
+                os.fchown(fd, owner[0], owner[1])
+            except (OSError, NotImplementedError) as exc:
+                unsupported_ownership_errnos = {
+                    errno.EINVAL,
+                    errno.ENOSYS,
+                    errno.ENOTSUP,
+                }
+                if (
+                    isinstance(exc, OSError)
+                    and not isinstance(exc, PermissionError)
+                    and exc.errno not in unsupported_ownership_errnos
+                ):
+                    raise
+                # The owner cannot be transferred (typically a non-root process
+                # facing a file it does not own). Keep the staged copy at least
+                # as private as the source instead of leaving it readable to
+                # this process's own uid/gid, which is what the kernel would
+                # otherwise grant.
+                mode = (mode if mode is not None else 0o600) & ~0o077
+        if mode is not None and hasattr(os, "fchmod"):
+            os.fchmod(fd, mode)
+        elif mode is not None:
+            os.chmod(tmp, mode)
+        f = os.fdopen(fd, "w", encoding=encoding)
+        owns_fd = False
+        with f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+    except BaseException:
+        if owns_fd:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+    return tmp
+
+
+def _publish_staged_write(staged: str, path: Path) -> None:
+    """Atomically move a temp from :func:`_stage_atomic_write` onto *path*.
+
+    Replaces the target's directory entry in one step, so the pre-existing
+    entry stays readable until this instant — there is no window in which a
+    caller has destroyed a recovery generation it was about to replace.
+    """
+    path = Path(path)
+    os.replace(staged, path)
+    _fsync_directory(path.parent)
+
+
+def _discard_staged_write(staged: str) -> None:
+    """Drop a temp this process owns, without touching any published entry."""
+    try:
+        os.unlink(staged)
+    except OSError:
+        pass
+
+
 def _hermes_home_has_webui_state(base: Path) -> bool:
     """Return True when *base* holds real WebUI state under its ``webui/`` dir.
 
