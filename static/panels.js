@@ -1046,10 +1046,35 @@ async function loadCronGatewayNotice() {
   }
 }
 
-async function loadCrons(animate) {
+let _cronLoadGeneration = 0;  // monotonically bumped per loadCrons() entry; stale loads bail
+let _cronAcceptedLoadGeneration = 0;  // latest load that published _cronList
+let _cronLatestLoadSettled = Promise.resolve();  // lets save completion await a superseding reader
+let _cronDetailRefreshKey = null;  // explicit refresh intent survives a superseding poll
+
+async function loadCrons(animate, options) {
+  const background = !!(options && options.background);
+  const hasDetailRefreshKey = !!(options && Object.prototype.hasOwnProperty.call(options, 'detailRefreshKey'));
+  const requestedDetailRefreshKey = hasDetailRefreshKey ? options.detailRefreshKey : null;
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
   loadCronGatewayNotice();
+  // #6767 stale-refresh guard: loadCrons() is async, and both the poller and
+  // switchPanel('tasks') can fire it. If a request started earlier resolves
+  // after a newer one (e.g. the poller fired, then the user reopened the panel
+  // and switchPanel started a fresh load), applying the older response would
+  // overwrite the newer list/detail with stale data. Bump a generation token
+  // at entry and bail once a superseded request realises it is no longer the
+  // latest, so only the newest render wins.
+  const _cronLoadSeq = ++_cronLoadGeneration;
+  let _resolveCronLoadSettled;
+  const _cronLoadSettled = new Promise(resolve => { _resolveCronLoadSettled = resolve; });
+  _cronLatestLoadSettled = _cronLoadSettled;
+  if (!background) {
+    _cronDetailRefreshKey = hasDetailRefreshKey
+      ? (requestedDetailRefreshKey || null)
+      : (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit'
+          ? _currentCronDetailKey : null);
+  }
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
@@ -1058,12 +1083,16 @@ async function loadCrons(animate) {
     await loadCronProfiles();
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
+    if (_cronLoadSeq !== _cronLoadGeneration) return data;  // callers still need their fetched jobs
+    _cronAcceptedLoadGeneration = _cronLoadSeq;
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
     if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
       _showAllCronProfiles = false;
       _cronOtherProfileCount = 0;
     }
+    // Capture after the await: the reader may have scrolled during the request.
+    const listScrollTop = background ? box.scrollTop : 0;
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
     // _cronList stays the single source of truth — only the render is split,
@@ -1109,7 +1138,8 @@ async function loadCrons(animate) {
       box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(emptyText)}</div>`;
       _appendCronProfileToggle(box);
       if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
-      return;
+      _cronDetailRefreshKey = null;
+      return data;
     }
     for (const entry of _activeJobs) _appendCronItem(box, entry);
     if (_pausedJobs.length) {
@@ -1134,14 +1164,36 @@ async function loadCrons(animate) {
       box.appendChild(details);
     }
     _appendCronProfileToggle(box);
-    // Re-render current detail with fresh data if we have one and we're not in a form
+    // Background polls update unread markers without discarding loaded output
+    // or collapsing a run the user is reading.
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
-      if (refreshed) _renderCronDetail(refreshed);
+      const differentDetailSelected = hasDetailRefreshKey && _currentCronDetailKey !== requestedDetailRefreshKey;
+      const selectedDetailRefreshPending = background && _cronDetailRefreshKey === _currentCronDetailKey;
+      if (refreshed && !selectedDetailRefreshPending &&
+          (differentDetailSelected || background)) {
+        const runs = $('cronDetailRuns');
+        if (runs) runs.classList.toggle('has-new-run', !!(refreshed && !refreshed.read_only && _cronNewJobIds.has(String(refreshed.id))));
+      }
+      else if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+    _cronDetailRefreshKey = null;
+    if (background) box.scrollTop = listScrollTop;
+    return data;
+  } catch(e) {
+    if (_cronLoadSeq !== _cronLoadGeneration) return;
+    // Retry one foreground read when a poll displaced an explicit refresh.
+    // Foreground failures do not recurse, and cancelled/hidden views do not retry.
+    if (background && _currentPanel === 'tasks' && _currentCronDetail &&
+        _cronDetailRefreshKey === _currentCronDetailKey &&
+        _cronMode !== 'create' && _cronMode !== 'edit') {
+      return await loadCrons(false);
+    }
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
   finally {
+    _resolveCronLoadSettled();
     if (animate && refreshBtn) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
@@ -1238,6 +1290,10 @@ function _cronAgentPromptCardHtml(job){
 }
 
 function _renderCronDetail(job){
+  // A same-selection presentation redraw (e.g. Prompt expansion) is not
+  // authoritative fresh data and must not cancel a pending action refresh.
+  // loadCrons consumes that intent after applying the latest list response.
+  if (_currentCronDetailKey !== _cronJobKey(job)) _cronDetailRefreshKey = null;
   _currentCronDetail = job;
   _currentCronDetailKey = _cronJobKey(job);
   const title = $('taskDetailTitle');
@@ -1500,6 +1556,7 @@ async function _loadRunContent(jobId, filename, runId){
 function openCronDetail(jobOrId, el){
   const job = _findCronJob(jobOrId);
   if (!job) return;
+  const refreshPending = typeof _cronDetailRefreshKey !== 'undefined' && !!_cronDetailRefreshKey;
   const detailKey = _cronJobKey(job);
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
   const target = el || $(_cronItemId(job));
@@ -1512,11 +1569,16 @@ function openCronDetail(jobOrId, el){
   _editingCronId = null;
   _stopCronWatch();
   _renderCronDetail(job);
+  // A pending action refresh belongs to the visible selection. Retarget it so
+  // the next authoritative load updates this detail without starting a request
+  // for every selection change.
+  if (refreshPending) _cronDetailRefreshKey = detailKey;
   if (!job.read_only) _checkCronWatchOnDetail(job.id, detailKey);
   _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearCronDetail(){
+  _cronDetailRefreshKey = null;
   _currentCronDetail = null;
   _currentCronDetailKey = '';
   _cronMode = 'empty';
@@ -1973,7 +2035,8 @@ function cancelCronForm(){
   if (_cronPreFormDetail) {
     const snap = _cronPreFormDetail;
     _cronPreFormDetail = null;
-    _renderCronDetail(snap);
+    const accepted = _cronList.find(job => _cronJobKey(job) === _cronJobKey(snap));
+    _renderCronDetail(accepted || snap);
     return;
   }
   _cronPreFormDetail = null;
@@ -2027,6 +2090,58 @@ async function saveCronForm(){
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  // Save completion owns only this form/view. Navigation or a replacement
+  // form must not be undone by either the write or its subsequent list read.
+  const formMode = _cronMode;
+  const formPanel = _currentPanel;
+  const formDetailKey = _currentCronDetailKey;
+  const formStillCurrent = () => $('cronFormError') === errEl &&
+    _currentPanel === formPanel && _cronMode === formMode && _currentCronDetailKey === formDetailKey;
+  const acceptedJobForCurrentForm = async (data, savedId) => {
+    if (!formStillCurrent()) return null;
+    const savedJob = () => {
+      if (!formStillCurrent()) return null;
+      return savedId
+        ? (_cronList.find(job => job.id === savedId) || null)
+        : (_cronList[_cronList.length - 1] || null);
+    };
+    if (data && data.jobs === _cronList) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // A completion poll can supersede this save's list request. If its accepted
+    // response has not landed yet, take one foreground read so the still-current
+    // form completes from the authoritative list rather than remaining saveable.
+    const recoveryGeneration = _cronLoadGeneration + 1;
+    data = await loadCrons(false, {detailRefreshKey: formDetailKey});
+    if (!formStillCurrent()) return null;
+    if (data && data.jobs === _cronList) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // The recovery read can itself be superseded. Await a bounded number of
+    // later readers instead of starting an unbounded chain of foreground reads.
+    // Each accepted reader publishes both its generation and _cronList.
+    let waitedFor = null;
+    for (let i = 0; i < 4 && formStillCurrent(); i++) {
+      if (_cronAcceptedLoadGeneration > recoveryGeneration) {
+        const job = savedJob();
+        if (job) return job;
+      }
+      const latestSettlement = _cronLatestLoadSettled;
+      if (!latestSettlement || latestSettlement === waitedFor) break;
+      waitedFor = latestSettlement;
+      await latestSettlement;
+    }
+    if (_cronAcceptedLoadGeneration > recoveryGeneration) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // The write already succeeded. Do not leave Create/Edit available for a
+    // duplicate submission when bounded list reconciliation could not settle it.
+    if (formStillCurrent()) _clearCronDetail();
+    return null;
+  };
   try{
     const modelEl = $('cronFormModel');
     const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
@@ -2052,14 +2167,24 @@ async function saveCronForm(){
         }
         // else: select not yet populated — omit model/provider to preserve saved value
       }
-      await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
-      _editingCronId = null;
-      _cronPreFormDetail = null;
+      await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       showToast(t('cron_job_updated'));
-      await loadCrons();
-      const job = _cronList && _cronList.find(j => j.id === editedId);
-      if (job) openCronDetail(job);
+      const saveViewCurrent = formStillCurrent();
+      if (!saveViewCurrent && _currentPanel !== 'tasks') return;
+      // Cancel returns an edit form to the same job's read view. That visible
+      // detail must receive the successful write; other navigation stays quiet.
+      const editedDetailShown = !saveViewCurrent && _cronMode === 'read' &&
+        !!_currentCronDetail && _currentCronDetailKey === formDetailKey;
+      const data = await loadCrons(false, {
+        background: !saveViewCurrent && !editedDetailShown,
+        detailRefreshKey: formDetailKey,
+      });
+      // A background refresh keeps a newer selection/output untouched. Only the
+      // still-current form may auto-open its saved job from the accepted list.
+      if (!saveViewCurrent) return;
+      const job = await acceptedJobForCurrentForm(data, editedId);
+      if (job && formStillCurrent()) openCronDetail(job);
       return;
     }
     const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications};
@@ -2079,13 +2204,20 @@ async function saveCronForm(){
       body.provider = _cronPreFormDetail.provider || null;
     }
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
-    _cronPreFormDetail = null;
-    _cronIsDuplicate = false;
     showToast(t('cron_job_created'));
-    await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
-    if (newId) openCronDetail(newId);
-    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1]);
+    const saveViewCurrent = formStillCurrent();
+    if (!saveViewCurrent && _currentPanel !== 'tasks') return;
+    const data = await loadCrons(false, {
+      background: !saveViewCurrent,
+      detailRefreshKey: formDetailKey,
+    });
+    if (!saveViewCurrent) return;
+    const job = await acceptedJobForCurrentForm(data, newId);
+    if (job && formStillCurrent()) {
+      _cronIsDuplicate = false;
+      openCronDetail(job);
+    }
   }catch(e){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
   }
@@ -13756,6 +13888,7 @@ async function _runCronPollTick(){
       }
       // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
       updateCronBadge();
+      if (_currentPanel === 'tasks' && $('cronList')) loadCrons(false, { background: true });
     }
   }catch(e){}
   finally{ _cronPollInFlight=false; }
