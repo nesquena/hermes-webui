@@ -84,6 +84,24 @@ def test_done_payload_persists_final_tps_when_exact_usage_available():
     assert "lastAsst._turnTps" in MESSAGES_JS, "done handler should persist final TPS on the last assistant message"
 
 
+def test_final_tps_uses_per_turn_completion_delta():
+    """A cached agent accumulates session_completion_tokens across turns.
+
+    Reusing that session total as the numerator while dividing by one turn's
+    duration reports TPS far above the model's real throughput on every turn
+    after the first. Final TPS must divide THIS turn's delta instead.
+    """
+    assert "turn_output_tokens = max(0, output_tokens - prev_output_tokens)" in STREAMING_PY, (
+        "turn completion delta should be derived from the agent's cumulative counters"
+    )
+    assert "float(turn_output_tokens) / _turn_duration_seconds" in STREAMING_PY, (
+        "final TPS numerator must be the per-turn completion delta"
+    )
+    assert "float(output_tokens) / _turn_duration_seconds" not in STREAMING_PY, (
+        "session-cumulative completion tokens must not be divided by a single turn's duration"
+    )
+
+
 def test_backend_marks_streaming_metering_availability_explicitly():
     assert "tps_available" in STREAMING_PY, "metering SSE payloads must explicitly say whether TPS is displayable"
     assert "estimated" in STREAMING_PY, "metering SSE payloads must explicitly distinguish estimated readings"

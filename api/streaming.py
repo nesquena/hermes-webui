@@ -15223,8 +15223,11 @@ def _run_agent_streaming(
                 except Exception:
                     _turn_duration_seconds = 0.0
                 _turn_tps = None
-                if output_tokens and _turn_duration_seconds > 0:
-                    _turn_tps = round(float(output_tokens) / _turn_duration_seconds, 1)
+                # Final TPS must use THIS turn's completion delta, not the agent's
+                # cumulative session counter: the WebUI reuses a cached agent across
+                # messages, so session_completion_tokens keeps growing (#1617).
+                if turn_output_tokens and _turn_duration_seconds > 0:
+                    _turn_tps = round(float(turn_output_tokens) / _turn_duration_seconds, 1)
                 _gateway_routing = _extract_gateway_routing_metadata(
                     agent,
                     result,
