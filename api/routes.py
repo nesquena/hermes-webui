@@ -15925,8 +15925,70 @@ class SavedPromptPersistenceError(RuntimeError):
     """
 
 
+def _saved_prompt_alias_direction(primary: Path, backup: Path) -> str:
+    """Classify how ``primary`` and ``backup`` are aliased to each other.
+
+    Returns ``"forward"`` when the primary's referent chain runs *through* the
+    backup entry (``primary -> backup``, possibly chained), ``"reverse"`` when
+    only the backup points at the primary, and ``"none"`` when the two entries
+    are independent.
+
+    Direction is read from the link targets themselves (``os.readlink``) rather
+    than from full resolution: two paths resolving to the same file says which
+    bytes are shared, not which entry's removal would break the other. Only the
+    forward direction is unsafe — replacing the *backup* entry leaves the
+    primary's link and referent untouched, while replacing the entry the primary
+    resolves through strands it.
+    """
+    if not primary.is_symlink():
+        return "none"
+    seen: set[Path] = set()
+    current = primary
+    # Walk the primary's referent chain. `resolve()` would collapse the whole
+    # chain to one path and lose which entry actually carries the link, which is
+    # exactly the distinction this needs.
+    for _ in range(_MAX_SYMLINK_CHAIN):
+        try:
+            target = os.readlink(current)
+        except OSError:
+            return "none"
+        nxt = Path(target) if os.path.isabs(target) else current.parent / target
+        nxt = Path(os.path.normpath(str(nxt)))
+        if nxt == backup:
+            return "forward"
+        if nxt in seen or not nxt.is_symlink():
+            return "none"
+        seen.add(nxt)
+        current = nxt
+    return "none"
+
+
+_MAX_SYMLINK_CHAIN = 32
+
+
+def _saved_prompt_backup_entry_is_publishable(backup: Path) -> bool:
+    """Whether the recovery entry can be replaced by a staged file.
+
+    The staged temp is written *beside* the entry, so a structural problem with
+    the entry itself — most importantly a directory parked at the backup path —
+    only surfaces at the publication boundary, by which point the primary has
+    already been replaced. Refusing that topology up front keeps the retained
+    guarantee that an unusable recovery copy stops the destructive mutation
+    before the primary is touched.
+
+    A symlink is always publishable: ``os.replace`` replaces the link entry
+    itself rather than writing through it.
+    """
+    return not (backup.is_dir() and not backup.is_symlink())
+
+
 def _save_saved_prompts(prompts: list) -> None:
-    from api.paths import _atomic_write_text
+    from api.paths import (
+        _atomic_write_text,
+        _discard_staged_write,
+        _publish_staged_write,
+        _stage_atomic_write,
+    )
 
     p = _saved_prompts_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -15935,10 +15997,12 @@ def _save_saved_prompts(prompts: list) -> None:
     payload = json.dumps(prompts, ensure_ascii=False, indent=2)
     backup = Path(str(p) + ".bak")
     # A primary resolving onto its own recovery path makes the two generations
-    # one file: unlinking the backup would drop the primary's referent, and the
-    # replacement below would be published through it into the recovery path.
-    # Refuse the topology before anything is mutated.
-    if p.is_symlink() and p.resolve(strict=False) == backup.resolve(strict=False):
+    # one file: replacing the backup would strand the primary's referent, and
+    # the replacement below would be published through it into the recovery
+    # path. Refuse that topology before anything is mutated. A backup that only
+    # points at the primary is the safe direction — its entry can be replaced
+    # without touching the primary's link or referent — so it is not refused.
+    if _saved_prompt_alias_direction(p, backup) == "forward":
         raise SavedPromptPersistenceError(
             "saved_prompts.json symlinks onto its own backup; refusing to publish"
         )
@@ -15950,28 +16014,56 @@ def _save_saved_prompts(prompts: list) -> None:
     except (OSError, ValueError):
         current = None
         known_good = False
+    staged: str | None = None
     if known_good:
-        # Publish an independent snapshot of the live generation while the
-        # primary keeps its mode, owner, links and metadata, so the shared
-        # writer's protections still govern the replacement below.
+        # An entry that cannot be replaced by a staged file has to be refused
+        # now, not at the publication boundary below — by then the primary has
+        # already been replaced and the refusal would be too late to protect it.
+        if not _saved_prompt_backup_entry_is_publishable(backup):
+            raise SavedPromptPersistenceError(
+                "saved_prompts.json.bak cannot be replaced; refusing to publish"
+            )
+        # Stage the recovery generation FIRST, without touching the existing
+        # backup entry: the pre-existing `.bak` must survive every failure up
+        # to the publication boundary below, so a failed save can never cost the
+        # only recoverable generation. The primary is untouched here, so it
+        # still holds its own mode, owner, links and metadata.
         try:
-            primary_mode = _stat.S_IMODE(os.stat(p).st_mode)
-            # Publish on a FRESH inode: unlinking first means no alias parked
-            # at the backup path (a symlink or extra hard link to an unrelated
-            # file, or the primary itself) is ever written through, and the
-            # primary's restrictions reach the temp inode before its bytes do —
-            # never a chmod after the fact.
-            backup.unlink(missing_ok=True)
-            _atomic_write_text(backup, current, mode=primary_mode)
+            primary_stat = os.stat(p)
+            staged = _stage_atomic_write(
+                backup,
+                current,
+                # Carry the primary's owner AND group, not just its mode: a
+                # 0660 primary shared with a restricted group must not publish
+                # a copy the process's default group can read.
+                mode=_stat.S_IMODE(primary_stat.st_mode),
+                owner=(primary_stat.st_uid, primary_stat.st_gid),
+            )
         except OSError as exc:
             # Preparation failure: the destructive mutation must not run with
             # no recoverable copy left behind.
             raise SavedPromptPersistenceError(
                 f"saved-prompt recovery copy could not be published: {exc}"
             ) from exc
-    # The primary is replaced in place by the shared writer. If this fails, the
-    # previous generation is still the primary and still the backup.
-    _atomic_write_text(p, payload)
+    try:
+        # The primary is replaced in place by the shared writer. If this fails,
+        # the previous generation is still the primary and still the backup.
+        _atomic_write_text(p, payload)
+    except BaseException:
+        if staged is not None:
+            _discard_staged_write(staged)
+        raise
+    if staged is not None:
+        # Publication boundary: the new recovery generation is complete and
+        # fsynced, so the old entry can now be replaced in one step. A failure
+        # here still leaves the previous generation readable as the primary.
+        try:
+            _publish_staged_write(staged, backup)
+        except OSError as exc:
+            _discard_staged_write(staged)
+            raise SavedPromptPersistenceError(
+                f"saved-prompt recovery copy could not be published: {exc}"
+            ) from exc
 
 
 # In-process cache for the app-shell template. The `/`, `/index.html`, and
