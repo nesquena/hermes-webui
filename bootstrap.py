@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import ipaddress
 import os
 import platform
 import shutil
@@ -778,6 +779,127 @@ def _already_serving_scheme(host: str, port: int) -> str:
     return ""
 
 
+_LAN_PROBE_TOTAL_BUDGET = 2.0
+_LAN_PROBE_PER_ADDRESS = 1.0
+
+# Address families worth probing for an own WebUI that holds the port on a
+# single interface. Loopback is excluded deliberately: it was already probed by
+# _already_serving_scheme, so repeating it only spends the budget.
+_LAN_ADDRESS_FAMILIES = (socket.AF_INET, socket.AF_INET6)
+
+
+def _is_usable_interface_address(text: str) -> bool:
+    """True for an address a listener can be reached on and a URL can name.
+
+    Drops loopback (already probed), the unspecified address (no host owns it),
+    and link-local addresses: ``http://[fe80::1]:8787`` cannot be spelled
+    without a zone id, so announcing one would print a URL that cannot reach the
+    listener even when it is our own WebUI.
+    """
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return not (address.is_loopback or address.is_unspecified or address.is_link_local)
+
+
+def _local_interface_addresses(family: int) -> list[str]:
+    """Addresses assigned to this machine's interfaces, deduplicated.
+
+    An own WebUI started with ``--host 100.x.y.z`` holds the port on that
+    interface alone, so a later wildcard bind conflicts with it while loopback
+    stays silent (#8137 part 2). The preflight needs this machine's own
+    addresses to find that instance.
+
+    Two sources, no new dependency: the address the kernel would use for
+    outbound traffic (a UDP ``connect()``, which sends no packet) and the
+    address the host name resolves to. Both are best-effort - a host with no
+    route, or an unresolvable name, simply yields fewer candidates.
+
+    ``gethostbyname_ex`` and the UDP ``connect()`` are deliberately used instead
+    of psutil/netifaces: bootstrap runs BEFORE dependencies are installed, so
+    anything from site-packages may not exist yet.
+    """
+    candidates: list[str] = []
+    # The default-route source address - the LAN or Tailscale address a WebUI
+    # is most likely bound to. UDP connect() sends no packet; TEST-NET-3
+    # (RFC 5737) is unroutable, so nothing leaves the machine.
+    try:
+        probe_target = ("203.0.113.1", 9) if family is socket.AF_INET else ("2001:db8::1", 9)
+        with socket.socket(family, socket.SOCK_DGRAM) as probe:
+            probe.connect(probe_target)
+            candidates.append(str(probe.getsockname()[0]))
+    except OSError:
+        pass
+    # The host name, which covers a machine whose WebUI is on an address the
+    # default route does not use.
+    try:
+        if family is socket.AF_INET:
+            candidates.extend(socket.gethostbyname_ex(socket.gethostname())[2])
+        else:
+            candidates.extend(
+                str(info[4][0])
+                for info in socket.getaddrinfo(socket.gethostname(), None, family)
+            )
+    except OSError:
+        pass
+
+    addresses: list[str] = []
+    for candidate in candidates:
+        # getaddrinfo can return a scope-id suffix ("fe80::1%eth0"); strip it so
+        # the probe URL stays well-formed.
+        text = str(candidate).split("%", 1)[0]
+        if not _is_usable_interface_address(text):
+            continue
+        if text not in addresses:
+            addresses.append(text)
+    return addresses
+
+
+def _already_serving_on_interface(host: str, port: int) -> tuple[str, str] | None:
+    """``(scheme, address)`` when OUR WebUI answers on a local interface address.
+
+    Second half of the #8137 part-2 preflight: a WebUI bound only to a LAN or
+    Tailscale address is our own instance, but the loopback probe cannot see it,
+    so bootstrap would report a foreign conflict and advise a second WebUI on
+    the same state dir.
+
+    Returns the ADDRESS as well as the scheme, because ``_url_host`` maps a
+    wildcard to ``localhost`` - correct for a wildcard-bound WebUI, but for a
+    LAN-only listener localhost is a closed port, so announcing it would send
+    the user to a URL that cannot reach the instance.
+
+    Only a wildcard bind reaches here: binding a specific address conflicts
+    only with a listener on that same address or on a wildcard, both of which
+    the configured/loopback probe already covers. Identifies our own server by
+    ``_HERMES_HEALTH_MARKERS`` exactly like the loopback probe, so a foreign
+    listener on the LAN address stays a conflict.
+    """
+    if host not in ("", "0.0.0.0", "::", "[::]"):
+        return None
+    deadline = time.monotonic() + _LAN_PROBE_TOTAL_BUDGET
+    for family in _LAN_ADDRESS_FAMILIES:
+        for address in _local_interface_addresses(family):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                # wait_for_health polls on a deadline but a single request keeps
+                # its own socket timeout, so the fallback needs its own cap: a
+                # host with many interfaces must not add seconds per address to
+                # a startup that is failing anyway.
+                return None
+            probe_host = f"[{address}]" if ":" in address else address
+            scheme = wait_for_health(
+                f"http://{probe_host}:{port}/health",
+                timeout=min(_LAN_PROBE_PER_ADDRESS, remaining),
+                markers=_HERMES_HEALTH_MARKERS,
+                accept_degraded=True,
+                tls_unknown=True,
+            )
+            if scheme:
+                return scheme, address
+    return None
+
+
 def main() -> int:
     global _LAST_DISCOVERY
     args = parse_args()
@@ -798,9 +920,22 @@ def main() -> int:
         # exclusive wildcard listener as WSAEACCES (#8137); without a WebUI
         # answer, the bare raise keeps that permission error unchanged.
         _scheme = _already_serving_scheme(args.host, args.port)
+        _serving_address = None
+        if not _scheme:
+            # A wildcard bind also conflicts with our own WebUI when it holds the
+            # port on a LAN/Tailscale address only; loopback cannot reach that
+            # (#8137 part 2).
+            _found = _already_serving_on_interface(args.host, args.port)
+            if _found:
+                _scheme, _serving_address = _found
         if not _scheme:
             raise
-        _url = f"{_scheme}://{_url_host(args.host)}:{args.port}"
+        # The announced host follows the listener: _url_host for the configured
+        # host keeps the localhost origin (saved session + passkey rpId) a
+        # wildcard or loopback WebUI is reached on, while a LAN-only instance
+        # must be named by its own address or the URL would be unreachable.
+        _host = _serving_address if _serving_address else _url_host(args.host)
+        _url = f"{_scheme}://{_host}:{args.port}"
         # A foreground/supervisor launch would be a second server on the same
         # port, so it still fails - with advice about its OWN instance
         # (review #8112, should-fix): the port-conflict text ("try
