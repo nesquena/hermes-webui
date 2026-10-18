@@ -9553,9 +9553,6 @@ def _resolve_compatible_session_model_state(
         if isinstance(providers_cfg, dict) and requested_provider in providers_cfg:
             return model, requested_provider, False
     if model and requested_provider:
-        # Set for the #8163 repair below so the fast-path return is skipped and
-        # execution falls through to the catalog-backed default-model backstop.
-        stranded_moa_preset = False
         # Only safe when the model itself does not carry an ``@provider:model``
         # qualifier — qualified strings require the catalog to decide whether
         # the qualifier matches the active provider (see slow path below).
@@ -9592,13 +9589,7 @@ def _resolve_compatible_session_model_state(
             if _repaired_model:
                 return _repaired_model, requested_provider, True
 
-            # #8163: a MoA preset name paired with a NON-moa provider can never
-            # resolve — the provider answers 404 "Model 'default' not found" on
-            # every turn, so the session strands permanently. The discriminator
-            # is structural (the name must be a *configured* MoA preset and the
-            # provider must not be moa), never the bare string "default", so a
-            # provider that legitimately serves a model with that name is left
-            # alone. A fresh explicit pick is still honoured (#3737).
+            # #8163: repair a MoA preset name stranded on a non-moa provider.
             if not explicit_model_pick and _is_stranded_moa_preset_name(
                 model,
                 requested_provider,
@@ -9606,14 +9597,10 @@ def _resolve_compatible_session_model_state(
             ):
                 if _profile_default:
                     return _profile_default, requested_provider, True
-                # No profile default to repair to: drop the unusable name and
-                # fall through to the catalog-backed default-model backstop
-                # below — the same path an empty session model already takes —
-                # so the active provider gets something it can actually resolve.
+                # No profile default: drop the unusable name and fall through to
+                # the catalog backstop below, as an empty session model already does.
                 model = ""
-                stranded_moa_preset = True
-
-            if not stranded_moa_preset:
+            else:
                 return model, requested_provider, False
 
     # Default (human chat/start) path calls get_available_models() with NO
