@@ -21,8 +21,8 @@ CSS = (REPO / "static" / "style.css").read_text(encoding="utf-8")
 def test_tps_renders_in_message_header_not_global_titlebar():
     assert "msg-tps-inline" in UI_JS, "assistant message headers need a TPS chip hook"
     assert "msg-tps-inline" in CSS, "TPS header chip needs an explicit CSS hook"
-    assert "_assistantRoleHtml(tsTitle='', tpsText='')" in UI_JS, (
-        "assistant role/header rendering should accept the per-message TPS text"
+    assert "_assistantRoleHtml(tsTitle='', tpsText='', toolText='')" in UI_JS, (
+        "assistant role/header rendering should accept per-message TPS and tool-time text"
     )
     assert "_formatTurnTps" in UI_JS, "TPS formatting should be centralized"
     assert "_turnTps" in UI_JS, "settled assistant messages should render final TPS from message metadata"
@@ -99,6 +99,33 @@ def test_final_tps_uses_per_turn_completion_delta():
     )
     assert "float(output_tokens) / _turn_duration_seconds" not in STREAMING_PY, (
         "session-cumulative completion tokens must not be divided by a single turn's duration"
+    )
+
+
+def test_final_tps_reports_pure_generation_speed():
+    """The settled chip reports model generation speed, not whole-turn wall clock.
+
+    The agent keeps one (completion_tokens, request_seconds) entry per provider
+    call; this turn's slice of those histories is the pure generation rate.
+    The whole-turn average stays in the payload as ``tps_turn`` so the header can
+    show tool/wait time next to it instead of folding it into the model number.
+    """
+    assert "_api_output_history" in STREAMING_PY and "_api_latency_history" in STREAMING_PY, (
+        "pure generation TPS must come from the agent's per-call histories"
+    )
+    assert "_turn_api_calls_base" in STREAMING_PY, (
+        "the per-turn slice needs a call-count baseline so cached agents do not leak prior turns"
+    )
+    assert "usage['tps_turn']" in STREAMING_PY, "whole-turn average should stay in the usage payload"
+    assert "usage['tool_seconds']" in STREAMING_PY, "tool wall time should be reported separately"
+    assert "usage['api_seconds']" in STREAMING_PY, "provider-call time should be reported separately"
+    assert "'_turnToolSeconds'" in STREAMING_PY, "tool time must persist on the assistant message"
+    assert "_tool_seconds_total" in STREAMING_PY, "tool durations must be accumulated server-side"
+    assert "msg-toolsec-inline" in UI_JS, "tool time needs its own header chip"
+    assert "function _formatToolSeconds(" in UI_JS, "tool time formatting should be centralized"
+    assert "d.usage.tool_seconds" in MESSAGES_JS, "done handler should read the tool-time field"
+    assert "'_turnToolSeconds'" in MESSAGES_JS, (
+        "ephemeral-field carry-forward must keep the tool chip across session reloads"
     )
 
 

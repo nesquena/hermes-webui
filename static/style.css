@@ -6300,6 +6300,7 @@ body code[class*="language-"],body pre[class*="language-"],body pre code[class*=
   font-variant-numeric: tabular-nums;
   line-height: 1.4;
 }
+.msg-toolsec-inline { margin-left: 6px; }
 .msg-time { opacity: .65; font-size: 10px; }
 .msg-role:hover .msg-time { opacity: 1; }
 
