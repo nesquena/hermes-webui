@@ -82,6 +82,20 @@
   }
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
+<!-- iOS 26/27 status-bar "scroll pocket" fix — inlined on purpose.
+     Installed web apps on this origin are NOT a secure context (plain HTTP on a
+     LAN/Tailscale address), so the service worker never registers: shell assets
+     come straight from the browser HTTP cache, and every `?v=` URL below is
+     `Cache-Control: immutable` for a year. Anything shipped only in style.css
+     therefore never reaches an already-installed app. index.html itself IS
+     re-fetched from the server on every launch, so the two halves of the fix
+     live where they can actually be delivered: the status-bar meta above and
+     this critical rule. style.css carries the same rule for browsers that do
+     have a working service worker. Drop this block once the app is served over
+     HTTPS. -->
+<style>
+  .pwa-standalone.pwa-ios .app-titlebar{position:sticky;top:0;}
+</style>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css" integrity="sha384-LJcOxlx9IMbNXDqJ2axpfEQKkAYbFjJfhXexLfiRJhjDU81mzgkiQq8rkV0j6dVh" crossorigin="anonymous">
   <!-- KaTeX math rendering CSS (loaded eagerly from vendored assets to prevent font CSP noise) -->
   <link rel="stylesheet" href="static/vendor/katex/0.16.22/katex.min.css">
@@ -1974,5 +1988,10 @@
   <div id="outlinePanel"></div>
 </div>
 <div class="profile-dropdown" id="profileDropdown"></div>
+<!-- TEMPORARY diagnostic for the iOS 26/27 status-bar blur work: reports the
+     installed app's real geometry/computed styles to the server access log as
+     a GET to /ios-probe?... Remove this tag together with static/ios-probe.js
+     once the blur investigation is settled. -->
+<script src="static/ios-probe.js?d=1" defer></script>
 </body>
 </html>
