@@ -13,6 +13,7 @@ composes those values. AA = 4.5:1 for normal text.
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -26,55 +27,43 @@ TEXT_TOKENS = (
     "gold", "code-text", "pre-text", "success", "warning", "error", "blue", "info",
     "user-bubble-placeholder",
 )
-DARK_INK = "#1D2021"  # gruvbox bg1 — the dark-ink foreground used on solid accent fills
-LIGHT_INK = "#FBF1C7"  # gruvbox light bg0 — cream ink on the darkened aqua fills
-BUTTON_INK_CASES = (
-    # What the browser paints on the solid primary fills: the ink is a fixed
-    # component colour (style.css overrides), not a palette token.
-    ("dark", DARK_INK, "--accent"),
-    ("dark", DARK_INK, "--accent-hover"),
-    ("light", LIGHT_INK, "--accent"),
-    ("light", LIGHT_INK, "--accent-hover"),
+LIGHT_PREFIX = ':root[data-skin="gruvbox"] '
+DARK_PREFIX = ':root.dark[data-skin="gruvbox"] '
+GRUVBOX_PREFIXES = (LIGHT_PREFIX, DARK_PREFIX)
+
+# Component-level paint model. Ink colours, repaired opacities/foregrounds
+# and the tree/diff syntax steps are parsed out of static/style.css itself,
+# so mutating (or reverting) a repaired declaration flips these checks the
+# way it flips the browser. Only the surface each element paints on is
+# declared here: the sidebar list paints on --sidebar, tool-card toggles on
+# --surface, and the tree/diff viewer inside code-block wraps (--code-bg).
+DARK_INK_RULE = DARK_PREFIX + ".msg-edit-send"
+DARK_INK_COVERED = (
+    DARK_PREFIX + ".msg-edit-send",
+    DARK_PREFIX + "#mainSettings .settings-btn",
+    DARK_PREFIX + '#mainSettings .sm-btn[onclick^="saveSettings"]',
+    DARK_PREFIX + "#mainSettings .settings-autosave-status button",
+    DARK_PREFIX + '#settingsUnsavedBar button[onclick^="saveSettings"]',
 )
-TREE_DIFF_CASES = (
-    # The tree/diff viewer paints inside code-block wraps, i.e. over --code-bg.
-    ("light", ".tree-num", "#8F3F71"),
-    ("light", ".tree-bool", "#A23803"),
-    ("dark", ".tree-num", "#D3869B"),
-    ("dark", ".tree-bool", "#FE8019"),
-)
-# Elements whose base rules reduce opacity: the gruvbox overrides pin opacity
-# back to 1, so the browser paints the token at full strength (the pre-override
-# composites, e.g. muted@.82 on sidebar at 4.13:1, are what failed the gate).
-COMPOSITED_CASES = (
-    ("dark", ".session-item.active .session-meta", "--accent-text", "--sidebar"),
-    ("dark", ".session-item .session-search-preview", "--muted", "--sidebar"),
-    ("dark", ".session-item.active .session-search-preview", "--accent-text", "--sidebar"),
-    ("dark", ".project-picker-create", "--blue", "--sidebar"),
-    ("dark", ".project-create-btn", "--muted", "--sidebar"),
-    ("dark", ".tool-card-more", "--blue", "--code-bg"),
-    ("dark", ".tool-cards-toggle button", "--blue", "--code-bg"),
-    ("dark", ".provider-card-meta", "--muted", "--sidebar"),
-    ("dark", ".session-date-header", "--muted", "--sidebar"),
-    ("dark", ".session-select-toggle", "--muted", "--sidebar"),
-    ("dark", ".session-empty-note", "--muted", "--sidebar"),
-    ("dark", ".session-action-meta", "--muted", "--sidebar"),
-    ("dark", ".log-line-debug", "--muted", "--sidebar"),
-    ("dark", ".session-source-chip[general]", "--strong", "--sidebar"),
-    ("light", ".session-item.active .session-meta", "--accent-text", "--sidebar"),
-    ("light", ".session-item .session-search-preview", "--muted", "--sidebar"),
-    ("light", ".session-item.active .session-search-preview", "--accent-text", "--sidebar"),
-    ("light", ".project-picker-create", "--blue", "--sidebar"),
-    ("light", ".project-create-btn", "--muted", "--sidebar"),
-    ("light", ".tool-card-more", "--blue", "--code-bg"),
-    ("light", ".tool-cards-toggle button", "--blue", "--code-bg"),
-    ("light", ".provider-card-meta", "--muted", "--sidebar"),
-    ("light", ".session-date-header", "--muted", "--sidebar"),
-    ("light", ".session-select-toggle", "--muted", "--sidebar"),
-    ("light", ".session-empty-note", "--muted", "--sidebar"),
-    ("light", ".session-action-meta", "--muted", "--sidebar"),
-    ("light", ".log-line-debug", "--muted", "--sidebar"),
-    ("light", ".session-source-chip[general]", "--strong", "--sidebar"),
+PROMOTED_INK_ELEMENTS = (".new-chat-btn", "button.send-btn:not(:disabled)")  # promoted accent fills also carry #1D2021 ink
+TREE_COLOR_ELEMENTS = (".tree-num", ".tree-bool")
+COMPONENT_CASES = (
+    # (base selector, gruvbox override element, surface the element paints on)
+    (".session-item.active .session-meta", ".session-item.active .session-meta", "--sidebar"),
+    (".session-item.selected .session-meta", ".session-item.active .session-meta", "--sidebar"),
+    (".session-search-preview", ".session-item .session-search-preview", "--sidebar"),
+    (".session-item.active .session-search-preview", ".session-item .session-search-preview", "--sidebar"),
+    (".project-picker-create", ".project-picker-create", "--sidebar"),
+    (".project-create-btn", ".project-create-btn", "--sidebar"),
+    (".tool-card-more", ".tool-card-more", "--surface"),
+    (".tool-cards-toggle button", ".tool-cards-toggle button", "--surface"),
+    (".provider-card-meta", ".provider-card-meta", "--sidebar"),
+    (".session-date-header", ".session-date-header", "--sidebar"),
+    (".session-select-toggle", ".session-select-toggle", "--sidebar"),
+    (".session-empty-note", ".session-empty-note", "--sidebar"),
+    (".session-action-meta", ".session-action-meta", "--sidebar"),
+    (".log-line-debug", ".log-line-debug", "--sidebar"),
+    (".session-source-chip", ".session-source-chip", "--sidebar"),
 )
 
 
@@ -114,6 +103,8 @@ def _rel_lum(rgb: tuple[float, float, float]) -> float:
 
 def _hex_rgb(hexcolor: str) -> tuple[float, float, float]:
     hexcolor = hexcolor.lstrip("#")
+    if len(hexcolor) == 3:
+        hexcolor = "".join(c * 2 for c in hexcolor)
     return tuple(int(hexcolor[i : i + 2], 16) for i in (0, 2, 4))  # type: ignore[return-value]
 
 
@@ -125,6 +116,130 @@ def contrast(fg: str, bg: str) -> float:
 def _blend_over(fg_rgba: tuple[float, float, float, float], bg: tuple[float, float, float]) -> tuple[float, float, float]:
     alpha = fg_rgba[3]
     return tuple(alpha * f + (1 - alpha) * b for f, b in zip(fg_rgba[:3], bg, strict=True))  # type: ignore[return-value]
+
+
+
+_RULE_RE = re.compile(r"([^{}]+)\{([^{}]*)\}", re.S)
+
+
+def _norm(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _rule_decls(body: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for decl in body.split(";"):
+        if ":" in decl:
+            key, _, value = decl.partition(":")
+            out[key.strip()] = _norm(value)
+    return out
+
+
+def _rule_entries(group_text: str) -> list[str]:
+    group_text = re.sub(r"/\*.*?\*/", "", group_text, flags=re.S)
+    return [_norm(part) for part in group_text.split(",")]
+
+
+def _collect_groups(css: str) -> list[tuple[list[str], dict[str, str]]]:
+    return [(_rule_entries(sel), _rule_decls(body)) for sel, body in _RULE_RE.findall(css)]
+
+
+def _base_rule(css: str, selector: str) -> dict[str, str]:
+    """Merged declarations of every rule whose selector list contains
+    `selector` exactly (no skin prefix, no pseudo classes); later rules win."""
+    merged: dict[str, str] = {}
+    for entries, decls in _collect_groups(css):
+        if selector in entries:
+            merged.update(decls)
+    return merged
+
+
+def _gruvbox_override(css: str, element: str, prefixes: tuple[str, ...] = GRUVBOX_PREFIXES) -> dict[str, str]:
+    """Merged gruvbox-scoped declarations applying to `element` in document
+    order. Non-state pseudo variants (:not chains) count; :hover does not."""
+    merged: dict[str, str] = {}
+    for entries, decls in _collect_groups(css):
+        hit = False
+        for entry in entries:
+            for prefix in prefixes:
+                target = prefix + element
+                if entry == target or entry.startswith(target + ":not("):
+                    hit = True
+                    break
+        if hit:
+            merged.update(decls)
+    return merged
+
+
+def _resolve_color(expr: str, pal: dict[str, str]):
+    """Hex | var() | color-mix(in srgb, ...) | rgba() -> (r, g, b, a)."""
+    e = _norm(expr).replace("!important", "")
+    if e.startswith("#"):
+        rgb = _hex_rgb(e.split()[0])
+        return (float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
+    m = re.fullmatch(r"var\((--[A-Za-z0-9-]+)\)", e)
+    if m and pal.get(m.group(1), "").startswith("#"):
+        rgb = _hex_rgb(pal[m.group(1)])
+        return (float(rgb[0]), float(rgb[1]), float(rgb[2]), 1.0)
+    m = re.fullmatch(r"color-mix\(\s*in srgb\s*,\s*(.+)\)", e)
+    if m:
+        parts = [_norm(p) for p in m.group(1).split(",")]
+        if len(parts) < 2:
+            return None
+
+        def split_part(part: str):
+            pm = re.fullmatch(r"(.+\S)\s+([\d.]+)%", part)
+            if pm:
+                return _resolve_color(pm.group(1), pal), float(pm.group(2)) / 100.0
+            return _resolve_color(part, pal), None
+
+        (c1, p1), (c2, p2) = split_part(parts[0]), split_part(parts[-1])
+        if c1 is None or c2 is None:
+            return None
+        if p1 is None and p2 is None:
+            p1 = p2 = 0.5
+        elif p1 is None:
+            p1 = max(0.0, 1.0 - p2)
+        elif p2 is None:
+            p2 = max(0.0, 1.0 - p1)
+        total = p1 + p2 or 1.0
+        w1, w2 = p1 / total, p2 / total
+        return (
+            w1 * c1[0] + w2 * c2[0],
+            w1 * c1[1] + w2 * c2[1],
+            w1 * c1[2] + w2 * c2[2],
+            w1 * c1[3] + w2 * c2[3],
+        )
+    m = re.fullmatch(r"rgba?\(([^)]+)\)", e)
+    if m:
+        vals = [v.strip() for v in m.group(1).split(",")]
+        nums = [float(v.rstrip("%")) / 100.0 if v.endswith("%") else float(v) for v in vals]
+        return (nums[0], nums[1], nums[2], nums[3] if len(nums) > 3 else 1.0)
+    return None
+
+
+def _painted_ratio(css: str, pal: dict[str, str], base_selector: str, override_element: str, surface: str, prefixes: tuple[str, ...] = GRUVBOX_PREFIXES):
+    """(ratio, error) for the browser-painted label on `surface`: gruvbox
+    override declarations win over the base rule; unresolved colors and
+    opacities are reported rather than silently assumed."""
+    bg = pal.get(surface, "")
+    if not bg.startswith("#"):
+        return None, f"missing surface token {surface}"
+    base = _base_rule(css, base_selector)
+    override = _gruvbox_override(css, override_element, prefixes)
+    color_expr = override.get("color") or base.get("color") or ""
+    opacity_expr = override.get("opacity") or base.get("opacity") or "1"
+    fg = _resolve_color(color_expr, pal)
+    if fg is None:
+        return None, f"unresolvable color {color_expr!r}"
+    try:
+        alpha = float(_norm(opacity_expr).replace("!important", ""))
+    except ValueError as exc:
+        return None, f"unparseable opacity {opacity_expr!r}: {exc}"
+    rgba = (fg[0], fg[1], fg[2], fg[3] * alpha)
+    painted = _blend_over(rgba, _hex_rgb(bg))
+    painted_hex = "#{:02X}{:02X}{:02X}".format(*(round(c) for c in painted))
+    return contrast(painted_hex, bg), None
 
 
 def failing_pairs(css: str = None) -> list[tuple[str, str, str, float]]:
@@ -160,42 +275,79 @@ def failing_pairs(css: str = None) -> list[tuple[str, str, str, float]]:
 def failing_component_pairs(css: str = None) -> list[tuple[str, str, str, float]]:
     """(mode, component, over, ratio) for every component-paint pair under 4.5:1.
 
-    Covers what the browser paints beyond plain token pairs:
-    - solid primary fills and their inks (BUTTON_INK_CASES),
-    - the hard-coded tree/diff syntax steps on their code-block surface,
-    - elements whose opacity the skin pins back to 1 (COMPOSITED_CASES).
+    All component values are read out of the stylesheet itself — the dark
+    solid-fill ink group, the promoted accent-fill inks, the hard-coded
+    tree/diff steps and the opacity/foreground repair rules (resolved to the
+    winning value incl. color-mix/rgba and the effective opacity) — so a
+    reverted or mutated repair fails here exactly as it paints in Chromium.
+    Structural failures (a named control missing from the ink group, an
+    unresolvable color) report ratio 0.0.
     """
+    css = css or CSS_PATH.read_text(encoding="utf-8")
     light, dark = gruvbox_blocks(css)
+    palettes = {"light": light, "dark": dark}
     failures: list[tuple[str, str, str, float]] = []
-    for mode, pal in (("light", light), ("dark", dark)):
-        if not pal:
-            continue
-        for mode_, fg_hex, fill_token in BUTTON_INK_CASES:
-            if mode_ != mode:
-                continue
-            if not pal.get(fill_token, "").startswith("#"):
-                failures.append((mode, f"ink {fg_hex}", fill_token, 0.0))
-                continue
-            ratio = contrast(fg_hex, pal[fill_token])
+    if not light or not dark:
+        return [("light", "<palette-block-missing>", "-", 0.0)]
+
+    def check_ink(ink_rgba, pal, fill_tokens, label):
+        if ink_rgba is None:
+            failures.append(("dark", f"ink rule missing/invalid: {label}", "--accent", 0.0))
+            return
+        ink_hex = "#{:02X}{:02X}{:02X}".format(*(round(c) for c in ink_rgba[:3]))
+        for fill in fill_tokens:
+            ratio = contrast(ink_hex, pal[fill])
             if ratio < AA:
-                failures.append((mode, f"ink {fg_hex}", fill_token, ratio))
-        for mode_, name, fg_hex in TREE_DIFF_CASES:
-            if mode_ != mode:
+                failures.append(("dark", f"ink {ink_hex} on {label}", fill, ratio))
+
+    # 1. dark solid-fill ink group: every gate-named control must be covered,
+    #    and the parsed ink must clear AA on the aqua fills it paints on.
+    ink_value: str | None = None
+    covered_entries: list[str] = []
+    for entries, decls in _collect_groups(css):
+        if DARK_INK_RULE in entries and "color" in decls:
+            ink_value, covered_entries = decls["color"], entries
+    ink_rgba = _resolve_color(ink_value, dark) if ink_value else None
+    if ink_rgba is None:
+        failures.append(("dark", f"dark ink rule missing: {DARK_INK_RULE}", "--accent", 0.0))
+    else:
+        for entry in DARK_INK_COVERED:
+            if entry not in covered_entries:
+                failures.append(("dark", f"ink group missing {entry}", "-", 0.0))
+        check_ink(ink_rgba, dark, ("--accent", "--accent-hover"), "dark ink group")
+
+    # 2. promoted translucent-accent controls: their solid fill rule must
+    #    carry ink that clears AA too (same mutation class as the ink group).
+    for element in PROMOTED_INK_ELEMENTS:
+        decls = _gruvbox_override(css, element, (DARK_PREFIX,))
+        check_ink(_resolve_color(decls.get("color", ""), dark) if decls.get("color") else None,
+                  dark, ("--accent", "--accent-hover"), f"{element} fill")
+
+    # 3. hard-coded tree/diff steps painted on the code-block surface.
+    for mode in ("light", "dark"):
+        prefixes = GRUVBOX_PREFIXES if mode == "dark" else (LIGHT_PREFIX,)
+        for element in TREE_COLOR_ELEMENTS:
+            decls = _gruvbox_override(css, element, prefixes)
+            fg = _resolve_color(decls.get("color", ""), palettes[mode]) if decls.get("color") else None
+            if fg is None:
+                failures.append((mode, f"{element} color missing", "--code-bg", 0.0))
                 continue
-            ratio = contrast(fg_hex, pal["--code-bg"])
+            hex_fg = "#{:02X}{:02X}{:02X}".format(*(round(c) for c in fg[:3]))
+            ratio = contrast(hex_fg, palettes[mode]["--code-bg"])
             if ratio < AA:
-                failures.append((mode, name, "--code-bg", ratio))
-        for mode_, name, token, surface in COMPOSITED_CASES:
-            if mode_ != mode:
-                continue
-            fg = pal.get(token, "")
-            bg = pal.get(surface, "")
-            if not fg.startswith("#") or not bg.startswith("#"):
-                failures.append((mode, name, surface, 0.0))
-                continue
-            ratio = contrast(fg, bg)
-            if ratio < AA:
-                failures.append((mode, name, surface, ratio))
+                failures.append((mode, element, "--code-bg", ratio))
+
+    # 4. opacity/foreground repairs: paint the winning color at the effective
+    #    opacity over the declared surface, per Chromium compositing.
+    for mode in ("light", "dark"):
+        pal = palettes[mode]
+        prefixes = GRUVBOX_PREFIXES if mode == "dark" else (LIGHT_PREFIX,)
+        for base_selector, override_element, surface in COMPONENT_CASES:
+            ratio, error = _painted_ratio(css, pal, base_selector, override_element, surface, prefixes)
+            if error is not None:
+                failures.append((mode, f"{base_selector} ({error})", surface, 0.0))
+            elif ratio < AA:
+                failures.append((mode, base_selector, surface, ratio))
     return failures
 
 

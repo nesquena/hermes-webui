@@ -159,3 +159,34 @@ def test_gruvbox_search_hit_and_tree_bool_meet_aa():
     # gruvbox step (#AF3A03 -> #A23803) to clear 4.5:1 on the code surface.
     assert ':root[data-skin="gruvbox"] .session-item.active .session-search-hit{color:var(--strong);}' in CSS
     assert ':root[data-skin="gruvbox"] .tree-bool{color:#A23803;}' in CSS
+
+
+def test_gruvbox_picker_foreground_restored():
+    # Master mixes --blue 70% into --sidebar for the sticky Create Project
+    # row; on gruvbox surfaces that mix measures 2.92:1 light / 3.80:1 dark,
+    # so the skin restores the full blue (4.81:1 / 6.00:1 on the sidebar).
+    assert ':root[data-skin="gruvbox"] .project-picker-create{color:var(--blue);}' in CSS
+    assert ':root[data-skin="gruvbox"] .project-picker-create:hover{color:var(--accent-text);}' in CSS
+
+
+def test_gruvbox_component_matrix_flags_reverted_repairs():
+    # failing_component_pairs reads its values from style.css itself: each of
+    # these mutations made the browser paint an AA failure and must flip the
+    # matrix — white button ink, faded repaired opacity, the old boolean hue,
+    # a dropped repair selector, and the picker foreground repair.
+    mutations = (
+        ("{color:#1D2021!important;}", "{color:#fff!important;}"),
+        ("border-color:var(--accent);color:#1D2021;", "border-color:var(--accent);color:#fff;"),
+        ("{opacity:1;}", "{opacity:.4;}"),
+        ("{opacity:1!important;}", "{opacity:.4!important;}"),
+        (".tree-bool{color:#A23803;}", ".tree-bool{color:#AF3A03;}"),
+        (
+            ':root[data-skin="gruvbox"] .project-picker-create{color:var(--blue);}',
+            ':root[data-skin="gruvbox"] .project-picker-other{color:var(--blue);}',
+        ),
+    )
+    for old, new in mutations:
+        assert old in CSS, f"mutation source missing: {old!r}"
+        assert failing_component_pairs(CSS.replace(old, new)), (
+            f"component matrix stayed green under mutation: {old!r} -> {new!r}"
+        )
