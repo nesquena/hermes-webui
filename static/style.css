@@ -1379,7 +1379,7 @@
     --error:#FF907E;--success:#B8BB26;--warning:#FABD2F;--info:#9FC2B5;
     --surface-subtle:rgba(235,219,178,.03);--surface-subtle-hover:rgba(235,219,178,.05);
     --border-subtle:rgba(235,219,178,.07);--border-muted:rgba(235,219,178,.12);
-    --user-bubble-bg:#3C3836;--user-bubble-border:#504945;--user-bubble-text:#FBF1C7;--user-bubble-placeholder:#A89984;
+    --user-bubble-bg:#3C3836;--user-bubble-border:#504945;--user-bubble-text:#FBF1C7;--user-bubble-placeholder:#BDAE93;
     --user-selection-bg:rgba(142,192,124,.24);--user-selection-text:#FBF1C7;
   }
   /* ── Gruvbox skin: component-level overrides ── */
@@ -1430,7 +1430,7 @@
   :root[data-skin="gruvbox"] .diff-block .diff-plus{color:var(--accent-text);}
   :root[data-skin="gruvbox"] .tree-str{color:var(--success);}
   :root[data-skin="gruvbox"] .tree-num{color:#8F3F71;}
-  :root[data-skin="gruvbox"] .tree-bool{color:#AF3A03;}
+  :root[data-skin="gruvbox"] .tree-bool{color:#A23803;}
   :root.dark[data-skin="gruvbox"] .tree-key,
   :root.dark[data-skin="gruvbox"] .diff-block .diff-plus{color:var(--accent-text);}
   :root.dark[data-skin="gruvbox"] .tree-str{color:var(--success);}
@@ -1438,6 +1438,35 @@
   :root.dark[data-skin="gruvbox"] .tree-bool{color:#FE8019;}
   :root[data-skin="gruvbox"] .diff-block .diff-minus,
   :root.dark[data-skin="gruvbox"] .diff-block .diff-minus{color:var(--error);}
+  /* AA round 2: dark ink on the remaining solid-accent fills; the unsaved-settings
+     bar's Save carries inline white color (panels.js), so !important is required */
+  :root.dark[data-skin="gruvbox"] .msg-edit-send,
+  :root.dark[data-skin="gruvbox"] #mainSettings .settings-btn,
+  :root.dark[data-skin="gruvbox"] #mainSettings .sm-btn[onclick^="saveSettings"],
+  :root.dark[data-skin="gruvbox"] #mainSettings .settings-autosave-status button,
+  :root.dark[data-skin="gruvbox"] #settingsUnsavedBar button[onclick^="saveSettings"]
+  {color:#1D2021!important;}
+  /* Inherited opacity reductions composite the (correct) palette under AA in
+     dark gruvbox; master-level passes come back when opacity is pinned to 1 */
+  :root[data-skin="gruvbox"] .session-item .session-search-preview,
+  :root[data-skin="gruvbox"] .session-item.active .session-meta
+  {opacity:1;}
+  :root[data-skin="gruvbox"] .session-item.active .session-search-hit{color:var(--strong);}
+  :root[data-skin="gruvbox"] .project-picker-create,
+  :root[data-skin="gruvbox"] .project-create-btn,
+  :root[data-skin="gruvbox"] .tool-card-more,
+  :root[data-skin="gruvbox"] .tool-cards-toggle button
+  {opacity:1;}
+  :root[data-skin="gruvbox"] .session-date-header,
+  :root[data-skin="gruvbox"] .session-select-toggle,
+  :root[data-skin="gruvbox"] .session-empty-note,
+  :root[data-skin="gruvbox"] .session-source-chip,
+  :root[data-skin="gruvbox"] .session-action-meta,
+  :root[data-skin="gruvbox"] .provider-card-meta,
+  :root[data-skin="gruvbox"] .log-line-debug
+  {opacity:1!important;}
+  :root[data-skin="gruvbox"] .session-source-chip:not([data-source-key="telegram"]):not([data-source-key="discord"]):not([data-source-key="slack"]):not([data-source-key="claude_code"])
+  {color:var(--strong);}
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
