@@ -1811,15 +1811,24 @@ def test_installed_ios_titlebar_is_the_status_bar_color_source():
     """iOS 26/27 draw a wide scroll-pocket blur over the top of an installed web
     app unless an opaque fixed/sticky box is hit-tested at the top edge. The
     opaque app titlebar provides that box, paired with status-bar-style=default.
+
+    The rule must exist in BOTH places, and neither copy is redundant:
+    style.css is what an HTTPS / service-worker deployment delivers, while the
+    inlined copy in index.html is the only channel that reaches an app installed
+    from a non-secure origin (no service worker registers there, and the `?v=`
+    stylesheet URL is immutable for a year). Dropping either copy silently
+    loses the fix on one of the two deployment shapes.
     """
-    m = re.search(r'(?m)^\s*\.pwa-standalone\.pwa-ios \.app-titlebar\{(?P<body>[^}]*)\}', CSS)
-    assert m, "installed-iOS titlebar rule missing from style.css"
-    rule = m.group("body")
-    assert "position:sticky" in rule, (
-        ".app-titlebar must be sticky in installed iOS web apps so WebKit's "
-        "top colour-extension view exists and the scroll-pocket blur is hidden"
-    )
-    assert "top:0" in rule, ".app-titlebar must be pinned to the top edge"
+    pattern = r"\.pwa-standalone\.pwa-ios \.app-titlebar\{[^}]*\}"
+    for label, source in (("style.css", CSS), ("index.html", HTML)):
+        m = re.search(pattern, source)
+        assert m, f"installed-iOS titlebar rule missing from {label}"
+        rule = m.group(0)
+        assert "position:sticky" in rule, (
+            f".app-titlebar must be sticky in {label} so WebKit's top "
+            "colour-extension view exists and the scroll-pocket blur is hidden"
+        )
+        assert "top:0" in rule, f".app-titlebar must be pinned to the top edge in {label}"
 
 
 def test_titlebar_safe_area_top_uses_scoped_variable():

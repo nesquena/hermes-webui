@@ -82,17 +82,23 @@
   }
 })()</script>
 <link rel="stylesheet" href="static/style.css?v=__WEBUI_VERSION__">
-<!-- iOS 26/27 status-bar "scroll pocket" fix — inlined on purpose.
-     Installed web apps on this origin are NOT a secure context (plain HTTP on a
-     LAN/Tailscale address), so the service worker never registers: shell assets
-     come straight from the browser HTTP cache, and every `?v=` URL below is
-     `Cache-Control: immutable` for a year. Anything shipped only in style.css
-     therefore never reaches an already-installed app. index.html itself IS
-     re-fetched from the server on every launch, so the two halves of the fix
-     live where they can actually be delivered: the status-bar meta above and
-     this critical rule. style.css carries the same rule for browsers that do
-     have a working service worker. Drop this block once the app is served over
-     HTTPS. -->
+<!-- iOS 26/27 status-bar "scroll pocket" fix — deliberately inlined, keep it here.
+     WebKit only suppresses the wide system blur over the top of an installed web
+     app while a fixed/sticky opaque box is hit-tested 4px inside the top edge,
+     and that whole mechanism is gated on the status bar obscuring the web view
+     (hence `default` above, never `black-translucent`). The opaque titlebar is
+     that box. This copy is load-bearing, not defensive: installed apps on this
+     origin are NOT a secure context (plain HTTP on a LAN/Tailscale address), so
+     no service worker ever registers and every `?v=` URL below is served
+     `Cache-Control: immutable` for a year — CSS shipped only in style.css
+     cannot reach an already-installed app. index.html IS re-fetched from the
+     server on every launch, so the rule rides along with it. style.css carries
+     the same rule for HTTPS/service-worker deployments; the duplication is
+     intentional and pinned by
+     tests/test_mobile_layout.py::test_installed_ios_titlebar_is_the_status_bar_color_source.
+     Measured on iOS 27 (installed): layout viewport 812px vs screen height
+     874px — the 62px difference is the system status-bar strip, and
+     env(safe-area-inset-top) reads 0 there. -->
 <style>
   .pwa-standalone.pwa-ios .app-titlebar{position:sticky;top:0;}
 </style>
@@ -1988,10 +1994,5 @@
   <div id="outlinePanel"></div>
 </div>
 <div class="profile-dropdown" id="profileDropdown"></div>
-<!-- TEMPORARY diagnostic for the iOS 26/27 status-bar blur work: reports the
-     installed app's real geometry/computed styles to the server access log as
-     a GET to /ios-probe?... Remove this tag together with static/ios-probe.js
-     once the blur investigation is settled. -->
-<script src="static/ios-probe.js?d=1" defer></script>
 </body>
 </html>
