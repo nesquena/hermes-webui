@@ -7529,6 +7529,17 @@ _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
+# #8158: a `models_endpoint_error` is a record of ONE probe outcome, not a
+# durable property of the provider, so it must not inherit the 24h catalog TTL.
+# Network reachability is not (and cannot be) one of the cache's invalidation
+# axes (config.yaml mtime/size, auth.json, .env, plugin dirs, catalog), so a
+# single transport-level miss — a DNS blip, a response past
+# CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS, a throttled retry — was otherwise
+# served verbatim for a full day, telling the user to "verify base_url" about a
+# byte-for-byte correct config while the endpoint sat there healthy. The errored
+# group is deliberately RETAINED (#7521) so the UI can explain a live failure;
+# this TTL bounds only how long that explanation may be *stale*.
+_MODELS_ENDPOINT_ERROR_CACHE_TTL: float = 60.0  # 1 minute
 _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
@@ -9115,6 +9126,26 @@ def _delete_models_cache_on_disk() -> None:
         pass  # already absent
 
 
+def _catalog_has_endpoint_error(cache: object) -> bool:
+    """True when any picker group in a catalog carries a models-endpoint diagnostic.
+
+    #8158: the single input to the error-state TTL. Shape-only and defensive —
+    a cache whose groups are not a list, or whose entries are not dicts, is
+    reported as healthy rather than raising, because the TTL must never be the
+    thing that breaks a malformed-but-loadable payload (the loaders already own
+    shape validation).
+    """
+    if not isinstance(cache, dict):
+        return False
+    groups = cache.get("groups")
+    if not isinstance(groups, list):
+        return False
+    for group in groups:
+        if isinstance(group, dict) and isinstance(group.get("models_endpoint_error"), dict):
+            return True
+    return False
+
+
 def _is_valid_models_cache(cache: object) -> bool:
     """Return True when a cache payload has the full /api/models shape.
 
@@ -9187,6 +9218,25 @@ def _is_loadable_disk_cache(cache: object) -> bool:
             runtime_sources,
         )
         return False
+    # #8158: the durable snapshot is a second door through which a stale probe
+    # diagnostic could re-enter — a process restart republishes the file into
+    # memory and the picker would serve the error again for the rest of the 24h
+    # TTL even though neither the endpoint nor the config had changed. Age an
+    # ERRORED snapshot by its own short TTL against the persisted ``_built_at``
+    # clock. A healthy snapshot is never age-limited here, and a missing or
+    # unreadable stamp counts as stale only when the catalog actually carries a
+    # diagnostic (an un-stamped file cannot be shown to be recent, whereas a
+    # healthy one must keep booting from cache).
+    if _catalog_has_endpoint_error(cache):
+        built_at = cache.get("_built_at")
+        age = time.time() - built_at if isinstance(built_at, (int, float)) else None
+        if age is None or age >= _MODELS_ENDPOINT_ERROR_CACHE_TTL:
+            logger.debug(
+                "models cache rejected: models_endpoint_error age=%r (ttl=%ss)",
+                age,
+                _MODELS_ENDPOINT_ERROR_CACHE_TTL,
+            )
+            return False
     return True
 
 
@@ -10012,12 +10062,27 @@ class _DeferredCatalogPublication:
 
 
 def _get_fresh_memory_models_cache(now: float) -> dict | None:
-    """Return a valid fresh in-memory /api/models cache, or clear stale shapes."""
+    """Return a valid fresh in-memory /api/models cache, or clear stale shapes.
+
+    #8158: a catalog carrying a `models_endpoint_error` is held to
+    ``_MODELS_ENDPOINT_ERROR_CACHE_TTL`` instead of the 24h catalog TTL. The
+    diagnostic describes one probe outcome, so once it ages out the caller
+    falls through to a rebuild that re-probes and lets a recovered endpoint
+    drop the message on its own. Only the ERRORED catalog is downgraded — a
+    healthy one keeps the full TTL and is never rebuilt on this clock.
+    """
     global _available_models_cache, _available_models_cache_ts
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
     if _available_models_cache is None:
         return None
-    if (now - _available_models_cache_ts) >= _AVAILABLE_MODELS_CACHE_TTL:
+    errored = _catalog_has_endpoint_error(_available_models_cache)
+    ttl = _MODELS_ENDPOINT_ERROR_CACHE_TTL if errored else _AVAILABLE_MODELS_CACHE_TTL
+    if (now - _available_models_cache_ts) >= ttl:
+        if errored:
+            logger.debug(
+                "models memory cache rejected: models_endpoint_error older than %ss",
+                ttl,
+            )
         return None
     current_sources = _models_cache_source_fingerprint()
     if _available_models_cache_source_fingerprint != current_sources:
