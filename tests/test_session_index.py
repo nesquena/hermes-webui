@@ -1695,3 +1695,44 @@ def test_background_rebuild_old_thread_finally_preserves_new_same_target_owner(t
 
     assert models._SESSION_INDEX_REBUILD_THREAD is new_thread
     assert models._SESSION_INDEX_REBUILD_THREAD_TARGET == target
+
+
+def test_all_sessions_survives_a_stale_shaped_persisted_ids_cache():
+    """_PERSISTED_SESSION_IDS_CACHE is a module global that callers reset directly
+    (this module's fixture writes the pre-store-revision three-field shape). A
+    shape mismatch must read as a cache MISS: a bare four-field unpack raised
+    ValueError, which all_sessions turned into a full-scan fallback on every poll
+    and which lost the last_message_at backfill."""
+    index_file = models.SESSION_INDEX_FILE
+    s = Session(
+        session_id="sess_stale_cache",
+        title="Stale Cache",
+        updated_at=210.0,
+        messages=[{"role": "assistant", "content": "reply", "_ts": 110.0}],
+    )
+    s.path.write_text(json.dumps(s.__dict__, ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_index_file(
+        index_file,
+        [
+            {
+                "session_id": s.session_id,
+                "title": s.title,
+                "updated_at": s.updated_at,
+                "workspace": s.workspace,
+                "model": s.model,
+                "message_count": 1,
+                "created_at": s.created_at,
+                "pinned": False,
+                "archived": False,
+            }
+        ],
+    )
+    # The legacy three-field shape, exactly as the fixture above writes it.
+    models._PERSISTED_SESSION_IDS_CACHE = (None, None, frozenset())
+
+    rows = models.all_sessions()
+
+    assert [row["session_id"] for row in rows] == [s.session_id]
+    # The index path ran (not the full-scan fallback), so the backfill persisted.
+    persisted = _read_index(index_file)
+    assert persisted[0].get("last_message_at") == 110.0
