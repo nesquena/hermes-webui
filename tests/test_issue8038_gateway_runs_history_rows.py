@@ -160,11 +160,10 @@ def test_only_a_user_row_is_a_recovered_prompt():
     assert _legacy_pairs(rows) == _pairs(_gateway_history(rows, tag="recovered-assistant-parity"))
 
 
-def test_a_tool_result_is_not_a_neighbour_on_the_gateway():
-    """The Gateway history carries no tool rows, so a recovered prompt after a
-    tool result separates two assistant turns of what is sent, and stays. The
-    legacy path sends the tool row, has a tool result before the prompt, and
-    drops it: the one place the two decide differently, each on its own rows."""
+def test_a_tool_result_is_a_neighbour_on_the_gateway():
+    """The Gateway history replays tool rows, so a recovered prompt after a tool
+    result has a tool result before it and is dropped, as the legacy path
+    decides: both projections agree on what stays."""
     tool_turn = {
         "role": "assistant",
         "content": "let me look that up",
@@ -178,7 +177,7 @@ def test_a_tool_result_is_not_a_neighbour_on_the_gateway():
     assert _pairs(_gateway_history(rows, tag="tool-neighbour")) == [
         ("user", "first question"),
         ("assistant", "let me look that up"),
-        ("user", "a prompt that was recovered"),
+        ("tool", "ok"),
         ("assistant", "second answer"),
     ]
     assert _legacy_pairs(rows) == [

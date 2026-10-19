@@ -975,6 +975,85 @@ def _gateway_run_headers(session_id, api_key) -> dict:
     return headers
 
 
+# Tool rows a Gateway turn keeps for model replay only: the runs API reports no tool
+# transcript, so the WebUI never displayed them and the display merge must not start to.
+_GATEWAY_REPLAY_ONLY_FIELD = "_gateway_replay_only"
+
+
+def _drop_replay_only_rows(messages) -> list:
+    return [
+        message for message in messages or []
+        if not (isinstance(message, dict) and message.get(_GATEWAY_REPLAY_ONLY_FIELD))
+    ]
+
+
+def _gateway_replay_extras(entry: dict, role: str) -> dict:
+    """Tool fields a replayed history row must keep so the gateway sees what the model's tools did."""
+    if role == "assistant":
+        calls = entry.get("tool_calls")
+        return {"tool_calls": calls} if isinstance(calls, list) and calls else {}
+    if role == "tool":
+        extras = {}
+        if entry.get("tool_call_id"):
+            extras["tool_call_id"] = str(entry["tool_call_id"])
+        tool_name = entry.get("tool_name") or entry.get("name")
+        if tool_name:
+            extras["tool_name"] = str(tool_name)
+        return extras
+    return {}
+
+
+def _fetch_gateway_turn_tool_rows(
+    base_url, api_key, session_id, *, limit: int = 200, timeout: float = 10.0,
+) -> list[dict]:
+    """Tool scaffolding the gateway persisted for the turn that just finished.
+
+    ``/v1/runs`` reports only the final text, so the WebUI would otherwise store just the user and
+    assistant rows and every later turn would replay a transcript with the tool calls cut out. The
+    gateway's session store holds the full turn: read the rows after the newest user row and keep the
+    assistant ``tool_calls`` rows and their ``tool`` results (the final reply is the caller's own).
+    Best effort: any failure, or a turn longer than ``limit`` rows, returns ``[]`` (text-only context).
+    """
+    try:
+        url = (
+            f"{str(base_url).rstrip('/')}/api/sessions/"
+            f"{urllib.parse.quote(str(session_id), safe='')}/messages?order=latest&limit={int(limit)}"
+        )
+        headers = {"Accept": "application/json"}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout) as resp:
+            rows = (json.loads(resp.read().decode("utf-8")) or {}).get("data")
+    except Exception:
+        logger.debug("Could not read gateway turn tool rows for %s", session_id, exc_info=True)
+        return []
+    if not isinstance(rows, list):
+        return []
+    last_user = next(
+        (i for i in range(len(rows) - 1, -1, -1) if isinstance(rows[i], dict) and rows[i].get("role") == "user"),
+        None,
+    )
+    if last_user is None:
+        return []
+    turn_rows: list[dict] = []
+    for row in rows[last_user + 1:]:
+        if not isinstance(row, dict) or row.get("display_kind") == "hidden":
+            continue
+        role = row.get("role")
+        if (role == "assistant" and row.get("tool_calls")) or (role == "tool" and row.get("tool_call_id")):
+            content = row.get("content")
+            turn_rows.append({
+                "role": role,
+                "content": "" if content is None else content,
+                _GATEWAY_REPLAY_ONLY_FIELD: True,
+                **_gateway_replay_extras(row, role),
+                **({"timestamp": row["timestamp"]} if row.get("timestamp") else {}),
+            })
+    from api.streaming import _pair_tool_history
+
+    return _pair_tool_history(turn_rows)
+
+
 def _run_gateway_runs_api_streaming(
     session_id, msg_text, model, workspace, stream_id,
     base_url, api_key, prefill_messages, body_extras,
@@ -1002,13 +1081,14 @@ def _run_gateway_runs_api_streaming(
             _active_turn_token_matches,
             _is_non_replayable_history_row,
             _is_reasoning_only_assistant_message,
+            _pair_tool_history,
             _recovered_user_row_is_kept,
             _strip_oob_blocks,
         )
 
         instructions_parts = []
         conversation_history = []
-        # (role, content, recovered) for each session row that may be sent.
+        # (role, content, recovered, tool_fields) for each session row that may be sent.
         history_rows = []
         # The active turn's retained user row (regeneration restamps it with
         # this stream's token at chat-start) is re-sent as `input` below;
@@ -1050,21 +1130,33 @@ def _run_gateway_runs_api_streaming(
             if _is_non_replayable_history_row(entry) or _is_reasoning_only_assistant_message(entry):
                 continue
             role = str(entry.get("role") or "").strip().lower()
-            if role not in {"user", "assistant"}:
+            if role not in {"user", "assistant", "tool"}:
                 continue
             content = entry.get("content")
-            if content is not None:
+            extras = _gateway_replay_extras(entry, role)
+            if role == "tool":
+                # A result is replayed only with the id that pairs it to a call.
+                if not extras.get("tool_call_id"):
+                    continue
+                content = "" if content is None else _strip_oob_blocks(content)
+            elif content is not None:
                 content = _strip_oob_blocks(content)
-                history_rows.append((role, content, role == "user" and bool(entry.get("_recovered"))))
+            elif extras:
+                content = ""  # an assistant row that only carries tool calls
+            else:
+                continue
+            history_rows.append((role, content, role == "user" and bool(entry.get("_recovered")), extras))
         # A _recovered user row is sent only where it opens an answered turn
         # (after an assistant turn or as the first row sent), as the legacy path decides it.
-        for index, (role, content, recovered) in enumerate(history_rows):
+        for index, (role, content, recovered, extras) in enumerate(history_rows):
             if recovered:
                 prev_role = conversation_history[-1]["role"] if conversation_history else None
                 next_role = history_rows[index + 1][0] if index + 1 < len(history_rows) else None
                 if not _recovered_user_row_is_kept(prev_role, next_role):
                     continue
-            conversation_history.append({"role": role, "content": content})
+            conversation_history.append({"role": role, "content": content, **extras})
+        # Only well-formed call/result pairs reach the gateway; the rest would 400 strict providers.
+        conversation_history = _pair_tool_history(conversation_history)
         for entry in prefill_messages or []:
             if not isinstance(entry, dict):
                 continue
@@ -2914,6 +3006,11 @@ def _run_gateway_chat_streaming(
                 "hint": "Check that Hermes Gateway API server is running and reachable.",
             })
             return
+        # The runs API reports only the final text; the tool calls/results the turn made live in the
+        # gateway's session store. Keep them in the model context so the next turn replays them.
+        turn_tool_rows = (
+            _fetch_gateway_turn_tool_rows(base_url, api_key, session_id) if _use_runs_api else []
+        )
         with _get_session_agent_lock(session_id):
             s = get_session(session_id)
             if not _stream_writeback_is_current(s, stream_id):
@@ -2980,18 +3077,18 @@ def _run_gateway_chat_streaming(
                 )
             except Exception:
                 logger.debug("Failed to stamp stable ids on gateway turn rows", exc_info=True)
-            s.context_messages = previous_context + [user_msg, assistant_msg]
+            s.context_messages = previous_context + [user_msg, *turn_tool_rows, assistant_msg]
             try:
                 from api.streaming import _is_context_compression_marker
 
                 display_context = [
                     msg
-                    for msg in previous_context
+                    for msg in _drop_replay_only_rows(previous_context)
                     if not _is_context_compression_marker(msg)
                 ]
             except Exception:
                 logger.debug("Failed to filter gateway display context markers", exc_info=True)
-                display_context = previous_context
+                display_context = _drop_replay_only_rows(previous_context)
             display = merge_session_messages_append_only(
                 previous_messages,
                 display_context,
@@ -2999,10 +3096,12 @@ def _run_gateway_chat_streaming(
             try:
                 from api.streaming import _merge_display_messages_after_agent_result
 
+                # Display keeps its text-only shape; tool rows live in the model context only.
+                visible_context = _drop_replay_only_rows(previous_context)
                 s.messages = _merge_display_messages_after_agent_result(
                     display,
-                    previous_context,
-                    s.context_messages,
+                    visible_context,
+                    visible_context + [user_msg, assistant_msg],
                     str(msg_text or ""),
                     source=pending_source,
                     verification_nudge_provenance={

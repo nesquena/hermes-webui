@@ -7932,33 +7932,8 @@ def _sanitize_messages_for_api(
             clean.append(sanitized)
 
     # #7237 (standalone): repair ADJACENT tool-call/result blocks before the
-    # global pass below. A result belonging to a later, unrelated turn must not
-    # make an earlier orphan call look answered and survive this projection.
-    _repaired_clean = _strip_orphan_tool_calls(clean)
-    clean = [
-        _repaired
-        for _original, _repaired in zip(clean, _repaired_clean, strict=True)
-        if not (
-            _original.get('role') == 'assistant'
-            and _original.get('tool_calls')
-            and not _repaired.get('tool_calls')
-            and not str(_repaired.get('content') or '').strip()
-        )
-    ]
-    # Recompute ownership from the repaired call rows: a tool result linked only
-    # to a now-removed non-adjacent call must be removed too.
-    _surviving_ids = {
-        _tc.get('id') or _tc.get('call_id')
-        for _msg in clean
-        if _msg.get('role') == 'assistant'
-        for _tc in (_msg.get('tool_calls') or [])
-        if isinstance(_tc, dict) and (_tc.get('id') or _tc.get('call_id'))
-    }
-    clean = [
-        _msg for _msg in clean
-        if _msg.get('role') != 'tool'
-        or (_msg.get('tool_call_id') or '') in _surviving_ids
-    ]
+    # global pass below.
+    clean = _pair_tool_history(clean)
 
     # Third pass: strip orphaned tool_calls from assistant messages — calls whose id
     # has no matching tool-role response in the clean list.  Strict providers (DeepSeek,
@@ -8225,6 +8200,43 @@ def _deduplicate_context_messages(messages):
             seen.add(key)
         deduped.append(msg)
     return deduped
+
+
+def _pair_tool_history(rows):
+    """Keep only tool scaffolding a model API accepts: an assistant ``tool_calls``
+    row followed immediately by results for its calls.
+
+    Unanswered calls, assistant rows left empty by dropping them, and results
+    that no surviving call owns are removed. A result belonging to a later,
+    unrelated turn must not make an earlier orphan call look answered and
+    survive. Shared by ``_sanitize_messages_for_api`` and the Gateway runs-API
+    history builder so both project tool rows alike. Input rows are not mutated.
+    """
+    repaired = _strip_orphan_tool_calls(rows)
+    rows = [
+        _repaired
+        for _original, _repaired in zip(rows, repaired, strict=True)
+        if not (
+            _original.get('role') == 'assistant'
+            and _original.get('tool_calls')
+            and not _repaired.get('tool_calls')
+            and not str(_repaired.get('content') or '').strip()
+        )
+    ]
+    # Recompute ownership from the repaired call rows: a tool result linked only
+    # to a now-removed non-adjacent call must be removed too.
+    surviving_ids = {
+        _tc.get('id') or _tc.get('call_id')
+        for _msg in rows
+        if _msg.get('role') == 'assistant'
+        for _tc in (_msg.get('tool_calls') or [])
+        if isinstance(_tc, dict) and (_tc.get('id') or _tc.get('call_id'))
+    }
+    return [
+        _msg for _msg in rows
+        if _msg.get('role') != 'tool'
+        or (_msg.get('tool_call_id') or '') in surviving_ids
+    ]
 
 
 def _strip_orphan_tool_calls(messages):

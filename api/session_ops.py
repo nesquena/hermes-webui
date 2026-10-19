@@ -800,8 +800,8 @@ def truncate_context_for_display_keep(
     # the signature matcher for both divergent cases so the cut lands on a real
     # turn boundary. Any residual dangling tool_use in the persisted context is
     # made wire-safe on the send path (streaming: ``_sanitize_messages_for_api``
-    # strips unanswered tool_calls; gateway: it forwards no tool_calls/tool rows
-    # at all), so we do not re-do that trimming here.
+    # strips unanswered tool_calls; gateway: ``_pair_tool_history`` keeps only
+    # answered call/result pairs), so we do not re-do that trimming here.
     if len(ctx) == len(msgs):
         return _result(ctx[:keep], min(keep, len(ctx)) - 1)
 
