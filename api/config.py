@@ -5279,6 +5279,15 @@ def _candidate_supports_reasoning(candidate: str) -> bool:
             if major >= 3:
                 return True
         return False
+    if "gemini" in token_set:
+        # Thinking is Gemini 2.5+ only; image/embedding/TTS variants never take an effort.
+        if token_set & {"image", "imagine", "embedding", "tts"}:
+            return False
+        match = re.search(r"gemini-(\d+)(?:-(\d{1,2})(?!\d))?", normalized)
+        if match:
+            version = (int(match.group(1)), int(match.group(2) or 0))
+            return version >= (2, 5)
+        return False
     if "kimi" in token_set or normalized.startswith("kimi"):
         return True
     if "minimax" in token_set or normalized.startswith("minimax"):
@@ -5340,8 +5349,8 @@ def _nested_route_reasoning_denied(model: str) -> bool:
 def _nested_gateway_route_reasoning(model: str) -> bool:
     """Recognize nested ``vertex/gemini-`` and ``gemini_cli/gemini-`` routes on custom providers.
 
-    The slash-prefix heuristic list includes ``google/gemini-2`` but not gateway-prefixed
-    Gemini ids, so capable models behind custom aggregators stayed hidden.
+    The slash-prefix heuristic list has no Gemini entry (Gemini is version-gated in
+    ``_candidate_supports_reasoning``), so gateway-prefixed Gemini ids are checked here.
     """
     lower = str(model or "").strip().lower()
     if not lower:
@@ -5603,7 +5612,6 @@ def _heuristic_reasoning_efforts(model_id: str, provider_id: str) -> list[str]:
         "anthropic/",
         "openai/",
         "x-ai/",
-        "google/gemini-2",
         "google/gemma-4",
         "qwen/qwen3",
         "tencent/hy3-preview",
