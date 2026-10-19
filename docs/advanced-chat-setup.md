@@ -51,6 +51,16 @@ never the prefill message bodies.
 
 ## Session title generation
 
+OpenAI-compatible title routes first request a strict JSON object with one
+`title` string. Unsupported schemas, empty schema results, and reasoning-only
+schema results retry the same prompt and budget with the existing compatibility
+request shape. Compatibility reasoning-only output still stops further attempts.
+Fresh candidates reject reasoning traces, option lists, and output over 12 words.
+Saved-title self-healing is narrower: ambiguous headings or a single quoted term
+are preserved unless there is actual multiple-option/list evidence. Manual titles
+remain protected. Invalid output retains the provisional title until a later
+exchange or the existing bounded recovery cap; this does not change retry ownership.
+
 Hermes WebUI derives a provisional session title from the first user message
 and, after the first response, may call an LLM to generate a better title
 (and periodically refresh it for long sessions).
