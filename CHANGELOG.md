@@ -82,6 +82,8 @@
 
 ### Fixed
 
+- **Agent update: a slow fetch is reported as a timeout, not a network outage.** When the in-app Agent update's fetch ran past its 15-second budget, the error said the remote couldn't be reached and suggested checking your connection. It now says the fetch was cancelled at the deadline and names the command. Real network failures keep their connectivity guidance. Thanks @pcsokonay. (#8375, fixes #8337)
+
 - **Terminal keeps your keystrokes in order.** Keys typed into the composer terminal are now sent one request at a time per shell, with anything typed meanwhile queued and sent next, so fast typing or a paste followed by Enter can no longer reach the shell out of order. Long pastes are split under the server's size limit, and unsent keys are dropped when the terminal is closed or restarted. Thanks @grzezlo. (#8341)
 
 - **Windows: starting the WebUI again reports "already running".** When our own WebUI already listens on the port, Windows can refuse the second bind with a permission error (WSAEACCES) instead of "address in use"; the launcher now recognises its own server behind that error. Thanks @Thanatos9404. (#8301, #8137)
