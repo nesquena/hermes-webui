@@ -1926,10 +1926,20 @@ def switch_profile(name: str, *, process_wide: bool = True) -> dict:
         except Exception:
             default_workspace = str(Path.home())
 
+    # One list build serves both the payload and the active row's display_name,
+    # read back by name so it matches the per-client (cookie) profile context
+    # rather than any process-global state.
+    _profiles_payload = list_profiles_api()
+    _active_display_name = ''
+    for _p in _profiles_payload:
+        if _p.get('name') == name:
+            _active_display_name = str(_p.get('display_name') or '')
+            break
     return {
-        'profiles': list_profiles_api(),
+        'profiles': _profiles_payload,
         'active': name,
         'is_default': _is_root_profile(name),
+        'display_name': _active_display_name,
         'default_model': default_model,
         'default_model_provider': default_model_provider,
         'default_workspace': default_workspace,
@@ -2235,6 +2245,7 @@ def _build_profile_rows_fast() -> list | None:
             'provider': provider,
             'has_env': (home / '.env').exists(),
             'visible': _profile_visible_from_meta(home),
+            'display_name': _profile_display_name(home),
             'skill_count': enabled_count,
             'enabled_skills': enabled_count,
             'total_skills': total_count,
@@ -2303,6 +2314,7 @@ def list_profiles_api() -> list:
                         'provider': p.provider,
                         'has_env': p.has_env,
                         'visible': _profile_visible_from_meta(p.path),
+                        'display_name': str(getattr(p, 'display_name', '') or ''),
                         'skill_count': enabled_count,
                         'enabled_skills': enabled_count,
                         'total_skills': total_count,
@@ -2321,6 +2333,7 @@ def list_profiles_api() -> list:
             'provider': None,
             'has_env': (hermes_home / '.env').exists(),
             'visible': _profile_visible_from_meta(hermes_home),
+            'display_name': _profile_display_name(hermes_home),
             'skill_count': enabled_count,
             'enabled_skills': enabled_count,
             'total_skills': total_count,
@@ -2368,6 +2381,7 @@ def list_profiles_api() -> list:
                 'provider': p.provider,
                 'has_env': p.has_env,
                 'visible': _profile_visible_from_meta(p.path),
+                'display_name': str(getattr(p, 'display_name', '') or ''),
                 'skill_count': enabled_count,
                 'enabled_skills': enabled_count,
                 'total_skills': total_count,
@@ -2393,6 +2407,27 @@ def _profile_visible_from_meta(profile_path: Path) -> bool:
     return visible is not False
 
 
+def _profile_display_name(profile_path: Path) -> str:
+    """Return the presentation-only display name from ``profile.yaml``.
+
+    Empty string when unset/unreadable — callers treat that as "show the
+    canonical id". Never raises: a corrupt meta file on one profile must not
+    break the whole profiles payload.
+    """
+    try:
+        from hermes_cli.profiles import read_profile_meta
+    except Exception:
+        return ''
+    try:
+        meta = read_profile_meta(Path(profile_path))
+    except Exception:
+        return ''
+    if not isinstance(meta, dict):
+        return ''
+    value = meta.get('display_name')
+    return str(value).strip() if isinstance(value, str) else ''
+
+
 def _default_profile_dict() -> dict:
     """Fallback profile dict when hermes_cli is not importable."""
     enabled_count, compatible_count = _get_profile_skills_stats(_DEFAULT_HERMES_HOME)
@@ -2406,6 +2441,7 @@ def _default_profile_dict() -> dict:
         'provider': None,
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'visible': True,
+        'display_name': _profile_display_name(_DEFAULT_HERMES_HOME),
         'skill_count': enabled_count,
         'enabled_skills': enabled_count,
         'total_skills': compatible_count,

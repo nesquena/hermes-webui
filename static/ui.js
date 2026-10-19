@@ -5,10 +5,25 @@
 // legacy reverse-scan over S.messages — that keeps new clients working
 // against old servers (Phase 1 may not yet be deployed everywhere).
 // See api/todo_state.py for the wire contract.
-const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null};
+const S={session:null,messages:[],entries:[],busy:false,pendingFiles:[],toolCalls:[],activeStreamId:null,currentDir:'.',activeProfile:'default',activeProfileIsDefault:true,activeProfileDisplayName:'',showHiddenWorkspaceFiles:false,todos:[],todoStateMeta:null,_pendingSessionToolsets:null};
+
+// Label for the profile chip / titlebar / assistant name. A renamed profile
+// shows its presentation-only display_name; otherwise the canonical id, which
+// stays the identity for switching and every API call (#8055).
+function profileChipDisplayLabel(){
+  const dn=(S.activeProfileDisplayName||'').trim();
+  return dn||S.activeProfile||'default';
+}
 
 function assistantDisplayName(){
-  if(S.activeProfile&&S.activeProfile!=='default') return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
+  // A renamed profile shows its presentation-only display name (profile.yaml
+  // display_name); the canonical id stays the identity for switching and API
+  // calls (#8055). Falls back to capitalising the id, then the saved bot name.
+  if(S.activeProfile&&S.activeProfile!=='default'){
+    const dn=(S.activeProfileDisplayName||'').trim();
+    if(dn) return dn;
+    return S.activeProfile.charAt(0).toUpperCase()+S.activeProfile.slice(1);
+  }
   return window._botName||'Hermes';
 }
 const INFLIGHT={};  // keyed by session_id while request in-flight
@@ -13426,9 +13441,9 @@ function syncTopbar(){
     if(typeof syncAppTitlebar==='function') syncAppTitlebar();
     // Update profile chip even when no session is active (e.g. right after profile switch)
     const _profileLabel=$('profileChipLabel');
-    if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
+    if(_profileLabel) _profileLabel.textContent=profileChipDisplayLabel();
     const _titleLabel=$('titlebarProfileLabel');
-    if(_titleLabel) _titleLabel.textContent=S.activeProfile||'default';
+    if(_titleLabel) _titleLabel.textContent=profileChipDisplayLabel();
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -13553,9 +13568,9 @@ function syncTopbar(){
   // scoping project/session operations to the session's own profile — is
   // unaffected by this line.
   const profileLabel=$('profileChipLabel');
-  if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
+  if(profileLabel) profileLabel.textContent=profileChipDisplayLabel();
   const titleLabel=$('titlebarProfileLabel');
-  if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+  if(titleLabel) titleLabel.textContent=profileChipDisplayLabel();
 }
 
 function msgContent(m){

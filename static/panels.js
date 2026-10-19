@@ -7348,9 +7348,13 @@ function renderProfileDropdown(data) {
     mgmt.onclick = () => { closeProfileDropdown(); mobileSwitchPanel('profiles'); };
     dd.appendChild(mgmt);
   }
-  // Sync titlebar label to the resolved active profile
+  // Sync titlebar label to the resolved active profile — through the same
+  // presentation helper the chip uses, so a renamed profile keeps its
+  // display_name instead of being overwritten by the canonical id when the
+  // dropdown opens (#8055 round-2). The canonical `active` value stays the
+  // identity for the menu rows/checkmarks above.
   const tbl = $('titlebarProfileLabel');
-  if (tbl) tbl.textContent = active;
+  if (tbl) tbl.textContent = profileChipDisplayLabel();
 }
 
 function toggleProfileDropdown(e) {
@@ -7464,6 +7468,8 @@ async function switchToProfile(name) {
   const _titlebarBtn = $('titlebarProfileBtn');
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
+  const _prevProfileDisplayName = S.activeProfileDisplayName || '';
+  const _prevProfileIsDefault = S.activeProfileIsDefault;
   const _switchGen = ++_profileSwitchGeneration;
   // Hold a switch-in-flight marker for the whole run: the stale-snapshot arm
   // below only lands once this POST resolves, and the gap before it is exactly
@@ -7479,6 +7485,10 @@ async function switchToProfile(name) {
   // Optimistic name update — shows the target name right away
   if (_chipLabel) _chipLabel.textContent = name;
   if (_titlebarLabel) _titlebarLabel.textContent = name;
+  // Optimistically clear the cached display name: the switch target's label
+  // resolves from /api/profiles below, and until then the canonical name is
+  // the honest value to show (#8055).
+  S.activeProfileDisplayName = '';
 
   // ── Clear stale content + show loading skeletons immediately (#4662) ───────
   // The conversation list and workspace tree still show the PREVIOUS profile's
@@ -7517,6 +7527,12 @@ async function switchToProfile(name) {
   // `typeof`-tolerant because the frontend test harnesses eval this function in
   // isolation, without panels.js's module scope (where the counter lives).
   let _tabVisGuardHeld = false;
+  // Set once the server accepts the switch POST (the target profile has
+  // committed). The catch block rolls the labels back ONLY while this is
+  // false: a late ancillary error after a successful switch must not revert
+  // an already-committed target, and superseded switches are handled by the
+  // _switchGen guards (#8055 round-2).
+  let _switchCommitted = false;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
@@ -7546,8 +7562,19 @@ async function switchToProfile(name) {
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
+    // The server accepted the POST: the target profile is now committed.
+    // From here on, an ancillary failure must NOT roll the labels back to the
+    // previous profile (#8055 round-2) — see the catch block.
+    _switchCommitted = true;
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    if (typeof data.display_name === 'string') S.activeProfileDisplayName = data.display_name;
+    if (typeof applyBotName === 'function') applyBotName();
+    if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
+    const _switchedChipLabel = $('profileChipLabel');
+    if (_switchedChipLabel) _switchedChipLabel.textContent = profileChipDisplayLabel();
+    const _switchedTitleLabel = $('titlebarProfileLabel');
+    if (_switchedTitleLabel) _switchedTitleLabel.textContent = profileChipDisplayLabel();
     // The switch's optimistic chip already claims the new profile, but the
     // localStorage hidden_tabs / tab_order mirror still holds the PREVIOUS
     // profile's snapshot until _refreshProfileSwitchBackground()'s
@@ -7760,14 +7787,33 @@ async function switchToProfile(name) {
     return true;
 
   } catch (e) {
-    // Revert the optimistic name update on error
-    if (_switchGen === _profileSwitchGeneration && _chipLabel) _chipLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration && _titlebarLabel) _titlebarLabel.textContent = _prevProfileName;
-    if (_switchGen === _profileSwitchGeneration) showToast(t('switch_failed') + e.message);
-    // The switch failed, so we're still on the previous profile and its caches
-    // are intact — restore the real list/tree so the loading skeletons we showed
-    // up front don't strand. (#4662)
-    if (_switchGen === _profileSwitchGeneration) {
+    // Revert the optimistic name update on error — but only for an
+    // UNCOMMITTED failure (the server rejected the POST before switching).
+    // Restore the previous identity/name pair, not just the canonical id, so
+    // the display name survives a failed switch (#8055 round-2). The labels
+    // resolve through profileChipDisplayLabel(), which reads the (unchanged)
+    // S.activeProfile — still _prevProfileName here — plus the restored
+    // display name. Late ancillary errors AFTER the POST committed
+    // (_switchCommitted) and superseded switches (_switchGen mismatch, which
+    // already returned early) must NOT roll back an already-committed target.
+    if (_switchGen === _profileSwitchGeneration && !_switchCommitted) {
+      S.activeProfileDisplayName = _prevProfileDisplayName;
+      S.activeProfileIsDefault = _prevProfileIsDefault;
+      if (_chipLabel) _chipLabel.textContent = profileChipDisplayLabel();
+      if (_titlebarLabel) _titlebarLabel.textContent = profileChipDisplayLabel();
+      if (typeof applyBotName === 'function') applyBotName();
+    } else if (_switchGen === _profileSwitchGeneration && _switchCommitted) {
+      // The switch already committed server-side; an ancillary error after it
+      // must not revert the labels to the previous profile — keep the
+      // committed target's resolved label.
+      if (_chipLabel) _chipLabel.textContent = profileChipDisplayLabel();
+      if (_titlebarLabel) _titlebarLabel.textContent = profileChipDisplayLabel();
+    }
+    if (_switchGen === _profileSwitchGeneration && !_switchCommitted) showToast(t('switch_failed') + e.message);
+    // The switch failed before committing, so we're still on the previous
+    // profile and its caches are intact — restore the real list/tree so the
+    // loading skeletons we showed up front don't strand. (#4662)
+    if (_switchGen === _profileSwitchGeneration && !_switchCommitted) {
       // The switch failed; _allSessions still holds the (still-current) previous
       // profile, so clear the skeleton flag and re-render to restore the real list
       // rather than strand the up-front skeleton (#4671). Lift the embargo too so the
