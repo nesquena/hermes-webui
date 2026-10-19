@@ -82,6 +82,34 @@
 
 ### Fixed
 
+- **The quota chip follows the open conversation's provider.** The chip by the model picker (and the Quota pill in the phone composer) used to show the server default's numbers: a DeepSeek chat showed Codex's 5-hour window. It now shows the conversation's own provider in its units (percent windows for plans, a balance for prepaid accounts), refreshes on a conversation, provider or profile switch, and clears at once so another account's numbers never show. Thanks @sheldon-im. (#6506)
+
+- **Test suite: the mobile camera-choice test no longer fails in full runs.** `test_issue6942_mobile_camera_choice_render` started its own server with the shared test server's config path, so after earlier tests configured a provider there it auto-completed and saved onboarding, and later browser contexts skipped the request the test waited for. The test's server now uses its own config and workspace. Test-only. (PR #8382)
+
+- **Composer menus stay open when the on-screen keyboard opens on tablets.** On tablets and foldables, typing in the model picker's search box no longer snaps the model, reasoning or workspace menu shut. They close only on a real switch between phone and desktop layouts, or when the composer collapses into its compact menu. Thanks @jatinbharadia. (#7472)
+
+- **Deleting a conversation now also clears its Gateway runtime records.** Deleting a session removed its messages but left the Gateway's runtime ledger (admissions, worker receipts, routing, spillover and mutation receipts) behind, so a deleted conversation could keep blocking or confusing later Gateway work. Deletes now run the Agent's own retirement step inside the same transaction. A conversation that is still running or finishing background work is refused with a clear message instead of being half-deleted, and in a batch delete only those sessions stay selected while the rest are removed. On an Agent too old to provide the step, or an install missing the Agent's dependencies, sessions with no runtime records still delete normally. (#8300, PR #8323, thanks @Overview3833)
+
+- **Agent update: a slow fetch is reported as a timeout, not a network outage.** When the in-app Agent update's fetch ran past its 15-second budget, the error said the remote couldn't be reached and suggested checking your connection. It now says the fetch was cancelled at the deadline and names the command. Real network failures keep their connectivity guidance. Thanks @pcsokonay. (#8375, fixes #8337)
+
+- **Terminal keeps your keystrokes in order.** Keys typed into the composer terminal are now sent one request at a time per shell, with anything typed meanwhile queued and sent next, so fast typing or a paste followed by Enter can no longer reach the shell out of order. Long pastes are split under the server's size limit, and unsent keys are dropped when the terminal is closed or restarted. Thanks @grzezlo. (#8341)
+
+- **Windows: starting the WebUI again reports "already running".** When our own WebUI already listens on the port, Windows can refuse the second bind with a permission error (WSAEACCES) instead of "address in use"; the launcher now recognises its own server behind that error. Thanks @Thanatos9404. (#8301, #8137)
+
+- **Faster session switching on code-heavy chats.** The copy-button pass marks code blocks it has already handled, so re-rendering a cached transcript no longer re-walks every code block to add nothing. Thanks @MuhammadUsamaMX. (#8309, #2168)
+
+- **Dashboard link setting rejects double-slash paths.** A browser dashboard URL whose path contains `//` (for example `https://host//dashboard`) is now refused when you save it, closing the last authority-like path shape the earlier #7844 hardening missed. Thanks @MuhammadUsamaMX. (#8354)
+
+- **Skills panel works again with current Hermes Agent builds.** The Agent renamed its skills-ordering helper on 2026-10-18 without keeping the old name, so the Skills list and skill usage stats returned a server error after the WebUI restarted. The WebUI now accepts both the old and new name (and falls back to the same ordering if neither exists), so it works with older and newer Agents alike. Thanks @sh4rknado. (#8367)
+
+- **Less CPU while chats are open.** Finding a run's journal file walked every session directory on each lookup, and those lookups sit on per-poll paths (stream reconnect probes, ownership checks). With hundreds of sessions that walk took a large share of the process and slowed even `/health`. Run paths are now cached (bounded, revalidated on use), hundreds of times faster per warm lookup. Thanks @silent-reader-cn. (#8322)
+
+- **Chats on a named custom provider keep their model.** A session pinned to `@custom:<name>:<model>` could silently switch to the catalog default on another provider when the catalog was cold (the provider lives in `custom_providers`, often in a profile config). Valid models are now kept, including server-side wakeup turns, and a model that was really removed from the provider's list moves to the provider's current default, with `${VAR}` defaults expanded in the session's own profile environment. Thanks @MoBluey. (#8256)
+
+- **Scheduled Tasks mark the job that just ran.** When a job finishes in the background, the Tasks list now refreshes on its own and marks the job with a dot, and an open job's Last Output card is marked too, without collapsing output you have open. The marker uses the app's unread colour and sits in the row's gutter so titles don't shift. Thanks @martindell. (#6767)
+
+- **Failed file previews say why.** When an inline CSV, diff, PDF, HTML or Excalidraw preview can't load, the card now explains it: session expired (reload the page), no access (move the file into the workspace or check permissions), or file gone. The download link is dropped for those three cases, since it would fail too. Translated in all 15 languages. Thanks @pxxD1998. (#7254)
+
 - **Keyboard and screen-reader users can open chats from the sidebar.** Tab now reaches each conversation title, Enter or a screen reader's click opens it, and the focused row shows a focus ring. Mouse and touch behave as before: a press doesn't leave focus on the title, drags and swipes don't open a chat, and clicking elsewhere during a rename saves it. Thanks @grzezlo. (#8214)
 
 - **Error toasts stay on screen.** Twenty-one error messages (Kanban unavailable, task dependency, workspace worktree and
@@ -521,6 +549,8 @@
 - **Documented the gateway approval-runs API opt-in.** `docs/advanced-chat-setup.md` and `docs/docker.md` now explain how to enable and use the gateway approval-runs API. Thanks @rodboev. (#5549, #5269)
 
 ### Changed
+
+- **Test suite: the run-journal echo-scan scaling check no longer flakes on a busy runner,** while still failing on a genuinely quadratic rebuild. Thanks @MuhammadUsamaMX. (#8328)
 
 - **Russian: the last English strings translated.** The Profiles explainer and the Transparent Stream timestamp setting now read in Russian. Thanks @RajPabnani03. (#8001)
 

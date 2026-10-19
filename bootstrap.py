@@ -621,9 +621,23 @@ def _find_free_port(host: str, start_port: int, attempts: int = 20) -> int | Non
 class PortInUseError(RuntimeError):
     """The configured port is already bound by another listener.
 
-    A distinct type because only THIS failure may be our own WebUI already
-    running: an invalid or unreachable bind address (EADDRNOTAVAIL and
-    friends) must stay a hard error instead of being probed for a server.
+    A distinct type because only THIS failure (and, on Windows,
+    ``PortAccessDeniedError``) may be our own WebUI already running: an
+    invalid or unreachable bind address (EADDRNOTAVAIL and friends) must stay
+    a hard error instead of being probed for a server.
+    """
+
+
+class PortAccessDeniedError(RuntimeError):
+    """Windows refused the bind with WSAEACCES (winerror 10013, errno EACCES).
+
+    A WebUI bound to a wildcard address (``--host 0.0.0.0``) holds the port
+    with ``SO_EXCLUSIVEADDRUSE``, and binding that port on a specific address
+    such as the default 127.0.0.1 then fails with WSAEACCES, not
+    WSAEADDRINUSE (#8137). A port inside a Windows excluded port range fails
+    the same way with nothing listening, so ``main()`` takes the
+    already-running path only when our WebUI answers the probe, and otherwise
+    keeps this permission error.
     """
 
 
@@ -633,8 +647,9 @@ def _check_port_available(host: str, port: int) -> None:
     Distinguishes a port conflict (address in use) from an invalid bind
     address or other socket error, and suggests a free alternative without
     silently switching ports or modifying persistent configuration. A
-    conflict raises ``PortInUseError``; every other bind failure raises a
-    plain ``RuntimeError`` so its cause stays visible.
+    conflict raises ``PortInUseError``, a Windows WSAEACCES raises
+    ``PortAccessDeniedError``, and every other bind failure raises a plain
+    ``RuntimeError`` so its cause stays visible.
     """
     check_host = _bind_host_for_check(host)
     family = socket.AF_INET6 if ":" in check_host else socket.AF_INET
@@ -666,7 +681,13 @@ def _check_port_available(host: str, port: int) -> None:
                 "The existing service was left untouched; no configuration was changed."
             )
             raise PortInUseError(" ".join(lines)) from exc
-        raise RuntimeError(
+        # Keyed on sys.platform like _apply_bind_flags. CPython keeps
+        # winerror 10013 and translates it to errno EACCES.
+        windows_access_denied = sys.platform == "win32" and (
+            getattr(exc, "winerror", None) == 10013 or exc.errno == errno.EACCES
+        )
+        error = PortAccessDeniedError if windows_access_denied else RuntimeError
+        raise error(
             f"Cannot bind {host}:{port} — {exc}. "
             "Check that the host address is valid and available on this machine."
         ) from exc
@@ -767,13 +788,15 @@ def main() -> int:
     # setting up dependencies, creating state, or launching the server.
     try:
         _check_port_available(args.host, args.port)
-    except PortInUseError:
+    except (PortInUseError, PortAccessDeniedError):
         # 10.10 (review #8112, fix 1): an occupied port is not automatically a
         # foreign service. If an own WebUI already answers there, take the
         # already-running path - report it ready and leave it untouched. Only a
         # port conflict is recovered here (review #8112, fix 2): a bind-address
         # error stays a hard error, otherwise a remote --host would be reported
-        # as running while nothing local ever started.
+        # as running while nothing local ever started. Windows reports our own
+        # exclusive wildcard listener as WSAEACCES (#8137); without a WebUI
+        # answer, the bare raise keeps that permission error unchanged.
         _scheme = _already_serving_scheme(args.host, args.port)
         if not _scheme:
             raise

@@ -7461,6 +7461,44 @@ def _refresh_index_rows_from_sidecar_metadata(
     return out
 
 
+def _strict_active_state_db_path() -> Path | None:
+    """Return the active profile's state.db, or None when it cannot resolve.
+
+    Unlike _active_state_db_path() this never degrades to HERMES_HOME: a caller
+    that would act destructively on a missing row must not read the wrong
+    database while the real profile is merely unresolved.
+    """
+    try:
+        from api.profiles import get_active_hermes_home
+        hermes_home = Path(get_active_hermes_home()).expanduser().resolve()
+    except Exception:
+        return None
+    return hermes_home / 'state.db'
+
+
+def state_db_session_presence(sid):
+    """True/False when the active state.db can answer for *sid*, None if it cannot.
+
+    ``delete_cli_session`` returns False both for an aborted transaction and for
+    a commit whose transcript cleanup is still pending (the cleanup manifest
+    keeps retrying it). Callers deciding whether user files are still safe to
+    remove need the difference: only a missing row proves the delete already
+    committed, and a missing or unreadable database proves nothing at all.
+    """
+    if not sid:
+        return False
+    db_path = _strict_active_state_db_path()
+    if db_path is None or not db_path.exists():
+        return None
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),))
+            return cur.fetchone() is not None
+    except Exception:
+        return None
+
+
 def state_db_has_session(sid: str) -> bool:
     """Return True when ``sid`` exists in the active state.db sessions table.
 
@@ -7471,22 +7509,7 @@ def state_db_has_session(sid: str) -> bool:
     path — the workspace is shared across session storage backends and is
     resolved separately via ``get_last_workspace()``.
     """
-    if not sid:
-        return False
-    try:
-        import sqlite3
-    except ImportError:
-        return False
-    db_path = _active_state_db_path()
-    if not db_path.exists():
-        return False
-    try:
-        with closing(open_state_db_readonly(db_path)) as conn:
-            cur = conn.cursor()
-            cur.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (str(sid),))
-            return cur.fetchone() is not None
-    except Exception:
-        return False
+    return state_db_session_presence(sid) is True
 
 
 class _ExternalSessionView:
@@ -15322,6 +15345,110 @@ def _cleanup_manifest_thread_lock(hermes_home):
         return lock
 
 
+class SessionDeleteRefused(Exception):
+    """The delete would destroy live gateway work, or its ledger cannot be fenced.
+
+    ``code`` is the bounded wire code the API returns: ``session_busy`` /
+    ``unknown_execution`` when the Agent's retirement helper refuses, and
+    ``runtime_ledger_unavailable`` when the helper (or the schema it needs) is
+    missing. Callers must not treat a refusal as an operational failure.
+    """
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+_LEDGER_TABLES = frozenset(
+    {
+        "session_admissions",
+        "worker_executions",
+        "worker_receipts",
+        "state_meta",
+        "gateway_routing",
+    }
+)
+
+
+def _has_gateway_runtime_rows(conn, session_ids, tables):
+    """True when any of these sessions still has gateway runtime rows.
+
+    Admissions point at a session through ``target_session_id``; workers through
+    ``session_id`` (receipts are their children, so a row-free worker table means
+    no receipts either).
+    """
+    placeholders = ",".join("?" * len(session_ids))
+    for table, column in (
+        ("session_admissions", "target_session_id"),
+        ("worker_executions", "session_id"),
+    ):
+        if table not in tables:
+            continue
+        if conn.execute(
+            f"SELECT 1 FROM {table} WHERE {column} IN ({placeholders}) LIMIT 1",
+            session_ids,
+        ).fetchone():
+            return True
+    return False
+
+
+def _retire_gateway_runtime_ledger(conn, session_ids, tables):
+    """Retire gateway runtime rows with the Agent's own deletion fence.
+
+    Terminal receipts survive as exact-retry evidence; live or unknown work
+    refuses the delete instead of being erased. A schema without the ledger
+    tables has nothing to retire. A partial ledger schema fails closed: deleting
+    only some of the ledger would leave the Agent's guards unsatisfied — but only
+    when there is something to retire, so a downgraded or misconfigured Agent
+    cannot block deleting a session that has no runtime rows at all.
+    """
+    if not tables & {"session_admissions", "worker_executions"}:
+        return
+    if not _LEDGER_TABLES.issubset(tables):
+        if not _has_gateway_runtime_rows(conn, session_ids, tables):
+            logger.warning(
+                "Partial gateway ledger schema; deleting row-free session(s) %s "
+                "without the Agent's retirement fence", session_ids,
+            )
+            return
+        raise SessionDeleteRefused("runtime_ledger_unavailable")
+    try:
+        from hermes_state_mutation_retirement import retire_sessions
+    except Exception as exc:
+        if not _has_gateway_runtime_rows(conn, session_ids, tables):
+            logger.warning(
+                "Agent retirement helper unavailable (%s); deleting row-free "
+                "session(s) %s without the fence", exc, session_ids,
+            )
+            return
+        raise SessionDeleteRefused("runtime_ledger_unavailable") from exc
+    # The helper imports the rest of the Agent lazily (hermes_state_common,
+    # tools.tool_result_storage, hermes_state_local, ...). An interpreter that
+    # can import the helper but not the Agent's dependencies fails inside the
+    # call, not at the import above: same degrade, and the savepoint keeps the
+    # soft path free of a half-written fence.
+    conn.execute("SAVEPOINT gateway_fence")
+    try:
+        retire_sessions(conn, session_ids)
+    except ImportError as exc:
+        conn.execute("ROLLBACK TO gateway_fence")
+        conn.execute("RELEASE gateway_fence")
+        if not _has_gateway_runtime_rows(conn, session_ids, tables):
+            logger.warning(
+                "Agent retirement fence not importable here (%s); deleting "
+                "row-free session(s) %s without it", exc, session_ids,
+            )
+            return
+        raise SessionDeleteRefused("runtime_ledger_unavailable") from exc
+    except Exception as exc:
+        # RuntimeStoreError carries the Agent's bounded reason code.
+        reason = getattr(exc, "reason", None)
+        if reason in ("session_busy", "unknown_execution"):
+            raise SessionDeleteRefused(reason) from exc
+        raise
+    conn.execute("RELEASE gateway_fence")
+
+
 def delete_cli_session(sid) -> bool:
     """Delete a CLI session while serializing manifest and DB cleanup."""
     try:
@@ -15334,6 +15461,8 @@ def delete_cli_session(sid) -> bool:
         with _cleanup_manifest_thread_lock(hermes_home):
             with _cleanup_manifest_process_lock(hermes_home):
                 return _delete_cli_session_locked(sid, hermes_home)
+    except SessionDeleteRefused:
+        raise
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
@@ -15363,7 +15492,11 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
 
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
-        return False
+        # No state.db means no DB rows to retire: a WebUI-only session lives
+        # entirely in its sidecars. It is only an error when a retry manifest
+        # still needs the DB to prove a session dead — that case already failed
+        # closed above, and its artifacts must stay.
+        return stale_cleanup_complete
 
     try:
         with closing(sqlite3.connect(str(db_path))) as conn:
@@ -15542,6 +15675,24 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
             delegate_ids = sorted(found - {sid})
             all_removed_ids = [sid, *delegate_ids]
             placeholders = ",".join("?" * len(all_removed_ids))
+
+            # Gateway runtime history (session_admissions / worker_executions /
+            # worker_receipts) is ON DELETE RESTRICT and a new-schema trigger
+            # refuses a bare session delete while those rows exist. Retire it
+            # through the Agent's own fence so terminal receipts survive as
+            # retry evidence and live work refuses the delete instead of being
+            # erased.
+            ledger_tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            try:
+                _retire_gateway_runtime_ledger(conn, all_removed_ids, ledger_tables)
+            except SessionDeleteRefused:
+                conn.rollback()
+                raise
 
             # Delete delegate children first (messages, then orphan their
             # children, then the rows themselves).
@@ -15740,6 +15891,8 @@ def _delete_cli_session_locked(sid, hermes_home) -> bool:
                     mp.unlink(missing_ok=True)
 
             return stale_cleanup_complete and not artifact_cleanup_failed
+    except SessionDeleteRefused:
+        raise
     except Exception:
         logger.warning("Failed to delete CLI session %s from state.db", sid, exc_info=True)
         return False
