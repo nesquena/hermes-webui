@@ -25,8 +25,14 @@ def script(source):
     # as the full cache renderer, whose API/filtering seams are not at issue.
     start = source.index('  const flatSessionRows=[];')
     end = source.index('  const archivePagingFilterActive=', start)
-    capture_start = source.index('  const viewportAnchorBeforeRender=')
-    capture_end = source.index("  list.innerHTML='';", capture_start)
+    # Older controls predate measured-layout capture. Extract only inputs owned
+    # by that revision rather than requiring a later contribution's declaration.
+    capture_marker = '  const viewportAnchorBeforeRender='
+    capture = ''
+    if capture_marker in source:
+        capture_start = source.index(capture_marker)
+        capture_end = source.index("  list.innerHTML='';", capture_start)
+        capture = source[capture_start:capture_end]
     names = ['_sessionVirtualWindow', '_sessionVirtualSpacer',
              '_scheduleSessionVirtualizedRender', '_ensureSessionVirtualScrollHandler',
              '_markSessionListPointerDown', '_markSessionListPointerUp',
@@ -58,7 +64,7 @@ function repaint(){
  renderCount++;
  const list=document.querySelector('#sessionList'),listScrollTopBeforeRender=list.scrollTop;
  const q=searchQueryRaw;
-""" + source[capture_start:capture_end] + r"""
+""" + capture + r"""
  list.replaceChildren();
 """ + source[start:end] + r"""
 }
@@ -91,6 +97,44 @@ function visible(){
 """
 
 
+def legacy_control(source, output):
+    """Replay the pre-measurement control without asserting later UI contracts.
+
+    Keep measurements and bounded-window violations in the report: a control
+    can lack the new summary/height-preservation behavior without failing setup.
+    """
+    results, errors = [], []
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch()
+        for width in [1280, 768, 390]:
+            page = browser.new_page(viewport={'width': width, 'height': 800})
+            page.on('pageerror', lambda e: errors.append(str(e)))
+            page.set_content('<input id="sessionSearch" hidden><div id="sessionList" style="width:300px;height:520px;overflow:auto"></div>')
+            page.add_style_tag(content=source('static/style.css'))
+            page.add_script_tag(content=script(source('static/sessions.js')))
+            for kind in ['children', 'reference', 'sparse']:
+                page.evaluate('(kind)=>scene("detailed",kind)', kind)
+                assert page.locator('.session-lineage-count').count() > 0
+                page.evaluate('document.querySelector("#sessionList").scrollTop=1000')
+                page.wait_for_timeout(80)
+                before = page.evaluate('visible()')
+                page.evaluate('repaint()')
+                page.wait_for_timeout(80)
+                after = page.evaluate('visible()')
+                dom = page.locator('.session-date-body>.session-item').count()
+                page.screenshot(path=str(output / f'{width}-{kind}-control.png'))
+                results.append(dict(scene=kind, width=width, before=before, after=after, dom=dom,
+                                    failures=['unbounded summary DOM'] if dom >= 80 else []))
+            page.close()
+        browser.close()
+    report = dict(mode='legacy-control-observations', results=results, errors=errors)
+    (output / 'report.json').write_text(json.dumps(report, indent=2))
+    print(json.dumps(dict(mode=report['mode'], cases=len(results), errors=errors,
+                         new_contract_failures=sum(bool(r['failures']) for r in results))))
+    if errors:
+        raise SystemExit(1)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
@@ -102,6 +146,10 @@ def main():
         if args.before_ref:
             return subprocess.check_output(['git', 'show', f'{args.before_ref}:{path}'], cwd=ROOT, text=True)
         return (ROOT / path).read_text()
+
+    if args.before_ref and 'function _sessionVirtualLayout(' not in source('static/sessions.js'):
+        legacy_control(source, args.output)
+        return
 
     results, errors = [], []
     with sync_playwright() as pw:

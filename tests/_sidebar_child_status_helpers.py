@@ -26,6 +26,9 @@ def component_script(source=None):
                  "_profileMatchesActiveProfile"]:
         if "function " + name + "(" in source:
             names.append(name)
+    for name in ["_releaseFocusLikeRowPress", "_repaintSidebarForBackgroundChurn", "_retireProjectPickerForExplicitRepaint"]:
+        if "function " + name + "(" in source:
+            names.append(name)
     # New helper is optional so the same harness exercises the exact prior head.
     if "function _sessionRowHasLineageSummary(" in source:
         names.append("_sessionRowHasLineageSummary")
@@ -39,7 +42,12 @@ def component_script(source=None):
     start = source.index("  function _renderOneSession(")
     end = source.index("    return el;\n  }", start) + len("    return el;\n  }")
     functions.append(source[start:end])
+    controls = re.search(r'^const SESSION_ROW_NESTED_CONTROL_SELECTOR = .*?;', source, re.M)
+    if controls:
+        functions.append(controls.group())
     return r"""
+let _sessionRowPointerReleasePending=false;
+let _sidebarRepaintBackgroundChurn=false;
 let activeSidForSidebar = 'other';
 const S={session:null,busy:false};
 const _showArchived=false, _sessionSelectMode=false, _showAllProfiles=false;

@@ -672,7 +672,8 @@ Fork and delegated row indicators are both 14px; delegated navigation targets
 are at least 44px tall on narrow layouts or coarse pointers, while fine-pointer
 desktop rows remain compact.
 Keyboard toggles retain focus on the replacement chip for the same conversation
-owner. Repaints do not take focus from another control or restore a missing owner.
+owner only when the replaced chip matches native `:focus-visible`; pointer-only
+focus is not restored, so leaving the row reveals its own notification cue. Repaints do not take focus from another control or restore a missing owner.
 On narrow/coarse chip rows, touch-generated hover hides the adjacent timestamp's
 paint without removing its layout space, so the compact disclosure does not move
 between touchend and the synthesized click.
@@ -700,8 +701,12 @@ Window selection and scroll callbacks, including pending animation frames,
 use content-coordinate offsets that include measured project/profile/archive
 controls and date headers. Group spacers use row-only prefix sums, so controls
 and headers are never counted twice. Both consume the same current
-layout. With unchanged row order and date-group placement, repainting preserves
-the visible conversation and its offset through row-height or expansion changes.
+layout. Layout shape projection reads existing unread state without persisting
+first-sight viewed counts or generation acknowledgements across the inventory;
+rendered conversation owners retain their existing persistence boundary. With
+unchanged row order and date-group placement, repainting preserves
+the visible conversation and its offset through row-height or expansion changes,
+including same-layout measurement invalidation of a parent taller than the viewport.
 Background activity reordering preserves the user's numeric scroll position instead
 of following a moved conversation into its new group, including non-virtual lists;
 reload and leaving search can bring an off-window active conversation into view

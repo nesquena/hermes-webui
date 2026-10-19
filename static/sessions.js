@@ -1371,13 +1371,15 @@ function _forgetObservedStreamingSession(sid) {
   _saveSessionObservedStreaming();
 }
 
-function _hasUnreadForSession(s) {
+// Layout inventories project unread state without first-sight or generation
+// acknowledgement writes. Rendered owners retain the existing persistence path.
+function _hasUnreadForSession(s, persistViewedCount = true) {
   if (!s || !s.session_id) return false;
   if (_hasSessionCompletionUnread(s.session_id)) return true;
   const counts = _getSessionViewedCounts();
   const generation = _sessionTranscriptGenerationForUnread(s.session_id, s.transcript_generation);
   if (!Object.prototype.hasOwnProperty.call(counts, s.session_id)) {
-    _setSessionViewedCount(s.session_id, Number(s.message_count || 0), generation);
+    if (persistViewedCount) _setSessionViewedCount(s.session_id, Number(s.message_count || 0), generation);
     return false;
   }
   const viewed = _sessionViewedCountRecord(counts[s.session_id]);
@@ -1386,7 +1388,7 @@ function _hasUnreadForSession(s) {
       Number(s.message_count || 0),
       Number(s.transcript_generation_baseline) || 0
     ));
-    _setSessionViewedCount(s.session_id, baseline, generation);
+    if (persistViewedCount) _setSessionViewedCount(s.session_id, baseline, generation);
     return Number.isFinite(s.message_count) && s.message_count > baseline;
   }
   if (generation < viewed.transcript_generation || !Number.isFinite(s.message_count)) return false;
@@ -9259,7 +9261,7 @@ function _sessionVirtualLayout(list, rows, query, activeSid, key=_sessionVirtual
       lineageExpanded,_expandedChildSessionKeys.has(lineageKey),_sessionSelectMode,
       segments.map(seg=>seg.session_id),
       query||'',query?_sessionDisplayTitle(s):'',_sessionSearchContentPreview(s,query),
-      active?activeSid:'',_isSessionEffectivelyStreaming(s),_hasUnreadForSession(s)&&!active,!!_sessionAttentionState(s)]);
+      active?activeSid:'',_isSessionEffectivelyStreaming(s),_hasUnreadForSession(s,false)&&!active,!!_sessionAttentionState(s)]);
     const id=s.session_id,old=previous.get(id);
     if(old&&old.shape===shape) layout.measured.set(id,old);
     return {id,shape,summary,active,group:row.group.label};
@@ -9788,7 +9790,7 @@ function renderSessionListFromCache(){
   // Clearing the list temporarily removes a native scrollbar. Measure the
   // occupied content width, not that transient wider empty-list layout.
   const virtualLayoutKeyBeforeRender=_sessionVirtualLayoutKey(list);
-  const focusedChildOwner=document.activeElement?.classList.contains('session-child-count')
+  const focusedChildOwner=document.activeElement?.classList.contains('session-child-count')&&document.activeElement.matches(':focus-visible')
     ? document.activeElement.dataset.childOwner : null;
   list.innerHTML='';
   // #4671: belt-and-suspenders. The authoritative skeleton-clear happens in
@@ -10126,7 +10128,9 @@ function renderSessionListFromCache(){
   }
   virtualLayout.chromeOffsets.push(virtualLayout.chromeOffsets.at(-1)||0);
   _sessionVirtualOffsets(virtualLayout);
-  const resizedAnchorIndex=stableRowOrder&&previousVirtualLayout!==virtualLayout&&viewportAnchorBeforeRender
+  // A row shape can invalidate its measurement in the same layout object.
+  // Admit the captured visible owner before estimates can exclude a tall row.
+  const resizedAnchorIndex=stableRowOrder&&viewportAnchorBeforeRender
     ?flatSessionRows.findIndex(row=>row.session.session_id===viewportAnchorBeforeRender.id):-1;
   const renderedVirtualRows=[],virtualSpacers=[];
   const activeIndex=flatSessionRows.findIndex(row=>_sessionLineageContainsSession(row.session,activeSidForSidebar));

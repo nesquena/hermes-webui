@@ -173,7 +173,22 @@ exercises the real grouping/window/row renderer and scroll listener: stable top
 conversation and offset at unchanged scrollTop, bounded DOM, bottom reachability,
 reload/search-return active anchoring, localized narrow layouts, density/theme/
 width changes with pending RAF, and child/prior-turn keyboard/touch navigation.
-Use `--before-ref <commit>` for exact-head regression evidence.
+Use `--before-ref <commit>` for exact-head regression evidence. Revisions before
+measured layout support run a separately labeled nine-scene legacy control
+(children/reference/sparse × desktop/tablet/phone), retaining scroll/row geometry
+and new-contract violations in `report.json`. Its successful exit establishes
+control execution without page errors, not acceptance of later virtualization
+contracts; it does not replace the current-head navigation matrix.
+
+`./scripts/test.sh tests/test_sidebar_projection_boundaries_browser.py`
+(or `python tests/browser_sidebar_projection_boundaries.py --output <artifact-directory>`)
+checks 14 scenes at 1280×844 and 390×844, with a 300px sidebar: empty real browser
+viewed stores at 200/400/800 parents, read-only transcript-generation projection,
+a measured first parent with 80 expanded children at scrollTop 2000 during batch
+entry and own-attention invalidation, pointer leave and consecutive native keyboard
+toggles without re-focusing. The geometry/rows/CSS and unread persistence helpers
+are production code; sorted payloads and transport are fixture seams, not live
+Agent/SSE. `--before-ref` records the same assertions against an exact prior head.
 
 `python tests/browser_archived_child_label.py --output <artifact-directory>`
 checks reference-only label glyph fit at 300/360px and mark/title geometry at
