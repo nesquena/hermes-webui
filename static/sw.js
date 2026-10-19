@@ -27,6 +27,7 @@ const SHELL_ASSETS = [
   './static/boot.js' + VQ,
   './static/assistant_turn_anchors.js' + VQ,
   './static/a11y-helpers.js' + VQ,
+  './static/a11y.js' + VQ,
   './static/ui.js' + VQ,
   './static/messages.js' + VQ,
   './static/sessions.js' + VQ,
