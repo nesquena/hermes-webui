@@ -210,6 +210,46 @@ def test_check_repo_reports_manual_update_for_baked_webui_version(tmp_path, monk
     assert seen['timeout'] == 3.0
 
 
+def test_published_release_payload_carries_latest_tag(tmp_path, monkeypatch):
+    """No-git/Docker payload (trailing a WebUI release) must carry latest_tag.
+
+    Maintainer fold, PR #6859 round 3: this payload shape had latest_version
+    but no latest_tag, so checkUpdatesNow's tagInfo chain fell through the
+    WebUI payload entirely and labeled the status line with the AGENT's tag
+    (e.g. "Up to date · Latest tag: v2026.9.24" while trailing v0.51.833).
+    """
+
+    class FakeResponse:
+        def __init__(self, body):
+            self._body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return self._body
+
+    payload = [
+        {'name': 'v0.51.833', 'commit': {'sha': 'current-sha'}},
+        {'name': 'v0.51.914', 'commit': {'sha': 'stable-sha'}},
+    ]
+
+    def fake_urlopen(request, timeout=0):
+        return FakeResponse(json.dumps(payload).encode('utf-8'))
+
+    monkeypatch.setattr(updates.urllib.request, 'urlopen', fake_urlopen)
+    monkeypatch.setattr(updates, 'WEBUI_VERSION', 'v0.51.833')
+
+    info = updates._check_webui_published_release_update(channel='stable')
+
+    assert info is not None
+    assert info['latest_version'] == 'v0.51.914'
+    assert info['latest_tag'] == 'v0.51.914'
+
+
 def test_check_repo_webui_no_git_falls_back_to_old_payload_on_tags_failure(tmp_path, monkeypatch):
     """If GitHub tags cannot be read, the Docker path must stay on can't-check."""
 
@@ -314,13 +354,43 @@ def test_apply_fetch_failure_keeps_connectivity_guidance_for_network_errors(tmp_
         assert result == {'ok': False, 'message': expected_message}
 
 
-def test_apply_fetch_failure_keeps_connectivity_guidance_for_timeout_shape(tmp_path):
-    """The _run_git timeout string should stay on the network-guidance branch."""
+def test_apply_fetch_failure_reports_cancelled_fetch_as_timeout(tmp_path):
+    """A fetch cancelled at the update deadline must read as a timeout on both
+    apply paths, not as connectivity guidance: the message names the cancelled
+    command and its bound."""
     (tmp_path / '.git').mkdir()
 
     def fake_git(args, cwd, timeout=10):
         if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
             return 'git fetch origin --quiet --tags --force timed out after 15s', False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    expected_message = (
+        'The fetch was cancelled after 15s — '
+        'git fetch origin --quiet --tags --force did not finish before the update deadline.'
+    )
+
+    for apply_fn in (updates.apply_force_update, updates.apply_update):
+        with patch.object(updates, '_run_git', side_effect=fake_git), \
+             patch.object(updates, 'REPO_ROOT', tmp_path), \
+             patch.object(updates, '_restart_blocker_snapshot', return_value={'restart_blocked': False, 'active_streams': 0, 'active_runs': 0}):
+            result = apply_fn('webui')
+
+        assert result == {'ok': False, 'message': expected_message}
+
+
+def test_apply_fetch_failure_keeps_connectivity_guidance_for_remote_timeout(tmp_path):
+    """libcurl's own stalled-transfer timeout ("Operation timed out after ...
+    milliseconds") is a remote-side network symptom and keeps the connectivity
+    guidance, unlike a fetch our own 15 s deadline cancelled."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
+            return (
+                "fatal: unable to access 'https://github.com/nesquena/hermes-webui.git/': "
+                'Operation timed out after 300000 milliseconds with 0 bytes received'
+            ), False
         raise AssertionError(f'unexpected git args: {args!r}')
 
     cases = [
@@ -1307,6 +1377,40 @@ def test_check_repo_release_not_affected_when_head_exactly_on_tag(tmp_path):
     assert result['latest_version'] == 'v2026.5.16'
 
 
+def test_check_repo_stable_up_to_date_payload_carries_real_latest_tag(tmp_path):
+    """Stable-channel up-to-date payload must carry the REAL latest tag.
+
+    Review item S1 on PR #6859: on this payload latest_version is the CURRENT
+    tag (HEAD is on it), so a frontend fallback to latest_version rendered
+    "Up to date · Latest tag: vOLD" — wrong label. The frontend now reads
+    latest_tag only, so this payload must emit it (latest_tag != current_tag).
+    """
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return 'v0.52.1\nv0.52.0', True
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+            return 'v0.52.0', True
+        # HEAD contains the latest tag → suppress_stable_fallthrough wins.
+        if args == ['merge-base', '--is-ancestor', 'v0.52.1', 'HEAD']:
+            return '', True
+        if args == ['remote', 'get-url', 'origin']:
+            return 'https://github.com/nesquena/hermes-webui.git', True
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        result = updates._check_repo_release(tmp_path, 'webui', channel='stable')
+
+    assert result is not None
+    assert result['behind'] == 0
+    # The wrong-label scenario: current_version is v0.52.0 (HEAD's tag) but
+    # the "Latest tag" suffix must show v0.52.1, the newest channel tag.
+    assert result['current_version'] == 'v0.52.0'
+    assert result['latest_version'] == 'v0.52.0'
+    assert result['latest_tag'] == 'v0.52.1'
+
+
 def test_check_repo_branch_check_runs_for_post_tag_commits(tmp_path):
     """End-to-end: when HEAD is past latest tag, _check_repo uses branch check.
 
@@ -1351,6 +1455,51 @@ def test_check_repo_branch_check_runs_for_post_tag_commits(tmp_path):
     assert info.get('release_based') is not True, (
         'post-tag HEAD should use branch check, not release-based check'
     )
+    # Branch-path payload carries the display-only tag context (latest_tag /
+    # current_tag) probed before the branch fallthrough.
+    assert info.get('latest_tag') == 'v2026.5.16', (
+        f"expected latest_tag=v2026.5.16 on branch path, got {info.get('latest_tag')!r}"
+    )
+    assert info.get('current_tag') == 'v2026.5.16', (
+        f"expected current_tag=v2026.5.16 on branch path, got {info.get('current_tag')!r}"
+    )
+
+
+def test_check_repo_branch_path_without_tags_omits_tag_fields(tmp_path):
+    """Branch-path fallthrough on a checkout with zero release tags must not
+    attach latest_tag/current_tag (no-tags install → no tag suffix shown)."""
+    (tmp_path / '.git').mkdir()
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['fetch', 'origin', '--tags', '--force']:
+            return '', True
+        if args == ['tag', '--list', 'v*', '--sort=-v:refname']:
+            return '', True  # no release tags at all
+        if args == ['describe', '--tags', '--abbrev=0', '--match', 'v*']:
+            return '', False
+        if args == ['describe', '--tags', '--always', '--match', 'v*']:
+            return '1d22b9c2d', True
+        if args == ['rev-parse', '--abbrev-ref', '@{upstream}']:
+            return '', False
+        if args == ['symbolic-ref', 'refs/remotes/origin/HEAD']:
+            return 'refs/remotes/origin/master', True
+        if args[:2] == ['rev-list', '--count']:
+            return '608', True
+        if args[0] == 'merge-base':
+            return 'abc1234' * 5, True
+        if args[:2] == ['rev-parse', '--short']:
+            return 'abc1234', True
+        if args == ['remote', 'get-url', 'origin']:
+            return 'https://github.com/nesquena/hermes-agent.git', True
+        return '', True
+
+    with patch.object(updates, '_run_git', side_effect=fake_git):
+        info = updates._check_repo(tmp_path, 'agent')
+
+    assert info is not None
+    assert info['behind'] == 608
+    assert 'latest_tag' not in info, 'no-tags checkout must not attach latest_tag'
+    assert 'current_tag' not in info, 'no-tags checkout must not attach current_tag'
 
 
 # ---------------------------------------------------------------------------

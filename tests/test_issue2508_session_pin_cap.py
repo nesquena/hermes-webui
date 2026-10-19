@@ -514,7 +514,9 @@ def test_session_rows_open_action_menu_from_right_click():
     assert 'el.oncontextmenu=(e)=>{' in SESSIONS_JS
     context_idx = SESSIONS_JS.find('el.oncontextmenu=(e)=>{')
     assert context_idx != -1
-    block = SESSIONS_JS[context_idx:SESSIONS_JS.find('};', context_idx) + 2]
+    context_end = SESSIONS_JS.find('// Use release events', context_idx)
+    assert context_end != -1
+    block = SESSIONS_JS[context_idx:context_end]
     assert 'e.preventDefault();' in block
     assert 'e.stopPropagation();' in block
     assert '_openSessionActionMenu(s, actions||el);' in block

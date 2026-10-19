@@ -102,6 +102,11 @@ def _ensure_state_db(profile=None):
             timestamp REAL NOT NULL
         );
     """)
+    # These fixtures model sessions whose titles may repeat (compression chains, parallel sessions). A state.db
+    # that a real Agent SessionDB created earlier in the run carries the Agent's unique title index, which would
+    # turn the INSERT OR REPLACE below into silent deletes of same-title rows (#8277). Drop it so the fixture
+    # always gets the schema it declares, whoever created the file first.
+    conn.execute("DROP INDEX IF EXISTS idx_sessions_title_unique")
     for column, ddl in (
         ('user_id', 'ALTER TABLE sessions ADD COLUMN user_id TEXT'),
         ('chat_id', 'ALTER TABLE sessions ADD COLUMN chat_id TEXT'),

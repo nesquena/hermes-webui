@@ -55,6 +55,7 @@ const context=vm.createContext({{
   localStorage,prefillIntent:null,
   _workspacePanelMode:'closed',
   _isCompactWorkspaceViewport:()=>false,
+  _syncQuotaForBootContext:()=>{{}},
   _maybeBindFreshDefaultWorkspaceSession:async(intent)=>{{
     bindCalls.push(intent);
     localStorage.setItem('hermes-webui-session','fresh-session');
