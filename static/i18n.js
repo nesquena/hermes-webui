@@ -28128,6 +28128,21 @@ function loadLocale() {
   // to `_detectBrowserLanguageHint()` so a `navigator` access throw
   // (some embedded webviews) can no longer abort loadLocale().
   setLocale(resolvePreferredLocale(stored, _detectBrowserLanguageHint()));
+  // Paint the resolved locale immediately. index.html ships hardcoded
+  // English text on every [data-i18n] element and this bundle is a defer'd
+  // ~1.9 MB payload, so without this the English shell stays visible until
+  // boot.js finishes its /api/settings round-trip (which is where the locale
+  // used to be applied). Restamping here removes that wait; the later
+  // settings-panel pass stays as the authoritative sync.
+  // Guarded for non-DOM callers (the node locale drivers in tests) and for
+  // the unit tests that strip the auto-`loadLocale()` call at the bottom.
+  try {
+    if (typeof document !== 'undefined' && document.querySelectorAll
+        && document.readyState !== 'loading'
+        && typeof applyLocaleToDOM === 'function') {
+      applyLocaleToDOM();
+    }
+  } catch (_) {}
 }
 
 /**
@@ -28174,6 +28189,10 @@ function applyLocaleToDOM() {
   if (typeof renderChatTodos === 'function') renderChatTodos();
   if (typeof syncWorkspacePanelUI === 'function') syncWorkspacePanelUI();
   if (typeof syncAppTitlebar === 'function') syncAppTitlebar();
+  // Release the pre-paint placeholder set by the inline language probe in
+  // index.html's <head>: the non-English shell was hidden so it would not
+  // flash English while this bundle was still downloading.
+  try { document.documentElement.removeAttribute('data-i18n-pending'); } catch (_) {}
 }
 
 // Apply saved locale immediately so there's no flash of English on reload.
