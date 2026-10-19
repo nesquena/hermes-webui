@@ -1693,15 +1693,28 @@ function _scheduleMessageVirtualizedRender(force, request){
 const _renderCache = new Map();
 const _renderCacheMax = 300;
 function _clearRenderCache(){ _renderCache.clear(); }
+// Two independent 32-bit multiplicative hashes over every UTF-16 unit of `text` (~64 bits together). Used for
+// long render-cache keys: the key must change whenever ANY character changes.
+function _renderCacheTextHash(text){
+  let a=0x811c9dc5, b=0x9e3779b9;
+  for(let i=0;i<text.length;i++){
+    const c=text.charCodeAt(i);
+    a=Math.imul(a^c,16777619)>>>0;
+    b=Math.imul(b^c,0x5bd1e995)>>>0;
+    b=(b^(b>>>15))>>>0;
+  }
+  return a.toString(36)+'.'+b.toString(36);
+}
 function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
   const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
   // Short content: use the full string as key (cheap Map lookup).
-  // Long content: length + prefix + suffix is good enough — collisions on
-  // 20-char prefix+suffix are vanishingly rare for chat messages.
   if(text.length <= 500) return p + ':' + text;
-  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+  // Long content: length + a hash of the whole text. The old length + first/last 20 characters key collided for
+  // equal-length messages that differ only in the middle (templated reports, regenerated answers, edited code),
+  // and the second message then displayed the first one's body.
+  return p + ':' + text.length + ':' + _renderCacheTextHash(text);
 }
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
@@ -18571,9 +18584,9 @@ window._bindHermesExtensionMessageActions=function(){
 // constant-allocation cost: strings are streamed char-by-char (no copy) and
 // object fields are walked key-by-key so only scalar string forms are ever
 // allocated — no integral JSON.stringify() of a whole payload, and no
-// head/tail slice copies. _renderCacheKey's length+edges shortcut is only
-// safe for the render-window geometry key, where equal span+edges means
-// equal window; here equal signature must mean equal CONTENT.
+// head/tail slice copies. Equal signature must mean equal CONTENT (the
+// per-message _renderCacheKey hashes every character of long bodies for the
+// same reason).
 function _addBoundedHash(add, value, depth){
   if(value==null){ add('null'); return; }
   const t=typeof value;
