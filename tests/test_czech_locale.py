@@ -1,10 +1,19 @@
 from collections import Counter
 from pathlib import Path
+import json
 import re
+import shutil
+import subprocess
+import tempfile
+
+import pytest
+
 from tests.test_issue2147_profile_concept_help import PROFILE_CONCEPT_KEYS
 
 
 REPO = Path(__file__).resolve().parent.parent
+I18N_JS = REPO / "static" / "i18n.js"
+NODE = shutil.which("node")
 PROFILE_CONCEPT_FALLBACK_KEYS = {
     *PROFILE_CONCEPT_KEYS,
     "workspace_artifact_source_session",
@@ -200,3 +209,105 @@ def test_czech_locale_uses_real_utf8_diacritics():
     cs_block = extract_locale_block(src, "cs")
     diacritics = "áčďéěíňóřšťúůýžÁČĎÉĚÍŇÓŘŠŤÚŮÝŽ"
     assert any(ch in cs_block for ch in diacritics), "Czech locale has no diacritics"
+
+
+# ── Runtime (node) coverage ────────────────────────────────────────────────
+# Source-text assertions cannot tell a JS escape (`\n`, one backslash) from a
+# double-escaped value (`\\n`, which renders as literal backslash-n text).  The
+# reviewed base was green while `showConfirmDialog` displayed the escape text,
+# so these tests drive the real `setLocale()` / `t()` and assert on the string
+# the UI would actually render.
+
+def _i18n_runtime(js_body: str) -> dict:
+    """Run `js_body` in a fresh node process after `static/i18n.js` is loaded."""
+    src = read(I18N_JS)
+    # Drop the boot-time loadLocale() call so the driver picks the locale.
+    src = re.sub(r"\nloadLocale\(\);\s*$", "", src, count=1)
+    driver = f"""
+const src = {src!r};
+global.localStorage = {{ getItem: () => null, setItem: () => {{}} }};
+global.document = {{
+  documentElement: {{ set lang(_) {{}} }},
+  querySelectorAll: () => [],
+  querySelector: () => null,
+  addEventListener: () => {{}},
+}};
+eval(src);
+{js_body}
+"""
+    with tempfile.NamedTemporaryFile(
+        "w", suffix=".js", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(driver)
+        path = f.name
+    try:
+        result = subprocess.run(
+            [NODE, path], capture_output=True, text=True, timeout=120
+        )
+    finally:
+        Path(path).unlink(missing_ok=True)
+    assert result.returncode == 0, (
+        f"node driver failed: rc={result.returncode} stderr={result.stderr!r}"
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_czech_share_confirm_renders_real_paragraph_break():
+    """cs.share_session_existing_confirm must reach the dialog as a real
+    paragraph break, not as literal `\\n` escape text.
+
+    `showConfirmDialog` assigns the value to `textContent`, so the escape text
+    is exactly what a Czech user saw: one run-on line with backslash-n in the
+    middle.
+    """
+    values = _i18n_runtime(
+        """
+setLocale('cs');
+const cs = t('share_session_existing_confirm');
+setLocale('en');
+const en = t('share_session_existing_confirm');
+process.stdout.write(JSON.stringify({ cs, en }));
+"""
+    )
+
+    cs = values["cs"]
+    en = values["en"]
+    assert "\\n" not in cs, f"Czech value leaks a literal escape sequence: {cs!r}"
+    assert "\\" not in cs, f"Czech value contains a literal backslash: {cs!r}"
+    assert cs.count("\n") == 2, f"expected two newlines, got {cs.count(chr(10))}"
+    paragraphs = cs.split("\n\n")
+    assert len(paragraphs) == 2 and all(p.strip() for p in paragraphs)
+    # Same paragraph shape as English, so the dialog keeps its two paragraphs.
+    assert cs.count("\n") == en.count("\n")
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_no_czech_value_leaks_escape_sequences_through_t():
+    """Any cs value whose source accidentally double-escapes a newline (or a
+    unicode escape) renders the backslash to the user.  `t()` is the only
+    seam the UI uses, so scan every translated value through it.
+    """
+    src = read(I18N_JS)
+    keys = sorted(locale_keys(src, "cs"))
+    values = _i18n_runtime(
+        f"""
+setLocale('cs');
+const keys = {json.dumps(keys)};
+const out = {{}};
+for (const k of keys) {{
+  try {{
+    const v = t(k);
+    if (typeof v === 'string') out[k] = v;
+  }} catch (_) {{}}
+}}
+process.stdout.write(JSON.stringify(out));
+"""
+    )
+
+    leaked = sorted(
+        key
+        for key, value in values.items()
+        if "\\n" in value or "\\t" in value or "\\u" in value
+    )
+    assert leaked == [], f"Czech values render escape sequences: {leaked}"

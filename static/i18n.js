@@ -20545,7 +20545,7 @@ const LOCALES = {
     share_session: 'Sdílet',
     share_session_tooltip: 'Vytvořit veřejný odkaz pro sdílení jen pro čtení',
     share_session_status_active: 'Veřejné sdílení aktivní',
-    share_session_existing_confirm: 'Tato konverzace už má veřejný odkaz pro sdílení jen pro čtení.\\n\\nZvolte Kopírovat existující pro použití tohoto odkazu, nebo Obnovit snímek pro přestavění veřejného snímku z nejnovějších viditelných zpráv.',
+    share_session_existing_confirm: 'Tato konverzace už má veřejný odkaz pro sdílení jen pro čtení.\n\nZvolte Kopírovat existující pro použití tohoto odkazu, nebo Obnovit snímek pro přestavění veřejného snímku z nejnovějších viditelných zpráv.',
     share_session_copy_existing: 'Kopírovat existující',
     share_session_refresh_snapshot: 'Obnovit snímek',
     share_session_link_copied: 'Odkaz pro sdílení zkopírován do schránky',
