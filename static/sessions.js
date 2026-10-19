@@ -5665,44 +5665,59 @@ function _renderBatchActionBar(){
   // Delete
   const deleteBtn=document.createElement('button');deleteBtn.className='batch-action-btn batch-action-btn-danger';
   deleteBtn.textContent=t('session_batch_delete');
-  deleteBtn.onclick=async()=>{
-    const ids=[..._selectedSessions];
-    const wtCount=_worktreeSessionCount(ids);
-    const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
-    const ok=await showConfirmDialog({
-      message:wtCount?t('session_batch_delete_worktree_confirm',ids.length,wtCount):t('session_batch_delete_confirm',ids.length),
-      confirmLabel:t('delete_title'),
-      danger:true
-    });
-    if(!ok)return;
-    const modelPickAtDelete=typeof _readComposerModelPick==='function'
-      ? _readComposerModelPick()
-      : null;
-    const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
-    try{
-      const results=await Promise.all(ids.map(async sid=>{
-        const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
-        return {response,session:sessionsById.get(sid)||null};
-      }));
-      ids.forEach(_forgetComposerDraftLocalFallback);
-      const retainedCount=_worktreeResponseCount(results);
-      const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
-      ids.forEach(_clearHandoffStorageForSession);
-      if(S.session&&ids.includes(S.session.session_id)){
-        S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
-        if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
-        const remaining=await api('/api/sessions'+_sessionListQueryString());
-        if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
-        else{
-          _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
-          $('msgInner').innerHTML='';$('emptyState').style.display='';
-        }
-      }
-      if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
-      else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
-      exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
-    }catch(e){showToast('Delete failed: '+(e.message||e));}
-  };bar.appendChild(deleteBtn);
+  deleteBtn.onclick=()=>_deleteSelectedSessionsBatch();bar.appendChild(deleteBtn);
+}
+async function _deleteSelectedSessionsBatch(){
+  const ids=[..._selectedSessions];
+  if(!ids.length)return;
+  const wtCount=_worktreeSessionCount(ids);
+  const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
+  const ok=await showConfirmDialog({
+    message:wtCount?t('session_batch_delete_worktree_confirm',ids.length,wtCount):t('session_batch_delete_confirm',ids.length),
+    confirmLabel:t('delete_title'),
+    danger:true
+  });
+  if(!ok)return;
+  const modelPickAtDelete=typeof _readComposerModelPick==='function'
+    ? _readComposerModelPick()
+    : null;
+  const modelPickRevisionAtDelete=Number(modelPickAtDelete&&modelPickAtDelete.revision||0)||0;
+  // Settle each request on its own: a refused delete (409, live gateway work)
+  // must not discard the ones that already committed (#8323 review item 1).
+  const settled=await Promise.allSettled(ids.map(async sid=>{
+    const response=await api('/api/session/delete',{method:'POST',body:JSON.stringify({session_id:sid})});
+    return {response,session:sessionsById.get(sid)||null};
+  }));
+  const results=settled.filter(r=>r.status==='fulfilled').map(r=>r.value);
+  const deletedIds=ids.filter((sid,i)=>settled[i].status==='fulfilled');
+  const failures=ids.map((sid,i)=>({sid,error:settled[i].reason})).filter(f=>f.error);
+  deletedIds.forEach(_forgetComposerDraftLocalFallback);
+  const retainedCount=_worktreeResponseCount(results);
+  const cleanupFailedCount=results.filter(result=>result.response&&result.response.state_db_cleanup_failed).length;
+  deletedIds.forEach(_clearHandoffStorageForSession);
+  if(S.session&&deletedIds.includes(S.session.session_id)){
+    S.session=null;S.messages=[];S.entries=[];localStorage.removeItem('hermes-webui-session');
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
+    const remaining=await api('/api/sessions'+_sessionListQueryString());
+    if(remaining.sessions&&remaining.sessions.length){await loadSession(remaining.sessions[0].session_id);}
+    else{
+      _settleEmptyComposerModelAfterFinalSessionDelete(modelPickRevisionAtDelete);
+      $('msgInner').innerHTML='';$('emptyState').style.display='';
+    }
+  }
+  if(failures.length){
+    // Keep the refused sessions selected with their drafts so the user can
+    // retry after stopping the work that blocked them.
+    showToast(_sessionDeleteErrorMessage(failures[0].error)+' ('+deletedIds.length+'/'+ids.length+')',0,'error');
+    _selectedSessions.clear();
+    failures.forEach(f=>_selectedSessions.add(f.sid));
+    await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
+    _updateBatchActionBar();
+    return;
+  }
+  if(cleanupFailedCount) showToast(t('delete_failed')+' ('+cleanupFailedCount+'/'+ids.length+')',0,'error');
+  else showToast((retainedCount?t('session_deleted_worktree'):t('session_delete'))+' ('+ids.length+')');
+  exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
 }
 function _showBatchProjectPicker(openerEl){
   const ids=[..._selectedSessions];if(!ids.length)return;
@@ -11262,6 +11277,17 @@ async function removeWorktree(session){
   }
 }
 
+// Wire codes from /api/session/delete are for clients, not for people: map the
+// bounded refusals to a sentence the user can act on (#8323 review item 3).
+function _sessionDeleteErrorMessage(err){
+  const code=err&&err.message?String(err.message):String(err||'');
+  if(code==='session_busy') return t('session_delete_busy');
+  if(code==='unknown_execution') return t('session_delete_unknown_execution');
+  if(code==='runtime_ledger_unavailable') return t('session_delete_ledger_unavailable');
+  if(code==='state_db_cleanup_failed') return t('session_delete_cleanup_failed');
+  return t('delete_failed')+code;
+}
+
 async function deleteSession(sid, beforeDelete=null){
   const session=_sessionSnapshotById(sid);
   const ok=await showConfirmDialog({
@@ -11298,7 +11324,7 @@ async function deleteSession(sid, beforeDelete=null){
       _repaintSidebarAfterSessionCompletion(sid);
     }
     const err=deleteResult.error;
-    setStatus(`Delete failed: ${err&&err.message?err.message:String(err)}`);
+    setStatus(_sessionDeleteErrorMessage(err));
     return false;
   }
   const response=deleteResult&&deleteResult.response;

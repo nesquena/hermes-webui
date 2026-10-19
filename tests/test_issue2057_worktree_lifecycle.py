@@ -1,5 +1,4 @@
 import sqlite3
-from pathlib import Path
 from types import SimpleNamespace
 
 import api.models as models
@@ -109,7 +108,12 @@ def test_delete_worktree_session_reports_retained_worktree_without_cleanup(tmp_p
     assert worktree.exists(), "session delete must not remove the git worktree directory"
 
 
-def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, monkeypatch):
+def test_delete_session_keeps_files_when_state_db_delete_fails(tmp_path, monkeypatch):
+    """A failed state.db delete must not strand a half-deleted WebUI session.
+
+    The DB rollback cannot restore an unlinked sidecar, index entry or tombstone,
+    so the handler must touch no user-visible file until the delete is durable.
+    """
     session_dir = _isolate_session_store(tmp_path, monkeypatch)
     sid = "dbfaildelete1"
     session = Session(
@@ -126,23 +130,16 @@ def test_delete_session_records_tombstone_when_state_db_delete_fails(tmp_path, m
     def fail_delete(value):
         raise RuntimeError("state.db locked")
 
-    real_unlink = Path.unlink
-
-    def fail_backup_unlink(path, *args, **kwargs):
-        if path.name == f"{sid}.json.bak":
-            raise PermissionError("backup locked")
-        return real_unlink(path, *args, **kwargs)
-
     monkeypatch.setattr(models, "delete_cli_session", fail_delete)
-    monkeypatch.setattr(Path, "unlink", fail_backup_unlink)
 
     assert routes.handle_post(object(), SimpleNamespace(path="/api/session/delete")) is True
 
-    assert captured["status"] == 200
-    assert captured["payload"]["ok"] is True
-    assert captured["payload"]["state_db_cleanup_failed"] is True
-    assert not (session_dir / f"{sid}.json").exists()
-    assert sid in models._load_webui_deleted_session_tombstone()
+    assert captured["status"] == 500
+    assert captured["payload"]["ok"] is False
+    assert captured["payload"]["error"] == "state_db_cleanup_failed"
+    assert (session_dir / f"{sid}.json").exists()
+    assert (session_dir / f"{sid}.json.bak").exists()
+    assert sid not in models._load_webui_deleted_session_tombstone()
 
 
 def test_delete_messaging_session_reopens_read_only_without_deleted_webui_tombstone(
