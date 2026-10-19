@@ -1849,7 +1849,7 @@ def test_lineage_segment_expansion_static_contract():
     assert "_expandedLineageKeys.add(lineageKey)" in js
     assert "_expandedLineageKeys.delete(lineageKey)" in js
     assert "_fetchLineageReportForRow(s,lineageKey).then" in js
-    assert js.count("_fetchLineageReportForRow(s,lineageKey).then(()=>renderSessionListFromCache());") == 2
+    assert js.count("_fetchLineageReportForRow(s,lineageKey).then(()=>_repaintSidebarForBackgroundChurn());") == 2
     assert "'/api/session/lineage/report?session_id='" in js
     assert "encodeURIComponent(s.session_id)" in js
     assert "className='session-lineage-segments'" in js

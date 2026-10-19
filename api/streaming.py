@@ -59,6 +59,7 @@ from api.config import (
     CUSTOM_ROUTE_NO_ENDPOINT,
     custom_provider_route_error,
     raise_for_custom_provider_route,
+    _parse_provider_qualified_model_id,
     model_with_provider_context,
     warm_models_catalog_provenance_if_cold,
     load_settings,
@@ -418,6 +419,13 @@ _STREAMING_CRON_PROFILE_HOME: contextvars.ContextVar[str | None] = contextvars.C
     default=None,
 )
 _STREAMING_CRONJOB_WRAPPER_INSTALLED = False
+# Set on the first failed install so the warning is logged once even though the
+# install itself keeps being retried (#8201).
+_STREAMING_CRONJOB_WRAPPER_WARNED = False
+# hermes-agent renamed the model-facing cron tool from ``cronjob`` to
+# ``cronjob_manage``. Older builds still register the old name, so resolve and
+# wrap every name that exists rather than one hardcoded name (#8189).
+_STREAMING_CRONJOB_TOOL_NAMES = ("cronjob_manage", "cronjob")
 
 
 def _stream_writeback_diag_threshold_seconds(environ=None):
@@ -490,40 +498,39 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
 
     The in-chat agent run already binds per-turn contextvars for other
     session-scoped state. Cron jobs are special because ``cron.jobs`` snapshots
-    path constants at import time, so the model-facing ``cronjob`` tool must
-    enter the existing WebUI cron profile context at the tool-call boundary.
-    That context uses the cron-specific lock and restores the module caches as
-    soon as the single cron tool call returns, avoiding long-lived global path
-    mutation for the whole agent turn.
+    path constants at import time, so the model-facing cron tool must enter the
+    existing WebUI cron profile context at the tool-call boundary. That context
+    uses the cron-specific lock and restores the module caches as soon as the
+    single cron tool call returns, avoiding long-lived global path mutation for
+    the whole agent turn.
     """
-    global _STREAMING_CRONJOB_WRAPPER_INSTALLED
+    global _STREAMING_CRONJOB_WRAPPER_INSTALLED, _STREAMING_CRONJOB_WRAPPER_WARNED
     if _STREAMING_CRONJOB_WRAPPER_INSTALLED:
         return
     try:
-        from tools.registry import registry
+        installed = _wrap_streaming_cronjob_tool_entries()
     except Exception:
-        logger.debug("streaming cronjob wrapper: tools registry unavailable", exc_info=True)
+        # A future hermes-agent shape change must not abort a chat stream
+        # (#8186). Warn once to keep the logs quiet, but leave the installed flag
+        # unset: one failed registration must not disable profile pinning for the
+        # life of the process, or every later chat-created job lands in the
+        # default profile's store (#8201).
+        if not _STREAMING_CRONJOB_WRAPPER_WARNED:
+            _STREAMING_CRONJOB_WRAPPER_WARNED = True
+            logger.warning("streaming cronjob wrapper: install failed", exc_info=True)
         return
+    _STREAMING_CRONJOB_WRAPPER_INSTALLED = installed
 
-    entry = registry.get_entry("cronjob")
-    if entry is None:
-        try:
-            import tools.cronjob_tools  # noqa: F401
-        except Exception:
-            logger.debug("streaming cronjob wrapper: cronjob tool import failed", exc_info=True)
-        entry = registry.get_entry("cronjob")
-    if entry is None:
-        logger.debug("streaming cronjob wrapper: cronjob tool not registered")
-        return
-    original_handler = entry.handler
-    if getattr(original_handler, "_webui_streaming_profile_wrapper", False):
-        _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
-        return
 
-    # This relies on the agent tool executor's ``propagate_context_to_thread``
-    # using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
-    # contextvar reaches the sync cronjob handler even when the tool call runs
-    # on the agent's ThreadPoolExecutor worker.
+def _streaming_cronjob_profile_handler(original_handler):
+    """Return a cron tool handler that enters the streaming cron profile.
+
+    This relies on the agent tool executor's ``propagate_context_to_thread``
+    using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
+    contextvar reaches the sync cronjob handler even when the tool call runs
+    on the agent's ThreadPoolExecutor worker.
+    """
+
     def _profile_scoped_cronjob_handler(args, **kwargs):
         profile_home = _STREAMING_CRON_PROFILE_HOME.get()
         if not profile_home:
@@ -534,20 +541,90 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
 
     _profile_scoped_cronjob_handler.__dict__["_webui_streaming_profile_wrapper"] = True
     _profile_scoped_cronjob_handler.__dict__["_webui_original_handler"] = original_handler
-    registry.register(
-        name=entry.name,
-        toolset=entry.toolset,
-        schema=entry.schema,
-        handler=_profile_scoped_cronjob_handler,
-        check_fn=entry.check_fn,
-        requires_env=entry.requires_env,
-        is_async=entry.is_async,
-        description=entry.description,
-        emoji=entry.emoji,
-        max_result_size_chars=entry.max_result_size_chars,
-        dynamic_schema_overrides=entry.dynamic_schema_overrides,
-    )
-    _STREAMING_CRONJOB_WRAPPER_INSTALLED = True
+    return _profile_scoped_cronjob_handler
+
+
+def _wrap_streaming_cronjob_tool_entries() -> bool:
+    """Wrap every registered cron tool name; True once at least one is wrapped.
+
+    Only the global registry slot is wrapped, so a profile-scoped tool override
+    stays scoped to its profile (#8201). Returns False when neither name
+    resolves, so a later stream can retry after the agent registers its tools.
+    """
+    try:
+        from tools.registry import registry
+    except Exception:
+        logger.debug("streaming cronjob wrapper: tools registry unavailable", exc_info=True)
+        return False
+
+    # ``get_entry`` resolves the merged view, where the active profile's scoped
+    # override wins over the global slot. Re-registering that entry without a
+    # scope would promote one profile's handler to every profile, so prefer the
+    # global-slot read where the registry offers it and leave scoped overrides
+    # untouched. Older builds only have ``get_entry``.
+    snapshot_registration = getattr(registry, "snapshot_registration", None)
+    if not callable(snapshot_registration):
+        snapshot_registration = None
+
+    def _resolve_entry(name):
+        if snapshot_registration is None:
+            return registry.get_entry(name)
+        return snapshot_registration(name, scope=None)
+
+    def _resolve_entries():
+        entries = []
+        for name in _STREAMING_CRONJOB_TOOL_NAMES:
+            entry = _resolve_entry(name)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    entries = _resolve_entries()
+    if not entries:
+        # Importing the tool module is what registers it. The module path is the
+        # same under both tool names.
+        try:
+            import tools.cronjob_tools  # noqa: F401
+        except Exception:
+            logger.debug("streaming cronjob wrapper: cronjob tool import failed", exc_info=True)
+        entries = _resolve_entries()
+    if not entries:
+        logger.debug("streaming cronjob wrapper: cronjob tool not registered")
+        return False
+
+    installed = False
+    seen = set()
+    for entry in entries:
+        if id(entry) in seen:
+            continue
+        seen.add(id(entry))
+        original_handler = entry.handler
+        if getattr(original_handler, "_webui_streaming_profile_wrapper", False):
+            installed = True
+            continue
+
+        register_kwargs = dict(
+            name=entry.name,
+            toolset=entry.toolset,
+            schema=entry.schema,
+            handler=_streaming_cronjob_profile_handler(original_handler),
+            check_fn=entry.check_fn,
+            requires_env=entry.requires_env,
+            is_async=entry.is_async,
+            description=entry.description,
+            emoji=entry.emoji,
+            max_result_size_chars=entry.max_result_size_chars,
+        )
+        # Older hermes-agent builds predate ``ToolEntry.dynamic_schema_overrides``
+        # (and the matching ``register()`` kwarg). Forward it only when both sides
+        # know it, otherwise every chat stream fails with AttributeError (#8186).
+        if hasattr(entry, "dynamic_schema_overrides") and _supports_kwarg(
+            registry.register, "dynamic_schema_overrides"
+        ):
+            register_kwargs["dynamic_schema_overrides"] = entry.dynamic_schema_overrides
+        registry.register(**register_kwargs)
+        installed = True
+    return installed
 
 
 def _supports_kwarg(func, kwarg_name: str) -> bool:
@@ -1003,6 +1080,87 @@ def _runtime_preferred_base_url(
     if _same_base_url_endpoint(configured_base_url, runtime_base_url):
         return runtime_base_url
     return configured_base_url
+
+
+_ROUTING_ENV_REF_RE = re.compile(r"\$\{[^}]+\}")
+
+
+def _drop_unresolved_routing_refs(block):
+    """Drop ``provider_routing`` values that still carry an unexpanded
+    ``${...}`` reference after env expansion.
+
+    Both chat paths expand ``${VAR}`` references before routing reaches the
+    Agent: the sync seam under the fail-closed profile scope
+    (``block_process_env_fallback``) and the streaming path via the expanded
+    config loader. A ``${VAR}`` that the profile does not define (for example
+    a variable only the server process env holds, or one defined nowhere)
+    survives expansion as its literal text. Forwarding that literal would
+    make OpenRouter restrict the request to a provider that does not exist
+    and fail a turn that master (which forwarded no routing) completes. Dropping the affected value restores master's
+    outcome for it, with a warning, without widening what a profile may
+    read from the server environment.
+
+    A list item is dropped individually; a field is dropped when its scalar
+    value is unresolved or its list empties. Non-string values are kept as
+    is. Never mutates ``block``; returns ``(clean_block, dropped)`` where
+    ``dropped`` maps field name to the number of dropped values.
+    """
+    if not isinstance(block, dict):
+        return {}, {}
+    clean = {}
+    dropped = {}
+    for key, value in block.items():
+        if isinstance(value, str):
+            if _ROUTING_ENV_REF_RE.search(value):
+                dropped[key] = 1
+            else:
+                clean[key] = value
+        elif isinstance(value, list):
+            kept = [
+                item for item in value
+                if not (isinstance(item, str)
+                        and _ROUTING_ENV_REF_RE.search(item))
+            ]
+            lost = len(value) - len(kept)
+            if lost:
+                dropped[key] = lost
+            if kept:
+                clean[key] = kept
+        else:
+            clean[key] = value
+    return clean, dropped
+
+
+def _provider_routing_kwargs_for_agent(cfg, agent_params):
+    """Map a profile config's ``provider_routing`` block to AIAgent kwargs.
+
+    Returns only the routing kwargs the installed hermes-agent build accepts
+    (``agent_params``), so older builds degrade gracefully. The WebUI
+    in-process runtime reads the session's own profile config and must forward
+    these, or OpenRouter provider routing (sort/ignore/only/order) is silently
+    dropped for browser chat turns. Mirrors the gateway's TurnRunner.
+    """
+    pr = (cfg or {}).get("provider_routing") or {}
+    if not isinstance(pr, dict):
+        pr = {}
+    pr, dropped = _drop_unresolved_routing_refs(pr)
+    for key, count in dropped.items():
+        logger.warning(
+            "provider_routing.%s references an environment variable this "
+            "profile does not define; dropping %d value(s) for this turn "
+            "instead of forwarding the literal ${...} text",
+            key,
+            count,
+        )
+    mapping = {
+        "providers_allowed": pr.get("only"),
+        "providers_ignored": pr.get("ignore"),
+        "providers_order": pr.get("order"),
+        "provider_sort": pr.get("sort"),
+        "provider_require_parameters": pr.get("require_parameters", False),
+        "provider_data_collection": pr.get("data_collection"),
+    }
+    return {k: v for k, v in mapping.items() if k in agent_params}
 
 
 def _is_fallback_lifecycle_message(kind: str, message: str) -> bool:
@@ -2191,6 +2349,16 @@ def _active_turn_authority(session, stream_id, msg_text):
     )
     return {
         'session_id': getattr(session, 'session_id', None),
+        # #7882 re-gate: fork-ownership context for delegation_wakeup turns —
+        # the row stamp keeps the typed _source, but the _fork_child_turn
+        # ownership proof regeneration requires is derived from the session's
+        # fork identity, not the row source.
+        'session_source': getattr(session, 'session_source', None),
+        'fork_session_id': (
+            getattr(session, 'session_id', None)
+            if str(getattr(session, 'session_source', None) or '').strip().lower() == 'fork'
+            else None
+        ),
         'token': token,
         'text': pending_text if pending_text is not None else msg_text,
         'timestamp': getattr(session, 'pending_started_at', None),
@@ -2218,6 +2386,13 @@ def _resolve_active_turn_authority(identity, *, result=None, agent=None):
     resolved = dict(identity)
     resolved.pop('agent_turn_boundary_resolved', None)
     resolved.pop('agent_turn_boundary_source', None)
+    # Preserve the fork-ownership context (#7882 re-gate): a delegation_wakeup
+    # turn inside a fork session derives its _fork_child_turn proof from these
+    # fields at materialization/settlement time.
+    if 'session_source' not in resolved:
+        resolved['session_source'] = None
+    if 'fork_session_id' not in resolved:
+        resolved['fork_session_id'] = None
 
     # Treat the boundary as one coherent pair. In particular, do not retain the
     # failed Agent instance's index/turn when credential self-heal creates a
@@ -2477,8 +2652,22 @@ def _materialize_active_turn_user(identity, msg_text, source):
             identity.get('source') or source or 'webui',
             active_turn_token=identity.get('token'),
         )
-        if str(identity.get('source') or source or '').strip().lower() == 'fork':
+        _settle_source = str(identity.get('source') or source or '').strip().lower()
+        if _settle_source == 'fork':
             child_session_id = identity.get('session_id')
+            if child_session_id:
+                message['_fork_child_turn'] = child_session_id
+        elif (
+            _settle_source == 'delegation_wakeup'
+            and str(identity.get('session_source') or '').strip().lower() == 'fork'
+        ):
+            # A delegation wakeup INSIDE a fork session: the row's _source stays
+            # delegation_wakeup (the hidden-row predicate keys on it), but the
+            # fork-ownership proof regeneration authorization requires rides on
+            # _fork_child_turn (#7882 re-gate must-fix 2 — without it every
+            # regeneration after an async delegation completes in a fork
+            # returns regeneration_read_only).
+            child_session_id = identity.get('session_id') or identity.get('fork_session_id')
             if child_session_id:
                 message['_fork_child_turn'] = child_session_id
     else:
@@ -2519,8 +2708,19 @@ def _settle_current_turn_boundary(previous_context, result_messages, identity, m
             _settle_source,
             active_turn_token=identity.get('token'),
         )
-        if str(_settle_source).strip().lower() == 'fork':
+        _settle_source_lower = str(_settle_source).strip().lower()
+        if _settle_source_lower == 'fork':
             child_session_id = identity.get('session_id')
+            if child_session_id:
+                existing_checkpoint['_fork_child_turn'] = child_session_id
+        elif (
+            _settle_source_lower == 'delegation_wakeup'
+            and str(identity.get('session_source') or '').strip().lower() == 'fork'
+        ):
+            # Fork-internal delegation wakeup (see _materialize_active_turn_user):
+            # keep _source = delegation_wakeup for hiding, but carry the fork
+            # ownership proof so regeneration stays authorized (#7882 re-gate).
+            child_session_id = identity.get('session_id') or identity.get('fork_session_id')
             if child_session_id:
                 existing_checkpoint['_fork_child_turn'] = child_session_id
         if isinstance(checkpoint, dict):
@@ -3222,6 +3422,7 @@ _GATEWAY_ROUTING_TOP_LEVEL_KEYS = {
     'used_provider',
     'used_model',
     'requested_provider',
+    'requested_route_provider',
     'requested_model',
 }
 _GATEWAY_ROUTING_CONTAINER_KEYS = (
@@ -3262,7 +3463,7 @@ def _find_gateway_metadata_payload(payload):
     return None
 
 
-def _normalize_gateway_routing_metadata(payload, requested_model=None, requested_provider=None):
+def _normalize_gateway_routing_metadata(payload, requested_model=None, requested_provider=None, requested_route_provider=None):
     """Return safe LLM Gateway routing metadata, or None when absent.
 
     LLM Gateway response metadata can contain provider/model routing details,
@@ -3287,6 +3488,10 @@ def _normalize_gateway_routing_metadata(payload, requested_model=None, requested
         fallback_provider = _clean_gateway_routing_scalar(requested_provider)
         if fallback_provider is not None:
             normalized['requested_provider'] = fallback_provider
+    if 'requested_route_provider' not in normalized:
+        fallback_route_provider = _clean_gateway_routing_scalar(requested_route_provider)
+        if fallback_route_provider is not None:
+            normalized['requested_route_provider'] = fallback_route_provider
 
     routing = []
     raw_routing = src.get('routing')
@@ -3332,7 +3537,7 @@ def _normalize_gateway_routing_metadata(payload, requested_model=None, requested
     return normalized
 
 
-def _extract_gateway_routing_metadata(agent, result, requested_model=None, requested_provider=None):
+def _extract_gateway_routing_metadata(agent, result, requested_model=None, requested_provider=None, requested_route_provider=None):
     candidates = []
     if isinstance(result, dict):
         candidates.extend([
@@ -3359,10 +3564,29 @@ def _extract_gateway_routing_metadata(agent, result, requested_model=None, reque
             candidate,
             requested_model=requested_model,
             requested_provider=requested_provider,
+            requested_route_provider=requested_route_provider,
         )
         if normalized:
             return normalized
     return None
+
+
+def _capture_turn_served_model(s, agent) -> str | None:
+    """Capture the model that actually served this turn onto the session.
+
+    #6068: the served model must be read AFTER agent.run: the agent
+    mutates agent.model when a fallback fires, so the pre-run
+    resolved_model would mis-attribute exactly the turns where
+    attribution matters most.
+    The configured selection is not proof that it served this turn.
+    Sets s.last_used_model from observed agent.model only, and to None
+    when nothing was observed.
+    """
+    _observed_model = getattr(agent, 'model', None)
+    _used_model = _observed_model.strip() if isinstance(_observed_model, str) else None
+    if s is not None:
+        s.last_used_model = (_used_model[:240]) if _used_model else None
+    return _used_model
 
 
 def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
@@ -6519,6 +6743,40 @@ def _is_generic_fallback_title(title) -> bool:
     return str(title or '').strip().lower() in {'conversation topic'}
 
 
+# Internal title-generation statuses are diagnostics, not user-facing text.
+# The manual regenerate route renders its 422 body verbatim in the sidebar
+# toast, so any status a user can trigger manually must be translated (#7693:
+# the toast used to show the raw internal code "llm_language_mismatch_aux").
+_TITLE_FAILURE_HUMAN_REASONS = {
+    'llm_language_mismatch': 'the generated title did not match the conversation language',
+    'llm_language_mismatch_aux': 'the generated title did not match the conversation language',
+    'llm_invalid': 'the title model returned an unusable title',
+    'llm_invalid_aux': 'the title model returned an unusable title',
+    'llm_empty': 'the title model returned an empty title',
+    'llm_empty_aux': 'the title model returned an empty title',
+    'llm_error': 'the title model could not be reached',
+    'llm_error_aux': 'the title model could not be reached',
+    'llm_empty_reasoning': 'the title model spent its budget on reasoning and returned no title',
+    'llm_empty_reasoning_aux': 'the title model spent its budget on reasoning and returned no title',
+    'llm_length': 'the title model hit its output limit before returning a title',
+    'llm_length_aux': 'the title model hit its output limit before returning a title',
+    'missing_exchange': 'this conversation has no assistant reply to title yet',
+    'empty_user_message': 'this session has no user message to title yet',
+    'empty_title': 'no title could be produced for this session',
+    'title_generation_disabled': 'title generation is disabled for this profile',
+}
+
+
+def _human_title_failure_reason(status) -> str:
+    """Map an internal title-generation status to readable failure text.
+
+    Known internal codes are translated; anything else passes through unchanged
+    so a new status stays debuggable instead of turning into an empty message.
+    """
+    key = str(status or '').strip()
+    return _TITLE_FAILURE_HUMAN_REASONS.get(key, key)
+
+
 # Recovery cap for a model that keeps answering badly: an invalid model output
 # suppresses the local fallback so the next completed exchange retries the LLM
 # (the local fallback would mark a warm-up opener as successfully titled). A
@@ -6808,7 +7066,11 @@ def generate_session_title_for_session(session, *, prefer_latest: bool = False, 
     return None, llm_status or 'empty_title', raw_preview
 
 
-def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
+def _preserve_pre_compression_snapshot(
+    s,
+    old_sid: str,
+    continuation_sid: str | None = None,
+) -> bool:
     """Persist old_sid as a read-only pre-compression snapshot.
 
     Context compression rotates the active WebUI session id from old_sid to the
@@ -6817,28 +7079,36 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
     """
     old_path = SESSION_DIR / f'{old_sid}.json'
     if not old_path.exists():
-        return
+        return False
     try:
         existing_text = old_path.read_text(encoding='utf-8')
         try:
             existing = json.loads(existing_text)
             existing_msgs = len(existing.get('messages') or [])
-            existing_snapshot = bool(existing.get('pre_compression_snapshot'))
         except (json.JSONDecodeError, ValueError):
             # Treat corrupt/malformed old JSON as missing history and rewrite it
             # from the in-memory pre-compression messages below. That is safer
             # than leaving an unreadable recovery snapshot behind.
             existing_msgs = -1
-            existing_snapshot = False
         if len(s.messages) > existing_msgs:
             # In-memory messages are newer than the file; save the full old
             # snapshot from the current session object while preserving its
             # pre-existing parent_session_id lineage.
             saved_sid = s.session_id
             saved_snapshot = bool(getattr(s, 'pre_compression_snapshot', False))
+            saved_continuation_sid = (
+                str(getattr(s, 'pre_compression_continuation_session_id', None) or '')
+                if getattr(s, 'pre_compression_continuation_session_id', None)
+                else None
+            )
             saved_pinned = bool(getattr(s, 'pinned', False))
             s.session_id = old_sid
             s.pre_compression_snapshot = True
+            s.pre_compression_continuation_session_id = (
+                str(continuation_sid).strip()
+                if continuation_sid
+                else None
+            )
             s.pinned = False
             # Stage-359 / PR #2295: clear runtime stream-state fields on the
             # archived snapshot so the sidebar does not reopen the parent as
@@ -6868,13 +7138,14 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
             finally:
                 s.session_id = saved_sid
                 s.pre_compression_snapshot = saved_snapshot
+                s.pre_compression_continuation_session_id = saved_continuation_sid
                 s.pinned = saved_pinned
                 s.active_stream_id = saved_active_stream_id
                 s.pending_user_message = saved_pending_user_message
                 s.pending_attachments = saved_pending_attachments
                 s.pending_started_at = saved_pending_started_at
                 s.pending_user_source = saved_pending_user_source
-            return
+            return True
         # Existing file is already at least as complete as memory; stamp only
         # the snapshot marker so index/sidebar projection can hide it without
         # rewriting a shorter messages array over a fuller transcript.
@@ -6882,6 +7153,11 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
         snapshot = Session.load(old_sid)
         if snapshot:
             snapshot.pre_compression_snapshot = True
+            snapshot.pre_compression_continuation_session_id = (
+                str(continuation_sid).strip()
+                if continuation_sid
+                else None
+            )
             snapshot.pinned = False
             # Stage-359 Opus SHOULD-FIX: clear runtime fields on the loaded
             # snapshot too. If the disk snapshot was last persisted while the
@@ -6900,10 +7176,205 @@ def _preserve_pre_compression_snapshot(s, old_sid: str) -> None:
                 "Marked pre-compression session %s as sidebar-hidden snapshot",
                 old_sid,
             )
+            return True
+        return False
     except OSError:
         logger.debug("Could not read old session file before preservation")
     except Exception:
         logger.debug("Failed to preserve pre-compression session file", exc_info=True)
+    return False
+
+
+def _migrate_compression_session_ownership(
+    s,
+    old_sid: str,
+    new_sid: str,
+    agent_lock,
+) -> bool:
+    """Atomically publish a durable compression continuation."""
+    from api import models as _models
+    from api.paths import _atomic_write_text
+
+    missing = object()
+    previous_state = (
+        s.session_id,
+        bool(getattr(s, 'pre_compression_snapshot', False)),
+        getattr(s, 'pre_compression_continuation_session_id', None),
+        getattr(s, 'parent_session_id', None),
+    )
+    old_path = SESSION_DIR / f'{old_sid}.json'
+    index_path = _models.SESSION_INDEX_FILE
+    index_row_snapshot = None
+    index_file_existed = False
+    try:
+        old_preimage = old_path.read_text(encoding='utf-8')
+        with _models._INDEX_WRITE_LOCK:
+            index_file_existed = index_path.exists()
+            if index_file_existed:
+                try:
+                    index_payload = json.loads(index_path.read_bytes())
+                except (OSError, json.JSONDecodeError):
+                    logger.debug(
+                        "Could not capture compression marker index row",
+                        exc_info=True,
+                    )
+                    return False
+                if not isinstance(index_payload, list):
+                    logger.debug(
+                        "Could not capture compression marker index row: index is not a list",
+                        exc_info=True,
+                    )
+                    return False
+                for row in index_payload:
+                    if (
+                        isinstance(row, dict)
+                        and str(row.get('session_id') or '') == old_sid
+                    ):
+                        index_row_snapshot = copy.deepcopy(row)
+                        break
+    except OSError:
+        logger.debug("Could not capture compression marker preimage", exc_info=True)
+        return False
+
+    def _restore_durable_snapshot() -> None:
+        def _updated_at_key(entry):
+            try:
+                return float((entry or {}).get('updated_at') or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        with _models._INDEX_WRITE_LOCK:
+            _atomic_write_text(old_path, old_preimage, encoding='utf-8')
+            if not index_path.exists():
+                if not index_file_existed:
+                    return
+                current_rows = []
+            else:
+                current_rows = json.loads(index_path.read_bytes())
+                if not isinstance(current_rows, list):
+                    raise ValueError("session index must be a list")
+
+            filtered = [
+                row for row in current_rows
+                if not (isinstance(row, dict) and str(row.get('session_id') or '') == old_sid)
+            ]
+            if index_row_snapshot is not None:
+                filtered.append(index_row_snapshot)
+                filtered.sort(key=_updated_at_key, reverse=True)
+            elif filtered == current_rows:
+                return
+            _payload = json.dumps(
+                filtered,
+                ensure_ascii=False,
+                indent=2,
+            )
+            _atomic_write_text(index_path, _payload, encoding='utf-8')
+
+    with LOCK:
+        if SESSIONS.get(old_sid) is not s or str(getattr(s, 'session_id', '') or '') != old_sid:
+            logger.warning(
+                "compression cache migration blocked by stale owner: old_sid=%s new_sid=%s",
+                old_sid,
+                new_sid,
+            )
+            return False
+        existing_new_session = SESSIONS.get(new_sid, missing)
+        if existing_new_session is not missing and existing_new_session is not s:
+            logger.warning(
+                "compression cache migration blocked by existing continuation owner: old_sid=%s new_sid=%s",
+                old_sid,
+                new_sid,
+            )
+            return False
+        with SESSION_AGENT_LOCKS_LOCK:
+            old_lock = SESSION_AGENT_LOCKS.get(old_sid, missing)
+            new_lock = SESSION_AGENT_LOCKS.get(new_sid, missing)
+            if old_lock is not missing and old_lock is not agent_lock:
+                logger.warning(
+                    "compression lock migration blocked by stale owner: old_sid=%s new_sid=%s",
+                    old_sid,
+                    new_sid,
+                )
+                return False
+            if new_lock is not missing and new_lock is not agent_lock:
+                logger.warning(
+                    "compression lock migration blocked by existing continuation lock: old_sid=%s new_sid=%s",
+                    old_sid,
+                    new_sid,
+                )
+                return False
+            SESSION_AGENT_LOCKS[old_sid] = agent_lock
+            SESSION_AGENT_LOCKS[new_sid] = agent_lock
+
+    if not _preserve_pre_compression_snapshot(s, old_sid, new_sid):
+        with SESSION_AGENT_LOCKS_LOCK:
+            if old_lock is missing and SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
+                SESSION_AGENT_LOCKS.pop(old_sid, None)
+            if new_lock is missing and SESSION_AGENT_LOCKS.get(new_sid) is agent_lock:
+                SESSION_AGENT_LOCKS.pop(new_sid, None)
+        return False
+
+    try:
+        with LOCK:
+            if SESSIONS.get(old_sid) is not s or str(getattr(s, 'session_id', '') or '') != old_sid:
+                raise RuntimeError("stale owner while publishing")
+            if existing_new_session is missing:
+                if SESSIONS.get(new_sid) is not None and SESSIONS.get(new_sid) is not s:
+                    raise RuntimeError("continuation owner changed during publish")
+            elif SESSIONS.get(new_sid) is not existing_new_session:
+                raise RuntimeError("continuation owner changed during publish")
+            with SESSION_AGENT_LOCKS_LOCK:
+                if SESSION_AGENT_LOCKS.get(old_sid, missing) not in (missing, agent_lock):
+                    raise RuntimeError("stale old-lock while publishing")
+                if SESSION_AGENT_LOCKS.get(new_sid) is not agent_lock:
+                    raise RuntimeError("continuation lock changed during publish")
+
+                s.session_id = new_sid
+                s.pre_compression_snapshot = False
+                s.pre_compression_continuation_session_id = None
+                s.parent_session_id = old_sid
+                SESSIONS[new_sid] = s
+                SESSIONS.move_to_end(new_sid)
+                _evict_sessions_over_cap()
+
+                if SESSIONS.get(old_sid) is s:
+                    SESSIONS.pop(old_sid, None)
+
+    except Exception:
+        try:
+            _restore_durable_snapshot()
+        except Exception:
+            logger.debug(
+                "Failed to restore compression marker durable state",
+                exc_info=True,
+            )
+        with LOCK:
+            if SESSIONS.get(new_sid) is s:
+                SESSIONS.pop(new_sid, None)
+            if existing_new_session is not missing:
+                SESSIONS[new_sid] = existing_new_session
+            if SESSIONS.get(old_sid) is None:
+                SESSIONS[old_sid] = s
+            s.session_id, s.pre_compression_snapshot, s.pre_compression_continuation_session_id, s.parent_session_id = previous_state
+            with SESSION_AGENT_LOCKS_LOCK:
+                if SESSION_AGENT_LOCKS.get(old_sid) is agent_lock:
+                    if old_lock is missing:
+                        SESSION_AGENT_LOCKS.pop(old_sid, None)
+                    else:
+                        SESSION_AGENT_LOCKS[old_sid] = old_lock
+                if SESSION_AGENT_LOCKS.get(new_sid) is agent_lock:
+                    if new_lock is missing:
+                        SESSION_AGENT_LOCKS.pop(new_sid, None)
+                    else:
+                        SESSION_AGENT_LOCKS[new_sid] = new_lock
+        logger.debug(
+            "Compression ownership migration aborted: old_sid=%s new_sid=%s",
+            old_sid,
+            new_sid,
+            exc_info=True,
+        )
+        return False
+    return True
 
 
 def _maybe_schedule_title_refresh(session, put_event, agent):
@@ -7460,6 +7931,35 @@ def _sanitize_messages_for_api(
         if sanitized.get('role'):
             clean.append(sanitized)
 
+    # #7237 (standalone): repair ADJACENT tool-call/result blocks before the
+    # global pass below. A result belonging to a later, unrelated turn must not
+    # make an earlier orphan call look answered and survive this projection.
+    _repaired_clean = _strip_orphan_tool_calls(clean)
+    clean = [
+        _repaired
+        for _original, _repaired in zip(clean, _repaired_clean, strict=True)
+        if not (
+            _original.get('role') == 'assistant'
+            and _original.get('tool_calls')
+            and not _repaired.get('tool_calls')
+            and not str(_repaired.get('content') or '').strip()
+        )
+    ]
+    # Recompute ownership from the repaired call rows: a tool result linked only
+    # to a now-removed non-adjacent call must be removed too.
+    _surviving_ids = {
+        _tc.get('id') or _tc.get('call_id')
+        for _msg in clean
+        if _msg.get('role') == 'assistant'
+        for _tc in (_msg.get('tool_calls') or [])
+        if isinstance(_tc, dict) and (_tc.get('id') or _tc.get('call_id'))
+    }
+    clean = [
+        _msg for _msg in clean
+        if _msg.get('role') != 'tool'
+        or (_msg.get('tool_call_id') or '') in _surviving_ids
+    ]
+
     # Third pass: strip orphaned tool_calls from assistant messages — calls whose id
     # has no matching tool-role response in the clean list.  Strict providers (DeepSeek,
     # newer OpenAI) reject with 400 when an assistant message references a tool call that
@@ -7588,6 +8088,37 @@ def _api_safe_message_positions(messages):
         if sanitized.get('role'):
             out.append((idx, sanitized))
 
+    # #7237 (standalone): mirror the adjacent-pair repair from
+    # _sanitize_messages_for_api so a non-adjacent later result cannot mask an
+    # early orphan call on this projection either.
+    _original_out = out
+    _repaired_rows = _strip_orphan_tool_calls([_m for _i, _m in _original_out])
+    out = [
+        (_i, _repaired)
+        for (_i, _original), _repaired in zip(_original_out, _repaired_rows, strict=True)
+        if not (
+            _original.get('role') == 'assistant'
+            and _original.get('tool_calls')
+            and not _repaired.get('tool_calls')
+            and not str(_repaired.get('content') or '').strip()
+        )
+    ]
+    # Recompute ownership from the repaired call rows (mirrors
+    # _sanitize_messages_for_api): a tool result linked only to a now-removed
+    # non-adjacent call must leave this projection too, or the two projections
+    # disagree by one row and positional metadata carry-forward misaligns.
+    _surviving_ids = {
+        _tc.get('id') or _tc.get('call_id')
+        for _i, _msg in out
+        if _msg.get('role') == 'assistant'
+        for _tc in (_msg.get('tool_calls') or [])
+        if isinstance(_tc, dict) and (_tc.get('id') or _tc.get('call_id'))
+    }
+    out = [
+        (_i, _msg) for _i, _msg in out
+        if _msg.get('role') != 'tool'
+        or (_msg.get('tool_call_id') or '') in _surviving_ids
+    ]
     # Third pass: strip orphaned tool_calls from assistant messages (mirrors
     # _sanitize_messages_for_api pass 3).
     answered_ids: set = set()
@@ -7694,6 +8225,91 @@ def _deduplicate_context_messages(messages):
             seen.add(key)
         deduped.append(msg)
     return deduped
+
+
+def _strip_orphan_tool_calls(messages):
+    """Return a context-only repair without mutating any input message rows.
+
+    Strict providers reject an assistant ``tool_calls`` entry when no matching
+    ``tool`` result follows in the same context. The repair belongs to the
+    model-facing context projection, not the display transcript, so the input
+    list and every input dictionary must remain unchanged. Clone only rows whose
+    ``tool_calls`` field is actually removed or filtered.
+    """
+    if not isinstance(messages, list):
+        return messages
+    repaired = list(messages)
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        calls = msg.get("tool_calls")
+        if isinstance(calls, str):
+            try:
+                calls = json.loads(calls)
+            except (ValueError, TypeError):
+                continue
+        if not isinstance(calls, list) or not calls:
+            continue
+        # The repair is called at completed-turn writeback sinks. A final row
+        # is not automatically in flight; preserving it solely because it is
+        # last lets settled orphan calls survive into the next request.
+        covered = set()
+        probe = idx + 1
+        while probe < len(messages):
+            following = messages[probe]
+            if not isinstance(following, dict):
+                break
+            # A temporary ``_recovered`` user row is materialized by the #1543
+            # stale-stream recovery path between an assistant's ``tool_calls``
+            # and their ``tool`` results. A later pass in
+            # ``_sanitize_messages_for_api`` / ``_api_safe_message_positions``
+            # drops that row from the final projection, so treat it as
+            # transparent here — otherwise a valid, completed tool pair is
+            # misclassified as an orphan and silently lost on exactly the
+            # recovery path this repair is meant to harden.
+            if following.get("role") == "user" and following.get("_recovered"):
+                probe += 1
+                continue
+            # Consecutive assistant rows merge in the Agent's repair, so an
+            # intermediate progress row between a call and its result is
+            # transparent here too (else a valid pair reads as an orphan).
+            if following.get("role") == "assistant":
+                probe += 1
+                continue
+            if following.get("role") != "tool":
+                break
+            covered.add(str(following.get("tool_call_id") or ""))
+            probe += 1
+        kept = []
+        dropped = []
+        for call in calls:
+            call_id = (
+                str(call.get("id") or call.get("call_id") or "")
+                if isinstance(call, dict)
+                else ""
+            )
+            if call_id and call_id in covered:
+                kept.append(call)
+            else:
+                dropped.append(call_id)
+        if not dropped:
+            continue
+        repaired_msg = copy.deepcopy(msg)
+        if kept:
+            repaired_msg["tool_calls"] = copy.deepcopy(kept)
+        else:
+            repaired_msg.pop("tool_calls", None)
+        repaired[idx] = repaired_msg
+        # debug, not warning: this runs on every projection of every turn, so an
+        # abandoned call would otherwise log several warnings per turn forever.
+        logger.debug(
+            "Dropped %d orphan tool_call id(s) at context index %d (no tool_result "
+            "immediately after); would have caused an upstream 400: %s",
+            len(dropped),
+            idx,
+            ", ".join(d for d in dropped if d) or "<missing id>",
+        )
+    return repaired
 
 
 def _assign_stable_message_ids(result_messages, *existing_arrays):
@@ -10225,6 +10841,14 @@ def _materialize_pending_user_turn_before_error(
         existing = messages[-1]
         if not isinstance(existing, dict) or existing.get('role') != 'user':
             return False
+        if active_turn_token and existing.get('_active_turn_token') and existing.get('_active_turn_token') != active_turn_token:
+            # Text + integer-second timestamp is not ownership (re-gate
+            # 2026-10-06 item 3): a second interrupt of the same prompt
+            # inside one second carries a DIFFERENT stream token, and this
+            # turn's recovery must run instead of collapsing into the other
+            # turn's row. Token-less rows (legacy data) keep the established
+            # timestamp check.
+            return False
         existing_source = existing.get('_source') or 'webui'
         try:
             existing_ts = int(existing.get('timestamp'))
@@ -10237,6 +10861,43 @@ def _materialize_pending_user_turn_before_error(
             and list(existing.get('attachments') or []) == pending_attachments
         )
 
+    def ctx_already_has_turn_mirror(ctx):
+        """True when the model context already carries this turn's mirror.
+
+        The gateway cancel-time reconcile (_reconcile_gateway_cancelled_context)
+        mirrors the interrupted prompt into context_messages BEFORE
+        _persist_cancelled_turn runs (re-gate 2026-10-05 item 2 order), and the
+        mirrored partial may trail it. Scanning the recent tail (not just the
+        last row) recognizes that mirror by content + timestamp + source and
+        prevents a second user row on a replayed settle.
+        """
+        if not isinstance(ctx, list) or not ctx:
+            return False
+        for row in reversed(ctx[-8:]):
+            if not (isinstance(row, dict) and row.get('role') == 'user'):
+                continue
+            if _normalize_user_text(_message_text(row.get('content'))) != _normalize_user_text(pending_text):
+                break
+            if (
+                active_turn_token
+                and row.get('_active_turn_token')
+                and row.get('_active_turn_token') != active_turn_token
+            ):
+                # Not this stream's row (re-gate 2026-10-06 item 3): the
+                # reconcile may not have mirrored this turn yet, or the
+                # matching row belongs to a different interrupt of the same
+                # prompt inside the same second. Token-less rows keep the
+                # established timestamp check.
+                break
+            try:
+                row_ts = int(row.get('timestamp'))
+            except (TypeError, ValueError):
+                break
+            if row_ts == recovered_ts and (row.get('_source') or 'webui') == pending_source:
+                return True
+            break
+        return False
+
     if is_exact_checkpoint(getattr(session, 'messages', None)):
         return False
     recovered = {
@@ -10247,7 +10908,17 @@ def _materialize_pending_user_turn_before_error(
     }
     if str(pending_source or '').strip().lower() == 'fork':
         recovered['_fork_child_turn'] = session.session_id
-    stamp_message_source(recovered, pending_source)
+    elif (
+        str(pending_source or '').strip().lower() == 'delegation_wakeup'
+        and str(getattr(session, 'session_source', None) or '').strip().lower() == 'fork'
+    ):
+        # Fork-internal delegation wakeup: keep the typed _source for hiding but
+        # carry the fork-ownership proof regeneration requires (#7882 re-gate).
+        recovered['_fork_child_turn'] = session.session_id
+    # The recovered row carries this stream's active-turn token so every
+    # downstream dedup can prove ownership by identity instead of by
+    # content + integer-second timestamp (re-gate 2026-10-06 item 3).
+    stamp_message_source(recovered, pending_source, active_turn_token=active_turn_token)
     if pending_attachments:
         recovered['attachments'] = pending_attachments
     session.messages.append(recovered)
@@ -10260,7 +10931,12 @@ def _materialize_pending_user_turn_before_error(
     # Placing the mirror here (rather than in _persist_cancelled_turn) covers
     # all three callers: cancel, provider-error, and exception paths.
     ctx = getattr(session, 'context_messages', None)
-    if isinstance(ctx, list) and ctx and not is_exact_checkpoint(ctx):
+    if (
+        isinstance(ctx, list)
+        and ctx
+        and not is_exact_checkpoint(ctx)
+        and not ctx_already_has_turn_mirror(ctx)
+    ):
         ctx.append(dict(recovered))
     # The new user turn is now committed to messages (#3831): advance a positive
     # truncation watermark left over from a prior retry/undo/edit so that
@@ -10965,6 +11641,7 @@ def _compute_agent_cache_signature(
     reasoning_config=None,
     main_request_overrides=None,
     _main_request_overrides=None,
+    provider_routing_kwargs=None,
     prefill_context=None,
     profile_home: str | None = None,
     safe_profile_runtime_env: dict | None = None,
@@ -10991,6 +11668,7 @@ def _compute_agent_cache_signature(
         sorted(toolsets) if toolsets else [],
         reasoning_config or {},
         _main_request_overrides or {},
+        provider_routing_kwargs or {},
         _public_prefill_context_status(prefill_context),
         profile_home or '',
         _env.get('TERMINAL_ENV', '') or '',
@@ -11902,6 +12580,7 @@ def _run_agent_streaming(
             else getattr(s, "model_provider", None)
         )
         provider_context = str(provider_context).strip().lower() if provider_context else None
+        _turn_route_provider = provider_context
         _agent_lock = _get_session_agent_lock(session_id)
         # #4251: the route layer already persisted this turn's model under the
         # session lock before dispatch, so a mismatch here means a newer picker
@@ -11921,6 +12600,8 @@ def _run_agent_streaming(
                 _last_persisted_model = model
                 _last_persisted_provider = provider_context
                 _turn_owns_persisted_model = True
+                _turn_route_model = model
+                _turn_route_provider = provider_context
 
         # TD1: set thread-local env context so concurrent sessions don't clobber globals
         # Check for pre-flight cancel (user cancelled before agent even started)
@@ -11984,6 +12665,11 @@ def _run_agent_streaming(
                 s.model_provider = provider_context
                 if _repaired and model != (s.model or ""):
                     s.model = model
+                _last_persisted_model = s.model
+                _last_persisted_provider = s.model_provider
+                # ponytail: finalize route snapshot when profile normalization is accepted
+                _turn_route_model = s.model
+                _turn_route_provider = s.model_provider
 
         # Capture the resolved profile name now, while profile context is
         # reliable. Used in the compression migration block to stamp s.profile
@@ -12834,6 +13520,7 @@ def _run_agent_streaming(
             # detached worker for a NAMED profile paired that profile's endpoint
             # with the DEFAULT profile's API key (finding #3). No-op for the
             # default/root profile.
+            _session_requested_provider = None
             with profiles_api.profile_scope_for_detached_worker(
                 _resolved_profile_name, "model + credential resolution", logger_override=logger
             ):
@@ -13159,6 +13846,15 @@ def _run_agent_streaming(
             # re-instantiated fresh each turn (#855).
             if 'gateway_session_key' in _agent_params:
                 _agent_kwargs['gateway_session_key'] = session_id
+            # OpenRouter provider_routing (sort/ignore/only/order): mirror the
+            # gateway's TurnRunner so browser chat turns respect the profile's
+            # provider_routing block. Per-param guarded for older agent builds.
+            # Captured (not recomputed) so the agent-cache signature below can
+            # include the effective routing: editing sort/only/ignore must mint
+            # a new agent for an already-open session instead of reusing one
+            # built on the old routing.
+            _routing_kwargs = _provider_routing_kwargs_for_agent(_cfg, _agent_params)
+            _agent_kwargs.update(_routing_kwargs)
 
             # ── Agent cache: reuse across messages in the same session ──
             # Mirrors gateway _agent_cache.  Keeps _user_turn_count alive so
@@ -13184,6 +13880,7 @@ def _run_agent_streaming(
                     toolsets=_toolsets,
                     reasoning_config=_reasoning_config,
                     main_request_overrides=_main_request_overrides,
+                    provider_routing_kwargs=_routing_kwargs,
                     prefill_context=_prefill_context,
                     profile_home=_profile_home,
                     safe_profile_runtime_env=_safe_profile_runtime_env,
@@ -13813,7 +14510,7 @@ def _run_agent_streaming(
                     new_sid = _agent_sid
                     _compression_origin_session_id = old_sid
                     _compression_continuation_session_id = new_sid
-                    s.session_id = new_sid
+                    _pre_migration_profile = s.profile
                     # Carry profile identity across the compression boundary.
                     # Without this, s.profile stays None on the continuation
                     # session. On the next request, _run_agent_streaming calls
@@ -13830,59 +14527,11 @@ def _run_agent_streaming(
                             "Stamped profile=%r on continuation session %s after compression",
                             _resolved_profile_name, new_sid,
                         )
-                    # Preserve the original session file so the full pre-compression
-                    # history survives even when summarisation fails. The previous
-                    # implementation renamed old_sid.json → new_sid.json, which
-                    # destroyed the only persistent copy of the uncompressed history
-                    # before the new (possibly summary-only) session had been saved.
-                    # If the LLM summariser also failed, the user was left with zero
-                    # recoverable messages. (#2223)
-                    # ---
-                    # Archive the old session: write its current state to disk so
-                    # the full conversation history survives even when context
-                    # compression removes messages from the model's context. Skip
-                    # the write when the file already contains up-to-date data
-                    # (i.e. it was just saved by a checkpoint).
-                    _preserve_pre_compression_snapshot(s, old_sid)
-                    # The continuation is the live/tip session, not another archived
-                    # snapshot. If the in-memory object was itself loaded from a
-                    # pre-compression snapshot (possible on repeated compression chains
-                    # or stale-cache repair paths), _preserve_pre_compression_snapshot()
-                    # intentionally restores that old flag; clear it before saving the
-                    # new continuation so sidebar/discoverability code does not hide the
-                    # session that owns the completed turn.
-                    s.pre_compression_snapshot = False
-                    # Always link the continuation session to its immediate predecessor
-                    # (the preserved snapshot). This OVERRIDES any prior
-                    # parent_session_id because the new continuation IS the next link
-                    # in the chain: traversal walks new → old → old.parent → ... root.
-                    # Stage-353 Opus SHOULD-FIX: previous `if not s.parent_session_id`
-                    # guard skipped this stamp on fork-of-fork compressions, so a
-                    # subsequent traversal from the new continuation would jump
-                    # over the just-preserved snapshot back to the original fork
-                    # parent, losing access to the recoverable history in old_sid.json.
-                    s.parent_session_id = old_sid
-                    with LOCK:
-                        cached_old_session = SESSIONS.pop(old_sid, None)
-                        if cached_old_session is not None and cached_old_session is not s:
-                            cached_old_sid = str(getattr(cached_old_session, 'session_id', '') or '')
-                            if cached_old_sid == str(old_sid):
-                                SESSIONS[old_sid] = cached_old_session
-                            else:
-                                logger.warning(
-                                    "compression cache migration skipped stale object: old_sid=%s new_sid=%s cached_session_id=%s",
-                                    old_sid,
-                                    new_sid,
-                                    cached_old_sid or None,
-                                )
-                        SESSIONS[new_sid] = s
-                        SESSIONS.move_to_end(new_sid)
-                        _evict_sessions_over_cap()  # #4765: safe LRU eviction (never active/unsaved)
-                    # Migrate the per-session lock by aliasing new_sid to the
-                    # held _agent_lock reference directly. Keep old_sid aliased
-                    # too until the weak registry can reclaim both safely after
-                    # all old-ID holders and waiters release the lock.
-                    _alias_session_agent_lock(old_sid, new_sid, _agent_lock)
+                    if not _migrate_compression_session_ownership(s, old_sid, new_sid, _agent_lock):
+                        s.profile = _pre_migration_profile
+                        raise RuntimeError(
+                            f"Failed to migrate compressed-session ownership: {old_sid}->{new_sid}",
+                        )
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
@@ -14132,6 +14781,7 @@ def _run_agent_streaming(
                                 toolsets=_toolsets,
                                 reasoning_config=_reasoning_config,
                                 main_request_overrides=_main_request_overrides,
+                                provider_routing_kwargs=_routing_kwargs,
                                 prefill_context=_prefill_context,
                                 profile_home=_profile_home,
                                 safe_profile_runtime_env=_safe_profile_runtime_env,
@@ -14300,7 +14950,7 @@ def _run_agent_streaming(
                             _err_type,
                             _err_hint,
                         )
-                        if _turn_pending_source == 'process_wakeup':
+                        if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                             _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                                 s,
                                 classification=_err_type,
@@ -14508,9 +15158,15 @@ def _run_agent_streaming(
                 cache_read_tokens = getattr(agent, 'session_cache_read_tokens', 0) or 0
                 cache_write_tokens = getattr(agent, 'session_cache_write_tokens', 0) or 0
                 prev_input_tokens = getattr(s, 'input_tokens', 0) or 0
+                prev_output_tokens = getattr(s, 'output_tokens', 0) or 0
                 prev_cache_read_tokens = getattr(s, 'cache_read_tokens', 0) or 0
+                prev_cache_write_tokens = getattr(s, 'cache_write_tokens', 0) or 0
+                prev_estimated_cost = getattr(s, 'estimated_cost', 0.0) or 0.0
                 turn_input_tokens = max(0, input_tokens - prev_input_tokens)
+                turn_output_tokens = max(0, output_tokens - prev_output_tokens)
                 turn_cache_read_tokens = max(0, cache_read_tokens - prev_cache_read_tokens)
+                turn_cache_write_tokens = max(0, cache_write_tokens - prev_cache_write_tokens)
+                turn_estimated_cost = max(0.0, (estimated_cost or 0.0) - prev_estimated_cost)
                 # Per-turn percent is computed server-side from persisted session
                 # counters so the message label uses the same denominator as the
                 # final usage payload even if the browser missed an intermediate event.
@@ -14572,18 +15228,48 @@ def _run_agent_streaming(
                 _gateway_routing = _extract_gateway_routing_metadata(
                     agent,
                     result,
+                    # The resolved (bare) model, as on master: a qualified
+                    # route hint such as @openrouter:gpt-4o served by gpt-4o
+                    # is not a model switch. The route provider rides along
+                    # separately for the settlement guard.
                     requested_model=resolved_model or model,
                     requested_provider=resolved_provider,
+                    requested_route_provider=_turn_route_provider,
                 )
-                # #6068: the served model must be read AFTER agent.run — the agent
+                # #6068: the served model must be read AFTER agent.run: the agent
                 # mutates agent.model when a fallback fires, so the pre-run
                 # resolved_model would mis-attribute exactly the turns where
                 # attribution matters most.
                 # The configured selection is not proof that it served this turn.
-                _observed_model = getattr(agent, 'model', None)
-                _used_model = _observed_model.strip() if isinstance(_observed_model, str) else None
+                # ponytail: normalize empty/whitespace to None for route equality
+                def _norm_str(v):
+                    val = str(v or '').strip().lower()
+                    return val if val else None
+
+                # ponytail: reuse shared parser for @provider:model tags
+                def _bare_route_model(v):
+                    val = str(v or '').strip()
+                    if val.startswith('@') and ':' in val:
+                        parsed = _parse_provider_qualified_model_id(val)
+                        if parsed:
+                            return parsed[0].strip().lower()
+                        return val.split(':', 1)[1].strip().lower()
+                    return val.lower() if val else None
+
+                _route_matches = True
+                if s is not None:
+                    _cur_m = getattr(s, 'model', None)
+                    _cur_p = getattr(s, 'model_provider', None)
+                    _target_m = _turn_route_model or resolved_model or model
+                    if _bare_route_model(_cur_m) != _bare_route_model(_target_m):
+                        _route_matches = False
+                    if _norm_str(_cur_p) != _norm_str(_turn_route_provider):
+                        _route_matches = False
+
+                _used_model = _capture_turn_served_model(s if _route_matches else None, agent)
                 if _gateway_routing:
-                    s.gateway_routing = _gateway_routing
+                    if _route_matches:
+                        s.gateway_routing = _gateway_routing
                     _history = list(getattr(s, 'gateway_routing_history', None) or [])
                     _history.append(_gateway_routing)
                     s.gateway_routing_history = _history[-50:]
@@ -14600,6 +15286,28 @@ def _run_agent_streaming(
                                 _dm['_firstTokenMs'] = _ttft_ms
                             if _used_model:
                                 _dm['_usedModel'] = _used_model
+                            # Persist the per-turn usage snapshot next to the other
+                            # settled-turn fields above so the token/cache footer
+                            # survives a session reload. The client already
+                            # derives the same shape from the SSE ``usage``
+                            # payload (_doneUsageFallback delta in messages.js),
+                            # but that value lives only in the live browser tab:
+                            # GET /api/session never returns ``_turnUsage``, so a
+                            # reload or a second tab loses the badge. Mirror the
+                            # client's delta semantics and write it alongside
+                            # ``_turnDuration``/``_firstTokenMs`` (same guard as
+                            # the #503 client path: only stamp when the turn
+                            # actually consumed tokens).
+                            if (turn_input_tokens or turn_output_tokens
+                                    or turn_cache_read_tokens or turn_cache_write_tokens):
+                                _dm['_turnUsage'] = {
+                                    'input_tokens': turn_input_tokens,
+                                    'output_tokens': turn_output_tokens,
+                                    'estimated_cost': turn_estimated_cost,
+                                    'cache_read_tokens': turn_cache_read_tokens,
+                                    'cache_write_tokens': turn_cache_write_tokens,
+                                    'cache_hit_percent': turn_cache_hit_percent,
+                                }
                             break
                 # Persist context window data on the session so the context-ring
                 # indicator survives a page reload (#1318). Must run BEFORE
@@ -15299,7 +16007,7 @@ def _run_agent_streaming(
                 with _lock_ctx:
                     if (
                         not ephemeral
-                        and _turn_pending_source == 'process_wakeup'
+                        and _turn_pending_source in ('process_wakeup', 'delegation_wakeup')
                         and _exc_is_credential_pool_empty
                     ):
                         # Merge the pause into the CURRENT session object under
@@ -15501,6 +16209,7 @@ def _run_agent_streaming(
                         toolsets=_toolsets,
                         reasoning_config=_reasoning_config,
                         main_request_overrides=_main_request_overrides,
+                        provider_routing_kwargs=_routing_kwargs,
                         prefill_context=_prefill_context,
                         profile_home=_profile_home,
                         safe_profile_runtime_env=_safe_profile_runtime_env,
@@ -15705,7 +16414,7 @@ def _run_agent_streaming(
             _lock_ctx = _agent_lock if _agent_lock is not None else contextlib.nullcontext()
             with _lock_ctx:
                 if not ephemeral and not _stream_writeback_is_current(s, stream_id):
-                    if _turn_pending_source == 'process_wakeup':
+                    if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                         # #6623 re-gate: merge the pause into the CURRENT
                         # session object under the canonical lock — never save
                         # the worker's detached snapshot. The helper fails
@@ -15725,7 +16434,7 @@ def _run_agent_streaming(
                     )
                     return
 
-                if _turn_pending_source == 'process_wakeup':
+                if _turn_pending_source in ('process_wakeup', 'delegation_wakeup'):
                     _recorded_pause = record_process_wakeup_provider_unavailable_pause(
                         s,
                         classification=_exc_type,
@@ -16465,7 +17174,21 @@ def cancel_stream(stream_id: str) -> bool:
                             if isinstance(_last_content, str) and _last_ts >= _pending_started:
                                 # Tolerate the workspace prefix the streaming thread prepends.
                                 if _pending_user == _last_content or _pending_user in _last_content:
-                                    _already_persisted = True
+                                    _row_token = _last_user.get('_active_turn_token')
+                                    if (
+                                        _cancel_turn_token
+                                        and _row_token
+                                        and _row_token != _cancel_turn_token
+                                    ):
+                                        # Content + recency is not turn ownership (re-gate
+                                        # 2026-10-06 item 3): a second interrupt of the same
+                                        # prompt inside one second must synthesize its OWN
+                                        # row (with its own token), not bind this turn's
+                                        # cancel identity to the previous interrupt's row.
+                                        # Token-less rows keep the established check.
+                                        _already_persisted = False
+                                    else:
+                                        _already_persisted = True
                         if _already_persisted:
                             _cancel_turn_start = _last_user_idx
                         else:
@@ -16574,6 +17297,44 @@ def cancel_stream(stream_id: str) -> bool:
                         "Failed to recover pending user message on cancel for %s",
                         _cancel_session_id,
                     )
+                # Gateway runs: mirror the interrupted turn (recovered user
+                # row + the streamed partial snapshot taken under streams_lock
+                # above) into the model-facing context BEFORE the stream id is
+                # cleared below. This runs while _stream_writeback_is_current
+                # still passes, so a normal user Stop reconciles the same
+                # snapshot a gateway-side cancel would, and the next turn's
+                # client-built conversation_history includes everything the
+                # gateway persisted at the moment of interruption.
+                try:
+                    _cancel_backend = ""
+                    if isinstance(active_run_entry, dict):
+                        _cancel_backend = str(active_run_entry.get("backend") or "")
+                    if _cancel_backend == "gateway" or (
+                        (getattr(_cs, "gateway_run", None) or {}).get("stream_id") == stream_id
+                    ):
+                        from api.gateway_chat import _reconcile_gateway_cancelled_context
+
+                        # ONE whole-second stamp shared by the model-facing
+                        # partial row and the display partial below: two
+                        # independent int(time.time()) calls can straddle a
+                        # second boundary and the display merge key (whole
+                        # seconds) would then insert a second copy of the
+                        # partial on the next successful turn (re-gate
+                        # 2026-10-05 item 5).
+                        _cancel_partial_ts = int(time.time())
+                        _reconcile_gateway_cancelled_context(
+                            _cs, stream_id, partial_text=_cancel_partial_text,
+                            partial_ts=_cancel_partial_ts,
+                        )
+                    else:
+                        _cancel_partial_ts = int(time.time())
+                except Exception:
+                    _cancel_partial_ts = int(time.time())
+                    logger.debug(
+                        "Failed gateway cancel-context reconcile for %s",
+                        stream_id,
+                        exc_info=True,
+                    )
                 _cs.active_stream_id = None
                 _cs.pending_user_message = None
                 _cs.pending_attachments = []
@@ -16599,6 +17360,12 @@ def cancel_stream(stream_id: str) -> bool:
                 # call and strict providers would 400 on the malformed entries.
                 # The underscore-prefixed key is not in the whitelist, so sanitize
                 # strips it. The UI reads it via static/messages.js. (v0.50.251.)
+                if _partial_msg is not None:
+                    # Same stamp the context reconcile used for its mirrored
+                    # partial row — one whole-second key so the display merge
+                    # cannot insert a second copy after a boundary straddle
+                    # (re-gate 2026-10-05 item 5).
+                    _partial_msg["timestamp"] = _cancel_partial_ts
                 _cancel_marker_exists = _session_has_cancel_marker(_cs)
                 _cancel_marker_idx = len(_cs.messages)
                 if _cancel_marker_exists:

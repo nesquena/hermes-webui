@@ -159,6 +159,7 @@ eval(extractFunc('_resyncSessionVirtualWindowAfterRender'));
 const makeLayout=()=>({rows:Array(200),contentOffsets:Array.from({length:201},(_,i)=>i*34),measurementGeneration:1});
 const list={scrollTop:3000,clientHeight:520,isConnected:true,_sessionVirtualLayout:makeLayout()};
 const oldWindow={virtualized:true,start:50,end:65};
+function _repaintSidebarForBackgroundChurn(){renderSessionListFromCache();}
 function renderSessionListFromCache(){
   renderCount++;
   list._sessionVirtualLayout.measurementGeneration++;

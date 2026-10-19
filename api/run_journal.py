@@ -45,6 +45,19 @@ _SEQ_CACHE_LOCK = threading.Lock()
 _SUMMARY_CACHE_MAX_ENTRIES = 128
 _SUMMARY_CACHE: OrderedDict[str, tuple[tuple[int, int, int, int, int], dict]] = OrderedDict()
 _SUMMARY_CACHE_LOCK = threading.Lock()
+# Run-id -> journal-file resolution. Both ``find_run_file`` and
+# ``find_run_summary`` locate the file with ``glob("*/{run_id}.jsonl")``, which
+# walks every session directory under the journal root, and both are reachable
+# from every SSE poll / reconnect probe. Measured at ~7 ms per call with 645
+# session directories, against ~0.02 ms once the path is known -- the walk, not
+# the parse, was the remaining hot spot for a busy WebUI.
+# A journal's path is stable for its lifetime, so this cache keeps
+# ``(session_id, path)`` and revalidates with a single ``stat``. A vanished file
+# invalidates the entry and falls back to the glob, so a removed-then-recreated
+# run still resolves. LRU-bounded like ``_SUMMARY_CACHE``.
+_RUN_PATH_CACHE_MAX_ENTRIES = 256
+_RUN_PATH_CACHE: OrderedDict[tuple[str, str], tuple[str, str]] = OrderedDict()
+_RUN_PATH_CACHE_LOCK = threading.Lock()
 # Events that mark a run terminal in the journal / summary sense.
 TERMINAL_SSE_EVENTS = frozenset({"done", "cancel", "apperror", "error", "stream_end"})
 # Events that should close an SSE relay drain loop. `done` is intentionally
@@ -773,21 +786,59 @@ def session_journal_fingerprint(session_id: str, *, session_dir: Path | None = N
     return (count, max_mtime, total_size)
 
 
+def _resolve_run_file(run_id: str, root: Path) -> tuple[str, Path] | None:
+    """Locate one run's journal file, reusing the last resolution while it lives.
+
+    ``glob("*/{run_id}.jsonl")`` walks every session directory under the journal
+    root on every call (~7 ms with 645 directories) and both ``find_run_file``
+    and ``find_run_summary`` sit on per-poll paths. A journal's path is stable for
+    its lifetime, so hold ``(session_id, path)`` and revalidate with a single
+    ``stat``. If the file vanished (journal deleted) drop the entry and fall back
+    to the glob, so a removed-then-recreated run still resolves.
+    """
+    cache_key = (str(root), run_id)
+    with _RUN_PATH_CACHE_LOCK:
+        cached = _RUN_PATH_CACHE.get(cache_key)
+        if cached is not None:
+            _RUN_PATH_CACHE.move_to_end(cache_key)
+    if cached is not None:
+        session_id, cached_path = cached
+        path = Path(cached_path)
+        try:
+            path.stat()
+        except OSError:
+            # The journal is gone: resolve from scratch so a re-created run wins.
+            with _RUN_PATH_CACHE_LOCK:
+                _RUN_PATH_CACHE.pop(cache_key, None)
+        else:
+            return session_id, path
+    journal_root = root / RUN_JOURNAL_DIR_NAME
+    for path in journal_root.glob(f"*/{run_id}.jsonl"):
+        session_id = path.parent.name
+        with _RUN_PATH_CACHE_LOCK:
+            _RUN_PATH_CACHE[cache_key] = (session_id, str(path))
+            _RUN_PATH_CACHE.move_to_end(cache_key)
+            while len(_RUN_PATH_CACHE) > _RUN_PATH_CACHE_MAX_ENTRIES:
+                _RUN_PATH_CACHE.popitem(last=False)
+        return session_id, path
+    return None
+
+
 def find_run_summary(run_id: str, *, session_dir: Path | None = None) -> dict | None:
     rid = _validate_id(run_id, "run_id")
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
-    journal_root = root / RUN_JOURNAL_DIR_NAME
-    for path in journal_root.glob(f"*/{rid}.jsonl"):
-        session_id = path.parent.name
-        summary = _get_cached_summary(path)
-        if summary is None:
-            pre_read_signature = _summary_cache_signature(path)
-            events, _malformed = _read_jsonl(path)
-            summary = _summary_from_events(session_id, rid, events)
-            _cache_summary(path, summary, expected_signature=pre_read_signature)
-        summary["path"] = str(path)
-        return summary
-    return None
+    resolved = _resolve_run_file(rid, root)
+    if resolved is None:
+        return None
+    session_id, path = resolved
+    summary = _get_cached_summary(path)
+    if summary is None:
+        pre_read_signature = _summary_cache_signature(path)
+        events, _malformed = _read_jsonl(path)
+        summary = _summary_from_events(session_id, rid, events)
+        _cache_summary(path, summary, expected_signature=pre_read_signature)
+    summary["path"] = str(path)
+    return summary
 
 
 def find_run_file(run_id: str, *, session_dir: Path | None = None) -> tuple[str, Path] | None:
@@ -805,10 +856,7 @@ def find_run_file(run_id: str, *, session_dir: Path | None = None) -> tuple[str,
     except ValueError:
         return None
     root = Path(session_dir) if session_dir is not None else _default_session_dir()
-    journal_root = root / RUN_JOURNAL_DIR_NAME
-    for path in journal_root.glob(f"*/{rid}.jsonl"):
-        return path.parent.name, path
-    return None
+    return _resolve_run_file(rid, root)
 
 
 def read_session_run_events(
@@ -979,6 +1027,18 @@ def delete_run_journal(session_id: str, *, session_dir: Path | None = None) -> b
         with _SUMMARY_CACHE_LOCK:
             for cache_key in [entry for entry in _SUMMARY_CACHE if str(Path(entry).parent) == dir_key]:
                 del _SUMMARY_CACHE[cache_key]
+        # Drop the run-id -> path resolutions for the removed runs. An entry would
+        # self-invalidate on its next stat, but holding it is pointless and a run
+        # re-created under the same id must not be served the old directory's
+        # session id. The values hold the path, so match on that rather than the
+        # key (which is the journal root, not the per-run directory).
+        with _RUN_PATH_CACHE_LOCK:
+            for cache_key in [
+                key
+                for key, value in _RUN_PATH_CACHE.items()
+                if str(Path(value[1]).parent) == dir_key
+            ]:
+                del _RUN_PATH_CACHE[cache_key]
     return removed
 
 

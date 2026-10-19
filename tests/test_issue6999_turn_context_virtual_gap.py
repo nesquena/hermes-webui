@@ -41,18 +41,21 @@ def _render_messages_body() -> str:
 
 def test_render_messages_feeds_full_vis_with_idx_to_turn_maps():
     body = _render_messages_body()
-    assert "_assistantTurnFinalVisibleContentMap(visWithIdx)" in body, (
+    # #7882 round-7: the maps now also take the raw turn-boundary map — the
+    # call sites pass (visWithIdx, _rawTurnBoundaryByRawIdx), still the FULL
+    # visWithIdx, never the virtual render window.
+    assert "_assistantTurnFinalVisibleContentMap(visWithIdx," in body, (
         "Turn context maps must see the FULL visWithIdx so an assistant run is "
         "never cut by the virtual window."
     )
-    assert "_assistantTurnVisibleContentMap(visWithIdx)" in body, (
+    assert "_assistantTurnVisibleContentMap(visWithIdx," in body, (
         "Turn visible-content map must see the FULL visWithIdx."
     )
     assert "_assistantTurnFinalVisibleContentMap(renderVisWithIdx)" not in body, (
         "The virtualized render window (head+tail with a gap) must never be "
         "used as turn-context input — it cuts runs and merges distinct turns."
     )
-    assert "_assistantTurnVisibleContentMap(renderVisWithIdx)" not in body
+    assert "_assistantTurnVisibleContentMap(renderVisWithIdx" not in body
 
 
 def _function_source(name: str) -> str:

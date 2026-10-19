@@ -242,6 +242,12 @@ bootstrap probe accepts either backend.
 
 ---
 
+## Browser becomes unresponsive while switching running conversations
+
+If `/health` is healthy and `active_runs` still contains the tasks, a frozen browser does not mean the backend workers have crashed. Reconnecting to a long reasoning stream can replay many chunks at once; repainting the activity scene for every chunk can block the browser main thread.
+
+Reasoning deltas remain in each conversation's `INFLIGHT` state. Display updates share the answer's coalesced render scheduler, with synchronous tail flushes at interim-answer, tool, and terminal boundaries. Queued renders check the current conversation and stream ownership before updating the pane. Transport recovery paints pending assistant prose before cancelling the queued frame, so already received text stays visible while reconnecting. Reloading the page reconnects to existing tasks; the backend does not need to restart just because the browser froze.
+
 ## "Response interrupted." marker keeps saying "no agent output was recovered"
 
 **Symptom.** After a live response stream stops before a turn completes (manual restart, OOM, crash, browser/SSE disconnect, lost worker bookkeeping, …), the affected chat shows an `**Response interrupted.**` marker. If the run-journal for that turn is already visible on disk, the marker says the partial output was recovered; if not, it preserves the user turn and says no agent output was recovered yet.
@@ -418,6 +424,24 @@ python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confir
 **Fix.** `/sessions` is now included alongside `/` and `/index.html` in the set of paths that serve the SPA shell. No configuration change is needed.
 
 ---
+
+## Update fetch cannot create a remote-tracking ref
+
+**Symptom.** After a remote branch rename, Git reports that
+`refs/remotes/origin/onboarding` exists and it cannot create
+`refs/remotes/origin/onboarding/next` (Git older than 2.51), or only
+`some local refs could not be updated; try running 'git remote prune origin'`
+(Git 2.51 and newer, which batches fetch ref updates).
+
+**Recovery.** For the updater's `fetch origin` commands and the default clone
+mapping (`+refs/heads/*:refs/remotes/origin/*`), the runner retries this collision
+once with `--prune --no-prune-tags` and an explicit remote-tracking-only
+mapping, so config changes during recovery cannot widen the prune destinations.
+Git removes stale remote-tracking refs before fetching their replacements;
+local branches, local-only tags, and
+working-tree edits remain intact. Custom mappings (including mappings into
+local tags or branches), explicit refspecs, and other failures retain their
+normal diagnostics and require manual inspection instead of automatic pruning.
 
 ## Update check reports a Git authentication or fetch failure
 

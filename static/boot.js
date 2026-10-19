@@ -936,7 +936,131 @@ $('btnSend').onclick=()=>{
   send();
 };
 $('mainChat')?.addEventListener('pointerdown', closeMobileWorkspacePanelFromChat);
-$('btnAttach').onclick=e=>{if(e&&e.preventDefault)e.preventDefault();$('fileInput').value='';$('fileInput').click();};
+let _attachChoiceOpen=false;
+let _attachChoicePointerDown=false;
+const _attachChoiceCapabilityQueries={
+  coarse:matchMedia('(pointer:coarse)'),
+  fine:matchMedia('(any-pointer:fine)'),
+};
+function _shouldOfferCameraChoice(){
+  try{
+    return _isTouchOnlyDevice();
+  }catch(_){return false;}
+}
+function _syncAttachChoiceSemantics(){
+  const attach=$('btnAttach');
+  if(!attach)return;
+  if(_shouldOfferCameraChoice()){
+    attach.setAttribute('aria-haspopup','menu');
+    attach.setAttribute('aria-controls','attachChoicePopup');
+    attach.setAttribute('aria-expanded',String(_attachChoiceOpen));
+  }else{
+    ['aria-haspopup','aria-controls','aria-expanded'].forEach(name=>attach.removeAttribute(name));
+  }
+}
+function _handleAttachChoiceCapabilityChange(){
+  if(!_shouldOfferCameraChoice()){
+    const popup=$('attachChoicePopup');
+    _dismissAttachChoice(!!(popup&&popup.contains(document.activeElement)));
+  }
+  _syncAttachChoiceSemantics();
+}
+function _setAttachChoiceOpen(open,restoreFocus){
+  const popup=$('attachChoicePopup');
+  const attach=$('btnAttach');
+  if(!popup||!attach)return;
+  _attachChoiceOpen=!!open;
+  popup.hidden=!_attachChoiceOpen;
+  popup.setAttribute('aria-hidden',String(!_attachChoiceOpen));
+  if(_attachChoiceOpen) popup.querySelector('[data-attach-choice]')?.focus();
+  else if(restoreFocus) attach.focus();
+  _syncAttachChoiceSemantics();
+}
+function _dismissAttachChoice(restoreFocus){
+  if(_attachChoiceOpen)_setAttachChoiceOpen(false,restoreFocus);
+}
+window._dismissAttachChoice=_dismissAttachChoice;
+function _openAttachInput(input){
+  _dismissAttachChoice();
+  if(!input)return;
+  const restoreFocus=()=>{
+    input.removeEventListener('change',restoreFocus);
+    input.removeEventListener('cancel',restoreFocus);
+    setTimeout(()=>$('btnAttach')?.focus(),0);
+  };
+  input.addEventListener('change',restoreFocus);
+  input.addEventListener('cancel',restoreFocus);
+  input.value='';
+  input.click();
+}
+function _cameraFileWithUniqueName(file,usedNames){
+  if(!file||!usedNames.has(file.name))return file;
+  const match=/^(.*?)(\.[^.]*)?$/.exec(file.name);
+  const stem=match?.[1]||file.name;
+  const ext=match?.[2]||'';
+  let index=1;
+  let name;
+  do{name=`${stem} (${index++})${ext}`;}while(usedNames.has(name));
+  return new File([file],name,{type:file.type,lastModified:file.lastModified});
+}
+function _handleCameraFiles(files){
+  const usedNames=new Set((S.pendingFiles||[]).map(file=>file.name));
+  const normalized=[];
+  for(const file of files||[]){
+    const normalizedFile=_cameraFileWithUniqueName(file,usedNames);
+    if(normalizedFile){normalized.push(normalizedFile);usedNames.add(normalizedFile.name);}
+  }
+  addFiles(normalized);
+}
+$('btnAttach').onclick=e=>{
+  _attachChoicePointerDown=false;
+  if(e&&e.preventDefault)e.preventDefault();
+  if(_shouldOfferCameraChoice())_setAttachChoiceOpen(!_attachChoiceOpen);
+  else {$('fileInput').value='';$('fileInput').click();}
+};
+$('btnAttach').addEventListener('pointerdown',()=>{_attachChoicePointerDown=_attachChoiceOpen;});
+$('btnAttach').addEventListener('pointercancel',()=>{_attachChoicePointerDown=false;});
+$('attachChoicePopup')?.addEventListener('click',e=>{
+  const choice=e.target.closest('[data-attach-choice]')?.dataset.attachChoice;
+  if(choice==='camera')_openAttachInput($('cameraFileInput'));
+  if(choice==='files')_openAttachInput($('fileInput'));
+});
+$('attachChoicePopup')?.addEventListener('focusout',e=>{
+  if(!e.currentTarget.contains(e.relatedTarget)){
+    if(_attachChoicePointerDown&&(!e.relatedTarget||e.relatedTarget===$('btnAttach')))return;
+    _dismissAttachChoice();
+  }
+});
+document.addEventListener('pointerdown',e=>{
+  if(_attachChoiceOpen&&!e.target.closest('#attachChoicePopup,#btnAttach'))_dismissAttachChoice();
+});
+function _handleAttachChoiceKeydown(e){
+  if(!_attachChoiceOpen)return false;
+  if(e.key==='Escape'){
+    e.preventDefault();
+    _dismissAttachChoice(true);
+    return true;
+  }
+  const popup=$('attachChoicePopup');
+  if(!popup||!popup.contains(document.activeElement))return false;
+  const choices=[...popup.querySelectorAll('[data-attach-choice]:not([disabled])')];
+  if(!choices.length)return false;
+  const current=choices.indexOf(document.activeElement);
+  let next=current;
+  if(e.key==='ArrowDown')next=current<0?0:(current+1)%choices.length;
+  else if(e.key==='ArrowUp')next=current<0?choices.length-1:(current-1+choices.length)%choices.length;
+  else if(e.key==='Home')next=0;
+  else if(e.key==='End')next=choices.length-1;
+  else return false;
+  e.preventDefault();
+  choices[next].focus();
+  return true;
+}
+_syncAttachChoiceSemantics();
+Object.values(_attachChoiceCapabilityQueries).forEach(query=>{
+  if(typeof query.addEventListener==='function')query.addEventListener('change',_handleAttachChoiceCapabilityChange);
+  else if(typeof query.addListener==='function')query.addListener(_handleAttachChoiceCapabilityChange);
+});
 
 // ── Voice input (Web Speech API + MediaRecorder fallback) ───────────────────
 function _micIsLocalhostOrLoopback(hostname){
@@ -2489,6 +2613,7 @@ function _currentSessionIsReusableEmptyChat(){
 }
 
 $('fileInput').onchange=e=>{addFiles(Array.from(e.target.files));e.target.value='';};
+$('cameraFileInput').onchange=e=>{_handleCameraFiles(Array.from(e.target.files));e.target.value='';};
 $('btnNewChat').onclick=async()=>{
   // If the current session has no messages AND nothing is in flight, just focus
   // the composer rather than creating another empty session that will clutter the
@@ -2658,10 +2783,20 @@ $('btnClearPreview').onclick=handleWorkspaceClose;
 // workspacePath click handler removed -- use topbar workspace chip dropdown instead
 function _applySessionContextMetadataUpdate(data){
   if(!S.session||!data||!data.session)return;
+  if(data.session.session_id && S.session.session_id && String(data.session.session_id) !== String(S.session.session_id)) return;
   S.session.context_length=data.session.context_length||0;
   S.session.threshold_tokens=data.session.threshold_tokens||0;
   S.session.last_prompt_tokens=data.session.last_prompt_tokens||0;
   S.session.post_compression_context_tokens_estimate=data.session.post_compression_context_tokens_estimate||null;
+  if('last_used_model' in data.session){
+    S.session.last_used_model=data.session.last_used_model||null;
+  }
+  if('gateway_routing' in data.session){
+    S.session.gateway_routing=data.session.gateway_routing||null;
+  }
+  if('gateway_routing_history' in data.session){
+    S.session.gateway_routing_history=data.session.gateway_routing_history||[];
+  }
   if(typeof _syncCtxIndicator==='function'){
     const u=S.lastUsage||{};
     const _pick=(latest,stored,dflt=0)=>latest!=null?latest:(stored!=null?stored:dflt);
@@ -2701,11 +2836,18 @@ $('modelSelect').onchange=async()=>{
   }
   if(!S.session){
     if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
+    if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncReasoningChip==='function') syncReasoningChip();
     return;
   }
   if(typeof _rememberPendingSessionModel==='function') _rememberPendingSessionModel(S.session.session_id,modelState.model,modelState.model_provider);
+  const routeChanged = String(S.session.model || '') !== String(modelState.model || '')
+    || String(S.session.model_provider || '') !== String(modelState.model_provider || '');
+  if(routeChanged){
+    S.session.last_used_model = null;
+    S.session.gateway_routing = null;
+  }
   S.session.model=modelState.model;
   S.session.model_provider=modelState.model_provider||null;
   if(typeof syncModelChip==='function') syncModelChip();
@@ -2715,18 +2857,23 @@ $('modelSelect').onchange=async()=>{
   if(typeof showToast==='function'){
     showToast(t('model_scope_toast')||'Applies to this conversation from your next message.', 3000);
   }
-  const data=await api('/api/session/update',{method:'POST',body:JSON.stringify({
-    session_id:S.session.session_id,
-    workspace:S.session.workspace,
-    model:modelState.model,
-    model_provider:modelState.model_provider||null,
+  S._modelUpdateSeq = (S._modelUpdateSeq || 0) + 1;
+  const updateSeq = S._modelUpdateSeq;
+  const targetSession = S.session;
+  const data = await api('/api/session/update', {method: 'POST', body: JSON.stringify({
+    session_id: S.session.session_id,
+    workspace: S.session.workspace,
+    model: modelState.model,
+    model_provider: modelState.model_provider || null,
   })});
+  if (S.session !== targetSession || S._modelUpdateSeq !== updateSeq) return;
   // NOTE: do NOT clear the pending explicit-pick marker here. It must survive until
   // the NEXT send() consumes it, otherwise the normal "pick → session-update → send"
   // flow loses the explicit-pick signal before /api/chat/start runs and the server
   // re-reverts a cross-family pick (the #3737 bug, Codex catch). send() clears it
   // after reading a matching pending pick. (#3739/#3737)
   _applySessionContextMetadataUpdate(data);
+  if (typeof syncModelChip === 'function') syncModelChip();
   // Warn if selected model belongs to a different provider than what Hermes is configured for
   if(typeof _checkProviderMismatch==='function'){
     const warn=_checkProviderMismatch(selectedModel);
@@ -2893,7 +3040,23 @@ $('msg').addEventListener('keydown',e=>{
   }
 });
 // B14: Cmd/Ctrl+K creates a new chat from anywhere
+// True when Enter belongs to the focused element rather than to a page-level
+// shortcut: text entry, and anything a keyboard user activates with Enter
+// (buttons, links, menu rows, tabs, options, ...). The approval shortcut below
+// uses it so Enter never approves a pending action out from under a control.
+const _ENTER_CONTROL_ROLES=/^(button|link|menuitem|menuitemradio|menuitemcheckbox|option|tab|switch|checkbox|radio|combobox|treeitem|textbox|searchbox|spinbutton|slider)$/;
+function _enterBelongsToFocusedControl(el){
+  if(!el||el===document.body||el===document.documentElement) return false;
+  if(el.isContentEditable) return true;
+  const tag=el.tagName||'';
+  if(tag==='TEXTAREA'||tag==='INPUT'||tag==='SELECT'||tag==='BUTTON'||tag==='SUMMARY') return true;
+  if(tag==='A'&&el.hasAttribute('href')) return true;
+  const role=(el.getAttribute&&el.getAttribute('role'))||'';
+  return _ENTER_CONTROL_ROLES.test(role);
+}
+
 document.addEventListener('keydown',async e=>{
+  if(_handleAttachChoiceKeydown(e))return;
   // Cmd/Ctrl+B toggles desktop sidebar collapse (VS Code convention).
   // Skip when typing in an input/textarea/contenteditable so text-edit
   // shortcuts (e.g. bold in some embedded editors) are never stolen.
@@ -2919,12 +3082,19 @@ document.addEventListener('keydown',async e=>{
     if(composer){e.preventDefault();composer.focus();}
     return;
   }
-  // Enter on approval card = Allow once (when a button inside the card is focused or
-  // card is visible and focus is not on an input/textarea/select)
+  // Enter while the approval card is on screen = Allow once, but only when no
+  // control has focus. A focused button, link or menu item (one of the card's own
+  // buttons included) keeps its own Enter: Enter on "Deny" denies, and Enter on the
+  // ⋮ trigger, a menu row or the project picker activates that control instead of
+  // approving the pending action and cancelling the key (#8130).
   if(e.key==='Enter'&&!e.metaKey&&!e.ctrlKey&&!e.shiftKey){
     const card=$('approvalCard');
-    const tag=(document.activeElement||{}).tagName||'';
-    if(card&&card.classList.contains('visible')&&tag!=='TEXTAREA'&&tag!=='INPUT'&&tag!=='SELECT'){
+    // Judge the element the key was pressed on (e.target), not document.activeElement:
+    // this listener runs after the target's own handlers, and a control that blurs or
+    // removes itself on Enter (queued-message editor, chip rename, "Show earlier steps")
+    // leaves the body focused by now. A handler that already consumed Enter
+    // (defaultPrevented) owns it too.
+    if(card&&card.classList.contains('visible')&&!e.defaultPrevented&&!_enterBelongsToFocusedControl(e.target)){
       e.preventDefault();
       if(typeof respondApproval==='function') respondApproval('once');
       return;
@@ -3665,6 +3835,7 @@ function _setComposerControlHidden(el, hidden){
 
 function _applyComposerFooterVisibilitySettings(){
   const hidden=window._composerControlVisibility||{};
+  if(hidden.hide_composer_attach&&typeof _dismissAttachChoice==='function')_dismissAttachChoice();
   for(const def of _allComposerControlToggleDefs()){
     const isHidden=!!hidden[def.key];
     for(const selector of def.selectors){
@@ -4260,7 +4431,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // re-run when the browser restores the page from bfcache.
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
-  if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+  const _syncQuotaForBootContext=()=>{
+    if(typeof _syncProviderQuotaForActiveContext==='function'){
+      _syncProviderQuotaForActiveContext();
+    }
+  };
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
@@ -4331,6 +4506,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           try{localStorage.removeItem('hermes-webui-session');}catch(_){}
         }
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        _syncQuotaForBootContext();
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
@@ -4345,6 +4521,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+        _syncQuotaForBootContext();
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -4384,6 +4561,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         : [];
       const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);
       if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){
+        if(typeof _rememberEmptyComposerModelOverride==='function'){
+          _rememberEmptyComposerModelOverride(S.session.model, S.session.model_provider);
+        }
         S.session=null; S.messages=[];
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible
@@ -4392,6 +4572,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+        _syncQuotaForBootContext();
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -4423,6 +4604,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
   // A route-only 404 can leave another saved session available for the next boot.
   if(!localStorage.getItem('hermes-webui-session')) await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+  _syncQuotaForBootContext();
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);

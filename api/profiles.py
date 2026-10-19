@@ -40,6 +40,10 @@ _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 # startup control: a pinned profile's .env may be loaded into live os.environ
 # later, but must not be able to change whether the process is isolated.
 _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
+# Launcher/deployment env before any profile .env is applied (init_profile_state
+# runs after this import). A root-profile read layers the root .env over this
+# instead of the live os.environ, which holds the switched-to profile's .env.
+_INITIAL_PROCESS_ENV = dict(os.environ)
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
@@ -1364,6 +1368,92 @@ def profile_env_for_background_worker(
                 _set_thread_env(**previous_thread_env)
             else:
                 _clear_thread_env()
+
+
+@contextmanager
+def profile_env_for_thread_readonly(
+    session,
+    purpose: str = "thread-local read",
+    logger_override: Optional[logging.Logger] = None,
+    *,
+    include_root: bool = False,
+):
+    """Bind a session profile's env to the CURRENT THREAD only.
+
+    For pure reads that resolve through the thread-local channel
+    (``api.config._thread_ctx`` via ``_expand_env_vars`` /
+    ``_thread_local_env_value``) and must NOT mutate process-wide
+    ``os.environ``. ``profile_env_for_background_worker`` mirrors the
+    profile env into ``os.environ`` because agent bodies still have
+    Hermes readers that call ``os.getenv()`` directly; its ``_ENV_LOCK``
+    covers setup/restore only, not the body, so two interleaved scopes
+    (e.g. an HTTP handler thread and a concurrent streaming worker)
+    restore over each other's mirrored env. A pure read needs no such
+    mirror: binding ``_thread_ctx`` alone is sufficient, and the state is
+    per-thread, so concurrent requests on other threads never interfere.
+
+    Like the background worker, the scope sets
+    ``block_process_env_fallback`` so a ``${VAR}`` that only the server
+    process env defines does NOT expand for a named profile (fail-closed
+    profile isolation). Callers that feed the expanded result to an
+    outbound request must treat any value that still contains ``${...}``
+    after expansion as absent (see
+    ``api.streaming._drop_unresolved_routing_refs``) instead of forwarding
+    the literal.
+
+    Accepts a session-like object with ``.profile`` or a profile name.
+    No-ops for default-profile sessions unless ``include_root`` is set:
+    after a process-wide profile switch ``os.environ`` holds the switched-to
+    profile's ``.env``, so callers that must resolve a root session's own
+    ``${VAR}`` bind the root env explicitly: the launcher env captured at
+    import (``_INITIAL_PROCESS_ENV``) with the root home's runtime env over
+    it, matching what the root profile sees when it is active. On resolution
+    failure it logs and yields with the thread's current env state untouched.
+    """
+    log = logger_override or logger
+    raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
+    profile = str(raw_profile or "").strip()
+    if not profile or (profile == "default" and not include_root):
+        yield
+        return
+
+    try:
+        # Lazy import avoids a module-load cycle: api.config imports
+        # api.profiles at module level.
+        from api.config import _thread_ctx
+
+        profile_home_path = Path(get_hermes_home_for_profile(profile))
+        runtime_env = get_profile_runtime_env(profile_home_path)
+        safe_runtime_env = filter_runtime_env_for_gateway_parity(runtime_env)
+    except Exception:
+        log.debug(
+            "Failed to resolve profile env for %s profile %s; keeping the "
+            "thread's current env",
+            purpose,
+            profile,
+            exc_info=True,
+        )
+        yield
+        return
+
+    previous_env = getattr(_thread_ctx, "env", {})
+    previous_env = dict(previous_env) if isinstance(previous_env, dict) else {}
+    previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+    # Any name that resolves to the root home (the legacy "default" or a renamed root alias, #1612) layers
+    # the root .env over the launcher snapshot, exactly like "default".
+    thread_env = dict(_INITIAL_PROCESS_ENV) if _is_root_profile(profile) else {}
+    thread_env.update(safe_runtime_env)
+    thread_env["HERMES_HOME"] = str(profile_home_path)
+    try:
+        _thread_ctx.env = thread_env
+        _thread_ctx.block_process_env_fallback = True
+        yield
+    finally:
+        _thread_ctx.block_process_env_fallback = previous_block
+        if previous_env:
+            _thread_ctx.env = previous_env
+        else:
+            _thread_ctx.env = {}
 
 
 @contextmanager

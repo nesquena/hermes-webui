@@ -685,8 +685,42 @@ function _cancelMessageVirtualizedRender(){
     _messageVirtualScrollRaf=0;
   }
 }
+// #7882 (gate round-7 CORE): a hidden delegation_wakeup row sits between the
+// parent's answer and the follow-up's answer in the RAW transcript. The
+// renderer only walks RENDERABLE rows, so hiding the wakeup deletes the
+// user-turn boundary: the two answers land in ONE .assistant-turn container,
+// and installing the follow-up's Worklog hides every earlier segment in that
+// container (the parent's answer ends up display:none). Turn ownership must
+// therefore be derived from the RAW messages: a user-role row is a turn
+// boundary even when it never acquires a DOM row — but ONLY for rows that
+// would otherwise be ordinary visible user turns. Compaction markers,
+// preserved task lists and recovery-control rows are skipped WITHOUT
+// resetting the container today (they `continue` before the isUser branch or
+// are filtered out entirely), so they must not bump the boundary either.
+function _rawTurnBoundaryByRawIdx(messages){
+  const out=new Map();
+  if(!Array.isArray(messages)) return out;
+  let boundary=-1;
+  let rawIdx=0;
+  for(const m of messages){
+    if(m&&m.role&&m.role!=='tool'){
+      const isUserRow=m.role==='user';
+      const skipNoReset=!isUserRow
+        ||_isContextCompactionMessage(m)
+        ||_isPreservedCompressionTaskListMessage(m)
+        ||_isRecoveryControlMessage(m);
+      if(!skipNoReset) boundary=rawIdx;
+      out.set(rawIdx,boundary);
+    }
+    rawIdx++;
+  }
+  return out;
+}
 function _messageIsRenderable(m){
   if(!m||!m.role||m.role==='tool') return false;
+  // Internal delegation handoffs remain in S.messages for model/recovery state,
+  // but never acquire a transcript row (including attachment-only rows).
+  if(m._source==='delegation_wakeup') return false;
   if(m._source === 'process_wakeup') return !!(msgContent(m)||m.attachments?.length);
   if(_isContextCompactionMessage(m)||_isPreservedCompressionTaskListMessage(m)) return false;
   if(_isRecoveryControlMessage(m)) return false;
@@ -1035,6 +1069,17 @@ function _messageRawIdxForSessionIndex(sessionIdx){
   const n=Number(sessionIdx);
   if(!Number.isFinite(n)) return null;
   return n-_messageSessionIndexBase();
+}
+// Current S.messages index of the message a rendered row shows. data-msg-idx is
+// relative to the _oldestIdx at render time and goes stale when full history
+// loads without a re-render (opening the outline does that); the row's
+// data-session-msg-idx is absolute and does not. Edit, regenerate and fork turn
+// this into an absolute keep_count (#2184), so a stale value truncated or forked
+// at the wrong turn.
+function _rowCurrentRawIdx(row, fallback){
+  const abs=row&&row.dataset?Number(row.dataset.sessionMsgIdx):NaN;
+  const raw=Number.isSafeInteger(abs)&&abs>=0?_messageRawIdxForSessionIndex(abs):null;
+  return Number.isSafeInteger(raw)&&raw>=0?raw:fallback;
 }
 function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container){
   const idx=Math.max(0,Number(visibleIdx)||0);
@@ -1449,7 +1494,7 @@ function _applyUserRowIntrinsicHeight(row, rawText){
   const h=Math.max(remembered, estimate);
   if(h>0) row.style.containIntrinsicSize='auto '+Math.round(h)+'px';
 }
-function _measureMessageVirtualRow(inner, entry){
+function _measureMessageVirtualRow(inner, entry, deferredWrites){
   if(!inner||!entry) return 0;
   const primary=inner.querySelector(`[data-msg-idx="${entry.rawIdx}"]`);
   if(!primary) return 0;
@@ -1470,8 +1515,18 @@ function _measureMessageVirtualRow(inner, entry){
   // extract it without this helper (they stub every collaborator by name).
   if(totalHeight>0 && primary.dataset && primary.dataset.role==='user'
      && typeof _rememberUserRowIntrinsicHeight==='function'){
+    // _rememberUserRowIntrinsicHeight below is a plain JS map write; only the
+    // contain-intrinsic-size assignment invalidates layout. Callers that measure a
+    // whole row set pass a pending buffer (#7677) so every style write lands AFTER
+    // every geometry read — the read/write interleaving this used to do made row N's
+    // getBoundingClientRect() force a fresh full-document layout after row N-1's
+    // write, i.e. N rows cost N layouts on a transcript that can be hundreds of
+    // thousands of pixels tall. No buffer (direct/legacy callers) keeps the
+    // immediate inline write.
     _rememberUserRowIntrinsicHeight(primary.dataset.sessionMsgIdx, totalHeight);
-    primary.style.containIntrinsicSize='auto '+Math.round(totalHeight)+'px';
+    const intrinsic='auto '+Math.round(totalHeight)+'px';
+    if(Array.isArray(deferredWrites)) deferredWrites.push({row:primary,intrinsic:intrinsic});
+    else primary.style.containIntrinsicSize=intrinsic;
   }
   return totalHeight;
 }
@@ -1481,10 +1536,15 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
   let changed=false;
   let measuredCount=0;
   let measuredTotal=0;
+  // #7677 read/write separation: the whole measurement pass is READS FIRST
+  // (every row's getBoundingClientRect()), then one WRITE phase that flushes the
+  // deferred contain-intrinsic-size values. All the reads therefore share a
+  // single layout instead of forcing one per row.
+  const deferredWrites=[];
   for(let vi=0;vi<renderVisWithIdx.length;vi++){
     const entry=renderVisWithIdx[vi];
     if(!entry) continue;
-    const totalHeight=_measureMessageVirtualRow(inner, entry);
+    const totalHeight=_measureMessageVirtualRow(inner, entry, deferredWrites);
     if(totalHeight<=0) continue;
     const visibleIdx=Number(renderVisibleIdxs&&renderVisibleIdxs[vi]);
     if(!Number.isFinite(visibleIdx)) continue;
@@ -1494,6 +1554,10 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
     }
     measuredTotal+=totalHeight;
     measuredCount++;
+  }
+  for(let wi=0;wi<deferredWrites.length;wi++){
+    const pending=deferredWrites[wi];
+    if(pending&&pending.row) pending.row.style.containIntrinsicSize=pending.intrinsic;
   }
   if(measuredCount>0){
     _messageVirtualEstimatedRowHeight=Math.max(60, Math.round(measuredTotal/measuredCount));
@@ -3156,7 +3220,17 @@ else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
-let _providerQuotaRefreshInFlight=false;
+// A provider switch can complete before an older account-quota request returns.
+// Only the newest request may update the composer; otherwise an old Codex result
+// can reappear while the active conversation uses another provider.
+let _providerQuotaRefreshSeq=0;
+let _providerQuotaContextIdentity;
+// profile|provider whose numbers the chip currently shows (null when cleared). A refetch for the same
+// profile and provider keeps them visible instead of blanking the chip until the response arrives.
+let _providerQuotaRenderedKey=null;
+function _providerQuotaProfileKey(){
+  return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
+}
 
 function _formatQuotaMoneyShort(value){
   const n=Number(value);
@@ -3193,67 +3267,270 @@ function _providerQuotaIndicatorText(status){
   }
   return null;
 }
+function clearProviderQuotaIndicator(){
+  _providerQuotaRenderedKey=null;
+  const chip=$('providerQuotaChip');
+  const label=$('providerQuotaChipLabel');
+  const mobileAction=$('composerMobileQuotaAction');
+  const mobileLabel=$('composerMobileQuotaLabel');
+  if(chip){chip.hidden=true;chip.removeAttribute('title');}
+  if(label) label.textContent='';
+  if(mobileAction){mobileAction.hidden=true;mobileAction.removeAttribute('title');}
+  if(mobileLabel) mobileLabel.textContent='';
+}
 function renderProviderQuotaIndicator(status){
   const chip=$('providerQuotaChip');
   const label=$('providerQuotaChipLabel');
   const mobileAction=$('composerMobileQuotaAction');
   const mobileLabel=$('composerMobileQuotaLabel');
-  if(!chip||!label) return;
+  if(!chip||!label){
+    clearProviderQuotaIndicator();
+    return;
+  }
   // Hide entirely when the user has disabled the ambient quota chip in Settings.
   // Boot defaults this on; an explicit false preference suppresses it.
   if(window._showQuotaChip!==true){
-    chip.hidden=true;
-    label.textContent='';
-    chip.removeAttribute('title');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    if(mobileLabel) mobileLabel.textContent='';
+    clearProviderQuotaIndicator();
     return;
   }
   const text=_providerQuotaIndicatorText(status);
   if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
-    chip.hidden=true;
-    label.textContent='';
-    chip.removeAttribute('title');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    if(mobileLabel) mobileLabel.textContent='';
+    clearProviderQuotaIndicator();
     return;
   }
   label.textContent=text.label;
   chip.title=text.title;
-  chip.hidden=false;
-  if(mobileAction){mobileAction.style.display='';mobileAction.title=text.title;}
   if(mobileLabel) mobileLabel.textContent=text.label;
+  if(mobileAction) mobileAction.title=text.title;
+  chip.hidden=false;
+  if(mobileAction) mobileAction.hidden=false;
 }
-async function refreshProviderQuotaIndicator(){
+async function refreshProviderQuotaIndicator(providerId){
+  const requestSeq=++_providerQuotaRefreshSeq;
+  const provider=String(providerId||'').trim();
+  const requestKey=_providerQuotaProfileKey()+'|'+provider;
+  // Clear before the request when the profile or provider changes, so the old account's numbers are not
+  // visible or keyboard-reachable meanwhile. A same-account refetch (session switch, tab return) keeps them.
+  // An unspecified provider means "the server's current default", which can change underneath, so it always clears.
+  if(!provider||requestKey!==_providerQuotaRenderedKey) clearProviderQuotaIndicator();
   // Short-circuit before the fetch when the chip is disabled — no point asking
   // the server for quota data the UI will throw away.
-  if(window._showQuotaChip!==true){
-    const chip=$('providerQuotaChip');
-    if(chip){chip.hidden=true;chip.removeAttribute('title');}
-    const mobileAction=$('composerMobileQuotaAction');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    const mobileLabel=$('composerMobileQuotaLabel');
-    if(mobileLabel) mobileLabel.textContent='';
-    return;
-  }
-  if(_providerQuotaRefreshInFlight) return;
-  _providerQuotaRefreshInFlight=true;
+  if(window._showQuotaChip!==true){clearProviderQuotaIndicator();return;}
+  const query=provider?'?provider='+encodeURIComponent(provider):'';
   try{
-    const status=await api('/api/provider/quota');
+    const status=await api('/api/provider/quota'+query);
+    if(requestSeq!==_providerQuotaRefreshSeq) return;
     renderProviderQuotaIndicator(status);
+    const chip=$('providerQuotaChip');
+    _providerQuotaRenderedKey=(chip&&!chip.hidden)?requestKey:null;
   }catch(_e){
-    renderProviderQuotaIndicator(null);
-  }finally{
-    _providerQuotaRefreshInFlight=false;
+    if(requestSeq!==_providerQuotaRefreshSeq) return;
+    clearProviderQuotaIndicator();
+  }
+}
+// Resolve the provider that should drive the composer quota request.
+// Prefers the active session's provider; when the composer is empty, falls
+// back to the retained empty-composer model override so a non-default provider
+// selected before opening a conversation still scopes the quota request.
+function _currentQuotaProvider(){
+  if(typeof S!=='undefined'&&S&&S.session){
+    return S.session.model_provider||null;
+  }
+  if(typeof _readEmptyComposerModelOverride==='function'){
+    const override=_readEmptyComposerModelOverride();
+    if(override&&override.model_provider) return override.model_provider;
+  }
+  return null;
+}
+// Keep account-quota state aligned with the authoritative session/composer
+// context without turning syncTopbar() into a high-frequency network poll.
+// Session identity is part of the key so switching between conversations is a
+// real refresh even when both use the same provider. Explicit visibility and
+// Settings refreshes intentionally bypass this de-duplication.
+function _syncProviderQuotaForActiveContext(){
+  if(typeof S==='undefined'||!S||S._bootReady!==true) return;
+  const provider=_currentQuotaProvider();
+  const providerIdentity=String(provider||'').trim();
+  // Quota is per profile (the route binds the profile env), so the active profile is part of the identity.
+  const profileIdentity='profile:'+_providerQuotaProfileKey()+'|';
+  const contextIdentity=profileIdentity+(S.session
+    ? 'session:'+String(S.session.session_id||'')+'|provider:'+providerIdentity
+    : 'composer|provider:'+providerIdentity);
+  if(contextIdentity===_providerQuotaContextIdentity) return;
+  _providerQuotaContextIdentity=contextIdentity;
+  if(typeof refreshProviderQuotaIndicator==='function'){
+    void refreshProviderQuotaIndicator(provider);
   }
 }
 window.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function'){
+    void refreshProviderQuotaIndicator(_currentQuotaProvider());
+  }
 });
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
 let _dynamicModelLabels={};
 window._configuredModelBadges=window._configuredModelBadges||{};
+
+// ── Locale-independent model-id sort contract (#7528 round-3) ─────────────
+// Shared with api/config.py `_natural_model_id_key`: NO localeCompare, no
+// browser collation. Both sides run the identical token algorithm so ordering
+// is deterministic across Python/JS boundaries:
+//   1. lowercase the id;
+//   2. split into digit runs and text runs (/\d+|[^\d]+/g);
+//   3. digit vs digit: compare numeric value (strip leading zeros, compare
+//      core length then core text), tie-break on raw run text (007 vs 7);
+//   4. text vs text: compare Unicode code points;
+//   5. digit run sorts before text run at the same position;
+//   6. shorter run list sorts first when prefix-identical.
+function _modelPickerContractRuns(value){
+  return String(value==null?'':value).toLowerCase().match(/\d+|[^\d]+/g)||[];
+}
+function _modelPickerCompareRuns(a,b){
+  const ad=/^\d+$/.test(a), bd=/^\d+$/.test(b);
+  if(ad&&bd){
+    const ac=(a.replace(/^0+/,'')||'0'), bc=(b.replace(/^0+/,'')||'0');
+    if(ac.length!==bc.length) return ac.length<bc.length?-1:1;
+    if(ac!==bc) return ac<bc?-1:1;
+    if(a!==b) return a<b?-1:1;
+    return 0;
+  }
+  if(!ad&&!bd){
+    const la=[...a], lb=[...b];
+    const common=Math.min(la.length,lb.length);
+    for(let i=0;i<common;i++){
+      const ca=la[i].codePointAt(0), cb=lb[i].codePointAt(0);
+      if(ca!==cb) return ca<cb?-1:1;
+    }
+    if(la.length!==lb.length) return la.length<lb.length?-1:1;
+    return 0;
+  }
+  return ad?-1:1;
+}
+function _modelPickerCompareContract(a,b){
+  const ra=_modelPickerContractRuns(a), rb=_modelPickerContractRuns(b);
+  const common=Math.min(ra.length,rb.length);
+  for(let i=0;i<common;i++){
+    const c=_modelPickerCompareRuns(ra[i],rb[i]);
+    if(c!==0) return c;
+  }
+  if(ra.length!==rb.length) return ra.length<rb.length?-1:1;
+  return 0;
+}
+// Provider-routing prefix handling: when a provider context IS known, strip
+// ONLY the exact `@${provider}:` prefix (a bare split on ':' would eat a
+// legit model suffix such as `model-a:free`). When it isn't, the common
+// routing prefixes (@custom:, @provider:name:) are stripped once so named
+// custom IDs still sort on the underlying model id.
+function _modelPickerSortableId(entry,providerHint){
+  let value=String(entry&&entry.value!=null?entry.value:(entry&&entry.id!=null?entry.id:entry)||'');
+  const provider=String(
+    providerHint||
+    (entry&&entry.providerId)||
+    (entry&&entry.provider_id)||
+    (entry&&entry.parentElement&&entry.parentElement.dataset&&entry.parentElement.dataset.provider)||
+    ''
+  ).trim();
+  if(value.startsWith('@')){
+    if(provider){
+      const prefix=`@${provider}:`;
+      if(value.toLowerCase().startsWith(prefix.toLowerCase())) value=value.slice(prefix.length);
+      else{
+        // Known group provider but a different routed prefix (e.g. legacy
+        // alias) — drop the first routing segment conservatively.
+        const colon=value.indexOf(':');
+        if(colon>=0) value=value.slice(colon+1);
+      }
+    }else{
+      // No provider context: strip a single @...: routing segment so named
+      // custom ids (e.g. @custom:name:model-a:free → name:model-a:free) still
+      // compare on the part after the first colon, preserving model suffix
+      // colons. Mirrors _providerFromModelValue semantics.
+      const colon=value.indexOf(':');
+      if(colon>=0) value=value.slice(colon+1);
+    }
+  }
+  return value;
+}
+// Keep the historical name — populated by populateModelDropdown, fallback to static map
+function _modelPickerSortValue(entry,providerHint){
+  return _modelPickerSortableId(entry,providerHint);
+}
+function _compareModelPickerEntries(a,b,providerHint){
+  const av=_modelPickerSortableId(a,providerHint);
+  const bv=_modelPickerSortableId(b,providerHint);
+  const c=_modelPickerCompareContract(av,bv);
+  if(c!==0) return c;
+  // Deterministic tie-break on raw ids (provider-qualified included).
+  const rawA=String(a&&a.value!=null?a.value:(a&&a.id!=null?a.id:a)||'');
+  const rawB=String(b&&b.value!=null?b.value:(b&&b.id!=null?b.id:b)||'');
+  return _modelPickerCompareContract(rawA,rawB);
+}
+function _sortModelPickerEntries(items,providerHint){
+  return Array.from(items||[]).sort((a,b)=>_compareModelPickerEntries(a,b,providerHint));
+}
+function _sortModelPickerOptions(group){
+  if(!group||!group.children) return;
+  const select=group.closest?group.closest('select'):null;
+  // Moving <option> nodes re-parents them, and a <select> keeps its selection
+  // by VALUE, not by node. Reordering therefore resets `selectedIndex` to the
+  // first option whenever the selected value's node moves — so "Show all"
+  // followed by picking another model silently stayed on the old session model
+  // (the unchanged-selection early return then saw a different value). Restore
+  // by OBJECT, never by value: a value match can lose the provider identity of
+  // routed twins that share a bare model id.
+  let selectedOption=null;
+  if(select&&typeof select.selectedOptions!=='undefined'&&select.selectedOptions&&select.selectedOptions.length){
+    selectedOption=select.selectedOptions[0];
+  }
+  const options=Array.from(group.children).filter(option=>option&&option.tagName==='OPTION');
+  // #7528 owner option B: custom/aggregator groups (`custom`, `custom:<name>`)
+  // are natural-sorted whole. Built-in provider groups keep their curated
+  // catalog options in place and natural-sort only the appended `extra`
+  // options (live /v1/models rows, Show-more overflow) as one block after
+  // them. Mirrors api/config.py `_sort_picker_group_models`.
+  const _groupPid=String((group.dataset&&group.dataset.provider)||'').trim().toLowerCase();
+  const _isExtraOption=option=>!!(option.dataset&&option.dataset.extra);
+  const ordered=(_groupPid==='custom'||_groupPid.startsWith('custom:'))
+    ? _sortModelPickerEntries(options)
+    : options.filter(option=>!_isExtraOption(option)).concat(_sortModelPickerEntries(options.filter(_isExtraOption)));
+  if(typeof group.replaceChildren==='function'){
+    group.replaceChildren(...ordered);
+  }else if(Array.isArray(group.children)){
+    // Lightweight DOMs used by the picker regression driver expose children as
+    // an Array. Reorder that array directly so the fallback does not duplicate
+    // options by calling their simplified appendChild implementation.
+    group.children.splice(0,group.children.length,...ordered);
+    for(const option of ordered){
+      option.parentElement=group;
+      if('parentNode' in option) option.parentNode=group;
+    }
+  }else{
+    for(const option of ordered) group.appendChild(option);
+  }
+  if(select&&selectedOption){
+    // #7528 [CORE]: look the captured option up in the WHOLE select, not just
+    // this group. Sorting a second group re-orders its own <optgroup> and
+    // leaves the other groups' options in place, so a selection living in a
+    // different group is still in `select.options` but is no longer in
+    // `group.children` — the old membership check then cleared the selection.
+    const allOptions='options' in select?Array.from(select.options):Array.from(group.children);
+    if(allOptions.indexOf(selectedOption)>=0){
+      selectedOption.selected=true;
+      if('selectedIndex' in select) select.selectedIndex=allOptions.indexOf(selectedOption);
+    }else if('selectedIndex' in select){
+      select.selectedIndex=-1;
+    }
+  }else if(select&&'selectedIndex' in select){
+    // #7528 [SILENT]: a zero-add live refresh on an initially unselected
+    // picker must keep it unselected. `selectedOption` is null here, so the
+    // restore above is skipped entirely and the browser is free to keep (or
+    // adopt) whatever index the re-rendered options left behind — observed as
+    // selectedIndex=-1 becoming a real model, which a later Settings save then
+    // persists as the default. Master preserves the empty selection.
+    select.selectedIndex=-1;
+  }
+}
 const MODEL_STATE_KEY='hermes-webui-model-state';
 const PENDING_SESSION_MODEL_PREFIX='hermes-webui-pending-session-model:';
 const PENDING_SESSION_MODEL_MAX_AGE_MS=10*60*1000;
@@ -4069,6 +4346,52 @@ async function populateModelDropdown(opts={}){
     window._defaultModel=data.default_model||null;
     window._configuredModelBadges=data.configured_model_badges||{};
     window._modelEndpointErrors={};
+    const _sortModelEntries=(items,providerId)=>{
+      const values=Array.from(items||[]);
+      if(typeof _sortModelPickerEntries==='function') return _sortModelPickerEntries(values,providerId);
+      // Minimal self-contained fallback for bare single-function eval harnesses
+      // (test_4737) that lack module-level picker helpers: never reference them
+      // here, and keep the body short so contract-sniffing tests that window
+      // the first chars of populateModelDropdown still see extra_models (#1567).
+      // The fallback must stay locale-INDEPENDENT: no `localeCompare(numeric:true)`,
+      // because the browser collation would tokenize digits under the host
+      // locale and can disagree with the Python ``_natural_model_id_key``
+      // backend (review blocker 3, 2026-09-19). When the contract function
+      // is in scope, delegate to it; otherwise do a deterministic ASCII-aware
+      // [0-9] run split that matches the shared contract tokenization.
+      const _compare=(a,b)=>{
+        if(typeof _modelPickerCompareContract==='function'){
+          return _modelPickerCompareContract(String(a||''),String(b||''));
+        }
+        const _runs=(s)=>String(s||'').toLowerCase().match(/[0-9]+|[^0-9]+/g)||[];
+        const _cmpRuns=(x,y)=>{
+          const _xd=/^[0-9]+$/.test(x), _yd=/^[0-9]+$/.test(y);
+          if(_xd&&_yd){
+            const _xc=(x.replace(/^0+/,'')||'0'), _yc=(y.replace(/^0+/,'')||'0');
+            if(_xc.length!==_yc.length) return _xc.length<_yc.length?-1:1;
+            if(_xc!==_yc) return _xc<_yc?-1:1;
+            if(x!==y) return x<y?-1:1;
+            return 0;
+          }
+          if(!_xd&&!_yd){
+            if(x<y) return -1; if(x>y) return 1; return 0;
+          }
+          return _xd?-1:1;
+        };
+        const _ra=_runs(a), _rb=_runs(b);
+        const _common=Math.min(_ra.length,_rb.length);
+        for(let _i=0;_i<_common;_i++){
+          const _c=_cmpRuns(_ra[_i],_rb[_i]);
+          if(_c!==0) return _c;
+        }
+        if(_ra.length!==_rb.length) return _ra.length<_rb.length?-1:1;
+        return 0;
+      };
+      return values.sort((a,b)=>{
+        const _aid=String(a&&a.id!=null?a.id:a||''), _bid=String(b&&b.id!=null?b.id:b||'');
+        return _compare(_aid,_bid);
+      });
+    };
     // Keep g.extra_models label hydration in this function for /model and tail selections.
 
     const _synthGroupsFromConfigured=()=>{
@@ -4133,7 +4456,11 @@ async function populateModelDropdown(opts={}){
         og.dataset.modelsEndpointError=JSON.stringify(g.models_endpoint_error);
         if(errorKey) window._modelEndpointErrors[errorKey]=g.models_endpoint_error;
       }
-      for(const m of (Array.isArray(g.models)?g.models:[])){
+      // #7528 owner option B: only custom/aggregator groups are re-sorted;
+      // built-in groups keep the curated catalog order the API shipped.
+      const _gPid=String(g.provider_id||'').trim().toLowerCase();
+      const _gModels=Array.isArray(g.models)?g.models:[];
+      for(const m of ((_gPid==='custom'||_gPid.startsWith('custom:'))?_sortModelEntries(_gModels,g.provider_id):_gModels)){
         const opt=document.createElement('option');
         opt.value=m.id;
         opt.textContent=m.label;
@@ -4245,12 +4572,14 @@ function _addLiveModelsToSelect(provider, models, sel){
     }
     if(existingIds.has(mid)) continue;
     const identity=optionIdentity(mid,provider);
+    let twin=null;
     if(existingNorm.has(identity)){
       const sameGroup=Array.from(providerGroup.children||[]).find(o=>optionIdentity(o.value,_getOptionProviderId(o))===identity);
       if(sameGroup){
         const incomingRoutable=String(mid).startsWith('@');
         const existingRoutable=String(sameGroup.value||'').startsWith('@');
         if(!(!existingRoutable&&incomingRoutable)) continue; // let proxy replace catalog twin
+        twin=sameGroup;
       }
     }
     const opt=document.createElement('option');
@@ -4263,13 +4592,26 @@ function _addLiveModelsToSelect(provider, models, sel){
     }else if(m && (m.supports_fast_tier === false || String(m.supports_fast_tier).toLowerCase()==='false')){
       opt.dataset.fast='0';
     }
-    providerGroup.appendChild(opt);
+    if(twin){
+      // A routed replacement for a catalog twin takes the twin's place and its
+      // curated/extra status (#7528 option B): dedup then drops the bare twin,
+      // so a built-in group keeps its curated order instead of the replacement
+      // being sorted into the extras block.
+      if(twin.dataset&&twin.dataset.extra) opt.dataset.extra='1';
+      providerGroup.insertBefore(opt,twin);
+    }else{
+      // Not part of the group's curated `models` list: _sortModelPickerOptions
+      // sorts these after the catalog rows of a built-in group (#7528 option B).
+      opt.dataset.extra='1';
+      providerGroup.appendChild(opt);
+    }
     existingIds.add(mid);
     existingNorm.add(identity);
     _dynamicModelLabels[mid]=m.label||m.id;
     added++;
   }
   if(typeof _deduplicateModelPickerOptions==='function') _deduplicateModelPickerOptions(sel,currentVal);
+  if(typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(providerGroup);
   const currentState=(currentVal&&typeof _modelStateForSelect==='function')
     ? _modelStateForSelect(sel, currentVal)
     : {model:currentVal||'', model_provider:(S.session&&S.session.model_provider)||null};
@@ -4514,10 +4856,37 @@ function syncModelChip(){
   const text=opt?opt.textContent:getModelLabel(sel.value||'');
   const compactText=_compactComposerModelChipLabel(sel.value||'', text);
   const gatewayRouting=_latestGatewayRoutingForSession(S.session);
-  const displayText=_formatGatewayModelLabel(sel.value||'',compactText,gatewayRouting)||compactText;
+  const pickerState=(typeof _modelStateForSelect==='function')
+    ? _modelStateForSelect(sel, sel.value)
+    : { model: sel.value||'', model_provider: null };
+  const pickerModel=pickerState.model||sel.value||'';
+  const _bareRouteModel=(v)=>{
+    const s=String(v||'').trim();
+    const p=(typeof _providerFromModelValue==='function')?String(_providerFromModelValue(s)||''):'';
+    const pre=p?`@${p}:`:'';
+    return (pre&&s.toLowerCase().startsWith(pre.toLowerCase()))?s.slice(pre.length):s;
+  };
+  const _pickerProv=String(pickerState.model_provider||'').trim().toLowerCase();
+  const _sessProv=String((S.session&&S.session.model_provider)||'').trim().toLowerCase();
+  // Only an explicit picker pick (the user chose a model in this tab) can make
+  // the session's served-model attribution stale. A dropdown that restored a
+  // fallback option on its own is not a user choice, so keep the attribution.
+  const _explicitPick=(S.session&&typeof _readExplicitPickerPick==='function')
+    ? _readExplicitPickerPick(S.session.session_id)
+    : null;
+  const routeMatches=!S.session||!S.session.model||!_explicitPick||(
+    _bareRouteModel(pickerModel).toLowerCase()===_bareRouteModel(S.session.model).toLowerCase()
+    &&(!_pickerProv||!_sessProv||_pickerProv===_sessProv)
+  );
+  const activeRouting=routeMatches?gatewayRouting:null;
+  const fallbackModel=(routeMatches&&S.session&&S.session.last_used_model)?S.session.last_used_model:(sel.value||'');
+  const fallbackText=(routeMatches&&S.session&&S.session.last_used_model)
+    ? _compactComposerModelChipLabel(S.session.last_used_model, getModelLabel(S.session.last_used_model))
+    : compactText;
+  const displayText=_formatGatewayModelLabel(fallbackModel,fallbackText,activeRouting)||fallbackText;
   label.textContent=displayText;
   if(mobileLabel) mobileLabel.textContent=displayText;
-  chip.title=gatewayRouting?`${sel.value||'Conversation model'} ${_gatewayRoutingLabel(gatewayRouting)}`:(sel.value||'Conversation model');
+  chip.title=activeRouting?`${fallbackModel||'Conversation model'} ${_gatewayRoutingLabel(activeRouting)}`:(fallbackModel||'Conversation model');
   chip.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
   if(mobileAction) mobileAction.classList.toggle('active',!!(dd&&dd.classList.contains('open')));
 }
@@ -4623,9 +4992,16 @@ function _positionModelDropdown(){
 
 function _readModelOverflowData(group){
   if(!group||!group.dataset||!group.dataset.extraModels) return [];
+  const _sortOverflowModels=(items)=>{
+    const providerId=(group.dataset&&group.dataset.provider)||'';
+    if(typeof _sortModelPickerEntries==='function') return _sortModelPickerEntries(items,providerId);
+    return Array.from(items||[]).sort((a,b)=>_modelPickerCompareContract(String(a&&a.id||''),String(b&&b.id||'')));
+  };
   try{
     const parsed=JSON.parse(group.dataset.extraModels);
-    return Array.isArray(parsed)?parsed.filter(m=>m&&m.id):[];
+    if(!Array.isArray(parsed)) return [];
+    const models=parsed.filter(m=>m&&m.id);
+    return _sortOverflowModels(models);
   }catch(_e){
     return [];
   }
@@ -4651,11 +5027,15 @@ function _appendOverflowOptionsToGroup(group, extraModels){
     if(existing){
       // Move the already-present option into this group rather than duplicating it.
       if(existing.parentNode!==group) group.appendChild(existing);
+      if(existing.dataset) existing.dataset.extra='1';
       continue;
     }
     const opt=document.createElement('option');
     opt.value=m.id;
     opt.textContent=m.label||m.id;
+    // Overflow rows come from `extra_models`, not the curated `models` list
+    // (#7528 option B: sorted after a built-in group's catalog rows).
+    if(opt.dataset) opt.dataset.extra='1';
     group.appendChild(opt);
     appended++;
   }
@@ -4663,6 +5043,7 @@ function _appendOverflowOptionsToGroup(group, extraModels){
     group.dataset.extraModels='[]';
     group.dataset.overflowExpanded='1';
   }
+  if(typeof _sortModelPickerOptions==='function') _sortModelPickerOptions(group);
   return appended;
 }
 
@@ -4812,6 +5193,78 @@ function renderModelDropdown(){
   const _groupMeta=new Map();
   const _groupOrder=[];
   const _badgeMap=window._configuredModelBadges||{};
+  const _sortPickerEntries=typeof _sortModelPickerEntries==='function'
+    ? _sortModelPickerEntries
+    : (items)=>Array.from(items||[]).sort((a,b)=>{
+        const valueOf=(entry)=>{
+          let value=String(entry&&entry.value!=null?entry.value:(entry&&entry.id!=null?entry.id:entry)||'');
+          const provider=String(entry&&entry.providerId||'').trim();
+          if(value.startsWith('@')){
+            const prefix=provider?`@${provider}:`:'';
+            if(prefix&&value.toLowerCase().startsWith(prefix.toLowerCase())) value=value.slice(prefix.length);
+            else if(value.includes(':')) value=value.slice(value.indexOf(':')+1);
+          }
+          return value;
+        };
+        const av=valueOf(a);
+        const bv=valueOf(b);
+        // Locale-INDEPENDENT comparator contract — no localeCompare(numeric:true)
+        // here, because the browser collation would tokenize digits under the
+        // host locale and could disagree with the Python backend
+        // ``_natural_model_id_key`` (review blocker 3, 2026-09-19). When the
+        // contract function is in scope, delegate to it; otherwise inline the
+        // shared [0-9] run split so an isolated eval harness still tokenizes
+        // identically to the Python side.
+        const _contract=typeof _modelPickerCompareContract==='function'
+          ? _modelPickerCompareContract
+          : null;
+        if(_contract){
+          const rawA=String(a&&a.value!=null?a.value:(a&&a.id!=null?a.id:a)||'');
+          const rawB=String(b&&b.value!=null?b.value:(b&&b.id!=null?b.id:b)||'');
+          return _contract(av,bv)||_contract(rawA,rawB);
+        }
+        const _runs=(s)=>String(s||'').toLowerCase().match(/[0-9]+|[^0-9]+/g)||[];
+        const _cmpRuns=(x,y)=>{
+          const _xd=/^[0-9]+$/.test(x), _yd=/^[0-9]+$/.test(y);
+          if(_xd&&_yd){
+            const _xc=(x.replace(/^0+/,'')||'0'), _yc=(y.replace(/^0+/,'')||'0');
+            if(_xc.length!==_yc.length) return _xc.length<_yc.length?-1:1;
+            if(_xc!==_yc) return _xc<_yc?-1:1;
+            if(x!==y) return x<y?-1:1;
+            return 0;
+          }
+          if(!_xd&&!_yd){
+            if(x<y) return -1; if(x>y) return 1; return 0;
+          }
+          return _xd?-1:1;
+        };
+        const _cmpStr=(p,q)=>{
+          const _rp=_runs(p), _rq=_runs(q);
+          const _common=Math.min(_rp.length,_rq.length);
+          for(let _i=0;_i<_common;_i++){
+            const _c=_cmpRuns(_rp[_i],_rq[_i]);
+            if(_c!==0) return _c;
+          }
+          if(_rp.length!==_rq.length) return _rp.length<_rq.length?-1:1;
+          return 0;
+        };
+        const rawA=String(a&&a.value!=null?a.value:(a&&a.id!=null?a.id:a)||'');
+        const rawB=String(b&&b.value!=null?b.value:(b&&b.id!=null?b.id:b)||'');
+        return _cmpStr(av,bv)||_cmpStr(rawA,rawB);
+      });
+  // #7528 owner option B — WHERE the comparator applies (mirrors
+  // _sortModelPickerOptions and api/config.py `_sort_picker_group_models`):
+  // custom/aggregator groups (`custom`, `custom:<name>`) are natural-sorted
+  // whole; built-in provider groups keep their curated rows in catalog order
+  // and natural-sort only their `extra` rows (Show-more overflow, live
+  // /v1/models additions) as one block after them.
+  const _sortsWholeGroup=(providerId)=>{
+    const pid=String(providerId||'').trim().toLowerCase();
+    return pid==='custom'||pid.startsWith('custom:');
+  };
+  const _orderGroupRows=(rows,providerId)=>_sortsWholeGroup(providerId)
+    ? _sortPickerEntries(rows)
+    : rows.filter(m=>!m.extra).concat(_sortPickerEntries(rows.filter(m=>m.extra)));
   const _ensureGroupMeta=(groupKey,groupLabel,providerId,optgroup)=>{
     if(!_groupMeta.has(groupKey)){
       _groupMeta.set(groupKey,{
@@ -4850,7 +5303,7 @@ function renderModelDropdown(){
         const displayName=rawValue.startsWith('@custom:')
           ? getModelLabel(rawValue)
           : (opt.textContent||getModelLabel(rawValue));
-        const entry={value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',groupKey,providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId),hiddenByDefault:false};
+        const entry={value:opt.value,name:esc(displayName),id:esc(opt.value),group:child.label||'',groupKey,providerId,modelsEndpointError,badge:_getConfiguredModelBadge(opt.value,_badgeMap,providerId),hiddenByDefault:false,extra:!!(opt.dataset&&opt.dataset.extra)};
         _modelData.push(entry);
         groupMeta.modelCount++;
       }
@@ -4868,6 +5321,7 @@ function renderModelDropdown(){
           modelsEndpointError,
           badge:_getConfiguredModelBadge(overflowModel.id,_badgeMap,providerId),
           hiddenByDefault:true,
+          extra:true,
         });
         groupMeta.modelCount++;
         groupMeta.hiddenCount++;
@@ -5053,6 +5507,62 @@ function renderModelDropdown(){
       // just asked to see more of it) regardless of any prior collapsed state.
       moreEl.remove();
       wrap.style.display='';
+      // Global group re-sort: the in-place reveal above appends overflow rows
+      // before the expander, but every already-visible row keeps its old slot
+      // — so a sorted visible head followed by a sorted overflow tail would
+      // not be globally ordered ([z-*] visible … [a-*] revealed). Re-position
+      // ALL `.model-opt` rows of the group in one picker-order pass so the
+      // fully expanded group follows the option-B order below (#7528).
+      // GUARD: a subgrouped group (OpenRouter/Nous with >= SUB_GROUP_MIN_MODELS
+      // visible rows) nests rows inside `.model-group-body.sub` wrappers. The
+      // in-place re-sort collects rows via `wrap.querySelectorAll('.model-opt')`
+      // and `wrap.appendChild(...)` MOVES them into the outer wrapper, emptying
+      // the subgroup bodies. Subgrouped groups need the full re-render path so
+      // the existing partition/renderer re-creates the per-prefix bodies
+      // (review blocker 1, 2026-09-19). Flat groups keep the in-place path
+      // because it's a cheap contiguous-ordering pass and preserves scroll
+      // position / group-open state across show-more.
+      const _hasSubgroupBodies=!!(wrap.querySelector&&wrap.querySelector('.model-group-body.sub'));
+      if(_hasSubgroupBodies){
+        // Persist the user's "show more" intent on the global cross-render
+        // force-open set BEFORE the full re-render. `_groupOpenState` is
+        // rebuilt per render and defaults to collapsed for a non-selected
+        // group, so without this add the re-render would re-collapse the
+        // just-revealed group and hide the overflow rows the user asked
+        // for (greptile P1 "Expanded group closes again", 2026-09-26).
+        _forceOpenGroups.add(groupKey);
+        _fullReRender();
+        return;
+      }
+      try{
+        const _allRows=Array.from(wrap.querySelectorAll('.model-opt'));
+        const _rowIds=[];
+        for(const _r of _allRows){
+          const _idEl=_r.querySelector('.model-opt-id');
+          const _id=_idEl?_idEl.textContent:'';
+          if(_id) _rowIds.push({row:_r,id:_id});
+        }
+        if(_rowIds.length>1){
+          const _groupProvider=(og.dataset&&og.dataset.provider)||'';
+          const _cmpRows=(x,y)=>{
+            const xKV=x.id.startsWith('@')?{id:x.id,providerId:_groupProvider}:{id:x.id};
+            const yKV=y.id.startsWith('@')?{id:y.id,providerId:_groupProvider}:{id:y.id};
+            return _compareModelPickerEntries(xKV,yKV,_groupProvider);
+          };
+          // #7528 owner option B: a built-in group keeps its curated rows in
+          // place and sorts only its extra rows (revealed overflow + live
+          // /v1/models rows) as one block after them; custom groups re-sort whole.
+          const _extraIds=new Set();
+          for(const _md of _modelData){
+            if(_md&&_md.groupKey===groupKey&&_md.extra){ _extraIds.add(_md.id); _extraIds.add(_md.value); }
+          }
+          const _isExtraRow=_pair=>_extraIds.has(_pair.id);
+          const _orderedRows=_sortsWholeGroup(_groupProvider)
+            ? _rowIds.sort(_cmpRows)
+            : _rowIds.filter(_pair=>!_isExtraRow(_pair)).concat(_rowIds.filter(_isExtraRow).sort(_cmpRows));
+          for(const _pair of _orderedRows) wrap.appendChild(_pair.row);
+        }
+      }catch(_se){ /* keep revealed rows even if re-sort fails */ }
       _forceOpenGroups.add(groupKey);
       const heading=wrap.previousElementSibling;
       if(heading&&heading.classList&&heading.classList.contains('model-group')){
@@ -5065,7 +5575,7 @@ function renderModelDropdown(){
       // not be reset to the top of the list and not have it jump unpredictably.
       if(firstNewRow && typeof firstNewRow.offsetTop==='number' && typeof requestAnimationFrame==='function'){
         const _targetTop=Math.max(0,firstNewRow.offsetTop-48);
-        const _doScroll=()=>{ try{ dd.scrollTop=_targetTop; }catch(_){} };
+        const _doScroll=()=>{ try{ dd.scrollTop=_targetTop;if(typeof _nudgeModelRowBelowStickyStack==='function') _nudgeModelRowBelowStickyStack(dd,firstNewRow); }catch(_){} };
         _doScroll();                                   // immediate
         requestAnimationFrame(()=>{ _doScroll(); requestAnimationFrame(_doScroll); });
         if(typeof setTimeout==='function') setTimeout(_doScroll,80); // after any refocus settles
@@ -5208,13 +5718,13 @@ function renderModelDropdown(){
       const meta=_groupMeta.get(groupKey);
       if(!meta) continue;
       const hiddenCount=_effectiveHiddenCount(groupKey);
-      const groupRows=_modelData.filter(m=>
+      const groupRows=_orderGroupRows(_modelData.filter(m=>
         m.groupKey===groupKey
         && !configuredIds.has(m.value)
         && !m.endpointErrorOnly
         && matches(m)
         && (!m.hiddenByDefault || !!term)
-      );
+      ),meta.providerId);
       const shouldRenderHeading=!!meta.label&&(groupRows.length||meta.endpointErrorOnly||(!term&&hiddenCount));
       if(shouldRenderHeading){
         const heading=document.createElement('div');
@@ -5278,6 +5788,7 @@ function renderModelDropdown(){
             return b[1].length-a[1].length;
           });
           for(const [pfx,pfxRows] of sorted){
+            const orderedPrefixRows=_orderGroupRows(pfxRows,meta.providerId);
             if(pfxRows.length>=2){
               const subKey=`${groupKey}::${pfx}`;
               if(!(subKey in _groupOpenState)) _groupOpenState[subKey]=true;
@@ -5300,9 +5811,9 @@ function renderModelDropdown(){
               });
               wrapper.appendChild(subHeading);
               wrapper.appendChild(subWrapper);
-              for(const m of pfxRows) subWrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
+              for(const m of orderedPrefixRows) subWrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
             } else {
-              for(const m of pfxRows) wrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
+              for(const m of orderedPrefixRows) wrapper.appendChild(_makeModelRow(m,shouldRenderHeading));
             }
           }
         } else {
@@ -5366,6 +5877,7 @@ function renderModelDropdown(){
     const row=rows[idx];
     row.classList.add('is-highlighted');
     if(typeof row.scrollIntoView==='function') row.scrollIntoView({block:'nearest'});
+    if(typeof _nudgeModelRowBelowStickyStack==='function') _nudgeModelRowBelowStickyStack(dd,row);
   };
   _si.addEventListener('keydown',e=>{
     if(e.key==='Escape'){closeDropdown();return;}
@@ -5407,6 +5919,14 @@ async function selectModelFromDropdown(value){
   const sameModel=String(currentState.model||'')===String(value||'');
   const sameProvider=String(currentState.model_provider||'')===String(provider||'');
   if(sameModel&&sameProvider){ closeModelDropdown(); return; }
+  if(S.session){
+    const sessionModelChanged = String(S.session.model || '') !== String(value || '')
+      || String(S.session.model_provider || '') !== String(provider || '');
+    if(sessionModelChanged){
+      S.session.last_used_model = null;
+      S.session.gateway_routing = null;
+    }
+  }
   // Resolve the provider-specific option so duplicate bare IDs (e.g. gpt-5.5
   // under OpenAI Codex vs OpenRouter) update session model_provider correctly.
   if(typeof _ensureModelOptionInDropdown==='function'){
@@ -5419,6 +5939,26 @@ async function selectModelFromDropdown(value){
   if(typeof sel.onchange==='function') await sel.onchange();
 }
 
+// The scope note and the search row are both sticky. Measure the live note
+// height (it wraps to two lines in longer locales / narrow sheets) so the
+// search row pins exactly under the note instead of a hard-coded 34px.
+function _syncModelDropdownStickyInsets(dd){
+  if(!dd||typeof dd.querySelector!=='function'||!dd.style) return;
+  const note=dd.querySelector('.model-scope-note');
+  const noteH=(note&&typeof note.getBoundingClientRect==='function')?Math.floor(note.getBoundingClientRect().height):0;
+  if(typeof dd.style.setProperty==='function') dd.style.setProperty('--model-scope-note-h',noteH+'px');
+}
+// scrollIntoView does not know about the pinned note + search stack, so a
+// nearest-scroll (arrow keys) or a clamped centre-scroll (open) can park the
+// row underneath it. Nudge the list so the row's top clears the stack; no-op
+// when it already does.
+function _nudgeModelRowBelowStickyStack(dd,row){
+  if(!dd||!row||typeof row.getBoundingClientRect!=='function'||typeof dd.querySelector!=='function') return;
+  const bottomOf=(el)=>(el&&typeof el.getBoundingClientRect==='function')?el.getBoundingClientRect().bottom:0;
+  const stack=Math.max(bottomOf(dd.querySelector('.model-scope-note')),bottomOf(dd.querySelector('.model-search-row')));
+  const top=row.getBoundingClientRect().top;
+  if(top<stack) dd.scrollTop-=Math.ceil(stack-top);
+}
 async function toggleModelDropdown(){
   const dd=$('composerModelDropdown');
   const chip=$('composerModelChip');
@@ -5438,8 +5978,10 @@ async function toggleModelDropdown(){
   renderModelDropdown();
   dd.classList.add('open');
   _positionModelDropdown();
+  _syncModelDropdownStickyInsets(dd);
   const activeRow=dd.querySelector('.model-opt.active');
-  if(activeRow&&typeof activeRow.scrollIntoView==='function') activeRow.scrollIntoView({block:'nearest'});
+  if(activeRow&&typeof activeRow.scrollIntoView==='function') activeRow.scrollIntoView({block:'center'});
+  _nudgeModelRowBelowStickyStack(dd,activeRow);
   chip.classList.add('active');
   const mobileAction=$('composerMobileModelAction');
   if(mobileAction) mobileAction.classList.add('active');
@@ -5568,7 +6110,12 @@ document.addEventListener('click',e=>{
 });
 window.addEventListener('resize',()=>{
   const dd=$('composerModelDropdown');
-  if(dd&&dd.classList.contains('open')) _positionModelDropdown();
+  if(dd&&dd.classList.contains('open')){
+    _positionModelDropdown();
+    // The scope note re-wraps at a new width, so its measured height (and the
+    // search row's sticky offset) must be recomputed on every resize.
+    if(typeof _syncModelDropdownStickyInsets==='function') _syncModelDropdownStickyInsets(dd);
+  }
   // Keep the reasoning dropdown aligned under its chip when the window
   // resizes while open — same pattern as the model dropdown above.
   const rdd=$('composerReasoningDropdown');
@@ -5589,7 +6136,12 @@ function _repositionOpenModelDropdown(){
   requestAnimationFrame(()=>{
     _modelDropdownRepositionScheduled=false;
     const openDd=$('composerModelDropdown');
-    if(openDd&&openDd.classList.contains('open')) _positionModelDropdown();
+    if(openDd&&openDd.classList.contains('open')){
+      _positionModelDropdown();
+      // A rotation / keyboard-open can also re-wrap the scope note, so refresh
+      // the sticky inset here too (same reason as the resize handler above).
+      if(typeof _syncModelDropdownStickyInsets==='function') _syncModelDropdownStickyInsets(openDd);
+    }
   });
 }
 if(window.visualViewport){
@@ -5613,6 +6165,15 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
+  // boundary crossing (this fit path measures real overflow at any width,
+  // e.g. a constant 760px viewport). CSS hides the inline model/reasoning/
+  // toolset anchors in burger mode and reveals the shared mobile config
+  // button/panel, so an open dropdown would outlive its hidden anchor.
+  // Capture the pre-measurement burger state and fire the composer menu
+  // cleanup when it actually TRANSITIONS — not on every fit pass, so
+  // mutation-driven refits with unchanged geometry remain harmless.
+  const wasBurger=footer.classList.contains('cf-burger');
   // Measure without ever PAINTING the expanded state. Stripping the stage
   // classes makes the footer briefly full-width, which grows the composer and
   // shrinks #messages by a few px; restoring them a moment later shrinks it
@@ -5647,6 +6208,14 @@ function _fitComposerFooter(){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
     }
+  }
+  // Post-restore transition check: fire the same composer menu cleanup used
+  // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
+  // above). Both burger transitions (entering and leaving) close — the same
+  // deterministic both-directions policy as the boundary listener.
+  const isBurger=next.includes('cf-burger');
+  if(isBurger!==wasBurger && typeof _onPhoneBoundaryChange==='function'){
+    try{ _onPhoneBoundaryChange(); }catch(_){ }
   }
 }
 window._fitComposerFooter=_fitComposerFooter;
@@ -6405,14 +6974,39 @@ document.addEventListener('keydown',function(e){
   closeReasoningDropdown();
 });
 
-window.addEventListener('resize',function(){
-  if(window.matchMedia && !window.matchMedia('(max-width: 640px)').matches){
-    closeMobileComposerConfig();
-    closeModelDropdown();
-    closeReasoningDropdown();
-    if(typeof closeWsDropdown==='function') closeWsDropdown();
+// Close phone-mode composer state when the phone/desktop boundary (640px) is
+// actually CROSSED — not on every window resize. Keyboard-induced resizes
+// (on-screen keyboard opening/closing on compact touch devices, e.g. the
+// Pixel Fold inner screen at ~804px) resize the visual viewport and fire a
+// window resize, which previously slammed an open model dropdown shut the
+// moment the user tapped the model search input. A MediaQueryList change
+// listener fires only when the (max-width:640px) match itself flips, so it
+// cannot fire for a keyboard-only height change, and it has no uninitialized
+// first-event state (the first boundary crossing after page load is still
+// delivered). Same pattern as static/pwa-startup.js:37-44.
+//
+// Direction policy: close on BOTH crossings (fold AND unfold). Upstream
+// previously closed only when leaving phone mode; closing when entering it
+// too is intentional — the phone layout's mobile drawer owns the sidebar and
+// the composer footer switches to the mobile config panel, so any desktop
+// dropdown state left open across a fold would render against the wrong
+// layout. Both directions reset the composer menu family deterministically.
+const _phoneWidthQuery=(typeof window!=='undefined'&&window.matchMedia)
+  ? window.matchMedia('(max-width: 640px)')
+  : null;
+function _onPhoneBoundaryChange(){
+  closeMobileComposerConfig();
+  closeModelDropdown();
+  closeReasoningDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+}
+if(_phoneWidthQuery){
+  if(typeof _phoneWidthQuery.addEventListener==='function'){
+    _phoneWidthQuery.addEventListener('change',_onPhoneBoundaryChange);
+  }else if(typeof _phoneWidthQuery.addListener==='function'){
+    _phoneWidthQuery.addListener(_onPhoneBoundaryChange);
   }
-});
+}
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only while the user is following the live tail.
@@ -7292,10 +7886,36 @@ function _activityLastObservedAge(group){
   if(!Number.isFinite(stamp)||stamp<=0)return null;
   return Math.max(0,_activityNowSeconds()-stamp);
 }
+function _intlFormatter(locales, options){
+  // Shared Intl.DateTimeFormat cache for per-row timestamp labels: building a
+  // formatter per row dominated long-transcript renders. The browser's default
+  // locale/time zone can change while the page is open (OS time-zone change),
+  // so re-check it once per task (one probe per render, not per row) and drop
+  // every cached formatter when it differs.
+  const f=_intlFormatter;
+  if(!f._envChecked){
+    const o=new Intl.DateTimeFormat().resolvedOptions();
+    const env=o.locale+'|'+o.timeZone;
+    if(env!==f._env||!f._cache){ f._cache=new Map(); f._env=env; }
+    f._envChecked=true;
+    queueMicrotask(()=>{ f._envChecked=false; });
+  }
+  const key=JSON.stringify([locales,options]);
+  let fmt=f._cache.get(key);
+  if(!fmt){ fmt=new Intl.DateTimeFormat(locales,options); f._cache.set(key,fmt); }
+  return fmt;
+}
 function _activityClockLabel(ts){
   const stamp=Number(ts||_activityNowSeconds());
   if(!Number.isFinite(stamp)||stamp<=0)return'';
-  try{return new Date(stamp*1000).toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});}catch(_){return'';}
+  try{
+    const d=new Date(stamp*1000);
+    // Date's locale methods return "Invalid Date", whereas Intl.format throws.
+    if(isNaN(d.getTime()))return d.toLocaleTimeString([], {hour:'numeric',minute:'2-digit'});
+    const opts={hour:'numeric',minute:'2-digit'};
+    const fmt=typeof _intlFormatter==='function'?_intlFormatter([],opts):new Intl.DateTimeFormat([],opts);
+    return fmt.format(d);
+  }catch(_){return'';}
 }
 // Full date+time label for the worklog event-time tooltip (title attr). Guards the
 // same valid-Date range as _timestampSeconds so a bad epoch never yields "Invalid
@@ -7306,7 +7926,9 @@ function _activityFullClockLabel(ts){
   try{
     const d=new Date(stamp*1000);
     if(isNaN(d.getTime()))return'';
-    return d.toLocaleString([], {year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+    const opts={year:'numeric',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'};
+    const fmt=typeof _intlFormatter==='function'?_intlFormatter([],opts):new Intl.DateTimeFormat([],opts);
+    return fmt.format(d);
   }catch(_){return'';}
 }
 function _timestampSeconds(value){
@@ -8235,11 +8857,51 @@ function _gatewayModelWarningText(routing){
   const used=getModelLabel(routing.used_model||'served model');
   return`Model switched: ${requested} → ${used}`;
 }
+function _canonicalModelForCompare(val){
+  if(!val) return '';
+  let str=String(val).trim().toLowerCase();
+  const colonIdx=str.lastIndexOf(':');
+  if(colonIdx!==-1) str=str.slice(colonIdx+1);
+  const slashIdx=str.lastIndexOf('/');
+  if(slashIdx!==-1) str=str.slice(slashIdx+1);
+  return str;
+}
+
 function _latestGatewayRoutingForSession(session){
   if(!session)return null;
-  if(session.gateway_routing)return session.gateway_routing;
-  const history=Array.isArray(session.gateway_routing_history)?session.gateway_routing_history:[];
-  return history.length?history[history.length-1]:null;
+  const fromHistory=!session.gateway_routing;
+  const routing=session.gateway_routing||(Array.isArray(session.gateway_routing_history)&&session.gateway_routing_history.length?session.gateway_routing_history[session.gateway_routing_history.length-1]:null);
+  if(!routing)return null;
+  const _canonical=(typeof _canonicalModelForCompare==='function')
+    ? _canonicalModelForCompare
+    : (val)=>{
+        if(!val) return '';
+        let str=String(val).trim().toLowerCase();
+        const colonIdx=str.lastIndexOf(':');
+        if(colonIdx!==-1) str=str.slice(colonIdx+1);
+        const slashIdx=str.lastIndexOf('/');
+        if(slashIdx!==-1) str=str.slice(slashIdx+1);
+        return str;
+      };
+  if(routing.requested_model&&session.model){
+    const reqModel=_canonical(routing.requested_model);
+    const sessModel=_canonical(session.model);
+    if(reqModel&&sessModel&&reqModel!==sessModel){
+      return null;
+    }
+  }
+  // Canonical provider identity matching: case-insensitive, preserves legacy/empty
+  const hasExplicitRoute=routing.requested_route_provider!==undefined&&routing.requested_route_provider!==null&&String(routing.requested_route_provider).trim()!=='';
+  const sessProvider=String(session.model_provider||'').trim().toLowerCase();
+  if(hasExplicitRoute){
+    const routeProvider=String(routing.requested_route_provider).trim().toLowerCase();
+    if(sessProvider && routeProvider && routeProvider !== sessProvider) return null;
+  } else if(fromHistory){
+    const reqProvider=String(routing.requested_provider||'').trim().toLowerCase();
+    // Fail closed on provider-less history candidate when active route has an explicit provider
+    if(sessProvider && (!reqProvider || reqProvider !== sessProvider)) return null;
+  }
+  return routing;
 }
 
 function _stripXmlToolCallsDisplay(s){
@@ -9138,7 +9800,16 @@ function lockComposerForClarify(placeholderText){
   // card is active (and survives page refresh / syncs across clients).
   const sid = S && S.session && S.session.session_id;
   if (sid && typeof _saveComposerDraftNow === 'function') {
-    _saveComposerDraftNow(sid, input.value || '', S.pendingFiles ? [...S.pendingFiles] : []);
+    const saveText = String(input.value || '');
+    const saveFiles = Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [];
+    try {
+      const saveResult = _saveComposerDraftNow(sid, saveText, saveFiles);
+      if (saveResult && typeof saveResult.catch === 'function') {
+        saveResult.catch((error)=>_handleComposerDraftPostFailure(error,sid,saveText,saveFiles));
+      }
+    } catch (error) {
+      _handleComposerDraftPostFailure(error,sid,saveText,saveFiles);
+    }
   }
   if(!_composerLockState){
     _composerLockState={
@@ -9659,10 +10330,16 @@ function copyToastText(btn){
   _copyText(text).then(done).catch(()=>{});
 }
 function showToast(msg,ms,type){
+  // A type name in the duration slot (showToast(msg,'error') or showToast(msg,'info',6000)) is a type, not a
+  // duration: setTimeout(fn,'error') fires at once, so those toasts vanished as soon as they appeared.
+  if(typeof ms==='string'&&/^(error|success|warning|info)$/.test(ms)&&(type==null||typeof type==='number')){
+    const swapped=type;type=ms;ms=(typeof swapped==='number')?swapped:null;
+  }
   const el=$('toast');if(!el)return;
   const s=String(msg==null?'':msg);let t=type;
   if(!t){const low=s.toLowerCase();if(/fail|error|denied|invalid|unavailable|no active|no workspace match|no model match|no personalities/.test(low))t='error';else if(/warn|queued|takes effect|skipped|fallback/.test(low))t='warning';else if(/saved|created|imported|restored|switched|set to|updated|duplicated|moved to|renamed|deleted|complete|pinned|archived|cleared|stopped/.test(low))t='success';else t='info';}
-  const duration=(ms==null)?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
+  // 0 (the old "use default" sentinel) and other non-positive or non-numeric values mean the default, not "hide now".
+  const duration=(ms==null||!(Number(ms)>0))?(t==='error'?TOAST_ERROR_DEFAULT_MS:TOAST_DEFAULT_MS):ms;
   el.className='toast show '+t;
   el.dataset.toastMessage=s;
   if(t==='error') el.innerHTML=`<span class="toast-message">${esc(s)}</span><button class="toast-copy" type="button" data-toast-copy="1" onclick="copyToastText(this);event.stopPropagation()">Copy</button><button class="toast-dismiss" type="button" aria-label="Dismiss error toast" data-toast-dismiss="1" onclick="dismissToast(this);event.stopPropagation()">Dismiss</button>`;
@@ -10845,22 +11522,33 @@ function renderTodoEmptyState(options={}){
 }
 
 function renderTodoRow(todo,options={}){
+  // ONE shared row renderer for all three Todos surfaces (sidebar panel,
+  // workspace-panel tab, in-chat tray). The tray used to hand-roll its own
+  // markup with tray-only class hooks, which duplicated this function and left
+  // dead CSS behind; it now calls this with {compact:true, rowClass:'...'}
+  // (reviewer re-gate 2026-10-08T03:10:50Z, "tidy the shared-row renderer").
   const td=todo||{};
+  const opts=options||{};
   const status=todoStatusKey(td.status);
   const visual=todoStatusVisual(status);
-  const showMetadata=!(options&&options.metadata===false);
+  const showMetadata=!(opts.metadata===false);
+  const compact=!!opts.compact;
+  const rowClass=opts.rowClass?(' '+String(opts.rowClass)):'';
   const isCompleted=status==='completed';
   const isCancelled=status==='cancelled';
   const contentColor=(isCompleted||isCancelled)?'var(--muted)':'var(--text)';
   const completedStyle=(isCompleted||isCancelled)?'text-decoration:line-through;opacity:.5':'';
   const metadata=showMetadata
-    ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(status)}</div>`
+    ? `<div class="todos-meta" style="font-size:10px;color:var(--muted);margin-top:2px;opacity:.6">${esc(td.id)} · ${esc(status)}</div>`
     : '';
+  const gap=compact?8:10;
+  const padY=compact?5:6;
+  const contentSize=compact?'12.5px':'13px';
   return `
-    <div style="display:flex;align-items:flex-start;gap:10px;padding:6px 0;border-bottom:1px solid var(--border);">
-      <span style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${visual.color}">${renderTodoStatusIcon(status,14)}</span>
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;color:${contentColor};${completedStyle};line-height:1.4">${esc(todoContent(td))}</div>
+    <div class="todos-row${rowClass}" style="display:flex;align-items:flex-start;gap:${gap}px;padding:${padY}px 0;border-bottom:1px solid var(--border);">
+      <span class="todos-status" style="font-size:14px;display:inline-flex;align-items:center;flex-shrink:0;margin-top:1px;color:${visual.color}">${renderTodoStatusIcon(status,14)}</span>
+      <div class="todos-body" style="flex:1;min-width:0">
+        <div class="todos-content" style="font-size:${contentSize};color:${contentColor};${completedStyle};line-height:1.4;overflow-wrap:anywhere">${esc(todoContent(td))}</div>
         ${metadata}
       </div>
     </div>`;
@@ -10877,6 +11565,373 @@ function _todosPanelIsActive(){
   return !!(panel&&panel.classList&&panel.classList.contains('active'));
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Chat todos: embedded collapsible task list at the top of the chat area.
+// Opt-in via the "Show task list in chat" checkbox (localStorage-backed,
+// frontend-only preference — no server settings round-trip needed).
+// When enabled, the sidebar Todos panel is hidden to avoid duplication.
+// ────────────────────────────────────────────────────────────────────────
+const CHAT_TODOS_LS_KEY='hermes-webui-chat-todos';
+let _chatTodosEnabled=null;             // null = uninitialised; true/false once known
+let _chatTodosInitialised=false;
+
+function _chatTodosReadPref(){
+  try{
+    const v=localStorage.getItem(CHAT_TODOS_LS_KEY);
+    // Default OFF (opt-in): the tray hides the sidebar Todos tab and paints a
+    // floating overlay in the transcript, so it must never appear for existing
+    // users who never asked for it. Only an explicit '1' turns it on.
+    if(v===null) return false;
+    return v==='1';
+  }catch(_){return false;}
+}
+function _chatTodosWritePref(v){
+  try{
+    // Persist both states explicitly ('1' enabled / '0' disabled). Removing the
+    // key on false would re-collide with the opt-in default and make a user's
+    // choice to enable the tray vanish on reload.
+    localStorage.setItem(CHAT_TODOS_LS_KEY,v?'1':'0');
+  }catch(_){}
+}
+function chatTodosEnabled(){
+  if(_chatTodosEnabled===null) _chatTodosEnabled=_chatTodosReadPref();
+  return _chatTodosEnabled;
+}
+function _setChatTodosEnabled(v){
+  _chatTodosEnabled=!!v;
+  _chatTodosWritePref(_chatTodosEnabled);
+  if(typeof _syncChatTodosRailVisibility==='function') _syncChatTodosRailVisibility();
+}
+function _syncChatTodosRailVisibility(){
+  // When the in-chat tray is active, hide the sidebar Todos panel so the
+  // user never has two competing todo surfaces.
+  const enabled=chatTodosEnabled();
+  if(enabled){
+    document.querySelectorAll('[data-panel="todos"]').forEach(function(el){
+      el.classList.add('nav-tab-hidden');
+    });
+  }else if(typeof _applyTabVisibility==='function'&&typeof _getHiddenTabs==='function'){
+    // Tray OFF: hand visibility back to its canonical owner. Unconditionally
+    // REMOVING nav-tab-hidden here also revealed a Todos entry the user had
+    // hidden independently through hidden_tabs, so an explicitly hidden tab
+    // reappeared immediately (or after reload). Deferring to
+    // _applyTabVisibility re-derives the tab's own preference instead.
+    //
+    // …but only once the mirror IS that preference. While a profile switch's
+    // /api/settings reconciliation is still in flight, localStorage still holds
+    // the PREVIOUS profile's hidden_tabs/tab_order, so re-deriving here would
+    // reimpose the old profile's tab visibility on the profile now in effect: a
+    // Todos entry the current profile hides pops back, or one it shows stays
+    // hidden, until settings refresh (greptile P1, 2026-10-08T20:06:51Z). Skip
+    // the window — the pending reconciliation re-runs _applyTabVisibility with
+    // the profile's own snapshot and already honours the tray's new state.
+    if(typeof _tabVisibilitySnapshotStale!=='function'||!_tabVisibilitySnapshotStale()){
+      _applyTabVisibility(_getHiddenTabs());
+    }
+  }
+  // If the sidebar Todos panel is currently open, bounce back to chat.
+  if(enabled){
+    const panel=document.getElementById('panelTodos');
+    if(panel&&panel.classList&&panel.classList.contains('active')&&typeof switchPanel==='function'){
+      switchPanel('chat',{fromRailClick:false});
+    }
+  }
+  // The workspace-panel Todos tab (Settings ▸ "Show Todos tab in workspace
+  // panel") is a third Todos surface: it must follow the tray too, otherwise
+  // the two settings contradict each other (reviewer re-gate 2026-10-07T18:08:02Z).
+  if(typeof _applyWorkspaceTodosTabVisibility==='function') _applyWorkspaceTodosTabVisibility();
+}
+// The tray is an in-flow strip, so the shell carries a marker class while it is
+// visible. CSS uses it to drop the floating Start jump pill below the strip
+// instead of letting it paint over the tray (reviewer re-gate 2026-10-07T18:08:02Z).
+let _chatTodosResizeObserver=null;
+// Last measured height of the strip's real box. The transcript is only re-pinned
+// when that box actually GREW (reviewer re-gate 2026-10-08T03:10:50Z).
+let _chatTodosRepinH=0;
+function _measureChatTodosTrayHeight(){
+  const tray=(typeof $==='function')?$('chatTodosPanel'):null;
+  if(!tray||tray.hidden) return 0;
+  try{ return (tray.getBoundingClientRect?tray.getBoundingClientRect().height:0)||0; }catch(_){ return 0; }
+}
+function _publishChatTodosHeight(){
+  // Measure the tray's ACTUAL box and publish it on the shell: CSS offsets the
+  // Start jump pill by it instead of the fixed 43px that only cleared the
+  // collapsed band and let the pill paint inside the expanded rows
+  // (re-gate 2026-10-07T20:13:25Z, [SHOULD-FIX] 2).
+  //
+  // Guarded on purpose: a hidden tray measures 0 and must never clobber a real
+  // height with 0. The observer below republishes as soon as the box is real
+  // again, so the guard no longer strands a stale value (re-gate
+  // 2026-10-07T23:49:23Z).
+  if(typeof document==='undefined'||!document.querySelector) return 0;
+  const shell=document.querySelector('.messages-shell');
+  if(!shell||!shell.style) return 0;
+  // The measured box is CEILed: the whole-tray cap below can leave a fractional
+  // height, and rounding DOWN shaved the Start pill's >=7px clearance
+  // (reviewer re-gate 2026-10-08T09:54:47Z, must-fix 1).
+  const h=Math.ceil(_measureChatTodosTrayHeight());
+  if(h>0&&shell.style.setProperty) shell.style.setProperty('--chat-todos-h',h+'px');
+  return h;
+}
+function _syncChatTodosShellClass(visible){
+  if(typeof document==='undefined'||!document.querySelector) return;
+  const shell=document.querySelector('.messages-shell');
+  if(shell&&shell.classList){
+    shell.classList.toggle('chat-todos-visible',!!visible);
+    if(!visible){
+      if(shell.style&&shell.style.removeProperty) shell.style.removeProperty('--chat-todos-h');
+      return;
+    }
+    _publishChatTodosHeight();
+  }
+}
+function _ensureChatTodosResizeObserver(){
+  // Lifecycle-owned tray observer. The strip's box changes on schedules that
+  // never call renderChatTodos()/toggleChatTodos(): resizing ACROSS the tray
+  // breakpoint (the strip grows 236px -> 276px at 393 -> 1440) and a hidden
+  // tray becoming visible again after Settings edits hydrate the list while
+  // chat is hidden (0 -> 276px, which kept the stale 77px and painted the
+  // whole Start pill inside the task rows). Observing the real box covers both,
+  // so the pill follows the tray's actual box instead of the last render's
+  // measurement (re-gate 2026-10-07T23:49:23Z).
+  if(typeof ResizeObserver!=='function') return;
+  if(typeof document==='undefined'||!document.querySelector) return;
+  const tray=(typeof $==='function')?$('chatTodosPanel'):null;
+  if(!tray) return;
+  if(_chatTodosResizeObserver&&_chatTodosResizeObserver._tray===tray) return;
+  if(_chatTodosResizeObserver&&_chatTodosResizeObserver.disconnect) _chatTodosResizeObserver.disconnect();
+  _chatTodosResizeObserver=null;
+  try{
+    const ro=new ResizeObserver(function(){
+      // Only a visible strip owns the pill offset: while chat is hidden the box
+      // measures 0 and publishing that would leave the pill un-offset. The
+      // hidden -> visible flip re-fires this observer with the real box.
+      const shell=document.querySelector('.messages-shell');
+      if(!(shell&&shell.classList&&shell.classList.contains('chat-todos-visible'))) return;
+      _publishChatTodosHeight();
+      // The bottom fade is a function of the tray's box too: a list that fit
+      // when it was rendered starts scrolling after a shorter viewport or a
+      // taller composer, and with scrollTop still 0 the cue stayed hidden, so
+      // the clipped list read as the complete list until something else
+      // refreshed it (Greptile P2 2026-10-09T21:45:10Z).
+      _updateChatTodosScrollCue();
+      // The repin's own growth gate decides whether the reader moves: a 0px
+      // hidden box records "nothing on screen", so the visible flip still counts
+      // as a real growth (reviewer re-gate 2026-10-08T03:10:50Z).
+      _repinChatTodosTranscript();
+    });
+    ro._tray=tray;
+    ro.observe(tray);
+    _chatTodosResizeObserver=ro;
+  }catch(_){ _chatTodosResizeObserver=null; }
+}
+function _syncChatTodosExpanded(open){
+  const tray=$('chatTodosPanel');
+  if(tray){
+    if(open) tray.classList.add('open');
+    else tray.classList.remove('open');
+  }
+  const head=$('chatTodosHead');
+  if(head&&head.setAttribute) head.setAttribute('aria-expanded',open?'true':'false');
+}
+function _chatTodosToggleEnabled(checked){
+  _setChatTodosEnabled(checked);
+  // The tray force-hides the sidebar Todos entry, so its visibility chip must be
+  // repainted here: toggling the tray from Settings changed nothing on screen
+  // while the chip kept reporting ON (re-gate 2026-10-07, static/ui.js:10503).
+  if(typeof _renderTabVisibilityChips==='function') _renderTabVisibilityChips();
+  // Keep the settings checkbox in sync for callers that toggle the tray from
+  // elsewhere (e.g. the tab-visibility chip that owns the same hide).
+  const prefCb=$('settingsChatTodosInChat');
+  if(prefCb) prefCb.checked=!!checked;
+  const tray=$('chatTodosPanel');
+  if(tray) tray.hidden=!checked;
+  // Enabling always (re)starts collapsed, and collapsing must drop the
+  // header's aria-expanded too — otherwise a tray expanded, turned off and
+  // turned back on is announced as expanded while its body is hidden.
+  _syncChatTodosExpanded(false);
+  renderChatTodos();
+  // Deliberately no whole-transcript rebuild here: the tray is an absolutely
+  // positioned overlay outside the message scroller, so toggling it changes no
+  // transcript layout (a full re-render cost ~256 ms at 300 messages).
+  //
+  // Deliberately NO appearance autosave either (reviewer re-gate
+  // 2026-10-08T23:19:27Z, static/ui.js:11074): the tray preference is persisted
+  // in localStorage by _setChatTodosEnabled above, whereas an appearance save
+  // would POST hidden_tabs/_getHiddenTabs() — a mirror that can still hold a
+  // stale server snapshot. Toggling the tray from Settings then clobbered a
+  // newer hidden_tabs a sibling client had written (verified over real HTTP:
+  // server []; toggling the tray saved ["todos","memory"] back). Explicit
+  // visibility-chip edits keep their own autosave.
+}
+
+// ── Chat todos summary ──────────────────────────────────────────────────
+function _currentTodos(){
+  // `todoStateMeta` is the sentinel for an explicit snapshot (live todo_state
+  // SSE or session cold-load). Without it, S.todos may hold the empty array
+  // hydration installs for an imported/legacy session whose tasks only exist
+  // as role:"tool" messages — returning that array would bypass the legacy
+  // renderer and hide a list that renders today. Explicit empty snapshots
+  // (meta present) still win.
+  if(S.todoStateMeta) return Array.isArray(S.todos)?S.todos:[];
+  if(typeof _legacyTodosFromMessages==='function'){
+    const legacy=_legacyTodosFromMessages();
+    if(Array.isArray(legacy)) return legacy;
+  }
+  return [];
+}
+function _chatTodosSummary(todos){
+  const active=todos.filter(t=>t&&t.status!=='completed'&&t.status!=='cancelled').length;
+  const total=todos.length;
+  if(!total) return {text:t('todos_no_active')||'No active tasks',active:0,total:0};
+  const text=active===0
+    ?t('todos_tray_summary_done',total)
+    :t('todos_tray_summary_active',active,total);
+  return {text,active,total};
+}
+function _repinChatTodosTranscript(){
+  // The tray is IN FLOW, so showing/growing it shrinks the transcript viewport.
+  // The earlier fix re-pinned on EVERY render path — including the feature-OFF
+  // default where the tray is hidden and nothing resized at all — which yanked a
+  // reader who had scrolled up with Auto-follow OFF back to the bottom
+  // (reviewer re-gate 2026-10-08T03:10:50Z, [SHOULD-FIX] 1). Two gates now:
+  //   1. Auto-follow OFF => never touch the scroll position (the setting only
+  //      suppresses AUTOMATIC following; a deliberate jump is explicit).
+  //   2. Re-pin only when the strip's measured box actually GREW. A shrink
+  //      cannot strand a pinned reader: a growing viewport only lowers
+  //      scrollHeight - clientHeight, which the browser clamps for us.
+  // The helper below is a no-op anyway when the reader scrolled away.
+  //
+  // The box must be measured BEFORE the Auto-follow gate (reviewer re-gate
+  // 2026-10-08T06:40:51Z, [SHOULD-FIX]): when the gate returned first, a hide
+  // with Auto-follow OFF never recorded the zero height, so a later re-show
+  // with follow ON compared against the stale pre-hide height, read "not
+  // grown", and skipped the re-pin — stranding a pinned reader. Tracking the
+  // box unconditionally (follow OUT of the measurement) keeps the baseline
+  // honest; only the ACTUAL re-pin stays gated. The measurement is CEILed here
+  // too, so the growth test compares against the SAME number the pill offset
+  // publishes (reviewer re-gate 2026-10-08T09:54:47Z, must-fix 1).
+  const h=Math.ceil(_measureChatTodosTrayHeight());
+  const grew=h>_chatTodosRepinH;
+  _chatTodosRepinH=h;
+  if(typeof window!=='undefined'&&window._autoScrollFollow===false) return;
+  if(!grew) return;
+  if(typeof _repinMessagesAfterComposerResize==='function') _repinMessagesAfterComposerResize();
+}
+function renderChatTodos(){
+  if(typeof $!=='function'||typeof document==='undefined') return;
+  const tray=$('chatTodosPanel');
+  if(!tray) return;
+  // Keep the lifecycle-owned box observer alive across every path that can
+  // (re)create or re-show the tray (re-gate 2026-10-07T23:49:23Z).
+  _ensureChatTodosResizeObserver();
+  if(!chatTodosEnabled()){
+    tray.hidden=true;
+    _syncChatTodosShellClass(false);
+    _repinChatTodosTranscript();
+    return;
+  }
+  const todos=_currentTodos();
+  if(!todos.length){
+    tray.hidden=true;
+    _syncChatTodosShellClass(false);
+    _repinChatTodosTranscript();
+    return;
+  }
+  tray.hidden=false;
+  _syncChatTodosShellClass(true);
+  _repinChatTodosTranscript();
+  // ONE progress label (reviewer re-gate 2026-10-07T18:08:02Z): the header
+  // used to print the active count twice (summary + counter). The summary span
+  // is generated text, so it also no longer carries data-i18n and is filled
+  // here for every locale.
+  const summary=_chatTodosSummary(todos);
+  const summaryEl=$('chatTodosSummary');
+  if(summaryEl) summaryEl.textContent=summary.text;
+  if(!tray.classList.contains('open')){
+    // Collapsed: header only. Render body lazily when expanded.
+    return;
+  }
+  const body=$('chatTodosBody');
+  if(!body) return;
+  // ONE shared row renderer (sidebar panel / workspace Todos tab / this tray), so
+  // the tray can never drift from the other Todos surfaces (reviewer re-gate
+  // 2026-10-08T03:10:50Z, "tidy the shared-row renderer").
+  const rows=renderTodoRows(todos,{metadata:false,compact:true,rowClass:'chat-todos-row'});
+  // The rows live in their own centred column so they line up with the
+  // transcript's reading column instead of spanning the full shell width
+  // (reviewer re-gate 2026-10-08T03:10:50Z).
+  body.innerHTML=`<div class="chat-todos-rows">${rows||`<div class="chat-todos-empty">${esc(t('todos_no_active'))}</div>`}</div>`;
+  _wireChatTodosScrollCue();
+  _updateChatTodosScrollCue();
+  // The expanded body's height depends on the row count (and growing a list is
+  // the case the reviewer measured a 199px gap on), so re-publish the strip
+  // height for the Start pill and re-pin the transcript to its new bottom.
+  _syncChatTodosShellClass(true);
+  _repinChatTodosTranscript();
+}
+function toggleChatTodos(){
+  const tray=$('chatTodosPanel');
+  if(!tray) return;
+  const isOpen=!tray.classList.contains('open');
+  _syncChatTodosExpanded(isOpen);
+  if(isOpen) renderChatTodos();
+  // Expanding/collapsing resizes the in-flow strip, so refresh the published
+  // height (Start pill offset) and re-pin the transcript on BOTH transitions —
+  // collapsing must not leave the scroller short either (re-gate
+  // 2026-10-07T20:13:25Z).
+  _syncChatTodosShellClass(!tray.hidden);
+  _repinChatTodosTranscript();
+  // Opening/closing the disclosure changes which rows are visible, so the
+  // "more below" cue is re-derived on both transitions (re-gate 2026-10-08).
+  _updateChatTodosScrollCue();
+}
+function _initChatTodos(){
+  if(_chatTodosInitialised) return;
+  _chatTodosInitialised=true;
+  if(typeof document==='undefined') return;
+  _chatTodosEnabled=chatTodosEnabled();
+  _syncChatTodosRailVisibility();
+  const tray=$('chatTodosPanel');
+  if(tray){
+    if(!chatTodosEnabled()){
+      tray.hidden=true;
+      _syncChatTodosShellClass(false);
+      return;
+    }
+    tray.hidden=false;
+    // In-flow strip: start collapsed so it costs only the ~35px header band.
+    _syncChatTodosShellClass(true);
+    _wireChatTodosScrollCue();
+    renderChatTodos();
+  }
+}
+
+// ── Overflow cue for the capped expanded body ──────────────────────────────
+// Below ~768px the body is capped (200px) and its scrollbar is an overlay that
+// mobile browsers only reveal while scrolling, so a capped list looked like a
+// complete one (reviewer re-gate 2026-10-08T03:10:50Z, "a mobile overflow cue
+// when the capped body scrolls"). The cue is a bottom fade published on the
+// wrapper, shown only while there is still content below the fold.
+let _chatTodosCueWired=false;
+function _wireChatTodosScrollCue(){
+  if(_chatTodosCueWired) return;
+  const body=$('chatTodosBody');
+  if(!body||!body.addEventListener) return;
+  _chatTodosCueWired=true;
+  body.addEventListener('scroll',_updateChatTodosScrollCue,{passive:true});
+}
+function _updateChatTodosScrollCue(){
+  const body=$('chatTodosBody');
+  const wrap=$('chatTodosBodyWrap');
+  if(!body||!wrap||!wrap.classList) return;
+  let moreBelow=false;
+  try{
+    moreBelow=(body.scrollHeight-body.clientHeight)>2&&(body.scrollHeight-body.scrollTop-body.clientHeight)>2;
+  }catch(_){ moreBelow=false; }
+  wrap.classList.toggle('chat-todos-overflowing',moreBelow);
+}
+
 function scheduleTodosRefresh(){
   // Idempotent: many `todo_state` events fire on each tool result, but
   // only the latest snapshot needs to paint.  RAF lets us coalesce
@@ -10885,6 +11940,7 @@ function scheduleTodosRefresh(){
   if(typeof requestAnimationFrame!=='function'){
     if(typeof loadTodos==='function') loadTodos();
     if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
+    if(typeof renderChatTodos==='function') renderChatTodos();
     return;
   }
   _todosRenderRafId=requestAnimationFrame(()=>{
@@ -10892,6 +11948,7 @@ function scheduleTodosRefresh(){
     const sidebarActive=_todosPanelIsActive();
     if(sidebarActive&&typeof loadTodos==='function') loadTodos();
     if(typeof _refreshWorkspacePanelTodos==='function') _refreshWorkspacePanelTodos();
+    if(typeof renderChatTodos==='function') renderChatTodos();
   });
 }
 
@@ -11307,6 +12364,8 @@ function _syncSystemHealthMonitorVisibility(){
 document.addEventListener('visibilitychange',_syncSystemHealthMonitorVisibility);
 if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',startSystemHealthMonitor);
 else startSystemHealthMonitor();
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',_initChatTodos);
+  else _initChatTodos();
 
 // ── Hermes agent/gateway heartbeat alert (#716) ──
 const AGENT_HEALTH_INTERVAL_MS=30000;
@@ -11448,6 +12507,11 @@ function _formatUpdateTargetStatus(label,info){
     :(info.branch?` (${info.branch})`:'');
   const noun=info.release_based?'release':'update';
   return `${label}${release}: ${info.behind} ${noun}${info.behind>1?'s':''}`;
+}
+function _updateTargetArrowNamesTag(info,tag){
+  // True only when THIS target's own status renders "(current -> tag)", so a "Latest tag" suffix would repeat it
+  // (#6859). Never search the combined status text: another target's version or branch can contain the tag string.
+  return !!(tag&&info&&info.release_based&&info.latest_version===tag&&_formatUpdateTargetStatus('',info));
 }
 function _formatManualUpdateInstruction(info){
   if(!(info&&info.no_git&&info.manual_update&&info.behind>0)) return null;
@@ -12333,14 +13397,42 @@ function getPendingSessionMessage(session, messagesOverride=null){
       ? _sameTranscriptMessage(row,pendingCandidate)
       : String(msgContent(row)||'').trim()===text;
   };
+  const _rowIdentityMatchesPending=(row)=>{
+    if(!row) return false;
+    if(typeof _activeTurnTokenMatches==='function'&&_activeTurnTokenMatches(row,session)) return true;
+    const ts=_messageTimestampSeconds(row);
+    const startedAt=Number(session?.pending_started_at);
+    return ts!==null&&Number.isFinite(startedAt)&&startedAt>0
+      &&Math.abs(ts-startedAt)<=_PENDING_ACTIVE_TURN_TS_EPSILON;
+  };
   const _adoptExistingRow=(row)=>{
     if(attachments.length&&!row.attachments?.length) row.attachments=attachments;
+    // #quiet-delegation: a state.db copy adopted on reload may predate the
+    // _source stamp (deferred save). Carry the pending turn's provenance so
+    // the hidden-row predicate still applies to the adopted row — but ONLY on
+    // identity proof (token or exact timestamp). Text equality alone must
+    // never stamp a real earlier row hidden (#quiet-delegation gate review
+    // finding 4).
+    const pendingSource=session?.pending_user_source;
+    if(pendingSource&&row&&!row._source&&_rowIdentityMatchesPending(row)) row._source=pendingSource;
     return null;
   };
   const currentTailUser=_pendingCurrentTailUserMessage(messages);
   if(currentTailUser){
     const sameCurrentTurn=_matchesPending(currentTailUser);
-    if(sameCurrentTurn) return _adoptExistingRow(currentTailUser);
+    if(sameCurrentTurn){
+      // A wakeup-sourced pending prompt that text-matches a real row WITHOUT
+      // the pending turn's token/timestamp identity must not swallow that
+      // row: leave it alone and materialize the pending row separately, so a
+      // delegation_wakeup stamp can never hide a real user turn (gate review
+      // finding 4). Ordinary webui prompts keep text-only dedupe — their row
+      // is never hidden and the deferred-save flow relies on it.
+      const pendingSource=session?.pending_user_source;
+      const wakeupSourced=!!pendingSource&&pendingSource!=='webui';
+      if(!wakeupSourced||_rowIdentityMatchesPending(currentTailUser)){
+        return _adoptExistingRow(currentTailUser);
+      }
+    }
   }
   // Fallback: the current turn's user row is already in the transcript but the
   // strict tail scan above could not see it because this turn's assistant/tool
@@ -12391,11 +13483,16 @@ async function checkInflightOnBoot(sid) {
 
 function _topbarLoadedMessageCount(){
   const messages=Array.isArray(S.messages)?S.messages:[];
-  return messages.filter(m=>m&&m.role&&m.role!=='tool').length;
+  return messages.filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length;
 }
 function _topbarMessageMetaText(){
   const loadedCount=_topbarLoadedMessageCount();
-  const totalCount=Number(S.session&&S.session.message_count);
+  // #quiet-delegation: prefer the server's visible count (hidden internal
+  // rows excluded) so "N of M messages" never counts delegation handoffs.
+  // Fall back to the raw count on servers that don't send it yet.
+  const rawTotal=Number(S.session&&S.session.message_count);
+  const visibleTotal=Number(S.session&&S.session.visible_message_count);
+  const totalCount=Number.isFinite(visibleTotal)&&visibleTotal>=0?visibleTotal:rawTotal;
   const hasTotal=Number.isFinite(totalCount)&&totalCount>0;
   const isTruncated=!!(typeof _messagesTruncated!=='undefined'&&_messagesTruncated);
   if(isTruncated&&hasTotal&&totalCount>loadedCount){
@@ -12427,6 +13524,7 @@ function syncTopbar(){
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
     const _titleLabel=$('titlebarProfileLabel');
     if(_titleLabel) _titleLabel.textContent=S.activeProfile||'default';
+    if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -12554,6 +13652,7 @@ function syncTopbar(){
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+  if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
 }
 
 function msgContent(m){
@@ -12785,10 +13884,11 @@ function _assistantVisibleContentForReasoningCompare(m){
   if(_isAssistantEmptyPlaceholderContent(m, content)) return '';
   return String(content||'');
 }
-function _assistantTurnFinalVisibleContentMap(visWithIdx){
+function _assistantTurnFinalVisibleContentMap(visWithIdx, turnBoundaryByRawIdx){
   const out=new Map();
   let runIdxs=[];
   let finalVisible='';
+  let runTurnId;
   const flush=()=>{
     for(const idx of runIdxs) out.set(idx, finalVisible);
     runIdxs=[];
@@ -12796,7 +13896,19 @@ function _assistantTurnFinalVisibleContentMap(visWithIdx){
   };
   for(const entry of visWithIdx||[]){
     const m=entry&&entry.m;
-    if(m&&m.role==='assistant'){
+    // #7882 (gate round-7 CORE): a hidden delegation_wakeup row between two
+    // answers is still a turn boundary — flush the run when the raw turn
+    // owner changes even though the boundary row never renders. The entry
+    // that triggered the flush STARTS the next run (a split, not a drop).
+    const turnId=turnBoundaryByRawIdx?turnBoundaryByRawIdx.get(entry.rawIdx):undefined;
+    if(m&&m.role==='assistant'&&(!turnBoundaryByRawIdx||turnId===runTurnId||runIdxs.length===0)){
+      if(runIdxs.length===0) runTurnId=turnId;
+      runIdxs.push(entry.rawIdx);
+      const visible=_assistantVisibleContentForReasoningCompare(m);
+      if(String(visible||'').trim()) finalVisible=visible;
+    }else if(m&&m.role==='assistant'&&runIdxs.length){
+      flush();
+      runTurnId=turnId;
       runIdxs.push(entry.rawIdx);
       const visible=_assistantVisibleContentForReasoningCompare(m);
       if(String(visible||'').trim()) finalVisible=visible;
@@ -12807,10 +13919,11 @@ function _assistantTurnFinalVisibleContentMap(visWithIdx){
   flush();
   return out;
 }
-function _assistantTurnVisibleContentMap(visWithIdx){
+function _assistantTurnVisibleContentMap(visWithIdx, turnBoundaryByRawIdx){
   const out=new Map();
   let runIdxs=[];
   let visibleTexts=[];
+  let runTurnId;
   const flush=()=>{
     for(const idx of runIdxs) out.set(idx, visibleTexts.slice());
     runIdxs=[];
@@ -12818,7 +13931,15 @@ function _assistantTurnVisibleContentMap(visWithIdx){
   };
   for(const entry of visWithIdx||[]){
     const m=entry&&entry.m;
-    if(m&&m.role==='assistant'){
+    const turnId=turnBoundaryByRawIdx?turnBoundaryByRawIdx.get(entry.rawIdx):undefined;
+    if(m&&m.role==='assistant'&&(!turnBoundaryByRawIdx||turnId===runTurnId||runIdxs.length===0)){
+      if(runIdxs.length===0) runTurnId=turnId;
+      runIdxs.push(entry.rawIdx);
+      const visible=_assistantVisibleContentForReasoningCompare(m);
+      if(String(visible||'').trim()) visibleTexts.push(visible);
+    }else if(m&&m.role==='assistant'&&runIdxs.length){
+      flush();
+      runTurnId=turnId;
       runIdxs.push(entry.rawIdx);
       const visible=_assistantVisibleContentForReasoningCompare(m);
       if(String(visible||'').trim()) visibleTexts.push(visible);
@@ -12917,6 +14038,116 @@ function _worklogDetailScrollableBody(el){
   if(!el||!el.querySelector) return null;
   return el.querySelector('.thinking-card-body,.tool-card-detail');
 }
+// Live thinking tail-follow: reasoning text that streams into an expanded
+// thinking card should keep scrolling into view the way the message pane
+// follows its bottom, while a reader who scrolls up inside the card is held
+// in place. Tail-follow state is EXPLICIT to live thinking rows: a settled
+// card is never seeded or pinned, so it keeps master's open-at-top reading
+// behavior. The latch below records per-body follow intent on live bodies
+// only (true at stream start, flipped by the passive scroll listener as the
+// reader moves: hold away from the tail, resume at the tail), and the detail
+// capture/restore path carries it across DOM rebuilds via the atBottom
+// snapshot field, which is recorded only for bodies that participate.
+const _THINKING_TAIL_STICK_PX=24;
+function _thinkingRowIsLive(row){
+  if(!row||!row.getAttribute) return false;
+  if(row.getAttribute('data-live-thinking-row')==='1') return true;
+  if(row.getAttribute('data-live-thinking')==='1') return true;
+  if(row.getAttribute('data-thinking-active')==='1') return true;
+  return !!(row.closest&&row.closest('[data-live-anchor-scene-owner="1"],[data-live-tool-call-group="1"],[data-live-assistant-turn="1"]'));
+}
+function _bindThinkingTailFollow(body, atTail){
+  if(!body||typeof body.addEventListener!=='function') return;
+  // atTail===undefined: a live body's own write seeds follow=true only when
+  // the latch is unset. An explicit atTail is AUTHORITATIVE (restore replaying
+  // captured intent onto a rebuilt body): it overrides the latch, or a body
+  // recreated mid-hold would be re-seeded true by its creation write and yank
+  // the reader to the bottom on the next rebuild.
+  if(atTail===undefined){
+    if(body._thinkingTailFollow===undefined) body._thinkingTailFollow=true;
+  }else{
+    body._thinkingTailFollow=!!atTail;
+  }
+  if(body._thinkingTailFollowBound) return;
+  body._thinkingTailFollowBound=true;
+  body.addEventListener('scroll',()=>{
+    const room=Math.max(0,(Number(body.scrollHeight)||0)-(Number(body.clientHeight)||0));
+    body._thinkingTailFollow=room-(Number(body.scrollTop)||0)<=_THINKING_TAIL_STICK_PX;
+  },{passive:true});
+}
+function _thinkingCardOpened(card){
+  // Shared by _toggleThinkingCard and _setTransparentCardOpen. The open
+  // transition animates the body height from zero, so measuring immediately
+  // classifies even a card that will fit when fully open as away from the tail
+  // (#7988 review) — settle the follow state once the layout is stable. Until
+  // then the latch stays unset and no write may pin (follow requires ===true).
+  const body=card&&card.querySelector?card.querySelector('.thinking-card-body'):null;
+  if(!body) return;
+  // Settled history must never acquire follow state: capture trusts the latch
+  // over the real position, so binding here makes a persisted card jump to the
+  // bottom on any later re-render (e.g. a 1280->390 reflow) (#7988 review).
+  const row=body.closest?body.closest('.msg,.thinking-row,[data-live-thinking-row]'):null;
+  if(typeof _thinkingRowIsLive==='function'&&!_thinkingRowIsLive(row||card)) return;
+  let done=false;
+  // Published so both tail writers can exclude a body whose open animation is
+  // still running: a delta landing inside the settle window must not pin a
+  // reader who is holding at the top (#7988 review).
+  // Each open supersedes the previous one's settle window. Without this, a
+  // stale timer from an earlier open (quick close+reopen) fires mid-animation
+  // of the current open and strands a card that will fit on HOLD (#7988
+  // review). A stale settle is a complete no-op: it must not clear the new
+  // settling flag or seed anything.
+  body._thinkingTailSettleGen=(Number(body._thinkingTailSettleGen)||0)+1;
+  const gen=body._thinkingTailSettleGen;
+  body._thinkingTailSettling=true;
+  const settle=(ev)=>{
+    if(gen!==body._thinkingTailSettleGen){
+      if(typeof body.removeEventListener==='function') body.removeEventListener('transitionend', settle);
+      return;
+    }
+    // Any transitionend on the body fires this, but opacity finishes well
+    // before max-height — measuring then reads a mid-animation height and
+    // seeds HOLD on a card that actually fits (#7988 review).
+    if(ev&&ev.propertyName&&ev.propertyName!=='max-height') return;
+    if(ev&&ev.target&&ev.target!==body) return;
+    if(done) return;
+    done=true;
+    body._thinkingTailSettling=false;
+    if(typeof body.removeEventListener==='function') body.removeEventListener('transitionend', settle);
+    // Closed again before the transition finished (quick re-toggle): leave the
+    // latch untouched so the reopen re-arms and seeds from a real layout,
+    // instead of stranding a live card on a collapsed-body measurement.
+    if(card&&card.classList&&!card.classList.contains('open')) return;
+    // Re-check at fire time, not at arm time: a scroll between open and
+    // settle (or a refresh that re-armed this on an already-open card) must
+    // not yank the reader (#7988 review). Seed only if still unset, pin only
+    // if still following.
+    if(body._thinkingTailFollow===undefined&&typeof _bindThinkingTailFollow==='function'){
+      _bindThinkingTailFollow(body, _worklogDetailBodyAtTail(body));
+    }
+    if(body._thinkingTailFollow===true){
+      body.scrollTop=Math.max(0,(Number(body.scrollHeight)||0)-(Number(body.clientHeight)||0));
+    }
+  };
+  if(typeof body.addEventListener==='function') body.addEventListener('transitionend', settle);
+  // Fallback when no transition runs (reduced motion, no CSS transition).
+  if(typeof setTimeout==='function') setTimeout(settle, 350);
+}
+function _toggleThinkingCard(card){
+  if(!card||!card.classList) return;
+  const opening=!card.classList.contains('open');
+  card.classList.toggle('open', opening);
+  if(opening) _thinkingCardOpened(card);
+}
+function _worklogDetailBodyAtTail(body){
+  if(!body) return true;
+  if(body._thinkingTailFollow===true) return true;
+  if(body._thinkingTailFollow===false) return false;
+  // Unbound body (e.g. a settled card that never streamed): fall back to the
+  // literal scroll position.
+  const room=Math.max(0,(Number(body.scrollHeight)||0)-(Number(body.clientHeight)||0));
+  return room-(Number(body.scrollTop)||0)<=_THINKING_TAIL_STICK_PX;
+}
 function _setWorklogDetailDisclosureOpen(el, open){
   if(!el||!el.classList) return;
   // #5966 (Codex F2 r2): restoring an OPEN state on a settled Transparent Stream
@@ -12957,10 +14188,21 @@ function _captureWorklogDetailDisclosureState(root){
     const key=_worklogDetailDisclosureKeyForElement(el, counts);
     if(!key) return;
     const body=_worklogDetailScrollableBody(el);
-    state.set(key,{
+    // atBottom is tail-follow state and is recorded ONLY for live thinking
+    // bodies that participate in tail-follow. Tool-card details and settled
+    // thinking cards keep master's plain absolute-offset restore. Liveness is
+    // part of the gate: a completed card keeps its streaming latch, and
+    // trusting that latch in capture would jump settled history on any later
+    // re-render (#7988 review).
+    const rowForLiveness=el.closest?el.closest('.agent-activity-thinking,.thinking-card-row,.thinking-row'):null;
+    const rowLive=typeof _thinkingRowIsLive==='function'?_thinkingRowIsLive(rowForLiveness):true;
+    const participates=!!(body&&body.classList&&body.classList.contains('thinking-card-body')&&body._thinkingTailFollow!==undefined&&rowLive);
+    const snap={
       open:_worklogDetailDisclosureIsOpen(el),
       scrollTop:body?Math.max(0,Number(body.scrollTop)||0):0,
-    });
+    };
+    if(participates) snap.atBottom=_worklogDetailBodyAtTail(body);
+    state.set(key,snap);
   });
   return state;
 }
@@ -12976,9 +14218,58 @@ function _restoreWorklogDetailDisclosureState(root, state){
     const open=(saved&&typeof saved==='object'&&'open' in saved)?saved.open:saved;
     _setWorklogDetailDisclosureOpen(el, open);
     const scrollTop=(saved&&typeof saved==='object')?Number(saved.scrollTop):0;
-    if(open&&Number.isFinite(scrollTop)&&scrollTop>0){
-      const body=_worklogDetailScrollableBody(el);
-      if(body) body.scrollTop=Math.min(scrollTop, Math.max(0, body.scrollHeight-body.clientHeight));
+    // Only snapshots that carried tail-follow state (participating live
+    // thinking bodies) bind the rebuilt body; everything else — tool details,
+    // settled cards, legacy boolean snapshots — keeps master's plain
+    // absolute-offset restore with no follow latch. The DESTINATION row must
+    // be live too: a settled destination ignores atBottom and restores its
+    // saved absolute offset (#7988 review).
+    const destRow=el.closest?el.closest('.agent-activity-thinking,.thinking-card-row,.thinking-row'):null;
+    const destLive=typeof _thinkingRowIsLive==='function'?_thinkingRowIsLive(destRow):true;
+    const hasFollow=!!(destLive&&saved&&typeof saved==='object'&&'atBottom' in saved);
+    const atBottom=hasFollow&&saved.atBottom===true;
+    const body=_worklogDetailScrollableBody(el);
+    // Follow intent is restored for live destinations whether or not the card
+    // is open: a collapsed following card must resume follow on reopen, not be
+    // re-measured at its top and put on hold (#7988 review). Nothing scrolls
+    // while closed — only the latch is carried.
+    if(body&&hasFollow&&typeof _bindThinkingTailFollow==='function') _bindThinkingTailFollow(body, atBottom);
+    if(open){
+      if(body){
+        // Carry the captured follow/hold intent across the rebuild (seeded
+        // WITH its scroll listener so later reader movement still counts) and
+        // re-pin tail readers to the NEW bottom — content may have grown while
+        // the DOM was rebuilt. Readers who had scrolled up get their absolute
+        // offset replayed.
+        // The re-pin reads scrollHeight; skip it on a collapsed card (the tail
+        // read forces a layout) — _toggleThinkingCard re-pins on open.
+        const elOpen=!el.classList||el.classList.contains('open');
+        if(atBottom&&elOpen){
+          body.scrollTop=Math.max(0, body.scrollHeight-body.clientHeight);
+        }else if(Number.isFinite(scrollTop)&&scrollTop>0){
+          body.scrollTop=Math.min(scrollTop, Math.max(0, body.scrollHeight-body.clientHeight));
+        }
+        // A live body whose follow state was never established — the first
+        // open was interrupted by this very rebuild and its settle window died
+        // with the old body — must finish opening, or it stays follow-less
+        // forever (#7988 review).
+        if(destLive&&body.classList&&body.classList.contains('thinking-card-body')&&body._thinkingTailFollow===undefined){
+          // A body that is inserted and opened in the same task runs no
+          // transition, so it is already at final layout and can be seeded
+          // immediately. This is the common case in compact_worklog, where
+          // every delta recreates the row and a replacement body would be
+          // discarded before its settle window ever fires (#7988 review).
+          if(elOpen&&!body._thinkingTailSettling&&(Number(body.clientHeight)||0)>0&&typeof _bindThinkingTailFollow==='function'){
+            _bindThinkingTailFollow(body, _worklogDetailBodyAtTail(body));
+            if(body._thinkingTailFollow===true) body.scrollTop=Math.max(0,(Number(body.scrollHeight)||0)-(Number(body.clientHeight)||0));
+          }else if(typeof _thinkingCardOpened==='function'){
+            // Mid-transition replacement (clientHeight still 0): arm the
+            // settle window on the REPLACEMENT body so it seeds from its real
+            // position once the open finishes.
+            _thinkingCardOpened(el);
+          }
+        }
+      }
     }
   });
 }
@@ -12987,15 +14278,19 @@ function _thinkingCardHtml(text, open){
   const copyBtn=`<button class="thinking-copy-btn" onclick="event.stopPropagation();_copyThinkingText(this)" title="${t('copy')}" aria-label="${t('copy')}">${li('copy',12)}</button>`;
   const shouldOpen=!!open||_worklogDetailsExpandedDefault();
   const classes=`thinking-card${shouldOpen?' open':''}`;
-  return `<div class="${classes}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
+  return `<div class="${classes}"><div class="thinking-card-header" onclick="_toggleThinkingCard(this.parentElement)"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-btn-row">${copyBtn}<span class="thinking-card-toggle">${li('chevron-right',12)}</span></span></div><div class="thinking-card-body"><pre>${esc(clean)}</pre></div></div>`;
 }
 function isSimplifiedToolCalling(){
   return window._simplifiedToolCalling!==false;
 }
-function _thinkingActivityNode(text, open, disclosureKey){
+function _thinkingActivityNode(text, open, disclosureKey, live){
   const row=document.createElement('div');
   row.className='agent-activity-thinking';
   row.setAttribute('data-worklog-thinking-card','1');
+  // Mark live rows BEFORE the creation write: the row is still detached here,
+  // and tail-follow must know this body is allowed to follow while settled
+  // cards are not.
+  if(live) row.setAttribute('data-live-thinking-row','1');
   if(disclosureKey) row.setAttribute('data-thinking-key', String(disclosureKey));
   row.innerHTML=_thinkingCardHtml(text, open);
   _renderThinkingInto(row,text);
@@ -13336,7 +14631,13 @@ function _setTransparentCardOpen(card, open){
   if(expanded&&row&&row.getAttribute('data-transparent-detail-deferred')==='1'){
     _materializeTransparentToolDetail(row);
   }
+  const wasOpen=!!(card.classList&&card.classList.contains('open'));
   card.classList.toggle('open',expanded);
+  // Arm follow-state settling only on a real closed→open transition. The
+  // rehydrate path re-applies the current open state on every refresh; arming
+  // there would schedule a delayed pin on an already-open card that can fire
+  // after the reader scrolled up (#7988 review).
+  if(expanded&&!wasOpen&&typeof _thinkingCardOpened==='function') _thinkingCardOpened(card);
   if(row) row.setAttribute('data-expanded',expanded?'1':'0');
   const header=card.querySelector('.tool-card-header,.thinking-card-header');
   if(header) header.setAttribute('aria-expanded',expanded?'true':'false');
@@ -13875,7 +15176,9 @@ function _applyTransparentRowFading(turn){
   const rows=Array.from(blocks.querySelectorAll(':scope > .transparent-event-row'));
   const isLive=turn.id==='liveAssistantTurn'||turn.getAttribute('data-live-assistant-turn')==='1';
   if(!isLive){
-    rows.forEach(row=>row.removeAttribute('data-transparent-fade'));
+    rows.forEach(row=>{
+      if(row.hasAttribute('data-transparent-fade')) row.removeAttribute('data-transparent-fade');
+    });
     return;
   }
   const total=rows.length;
@@ -13883,9 +15186,15 @@ function _applyTransparentRowFading(turn){
     const row=rows[i];
     // Newest = full opacity; each step back drops by 1 (floors at 5).
     const stepsFromEnd=total-1-i;
-    if(stepsFromEnd<=0){row.removeAttribute('data-transparent-fade');continue;}
+    if(stepsFromEnd<=0){
+      if(row.hasAttribute('data-transparent-fade')) row.removeAttribute('data-transparent-fade');
+      continue;
+    }
     const step=Math.min(5,stepsFromEnd);
-    row.setAttribute('data-transparent-fade',String(step));
+    const stepStr=String(step);
+    if(row.getAttribute('data-transparent-fade')!==stepStr){
+      row.setAttribute('data-transparent-fade',stepStr);
+    }
   }
 }
 // Resolve the assistant message that carries a transparent turn's settled
@@ -13963,7 +15272,10 @@ function _renderTransparentTurnFooter(turn, opts){
       turn.appendChild(footer);
     }
   }
-  footer.innerHTML=html.replace(/^<div class="transparent-turn-footer">|<\/div>$/g,'');
+  const targetHtml=html.replace(/^<div class="transparent-turn-footer">|<\/div>$/g,'');
+  if(footer.innerHTML!==targetHtml){
+    footer.innerHTML=targetHtml;
+  }
 }
 // ── Activity-group user expand intent (#1298) ──────────────────────────────
 // When the user manually expands the live "Activity" dropdown during streaming,
@@ -14361,7 +15673,7 @@ function _appendWorklogStep(group, anchor, cards, thinkingText, opts){
     const thinkingKey=(opts&&opts.thinkingKey)||`reason:${String(thinkingText).trim()}`;
     const thinkingDisclosureKey=(opts&&opts.thinkingDisclosureKey)||thinkingKey;
     if(!seenReasons||!seenReasons.has(thinkingKey)){
-      const thinking=_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey);
+      const thinking=_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey, !!(opts&&opts.live));
       if(thinking){
         list.appendChild(thinking);
         wroteProse=true;
@@ -14553,7 +15865,7 @@ function _anchorSceneNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
-    node=_thinkingActivityNode(text, false, row.row_id||row.local_id||'anchor-thinking');
+    node=_thinkingActivityNode(text, false, row.row_id||row.local_id||'anchor-thinking', !settled);
   }else if(row.role==='tool'){
     node=buildToolCard(_anchorSceneToolCallFromRow(row,opts));
   }else if(row.role==='lifecycle'){
@@ -14628,7 +15940,7 @@ function _anchorSceneTransparentNodeForRow(row, opts){
     if(window._showThinking===false) return null;
     const text=String(row.text||row.thinking&&row.thinking.text||'').trim();
     if(!text) return null;
-    node=_decorateTransparentEventRow(_thinkingActivityNode(text,false,row.row_id||row.local_id||'anchor-thinking'),{
+    node=_decorateTransparentEventRow(_thinkingActivityNode(text,false,row.row_id||row.local_id||'anchor-thinking', live),{
       type:'thinking',
       text,
       preview:text,
@@ -15232,8 +16544,23 @@ function _refreshTransparentThinkingLiveRow(existing, node){
   const existingPre = existing.querySelector('.thinking-card-body pre');
   const nodePre = node.querySelector('.thinking-card-body pre');
   if(!existingPre || !nodePre) return false;
+  const thinkingBody = existingPre.closest ? existingPre.closest('.thinking-card-body') : null;
+  // Same tail-follow rule as _renderThinkingInto: only LIVE, OPEN thinking
+  // rows may seed the follow latch or move their body to the tail (a
+  // collapsed body's tail read would force a layout per delta).
+  const thinkingLive = typeof _thinkingRowIsLive==='function'?_thinkingRowIsLive(existing):true;
+  const thinkingCard = thinkingBody&&thinkingBody.closest?thinkingBody.closest('.thinking-card'):null;
+  const thinkingOpen = !thinkingCard||(thinkingCard.classList&&thinkingCard.classList.contains('open'));
+  // A body still running its open animation is excluded: seeding or pinning
+  // inside that window yanks a reader holding at the top (#7988 review).
+  const thinkingSettling = !!(thinkingBody&&thinkingBody._thinkingTailSettling);
+  if(thinkingBody&&thinkingLive&&thinkingOpen&&!thinkingSettling&&typeof _bindThinkingTailFollow==='function') _bindThinkingTailFollow(thinkingBody);
+  const thinkingFollow = thinkingBody&&thinkingLive&&thinkingOpen&&!thinkingSettling&&thinkingBody._thinkingTailFollow===true;
   const nextText = String(nodePre.textContent || '');
-  if(existingPre.textContent !== nextText) existingPre.textContent = nextText;
+  if(existingPre.textContent !== nextText){
+    existingPre.textContent = nextText;
+    if(thinkingFollow) thinkingBody.scrollTop=Math.max(0,(Number(thinkingBody.scrollHeight)||0)-(Number(thinkingBody.clientHeight)||0));
+  }
   const nodePreview = node.querySelector('.transparent-event-thinking-preview');
   const previewText = nodePreview ? String(nodePreview.textContent || '') : nextText;
   if(typeof _decorateTransparentEventRow === 'function'){
@@ -15746,6 +17073,15 @@ function _computeTransparentHiddenPrefixCount(rows){
 // renderMessages({preserveScroll:true}) call and cleared after the settled-scene
 // render pass; null at all other times.
 let _keepSettledWorklogOpenForStreamId=null;
+// #7677: PRE-INIT snapshot taken by the keep-open settle render (renderMessages
+// computes `cacheHtml` before highlightCode/addCopyButtons/initTreeViews and
+// deliberately does NOT cache the forced-open DOM, #5260). When the settle chain
+// then skips the unarmed rebuild, _cacheSettledTranscriptHtml() publishes this
+// stash so the session still lands in _sessionHtmlCache. Capturing it here —
+// rather than from the live DOM afterwards — is what keeps restored controls
+// working: innerHTML cannot save onclick handlers, and addCopyButtons() /
+// initTreeViews() skip already-initialized markup on restore.
+let _settleKeepOpenCacheStash=null;
 function _shouldKeepSettledWorklogOpenForStreamSettle(streamId){
   // Round 6 scroll-jump guard: collapsing the JUST-settled live worklog into a
   // compact summary at STREAM_DONE shrinks the transcript by hundreds of px. The
@@ -15792,6 +17128,138 @@ function _assistantTurnHasVisibleRenderedSegment(turn){
   }
   return false;
 }
+// #7677 (terminal settlement). STREAM_DONE renders the just-settled turn with the
+// keep-open token armed, disarms, then collapses that turn in place — or falls back
+// to a SECOND full transcript rebuild. The in-place collapse below keys off the
+// settled-scene OWNER group, which only the NON-transparent settled renderer stamps
+// (_renderSettledAnchorSceneForMessage), so transparent streams never matched a
+// group and ALWAYS paid the second rebuild: the "~11 s of every turn" of this issue,
+// on top of an already multi-second first render.
+//
+// The only armed-keep-open effect the TRANSPARENT settled renderer honors is the
+// per-turn row-cap exemption (`justSettled` in
+// _renderSettledAnchorSceneTransparentForMessage): while the token is armed the
+// just-settled turn renders its activity rows in FULL, and the unarmed rebuild's
+// only job is to re-cap that one turn behind a "Show earlier steps" affordance. So
+// whenever the armed render left the turn within the cap slack — including the
+// common plain reply whose scene has no activity rows at all — the unarmed rebuild
+// would produce exactly the same DOM and there is nothing left to collapse.
+//
+// Fail closed in every other case: non-transparent stream, a worklog-worthy scene
+// whose rows are not in the rendered transcript (windowing / cache divergence), or
+// a turn over the cap that an unarmed rebuild WOULD re-cap. Cost is never traded
+// for correctness — the second render stays the fallback.
+// #7677 (review P1). The UNARMED rebuild's decision to re-cap a turn is taken
+// from the SCENE'S ROW LIST (`_anchorSceneRowsForRendering(...,{settled:true})`)
+// and the turn's revealed state — never from what happens to sit in the DOM.
+// Rows that render no node at all (hidden reasoning) are still in that list, so
+// counting the nodes the ARMED render left behind can read cap+slack while the
+// list is longer, and declare the second render redundant while an unarmed
+// rebuild would still re-cap the turn to its last 30 rows + a "Show earlier
+// steps" affordance. Any row source we cannot read fails CLOSED (pay the second
+// render); correctness is never traded for the saved rebuild.
+function _transparentSettledTurnWouldBeCapped(inner, scene, rawIdx){
+  if(!scene) return false;
+  if(typeof _anchorSceneRowsForRendering!=='function') return true;
+  let rows=null;
+  try{ rows=_anchorSceneRowsForRendering(scene,{settled:true}); }catch(_e){ rows=null; }
+  if(!Array.isArray(rows)) return true;
+  if(rows.length<=_TRANSPARENT_SETTLED_ROW_CAP+_TRANSPARENT_SETTLED_ROW_CAP_SLACK) return false;
+  // #5966 Codex F3: the persistent revealed set is authoritative — an already
+  // revealed turn is never re-capped by a rebuild. The DOM flag
+  // (data-transparent-earlier-revealed) is only the renderer's same-render fast
+  // path; ignoring it here fails toward the second render, i.e. the safe side.
+  if(typeof _transparentRevealKey==='function'
+     &&typeof _transparentRevealedTurns!=='undefined'
+     &&_transparentRevealedTurns&&typeof _transparentRevealedTurns.has==='function'){
+    const session=(typeof S!=='undefined'&&S)?S.session:null;
+    if(_transparentRevealedTurns.has(_transparentRevealKey(session&&session.session_id, rawIdx))) return false;
+  }
+  return true;
+}
+// #7677 (review P2 / r2 P1). STREAM_DONE's unarmed second render was also the
+// pass that wrote the settled transcript into _sessionHtmlCache (the keep-open
+// ARMED render is deliberately uncached, #5260). Skipping that rebuild therefore
+// used to leave the session uncached, so switching away and back paid a full
+// rebuild. Publish the PRE-INIT snapshot the armed render stashed — no rebuild —
+// under exactly the gates renderMessages() applies to its own cache write: the
+// stash must belong to the live session, no in-flight stream, no transient
+// compression/handoff card, and <300 KB of HTML. Reading the LIVE DOM here would
+// be wrong: by settle time it is post-init, and innerHTML cannot carry the copy
+// buttons' / tree views' onclick handlers, so restored controls would be dead.
+function _cacheSettledTranscriptHtml(){
+  try{
+    if(typeof _settleKeepOpenCacheStash==='undefined'||!_settleKeepOpenCacheStash) return false;
+    const stash=_settleKeepOpenCacheStash;
+    const sid=stash.sid;
+    const currentSid=(typeof S!=='undefined'&&S&&S.session)?S.session.session_id:null;
+    if(!sid||sid!==currentSid) return false;
+    if(typeof INFLIGHT!=='undefined'&&INFLIGHT&&INFLIGHT[sid]) return false;
+    const w=(typeof window!=='undefined')?window:null;
+    const hasTransient=!!(w&&(
+      (w._compressionUi&&(!w._compressionUi.sessionId||w._compressionUi.sessionId===sid))||
+      (w._handoffUi&&(!w._handoffUi.sessionId||w._handoffUi.sessionId===sid))
+    ));
+    if(hasTransient) return false;
+    if(!stash.html||stash.html.length>=300000) return false;
+    if(typeof _sessionHtmlCache==='undefined'||!_sessionHtmlCache||typeof _sessionHtmlCache.set!=='function') return false;
+    if(typeof _sessionHtmlCacheSid!=='undefined') _sessionHtmlCacheSid=sid;
+    _sessionHtmlCache.set(sid,{
+      html:stash.html,
+      msgCount:stash.msgCount,
+      renderWindowKey:stash.renderWindowKey,
+      signature:stash.signature,
+    });
+    if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
+    _settleKeepOpenCacheStash=null;
+    return true;
+  }catch(_e){ return false; }
+}
+function _transparentSettledTurnSecondRenderIsRedundant(streamId){
+  if(!streamId) return false;
+  if(typeof isTransparentStream!=='function'||!isTransparentStream()) return false;
+  const inner=$('msgInner');
+  if(!inner||typeof inner.querySelectorAll!=='function') return false;
+  const messages=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:[];
+  const ownerIdxs=[];
+  const ownerScenes=[];
+  let ownerScene=null;
+  for(let i=0;i<messages.length;i++){
+    const m=messages[i];
+    if(!m||String(m._anchor_stream_id||'')!==String(streamId)) continue;
+    ownerIdxs.push(String(i));
+    ownerScenes.push(m._anchor_activity_scene||null);
+    ownerScene=m._anchor_activity_scene||ownerScene;
+  }
+  if(!ownerIdxs.length) return false;
+  // #7677 (review P1): decide with the renderer's own inputs first — if the
+  // unarmed rebuild would re-cap ANY of this stream's owner turns, the second
+  // render is not redundant no matter what the armed render left in the DOM.
+  if(typeof _transparentSettledTurnWouldBeCapped==='function'){
+    for(let k=0;k<ownerScenes.length;k++){
+      if(!ownerScenes[k]) continue;
+      if(_transparentSettledTurnWouldBeCapped(inner, ownerScenes[k], Number(ownerIdxs[k]))) return false;
+    }
+  }
+  // The transparent settled renderer stamps each row node with the owner message's
+  // RAW index (data-anchor-owner-idx); count only this stream's settled rows.
+  // This stays as the SECOND guard: it catches a turn whose scene rows are not in
+  // the rendered transcript at all (windowing / cache divergence), where the row
+  // list alone cannot prove the two renders match.
+  let renderedRows=0;
+  const nodes=inner.querySelectorAll('[data-anchor-owner-idx][data-anchor-settled-scene-row="1"]');
+  for(let i=0;i<nodes.length;i++){
+    if(ownerIdxs.indexOf(String(nodes[i]&&nodes[i].getAttribute('data-anchor-owner-idx')))>=0) renderedRows++;
+  }
+  if(!renderedRows){
+    // No settled rows rendered for this turn: a rebuild is a no-op unless the scene
+    // is worklog-worthy (its rows would appear — but then they would be here).
+    if(!ownerScene) return true;
+    if(typeof _anchorSceneSceneHasWorklogWorthyRows!=='function') return false;
+    return !_anchorSceneSceneHasWorklogWorthyRows(ownerScene);
+  }
+  return renderedRows<=(_TRANSPARENT_SETTLED_ROW_CAP+_TRANSPARENT_SETTLED_ROW_CAP_SLACK);
+}
 function _collapseJustSettledWorklogInPlace(streamId){
   // #6414: STREAM_DONE used to render the settled turn once with its Worklog
   // forced open, then immediately run a second full render only to collapse it.
@@ -15805,7 +17273,20 @@ function _collapseJustSettledWorklogInPlace(streamId){
   const group=Array.from(inner.querySelectorAll('[data-anchor-settled-scene-owner="1"]'))
     .filter(candidate=>candidate.getAttribute('data-anchor-stream-id')===String(streamId))
     .pop();
-  if(!group) return false;
+  if(!group){
+    // #7677: no settled-scene owner group means either a non-transparent miss
+    // (keep the old fail-closed fallback) or a TRANSPARENT stream, which never
+    // stamps that group at all — in which case the second STREAM_DONE render is
+    // redundant exactly when the armed settle render already matches the unarmed
+    // one. Non-transparent callers still get false from the helper below.
+    const redundant=_transparentSettledTurnSecondRenderIsRedundant(streamId);
+    // #7677 (review P2): skipping the unarmed rebuild also skips the cache write
+    // that rebuild used to perform (the armed render is deliberately uncached,
+    // #5260) — snapshot the already-settled DOM so a later switch-away/switch-back
+    // still hits _sessionHtmlCache instead of a full rebuild.
+    if(redundant&&typeof _cacheSettledTranscriptHtml==='function') _cacheSettledTranscriptHtml();
+    return redundant;
+  }
   const ownerTurn=typeof group.closest==='function'?group.closest('.assistant-turn'):null;
   const ownerHasVisibleSegment=_assistantTurnHasVisibleRenderedSegment(ownerTurn);
   if(ownerHasVisibleSegment===null) return false;
@@ -16967,6 +18448,7 @@ function clearMessageRenderCache(){
   _clearRenderCache();
   _sessionHtmlCache.clear();
   _sessionHtmlCacheSid=null;
+  _settleKeepOpenCacheStash=null;
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
 }
@@ -18600,8 +20082,13 @@ function renderMessages(options){
   // distinct turns into one run (duplicate final-answer in Worklog/Thinking,
   // or later-turn prose used as an echo-strip input). Turn context must
   // always be complete — never cut mid-run, never head+tail with a gap.
-  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visWithIdx);
-  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visWithIdx);
+  // #7882 (gate round-7 CORE): the maps also split runs at HIDDEN user-row
+  // boundaries (delegation wakeups) — a hidden wakeup between two answers
+  // still separates the turns. The boundary map derives turn ownership from
+  // the RAW messages via _rawTurnBoundaryByRawIdx().
+  const _turnBoundaryMap=_rawTurnBoundaryByRawIdx(S.messages);
+  const assistantTurnFinalVisibleContentByRawIdx=_assistantTurnFinalVisibleContentMap(visWithIdx,_turnBoundaryMap);
+  const assistantTurnVisibleContentByRawIdx=_assistantTurnVisibleContentMap(visWithIdx,_turnBoundaryMap);
   const hasServerOlder=!!(typeof _messagesTruncated!=='undefined' && _messagesTruncated && S.messages.length>0);
   const serverOlderCount=hasServerOlder&&Number.isFinite(Number(_oldestIdx))?Math.max(0,Number(_oldestIdx)):0;
   if(typeof _applySessionNavigationPrefs==='function') _applySessionNavigationPrefs();
@@ -18686,9 +20173,11 @@ function renderMessages(options){
   // body is empty) against the answer prose carried by a SIBLING message in the
   // same turn. A turn = the run of assistant messages between two user messages.
   // Map every assistant rawIdx in a run to the run's combined visible text.
+  // #7882 (gate round-7 CORE): runs also split at HIDDEN user-row boundaries
+  // (delegation wakeups) — see _rawTurnBoundaryByRawIdx.
   const _turnVisibleTextByRawIdx=new Map();
   {
-    let _run=[]; let _runText=[];
+    let _run=[]; let _runText=[]; let _runTurnId;
     const _flush=()=>{
       if(_run.length){
         const combined=_runText.join('\n\n');
@@ -18698,10 +20187,23 @@ function renderMessages(options){
     };
     for(const entry of renderVisWithIdx){
       const em=entry&&entry.m; const role=em&&em.role;
-      if(role==='assistant'){
+      const _turnId=_turnBoundaryMap.get(entry.rawIdx);
+      if(role==='assistant'&&(_run.length===0||_turnId===_runTurnId)){
+        if(_run.length===0) _runTurnId=_turnId;
         _run.push(entry.rawIdx);
         // Visible prose = content with any leading <think>…</think> /channel-thought
         // block stripped (the same blocks the per-message extractor removes below).
+        let vis=typeof em.content==='string'?em.content:'';
+        vis=vis.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'')
+               .replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'')
+               .replace(/^\s*<\|turn\|>thinking\n[\s\S]*?<turn\|>\s*/,'').trim();
+        if(vis) _runText.push(vis);
+      }else if(role==='assistant'&&_run.length){
+        // #7882 (gate round-7 CORE): the entry that triggered the boundary
+        // flush STARTS the next run (a split, not a drop).
+        _flush();
+        _runTurnId=_turnId;
+        _run.push(entry.rawIdx);
         let vis=typeof em.content==='string'?em.content:'';
         vis=vis.replace(/^\s*<think>[\s\S]*?<\/think>\s*/,'')
                .replace(/^\s*<\|channel\|?>thought\n?[\s\S]*?<channel\|>\s*/,'')
@@ -18842,6 +20344,21 @@ function renderMessages(options){
     }
     const isProcessWakeup=m&&m._source==='process_wakeup';
     const isUser=m.role==='user';
+    // #7882 (gate round-7 CORE): a hidden delegation_wakeup row between two
+    // answers deletes the user-turn boundary from the visible projection —
+    // without this check both answers render into ONE .assistant-turn
+    // container and installing the follow-up's Worklog hides the parent's
+    // answer segment. Split the container wherever the RAW turn owner
+    // changes, so a hidden row still acts as a turn boundary. Visible user
+    // rows reset below anyway (isUser branch); compaction/recovery rows and
+    // preserved task lists never bump the boundary map, matching their
+    // skip-without-reset behavior here.
+    if(currentAssistantTurn&&vi>0){
+      const prevEntry=renderVisWithIdx[vi-1];
+      if(prevEntry&&_turnBoundaryMap.get(prevEntry.rawIdx)!==_turnBoundaryMap.get(rawIdx)){
+        currentAssistantTurn=null;
+      }
+    }
     if(!isUser&&_isMarkerOnlyAssistantCompressionMessage(m)){
       content='**Error:** No response received after context compression. Please retry.';
     }
@@ -18899,7 +20416,7 @@ function renderMessages(options){
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
       : false;
-    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1})">${li('git-branch',13)}</button>`;
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1},this)">${li('git-branch',13)}</button>`;
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
@@ -19682,7 +21199,7 @@ function renderMessages(options){
             // Echoed reasoning already rendered for this turn — skip the duplicate.
           }else{
             if(_thinkKey)_seen.add(_thinkKey);
-            const thinkingRow=_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false),{
+            const thinkingRow=_decorateTransparentEventRow(_thinkingActivityNode(event.thinkingText,false,null,false),{
               type:'thinking',
               text:event.thinkingText,
               preview:event.thinkingText,
@@ -19767,7 +21284,15 @@ function renderMessages(options){
         failover.textContent=failoverText;
         fragments.push(failover);
       }
-      if(gatewayText){
+      // The transparent turn footer owns the model label (.lf-model) whenever
+      // the turn has transparent event rows; skip the generic chip and gateway
+      // label there so exactly one model label renders per turn. Model sits after
+      // duration to match the transparent footer order (elapsed, model, ...).
+      const _transparentFooterOwnsModel=(usedModelText||gatewayText)&&isTransparentStream()&&row&&(()=>{
+        const blocks=_assistantTurnBlocks(row);
+        return !!(blocks&&blocks.querySelector(':scope > .transparent-event-row'));
+      })();
+      if(gatewayText&&!_transparentFooterOwnsModel){
         const gateway=document.createElement('span');
         gateway.className='msg-gateway-inline';
         gateway.textContent=gatewayText;
@@ -19779,14 +21304,6 @@ function renderMessages(options){
         duration.textContent=`Done in ${durationText}`;
         fragments.push(duration);
       }
-      // The transparent turn footer owns the model label (.lf-model) whenever
-      // the turn has transparent event rows — skip the generic chip there so
-      // exactly one model label renders per turn. Model sits after duration to
-      // match the transparent footer order (elapsed · model · …).
-      const _transparentFooterOwnsModel=usedModelText&&isTransparentStream()&&row&&(()=>{
-        const blocks=_assistantTurnBlocks(row);
-        return !!(blocks&&blocks.querySelector(':scope > .transparent-event-row'));
-      })();
       if(usedModelText&&!_transparentFooterOwnsModel){
         const usedModel=document.createElement('span');
         usedModel.className='msg-used-model-inline';
@@ -19844,9 +21361,8 @@ function renderMessages(options){
       _applyTransparentRowFading(turn);
       if(hasTransparentRows){
         // Read turn metadata from the final metadata-bearing assistant segment,
-        // not querySelector's first match — a tool turn's activity segment
-        // precedes the answer, and the metadata lives on the last message
-        // (#6068 gate round 2: multi-segment turns lost the model label).
+        // not querySelector's first match: a tool turn's activity segment
+        // precedes the answer, and the metadata lives on the last message.
         const msg=_transparentTurnMetaMessage(turn);
         let durationText='';
         let modelText='';
@@ -19856,6 +21372,10 @@ function renderMessages(options){
         if(msg){
           if(msg._turnDuration!=null) durationText=_formatTurnDuration(msg._turnDuration);
           modelText=_usedModelTurnChipLabel(msg);
+          const routing=msg._gatewayRouting;
+          if(routing&&typeof _formatGatewayModelLabel==='function'){
+            modelText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing)||modelText;
+          }
           if(modelText) modelTitle=String(msg._usedModel||'').trim();
           if(msg._firstTokenMs!=null) ttftText=_formatFirstToken(msg._firstTokenMs);
           if(msg._turnUsage){
@@ -20107,6 +21627,26 @@ function renderMessages(options){
       _sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});
       if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     }
+    // #7677: an unarmed render supersedes any pending settle stash.
+    _settleKeepOpenCacheStash=null;
+  }else if(sid&&_keepOpenArmed){
+    // #7677: still no cache WRITE here (#5260 — the forced-open DOM must never be
+    // persisted), but stash the pre-init snapshot this render already computed.
+    // `cacheHtml` is taken BEFORE highlightCode/addCopyButtons/initTreeViews run,
+    // so it is exactly what the normal cache path would have stored. When the
+    // settle chain then skips the unarmed rebuild, _cacheSettledTranscriptHtml()
+    // publishes this stash — reading it back from the live DOM instead would save
+    // copy buttons and JSON/YAML trees WITHOUT their onclick handlers, leaving
+    // dead controls after a session switch (#7677 review r2 P1).
+    _settleKeepOpenCacheStash=(cacheHtml&&cacheHtml.length<300_000)
+      ? {
+        sid,
+        msgCount,
+        renderWindowKey,
+        html:cacheHtml,
+        signature:cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature,
+      }
+      : null;
   }
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
@@ -21167,7 +22707,7 @@ function editMessage(btn) {
   if(S.busy) return;
   const row = btn.closest('[data-msg-idx]');
   if(!row) return;
-  const msgIdx = parseInt(row.dataset.msgIdx, 10);
+  let msgIdx = parseInt(row.dataset.msgIdx, 10);
   const originalText = row.dataset.rawText || '';
   const body = row.querySelector('.msg-body');
   if(!body || row.dataset.editing) return;
@@ -21191,6 +22731,9 @@ function editMessage(btn) {
   bar.querySelector('.msg-edit-send').onclick = async () => {
     const newText = ta.value.trim();
     if(!newText) return;
+    // Re-read the row's index at send time: history can load (e.g. the outline
+    // opening) after the edit opened, which re-bases data-msg-idx (#2184).
+    if(typeof _rowCurrentRawIdx==='function') msgIdx = _rowCurrentRawIdx(row, msgIdx);
     await submitEdit(msgIdx, newText);
   };
   bar.querySelector('.msg-edit-cancel').onclick = () => cancelEdit(row, originalText, body);
@@ -21279,7 +22822,8 @@ async function regenerateResponse(btn) {
   if(!S.session || S.busy) return;
   const row=btn&&btn.closest&&btn.closest('[data-msg-idx]');
   if(!row)return;
-  const clickedAbsoluteIndex=_oldestIdx+parseInt(row.dataset.msgIdx,10);
+  const clickedRowIdx=parseInt(row.dataset.msgIdx,10);
+  const clickedAbsoluteIndex=_oldestIdx+(typeof _rowCurrentRawIdx==='function'?_rowCurrentRawIdx(row,clickedRowIdx):clickedRowIdx);
   const initialSid = S.session.session_id;
   if(typeof _ensureAllMessagesLoaded==='function'){
     await _ensureAllMessagesLoaded();
@@ -21530,13 +23074,24 @@ function _buildTreeDOM(val, depth){
   return el;
 }
 
+// #2168 (session-switch latency): every other helper called by
+// postProcessRenderedMessages carries a selector-level idempotence marker so a
+// repeat pass matches zero nodes and returns early. This one alone re-walked
+// every code block in the transcript and then ran a nested querySelector() per
+// block to filter out ones that already had a button — on a cached-transcript
+// switch that is O(code blocks) node visits to add nothing. The data-copy-btn
+// marker makes the repeat pass match nothing; the nested guard stays as the
+// correctness backstop for header-placed buttons (see #1096).
 function addCopyButtons(container){
   const el=container||$('msgInner');
   if(!el) return;
-  el.querySelectorAll('pre > code').forEach(codeEl=>{
+  el.querySelectorAll('pre > code:not([data-copy-btn])').forEach(codeEl=>{
     const pre=codeEl.parentElement;
     const header=pre.previousElementSibling;
-    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))) return;
+    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))){
+      codeEl.dataset.copyBtn='1';  // already has one; mark so the selector stops re-matching it
+      return;
+    }
     const btn=document.createElement('button');
     btn.className='code-copy-btn';
     btn.textContent=t('copy');
@@ -21557,11 +23112,33 @@ function addCopyButtons(container){
       btn.style.cssText='position:absolute;top:6px;right:6px;';
       pre.appendChild(btn);
     }
+    // Marked after BOTH placements so a block whose button was appended to the
+    // sibling .pre-header is skipped by the selector on the next pass too.
+    codeEl.dataset.copyBtn='1';
   });
 }
 
 let _mermaidLoading=false;
 let _mermaidReady=false;
+
+function _mediaPreviewErrorKey(error,fallbackKey){
+  const status=Number(error&&error.status);
+  if(status===401) return 'media_preview_unauthorized';
+  if(status===403) return 'media_preview_forbidden';
+  if(status===404) return 'media_preview_not_found';
+  return fallbackKey;
+}
+
+function _mediaPreviewAllowsDownload(errorKey){
+  return errorKey!=='media_preview_unauthorized'&&errorKey!=='media_preview_forbidden'&&errorKey!=='media_preview_not_found';
+}
+
+function _requireMediaResponse(response){
+  if(response.ok) return response;
+  const error=new Error(String(response.status));
+  error.status=response.status;
+  throw error;
+}
 
 function loadDiffInline(container){
   const DIFF_MAX_SIZE=512*1024; // 512 KB cap for inline diff rendering
@@ -21571,7 +23148,7 @@ function loadDiffInline(container){
     const path=el.dataset.path;
     const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
     fetch(_mediaPreviewUrl(path,{snap:snap||undefined}))
-      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(r=>_requireMediaResponse(r).text())
       .then(text=>{
         if(text.length>DIFF_MAX_SIZE){
           el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_too_large')}</span></div>`;
@@ -21586,8 +23163,8 @@ function loadDiffInline(container){
         }).join('\n');
         el.outerHTML=`<div class="diff-inline"><div class="pre-header">${esc(path.split('/').pop())}</div><pre class="diff-block"><code>${lines}</code></pre></div>`;
       })
-      .catch(()=>{
-        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('diff_error')}</span></div>`;
+      .catch(error=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t(_mediaPreviewErrorKey(error,'diff_error'))}</span></div>`;
       });
   });
 }
@@ -21646,7 +23223,10 @@ function buildCsvTablePreview(path, text, downloadUrl=''){
 
 function _csvPreviewErrorHtml(path, errorKey, downloadUrl=_csvMediaUrl(path,{download:true})){
   const fname=path.split('/').pop()||path;
-  return `<div class="diff-inline-error">${esc(fname)}<br><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
+  const downloadHtml=_mediaPreviewAllowsDownload(errorKey)
+    ? `<br><a class="msg-media-link" href="${esc(downloadUrl)}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+    : '';
+  return `<div class="diff-inline-error">${esc(fname)}${downloadHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
 }
 
 function loadCsvInline(container){
@@ -21658,13 +23238,13 @@ function loadCsvInline(container){
     const mediaUrl=_csvMediaUrl(path,{snap:snap||undefined});
     const downloadUrl=_csvMediaUrl(path,{download:true,snap:snap||undefined});
     fetch(mediaUrl)
-      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(r=>_requireMediaResponse(r).text())
       .then(text=>{
         const preview=buildCsvTablePreview(path, text, downloadUrl);
         el.outerHTML=preview.html||_csvPreviewErrorHtml(path, preview.errorKey||'csv_error', downloadUrl);
       })
-      .catch(()=>{
-        el.outerHTML=_csvPreviewErrorHtml(path, 'csv_error', downloadUrl);
+      .catch(error=>{
+        el.outerHTML=_csvPreviewErrorHtml(path, _mediaPreviewErrorKey(error,'csv_error'), downloadUrl);
       });
   });
 }
@@ -21678,7 +23258,7 @@ function loadExcalidrawInline(container){
     const snap=_mediaSnapQuery(el).replace(/^&snap=/,'');
     const downloadUrl=_mediaPreviewUrl(path,{download:true,snap:snap||undefined});
     fetch(_mediaPreviewUrl(path,{snap:snap||undefined}))
-      .then(r=>{if(!r.ok) throw new Error(r.status);return r.text();})
+      .then(r=>_requireMediaResponse(r).text())
       .then(text=>{
         if(text.length>EXCALIDRAW_MAX_SIZE){
           el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_too_large')}</span></div>`;
@@ -21705,8 +23285,8 @@ function loadExcalidrawInline(container){
         // Lazy-init Excalidraw render after DOM insertion
         requestAnimationFrame(()=>_renderExcalidrawCanvases());
       })
-      .catch(()=>{
-        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t('excalidraw_error')}</span></div>`;
+      .catch(error=>{
+        el.outerHTML=`<div class="diff-inline-error">${esc(path.split('/').pop())}<br><span style="color:var(--muted);font-size:12px">${t(_mediaPreviewErrorKey(error,'excalidraw_error'))}</span></div>`;
       });
   });
 }
@@ -21810,7 +23390,7 @@ function loadPdfInline(container){
     const dlUrl=_mediaPreviewUrl(path,{download:true,snap:snap||undefined});
     const loadPdf=(pdfjsLib)=>{
       fetch(mediaUrl)
-        .then(r=>{if(!r.ok) throw new Error(r.status); return r.arrayBuffer();})
+        .then(r=>_requireMediaResponse(r).arrayBuffer())
         .then(buf=>{
           if(buf.byteLength>PDF_MAX_SIZE){
             el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_too_large')}</span></div>`;
@@ -21857,8 +23437,13 @@ function loadPdfInline(container){
           };
           renderPage(1);
         })
-        .catch(()=>{
-          el.outerHTML=`<div class="pdf-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('pdf_error')}</span></div>`;
+        .catch(error=>{
+          const errorKey=_mediaPreviewErrorKey(error,'pdf_error');
+          const fileHtml=_mediaPreviewAllowsDownload(errorKey)
+            ? `<a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+            : esc(fname);
+          const errorClass=_mediaPreviewAllowsDownload(errorKey)?'pdf-preview-fallback':'diff-inline-error';
+          el.outerHTML=`<div class="${errorClass}">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
         });
     };
     if(_pdfjsReady){
@@ -21901,7 +23486,7 @@ function loadHtmlInline(container){
     const openUrl=_mediaPreviewUrl(path,{inline:true,snap:snap||undefined});
     const dlUrl=_mediaPreviewUrl(path,{download:true,snap:snap||undefined});
     fetch(mediaUrl, {cache:'no-store'})
-      .then(r=>{if(!r.ok) throw new Error(r.status); return r.text();})
+      .then(r=>_requireMediaResponse(r).text())
       .then(html=>{
         if(html.length>HTML_MAX_SIZE){
           el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${openUrl}" target="_blank" rel="noopener">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_too_large')}</span></div>`;
@@ -21910,10 +23495,28 @@ function loadHtmlInline(container){
         const safeHtml=html.replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
         el.outerHTML=`<div class="html-preview-wrap"><div class="html-preview-header"><span>${t('html_sandbox_label')}</span><a href="${openUrl}" target="_blank" rel="noopener" class="html-open-link">${t('html_open_full')} ↗</a></div><iframe srcdoc="${safeHtml}" sandbox="allow-scripts" class="html-preview-iframe" loading="lazy"></iframe></div>`;
       })
-      .catch(()=>{
-        el.outerHTML=`<div class="html-preview-fallback"><a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a><br><span style="color:var(--muted);font-size:12px">${t('html_error')}</span></div>`;
+      .catch(error=>{
+        const errorKey=_mediaPreviewErrorKey(error,'html_error');
+        const fileHtml=_mediaPreviewAllowsDownload(errorKey)
+          ? `<a class="msg-media-link" href="${dlUrl}" download="${esc(fname)}">📎 ${esc(fname)}</a>`
+          : esc(fname);
+        const errorClass=_mediaPreviewAllowsDownload(errorKey)?'html-preview-fallback':'diff-inline-error';
+        el.outerHTML=`<div class="${errorClass}">${fileHtml}<br><span style="color:var(--muted);font-size:12px">${t(errorKey)}</span></div>`;
       });
   });
+}
+
+// Identical replies reuse cached markdown HTML and therefore the same
+// data-mermaid-id; mermaid.render() then fails for every block after the
+// first because the id is already taken. Hand such a block a fresh id.
+function _uniqueMermaidRenderId(block){
+  let id=block.dataset.mermaidId||('m-'+Math.random().toString(36).slice(2));
+  const sel=(typeof CSS!=='undefined'&&CSS.escape)?CSS.escape(id):id;
+  if(document.getElementById(id)||document.querySelectorAll('[data-mermaid-id="'+sel+'"]').length>1){
+    id=id+'-'+Math.random().toString(36).slice(2,8);
+    block.dataset.mermaidId=id;
+  }
+  return id;
 }
 
 function renderMermaidBlocks(container){
@@ -21945,7 +23548,7 @@ function renderMermaidBlocks(container){
   blocks.forEach(async(block)=>{
     block.dataset.rendered='true';
     const code=block.textContent;
-    const id=block.dataset.mermaidId||('m-'+Math.random().toString(36).slice(2));
+    const id=_uniqueMermaidRenderId(block);
     try{
       const {svg}=await mermaid.render(id,code);
       const tmp=document.getElementById('d'+id);
@@ -22034,7 +23637,7 @@ function _thinkingMarkup(text=''){
   const clean=_sanitizeThinkingDisplayText(text);
   const openClass=_worklogDetailsExpandedDefault()?' open':'';
   return (clean&&String(clean).trim())
-    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="this.parentElement.classList.toggle('open')"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
+    ? `<div class="thinking-card${openClass}"><div class="thinking-card-header" onclick="_toggleThinkingCard(this.parentElement)"><span class="thinking-card-icon">${li('lightbulb',14)}</span><span class="thinking-card-label">${t('thinking')}</span><span class="thinking-card-toggle">${li('chevron-right',12)}</span></div><div class="thinking-card-body"><pre>${esc(String(clean).trim())}</pre></div></div>`
     : `<div class="thinking"><div class="dot"></div><div class="dot"></div><div class="dot"></div></div>`;
 }
 function _renderThinkingInto(row,text=''){
@@ -22046,7 +23649,26 @@ function _renderThinkingInto(row,text=''){
   }
   const pre=row.querySelector('.thinking-card-body pre');
   if(pre){
+    const body=pre.closest?pre.closest('.thinking-card-body'):null;
+    // Tail-follow applies to LIVE thinking rows only. A settled card (or any
+    // body whose reader has scrolled up) keeps its scroll position: a creation
+    // write must never seed the follow latch or the next rebuild would jump a
+    // settled top-of-card reader to the bottom.
+    const live=typeof _thinkingRowIsLive==='function'?_thinkingRowIsLive(row):true;
+    // Collapsed cards neither bind nor pin: the tail read forces a layout on
+    // every delta (#7988 review) and the reader cannot see the stream anyway.
+    // A body that opens later seeds its follow state from its real position
+    // in _toggleThinkingCard.
+    const card=body&&body.closest?body.closest('.thinking-card'):null;
+    const open=!card||(card.classList&&card.classList.contains('open'));
+    // A body still running its open animation is excluded: seeding or pinning
+    // inside that window yanks a reader holding at the top (#7988 review).
+    const settling=!!(body&&body._thinkingTailSettling);
+    if(body&&live&&open&&!settling&&typeof _bindThinkingTailFollow==='function') _bindThinkingTailFollow(body);
+    const follow=body&&live&&open&&!settling&&body._thinkingTailFollow===true;
+    const changed=pre.textContent!==clean;
     pre.textContent=clean;
+    if(follow&&changed) body.scrollTop=Math.max(0,(Number(body.scrollHeight)||0)-(Number(body.clientHeight)||0));
     return;
   }
   row.innerHTML=_thinkingMarkup(text);
@@ -22064,6 +23686,7 @@ function finalizeThinkingCard(){
       row.removeAttribute('id');
       row.removeAttribute('data-thinking-active');
       row.removeAttribute('data-live-thinking');
+      row.removeAttribute('data-live-thinking-row');
     }
     return;
   }
@@ -22097,6 +23720,7 @@ function finalizeThinkingCard(){
     turn.querySelectorAll('.agent-activity-thinking[data-thinking-active="1"]').forEach(active=>{
       active.removeAttribute('data-thinking-active');
       active.removeAttribute('data-live-thinking');
+      active.removeAttribute('data-live-thinking-row');
     });
     _syncToolCallGroupSummary(group);
   }
@@ -22161,7 +23785,7 @@ function appendThinking(text='', options){
     if(isTransparentStream()){
       let row=blocks.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
-        row=_thinkingActivityNode(clean, false);
+        row=_thinkingActivityNode(clean, false, null, true);
         row.id='thinkingRow';
         row.setAttribute('data-live-thinking','1');
         row.setAttribute('data-live-thinking-key',thinkingKey);
@@ -22172,6 +23796,7 @@ function appendThinking(text='', options){
             el.removeAttribute('id');
             el.removeAttribute('data-thinking-active');
             el.removeAttribute('data-live-thinking');
+            el.removeAttribute('data-live-thinking-row');
           }
         });
         row.setAttribute('data-thinking-active','1');
@@ -22210,7 +23835,7 @@ function appendThinking(text='', options){
     if(list){
       let row=list.querySelector(`.agent-activity-thinking[data-live-thinking="1"][data-live-thinking-key="${CSS.escape(thinkingKey)}"]`);
       if(!row){
-        row=_thinkingActivityNode(clean, false, thinkingKey);
+        row=_thinkingActivityNode(clean, false, thinkingKey, true);
         row.setAttribute('data-live-thinking','1');
         row.setAttribute('data-live-thinking-key',thinkingKey);
         if(segmentSeq) row.setAttribute('data-live-segment-seq',segmentSeq);
@@ -22219,6 +23844,7 @@ function appendThinking(text='', options){
           if(el!==row){
             el.removeAttribute('data-thinking-active');
             el.removeAttribute('data-live-thinking');
+            el.removeAttribute('data-live-thinking-row');
           }
         });
         row.setAttribute('data-thinking-active','1');
@@ -22241,6 +23867,7 @@ function removeThinking(){
       row.removeAttribute('id');
       row.removeAttribute('data-thinking-active');
       row.removeAttribute('data-live-thinking');
+      row.removeAttribute('data-live-thinking-row');
     });
     if(liveTurn&&blocks&&!blocks.children.length) liveTurn.remove();
     return;
@@ -23509,10 +25136,39 @@ function _showUploadTooLarge(file){
   if(typeof setStatus==='function')setStatus(`\u274c ${message}`);
   else if(typeof showToast==='function')showToast(message,5000,'error');
 }
+// Mobile camera/photo pickers (iOS Safari in particular) hand every photo the
+// same generic name ("image.jpg"). Dropping a file just because its name is
+// taken silently loses the second photo. Only skip a true duplicate (same
+// name, size and mtime); otherwise keep the file under a collision-free name.
+function _pendingFileUniqueName(name){
+  const taken=new Set((S.pendingFiles||[]).map(p=>p&&p.name));
+  if(!taken.has(name))return name;
+  // Keep compound archive extensions whole (.tar.gz etc.) so the renamed copy
+  // still matches _ARCHIVE_EXTS and is extracted rather than uploaded as-is.
+  const compound=/\.tar\.(gz|bz2|xz)$/i.exec(name);
+  const dot=compound?compound.index:name.lastIndexOf('.');
+  const stem=dot>0?name.slice(0,dot):name;
+  const ext=dot>0?name.slice(dot):'';
+  for(let i=2;;i++){
+    const candidate=`${stem}-${i}${ext}`;
+    if(!taken.has(candidate))return candidate;
+  }
+}
+// A pending file's identity is its ORIGINAL name (before any collision rename).
+function _pendingFileOrigName(p){return (p&&p._origName)||(p&&p.name);}
 function addFiles(files){
   for(const f of files){
     if(f&&f.size>MAX_UPLOAD_BYTES){_showUploadTooLarge(f);continue;}
-    if(!S.pendingFiles.find(p=>p.name===f.name))S.pendingFiles.push(f);
+    // True duplicate: same original name, size and mtime as ANY pending file,
+    // including one already renamed to a collision-free alias.
+    if(S.pendingFiles.some(p=>_pendingFileOrigName(p)===f.name&&p.size===f.size&&p.lastModified===f.lastModified))continue;
+    if(S.pendingFiles.some(p=>p.name===f.name)){
+      const copy=new File([f],_pendingFileUniqueName(f.name),{type:f.type,lastModified:f.lastModified});
+      try{Object.defineProperty(copy,'_origName',{value:f.name});}catch(_){}
+      S.pendingFiles.push(copy);
+      continue;
+    }
+    S.pendingFiles.push(f);
   }
   renderTray();
 }

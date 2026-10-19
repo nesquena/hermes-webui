@@ -91,41 +91,50 @@ function _excerptText(content) {
 }
 
 // Scrolls to a user message row identified by its rawIdx and flashes it.
-function _jumpToMessage(rawIdx) {
+async function _jumpToMessage(rawIdx) {
   const sid = _currentSid();
   if (!sid) return;
 
   const rowId = 'msg-user-' + rawIdx;
-  const row   = document.getElementById(rowId);
-  if (row) {
+  const targetRow = function() {
+    const row = document.getElementById(rowId);
+    // Loading full history changes local indices without rebuilding the DOM.
+    // A tail row with the same local id must not impersonate this target.
+    return row && Number(row.dataset.sessionMsgIdx) === _messageSessionIndexForRawIdx(rawIdx) ? row : null;
+  };
+  const scrollToRow = function() {
+    if (_currentSid() !== sid) return;
+    const row = targetRow();
+    if (!row) return;
+    // Use the same smooth-scroll ownership as response jumps. Cancel delayed
+    // bottom writes before scrolling, including the already-rendered-row path.
+    _beginMessageJumpScroll(document.getElementById('messages'));
     row.scrollIntoView({ block: 'center', behavior: 'smooth' });
     _flashRow(row);
+  };
+  if (targetRow()) {
+    _cancelBottomSettle();
+    scrollToRow();
     return;
   }
 
-  // Row is outside the render window — reload the full session and retry.
-  // Request the COMPLETE transcript via the explicit msg_limit=all escape
-  // hatch: the target row is addressed by absolute index (msg-user-<rawIdx>),
-  // so a bounded tail window would miss early rows. The bare no-limit shape
-  // is not used here intentionally — full-transcript intent must be explicit
-  // so recovery paths stay bounded (#7310/#7625).
-  if (typeof api !== 'function') return;
   if (S.busy || S.activeStreamId) return;
-  api('/api/session?session_id=' + encodeURIComponent(sid) +
-      '&messages=1&resolve_model=0&msg_limit=all')
-    .then(function(data) {
-      if (!data || !data.session) return;
-      if (!S.session || S.session.session_id !== sid) return;  // session switched
-      S.messages = data.session.messages || [];                // populate S
-      _expandOutlineRenderWindow();
-      if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
-      window.setTimeout(function() {
-        if (!S.session || S.session.session_id !== sid) return;
-        const r = document.getElementById('msg-user-' + rawIdx);
-        if (r) { r.scrollIntoView({ block: 'center', behavior: 'smooth' }); _flashRow(r); }
-      }, 120);
-    })
-    .catch(function() {});
+  try {
+    // A missing DOM row is not missing history. The shared loader requests
+    // /api/session with msg_limit=all only while truncated, and preserves
+    // message generations, ephemeral turn fields and tool-call metadata.
+    if (typeof _ensureAllMessagesLoaded !== 'function') return;
+    await _ensureAllMessagesLoaded();
+    if (_currentSid() !== sid || S.busy || S.activeStreamId) return;
+    if (typeof _messagesTruncated !== 'undefined' && _messagesTruncated) return;
+    _cancelBottomSettle();
+    _beginMessageJumpScroll(document.getElementById('messages'));
+    _expandOutlineRenderWindow();
+    if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
+    // Re-arm ownership after a potentially long synchronous render, before
+    // starting the native animation. No arbitrary delay or bottom-follow race.
+    requestAnimationFrame(scrollToRow);
+  } catch (_) {}
 }
 
 // Brief highlight flash on a message row after jumping.

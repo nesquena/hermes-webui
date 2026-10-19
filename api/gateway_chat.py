@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import threading
+from pathlib import Path
 import time
 import uuid
 import urllib.error
@@ -997,6 +998,8 @@ def _run_gateway_runs_api_streaming(
                 logger.debug("Failed to build runs-API multimodal attachment payload", exc_info=True)
                 message_content = str(msg_text or "")
         from api.streaming import (
+            _active_turn_authority,
+            _active_turn_token_matches,
             _is_non_replayable_history_row,
             _is_reasoning_only_assistant_message,
             _recovered_user_row_is_kept,
@@ -1007,9 +1010,41 @@ def _run_gateway_runs_api_streaming(
         conversation_history = []
         # (role, content, recovered) for each session row that may be sent.
         history_rows = []
+        # The active turn's retained user row (regeneration restamps it with
+        # this stream's token at chat-start) is re-sent as `input` below;
+        # sending it in conversation_history too makes the gateway see the
+        # prompt twice (re-gate 2026-10-05 item 3). The reconciled partial of
+        # that same interrupted turn is dropped with it.
+        active_turn_identity = _active_turn_authority(session, stream_id, msg_text)
+        drop_reconciled_partial = False
+        # Set when the outbound history is EMPTY ON PURPOSE and the webui
+        # KNOWS it: either the token match excluded the retained active-turn
+        # user row (it rides as `input` alone), context_messages had rows
+        # that were all filtered away, or the session was deliberately
+        # emptied (the 0.0 truncate-to-empty watermark stamped; a
+        # deferred-mode turn commits the new prompt only after the run,
+        # while eager mode checkpoints it into messages without advancing
+        # that watermark). An
+        # absent (or empty) key makes the Gateway admission handler fall back
+        # to its own stored transcript, which reloads turns the user just
+        # deleted (re-gate 2026-10-06 item 2; #8166 Greptile 2026-10-08:
+        # /clear leaves the gateway store intact, so its pre-clear transcript
+        # resurrected wholesale).
+        active_row_excluded = False
         for entry in getattr(session, "context_messages", None) or []:
             if not isinstance(entry, dict):
                 continue
+            if _active_turn_token_matches(entry, active_turn_identity):
+                drop_reconciled_partial = True
+                active_row_excluded = True
+                continue
+            if (
+                drop_reconciled_partial
+                and entry.get("role") == "assistant"
+                and entry.get(_GATEWAY_CANCEL_RECONCILED_STREAM_KEY)
+            ):
+                continue
+            drop_reconciled_partial = False
             # The same rows the legacy path drops: error markers, empty partials
             # and reasoning-only assistant rows.
             if _is_non_replayable_history_row(entry) or _is_reasoning_only_assistant_message(entry):
@@ -1059,6 +1094,45 @@ def _run_gateway_runs_api_streaming(
             run_body["instructions"] = "\n\n".join(part for part in instructions_parts if part)
         if conversation_history:
             run_body["conversation_history"] = conversation_history
+        elif (
+            active_row_excluded
+            or bool(getattr(session, "context_messages", None))
+            # 0.0 is the truncate-to-empty sentinel every deliberate
+            # emptying stamps (/clear, retry, undo, truncate keep=0 via
+            # session_ops._truncation_watermark_for([])); the eager-mode
+            # chat-start checkpoint appends the NEW prompt to messages but
+            # never advances a 0.0 watermark, so this holds in both save
+            # modes. A brand-new or imported session has no watermark.
+            or getattr(session, "truncation_watermark", None) == 0.0
+        ):
+            # The outbound history is empty ON PURPOSE and the webui KNOWS
+            # it: the retained active-turn row was excluded and nothing else
+            # survived the filters (regenerate), context_messages HAD rows
+            # that were all filtered away, or the session was deliberately
+            # emptied (0.0 truncate-to-empty watermark — /clear, retry,
+            # undo, truncate keep=0; api/routes.py /api/session/clear). Keep
+            # the key non-empty with a sentinel so the admission handler
+            # takes this body as-is instead of falling back to its stored
+            # transcript and resurrecting deleted turns (re-gate 2026-10-06
+            # item 2; #8166 Greptile 2026-10-08: /clear leaves the gateway
+            # store intact, so its pre-clear transcript resurrected
+            # wholesale).
+            # The sentinel is a USER row: the Anthropic-native converter
+            # keeps the LAST system row, so a system sentinel replaced the
+            # cached prompt + WebUI instructions wholesale on every
+            # deliberate-empty lane (re-gate 2026-10-13 item 2).
+            # Any other empty-history shape OMITS the key so the admission
+            # handler falls back to its own stored transcript exactly as on
+            # master: a brand-new session's first deferred-mode turn
+            # (messages empty, context empty, NO watermark) and an imported
+            # CLI/legacy session (messages populated, context empty).
+            # api/gateway_chat.py 73955fec had fired the sentinel for EVERY
+            # empty outbound history, so imported sessions ran blind
+            # (re-gate 2026-10-12 14:04 UTC).
+            # The prompt travels in `input` only.
+            run_body["conversation_history"] = [
+                {"role": "user", "content": "No earlier conversation turns."}
+            ]
         update_active_run(stream_id, phase="gateway-request")
         # Persist the exact body first: a restart before the run id is saved replays this admission.
         if on_run_id is not None:
@@ -1644,15 +1718,105 @@ def _sidecars_with_active_stream(session_dir) -> list[str]:
     return ids
 
 
-def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
-    """URL and key of the session's own profile, root included, never the process-active profile."""
+def _profile_config_path(home):
+    """config.yaml of a profile home. For the ACTIVE profile that is the authoritative ambient config file
+    (HERMES_CONFIG_PATH may point outside the profile home), the same rule get_config_for_profile_home() uses;
+    any other profile reads its own home, so a divergent profile never inherits the active custom config."""
     from api import profiles as _profiles
-    from api.config import get_config_for_profile_home
+    from api.config import _get_config_path
+    from api.workspace import _safe_resolve
 
-    home = _profiles.get_hermes_home_for_profile(str(profile_name or "").strip())
-    environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
-    environ.update(_profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home)))
-    return _gateway_base_url(get_config_for_profile_home(home), environ), _gateway_api_key(environ)
+    target = _safe_resolve(Path(home).expanduser())
+    try:
+        if _safe_resolve(Path(_profiles.get_active_hermes_home()).expanduser()) == target:
+            return _get_config_path()
+    except Exception:
+        pass
+    try:
+        ambient = _get_config_path()
+        if _safe_resolve(ambient.parent) == target:
+            return ambient
+    except Exception:
+        pass
+    return Path(home) / "config.yaml"
+
+
+def _process_profile_is_root() -> bool:
+    """True when the .env the process mirrored into os.environ is the default profile's (~/.hermes/.env)."""
+    from api import profiles as _profiles
+    from api.workspace import _safe_resolve
+
+    try:
+        return (_safe_resolve(Path(_profiles.get_process_profile_home()).expanduser())
+                == _safe_resolve(Path(_profiles.get_hermes_home_for_profile("")).expanduser()))
+    except Exception:
+        return False  # fail closed: treat the mirrored alias as per-profile
+
+
+def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
+    """URL and key for a session's profile, never those of the process-active profile.
+
+    The shared pair is what the WebUI process was given (launcher environment, default profile's .env, ambient
+    config): exactly what a single-profile deployment sends. A profile may override each half on its own:
+
+    - URL: its own HERMES_WEBUI_GATEWAY_BASE_URL in its .env, or webui_gateway_base_url in its config.yaml
+      (${VAR} expanded from that profile's .env, read fresh from the file, never from the process environment or
+      the cached ambient config); without one it keeps the shared URL.
+    - Key, on a URL that is not the shared one: the profile's own HERMES_WEBUI_GATEWAY_API_KEY or API_SERVER_KEY,
+      or none; the launcher's and the shared key are never sent to another Gateway.
+    - Key, on the shared URL: the profile's own HERMES_WEBUI_GATEWAY_API_KEY, then the shared alias (the
+      launcher's export, or the root profile's .env), then the profile's API_SERVER_KEY (the key of its own
+      Gateway), then the shared key.
+    """
+    from api import profiles as _profiles
+    from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx, get_config
+
+    shared_url, shared_key = _gateway_base_url(get_config(), os.environ), _gateway_api_key(os.environ)
+
+    home = Path(_profiles.get_hermes_home_for_profile(str(profile_name or "").strip()))
+    own_env = _profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home))
+    raw_cfg = _load_yaml_config_file_raw(_profile_config_path(home), _copy=False)
+    own_url_cfg = raw_cfg.get("webui_gateway_base_url") if isinstance(raw_cfg, dict) else None
+    own_url_env = str(own_env.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    own_alias = str(own_env.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    own_key = own_alias or str(own_env.get("API_SERVER_KEY") or "").strip()
+    # The launcher's explicit WebUI alias (an export, not a value mirrored from a profile's .env) is the key
+    # for the shared URL: there it keeps outranking a profile's API_SERVER_KEY, which is the key of that
+    # profile's OWN Gateway (docs: HERMES_WEBUI_GATEWAY_API_KEY first, API_SERVER_KEY as the fallback).
+    # An alias the profile loader mirrored from a NAMED active profile's .env is that profile's, not shared; one
+    # mirrored from the root profile's ~/.hermes/.env is the shared alias.
+    shared_alias = str(os.environ.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    if _WEBUI_GATEWAY_API_KEY_ENV in _profiles._loaded_profile_env_keys and not _process_profile_is_root():
+        shared_alias = ""
+
+    if not (own_url_env or own_url_cfg or own_key):
+        return shared_url, shared_key
+
+    url = shared_url
+    if own_url_env or own_url_cfg:
+        environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
+        environ.update(own_env)
+        previous_env = getattr(_thread_ctx, "env", {})
+        previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+        _thread_ctx.env = dict(environ)
+        _thread_ctx.block_process_env_fallback = True
+        try:
+            expanded_url = _expand_env_vars(own_url_cfg)
+        finally:
+            _thread_ctx.env = previous_env
+            _thread_ctx.block_process_env_fallback = previous_block
+        # a launcher-exported URL still outranks config.yaml, as everywhere else
+        url_env = own_url_env or str(environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+        url = _gateway_base_url({"webui_gateway_base_url": expanded_url} if expanded_url else {},
+                                {_WEBUI_GATEWAY_BASE_URL_ENV: url_env} if url_env else {})
+        if "${" in url:
+            raise RuntimeError(
+                f"gateway URL for profile {profile_name or 'default'!r} still contains an unresolved variable "
+                f"({url}); set it in that profile's .env"
+            )
+    if url != shared_url:
+        return url, own_key  # the profile's own Gateway: its own key or none, never the shared one
+    return url, (own_alias or shared_alias or own_key or shared_key)
 
 
 def _resume_gateway_run_for_session(session) -> bool:
@@ -1861,13 +2025,36 @@ def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
         # Row order matches cancel_stream(): the user turn is materialized
         # before the partial row is placed, and the partial is inserted
         # before any cancel marker that is already present. Clearing the
-        # pending fields here keeps _persist_cancelled_turn's own
+        # NOTE: the pending identity fields are cleared AFTER the reconcile
         # materialize idempotent (no duplicate user row).
         _materialize_pending_user_turn_before_error(session)
-        session.pending_user_message = None
-        session.pending_attachments = []
-        session.pending_started_at = None
-        session.pending_user_source = None
+        # Reconcile BEFORE any downstream row-shuffling — including the
+        # display partial insert below (maintainer re-gate 2026-10-12 09:01
+        # UTC item 1). With an EMPTY context the reconcile seeds itself from
+        # the transcript projection, so a display partial already sitting in
+        # session.messages was projected into the seeded context BEFORE the
+        # recovered prompt: the seeded `_recovered` row then sat before an
+        # assistant tail, the partial-append guard saw no owning-prompt tail
+        # (the seeded `_recovered` flag was never cleared), and the
+        # admission builder's answered-turn rule dropped the prompt while
+        # its partial appeared to answer an older unanswered turn. Seeding
+        # while the transcript still ends with the owning prompt lets the
+        # `_recovered`-flag clear / partial append see it. This keeps the
+        # round-3 ordering contract — the reconcile needs the pending turn
+        # identity (pending_user_message / pending_started_at) to mirror the
+        # interrupted turn (prompt + streamed partial) into the model-facing
+        # context; the status-lane materialization above does NOT clear that
+        # identity (only _persist_cancelled_turn below does), so this
+        # ordering holds for both cancellation lanes — and extends it: the
+        # reconcile must precede the DISPLAY insert too. partial_ts shares
+        # the display partial's whole-second stamp (re-gate item 5) so the
+        # display merge key cannot insert a second copy of the partial on
+        # the next successful turn.
+        _reconcile_gateway_cancelled_context(
+            session,
+            stream_id,
+            partial_ts=partial_msg.get("timestamp") if partial_msg is not None else None,
+        )
         if partial_msg is not None:
             if not isinstance(session.messages, list):
                 session.messages = []
@@ -1889,9 +2076,367 @@ def _settle_gateway_cancelled_turn(session_id, stream_id) -> None:
                     break
             if not _partial_marker_already_present(session.messages, partial_msg, before_idx=marker_idx):
                 session.messages.insert(marker_idx, partial_msg)
+        # Identity cleared only NOW: the reconcile above consumed
+        # pending_user_message / pending_started_at as the turn identity.
+        session.pending_user_message = None
+        session.pending_attachments = []
+        session.pending_started_at = None
+        session.pending_user_source = None
         _persist_cancelled_turn(session, message="Cancelled by gateway")
         session.gateway_run = None
         session.save()
+
+
+# Rows reconciled at cancel time carry the settling stream id so a replayed
+# settle of the same turn can never append the same partial twice.
+_GATEWAY_CANCEL_RECONCILED_STREAM_KEY = "_gateway_cancelled_stream"
+
+
+def _gateway_stream_partial_text(stream_id) -> str:
+    """Best-effort read of the partial assistant text streamed for a run."""
+    try:
+        return str(STREAM_PARTIAL_TEXT.get(stream_id) or "")
+    except Exception:
+        return ""
+
+
+def _project_transcript_context_rows(messages) -> list:
+    """Project the canonical display transcript into model-facing context rows.
+
+    The same row filters the runs-API history builder applies: error markers,
+    empty partials, reasoning-only assistant rows, and non user/assistant
+    roles never seed the model context. ``_recovered`` flags are KEPT so the
+    builder's answered-turn rule still decides visibility at send time,
+    timestamps are preserved verbatim so transcript merges recognize the rows
+    as the same ones, and each user row's ``_active_turn_token`` is KEPT so
+    same-second interrupts of one prompt stay distinguishable after the seed
+    (a token-less seeded row collapses the next interrupt into the content +
+    int-second fallback). Used to seed an EMPTY context_messages from
+    session.messages (imported CLI sessions, first gateway turns cancelled
+    gateway-side) before the interrupted turn is appended.
+    """
+    from api.streaming import (
+        _is_non_replayable_history_row,
+        _is_reasoning_only_assistant_message,
+        _strip_oob_blocks,
+    )
+
+    rows = []
+    for entry in messages or []:
+        if not isinstance(entry, dict):
+            continue
+        if _is_non_replayable_history_row(entry) or _is_reasoning_only_assistant_message(entry):
+            continue
+        # Journal-recovered rows without a proven context owner are display-only:
+        # projecting them would hand the model an answer it never produced in
+        # this context (same exclusion master's cancel path applies).
+        if entry.get("_recovered_display_only") is True:
+            continue
+        role = str(entry.get("role") or "").strip().lower()
+        if role not in {"user", "assistant"}:
+            continue
+        content = entry.get("content")
+        if content is None:
+            continue
+        row = {"role": role, "content": _strip_oob_blocks(content)}
+        ts = entry.get("timestamp")
+        if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
+            row["timestamp"] = ts
+        if entry.get("_recovered"):
+            row["_recovered"] = True
+        row_token = entry.get("_active_turn_token")
+        if row_token:
+            # Turn identity survives the projection (maintainer re-gate
+            # 2026-10-12 09:01 UTC item 2): a second interrupt of the same
+            # prompt inside one wall second is distinguishable from the
+            # first only by its stream-bound token, and a token-less seeded
+            # row makes the mirror dedup fall back to content + int-second
+            # and swallow the second turn. Tokens are stream-scoped
+            # (stream_id:started_at), never session-scoped, so a preserved
+            # token can only ever match the exact stream that created it —
+            # there is no fork boundary where stripping it is required.
+            row["_active_turn_token"] = str(row_token)
+        rows.append(row)
+    return rows
+
+
+def _drop_active_turn_rows_for_writeback(rows, active_turn_identity) -> list:
+    """Remove the active turn's retained rows from a model-context snapshot.
+
+    The regeneration start restamps the retained interrupted-turn user row
+    with the NEW stream's active-turn token while the same prompt is also
+    sent as ``input``. Keeping the row in the snapshot duplicates the prompt:
+    once in the outbound conversation_history, once more when the success
+    writeback appends the freshly materialized user row (re-gate 2026-10-05
+    item 3). The reconciled partial of the SAME interrupted turn — stamped
+    with the cancel-reconciliation key — is dropped with it: the turn is
+    being re-run wholesale, so a partial of the answer it is about to
+    regenerate must not ride along.
+    """
+    from api.streaming import _active_turn_token_matches
+
+    kept = []
+    drop_reconciled_partial = False
+    for row in rows:
+        if _active_turn_token_matches(row, active_turn_identity):
+            drop_reconciled_partial = True
+            continue
+        if (
+            drop_reconciled_partial
+            and isinstance(row, dict)
+            and row.get("role") == "assistant"
+            and row.get(_GATEWAY_CANCEL_RECONCILED_STREAM_KEY)
+        ):
+            continue
+        drop_reconciled_partial = False
+        kept.append(row)
+    return kept
+
+
+def _reconcile_gateway_cancelled_context(session, stream_id, *, partial_text=None, partial_ts=None) -> bool:
+    """Mirror an interrupted gateway turn into the model-facing context.
+
+    Called when a gateway run settles cancelled/interrupted so WebUI's
+    context_messages includes everything the gateway persisted at the moment
+    of interruption. With that snapshot complete, the next turn's always-send
+    conversation_history is correct for every flow: fork (snapshot includes
+    the parent prefix), truncate/undo/retry (snapshot is the shortened one),
+    prefill (snapshot + prefill compose), and a normal user Stop (cancel_stream
+    invokes this while the stream id is still current). Session state is saved
+    by the caller.
+
+    Order: the canonical transcript projection when the context is EMPTY (an
+    imported CLI session or a first gateway turn cancelled gateway-side still
+    has the whole conversation in session.messages — never fabricate a
+    two-row world that would replace the gateway's stored transcript, re-gate
+    2026-10-05 item 1), then the interrupted turn's pending user row, then the
+    partial assistant text the browser saw (STREAM_PARTIAL_TEXT for the
+    stream; skipped when empty).
+
+    Idempotent per turn/stream identity: the partial row is stamped with the
+    settling stream id and user-row mirrors are deduped by content and
+    timestamp, so double settlement appends nothing twice. A replayed settle
+    can still make the pending-user materializer re-append the prompt AFTER
+    the already-reconciled partial (its exact-checkpoint guard only inspects
+    the context tail); such trailing duplicates are collapsed here.
+
+    ``partial_ts`` optionally shares ONE whole-second stamp between the
+    model-facing partial row and the display partial cancel_stream appends
+    (re-gate item 5): two independent int(time.time()) calls can straddle a
+    second boundary and the display merge key would then insert a second
+    copy of the partial on the next successful turn.
+
+    Returns True when the context changed.
+    """
+    from api.process_event_utils import build_active_turn_token
+    from api.streaming import (
+        _build_partial_message,
+        _normalize_user_text,
+        stamp_message_source,
+    )
+
+    if session is None or not stream_id:
+        return False
+    context = getattr(session, "context_messages", None)
+    if not isinstance(context, list):
+        context = []
+        session.context_messages = context
+
+    changed = False
+
+    # (0) An empty context is not an empty world: seed the canonical
+    # transcript projection (the same row filters the runs-API history
+    # builder applies) BEFORE appending the interrupted turn, so the next
+    # turn's conversation_history carries the prior conversation + the
+    # interrupted turn instead of replacing the gateway's stored transcript
+    # with a two-row world.
+    if not context:
+        seeded = _project_transcript_context_rows(getattr(session, "messages", None))
+        if seeded:
+            context.extend(seeded)
+            changed = True
+
+    pending_text = str(getattr(session, "pending_user_message", None) or "")
+    pending_started_at = getattr(session, "pending_started_at", None)
+    pending_token = build_active_turn_token(stream_id, pending_started_at)
+    prompt_appended_this_call = False
+
+    # (a) The interrupted turn's user prompt. cancel_stream and
+    # _persist_cancelled_turn materialize it into session.messages; mirror the
+    # same row (content + pending_started_at timestamp) into the context
+    # unless an identical row is already there.
+    if pending_text:
+        try:
+            recovered_ts = int(time.time())
+        except AttributeError:
+            # Watchdog harness patches gc.time with a monotonic-only stub.
+            recovered_ts = int(partial_ts) if partial_ts is not None else 0
+        if isinstance(pending_started_at, (int, float)) and pending_started_at > 0:
+            recovered_ts = int(pending_started_at)
+        normalized_pending = _normalize_user_text(pending_text)
+        already_mirrored = False
+        for row in reversed(context[-8:]):
+            if not (isinstance(row, dict) and row.get("role") == "user"):
+                continue
+            if _normalize_user_text(str(row.get("content") or "")) != normalized_pending:
+                break
+            if (
+                pending_token
+                and row.get("_active_turn_token")
+                and row.get("_active_turn_token") != pending_token
+            ):
+                # Text + integer-second timestamp is not ownership (re-gate
+                # 2026-10-06 item 3): a DIFFERENT stream's identical prompt
+                # interrupted inside the same second carries its own token,
+                # and this turn must still be mirrored. Rows without a token
+                # (legacy data, lossless-unto-them projections) keep the
+                # established timestamp check.
+                break
+            try:
+                row_ts = int(row.get("timestamp") or 0)
+            except (TypeError, ValueError):
+                row_ts = None
+            if row_ts is None or row_ts == recovered_ts:
+                already_mirrored = True
+            break
+        if not already_mirrored:
+            user_row = {
+                "role": "user",
+                "content": pending_text,
+                "timestamp": recovered_ts,
+                "_recovered": True,
+            }
+            if pending_token:
+                # Turn identity for the token-based exclusion on the next
+                # turn: the regenerate path must drop THIS row from outbound
+                # history and from the writeback snapshot instead of
+                # duplicating the prompt (re-gate item 3).
+                user_row["_active_turn_token"] = pending_token
+            stamp_message_source(
+                user_row, getattr(session, "pending_user_source", None) or "webui",
+            )
+            pending_attachments = list(getattr(session, "pending_attachments", None) or [])
+            if pending_attachments:
+                user_row["attachments"] = pending_attachments
+            context.append(user_row)
+            prompt_appended_this_call = True
+            changed = True
+
+    def _user_row_identity(row):
+        """Comparable identity for a user context row (or None).
+
+        The active-turn token is part of the identity (re-gate 2026-10-06
+        item 3): two interrupts of the same prompt inside one second share
+        content and integer-second timestamp but never a token, so a replay
+        collapse for one turn must never swallow the other turn's row.
+        """
+        if not isinstance(row, dict) or row.get("role") != "user":
+            return None
+        try:
+            row_ts = int(row.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            row_ts = -1
+        return (
+            _normalize_user_text(str(row.get("content") or "")),
+            row_ts,
+            row.get("_active_turn_token"),
+        )
+
+    # Locate a partial this stream already reconciled, and collapse any
+    # replayed user rows the materializer appended after it.
+    reconciled_idx = None
+    for idx in range(len(context) - 1, -1, -1):
+        row = context[idx]
+        if (
+            isinstance(row, dict)
+            and row.get(_GATEWAY_CANCEL_RECONCILED_STREAM_KEY) == stream_id
+        ):
+            reconciled_idx = idx
+            break
+    if reconciled_idx is not None:
+        seen_user_identities = {
+            _user_row_identity(row) for row in context[:reconciled_idx]
+        }
+        seen_user_identities.discard(None)
+        kept = []
+        dropped_replay = False
+        for row in context[reconciled_idx + 1:]:
+            identity = _user_row_identity(row)
+            if (
+                identity is not None
+                and identity in seen_user_identities
+                and isinstance(row, dict)
+                and row.get("_recovered")
+            ):
+                dropped_replay = True
+                continue
+            if identity is not None:
+                seen_user_identities.add(identity)
+            kept.append(row)
+        if dropped_replay:
+            context[reconciled_idx + 1:] = kept
+            changed = True
+
+    def _interrupted_turn_owns_tail_row(row) -> bool:
+        """True when the trailing user context row IS the interrupted prompt.
+
+        Ownership is the turn identity, never "any trailing user row" (re-gate
+        item 2): the row this reconcile just materialized, a row carrying this
+        stream's active-turn token (a replayed settle after the pending state
+        was cleared), or an identical content + pending_started_at timestamp
+        row (the transcript-recovery materializer's shape).
+        """
+        if prompt_appended_this_call:
+            return True
+        if not isinstance(row, dict):
+            return False
+        if pending_token and row.get("_active_turn_token") == pending_token:
+            return True
+        if not pending_text:
+            return False
+        if _normalize_user_text(str(row.get("content") or "")) != _normalize_user_text(pending_text):
+            return False
+        if not (isinstance(pending_started_at, (int, float)) and pending_started_at > 0):
+            return True
+        try:
+            row_ts = int(row.get("timestamp") or 0)
+        except (TypeError, ValueError):
+            return False
+        return row_ts == int(pending_started_at)
+
+    # (b) The partial assistant text the browser saw (what the gateway's
+    # persisted incomplete snapshot holds). Only appended while the context
+    # tail is the interrupted prompt's OWN row — identity/token matched, not
+    # merely a trailing user row, which can be an older unanswered prompt
+    # (re-gate 2026-10-05 item 2).
+    if reconciled_idx is None:
+        raw_partial = (
+            partial_text
+            if partial_text is not None
+            else _gateway_stream_partial_text(stream_id)
+        )
+        partial_row = _build_partial_message(raw_partial, "", []) if raw_partial else None
+        if partial_row is not None:
+            if context and _interrupted_turn_owns_tail_row(context[-1]):
+                # The partial is about to ride directly under its verified
+                # owning user row: that pair IS the interrupted turn, so the
+                # row is no longer a possibly-unanswered recovered prompt.
+                # Clearing the flag keeps the runs-API history builder from
+                # dropping the question and pairing the partial with the
+                # wrong one (re-gate 2026-10-06 item 1).
+                context[-1].pop("_recovered", None)
+                if partial_ts is not None:
+                    partial_row["timestamp"] = partial_ts
+                partial_row[_GATEWAY_CANCEL_RECONCILED_STREAM_KEY] = stream_id
+                context.append(partial_row)
+                changed = True
+            else:
+                logger.debug(
+                    "Skipping gateway cancel partial mirror for stream %s: "
+                    "interrupted prompt is not the context tail",
+                    stream_id,
+                )
+    return changed
 
 
 def _stream_writeback_is_current(session: Any, stream_id: str) -> bool:
@@ -2071,7 +2616,10 @@ def _run_gateway_chat_streaming(
             model=model,
             model_provider=model_provider,
         )
-        base_url, api_key = reattach_endpoint or (_gateway_base_url(cfg), _gateway_api_key())
+        # The session's own profile, not the process-active one: this worker thread has no
+        # thread-local profile, so get_config()/os.environ describe whichever profile the
+        # process loaded. Same resolver the restart-reattach path already uses.
+        base_url, api_key = reattach_endpoint or _gateway_endpoint_for_profile(getattr(s, "profile", None))
         with _STREAM_RUN_STARTING_CONDITION:
             _STREAM_ENDPOINTS[stream_id] = (base_url, api_key)
         try:
@@ -2409,6 +2957,15 @@ def _run_gateway_chat_streaming(
                 if isinstance(stored_context, list) and (regeneration or stored_context)
                 else getattr(s, "messages", None) or []
             )
+            # The active turn's retained user row (restamped with this
+            # stream's token at regeneration start) is re-materialized below
+            # as user_msg; dropping it from the snapshot keeps the saved model
+            # context at exactly one copy of the prompt (re-gate 2026-10-05
+            # item 3), and the interrupted turn's reconciled partial goes with
+            # it for the same reason.
+            previous_context = _drop_active_turn_rows_for_writeback(
+                previous_context, active_turn_identity,
+            )
             previous_process_wakeup_pause = dict(getattr(s, "process_wakeup_pause", {}) or {})
             # Stamp stable ids on the two new rows (shared with the display merge
             # below) so display and model-context copies share an id for the
@@ -2486,7 +3043,7 @@ def _run_gateway_chat_streaming(
             )
 
             def _restore_cancelled_success_writeback():
-                if pending_source == "process_wakeup":
+                if pending_source in ("process_wakeup", "delegation_wakeup"):
                     s.context_messages = previous_context
                     s.messages = previous_messages
                     s.process_wakeup_pause = dict(previous_process_wakeup_pause)
@@ -2586,7 +3143,7 @@ def _run_gateway_chat_streaming(
             err_body = ""
         put_gateway_event(
             "apperror",
-            _gateway_http_error_event(exc, err_body, api_key_configured=bool(_gateway_api_key())),
+            _gateway_http_error_event(exc, err_body, api_key_configured=bool(api_key)),
         )
     except Exception as exc:
         safe = _redact_text(str(exc))[:500]
