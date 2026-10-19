@@ -11457,6 +11457,10 @@ def _limited_webui_messages_for_display_with_sidecar(
         truncation_boundary=getattr(session, "truncation_boundary", None),
         incoming_provenance="state_db",
         cancelled_journal_owner_messages=getattr(session, "messages", None) or [],
+        # #8195: state_db_messages came from the include_compacted display
+        # projection, so compaction-archived rows older than the sidecar start
+        # belong in front of it instead of being dropped as a resurrection.
+        display_history=True,
     )
     merged = _project_native_image_payload_conflicts_for_display(
         sidecar_messages,
@@ -16058,6 +16062,12 @@ def _handle_session_get(handler, parsed) -> bool:
                     owner_positions=_display_owner_positions,
                 )
             _state_db_reader_kwargs = {"profile": _session_profile}
+            # Display coordinate space only (#8195): keep compaction-archived
+            # transcript history visible for external/Desktop sessions, the
+            # same projection hermes-state paints for the Desktop app. Model
+            # context and settled-state reconciliation keep their own
+            # active-only reads and never receive these kwargs.
+            _state_db_reader_kwargs["include_compacted"] = True
             if _cancelled_journal_turn_owner(getattr(s, "messages", None) or [], include_live_partial=True):
                 _state_db_reader_kwargs["include_row_identity"] = True
             if state_db_since_timestamp is not None:
@@ -16189,6 +16199,10 @@ def _handle_session_get(handler, parsed) -> bool:
                     truncation_boundary=getattr(s, "truncation_boundary", None),
                     incoming_provenance="state_db",
                     cancelled_journal_owner_messages=getattr(s, "messages", None) or [],
+                    # #8195: state_db_messages is the include_compacted display
+                    # projection; archived rows predate a sidecar materialized
+                    # from the post-compaction active rows and must stay visible.
+                    display_history=True,
                 )
                 _all_msgs = _merged_webui_lineage_messages_for_display(
                     s,
@@ -16571,6 +16585,24 @@ def _handle_session_get(handler, parsed) -> bool:
         # the wire shape stays byte-equivalent to the previous inline
         # synthesis (the frontend has been reading these exact keys).
         msgs = list(synth.messages or [])
+        # #8195: the synthesizer's messages come from the ACTIVE-only read
+        # (get_cli_session_messages), which is exactly what model context must
+        # see. This GET stub never feeds the model, so repaint the
+        # compaction-archived transcript the Desktop app paints for external
+        # sessions: read the same rows through the include_compacted display
+        # projection. Claude Code rows do not live in state.db, so an empty
+        # read keeps the synthesizer's own messages.
+        try:
+            _display_msgs = get_state_db_session_messages(
+                sid,
+                stitch_continuations=True,
+                profile=None,
+                include_compacted=True,
+            )
+        except Exception:
+            _display_msgs = []
+        if _display_msgs:
+            msgs = _display_msgs
         sess = {
             "session_id": synth.session_id,
             "title": synth.title,
