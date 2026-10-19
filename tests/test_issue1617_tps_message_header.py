@@ -10,6 +10,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 CONFIG_PY = (REPO / "api" / "config.py").read_text(encoding="utf-8")
 STREAMING_PY = (REPO / "api" / "streaming.py").read_text(encoding="utf-8")
+MODELS_PY = (REPO / "api" / "models.py").read_text(encoding="utf-8")
 BOOT_JS = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
 INDEX_HTML = (REPO / "static" / "index.html").read_text(encoding="utf-8")
 MESSAGES_JS = (REPO / "static" / "messages.js").read_text(encoding="utf-8")
@@ -126,6 +127,9 @@ def test_final_tps_reports_pure_generation_speed():
     assert "d.usage.tool_seconds" in MESSAGES_JS, "done handler should read the tool-time field"
     assert "'_turnToolSeconds'" in MESSAGES_JS, (
         "ephemeral-field carry-forward must keep the tool chip across session reloads"
+    )
+    assert '"_turnToolSeconds"' in MODELS_PY, (
+        "session display-metadata allowlist must pass the tool chip through the API"
     )
 
 
