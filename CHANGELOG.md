@@ -82,6 +82,14 @@
 
 ### Fixed
 
+- **Terminal keeps your keystrokes in order.** Keys typed into the composer terminal are now sent one request at a time per shell, with anything typed meanwhile queued and sent next, so fast typing or a paste followed by Enter can no longer reach the shell out of order. Long pastes are split under the server's size limit, and unsent keys are dropped when the terminal is closed or restarted. Thanks @grzezlo. (#8341)
+
+- **Windows: starting the WebUI again reports "already running".** When our own WebUI already listens on the port, Windows can refuse the second bind with a permission error (WSAEACCES) instead of "address in use"; the launcher now recognises its own server behind that error. Thanks @Thanatos9404. (#8301, #8137)
+
+- **Faster session switching on code-heavy chats.** The copy-button pass marks code blocks it has already handled, so re-rendering a cached transcript no longer re-walks every code block to add nothing. Thanks @MuhammadUsamaMX. (#8309, #2168)
+
+- **Dashboard link setting rejects double-slash paths.** A browser dashboard URL whose path contains `//` (for example `https://host//dashboard`) is now refused when you save it, closing the last authority-like path shape the earlier #7844 hardening missed. Thanks @MuhammadUsamaMX. (#8354)
+
 - **Skills panel works again with current Hermes Agent builds.** The Agent renamed its skills-ordering helper on 2026-10-18 without keeping the old name, so the Skills list and skill usage stats returned a server error after the WebUI restarted. The WebUI now accepts both the old and new name (and falls back to the same ordering if neither exists), so it works with older and newer Agents alike. Thanks @sh4rknado. (#8367)
 
 - **Less CPU while chats are open.** Finding a run's journal file walked every session directory on each lookup, and those lookups sit on per-poll paths (stream reconnect probes, ownership checks). With hundreds of sessions that walk took a large share of the process and slowed even `/health`. Run paths are now cached (bounded, revalidated on use), hundreds of times faster per warm lookup. Thanks @silent-reader-cn. (#8322)
@@ -531,6 +539,8 @@
 - **Documented the gateway approval-runs API opt-in.** `docs/advanced-chat-setup.md` and `docs/docker.md` now explain how to enable and use the gateway approval-runs API. Thanks @rodboev. (#5549, #5269)
 
 ### Changed
+
+- **Test suite: the run-journal echo-scan scaling check no longer flakes on a busy runner,** while still failing on a genuinely quadratic rebuild. Thanks @MuhammadUsamaMX. (#8328)
 
 - **Russian: the last English strings translated.** The Profiles explainer and the Transparent Stream timestamp setting now read in Russian. Thanks @RajPabnani03. (#8001)
 
