@@ -1295,6 +1295,27 @@ def _normalize_disabled_set(values) -> set:
     return {str(v).strip() for v in values if str(v).strip()}
 
 
+def _skill_listing_order_key(skill: dict) -> tuple:
+    return (skill.get("category") or "", skill["name"])
+
+
+def _resolve_agent_sort_skills(skills_tool_module):
+    """Return the Agent's skill-listing order helper under whichever name it exports.
+
+    Agent commit 93fafc4d6ff (2026-10-18) renamed ``_sort_skills`` to
+    ``sort_skills`` with no underscore alias, while older Agents only export the
+    private name. WebUI runs against both, so resolve the helper by attribute
+    instead of importing one spelling (an ImportError here took down
+    ``/api/skills`` and ``/api/skills/usage`` on newer Agents). If neither name
+    exists, fall back to the same ``(category, name)`` order the helper uses.
+    """
+    for attr in ("sort_skills", "_sort_skills"):
+        candidate = getattr(skills_tool_module, attr, None)
+        if callable(candidate):
+            return candidate
+    return lambda skills: sorted(skills, key=_skill_listing_order_key)
+
+
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
     """List skills using an explicit local skills directory.
 
@@ -1302,14 +1323,17 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     scan root explicit so per-client WebUI profile switches do not race on or
     leak through the skills tool's module-global ``SKILLS_DIR``.
     """
+    import importlib
+
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import (
         MAX_DESCRIPTION_LENGTH,
         _EXCLUDED_SKILL_DIRS,
         _parse_frontmatter,
-        _sort_skills,
         skill_matches_platform,
     )
+
+    sort_skills = _resolve_agent_sort_skills(importlib.import_module("tools.skills_tool"))
 
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
@@ -1367,7 +1391,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 
     if category:
         all_skills = [s for s in all_skills if s.get("category") == category]
-    all_skills = _sort_skills(all_skills)
+    all_skills = sort_skills(all_skills)
     categories = sorted(set(s.get("category") for s in all_skills if s.get("category")))
     result = {
         "success": True,
@@ -8449,6 +8473,108 @@ def _ordered_custom_provider_model_ids(entry: dict) -> list[str]:
     return ordered
 
 
+def _custom_provider_allowlist_ids(_cp: dict) -> list[str]:
+    """Plural ``models`` list only — the explicit allowlist signal.
+
+    The singular ``model`` field is sticky/default metadata, NOT an
+    allowlist: it must not gate live-catalog filtering, otherwise a
+    provider configured with only ``model: assistant`` (no ``models``
+    list) would be collapsed to a single model.  Only an explicit
+    ``models`` allowlist expresses "show exactly these models".
+
+    An auto-discovered catalog is NOT an allowlist: when Hermes
+    persisted discovery results back into config (``models: {...}``
+    plus ``models_discovered: true``), that mapping is a snapshot
+    of what the gateway exposed at discovery time.  Gating on it
+    would permanently pin the live catalog to the first-discovery
+    set, silently dropping any model the user pulls in later
+    (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
+    is the shared predicate the ``/api/models`` path already uses;
+    when it says "discovered", return no allowlist and let the
+    live probe win.  An explicit ``discover_models: false`` opt-out
+    re-pins the catalog (the predicate accounts for it), so a
+    hand-pinned discovered catalog still filters.
+
+    A dict-shaped ``models`` mapping that is NOT marked discovered is
+    *per-model metadata* written by the Hermes Agent setup flow
+    (``hermes_cli/model_switch.py::_save_custom_provider`` and the
+    setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
+    not a catalog narrow: treating its keys as an allowlist would
+    collapse the live picker to the single saved default (keyless
+    Ollama) while the CLI live-probe shows the full catalog.  Only an
+    explicit ``discover_models: false`` opts into treating the dict
+    keys as a pinned allowlist.  List/JSON-array-string/Python-literal
+    shapes remain plain allowlists.
+
+    The plural value is decoded through ``_parse_config_string_list()``
+    because ``hermes config set`` / JSON-mode editor saves persist
+    lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
+    Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
+    made a serialized allowlist fall through to ``[]``, which the
+    caller reads as "no allowlist configured" and floods the picker
+    with the full upstream catalog — the same class of bug as the
+    ``skills.disabled`` regression (#7120 / #7134).
+    """
+    from api.config import (
+        _provider_discover_allowed,
+        _provider_models_are_discovered_catalog,
+    )
+
+    if _provider_models_are_discovered_catalog(_cp):
+        return []
+    _ids = []
+    _models = _cp.get("models")
+    # Serialized shapes only: ``hermes config set`` / JSON-mode
+    # editor saves persist lists as quoted JSON-array strings
+    # (``'["chat-a","chat-b"]'``) or Python literals
+    # (``"['chat-a']"``).  Decode the array itself (JSON first, then a
+    # Python literal) and walk it below, so mapping members keep their
+    # id|model|name metadata; the shared decoder str()-ifies members
+    # (``"{'id': 'a'}"``).  Anything else goes through
+    # ``_parse_config_string_list()`` as before.
+    if isinstance(_models, str):
+        import ast
+
+        _decoded = None
+        _stripped = _models.strip()
+        if _stripped.startswith("["):
+            try:
+                _decoded = json.loads(_stripped)
+            except ValueError:
+                try:
+                    _decoded = ast.literal_eval(_stripped)
+                except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                    _decoded = None
+        if isinstance(_decoded, list):
+            _models = _decoded
+        else:
+            _models = _parse_config_string_list(_models)
+    if isinstance(_models, dict):
+        # A dict-shaped ``models`` is per-model metadata written by
+        # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
+        # ``discover_models: false`` opt-out treats the dict keys as a
+        # pinned allowlist; otherwise return the empty allowlist so the
+        # live probe returns the full catalog.
+        if _provider_discover_allowed(_cp):
+            return []
+        for _mid in _models:
+            # Pre-fix Hermes wrote these sentinels inside the mapping;
+            # skip them like the Agent's ``_declared_model_ids``.
+            if _mid in ("__explicit_model_allowlist__", "__discovered_model_catalog__"):
+                continue
+            if isinstance(_mid, str) and _mid.strip():
+                _ids.append(_mid.strip())
+    elif isinstance(_models, (list, tuple)):
+        for _item in _models:
+            if isinstance(_item, str) and _item.strip():
+                _ids.append(_item.strip())
+            elif isinstance(_item, dict):
+                _mid = _item.get("id") or _item.get("model") or _item.get("name")
+                if _mid and str(_mid).strip():
+                    _ids.append(str(_mid).strip())
+    return _ids
+
+
 def _repair_bare_custom_provider_model(
     bare_model: str,
     provider: str | None,
@@ -8511,6 +8637,91 @@ def _repair_bare_custom_provider_model(
         return None
 
 
+def _repair_removed_qualified_custom_provider_model(
+    model: str,
+    provider: str | None,
+    *,
+    config_obj: dict | None,
+    profile: str | None = None,
+) -> str | None:
+    """Move a removed named-custom model to that provider's pinned list.
+
+    The target is the configured default when it's in the pinned list,
+    otherwise the first pinned model. A session on the configured default
+    (``${VAR}`` expanded with ``profile``'s env) is kept even outside the
+    list, since the picker still offers it. Only a pinned allowlist (``_custom_provider_allowlist_ids``) can prove a
+    model was removed: a discovered catalog snapshot or dict-shaped metadata
+    may omit models the live probe still serves. Needs the session's own
+    profile config; ``None`` is ambiguous (no profile, unreadable profile, or
+    a caller that doesn't pass one) and the shared ``cfg`` may belong to
+    another profile, so it never repairs from it. Colliding slugs fail closed.
+    """
+    prov = _clean_session_model_provider(provider)
+    bare_model, qualified_provider = _split_provider_qualified_model(model)
+    if (
+        not isinstance(config_obj, dict)
+        or not prov
+        or not prov.startswith("custom:")
+        or qualified_provider != prov
+    ):
+        return None
+
+    from api.config import (
+        AmbiguousCustomProviderError,
+        _custom_provider_slug_key,
+        _unique_custom_provider_entry,
+    )
+
+    try:
+        entry = _unique_custom_provider_entry(
+            config_obj.get("custom_providers"),
+            _custom_provider_slug_key(prov),
+        )
+    except AmbiguousCustomProviderError:
+        return None
+    if not entry:
+        return None
+    pinned = _custom_provider_allowlist_ids(entry)
+    raw_models = entry.get("models")
+    if (
+        isinstance(raw_models, str)
+        and raw_models.strip().startswith("[")
+        and pinned == [raw_models.strip()]
+    ):
+        # Serialized list that failed to decode: not proof of anything.
+        # A plain single-model string is still a valid one-model allowlist.
+        return None
+    if any("${" in item for item in pinned):
+        # Unresolved env reference: the raw profile YAML isn't the real ID.
+        return None
+
+    def _own_bare(item: str) -> str:
+        # Unwrap only this provider's own wrapper; ``@safe:x`` is a real ID.
+        bare, item_provider = _split_provider_qualified_model(item)
+        return bare if item_provider == prov else item
+
+    pinned_bare = [_own_bare(item) for item in pinned]
+    if not pinned or bare_model in pinned_bare:
+        return None
+    default_raw = str(entry.get("model") or "").strip()
+    if "${" in default_raw:
+        # Expand with the session profile's env, root included (read-only,
+        # fail-closed); left unresolved, it falls back to the pinned list.
+        from api.config import _expand_env_vars
+        from api.profiles import profile_env_for_thread_readonly
+
+        with profile_env_for_thread_readonly(
+            profile or "", "custom provider default", include_root=True,
+        ):
+            default_raw = _expand_env_vars(default_raw).strip()
+    default_bare = _own_bare(default_raw)
+    # The singular default stays a picker entry even outside ``models``.
+    if bare_model == default_bare:
+        return None
+    replacement = default_bare if default_bare in pinned_bare else pinned_bare[0]
+    return f"@{prov}:{replacement}"
+
+
 def _moa_fast_path_model_state(model: str) -> tuple[str, str, bool]:
     """Strip an optional ``@moa:``/``moa/`` prefix from an MoA-routed model.
 
@@ -8537,6 +8748,7 @@ def _resolve_compatible_session_model_state(
     profile_config: dict | None = None,
     explicit_model_pick: bool = False,
     prefer_cached_catalog: bool = False,
+    profile: str | None = None,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -8574,6 +8786,25 @@ def _resolve_compatible_session_model_state(
     if model and requested_provider == "moa":
         return _moa_fast_path_model_state(model)
     if model and requested_provider and model.startswith(f"@{requested_provider}:"):
+        # A fresh explicit pick is never second-guessed as stale.
+        repaired_model = None if explicit_model_pick else _repair_removed_qualified_custom_provider_model(
+            model,
+            requested_provider,
+            config_obj=profile_config,
+            profile=profile,
+        )
+        if repaired_model:
+            return repaired_model, requested_provider, True
+        if (
+            requested_provider.startswith("custom:")
+            and _split_provider_qualified_model(model)[1] == requested_provider
+        ):
+            # Keeping a pick rewrites nothing, so a session without a profile
+            # config may check the active config (repair above may not).
+            from api.config import _named_custom_provider_slug_for_provider
+
+            if _named_custom_provider_slug_for_provider(requested_provider, profile_config):
+                return model, requested_provider, False
         try:
             from api.config import cfg as _active_cfg
 
@@ -8989,6 +9220,7 @@ def _resolve_effective_session_model_for_display(session) -> str:
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(session, "profile", None),
         # GET /api/session is a hot, side-effect-free per-tab/per-poll path.
         # It must never pay the cold live provider-catalog rebuild (a
         # botocore IMDS probe that cannot resolve on a non-AWS / WSL / corp
@@ -9013,6 +9245,7 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(session, "profile", None),
         # See _resolve_effective_session_model_for_display: same hot
         # side-effect-free GET /api/session path; must not trigger the cold
         # live rebuild. prefer_cached_catalog resolves from warm/disk cache
@@ -18458,6 +18691,17 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
+        try:
+            p = (SESSION_DIR / f"{sid}.json").resolve()
+            p.relative_to(SESSION_DIR.resolve())
+        except Exception:
+            return bad(handler, "Invalid session_id", 400)
+        # Evict outside the mutation lock: the lifecycle commit performs provider
+        # I/O (it can wait on another commit) and must not hold a per-session
+        # lock. It runs before the DB delete because that commit writes state.db
+        # and would otherwise recreate the session being deleted.
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
@@ -18465,11 +18709,70 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
         try:
+            # Delete state.db rows BEFORE any user-visible file. A refusal (live
+            # gateway work, unfenceable ledger) or a failed commit must leave the
+            # whole session intact instead of stranding an unrecoverable
+            # half-delete: the sidecar, index entry, backups and tombstone are
+            # not restored by the DB rollback.
+            state_db_cleanup_failed = False
+            delete_raised = False
+            if not is_messaging_session:
+                try:
+                    from api.models import SessionDeleteRefused, delete_cli_session
+
+                    state_db_cleanup_failed = not delete_cli_session(sid)
+                except SessionDeleteRefused as exc:
+                    return j(
+                        handler,
+                        {"ok": False, "error": exc.code, "action": "session_delete"},
+                        status=409,
+                    )
+                except Exception:
+                    state_db_cleanup_failed = True
+                    delete_raised = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
+                if state_db_cleanup_failed:
+                    # A False return covers an aborted transaction and a commit
+                    # whose artifact cleanup is still pending (its manifest
+                    # retries it). Only a surviving row proves nothing was
+                    # committed; then user files must stay. Otherwise the
+                    # conversation is already gone and the remaining cleanup
+                    # must still run, or the sidecar, index entry and tombstone
+                    # would strand a deleted session. An exception proves
+                    # nothing either way, so it keeps failing closed.
+                    from api.models import state_db_session_presence
+
+                    if delete_raised or state_db_session_presence(sid) is not False:
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "error": "state_db_cleanup_failed",
+                                "action": "session_delete",
+                            },
+                            status=500,
+                        )
+                    logger.warning(
+                        "Session %s committed; transcript cleanup is still pending",
+                        sid,
+                    )
+            # Runtime cleanup only after the delete is durable: closing the
+            # terminal of a refused delete would kill the very work that made
+            # the Agent refuse it.
+            # Prune the completion-dedup entry too. The reaper sweeps it once the
+            # completion is delivered (drained from PENDING); a session deleted
+            # while a completion is still pending would otherwise keep its entry.
             try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
+                from api.background_process import forget_bg_task_completion_dedup
+
+                forget_bg_task_completion_dedup(sid)
             except Exception:
-                return bad(handler, "Invalid session_id", 400)
+                logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
+            try:
+                from api.terminal import close_terminal
+                close_terminal(sid)
+            except Exception:
+                logger.debug("Failed to close workspace terminal for deleted session %s", sid)
             sidecar_deleted = False
             with LOCK:
                 SESSIONS.pop(sid, None)
@@ -18499,10 +18802,6 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
-        # Evict outside the mutation lock: lifecycle commit may perform provider
-        # I/O and must not hold a per-session Session lock.
-        from api.config import _evict_session_agent
-        _evict_session_agent(sid)
         try:
             from api.upload import _session_attachment_dir
 
@@ -18528,31 +18827,6 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
-        # Prune the completion-dedup entry too. The reaper sweeps it once the
-        # completion is delivered (drained from PENDING); a session deleted
-        # while a completion is still pending would otherwise keep its entry.
-        try:
-            from api.background_process import forget_bg_task_completion_dedup
-
-            forget_bg_task_completion_dedup(sid)
-        except Exception:
-            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
-        try:
-            from api.terminal import close_terminal
-            close_terminal(sid)
-        except Exception:
-            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
         response = {
             "state_db_cleanup_failed": state_db_cleanup_failed,
@@ -24640,99 +24914,6 @@ def _handle_live_models(handler, parsed):
                 _env = str(_cp.get("key_env") or "").strip()
                 return os.getenv(_env, "").strip() if _env else ""
 
-            def _custom_provider_models_discover_is_false(_cp):
-                """True when ``discover_models`` is an explicit ``false`` opt-out.
-
-                Mirrors ``api.config._provider_discover_allowed`` / Hermes
-                Agent ``model_switch_providers._discover_flag``: ``discover_models``
-                defaults to True, and the string forms ``"false"``/``"no"``/``"0"``
-                (case-insensitive) mean False.  Used to decide whether a
-                dict-shaped ``models`` mapping is a hand-pinned allowlist (only
-                when discovery is off) rather than per-model metadata.
-                """
-                _discover = _cp.get("discover_models", True) if isinstance(_cp, dict) else True
-                if isinstance(_discover, str):
-                    return _discover.strip().lower() in {"false", "no", "0"}
-                return not bool(_discover)
-
-            def _custom_provider_allowlist_ids(_cp):
-                """Plural ``models`` list only — the explicit allowlist signal.
-
-                The singular ``model`` field is sticky/default metadata, NOT an
-                allowlist: it must not gate live-catalog filtering, otherwise a
-                provider configured with only ``model: assistant`` (no ``models``
-                list) would be collapsed to a single model.  Only an explicit
-                ``models`` allowlist expresses "show exactly these models".
-
-                An auto-discovered catalog is NOT an allowlist: when Hermes
-                persisted discovery results back into config (``models: {...}``
-                plus ``models_discovered: true``), that mapping is a snapshot
-                of what the gateway exposed at discovery time.  Gating on it
-                would permanently pin the live catalog to the first-discovery
-                set, silently dropping any model the user pulls in later
-                (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
-                is the shared predicate the ``/api/models`` path already uses;
-                when it says "discovered", return no allowlist and let the
-                live probe win.  An explicit ``discover_models: false`` opt-out
-                re-pins the catalog (the predicate accounts for it), so a
-                hand-pinned discovered catalog still filters.
-
-                A dict-shaped ``models`` mapping that is NOT marked discovered is
-                *per-model metadata* written by the Hermes Agent setup flow
-                (``hermes_cli/model_switch.py::_save_custom_provider`` and the
-                setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
-                not a catalog narrow: treating its keys as an allowlist would
-                collapse the live picker to the single saved default (keyless
-                Ollama) while the CLI live-probe shows the full catalog.  Only an
-                explicit ``discover_models: false`` opts into treating the dict
-                keys as a pinned allowlist.  List/JSON-array-string/Python-literal
-                shapes remain plain allowlists.
-
-                The plural value is decoded through ``_parse_config_string_list()``
-                because ``hermes config set`` / JSON-mode editor saves persist
-                lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
-                Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
-                made a serialized allowlist fall through to ``[]``, which the
-                caller reads as "no allowlist configured" and floods the picker
-                with the full upstream catalog — the same class of bug as the
-                ``skills.disabled`` regression (#7120 / #7134).
-                """
-                from api.config import _provider_models_are_discovered_catalog
-
-                if _provider_models_are_discovered_catalog(_cp):
-                    return []
-                _ids = []
-                _models = _cp.get("models")
-                # Serialized shapes only: ``hermes config set`` / JSON-mode
-                # editor saves persist lists as quoted JSON-array strings
-                # (``'["chat-a","chat-b"]'``) or Python literals
-                # (``"['chat-a']"``).  Decode those through the shared helper so
-                # they are honored; native dict/list values are walked below so
-                # dict *entries* keep their id|model|name metadata (the decoder
-                # str()-ifies list members, which would mangle them).
-                if isinstance(_models, str):
-                    _models = _parse_config_string_list(_models)
-                if isinstance(_models, dict):
-                    # A dict-shaped ``models`` is per-model metadata written by
-                    # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
-                    # ``discover_models: false`` opt-out treats the dict keys as a
-                    # pinned allowlist; otherwise return the empty allowlist so the
-                    # live probe returns the full catalog.
-                    if not _custom_provider_models_discover_is_false(_cp):
-                        return []
-                    for _mid in _models:
-                        if isinstance(_mid, str) and _mid.strip():
-                            _ids.append(_mid.strip())
-                elif isinstance(_models, (list, tuple)):
-                    for _item in _models:
-                        if isinstance(_item, str) and _item.strip():
-                            _ids.append(_item.strip())
-                        elif isinstance(_item, dict):
-                            _mid = _item.get("id") or _item.get("model") or _item.get("name")
-                            if _mid and str(_mid).strip():
-                                _ids.append(str(_mid).strip())
-                return _ids
-
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
             # Fall back to the custom_providers entries from config.yaml so
@@ -27758,6 +27939,7 @@ def start_session_turn(
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(s, "profile", None),
         prefer_cached_catalog=True,
     )
     _paused_wakeup_response = None
@@ -28192,6 +28374,7 @@ def _handle_goal_command(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
             explicit_model_pick=explicit_model_pick,
         )
         alias_refusal = _external_model_alias_lane_response(
@@ -28303,6 +28486,7 @@ def _handle_goal_command(handler, body):
                 profile_provider=_pp_provider,
                 profile_default_model=_pp_default,
                 profile_config=_pp_cfg,
+                profile=getattr(s, "profile", None),
                 explicit_model_pick=explicit_model_pick,
             )
             # #6703 parity: same explicit-pick signature stamping on the
@@ -28606,6 +28790,7 @@ def _handle_chat_start(handler, body, diag=None):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
             explicit_model_pick=explicit_model_pick,
         )
         from api.runtime_adapter import runtime_adapter_runner_enabled
@@ -28877,6 +29062,7 @@ def _handle_chat_sync(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
         )[:2]
         s.model = model
         s.model_provider = model_provider

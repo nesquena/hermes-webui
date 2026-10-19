@@ -1901,6 +1901,7 @@ async function send(){
       // (clearConversation, deleteSession): hydrate against a null session,
       // which resets S.todos/S.todoStateMeta and reschedules the tray paint.
       if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(null);
+      if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
       setBusy(false);setComposerStatus('');
       if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
       if(typeof renderMessages==='function') renderMessages();

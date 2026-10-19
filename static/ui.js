@@ -3220,7 +3220,17 @@ else _initMediaPlaybackObserver();
 setTimeout(_initMediaPlaybackObserver,0);
 
 // ── Ambient provider quota indicator (#1766) ────────────────────────────────
-let _providerQuotaRefreshInFlight=false;
+// A provider switch can complete before an older account-quota request returns.
+// Only the newest request may update the composer; otherwise an old Codex result
+// can reappear while the active conversation uses another provider.
+let _providerQuotaRefreshSeq=0;
+let _providerQuotaContextIdentity;
+// profile|provider whose numbers the chip currently shows (null when cleared). A refetch for the same
+// profile and provider keeps them visible instead of blanking the chip until the response arrives.
+let _providerQuotaRenderedKey=null;
+function _providerQuotaProfileKey(){
+  return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
+}
 
 function _formatQuotaMoneyShort(value){
   const n=Number(value);
@@ -3257,62 +3267,105 @@ function _providerQuotaIndicatorText(status){
   }
   return null;
 }
+function clearProviderQuotaIndicator(){
+  _providerQuotaRenderedKey=null;
+  const chip=$('providerQuotaChip');
+  const label=$('providerQuotaChipLabel');
+  const mobileAction=$('composerMobileQuotaAction');
+  const mobileLabel=$('composerMobileQuotaLabel');
+  if(chip){chip.hidden=true;chip.removeAttribute('title');}
+  if(label) label.textContent='';
+  if(mobileAction){mobileAction.hidden=true;mobileAction.removeAttribute('title');}
+  if(mobileLabel) mobileLabel.textContent='';
+}
 function renderProviderQuotaIndicator(status){
   const chip=$('providerQuotaChip');
   const label=$('providerQuotaChipLabel');
   const mobileAction=$('composerMobileQuotaAction');
   const mobileLabel=$('composerMobileQuotaLabel');
-  if(!chip||!label) return;
+  if(!chip||!label){
+    clearProviderQuotaIndicator();
+    return;
+  }
   // Hide entirely when the user has disabled the ambient quota chip in Settings.
   // Boot defaults this on; an explicit false preference suppresses it.
   if(window._showQuotaChip!==true){
-    chip.hidden=true;
-    label.textContent='';
-    chip.removeAttribute('title');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    if(mobileLabel) mobileLabel.textContent='';
+    clearProviderQuotaIndicator();
     return;
   }
   const text=_providerQuotaIndicatorText(status);
   if(!text||status.status!=='available'||(!status.quota&&!status.account_limits)){
-    chip.hidden=true;
-    label.textContent='';
-    chip.removeAttribute('title');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    if(mobileLabel) mobileLabel.textContent='';
+    clearProviderQuotaIndicator();
     return;
   }
   label.textContent=text.label;
   chip.title=text.title;
-  chip.hidden=false;
-  if(mobileAction){mobileAction.style.display='';mobileAction.title=text.title;}
   if(mobileLabel) mobileLabel.textContent=text.label;
+  if(mobileAction) mobileAction.title=text.title;
+  chip.hidden=false;
+  if(mobileAction) mobileAction.hidden=false;
 }
-async function refreshProviderQuotaIndicator(){
+async function refreshProviderQuotaIndicator(providerId){
+  const requestSeq=++_providerQuotaRefreshSeq;
+  const provider=String(providerId||'').trim();
+  const requestKey=_providerQuotaProfileKey()+'|'+provider;
+  // Clear before the request when the profile or provider changes, so the old account's numbers are not
+  // visible or keyboard-reachable meanwhile. A same-account refetch (session switch, tab return) keeps them.
+  // An unspecified provider means "the server's current default", which can change underneath, so it always clears.
+  if(!provider||requestKey!==_providerQuotaRenderedKey) clearProviderQuotaIndicator();
   // Short-circuit before the fetch when the chip is disabled — no point asking
   // the server for quota data the UI will throw away.
-  if(window._showQuotaChip!==true){
-    const chip=$('providerQuotaChip');
-    if(chip){chip.hidden=true;chip.removeAttribute('title');}
-    const mobileAction=$('composerMobileQuotaAction');
-    if(mobileAction){mobileAction.style.display='none';mobileAction.removeAttribute('title');}
-    const mobileLabel=$('composerMobileQuotaLabel');
-    if(mobileLabel) mobileLabel.textContent='';
-    return;
-  }
-  if(_providerQuotaRefreshInFlight) return;
-  _providerQuotaRefreshInFlight=true;
+  if(window._showQuotaChip!==true){clearProviderQuotaIndicator();return;}
+  const query=provider?'?provider='+encodeURIComponent(provider):'';
   try{
-    const status=await api('/api/provider/quota');
+    const status=await api('/api/provider/quota'+query);
+    if(requestSeq!==_providerQuotaRefreshSeq) return;
     renderProviderQuotaIndicator(status);
+    const chip=$('providerQuotaChip');
+    _providerQuotaRenderedKey=(chip&&!chip.hidden)?requestKey:null;
   }catch(_e){
-    renderProviderQuotaIndicator(null);
-  }finally{
-    _providerQuotaRefreshInFlight=false;
+    if(requestSeq!==_providerQuotaRefreshSeq) return;
+    clearProviderQuotaIndicator();
+  }
+}
+// Resolve the provider that should drive the composer quota request.
+// Prefers the active session's provider; when the composer is empty, falls
+// back to the retained empty-composer model override so a non-default provider
+// selected before opening a conversation still scopes the quota request.
+function _currentQuotaProvider(){
+  if(typeof S!=='undefined'&&S&&S.session){
+    return S.session.model_provider||null;
+  }
+  if(typeof _readEmptyComposerModelOverride==='function'){
+    const override=_readEmptyComposerModelOverride();
+    if(override&&override.model_provider) return override.model_provider;
+  }
+  return null;
+}
+// Keep account-quota state aligned with the authoritative session/composer
+// context without turning syncTopbar() into a high-frequency network poll.
+// Session identity is part of the key so switching between conversations is a
+// real refresh even when both use the same provider. Explicit visibility and
+// Settings refreshes intentionally bypass this de-duplication.
+function _syncProviderQuotaForActiveContext(){
+  if(typeof S==='undefined'||!S||S._bootReady!==true) return;
+  const provider=_currentQuotaProvider();
+  const providerIdentity=String(provider||'').trim();
+  // Quota is per profile (the route binds the profile env), so the active profile is part of the identity.
+  const profileIdentity='profile:'+_providerQuotaProfileKey()+'|';
+  const contextIdentity=profileIdentity+(S.session
+    ? 'session:'+String(S.session.session_id||'')+'|provider:'+providerIdentity
+    : 'composer|provider:'+providerIdentity);
+  if(contextIdentity===_providerQuotaContextIdentity) return;
+  _providerQuotaContextIdentity=contextIdentity;
+  if(typeof refreshProviderQuotaIndicator==='function'){
+    void refreshProviderQuotaIndicator(provider);
   }
 }
 window.addEventListener('visibilitychange',()=>{
-  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+  if(document.visibilityState==='visible'&&typeof refreshProviderQuotaIndicator==='function'){
+    void refreshProviderQuotaIndicator(_currentQuotaProvider());
+  }
 });
 
 // Dynamic model labels -- populated by populateModelDropdown(), fallback to static map
@@ -6112,6 +6165,15 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
+  // boundary crossing (this fit path measures real overflow at any width,
+  // e.g. a constant 760px viewport). CSS hides the inline model/reasoning/
+  // toolset anchors in burger mode and reveals the shared mobile config
+  // button/panel, so an open dropdown would outlive its hidden anchor.
+  // Capture the pre-measurement burger state and fire the composer menu
+  // cleanup when it actually TRANSITIONS — not on every fit pass, so
+  // mutation-driven refits with unchanged geometry remain harmless.
+  const wasBurger=footer.classList.contains('cf-burger');
   // Measure without ever PAINTING the expanded state. Stripping the stage
   // classes makes the footer briefly full-width, which grows the composer and
   // shrinks #messages by a few px; restoring them a moment later shrinks it
@@ -6146,6 +6208,14 @@ function _fitComposerFooter(){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
     }
+  }
+  // Post-restore transition check: fire the same composer menu cleanup used
+  // by the 640px MediaQueryList boundary listener (see _onPhoneBoundaryChange
+  // above). Both burger transitions (entering and leaving) close — the same
+  // deterministic both-directions policy as the boundary listener.
+  const isBurger=next.includes('cf-burger');
+  if(isBurger!==wasBurger && typeof _onPhoneBoundaryChange==='function'){
+    try{ _onPhoneBoundaryChange(); }catch(_){ }
   }
 }
 window._fitComposerFooter=_fitComposerFooter;
@@ -6904,14 +6974,39 @@ document.addEventListener('keydown',function(e){
   closeReasoningDropdown();
 });
 
-window.addEventListener('resize',function(){
-  if(window.matchMedia && !window.matchMedia('(max-width: 640px)').matches){
-    closeMobileComposerConfig();
-    closeModelDropdown();
-    closeReasoningDropdown();
-    if(typeof closeWsDropdown==='function') closeWsDropdown();
+// Close phone-mode composer state when the phone/desktop boundary (640px) is
+// actually CROSSED — not on every window resize. Keyboard-induced resizes
+// (on-screen keyboard opening/closing on compact touch devices, e.g. the
+// Pixel Fold inner screen at ~804px) resize the visual viewport and fire a
+// window resize, which previously slammed an open model dropdown shut the
+// moment the user tapped the model search input. A MediaQueryList change
+// listener fires only when the (max-width:640px) match itself flips, so it
+// cannot fire for a keyboard-only height change, and it has no uninitialized
+// first-event state (the first boundary crossing after page load is still
+// delivered). Same pattern as static/pwa-startup.js:37-44.
+//
+// Direction policy: close on BOTH crossings (fold AND unfold). Upstream
+// previously closed only when leaving phone mode; closing when entering it
+// too is intentional — the phone layout's mobile drawer owns the sidebar and
+// the composer footer switches to the mobile config panel, so any desktop
+// dropdown state left open across a fold would render against the wrong
+// layout. Both directions reset the composer menu family deterministically.
+const _phoneWidthQuery=(typeof window!=='undefined'&&window.matchMedia)
+  ? window.matchMedia('(max-width: 640px)')
+  : null;
+function _onPhoneBoundaryChange(){
+  closeMobileComposerConfig();
+  closeModelDropdown();
+  closeReasoningDropdown();
+  if(typeof closeWsDropdown==='function') closeWsDropdown();
+}
+if(_phoneWidthQuery){
+  if(typeof _phoneWidthQuery.addEventListener==='function'){
+    _phoneWidthQuery.addEventListener('change',_onPhoneBoundaryChange);
+  }else if(typeof _phoneWidthQuery.addListener==='function'){
+    _phoneWidthQuery.addListener(_onPhoneBoundaryChange);
   }
-});
+}
 
 // ── Scroll pinning ──────────────────────────────────────────────────────────
 // When streaming, auto-scroll only while the user is following the live tail.
@@ -13429,6 +13524,7 @@ function syncTopbar(){
     if(_profileLabel) _profileLabel.textContent=S.activeProfile||'default';
     const _titleLabel=$('titlebarProfileLabel');
     if(_titleLabel) _titleLabel.textContent=S.activeProfile||'default';
+    if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     return;
   }
   const sessionTitle=S.session.title||t('untitled');
@@ -13556,6 +13652,7 @@ function syncTopbar(){
   if(profileLabel) profileLabel.textContent=S.activeProfile||'default';
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
+  if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
 }
 
 function msgContent(m){
@@ -22977,13 +23074,24 @@ function _buildTreeDOM(val, depth){
   return el;
 }
 
+// #2168 (session-switch latency): every other helper called by
+// postProcessRenderedMessages carries a selector-level idempotence marker so a
+// repeat pass matches zero nodes and returns early. This one alone re-walked
+// every code block in the transcript and then ran a nested querySelector() per
+// block to filter out ones that already had a button — on a cached-transcript
+// switch that is O(code blocks) node visits to add nothing. The data-copy-btn
+// marker makes the repeat pass match nothing; the nested guard stays as the
+// correctness backstop for header-placed buttons (see #1096).
 function addCopyButtons(container){
   const el=container||$('msgInner');
   if(!el) return;
-  el.querySelectorAll('pre > code').forEach(codeEl=>{
+  el.querySelectorAll('pre > code:not([data-copy-btn])').forEach(codeEl=>{
     const pre=codeEl.parentElement;
     const header=pre.previousElementSibling;
-    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))) return;
+    if(pre.querySelector('.code-copy-btn')||(header&&header.classList.contains('pre-header')&&header.querySelector('.code-copy-btn'))){
+      codeEl.dataset.copyBtn='1';  // already has one; mark so the selector stops re-matching it
+      return;
+    }
     const btn=document.createElement('button');
     btn.className='code-copy-btn';
     btn.textContent=t('copy');
@@ -23004,6 +23112,9 @@ function addCopyButtons(container){
       btn.style.cssText='position:absolute;top:6px;right:6px;';
       pre.appendChild(btn);
     }
+    // Marked after BOTH placements so a block whose button was appended to the
+    // sibling .pre-header is skipped by the selector on the next pass too.
+    codeEl.dataset.copyBtn='1';
   });
 }
 

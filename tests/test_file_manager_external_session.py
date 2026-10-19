@@ -820,6 +820,7 @@ def test_get_session_for_file_ops_state_db_fallback(
 
     monkeypatch.setattr(models_module, "get_session", raise_key)
     monkeypatch.setattr(models_module, "_active_state_db_path", lambda: db)
+    monkeypatch.setattr(models_module, "_strict_active_state_db_path", lambda: db)
     monkeypatch.setattr(
         models_module, "get_last_workspace", lambda: str(workspace)
     )
@@ -844,6 +845,7 @@ def test_get_session_for_file_ops_unknown_session_raises(
 
     monkeypatch.setattr(models_module, "get_session", raise_key)
     monkeypatch.setattr(models_module, "_active_state_db_path", lambda: db)
+    monkeypatch.setattr(models_module, "_strict_active_state_db_path", lambda: db)
     monkeypatch.setattr(models_module, "get_last_workspace", lambda: str(tmp_path))
 
     with pytest.raises(KeyError):
@@ -852,7 +854,7 @@ def test_get_session_for_file_ops_unknown_session_raises(
 
 def test_state_db_has_session_missing_db(models_module, monkeypatch, tmp_path):
     monkeypatch.setattr(
-        models_module, "_active_state_db_path", lambda: tmp_path / "missing.db"
+        models_module, "_strict_active_state_db_path", lambda: tmp_path / "missing.db"
     )
     assert models_module.state_db_has_session("any") is False
 
@@ -860,6 +862,6 @@ def test_state_db_has_session_missing_db(models_module, monkeypatch, tmp_path):
 def test_state_db_has_session_present(models_module, monkeypatch, tmp_path):
     db = tmp_path / "state.db"
     _make_state_db(db, "cli-9")
-    monkeypatch.setattr(models_module, "_active_state_db_path", lambda: db)
+    monkeypatch.setattr(models_module, "_strict_active_state_db_path", lambda: db)
     assert models_module.state_db_has_session("cli-9") is True
     assert models_module.state_db_has_session("nope") is False
