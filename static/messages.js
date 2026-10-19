@@ -2443,6 +2443,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let assistantText='';
   let reasoningText='';
   if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
+  if(typeof a11yOnStreamStart==='function') a11yOnStreamStart(activeSid,{reconnecting});
   const existingLive=LIVE_STREAMS[activeSid];
   if(
     existingLive&&existingLive.streamId===streamId&&existingLive.source&&
@@ -2636,6 +2637,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _setActivePaneIdleIfOwner(){
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
+      if(typeof a11ySetStreamBusy==='function') a11ySetStreamBusy(false, activeSid);
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
@@ -6499,6 +6501,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _flushPendingSegmentRender({force:true});
       appendLiveToolCard(tc,{sessionId:activeSid,streamId});
+      if(typeof a11yOnToolStart==='function') a11yOnToolStart(tc, activeSid);
       snapshotLiveTurn();
       _freshSegment=true;
       _smdEndParser();
@@ -6540,6 +6543,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       } else {
         appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       }
+      if(typeof a11yOnToolComplete==='function') a11yOnToolComplete(tc, activeSid);
       snapshotLiveTurn();
       scrollIfPinned();
     });
@@ -7061,6 +7065,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
         _setActivePaneIdleIfOwner();
+        if(typeof a11yOnStreamDone==='function'){
+          a11yOnStreamDone(activeSid,{
+            message:lastAsst,
+            liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
+          });
+        }
         _dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId,{
           status:d.status||'completed',
           endedAt:Date.now()/1000,
@@ -7353,6 +7363,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
       _setActivePaneIdleIfOwner();
+      if(_extensionErrorType==='turn:cancel'){
+        if(typeof a11yOnStreamCancel==='function') a11yOnStreamCancel(activeSid);
+      }else{
+        if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, d.message||'');
+      }
       renderSessionList(); // clear streaming indicator immediately on apperror
       _dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId,{
         status:d.status||d.type||(_extensionErrorType==='turn:cancel'?'cancelled':'error'),
@@ -7567,6 +7582,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;
       renderSessionList();
       _setActivePaneIdleIfOwner();
+      if(typeof a11yOnStreamCancel==='function') a11yOnStreamCancel(activeSid);
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
@@ -7966,6 +7982,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     _setActivePaneIdleIfOwner();
+    if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, 'Connection lost');
     _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
       status:'connection_lost',
       endedAt:Date.now()/1000,
