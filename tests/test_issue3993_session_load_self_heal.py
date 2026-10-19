@@ -15,10 +15,35 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _source_function(js: str, name: str, *, async_: bool = False) -> str:
+    prefix = "async " if async_ else ""
+    start = js.index(f"{prefix}function {name}(")
+    return js[start:js.index("\n}", start) + 2]
+
+
+def _session_reference_helpers(js: str) -> str:
+    return "\n".join([
+        _source_function(js, "_sessionReferenceIdIsValid"),
+        _source_function(js, "_sessionReferenceProfileIsValid"),
+        _source_function(js, "_parseSessionReference"),
+        _source_function(js, "_profileMatchesProfileState"),
+        _source_function(js, "_sessionProfilesMatch"),
+        _source_function(js, "_sessionPayloadProfileForExpected"),
+        _source_function(js, "_sessionNavigationGenerationIsCurrent"),
+        _source_function(js, "_captureSessionNavigationView"),
+        _source_function(js, "_restoreSessionNavigationView"),
+        _source_function(js, "_preflightSessionReference", async_=True),
+        _source_function(js, "_restoreSessionReference", async_=True),
+        _source_function(js, "_openSessionReference", async_=True),
+    ])
+
+
 def _run_load_session_failures(*, statuses, sid, route, saved, current_sid=None,
-                               run_boot_catch=False, switch_status=None) -> dict:
+                               run_boot_catch=False, switch_status=None, attempts=None) -> dict:
     """Run the real loadSession() error path with browser-owned restore state."""
     assert NODE, "node is required"
+    if attempts is None:
+        attempts = len(statuses) if run_boot_catch else 1
     js = _read(SESSIONS_JS)
     load_start = js.index("async function loadSession(sid){")
     load_end = js.index("\n// ── Handoff hint logic", load_start)
@@ -31,9 +56,21 @@ def _run_load_session_failures(*, statuses, sid, route, saved, current_sid=None,
     load_call = boot.index("await loadSession(saved, {preserveActiveInput:true});")
     catch_start = boot.index("\n    catch(", load_call)
     catch_open = boot.index("{", catch_start)
-    catch_close = boot.index("}", catch_open)
+    # This catch has nested blocks, but its comments and string literals contain
+    # no braces, so a balanced source-level brace count is sufficient here.
+    catch_depth = 0
+    for catch_close, char in enumerate(boot[catch_open:], catch_open):
+        if char == "{":
+            catch_depth += 1
+        elif char == "}":
+            catch_depth -= 1
+            if catch_depth == 0:
+                break
+    else:
+        raise AssertionError("boot restore catch is unterminated")
     spec = json.dumps({
         "load": js[load_start:load_end],
+        "navigationHelpers": _session_reference_helpers(js),
         "routeParser": js[route_start:route_end],
         "profileMismatchParser": js[mismatch_start:mismatch_end],
         "bootCatch": boot[catch_open + 1:catch_close],
@@ -44,6 +81,7 @@ def _run_load_session_failures(*, statuses, sid, route, saved, current_sid=None,
         "currentSid": current_sid,
         "runBootCatch": run_boot_catch,
         "switchStatus": switch_status,
+        "attempts": attempts,
     })
     script = f"""
 const vm = require('node:vm');
@@ -66,46 +104,80 @@ const localStorage = {{
 }};
 const requests = [];
 const errors = [];
+const outcomes = [];
+const profileSwitches = [];
 const startedSessionStreams = [];
 const noop = () => {{}};
 const msgInner = {{innerHTML:''}};
+const ui = {{
+  msg:{{value:''}}, msgInner,
+  emptyState:{{style:{{display:''}}}}, modelSelect:{{value:''}},
+  fileTree:{{innerHTML:'',style:{{display:''}}}}
+}};
 const context = vm.createContext({{
-  S: {{session:spec.currentSid ? {{session_id:spec.currentSid}} : null, messages:[], toolCalls:[]}},
+  S: {{session:spec.currentSid ? {{session_id:spec.currentSid}} : null, messages:[], toolCalls:[],activeProfile:'initial-profile'}},
   INFLIGHT:{{}},
   window: {{location, history}}, history, localStorage, URL, URLSearchParams,
   _loadingSessionId:null, _loadSessionGeneration:0,
+  _sessionNavigationGeneration:0, _sessionNavigationRollbackAnchor:null,
   _appRootPath:()=> '/',
-  _switchProfileForSessionLoad:async()=>{{const error=new Error('profile switch failed');error.status=spec.switchStatus;throw error;}},
+  _setActiveSessionUrl(sid,profile){{
+    const query=profile?`?profile=${{encodeURIComponent(profile)}}`:'';
+    history.pushState({{session_id:sid}},'',`/session/${{encodeURIComponent(sid)}}${{query}}`);
+  }},
+  switchToProfile:async(profile)=>{{
+    profileSwitches.push(profile);
+    if(spec.switchStatus){{const error=new Error('profile switch failed');error.status=spec.switchStatus;throw error;}}
+    context.S.activeProfile=profile;context.S.activeProfileIsDefault=profile==='default';return true;
+  }},
   _rearmActiveSessionStream:noop, _updateYoloPill:noop,
   stopApprovalPolling:noop, hideApprovalCard:noop, clearCompressionUi:noop,
   _clearSameSessionForceReloadHint:noop, showToast:noop,
   startSessionStream:(sid)=>startedSessionStreams.push(sid),
   _saveComposerDraftNow:async()=>{{}},
-  $:(id)=>id==='msgInner' ? msgInner : {{value:''}},
+  $:(id)=>ui[id]||null,
   api:async(path)=>{{
-    requests.push(new URL(path, location.origin).searchParams.get('session_id'));
+    const requestedSid=new URL(path, location.origin).searchParams.get('session_id');
+    requests.push(requestedSid);
     const error=new Error('metadata failed');
     error.status=spec.statuses[requests.length-1];
-    if(error.status===409) error.body=JSON.stringify({{code:'session_profile_mismatch',profile:'other-profile'}});
+    if(error.status===409) error.body=JSON.stringify({{code:'session_profile_mismatch',profile:'other-profile',session_id:requestedSid}});
     if(error.status===401) return undefined;
     throw error;
   }}
 }});
-vm.runInContext(spec.profileMismatchParser + '\\n' + spec.routeParser + '\\n' + spec.load, context);
+vm.runInContext(spec.navigationHelpers + '\\n' + spec.profileMismatchParser + '\\n' + spec.routeParser + '\\n' + spec.load, context);
+const urlSession = context._sessionIdFromLocation();
+const AsyncFunction = Object.getPrototypeOf(async function(){{}}).constructor;
+const bootCatch = new AsyncFunction(
+  'localStorage','_','urlSession','S','syncTopbar','syncWorkspacePanelState','$',
+  'renderSessionList','_finalizeComposerPrefillOnBoot','prefillIntent',
+  'startGatewaySSE','_applyPendingPanelIntent',spec.bootCatch
+);
+const asyncNoop = async()=>{{}};
 (async()=>{{
-  for(let i=0;i<spec.statuses.length;i++){{
+  for(let i=0;i<spec.attempts;i++){{
     const retrySid=context._sessionIdFromLocation() || localStorage.getItem('hermes-webui-session');
     const requestedSid=i===0 ? spec.sid : retrySid;
     if(!requestedSid) break;
-    try{{await context.loadSession(requestedSid);}}
+    try{{
+      const result=await context.loadSession(requestedSid);
+      outcomes.push(result===undefined?'undefined':result);
+    }}
     catch(error){{
+      outcomes.push('threw');
       errors.push({{status:error.status||null, message:error.message}});
-      if(spec.runBootCatch) new Function('localStorage','e',spec.bootCatch)(localStorage,error);
+      if(spec.runBootCatch) await bootCatch(
+        localStorage,error,urlSession,context.S,noop,noop,
+        (id)=>ui[id]||null,asyncNoop,asyncNoop,null,noop,asyncNoop
+      );
     }}
   }}
   process.stdout.write(JSON.stringify({{
     requests,
     errors,
+    outcomes,
+    profileSwitches,
     activeSid:context.S.session&&context.S.session.session_id||null,
     startedSessionStreams,
     saved:localStorage.getItem('hermes-webui-session'),
@@ -134,22 +206,19 @@ def _run_continuation_restore(responses, *, attempts=1, current_sid=None,
     draft_start = js.index("function _restoreComposerDraft(draft, targetSid, opts={}) {")
     draft_end = js.index("\n}\n\n// Clear the saved draft", draft_start) + 2
 
-    def source_function(name):
-        start = js.index(f"function {name}(")
-        return js[start:js.index("\n}", start) + 2]
-
     draft_dependencies = "\n".join([
         js[js.index("const _composerDraftLocalFallbackBySid = new Map();"):].splitlines()[0],
         js[js.index("const _composerDraftRestoreSuppressedUntilBySid = new Map();"):].splitlines()[0],
-        source_function("_composerDraftFileSignature"),
-        source_function("_composerDraftFilesForPersist"),
-        source_function("_composerDraftPayloadSignature"),
-        source_function("_composerDraftHasPayload"),
-        source_function("_clearComposerDraftRestoreSuppression"),
-        source_function("_isComposerDraftRestoreSuppressed"),
+        _source_function(js, "_composerDraftFileSignature"),
+        _source_function(js, "_composerDraftFilesForPersist"),
+        _source_function(js, "_composerDraftPayloadSignature"),
+        _source_function(js, "_composerDraftHasPayload"),
+        _source_function(js, "_clearComposerDraftRestoreSuppression"),
+        _source_function(js, "_isComposerDraftRestoreSuppressed"),
     ])
     spec = json.dumps({
         "load": js[load_start:load_end],
+        "navigationHelpers": _session_reference_helpers(js),
         "routeParser": js[route_start:route_end],
         "profileMismatchParser": js[mismatch_start:mismatch_end],
         "draftDependencies": draft_dependencies,
@@ -187,15 +256,19 @@ const context=vm.createContext({{
   window:{{location,history}},history,localStorage,URL,URLSearchParams,
   document:{{baseURI:'http://example.test/'}},
   _loadingSessionId:null,_loadSessionGeneration:0,
+  _sessionNavigationGeneration:0,_sessionNavigationRollbackAnchor:null,
   _appRootPath:()=> '/',
   _resolveSessionIdFromSidebarLineage:(sid)=>spec.lineageParent&&sid===spec.lineageParent?spec.lineageChild:sid,
-  _setActiveSessionUrl(sid){{history.pushState({{session_id:sid}},'',`/session/${{encodeURIComponent(sid)}}`);}},
+  _setActiveSessionUrl(sid,profile){{
+    const query=profile?`?profile=${{encodeURIComponent(profile)}}`:'';
+    history.pushState({{session_id:sid}},'',`/session/${{encodeURIComponent(sid)}}${{query}}`);
+  }},
   _ensureMessagesLoaded:async(sid)=>{{context.S.messages=[{{role:'assistant',content:`loaded ${{sid}}`}}];}},
   _rearmActiveSessionStream:noop,_updateYoloPill:noop,
   stopApprovalPolling:noop,hideApprovalCard:noop,stopSessionStream:noop,
   stopClarifyPolling:noop,hideClarifyCard:noop,clearCompressionUi:noop,
   _saveComposerDraftNow:async()=>{{}},
-  _switchProfileForSessionLoad:async(profile)=>{{profileSwitches.push(profile);context.S.activeProfile=profile;}},
+  switchToProfile:async(profile)=>{{profileSwitches.push(profile);context.S.activeProfile=profile;context.S.activeProfileIsDefault=profile==='default';return true;}},
   _clearSameSessionForceReloadHint:noop,
   _clearDeferredActiveSessionExternalRefresh:noop,
   _resolveSessionModelForDisplaySoon:noop,
@@ -222,14 +295,14 @@ const context=vm.createContext({{
     if(!response) throw new Error('Unexpected metadata request for '+sid);
     if(response.status){{
       const error=new Error('metadata failed');error.status=response.status;
-      if(response.status===409) error.body=JSON.stringify({{code:'session_profile_mismatch',profile:response.profile||'other-profile'}});
+      if(response.status===409) error.body=JSON.stringify({{code:'session_profile_mismatch',profile:response.profile||'other-profile',session_id:sid}});
       throw error;
     }}
     return {{session:response.session}};
   }}
 }});
 vm.runInContext(spec.draftDependencies+'\\n'+spec.draftRestore,context);
-vm.runInContext(spec.profileMismatchParser+'\\n'+spec.routeParser+'\\n'+spec.load,context);
+vm.runInContext(spec.navigationHelpers+'\\n'+spec.profileMismatchParser+'\\n'+spec.routeParser+'\\n'+spec.load,context);
 (async()=>{{
   const errors=[];
   const attemptStates=[];
@@ -256,6 +329,7 @@ vm.runInContext(spec.profileMismatchParser+'\\n'+spec.routeParser+'\\n'+spec.loa
     composer:composer.value,
     saved:localStorage.getItem('hermes-webui-session'),
     routeSid:context._sessionIdFromLocation(),
+    routeProfile:new URLSearchParams(location.search).get('profile'),
     pathname:location.pathname
   }}));
 }})().catch(error=>{{process.stderr.write(error.stack);process.exit(1);}});
@@ -269,7 +343,7 @@ def test_transient_metadata_failure_keeps_valid_restore_for_retry():
     """A one-time server failure leaves route/localStorage available to boot again."""
     data = _run_load_session_failures(
         statuses=[500, 500], sid="valid-session", route="/session/valid-session",
-        saved="valid-session",
+        saved="valid-session", attempts=2,
     )
     assert data["requests"] == ["valid-session", "valid-session"]
     assert data["errors"] == []
@@ -368,7 +442,10 @@ def test_missing_parent_after_continuation_fallback_clears_matching_restore_stat
 
 
 def test_profile_retry_keeps_continuation_parent_fallback_intent():
-    """A profile retry's new generation still falls back to P after C returns 404."""
+    """A profile retry still falls back to P after C returns 404.
+
+    Each profile mismatch now has a same-SID preflight request before switching.
+    """
     parent = {
         "session_id": "parent-session",
         "continuation_session_id": "child-session",
@@ -378,18 +455,22 @@ def test_profile_retry_keeps_continuation_parent_fallback_intent():
     data = _run_continuation_restore([
         {"session": parent},
         {"status": 409, "profile": "continuation-profile"},
+        {"status": 409, "profile": "continuation-profile"},
         {"status": 404},
+        {"status": 409, "profile": "initial-profile"},
         {"status": 409, "profile": "initial-profile"},
         {"session": parent},
     ], current_sid="active-session")
     assert data["requests"] == [
-        "parent-session", "child-session", "child-session", "parent-session", "parent-session",
+        "parent-session", "child-session", "child-session", "child-session",
+        "parent-session", "parent-session", "parent-session",
     ]
     assert data["profileSwitches"] == ["continuation-profile", "initial-profile"]
     assert data["sessionSid"] == "parent-session"
     assert data["composer"] == "parent draft"
     assert data["saved"] == "parent-session"
     assert data["routeSid"] == "parent-session"
+    assert data["routeProfile"] == "initial-profile"
 
 
 def test_failed_continuation_metadata_stays_retryable_without_parent_fallback():
@@ -427,14 +508,15 @@ def test_failed_continuation_metadata_stays_retryable_without_parent_fallback():
 
 
 def test_failed_profile_switch_keeps_original_metadata_status():
-    """A secondary switch 404 must not turn the original metadata 409 into a
-    missing-session result and clear the restore target."""
+    """The failed open resolves without leaking the switch's 404 into self-heal."""
     data = _run_load_session_failures(
-        statuses=[409], sid="valid-session", route="/session/valid-session",
+        statuses=[409, 409], sid="valid-session", route="/session/valid-session",
         saved="valid-session", switch_status=404,
     )
-    assert data["requests"] == ["valid-session"]
+    assert data["requests"] == ["valid-session", "valid-session"]
+    assert data["profileSwitches"] == ["other-profile"]
     assert data["errors"] == []
+    assert data["outcomes"] == ["undefined"]
     assert data["saved"] == "valid-session"
     assert data["routeSid"] == "valid-session"
 

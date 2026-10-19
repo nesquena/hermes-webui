@@ -7,10 +7,10 @@ UI_JS = (ROOT / "static" / "ui.js").read_text(encoding="utf-8")
 
 
 def _load_session_inflight_branch() -> str:
-    start = SESSIONS_JS.find("if(INFLIGHT[sid]){")
-    assert start != -1, "loadSession INFLIGHT branch not found"
-    end = SESSIONS_JS.find("}else{", start)
-    assert end != -1, "loadSession INFLIGHT branch end not found"
+    start = SESSIONS_JS.find("if(INFLIGHT[sid]){\n    _ensureInflightLiveAssistantMessage")
+    assert start != -1, "loadSession live-recovery branch not found"
+    end = SESSIONS_JS.find("// Phase 2b: Idle session", start)
+    assert end != -1, "loadSession live-recovery branch end not found"
     return SESSIONS_JS[start:end]
 
 

@@ -240,12 +240,13 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
         """After await newSession(false) in the sessionInProgress branch,
         the code must call syncTopbar() so the profile/workspace chips reflect
         the new profile's default workspace."""
-        # Find the sessionInProgress block
-        idx = PANELS_JS.find('if (sessionInProgress)')
+        # The existing-session navigation branch must not create an intermediate
+        # session; the ordinary in-progress branch syncs the topbar after newSession.
+        idx = PANELS_JS.find('else if (sessionInProgress) {')
+        end = PANELS_JS.find('} else {', idx)
         self.assertGreater(idx, -1, "sessionInProgress branch must exist in panels.js")
-
-        # Slice from that point to cover the relevant block
-        block = PANELS_JS[idx:idx + 1000]
+        self.assertGreater(end, idx, "sessionInProgress branch end not found")
+        block = PANELS_JS[idx:end]
 
         # newSession(false, ...) must be called first
         self.assertIn('await newSession(false', block,
@@ -261,9 +262,10 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
 
     def test_profile_default_workspace_applied_to_new_session(self):
         """newSession(false) should apply the pending profile workspace itself."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
+        idx = PANELS_JS.find('else if (sessionInProgress) {')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        end = PANELS_JS.find('} else {', idx)
+        block = PANELS_JS[idx:end]
 
         self.assertIn('await newSession(false', block)
         self.assertNotIn('/api/session/update', block,
@@ -272,9 +274,10 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
 
     def test_api_session_update_called_for_new_session_workspace(self):
         """The profile switch path should avoid duplicate workspace persistence."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
+        idx = PANELS_JS.find('else if (sessionInProgress) {')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        end = PANELS_JS.find('} else {', idx)
+        block = PANELS_JS[idx:end]
 
         self.assertNotIn('/api/session/update', block,
                          "newSession(false) receives S._profileSwitchWorkspace, so "
@@ -283,9 +286,10 @@ class TestWorkspaceChipAfterProfileSwitch(unittest.TestCase):
     def test_sync_topbar_before_render_session_list(self):
         """syncTopbar() should be called before renderSessionList()
         so the chips are correct when the UI re-renders."""
-        idx = PANELS_JS.find('if (sessionInProgress)')
+        idx = PANELS_JS.find('else if (sessionInProgress) {')
         self.assertGreater(idx, -1)
-        block = PANELS_JS[idx:idx + 1000]
+        end = PANELS_JS.find('} else {', idx)
+        block = PANELS_JS[idx:end]
 
         pos_sync = block.find('syncTopbar()')
         pos_render = block.find('await renderSessionList()')

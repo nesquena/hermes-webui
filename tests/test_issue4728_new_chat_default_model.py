@@ -81,6 +81,7 @@ globalThis.NO_PROJECT_FILTER = '__NO_PROJECT_FILTER__';
 globalThis._activeProject = '';
 globalThis._sessionSourceFilter = 'webui';
 globalThis._newSessionInFlight = null;
+globalThis._sessionNavigationGeneration = 0; globalThis._sessionNavigationRollbackAnchor = null;
 globalThis._messagesTruncated = false;
 globalThis._oldestIdx = 0;
 globalThis.INFLIGHT = {};

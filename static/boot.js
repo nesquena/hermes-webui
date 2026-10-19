@@ -134,7 +134,18 @@ function _rootPrefillNeedsFreshComposer(urlSession, savedLocal, prefillIntent){
   return !urlSession&&!!savedLocal&&_prefillHasDraftText(prefillIntent);
 }
 function _profileQueryBlocksSavedLocalRestore(profileIntent, urlSession){
-  return !!(profileIntent&&profileIntent.hasParam&&profileIntent.valid&&!urlSession);
+  return !!(profileIntent&&profileIntent.hasParam&&!urlSession);
+}
+async function _restoreBootSession(urlSession, profileIntent, savedSession, options){
+  options=options||{};
+  if(urlSession){
+    if(profileIntent&&profileIntent.hasParam&&(!profileIntent.valid||typeof _openSessionReference!=='function')) return false;
+    if(typeof _openSessionReference!=='function') return false;
+    const loadOptions=options.exactTarget?{preserveActiveInput:true,skipLineageResolve:true,skipContinuationResolve:true}:undefined;
+    return await _openSessionReference(urlSession,profileIntent&&profileIntent.hasParam?profileIntent.name:null,{bootRestore:true,loadOptions})===true;
+  }
+  if(!savedSession||typeof loadSession!=='function') return false;
+  return await loadSession(savedSession,{preserveActiveInput:true})===true;
 }
 function _shouldStartFreshPwaChat(action,urlSession){
   return action==='new-chat'&&!urlSession;
@@ -4313,24 +4324,25 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   const titleLabel=$('titlebarProfileLabel');
   if(titleLabel) titleLabel.textContent=S.activeProfile||'default';
   const profileIntent=(typeof _profileQueryIntentFromLocation==='function')?_profileQueryIntentFromLocation():null;
+  const _urlSessionBeforeProfile=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const _savedLocalBeforeProfileSwitch=localStorage.getItem('hermes-webui-session');
   const _profileSwitchProfileBefore=S.activeProfile||'default';
   const _profileSwitchIsDefaultBefore=!!S.activeProfileIsDefault;
+  const profileIntentInvalid=!!(profileIntent&&profileIntent.hasParam&&!profileIntent.valid);
   let _profileSwitchCompleted=false;
   let _profileSwitchChangedProfile=false;
-  if(profileIntent&&profileIntent.hasParam){
+  if(profileIntent&&profileIntent.hasParam&&!S._ambiguousSessionUrlIntent&&!_urlSessionBeforeProfile){
     try{
       if(profileIntent.valid){
         if(typeof switchToProfile==='function'){
           _profileSwitchCompleted=await switchToProfile(profileIntent.name)===true;
           if(_profileSwitchCompleted){
             _profileSwitchChangedProfile=(S.activeProfile||'default')!==_profileSwitchProfileBefore||!!S.activeProfileIsDefault!==_profileSwitchIsDefaultBefore;
-            if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
+            if(_profileSwitchChangedProfile&&typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
           }
         }
       }else{
         console.warn('[boot] ignored invalid profile query', profileIntent.name);
-        if(typeof _consumeProfileQueryParamFromLocation==='function') _consumeProfileQueryParamFromLocation();
       }
     }catch(e){
       console.warn('[boot] profile query switch failed', e);
@@ -4432,6 +4444,14 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
   if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
+  if(profileIntentInvalid&&!urlSession){
+    S._bootReady=true;
+    syncTopbar();syncWorkspacePanelState();
+    $('emptyState').style.display='';
+    await _finalizeComposerPrefillOnBoot(prefillIntent);
+    if(typeof startGatewaySSE==='function') startGatewaySSE();
+    return;
+  }
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
     : null;
@@ -4490,7 +4510,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     }catch(_){}
   }
   const savedLocal=localStorage.getItem('hermes-webui-session');
-  const saved=urlSession||savedLocal;
+  const saved=(S._ambiguousSessionUrlIntent||profileIntentInvalid)?null:(urlSession||savedLocal);
   if(saved){
     try{
       const savedSidebarOnlyState=(!urlSession&&savedLocal)
@@ -4525,8 +4545,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       // tab lands on that child instead of folding it into its compressed
       // parent's lineage row (#7429 review 2026-10-08). Ordinary deep links —
       // e.g. a historical lineage segment URL — keep landing on the tip.
-      if(!!urlSession&&typeof _sessionUrlRequestsExactTarget==='function'&&_sessionUrlRequestsExactTarget()){
-        await loadSession(saved, {preserveActiveInput:true, skipLineageResolve:true});
+      if(urlSession){
+        const exactTarget=typeof _sessionUrlRequestsExactTarget==='function'&&_sessionUrlRequestsExactTarget();
+        if(!(await _restoreBootSession(urlSession,profileIntent,null,{exactTarget}))) throw new Error('explicit session reference could not be restored');
       }else{
         await loadSession(saved, {preserveActiveInput:true});
       }
@@ -4581,7 +4602,21 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
       // Applied last on purpose: a panel intent must not come at the cost of
       // the session restore or its in-flight stream recovery (#7652 r5).
       await _applyPendingPanelIntent();return;}
-    catch(_){/* loadSession owns targeted 404 cleanup; retain unrelated saved sessions */}
+    catch(_){
+      if(urlSession){
+        // An explicit URL is authoritative. A failed restore must not fall
+        // through to fresh-chat/default-workspace boot and silently replace it.
+        S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        S._bootReady=true;
+        syncTopbar();syncWorkspacePanelState();
+        $('emptyState').style.display='';
+        await renderSessionList();
+        await _finalizeComposerPrefillOnBoot(prefillIntent);
+        if(typeof startGatewaySSE==='function')startGatewaySSE();
+        await _applyPendingPanelIntent();
+        return;
+      }
+    }
   }
   // no saved session - show empty state, wait for user to hit +
   S._bootReady=true;
@@ -4603,6 +4638,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
 })().catch(e=>{
   console.error('[hermes] boot failed', e);
   try{S._bootReady=true;}catch(_){}
+  try{if(typeof startGatewaySSE==='function')startGatewaySSE();}catch(_){}
   try{syncTopbar();}catch(_){}
   try{syncWorkspacePanelState();}catch(_){}
   try{$('emptyState').style.display='';}catch(_){}

@@ -44,6 +44,7 @@ def _render(markdown: str) -> str:
     )
     js += "\n" + _extract_function(UI_JS, "_matchBacktickFenceLine")
     js += "\n" + _extract_function(UI_JS, "_isBacktickFenceClose")
+    js += "\n" + _extract_function(UI_JS, "_htmlTagEnd")
     js += "\n" + _extract_function(UI_JS, "renderMd")
     js += textwrap.dedent(
         r'''
