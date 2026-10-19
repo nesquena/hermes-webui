@@ -21633,7 +21633,7 @@ const LOCALES = {
     cmd_workspace: 'Přepnout pracovní prostor podle názvu',
     collapse_all: 'Sbalit vše',
     show_earlier_step_one: 'Zobrazit 1 dřívější krok',
-    show_earlier_steps: 'Zobrazit {0} dřívějších kroků',
+    show_earlier_steps: 'Zobrazit dřívější kroky ({0})',
     command_label: 'Příkaz',
     composer_placeholder_busy_interrupt: 'Enter = přerušení | /queue | /background | /steer',
     composer_placeholder_busy_queue: 'Enter = fronta | /interrupt | /background | /steer',
