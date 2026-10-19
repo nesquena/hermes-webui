@@ -64,6 +64,12 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+# Parsed ``.env`` of the process owner, recorded whenever a *permanent* reload
+# runs for that owner home. Deployment-level reads (owner ``config.yaml``
+# ``${VAR}`` expansion, owner Gateway endpoint) resolve against this plus the
+# launcher snapshot instead of live ``os.environ``, which may hold a named
+# profile's background-worker mirror at that moment.
+_PROCESS_OWNER_DOTENV: dict[str, str] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -863,6 +869,21 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+def get_process_owner_environ() -> dict[str, str]:
+    """Return the process owner's stable environment for deployment-level reads.
+
+    The launcher environment captured at import, overlaid with the owner's
+    parsed ``.env`` from the last permanent reload. Live ``os.environ`` is
+    deliberately excluded: while a named-profile background worker holds its
+    environment mirror, ``os.environ`` carries that profile's values, and the
+    owner's ``config.yaml`` ``${VAR}`` expansion and Gateway endpoint must not
+    follow them.
+    """
+    environ = dict(_INITIAL_PROCESS_ENV)
+    environ.update(_PROCESS_OWNER_DOTENV)
+    return environ
+
+
 _TERMINAL_ENV_MAPPINGS = {
     'backend': 'TERMINAL_ENV',
     'env_type': 'TERMINAL_ENV',
@@ -1425,7 +1446,7 @@ def profile_env_for_thread_readonly(
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
     if not profile or (profile == "default" and not include_root):
-        yield
+        yield None
         return
 
     try:
@@ -1444,7 +1465,7 @@ def profile_env_for_thread_readonly(
             profile,
             exc_info=True,
         )
-        yield
+        yield None
         return
 
     previous_env = getattr(_thread_ctx, "env", {})
@@ -1458,7 +1479,7 @@ def profile_env_for_thread_readonly(
     try:
         _thread_ctx.env = thread_env
         _thread_ctx.block_process_env_fallback = True
-        yield
+        yield dict(thread_env)
     finally:
         _thread_ctx.block_process_env_fallback = previous_block
         if previous_env:
@@ -1485,26 +1506,29 @@ def profile_scope_for_request_read(
     ``_gateway_api_key()`` picks up the named profile's Gateway endpoint and key.
 
     Yields the profile-owned environment for callers to pass explicitly to those
-    readers, or ``None`` for an empty/root profile name, where the process env
-    still applies. Values must come from this mapping, never from ``os.environ``.
+    readers. It never yields ``None``: an empty or root profile name binds the
+    stable root environment (the launcher snapshot with the root home's ``.env``
+    over it) instead of leaving the reads to a live ``os.environ`` that another
+    profile's background worker may be mirroring. Values must come from this
+    mapping, never from ``os.environ``.
     """
     name = (profile_name or "").strip()
-    if not name:
-        yield None
-        return
     previous_profile = getattr(_tls, "profile", None)
-    set_request_profile(name)
+    if name:
+        set_request_profile(name)
     try:
-        if _is_root_profile(name):
-            yield None
-        else:
-            with profile_env_for_thread_readonly(
-                name, purpose, logger_override=logger_override
-            ):
-                from api.config import _thread_ctx
-
-                bound_env = getattr(_thread_ctx, "env", {})
-                yield dict(bound_env) if isinstance(bound_env, dict) else {}
+        with profile_env_for_thread_readonly(
+            name or "default",
+            purpose,
+            logger_override=logger_override,
+            include_root=True,
+        ) as bound_env:
+            if isinstance(bound_env, dict):
+                yield dict(bound_env)
+            else:
+                # Resolution failed. Keep the launcher snapshot rather than
+                # falling through to a live os.environ another profile owns.
+                yield dict(_INITIAL_PROCESS_ENV)
     finally:
         if previous_profile is None:
             clear_request_profile()
@@ -1754,13 +1778,22 @@ def _refresh_gateway_deployment_snapshot(home: Path, loaded_env: dict[str, str])
     and importing it from here would add a module-load cycle. Temporary
     worker-environment mirrors never call this — only the permanent reload
     path does.
+
+    The owner's parsed dotenv is recorded here in every case, because
+    deployment-level readers (``get_process_owner_environ``) resolve the owner
+    ``config.yaml`` placeholders and Gateway endpoint from it plus the launcher
+    snapshot rather than from live ``os.environ``.
     """
+    global _PROCESS_OWNER_DOTENV
+
     try:
         is_process_owner = home.expanduser().resolve() == get_process_profile_home().expanduser().resolve()
     except OSError:
         is_process_owner = home.expanduser() == get_process_profile_home().expanduser()
     if not is_process_owner:
         return
+
+    _PROCESS_OWNER_DOTENV = dict(loaded_env)
 
     gateway_chat = sys.modules.get("api.gateway_chat")
     if gateway_chat is None:
@@ -1788,14 +1821,18 @@ def _reload_dotenv(home: Path):
     """
     global _loaded_profile_env_keys
 
-    # Remove keys loaded from the previous profile first.
-    for key in list(_loaded_profile_env_keys):
+    # Remove keys loaded from the previous profile first. A dotenv value is an
+    # overlay on the process launch environment, so restore the launcher's
+    # Gateway value only for the keys this reload actually removed: updating
+    # every deployment key would overwrite a concurrent named-profile worker's
+    # live mirror with the deployment credential and URL.
+    removed_keys = [key for key in _loaded_profile_env_keys if key in os.environ]
+    for key in removed_keys:
         os.environ.pop(key, None)
     _loaded_profile_env_keys = set()
-    # A dotenv value is an overlay on the process launch environment. If that
-    # value disappears on a later reload, restore the launcher's Gateway value
-    # instead of losing the operator fallback when the tracked key is cleared.
-    os.environ.update(_INITIAL_GATEWAY_DEPLOYMENT_ENV)
+    for key in removed_keys:
+        if key in _INITIAL_GATEWAY_DEPLOYMENT_ENV:
+            os.environ[key] = _INITIAL_GATEWAY_DEPLOYMENT_ENV[key]
 
     env_path = home / '.env'
     loaded_env: dict[str, str] = {}

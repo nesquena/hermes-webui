@@ -309,6 +309,20 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
 
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    # A root session resolves its Gateway settings from the launcher snapshot
+    # bound for the request, not from live os.environ.
+    import api.profiles as _profiles
+
+    monkeypatch.setitem(
+        _profiles._INITIAL_PROCESS_ENV,
+        "HERMES_WEBUI_GATEWAY_BASE_URL",
+        "http://gateway.local",
+    )
+    monkeypatch.setitem(
+        _profiles._INITIAL_PROCESS_ENV,
+        "HERMES_WEBUI_GATEWAY_API_KEY",
+        "secret-token",
+    )
     monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *args, **kwargs: "high")
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {
         "status": "loaded",
@@ -1724,7 +1738,14 @@ def test_gateway_runs_api_body_includes_session_id():
     env["HERMES_WEBUI_GATEWAY_BASE_URL"] = "http://gateway.local"
 
     try:
-        with patch.dict("os.environ", env, clear=True):
+        with patch.dict("os.environ", env, clear=True), patch.dict(
+            "api.profiles._INITIAL_PROCESS_ENV",
+            {
+                "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+                "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+                "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gateway.local",
+            },
+        ):
             with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
                  patch("urllib.request.urlopen", side_effect=fake_urlopen), \
                  patch("api.gateway_chat.get_session", return_value=MagicMock(
@@ -1791,6 +1812,11 @@ def test_gateway_runs_api_classifies_terminal_provider_error(tmp_path, monkeypat
             "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
             "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gateway.local",
         }, clear=True), \
+             patch.dict("api.profiles._INITIAL_PROCESS_ENV", {
+                 "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+                 "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+                 "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gateway.local",
+             }), \
              patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
              patch("urllib.request.urlopen", side_effect=fake_urlopen):
             _run_gateway_chat_streaming(

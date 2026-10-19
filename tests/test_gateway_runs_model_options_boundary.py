@@ -898,6 +898,18 @@ def test_named_profile_request_leaves_the_process_env_alone(monkeypatch, tmp_pat
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://root-gw.test")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "root-key")
+    # The default-profile lane resolves from the launcher snapshot bound for
+    # the request, not from live os.environ.
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV,
+        "HERMES_WEBUI_GATEWAY_BASE_URL",
+        "http://root-gw.test",
+    )
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV,
+        "HERMES_WEBUI_GATEWAY_API_KEY",
+        "root-key",
+    )
     monkeypatch.setattr(
         config,
         "resolve_model_reasoning_efforts",
@@ -1259,12 +1271,17 @@ def _pin_scoped_config_read(monkeypatch) -> None:
 
     The suite's global ``HERMES_CONFIG_PATH`` would pin every read to the
     shared test config, so a scoped read would never see the profile's own
-    ``config.yaml``. Drop it for this test and pin the cache globals empty so
-    no other profile's cached structure leaks into the scoped read.
+    ``config.yaml``. The owner-config reader resolves from the launcher
+    snapshot, so drop the key there as well. Pin the cache globals empty so no
+    other profile's cached structure leaks into the scoped read.
     """
     import api.config as config
+    import api.profiles as profiles
 
     monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.delitem(
+        profiles._INITIAL_PROCESS_ENV, "HERMES_CONFIG_PATH", raising=False
+    )
     cache = {}
     monkeypatch.setattr(config, "_cfg_cache", cache)
     monkeypatch.setattr(config, "cfg", cache)
@@ -1326,6 +1343,9 @@ def test_owner_alias_only_gateway_key_keeps_the_launcher_canonical(monkeypatch, 
         "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
         {"HERMES_WEBUI_GATEWAY_API_KEY": "launcher-old-key"},
     )
+    # The launcher exports the canonical key at process start; the reload layer
+    # only restores keys it removed, so the fixture has to seed it.
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "launcher-old-key")
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
     monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
     (tmp_path / ".env").write_text(
@@ -2024,6 +2044,13 @@ def test_owner_gateway_identity_honors_external_config_path(monkeypatch, tmp_pat
     captured = {}
     with _restored_process_env():
         monkeypatch.setenv("HERMES_CONFIG_PATH", str(external_config))
+        # The operator pin reaches owner-config expansion through the launcher
+        # snapshot, not live os.environ.
+        monkeypatch.setitem(
+            profiles._INITIAL_PROCESS_ENV,
+            "HERMES_CONFIG_PATH",
+            str(external_config),
+        )
         profiles._reload_dotenv(tmp_path)
         _capture_gateway_wire_body(
             None,
@@ -2789,3 +2816,142 @@ def test_installed_handler_boundary_covers_the_full_request_ladder():
     assert results[1] == {"enabled": True, "effort": "low"}
     assert results[2] == {"enabled": True, "effort": "high"}
     assert results[3] == {"enabled": True, "effort": "xhigh"}
+
+
+def test_root_request_ignores_a_parked_worker_env_mirror(monkeypatch, tmp_path):
+    """A named-profile worker's mirror must not redirect a root request.
+
+    ``profile_env_for_background_worker`` writes the named profile's ``.env``
+    into ``os.environ`` for the worker's whole body. A concurrent root session
+    used to resolve its Gateway endpoint and key from that live env, sending
+    its chats to another profile's receiver; it must read the launcher snapshot
+    plus the root ``.env`` instead (re-gate round 12, item 1).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    (tmp_path / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://owner-gw.test\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=owner-key\n",
+        encoding="utf-8",
+    )
+    mirror_home = tmp_path / "profiles" / "mirror"
+    mirror_home.mkdir(parents=True)
+    (mirror_home / ".env").write_text(
+        "HERMES_WEBUI_GATEWAY_BASE_URL=http://mirror-gw.test\n"
+        "HERMES_WEBUI_GATEWAY_API_KEY=mirror-key\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def worker_body():
+        with profiles.profile_env_for_background_worker("mirror"):
+            entered.set()
+            assert release.wait(timeout=5)
+
+    worker = threading.Thread(target=worker_body)
+    worker.start()
+    resolved = {}
+    try:
+        assert entered.wait(timeout=5), "worker never entered its mirror scope"
+        with profiles.profile_scope_for_request_read(None, "root request") as environ:
+            merged = gateway_chat._gateway_request_environ(environ, config_data={})
+            resolved["base_url"] = gateway_chat._gateway_base_url({}, environ=merged)
+            resolved["api_key"] = gateway_chat._gateway_api_key(environ=merged)
+        resolved["mirrored_url"] = os.environ.get("HERMES_WEBUI_GATEWAY_BASE_URL")
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert resolved["mirrored_url"] == "http://mirror-gw.test"
+    assert resolved["base_url"] == "http://owner-gw.test"
+    assert resolved["api_key"] == "owner-key"
+
+
+def test_owner_config_placeholder_ignores_a_parked_worker_env_mirror(
+    monkeypatch, tmp_path
+):
+    """Owner ``${VAR}`` expansion reads the launcher snapshot, not a mirror.
+
+    While a named-profile worker holds its env mirror, the owner's
+    ``config.yaml`` placeholder used to expand to the worker's value and could
+    send the deployment credential to the wrong receiver (re-gate round 12,
+    item 2).
+    """
+    from api import config
+    import api.profiles as profiles
+
+    _write_gateway_config(tmp_path, "${OWNER_GATEWAY_URL}")
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    mirror_home = tmp_path / "profiles" / "mirror"
+    mirror_home.mkdir(parents=True)
+    (mirror_home / ".env").write_text(
+        "OWNER_GATEWAY_URL=http://mirror-gw.test\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    monkeypatch.setattr(profiles, "_PROCESS_OWNER_DOTENV", {})
+    monkeypatch.setitem(
+        profiles._INITIAL_PROCESS_ENV, "OWNER_GATEWAY_URL", "http://owner-gw.test"
+    )
+    _pin_scoped_config_read(monkeypatch)
+
+    entered = threading.Event()
+    release = threading.Event()
+
+    def worker_body():
+        with profiles.profile_env_for_background_worker("mirror"):
+            entered.set()
+            assert release.wait(timeout=5)
+
+    worker = threading.Thread(target=worker_body)
+    worker.start()
+    owner_config = {}
+    try:
+        assert entered.wait(timeout=5), "worker never entered its mirror scope"
+        owner_config = config.get_config_for_process_owner(
+            profiles.get_process_profile_home()
+        )
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert owner_config["webui_gateway_base_url"] == "http://owner-gw.test"
+
+
+def test_permanent_reload_keeps_a_parked_worker_env_mirror(monkeypatch, tmp_path):
+    """A permanent reload restores only the keys it actually removed.
+
+    ``_reload_dotenv`` used to write every launcher Gateway key back into
+    ``os.environ``, which replaced a concurrent named-profile worker's live
+    mirror with the deployment credential (re-gate round 12, item 3).
+    """
+    from api import gateway_chat
+    import api.profiles as profiles
+
+    (tmp_path / ".env").write_text("", encoding="utf-8")
+    monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
+    monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
+    monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
+    monkeypatch.setattr(
+        profiles,
+        "_INITIAL_GATEWAY_DEPLOYMENT_ENV",
+        {
+            "HERMES_WEBUI_GATEWAY_BASE_URL": "http://owner-gw.test",
+            "HERMES_WEBUI_GATEWAY_API_KEY": "deployment-key",
+        },
+    )
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set())
+    monkeypatch.setattr(gateway_chat, "_GATEWAY_DEPLOYMENT_ENV", {})
+
+    with _restored_process_env():
+        os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"] = "http://127.0.0.1:2"
+        os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] = "mirror-key"
+        profiles._reload_dotenv(tmp_path)
+        assert os.environ["HERMES_WEBUI_GATEWAY_BASE_URL"] == "http://127.0.0.1:2"
+        assert os.environ["HERMES_WEBUI_GATEWAY_API_KEY"] == "mirror-key"

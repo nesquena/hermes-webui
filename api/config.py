@@ -980,9 +980,10 @@ def get_config_for_process_owner(profile_home: "Path | str | None") -> dict:
 
     Resolve the operator's authoritative ``HERMES_CONFIG_PATH`` first (matching
     ``_get_config_path``), otherwise read the process owner's ``config.yaml``.
-    Environment expansion is pinned to a snapshot of the actual process env,
-    which is where the owner's dotenv values live; request thread-locals are
-    deliberately excluded.  This is a read-only, cache-safe snapshot.
+    Environment expansion is pinned to the owner's stable environment — the
+    launcher snapshot overlaid with the owner's parsed ``.env`` — never live
+    ``os.environ``, which may hold a named-profile background worker's mirror,
+    and never request thread-locals. This is a read-only, cache-safe snapshot.
     """
     if not profile_home:
         return {}
@@ -991,7 +992,9 @@ def get_config_for_process_owner(profile_home: "Path | str | None") -> dict:
     except Exception:
         return {}
 
-    owner_environ = dict(os.environ)
+    from api.profiles import get_process_owner_environ
+
+    owner_environ = get_process_owner_environ()
     env_override = str(owner_environ.get("HERMES_CONFIG_PATH") or "").strip()
     config_path = Path(env_override).expanduser() if env_override else owner_home / "config.yaml"
     raw = _load_yaml_config_file_raw(config_path, _copy=False)

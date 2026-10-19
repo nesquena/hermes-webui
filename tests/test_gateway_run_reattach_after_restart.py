@@ -29,6 +29,14 @@ def isolated_sessions(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_WEBUI_CHAT_BACKEND", "gateway")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_USE_RUNS_API", "1")
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    # A root/default session resolves Gateway settings from the launcher
+    # snapshot bound for the request, so the fixture seeds it as well.
+    for _key, _value in {
+        "HERMES_WEBUI_CHAT_BACKEND": "gateway",
+        "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1",
+        "HERMES_WEBUI_GATEWAY_BASE_URL": "http://gateway.local",
+    }.items():
+        monkeypatch.setitem(profiles._INITIAL_PROCESS_ENV, _key, _value)
     monkeypatch.setattr(gateway_chat, "GATEWAY_REATTACH_POLL_INTERVAL", 0.01)
     monkeypatch.setattr(gateway_chat, "_gateway_reasoning_effort_for_request", lambda *a, **k: None)
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {

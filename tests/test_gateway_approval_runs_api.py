@@ -6,6 +6,7 @@ import json
 import socket
 import threading
 import urllib.error
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -16,6 +17,20 @@ _MISSING = object()
 _TEST_ROUTE_SESSION_LOCK = threading.Lock()
 _TEST_ROUTE_SESSION_PRIOR: dict[str, object] = {}
 _TEST_ROUTE_SESSION_REFCOUNTS: dict[str, int] = {}
+
+
+@contextmanager
+def _root_gateway_env(values: dict):
+    """Patch the live env and the launcher snapshot root sessions resolve from.
+
+    A root/default session resolves Gateway settings from the launcher snapshot
+    bound for the request (``profile_scope_for_request_read``), not from live
+    ``os.environ``, so a fixture that simulates the launcher has to seed both.
+    """
+    with patch.dict("os.environ", values), patch.dict(
+        "api.profiles._INITIAL_PROCESS_ENV", values
+    ):
+        yield
 
 
 def _reset_gateway_run_start_state(stream_id: str) -> None:
@@ -333,7 +348,7 @@ def test_gateway_runs_api_submission():
     mock_session.pending_started_at = None
 
     try:
-        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
+        with _root_gateway_env({"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
             with patch("api.gateway_chat.gateway_supports_approval", lambda *_args, **_kwargs: True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", fake_runs_streaming), \
                  patch("api.gateway_chat._gateway_reasoning_effort_for_request", return_value="high"), \
@@ -496,8 +511,7 @@ def test_gateway_stream_teardown_fail_closes_parked_run_producer():
         with approvals._lock:
             approvals._pending.pop(sid, None)
             approvals._gateway_queues[sid] = [target, survivor]
-        with patch.dict(
-            "os.environ",
+        with _root_gateway_env(
             {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"},
         ), patch("api.gateway_chat.gateway_supports_approval", return_value=True), patch(
             "api.gateway_chat._run_gateway_runs_api_streaming",
@@ -3221,7 +3235,7 @@ def test_gateway_runs_api_cancel_does_not_emit_empty_response():
         return None, {}
 
     try:
-        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
+        with _root_gateway_env({"HERMES_WEBUI_CHAT_BACKEND": "gateway", "HERMES_WEBUI_GATEWAY_USE_RUNS_API": "1"}):
             with patch("api.gateway_chat.gateway_supports_approval", return_value=True), \
                  patch("api.gateway_chat._run_gateway_runs_api_streaming", side_effect=fake_runs_streaming), \
                  patch("api.gateway_chat.get_session", return_value=mock_session):
@@ -3814,7 +3828,7 @@ def test_gateway_empty_response_no_approval_banner():
         return resp
 
     try:
-        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
+        with _root_gateway_env({"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
             with patch("api.gateway_chat.gateway_supports_approval", return_value=False), \
                  patch("urllib.request.urlopen", side_effect=fake_urlopen), \
                  patch("api.gateway_chat.get_session", return_value=MagicMock(
@@ -3889,7 +3903,7 @@ def test_gateway_chat_completions_path_unchanged():
         return resp
 
     try:
-        with patch.dict("os.environ", {"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
+        with _root_gateway_env({"HERMES_WEBUI_CHAT_BACKEND": "gateway"}):
             with patch("api.gateway_chat.gateway_supports_approval", return_value=False), \
                  patch("urllib.request.urlopen", side_effect=fake_urlopen), \
                  patch("api.gateway_chat.get_session", return_value=mock_session), \
