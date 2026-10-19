@@ -1295,6 +1295,27 @@ def _normalize_disabled_set(values) -> set:
     return {str(v).strip() for v in values if str(v).strip()}
 
 
+def _skill_listing_order_key(skill: dict) -> tuple:
+    return (skill.get("category") or "", skill["name"])
+
+
+def _resolve_agent_sort_skills(skills_tool_module):
+    """Return the Agent's skill-listing order helper under whichever name it exports.
+
+    Agent commit 93fafc4d6ff (2026-10-18) renamed ``_sort_skills`` to
+    ``sort_skills`` with no underscore alias, while older Agents only export the
+    private name. WebUI runs against both, so resolve the helper by attribute
+    instead of importing one spelling (an ImportError here took down
+    ``/api/skills`` and ``/api/skills/usage`` on newer Agents). If neither name
+    exists, fall back to the same ``(category, name)`` order the helper uses.
+    """
+    for attr in ("sort_skills", "_sort_skills"):
+        candidate = getattr(skills_tool_module, attr, None)
+        if callable(candidate):
+            return candidate
+    return lambda skills: sorted(skills, key=_skill_listing_order_key)
+
+
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
     """List skills using an explicit local skills directory.
 
@@ -1302,14 +1323,17 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     scan root explicit so per-client WebUI profile switches do not race on or
     leak through the skills tool's module-global ``SKILLS_DIR``.
     """
+    import importlib
+
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import (
         MAX_DESCRIPTION_LENGTH,
         _EXCLUDED_SKILL_DIRS,
         _parse_frontmatter,
-        _sort_skills,
         skill_matches_platform,
     )
+
+    sort_skills = _resolve_agent_sort_skills(importlib.import_module("tools.skills_tool"))
 
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
@@ -1367,7 +1391,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 
     if category:
         all_skills = [s for s in all_skills if s.get("category") == category]
-    all_skills = _sort_skills(all_skills)
+    all_skills = sort_skills(all_skills)
     categories = sorted(set(s.get("category") for s in all_skills if s.get("category")))
     result = {
         "success": True,
@@ -18667,6 +18691,17 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
+        try:
+            p = (SESSION_DIR / f"{sid}.json").resolve()
+            p.relative_to(SESSION_DIR.resolve())
+        except Exception:
+            return bad(handler, "Invalid session_id", 400)
+        # Evict outside the mutation lock: the lifecycle commit performs provider
+        # I/O (it can wait on another commit) and must not hold a per-session
+        # lock. It runs before the DB delete because that commit writes state.db
+        # and would otherwise recreate the session being deleted.
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
@@ -18674,11 +18709,70 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
         try:
+            # Delete state.db rows BEFORE any user-visible file. A refusal (live
+            # gateway work, unfenceable ledger) or a failed commit must leave the
+            # whole session intact instead of stranding an unrecoverable
+            # half-delete: the sidecar, index entry, backups and tombstone are
+            # not restored by the DB rollback.
+            state_db_cleanup_failed = False
+            delete_raised = False
+            if not is_messaging_session:
+                try:
+                    from api.models import SessionDeleteRefused, delete_cli_session
+
+                    state_db_cleanup_failed = not delete_cli_session(sid)
+                except SessionDeleteRefused as exc:
+                    return j(
+                        handler,
+                        {"ok": False, "error": exc.code, "action": "session_delete"},
+                        status=409,
+                    )
+                except Exception:
+                    state_db_cleanup_failed = True
+                    delete_raised = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
+                if state_db_cleanup_failed:
+                    # A False return covers an aborted transaction and a commit
+                    # whose artifact cleanup is still pending (its manifest
+                    # retries it). Only a surviving row proves nothing was
+                    # committed; then user files must stay. Otherwise the
+                    # conversation is already gone and the remaining cleanup
+                    # must still run, or the sidecar, index entry and tombstone
+                    # would strand a deleted session. An exception proves
+                    # nothing either way, so it keeps failing closed.
+                    from api.models import state_db_session_presence
+
+                    if delete_raised or state_db_session_presence(sid) is not False:
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "error": "state_db_cleanup_failed",
+                                "action": "session_delete",
+                            },
+                            status=500,
+                        )
+                    logger.warning(
+                        "Session %s committed; transcript cleanup is still pending",
+                        sid,
+                    )
+            # Runtime cleanup only after the delete is durable: closing the
+            # terminal of a refused delete would kill the very work that made
+            # the Agent refuse it.
+            # Prune the completion-dedup entry too. The reaper sweeps it once the
+            # completion is delivered (drained from PENDING); a session deleted
+            # while a completion is still pending would otherwise keep its entry.
             try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
+                from api.background_process import forget_bg_task_completion_dedup
+
+                forget_bg_task_completion_dedup(sid)
             except Exception:
-                return bad(handler, "Invalid session_id", 400)
+                logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
+            try:
+                from api.terminal import close_terminal
+                close_terminal(sid)
+            except Exception:
+                logger.debug("Failed to close workspace terminal for deleted session %s", sid)
             sidecar_deleted = False
             with LOCK:
                 SESSIONS.pop(sid, None)
@@ -18708,10 +18802,6 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
-        # Evict outside the mutation lock: lifecycle commit may perform provider
-        # I/O and must not hold a per-session Session lock.
-        from api.config import _evict_session_agent
-        _evict_session_agent(sid)
         try:
             from api.upload import _session_attachment_dir
 
@@ -18737,31 +18827,6 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
-        # Prune the completion-dedup entry too. The reaper sweeps it once the
-        # completion is delivered (drained from PENDING); a session deleted
-        # while a completion is still pending would otherwise keep its entry.
-        try:
-            from api.background_process import forget_bg_task_completion_dedup
-
-            forget_bg_task_completion_dedup(sid)
-        except Exception:
-            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
-        try:
-            from api.terminal import close_terminal
-            close_terminal(sid)
-        except Exception:
-            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
         response = {
             "state_db_cleanup_failed": state_db_cleanup_failed,
