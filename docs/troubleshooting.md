@@ -425,6 +425,24 @@ python3 scripts/ensure_state_db_read_indexes.py --db ~/.hermes/state.db --confir
 
 ---
 
+## Update fetch cannot create a remote-tracking ref
+
+**Symptom.** After a remote branch rename, Git reports that
+`refs/remotes/origin/onboarding` exists and it cannot create
+`refs/remotes/origin/onboarding/next` (Git older than 2.51), or only
+`some local refs could not be updated; try running 'git remote prune origin'`
+(Git 2.51 and newer, which batches fetch ref updates).
+
+**Recovery.** For the updater's `fetch origin` commands and the default clone
+mapping (`+refs/heads/*:refs/remotes/origin/*`), the runner retries this collision
+once with `--prune --no-prune-tags` and an explicit remote-tracking-only
+mapping, so config changes during recovery cannot widen the prune destinations.
+Git removes stale remote-tracking refs before fetching their replacements;
+local branches, local-only tags, and
+working-tree edits remain intact. Custom mappings (including mappings into
+local tags or branches), explicit refspecs, and other failures retain their
+normal diagnostics and require manual inspection instead of automatic pruning.
+
 ## Update check reports a Git authentication or fetch failure
 
 **Symptom.** The update status is stale or reports `fetch failed`, `Authentication failed`, or

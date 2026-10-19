@@ -339,7 +339,8 @@ function _resyncChatSidebarAfterPanelSwitch() {
     // rebuilds rows, which is correct for normal list refreshes but hostile to
     // this one-shot panel-transition repair.
     if (typeof _sessionActionMenu !== 'undefined' && _sessionActionMenu) return;
-    renderSessionListFromCache();
+    if (typeof _repaintSidebarForBackgroundChurn === 'function') _repaintSidebarForBackgroundChurn();
+    else if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   };
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
   else run();
@@ -423,6 +424,8 @@ async function switchPanel(name, opts = {}) {
     }
   }
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
+  if (prevPanel === 'chat' && nextPanel !== 'chat'
+      && typeof _dismissAttachChoice === 'function') _dismissAttachChoice();
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   // Close any long-lived Kanban SSE stream when leaving the kanban panel
   // so we don't keep a stale connection open in the background.
@@ -1043,10 +1046,35 @@ async function loadCronGatewayNotice() {
   }
 }
 
-async function loadCrons(animate) {
+let _cronLoadGeneration = 0;  // monotonically bumped per loadCrons() entry; stale loads bail
+let _cronAcceptedLoadGeneration = 0;  // latest load that published _cronList
+let _cronLatestLoadSettled = Promise.resolve();  // lets save completion await a superseding reader
+let _cronDetailRefreshKey = null;  // explicit refresh intent survives a superseding poll
+
+async function loadCrons(animate, options) {
+  const background = !!(options && options.background);
+  const hasDetailRefreshKey = !!(options && Object.prototype.hasOwnProperty.call(options, 'detailRefreshKey'));
+  const requestedDetailRefreshKey = hasDetailRefreshKey ? options.detailRefreshKey : null;
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
   loadCronGatewayNotice();
+  // #6767 stale-refresh guard: loadCrons() is async, and both the poller and
+  // switchPanel('tasks') can fire it. If a request started earlier resolves
+  // after a newer one (e.g. the poller fired, then the user reopened the panel
+  // and switchPanel started a fresh load), applying the older response would
+  // overwrite the newer list/detail with stale data. Bump a generation token
+  // at entry and bail once a superseded request realises it is no longer the
+  // latest, so only the newest render wins.
+  const _cronLoadSeq = ++_cronLoadGeneration;
+  let _resolveCronLoadSettled;
+  const _cronLoadSettled = new Promise(resolve => { _resolveCronLoadSettled = resolve; });
+  _cronLatestLoadSettled = _cronLoadSettled;
+  if (!background) {
+    _cronDetailRefreshKey = hasDetailRefreshKey
+      ? (requestedDetailRefreshKey || null)
+      : (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit'
+          ? _currentCronDetailKey : null);
+  }
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
@@ -1055,12 +1083,16 @@ async function loadCrons(animate) {
     await loadCronProfiles();
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
+    if (_cronLoadSeq !== _cronLoadGeneration) return data;  // callers still need their fetched jobs
+    _cronAcceptedLoadGeneration = _cronLoadSeq;
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
     if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
       _showAllCronProfiles = false;
       _cronOtherProfileCount = 0;
     }
+    // Capture after the await: the reader may have scrolled during the request.
+    const listScrollTop = background ? box.scrollTop : 0;
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
     // _cronList stays the single source of truth — only the render is split,
@@ -1106,7 +1138,8 @@ async function loadCrons(animate) {
       box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(emptyText)}</div>`;
       _appendCronProfileToggle(box);
       if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
-      return;
+      _cronDetailRefreshKey = null;
+      return data;
     }
     for (const entry of _activeJobs) _appendCronItem(box, entry);
     if (_pausedJobs.length) {
@@ -1131,14 +1164,36 @@ async function loadCrons(animate) {
       box.appendChild(details);
     }
     _appendCronProfileToggle(box);
-    // Re-render current detail with fresh data if we have one and we're not in a form
+    // Background polls update unread markers without discarding loaded output
+    // or collapsing a run the user is reading.
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
-      if (refreshed) _renderCronDetail(refreshed);
+      const differentDetailSelected = hasDetailRefreshKey && _currentCronDetailKey !== requestedDetailRefreshKey;
+      const selectedDetailRefreshPending = background && _cronDetailRefreshKey === _currentCronDetailKey;
+      if (refreshed && !selectedDetailRefreshPending &&
+          (differentDetailSelected || background)) {
+        const runs = $('cronDetailRuns');
+        if (runs) runs.classList.toggle('has-new-run', !!(refreshed && !refreshed.read_only && _cronNewJobIds.has(String(refreshed.id))));
+      }
+      else if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+    _cronDetailRefreshKey = null;
+    if (background) box.scrollTop = listScrollTop;
+    return data;
+  } catch(e) {
+    if (_cronLoadSeq !== _cronLoadGeneration) return;
+    // Retry one foreground read when a poll displaced an explicit refresh.
+    // Foreground failures do not recurse, and cancelled/hidden views do not retry.
+    if (background && _currentPanel === 'tasks' && _currentCronDetail &&
+        _cronDetailRefreshKey === _currentCronDetailKey &&
+        _cronMode !== 'create' && _cronMode !== 'edit') {
+      return await loadCrons(false);
+    }
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
   finally {
+    _resolveCronLoadSettled();
     if (animate && refreshBtn) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
@@ -1235,6 +1290,10 @@ function _cronAgentPromptCardHtml(job){
 }
 
 function _renderCronDetail(job){
+  // A same-selection presentation redraw (e.g. Prompt expansion) is not
+  // authoritative fresh data and must not cancel a pending action refresh.
+  // loadCrons consumes that intent after applying the latest list response.
+  if (_currentCronDetailKey !== _cronJobKey(job)) _cronDetailRefreshKey = null;
   _currentCronDetail = job;
   _currentCronDetailKey = _cronJobKey(job);
   const title = $('taskDetailTitle');
@@ -1497,6 +1556,7 @@ async function _loadRunContent(jobId, filename, runId){
 function openCronDetail(jobOrId, el){
   const job = _findCronJob(jobOrId);
   if (!job) return;
+  const refreshPending = typeof _cronDetailRefreshKey !== 'undefined' && !!_cronDetailRefreshKey;
   const detailKey = _cronJobKey(job);
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
   const target = el || $(_cronItemId(job));
@@ -1509,11 +1569,16 @@ function openCronDetail(jobOrId, el){
   _editingCronId = null;
   _stopCronWatch();
   _renderCronDetail(job);
+  // A pending action refresh belongs to the visible selection. Retarget it so
+  // the next authoritative load updates this detail without starting a request
+  // for every selection change.
+  if (refreshPending) _cronDetailRefreshKey = detailKey;
   if (!job.read_only) _checkCronWatchOnDetail(job.id, detailKey);
   _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearCronDetail(){
+  _cronDetailRefreshKey = null;
   _currentCronDetail = null;
   _currentCronDetailKey = '';
   _cronMode = 'empty';
@@ -1970,7 +2035,8 @@ function cancelCronForm(){
   if (_cronPreFormDetail) {
     const snap = _cronPreFormDetail;
     _cronPreFormDetail = null;
-    _renderCronDetail(snap);
+    const accepted = _cronList.find(job => _cronJobKey(job) === _cronJobKey(snap));
+    _renderCronDetail(accepted || snap);
     return;
   }
   _cronPreFormDetail = null;
@@ -2024,6 +2090,58 @@ async function saveCronForm(){
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  // Save completion owns only this form/view. Navigation or a replacement
+  // form must not be undone by either the write or its subsequent list read.
+  const formMode = _cronMode;
+  const formPanel = _currentPanel;
+  const formDetailKey = _currentCronDetailKey;
+  const formStillCurrent = () => $('cronFormError') === errEl &&
+    _currentPanel === formPanel && _cronMode === formMode && _currentCronDetailKey === formDetailKey;
+  const acceptedJobForCurrentForm = async (data, savedId) => {
+    if (!formStillCurrent()) return null;
+    const savedJob = () => {
+      if (!formStillCurrent()) return null;
+      return savedId
+        ? (_cronList.find(job => job.id === savedId) || null)
+        : (_cronList[_cronList.length - 1] || null);
+    };
+    if (data && data.jobs === _cronList) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // A completion poll can supersede this save's list request. If its accepted
+    // response has not landed yet, take one foreground read so the still-current
+    // form completes from the authoritative list rather than remaining saveable.
+    const recoveryGeneration = _cronLoadGeneration + 1;
+    data = await loadCrons(false, {detailRefreshKey: formDetailKey});
+    if (!formStillCurrent()) return null;
+    if (data && data.jobs === _cronList) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // The recovery read can itself be superseded. Await a bounded number of
+    // later readers instead of starting an unbounded chain of foreground reads.
+    // Each accepted reader publishes both its generation and _cronList.
+    let waitedFor = null;
+    for (let i = 0; i < 4 && formStillCurrent(); i++) {
+      if (_cronAcceptedLoadGeneration > recoveryGeneration) {
+        const job = savedJob();
+        if (job) return job;
+      }
+      const latestSettlement = _cronLatestLoadSettled;
+      if (!latestSettlement || latestSettlement === waitedFor) break;
+      waitedFor = latestSettlement;
+      await latestSettlement;
+    }
+    if (_cronAcceptedLoadGeneration > recoveryGeneration) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // The write already succeeded. Do not leave Create/Edit available for a
+    // duplicate submission when bounded list reconciliation could not settle it.
+    if (formStillCurrent()) _clearCronDetail();
+    return null;
+  };
   try{
     const modelEl = $('cronFormModel');
     const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
@@ -2049,14 +2167,24 @@ async function saveCronForm(){
         }
         // else: select not yet populated — omit model/provider to preserve saved value
       }
-      await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
-      _editingCronId = null;
-      _cronPreFormDetail = null;
+      await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       showToast(t('cron_job_updated'));
-      await loadCrons();
-      const job = _cronList && _cronList.find(j => j.id === editedId);
-      if (job) openCronDetail(job);
+      const saveViewCurrent = formStillCurrent();
+      if (!saveViewCurrent && _currentPanel !== 'tasks') return;
+      // Cancel returns an edit form to the same job's read view. That visible
+      // detail must receive the successful write; other navigation stays quiet.
+      const editedDetailShown = !saveViewCurrent && _cronMode === 'read' &&
+        !!_currentCronDetail && _currentCronDetailKey === formDetailKey;
+      const data = await loadCrons(false, {
+        background: !saveViewCurrent && !editedDetailShown,
+        detailRefreshKey: formDetailKey,
+      });
+      // A background refresh keeps a newer selection/output untouched. Only the
+      // still-current form may auto-open its saved job from the accepted list.
+      if (!saveViewCurrent) return;
+      const job = await acceptedJobForCurrentForm(data, editedId);
+      if (job && formStillCurrent()) openCronDetail(job);
       return;
     }
     const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications};
@@ -2076,13 +2204,20 @@ async function saveCronForm(){
       body.provider = _cronPreFormDetail.provider || null;
     }
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
-    _cronPreFormDetail = null;
-    _cronIsDuplicate = false;
     showToast(t('cron_job_created'));
-    await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
-    if (newId) openCronDetail(newId);
-    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1]);
+    const saveViewCurrent = formStillCurrent();
+    if (!saveViewCurrent && _currentPanel !== 'tasks') return;
+    const data = await loadCrons(false, {
+      background: !saveViewCurrent,
+      detailRefreshKey: formDetailKey,
+    });
+    if (!saveViewCurrent) return;
+    const job = await acceptedJobForCurrentForm(data, newId);
+    if (job && formStillCurrent()) {
+      _cronIsDuplicate = false;
+      openCronDetail(job);
+    }
   }catch(e){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
   }
@@ -3860,7 +3995,12 @@ function _kanbanRenderTaskDetail(data){
   // bridge rejects PATCH status='running' with HTTP 400 to match the agent
   // dashboard plugin's contract. UI users want to claim/promote a ready task
   // via the dispatcher Nudge button, not flip it to running by hand.
-  const statusButtons = ['triage', 'todo', 'ready', 'blocked', 'done', 'archived'].map(status =>
+  // 'scheduled' mirrors the board's column order (right after 'todo'): the
+  // cards are HTML5-draggable only, so this button is the only way a
+  // touch/tablet user can move a task INTO the Scheduled column. It reuses
+  // _kanbanColumnLabel + the same PATCH path, which the bridge routes through
+  // the Agent's schedule_task() verb.
+  const statusButtons = ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'done', 'archived'].map(status =>
     `<button class="btn secondary" onclick="updateKanbanTask(${jsArg(task.id)},{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
   ).join('') + `<button class="btn secondary" onclick="blockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_unblock'))}</button>`;
   return `<div class="kanban-task-preview-header">
@@ -4507,6 +4647,9 @@ async function copyLogsAll() {
 }
 
 // ── Insights panel ──
+// Latest-request generation counter: an older /api/insights response that
+// resolves after a newer request must not overwrite the newer render.
+let _insightsReqToken = 0;
 const STATIC_MODEL_HEALTH_ROWS = [
   {id:'openai/gpt-5.4-mini', provider:'OpenAI', inputCostPerM:0.25, outputCostPerM:2.00, replacement:'Default economical general-purpose model'},
   {id:'openai/gpt-5.4', provider:'OpenAI', inputCostPerM:2.00, outputCostPerM:10.00, replacement:'Use for complex synthesis; fall back to Mini for routine turns'},
@@ -4540,23 +4683,113 @@ async function loadInsights(animate) {
     refreshBtn.disabled = true;
   }
   const period = ($('insightsPeriod') || {}).value || '30';
+  // Re-cap the custom-range pickers on every refresh: a tab left open across
+  // midnight otherwise keeps yesterday as `max` and today stays unselectable
+  // (greptile P2, 2026-10-15T22:36:54Z, static/panels.js:4604).
+  _insightsSyncDateLimits();
+  const qs = new URLSearchParams();
+  if (period === 'custom') {
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    const startVal = startEl && startEl.value;
+    const endVal = endEl && endEl.value;
+    // Send RAW YYYY-MM-DD strings, not browser-local epoch seconds: the
+    // server interprets them in ITS OWN timezone, so a browser in another
+    // timezone can never shift the selected calendar day.
+    if (startVal) qs.set('start', startVal);
+    if (endVal) qs.set('end', endVal);
+  } else {
+    qs.set('days', period);
+  }
+  // Latest-request guard: date inputs fire one load per change; a slower
+  // earlier response must never overwrite a newer range.  Each call takes
+  // its own token; only the newest token may render.
+  const reqToken = ++_insightsReqToken;
   try {
     const [data, wikiStatus, skillUsage] = await Promise.all([
-      api(`/api/insights?days=${period}`),
+      api(`/api/insights?${qs.toString()}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
     ]);
+    if (reqToken !== _insightsReqToken) return;
     _renderInsights(data, box, wikiStatus, skillUsage);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
+    if (reqToken !== _insightsReqToken) return;
     box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
   } finally {
-    if (animate && refreshBtn) {
+    // Restore the refresh button when THIS request is the latest, regardless
+    // of whether it initiated the animation.  A superseding NON-animated
+    // request (e.g. a date change while an animated refresh is in flight)
+    // owns the shared control now; gating restoration on `animate` would
+    // leave the button permanently disabled after A(superseded)->B(latest).
+    if (refreshBtn && reqToken === _insightsReqToken) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
   }
+}
+
+// A future bound is not a servable window: cap both date controls at today so
+// the platform picker cannot offer dates the server will reject (#6970).
+// Lives in one helper because the cap must be recomputed whenever it could have
+// aged: entering Custom, every refresh, and whenever a picker is opened. Writing
+// it only from insightsPeriodChange left a panel that stayed open across
+// midnight with yesterday as the cap, so today was unselectable until the user
+// detoured through a preset (greptile P2, 2026-10-15T22:36:54Z,
+// static/panels.js:4604).
+//
+// Write `max` ONLY when the value actually changes.  Assigning it
+// unconditionally re-set the `<input type="date">` control on every segment
+// edit (the inputs run loadInsights() from onchange, which calls this helper),
+// and Chromium drops the in-progress segment editor when `max` is written -
+// even to the same string - so typing "09012026" into the month/day/year
+// segments ended with both fields empty and the request losing its range
+// (maintainer re-gate, 2026-10-16T01:48:06Z).
+function _insightsSyncDateLimits() {
+  const startEl = $('insightsStart');
+  const endEl = $('insightsEnd');
+  if (!startEl || !endEl) return;
+  const today = _toDateLocal(new Date());
+  if (startEl.max !== today) startEl.max = today;
+  if (endEl.max !== today) endEl.max = today;
+}
+
+function insightsPeriodChange() {
+  const sel = $('insightsPeriod');
+  const customWrap = $('insightsCustomRange');
+  if (!sel || !customWrap) return;
+  const isCustom = sel.value === 'custom';
+  customWrap.style.display = isCustom ? 'flex' : 'none';
+  if (isCustom) {
+    // Default the range to the last 30 calendar days only when the user
+    // hasn't already picked a custom range — so Custom(A/B) → preset →
+    // Custom still shows A/B instead of silently erasing it.
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    _insightsSyncDateLimits();
+    if (startEl && endEl && !startEl.value && !endEl.value) {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 29);  // inclusive: start..today = 30 days
+      endEl.value = _toDateLocal(end);
+      startEl.value = _toDateLocal(start);
+    }
+  }
+  loadInsights();
+}
+
+function insightsRangeInputs() {
+  // Each date change is its own request generation; the guard in
+  // loadInsights() drops any stale in-flight response.
+  _insightsReqToken++;
+  loadInsights();
+}
+
+function _toDateLocal(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function _formatLlmWikiTimestamp(value) {
@@ -4733,7 +4966,8 @@ async function _openWikiBrowser() {
  *   31–90 days → 2-day buckets
  *   91–180 days → 3-day buckets
  *   181–365 days → 8-day buckets
- * Result is always <= ~52 bars.
+ *   >365 days → dynamic (ceil(len/52)) to keep chart bounded
+ * Result is always <= ~52 bars (tested up to 5 calendar years ≈1826 days).
  * Each bucket row has:
  *   - label: short label for axis (e.g. MM-DD or MM-DD–MM-DD)
  *   - title: full tooltip title (e.g. 2026-01-01 – 2026-01-05)
@@ -4745,7 +4979,7 @@ function _bucketDailyTokensForChart(rows) {
   const len = rows.length;
   if (len <= 30) return rows;  // per-day resolution for 7/30-day ranges
 
-  // Target <= 75 bars; derive bucket size
+  // Target <= 52 bars; derive bucket size
   let bucketSize;
   if (len <= 90) {
     bucketSize = 2;
@@ -4754,7 +4988,7 @@ function _bucketDailyTokensForChart(rows) {
   } else if (len <= 365) {
     bucketSize = 8;  // <=52 bars for 365 days (ceil(365/8)=46)
   } else {
-    bucketSize = 8;  // fallback for >365 (shouldn't occur in practice)
+    bucketSize = Math.ceil(len / 52);  // 5-year ≈1826 → 36 → 51 bars, preserves invariant
   }
 
   const result = [];
@@ -4919,23 +5153,57 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
       </div>
     </div>`;
 
-  box.innerHTML = `
-    ${_renderSystemHealthPanel()}
-    ${_renderLlmWikiStatus(wikiStatus)}
-    ${_renderSkillUsage(skillUsage)}
-    <div class="insights-grid">
-      ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
-    </div>
-    ${dailyHtml}
-    ${modelHealthHtml}
-    <div class="insights-row insights-usage-grid">
-      ${tokenCards}
-      ${modelsHtml}
-    </div>
-    ${dowHtml}
-    ${hodHtml}
-    <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(t('insights_footer').replace('{days}', d.period_days))}</div>
-  `;
+  const periodSel = $('insightsPeriod');
+  // The server tells us which window it ACTUALLY served: "custom" means a
+  // real absolute window was queried (after swap/clamp/DST/5yr-cap), while
+  // "trailing" means the request fell back to the trailing days-window (e.g.
+  // an all-future or fully-invalid custom range).  Never trust the raw
+  // selector/inputs for a range that the server rejected and replaced - that
+  // would render a future/invalid range while the cards/chart show the
+  // trailing query (Greptile P1: 'custom range normalizes to trailing').
+  // Selective fall-back disclosure (#6970 UX r1): the selector says "custom"
+  // but the server served a trailing window instead (an all-future or
+  // fully-invalid range).  Say so right next to the inputs - the footer that
+  // carries the served window sits below the fold.
+  const fellBack = !!(periodSel && periodSel.value === 'custom' && d.mode !== 'custom');
+  const rangeNoteEl = $('insightsRangeNote');
+  if (rangeNoteEl) {
+    rangeNoteEl.textContent = fellBack
+      ? t('insights_range_fallback').replace('{days}', d.period_days)
+      : '';
+    rangeNoteEl.classList.toggle('is-visible', fellBack);
+  }
+  for (const dateEl of [$('insightsStart'), $('insightsEnd')]) {
+    if (!dateEl) continue;
+    if (fellBack) dateEl.setAttribute('aria-invalid', 'true');
+    else dateEl.removeAttribute('aria-invalid');
+  }
+  const isCustomRange = periodSel && periodSel.value === 'custom' && d.mode === 'custom';
+  // The server reports the EFFECTIVE calendar window it actually queried
+  // (after swap, DST alignment, and the 5-year cap).  Use it verbatim; the
+  // trailing footer shows the literal day count instead.
+  const effStart = isCustomRange && d.effective_start;
+  const effEnd = isCustomRange && d.effective_end;
+  const rangeLabel = isCustomRange
+    ? (effStart && effEnd ? t('insights_footer_range').replace('{start}', effStart).replace('{end}', effEnd) : t('insights_footer').replace('{days}', d.period_days))
+    : t('insights_footer').replace('{days}', d.period_days);
+    box.innerHTML = `
+      ${_renderSystemHealthPanel()}
+      ${_renderLlmWikiStatus(wikiStatus)}
+      ${_renderSkillUsage(skillUsage)}
+      <div class="insights-grid">
+        ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
+      </div>
+      ${dailyHtml}
+      ${modelHealthHtml}
+      <div class="insights-row insights-usage-grid">
+        ${tokenCards}
+        ${modelsHtml}
+      </div>
+      ${dowHtml}
+      ${hodHtml}
+      <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(rangeLabel)}</div>
+    `;
 }
 
 async function clearConversation() {
@@ -4948,6 +5216,21 @@ async function clearConversation() {
     S.session = data.session;
     S.messages = [];
     S.toolCalls = [];
+    // The in-chat todos tray renders from S.todos + the INFLIGHT snapshot
+    // (ui.js), so clearing the transcript must drop BOTH: otherwise the tray
+    // keeps painting the cleared conversation's tasks and _currentTodos() hands
+    // the stale list back even after the tray is re-expanded (Greptile P1
+    // 2026-10-10T02:22:20Z).  Purge the in-flight TODO payload FIRST —
+    // _hydrateTodosFromSession() treats a present INFLIGHT[sid] as
+    // authoritative, so hydrating alone would install the very list we are
+    // clearing.  The stream payload (messages/uploads) is deliberately left
+    // alone.
+    if(typeof INFLIGHT==='object'&&INFLIGHT&&S.session&&S.session.session_id
+       &&INFLIGHT[S.session.session_id]){
+      delete INFLIGHT[S.session.session_id].todos;
+      delete INFLIGHT[S.session.session_id].todoStateMeta;
+    }
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     syncTopbar();
     renderMessages();
     showToast(t('conversation_cleared'));
@@ -6720,6 +7003,43 @@ async function _profileSwitchPanelLoad(){
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 }
 
+// ── Tab-visibility reconciliation guard ────────────────────────────────────
+// hidden_tabs / tab_order are per-profile settings mirrored into localStorage.
+// From the moment a profile switch's settings reconciliation is in flight, that
+// mirror still holds the PREVIOUS profile's snapshot. Anything that re-derives
+// tab visibility from the mirror inside that window — the in-chat todos tray
+// hands the Todos rail entry back with _applyTabVisibility(_getHiddenTabs()) —
+// would reimpose the old profile's tab visibility on the profile now in effect:
+// a Todos entry the current profile hides pops back, or one it shows stays
+// hidden, until settings refresh (greptile P1, static/ui.js:10501,
+// 2026-10-08T20:06:51Z). Callers use this to skip the stale window; the pending
+// reconciliation applies that profile's own snapshot itself.
+let _tabVisReconcilePending = 0;
+// Profile switches currently in flight: bumped the instant a switch takes a new
+// generation and dropped in its finally. A switch is the ONLY other thing that
+// arms nothing here but will still rewrite the mirror later, so the replay
+// below needs to tell "a NEWER switch is still running and will reconcile"
+// apart from "the switch that superseded this reconciliation already failed"
+// (a failed switch runs no reconciliation of its own, so the last release to
+// see a zero counter is then the SUPERSEDED one). greptile P1,
+// static/panels.js:6783, 2026-10-09T00:15:45Z.
+let _profileSwitchInFlight = 0;
+function _tabVisibilitySnapshotStale(){ return _tabVisReconcilePending > 0; }
+
+// Replay the tray's rail release once the localStorage hidden_tabs mirror is
+// authoritative again for the profile now in effect: no /api/settings
+// reconciliation is in flight and no switch is running that would rewrite it
+// afterwards. Skipped for a superseded reconciliation whose newer switch is
+// still in flight (greptile P1, 2026-10-08T23:51:52Z) — but NOT for one whose
+// newer switch already FAILED: that switch ran no reconciliation of its own, so
+// without the replay a tray disabled during the window leaves the Todos rail
+// entry stale until the next settings refresh (greptile P1, 2026-10-09T00:15:45Z).
+function _maybeReplayChatTodosRailSync(){
+  if (_tabVisReconcilePending > 0) return;
+  if (_profileSwitchInFlight > 0) return;
+  if (typeof _syncChatTodosRailVisibility === 'function') _syncChatTodosRailVisibility();
+}
+
 function _refreshProfileSwitchBackground(gen){
   window._modelDropdownReady=null;
   if (typeof window._ensureModelDropdownReady === 'function') {
@@ -6733,6 +7053,9 @@ function _refreshProfileSwitchBackground(gen){
   // appearance setting; without this fetch, Profile A's hidden-tabs choice
   // would remain in effect under Profile B until the user opens Settings.
   // Stage-394 follow-up to #2636 deep review.
+  // The mirror is about to be re-derived from the new profile's settings, so it
+  // is stale from here until the fetch below settles (see the guard above).
+  _tabVisReconcilePending++;
   Promise.resolve(api('/api/settings')).then(function(s){
     if (gen !== _profileSwitchGeneration) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
@@ -6753,7 +7076,28 @@ function _refreshProfileSwitchBackground(gen){
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
     window._showTitlebarProfile=!!(s&&s.show_titlebar_profile);
     if(typeof _applyTitlebarProfileVisibility==='function') _applyTitlebarProfileVisibility();
-  }).catch(function(){});
+  }).catch(function(){}).then(function(){
+    // Release on BOTH settle paths (the catch above swallows rejections), so a
+    // superseded or failed reconciliation can never strand tab visibility
+    // behind the stale-snapshot guard.
+    _tabVisReconcilePending--;
+    // Replay the tray's rail release once the mirror is authoritative again
+    // (reviewer re-gate 2026-10-08T23:19:27Z, static/panels.js:6766). Every
+    // release path cleared the guard by skipping _syncChatTodosRailVisibility
+    // while the mirror still held the PREVIOUS profile's snapshot, but nothing
+    // re-ran it afterwards: disabling the tray during a failed reconciliation
+    // left the Todos entry hidden although the guard was already clear.
+    //
+    // The decision lives in _maybeReplayChatTodosRailSync(): a SUPERSEDED
+    // reconciliation must NOT replay while its newer switch is still in flight
+    // (it can be the last release to see a zero counter there, and re-deriving
+    // from the then-stale mirror would reimpose the previous profile's
+    // hidden_tabs — greptile P1, 2026-10-08T23:51:52Z), but it MUST replay once
+    // that switch has FAILED: a failed switch runs no reconciliation of its own,
+    // so nothing else would ever re-run the sync and a tray disabled during the
+    // window left the Todos rail entry stale (greptile P1, 2026-10-09T00:15:45Z).
+    _maybeReplayChatTodosRailSync();
+  });
 }
 
 async function loadProfilesPanel() {
@@ -7121,6 +7465,14 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  // Hold a switch-in-flight marker for the whole run: the stale-snapshot arm
+  // below only lands once this POST resolves, and the gap before it is exactly
+  // where a superseded reconciliation's release must NOT replay the previous
+  // profile's mirror (greptile P1, 2026-10-08T22:06:59Z). Dropped in the finally,
+  // where a FAILED switch then lets that release replay (see
+  // _maybeReplayChatTodosRailSync). typeof-tolerant like the other counter ops
+  // because the frontend test harnesses eval these statements in isolation.
+  if (typeof _profileSwitchInFlight === 'number') _profileSwitchInFlight++;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
@@ -7159,6 +7511,12 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  // Stale-snapshot guard ownership for THIS switch: armed the instant
+  // S.activeProfile changes (see below), handed to the settings reconciliation
+  // on success, released in `finally` on every other exit. The counter arms are
+  // `typeof`-tolerant because the frontend test harnesses eval this function in
+  // isolation, without panels.js's module scope (where the counter lives).
+  let _tabVisGuardHeld = false;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
@@ -7188,8 +7546,24 @@ async function switchToProfile(name) {
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
+    // A retained empty-composer pick belongs to the old profile's providers; keeping it
+    // would make New Chat / Send post the old profile's model (#6506 gate).
+    if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // The switch's optimistic chip already claims the new profile, but the
+    // localStorage hidden_tabs / tab_order mirror still holds the PREVIOUS
+    // profile's snapshot until _refreshProfileSwitchBackground()'s
+    // /api/settings reconciliation settles. Arm the stale-snapshot guard at
+    // THIS instant rather than inside that reconciliation: everything between
+    // here and the call at the bottom of this function is async, and a tray-off
+    // release landing in the gap would re-derive tab visibility from the
+    // previous profile's mirror — revealing a Todos entry the new profile hides
+    // or keeping a visible one hidden until settings refresh (greptile P1,
+    // static/panels.js:6741, 2026-10-08T22:06:59Z). Ownership is handed to the
+    // reconciliation below; every other exit releases it in `finally`.
+    _tabVisGuardHeld = true;
+    if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
     }
@@ -7378,6 +7752,13 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
+    // Hand the stale-snapshot guard over to the /api/settings reconciliation
+    // (it releases on both settle paths). The decrement here and the
+    // synchronous re-arm at the top of _refreshProfileSwitchBackground are
+    // neighbours in the same task, so no handler can observe a zero counter
+    // between them.
+    if (_tabVisGuardHeld && typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending--;
+    _tabVisGuardHeld = false;
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 
@@ -7418,6 +7799,22 @@ async function switchToProfile(name) {
     if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
+    // Release the stale-snapshot guard on every exit that did NOT hand it to the
+    // settings reconciliation (switch failure, superseded switch, early return).
+    // The count is a plain counter and this arm is ours, so the release is
+    // unconditional; a stranded arm would pin tab visibility to the stale window
+    // for the rest of the session (greptile P1, static/panels.js:6741).
+    if (_tabVisGuardHeld) { _tabVisGuardHeld = false; if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending--; }
+    // This switch is no longer in flight. A switch that FAILED (or was
+    // superseded) never runs a /api/settings reconciliation of its own, so the
+    // release that brought the counter to zero can be a SUPERSEDED
+    // reconciliation's, which must still replay the tray rail sync — otherwise a
+    // tray disabled during the window leaves the Todos rail entry stale until
+    // the next settings refresh (greptile P1, static/panels.js:6783,
+    // 2026-10-09T00:15:45Z). A successful switch hands the mirror to its own
+    // reconciliation, so the counter is still > 0 here and that one replays.
+    if (typeof _profileSwitchInFlight === 'number' && _profileSwitchInFlight > 0) _profileSwitchInFlight--;
+    if (typeof _maybeReplayChatTodosRailSync === 'function') _maybeReplayChatTodosRailSync();
   }
 }
 
@@ -7691,13 +8088,40 @@ function _sanitizeTabPanelList(panels){
   return out;
 }
 
+// The localStorage key is a CACHE of the resolved preference, never the
+// authority (gate certificate 2026-10-13, "stale hidden-tabs replay,
+// including when the tray is off"): _setHiddenTabs tolerates a failed write
+// (quota exhausted, storage blocked/disabled), which leaves the READABLE
+// mirror holding the PREVIOUS list.  A later reader then restored that stale
+// preference over the hidden_tabs the server had just resolved - the in-chat
+// tray's rail-sync replay calls _applyTabVisibility(_getHiddenTabs()), so a
+// tray-off profile switch reversed the freshly applied tabs (Todos hidden /
+// Memory visible became Todos visible / Memory hidden).  Remember the
+// resolved list in memory and prefer it over the mirror.
+let _hiddenTabsResolved = null;
+
 function _getHiddenTabs(){
+  if(_hiddenTabsResolved) return _hiddenTabsResolved.slice();
   try{var h=localStorage.getItem(_HIDDEN_TABS_LS_KEY);if(h)return _sanitizeTabPanelList(JSON.parse(h));}catch(e){}
   return[];
 }
 
 function _setHiddenTabs(panels){
-  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(_sanitizeTabPanelList(panels)));}catch(e){}
+  var resolved=_sanitizeTabPanelList(panels);
+  _hiddenTabsResolved=resolved;
+  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(resolved));}catch(e){}
+}
+
+// The mirror is ALSO shared with other tabs. A successful write from another
+// tab fires a `storage` event here, and that newer value must win over the
+// copy this page resolved - otherwise an appearance autosave in the second
+// tab posts its OLD hidden_tabs list and undoes the first tab's choice
+// (greptile P1, 2026-10-15T14:49:46Z). A write by THIS page never fires the
+// event here, so an in-page reconciliation keeps the authority it needs.
+if(typeof window!=='undefined'&&window.addEventListener){
+  window.addEventListener('storage',function(e){
+    if(e&&e.key===_HIDDEN_TABS_LS_KEY) _hiddenTabsResolved=null;
+  });
 }
 
 function _getTabOrder(){
@@ -7779,11 +8203,17 @@ function _applyTabOrder(order){
 function _applyTabVisibility(hidden){
   hidden=_sanitizeTabPanelList(hidden);
   _applyTabOrder(_getTabOrder());
+  // Chat-todos: when the in-chat tray is enabled, the sidebar Todos entry
+  // must remain hidden regardless of hidden_tabs content (avoid duplication).
+  // We re-apply this preference after every hidden_tabs change so profile
+  // switches or settings saves cannot overwrite it.
+  var chatTodosOn=(typeof chatTodosEnabled==='function'?chatTodosEnabled():false);
   // Hide/unhide all [data-panel] elements (sidebar-nav buttons + rail buttons)
   document.querySelectorAll('[data-panel]').forEach(function(el){
     var panel=el.dataset.panel;
     if(!panel)return;
     var shouldHide=hidden.indexOf(panel)!==-1;
+    if(panel==='todos'&&chatTodosOn) shouldHide=true;
     // Never hide always-visible panels (chat, settings) even if present in hidden_tabs
     if(_ALWAYS_VISIBLE_TABS.has(panel)) shouldHide=false;
     el.classList.toggle('nav-tab-hidden',shouldHide);
@@ -7795,6 +8225,13 @@ function _applyTabVisibility(hidden){
   if(activeEl&&activeEl.classList.contains('nav-tab-hidden')){
     if(typeof switchPanel==='function') switchPanel('chat');
   }
+}
+
+function _tabVisibilityChipForcedOff(panel){
+  // The in-chat tray force-hides the sidebar Todos entry, so that panel's own
+  // chip must render OFF and its click must resolve the tray, not flip a
+  // hidden_tabs bit that cannot change what is on screen.
+  return panel==='todos'&&typeof chatTodosEnabled==='function'&&chatTodosEnabled();
 }
 
 function _renderTabVisibilityChips(){
@@ -7812,7 +8249,7 @@ function _renderTabVisibilityChips(){
     var chip=document.createElement('button');
     chip.type='button';
     chip.className='tab-visibility-chip';
-    var isOff=hidden.indexOf(panel)!==-1;
+    var isOff=hidden.indexOf(panel)!==-1||_tabVisibilityChipForcedOff(panel);
     if(isOff)chip.classList.add('chip-off');
     chip.textContent=label;
     chip.setAttribute('data-tab-panel',panel);
@@ -7873,6 +8310,28 @@ function _handleTabVisibilityChipDrop(e,targetPanel){
 
 function _toggleTabVisibilityChip(panel){
   if(_ALWAYS_VISIBLE_TABS.has(panel))return;
+  // A tray-forced chip cannot be turned on by editing hidden_tabs: the tray
+  // re-hides the tab on every pass, so two clicks left the chip ON with the
+  // tab still hidden. Turn the tray off instead — it is what owns the hide —
+  // so the click actually restores the sidebar Todos tab.
+  if(_tabVisibilityChipForcedOff(panel)){
+    // The tray owns the hide — turn it off. But the user may ALSO have hidden
+    // this tab independently (hidden_tabs), and that bit survives the tray
+    // being disabled: the click then left the tab hidden and the chip still
+    // OFF, i.e. it took a second click to reveal a tab the user had just
+    // switched on (re-gate 2026-10-07, static/panels.js:7878). Drop the
+    // independent hide in the same explicit chip-enable branch.
+    var forced=_getHiddenTabs();
+    var forcedIdx=forced.indexOf(panel);
+    if(forcedIdx!==-1){
+      forced.splice(forcedIdx,1);
+      _setHiddenTabs(forced);
+    }
+    if(typeof _chatTodosToggleEnabled==='function') _chatTodosToggleEnabled(false);
+    _renderTabVisibilityChips();
+    _scheduleAppearanceAutosave();
+    return;
+  }
   var hidden=_getHiddenTabs();
   var idx=hidden.indexOf(panel);
   if(idx!==-1){
@@ -9049,10 +9508,26 @@ function _rememberPreferencesSaved(payload){
 }
 
 function _applyWorkspaceTodosTabVisibility(){
+  // The in-chat task-list tray replaces every other Todos surface, so while it
+  // is on it also owns the workspace-panel Todos tab. The setting row stays
+  // VISIBLE but disabled, with an explanation, instead of vanishing: hiding it
+  // left the user staring at a tab that refused to appear with no way to see
+  // why (reviewer re-gate 2026-10-08T03:10:50Z).
+  const trayOn=(typeof chatTodosEnabled==='function')&&chatTodosEnabled();
+  const want=!!window._workspaceTodosTab&&!trayOn;
   const tab=$('workspaceTodosTab');
-  if(tab) tab.hidden=!window._workspaceTodosTab;
+  if(tab) tab.hidden=!want;
+  const field=$('settingsWorkspaceTodosTabField');
+  const box=$('settingsWorkspaceTodosTab');
+  if(box) box.disabled=!!trayOn;
+  if(field){
+    if(field.classList) field.classList.toggle('is-disabled',!!trayOn);
+    field.hidden=false;
+  }
+  const note=$('settingsWorkspaceTodosTabNote');
+  if(note) note.hidden=!trayOn;
   const rp=document.querySelector('.rightpanel');
-  if(!window._workspaceTodosTab && rp && rp.dataset.activeTab==='todos'){
+  if(!want && rp && rp.dataset.activeTab==='todos'){
     if(typeof switchWorkspacePanelTab==='function') switchWorkspacePanelTab('files');
   }
 }
@@ -9338,6 +9813,18 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    const chatTodosCb=$('settingsChatTodosInChat');
+    if(chatTodosCb){
+      chatTodosCb.checked=!!(typeof chatTodosEnabled==='function'&&chatTodosEnabled());
+      // No appearance autosave here (reviewer re-gate 2026-10-08T23:19:27Z,
+      // static/panels.js:9355): the checkbox only drives the tray preference
+      // (localStorage), and an appearance save would POST this client's stale
+      // hidden_tabs mirror, overwriting a newer server snapshot written by
+      // another client. Explicit visibility-chip edits still autosave.
+      chatTodosCb.onchange=function(){
+        if(typeof _chatTodosToggleEnabled==='function') _chatTodosToggleEnabled(this.checked);
+      };
+    }
     const autoScrollFollowCb=$('settingsAutoScrollFollow');
     if(autoScrollFollowCb){
       autoScrollFollowCb.checked=settings.auto_scroll_follow!==false;
@@ -9590,7 +10077,12 @@ async function loadSettingsPanel(){
       window._showQuotaChip=showQuotaChipCb.checked;
       showQuotaChipCb.addEventListener('change',()=>{
         window._showQuotaChip=showQuotaChipCb.checked;
-        if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+        if(typeof refreshProviderQuotaIndicator==='function'){
+          const provider=(typeof _currentQuotaProvider==='function')
+            ? _currentQuotaProvider()
+            : ((typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null);
+          void refreshProviderQuotaIndicator(provider);
+        }
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -11312,11 +11804,20 @@ function _formatProviderQuotaReset(value){
 }
 
 function _formatProviderQuotaWindowLabel(accountLimits,w){
-  const raw=((w&&w.label)||t('provider_quota_window_fallback')).trim();
+  const label=String((w&&w.label)||'').trim();
+  const raw=label||t('provider_quota_window_fallback');
   const provider=((accountLimits&&accountLimits.provider)||'').toLowerCase();
   if(provider==='openai-codex'){
-    if(raw.toLowerCase()==='session') return t('provider_quota_session_limit');
-    if(raw.toLowerCase()==='weekly') return t('provider_quota_weekly_limit');
+    const durationValue=w&&w.limit_window_seconds;
+    const absent=durationValue===null||durationValue===undefined||durationValue==='';
+    const duration=Math.trunc(Number(durationValue));
+    if(duration===18000) return t('provider_quota_session_limit');
+    if(duration===604800) return t('provider_quota_weekly_limit');
+    if(absent){
+      const mapped={session:t('provider_quota_session_limit'),weekly:t('provider_quota_weekly_limit')}[label.toLowerCase()];
+      if(mapped) return mapped;
+    }
+    if(!label||label.toLowerCase()==='session'||label.toLowerCase()==='weekly') return t('provider_quota_usage_limit');
   }
   return raw||t('provider_quota_window_fallback');
 }
@@ -11657,11 +12158,25 @@ function _buildProviderCard(p){
   const modelCount=Number.isFinite(p.models_total)
     ? p.models_total
     : (Array.isArray(p.models) ? p.models.length : 0);
-  const sourceLabel=p.key_source==='oauth'
-    ? t('providers_status_oauth')
-    : p.key_source==='config_yaml'
-      ? t('providers_status_configured')||'Configured'
-      : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
+  const isConfigured=p.is_self_hosted===true
+    ? typeof p.base_url==='string' && p.base_url.trim().length>0
+    : p.has_key;
+  // The meta line names the credential source and the pill carries the status: a keyed
+  // card reads "API key" + "API key configured". A configured keyless self-hosted card
+  // names its endpoint (host[:port] only: no path, no userinfo) instead of repeating
+  // "Configured" in both slots.
+  const selfHostedEndpoint=(raw)=>{
+    const value=String(raw||'').trim();
+    try{ const u=new URL(value); if(u.host) return u.host; }catch(_){}
+    return value.replace(/^[a-z][a-z0-9+.-]*:\/\//i,'').replace(/^[^@/]*@/,'').split(/[/?#]/)[0];
+  };
+  const sourceLabel=p.is_self_hosted
+    ? (isConfigured ? (selfHostedEndpoint(p.base_url)||t('providers_status_configured_label')||'Configured') : t('providers_status_not_configured_label'))
+    : p.key_source==='oauth'
+      ? t('providers_status_oauth')
+      : p.key_source==='config_yaml'
+        ? t('providers_status_configured')||'Configured'
+        : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
   const metaParts=[];
   if(modelCount>0) metaParts.push(modelCount+(modelCount===1?' model':' models'));
   metaParts.push(sourceLabel);
@@ -11676,7 +12191,7 @@ function _buildProviderCard(p){
       <div class="provider-card-name">${esc(p.display_name)}</div>
       <div class="provider-card-meta">${esc(metaText)}</div>
     </div>
-    ${p.has_key?`<span class="provider-card-badge">${esc(t('providers_status_configured'))}</span>`:''}
+    ${isConfigured?`<span class="provider-card-badge">${esc(t(p.is_self_hosted?'providers_status_configured_label':'providers_status_configured'))}</span>`:''}
     <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
   `;
   card.appendChild(header);
@@ -12483,10 +12998,21 @@ async function checkUpdatesNow(channelOverride){
       const noGitParts=[];
       if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
+      // Release-tag context for the status line (display-only; update
+      // decisions are made by the per-target checks above).  WebUI-first so
+      // the suffix matches the panel's own version line order. No fallback to
+      // the release-path version field: on the stable up-to-date payload it
+      // holds the CURRENT tag, which would mislabel it as "Latest". Both
+      // payload shapes carry latest_tag from the backend (#6859 review S1).
+      const tagInfo=(data.webui&&data.webui.latest_tag)
+        ||(data.agent&&data.agent.latest_tag)||'';
+      // The target whose tag is shown. Its own release arrow may already name the tag (#6859 Fable r1).
+      const tagOwner=(data.webui&&data.webui.latest_tag)?data.webui:data.agent;
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
+        if(tagInfo&&!_updateTargetArrowNamesTag(tagOwner,tagInfo)) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
@@ -12495,7 +13021,9 @@ async function checkUpdatesNow(channelOverride){
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
-        if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
+        let txt=t('settings_up_to_date');
+        if(tagInfo) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
+        if(status){status.textContent=txt;status.style.color='var(--success)';}
         if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       }
     }
@@ -13368,6 +13896,7 @@ async function _runCronPollTick(){
       }
       // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
       updateCronBadge();
+      if (_currentPanel === 'tasks' && $('cronList')) loadCrons(false, { background: true });
     }
   }catch(e){}
   finally{ _cronPollInFlight=false; }

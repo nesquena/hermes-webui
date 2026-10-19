@@ -308,6 +308,7 @@ function _wireMessageWindowLoadEarlierButton() {}
 function _compressionAnchorIndex() { return null; }
 function _assistantTurnFinalVisibleContentMap() { return new Map(); }
 function _assistantTurnVisibleContentMap() { return new Map(); }
+function _rawTurnBoundaryByRawIdx() { return new Map(); }
 function _engineAwareCompressionCopy() {
   return { label: 'context_compaction_label', preview: 'reference_only_label' };
 }

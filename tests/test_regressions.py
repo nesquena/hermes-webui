@@ -354,7 +354,9 @@ def test_server_delete_prunes_session_index(cleanup_test_sessions):
             text.find('if parsed.path == "/api/session/delete":'),
         )
         if delete_idx >= 0:
-            delete_block = text[delete_idx:delete_idx+2400]
+            # Wide window: the handler must stay within one block for this scan
+            # even after the state.db-first reordering (#8300).
+            delete_block = text[delete_idx:delete_idx+8000]
             assert "prune_session_from_index(sid)" in delete_block, \
                 f"{label} session/delete must prune SESSION_INDEX_FILE"
             return
@@ -369,7 +371,8 @@ def test_server_delete_removes_session_bak_snapshot(cleanup_test_sessions):
         routes_src.find('if parsed.path == "/api/session/delete":'),
     )
     assert delete_idx >= 0, "session/delete handler not found in api/routes.py"
-    delete_block = routes_src[delete_idx:delete_idx+2400]
+    # Wide window: see test_server_delete_prunes_session_index (#8300).
+    delete_block = routes_src[delete_idx:delete_idx+8000]
     assert "with_suffix('.json.bak').unlink" in delete_block or 'with_suffix(".json.bak").unlink' in delete_block, \
         "session/delete must unlink <sid>.json.bak to avoid later orphan-backup recovery"
 
@@ -575,16 +578,27 @@ def test_queue_card_cross_session_clear_called_before_draft_save(cleanup_test_se
     survive into the destination session.
     """
     src = (REPO_ROOT / "static/sessions.js").read_text()
-    block_pattern = re.compile(
-        r"if \(currentSid && currentSid !== sid\) \{\s*"
-        r"if\(typeof window\._clearPendingSelections==='function'\) window\._clearPendingSelections\(\);\s*"
-        r"if\(typeof _clearQueueCardDisplay==='function'\) _clearQueueCardDisplay\(currentSid\);\s*"
-        r"await _saveComposerDraftNow\(currentSid",
-        re.S,
+    load_start = src.index("async function loadSession(sid){")
+    cross_start = src.index("if (currentSid && currentSid !== sid) {", load_start)
+    cross_end = src.index("  const _keepStaleUntilLoaded", cross_start)
+    cross_block = src[cross_start:cross_end]
+    ordered_steps = (
+        "if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();",
+        "if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);",
+        "const draftText = ($('msg') || {}).value || '';",
+        "const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];",
+        "try {",
+        "await _saveComposerDraftNow(currentSid, draftText, draftFiles);",
     )
-    assert block_pattern.search(src), (
-        "cross-session loadSession path must clear queue card display via"
-        " _clearQueueCardDisplay(currentSid) before awaiting _saveComposerDraftNow"
+    positions = [cross_block.index(step) for step in ordered_steps]
+    assert positions == sorted(positions), (
+        "cross-session load must clear selections and queue card, capture the draft, "
+        "then await its save in order"
+    )
+    save_end = cross_start + positions[-1] + len(ordered_steps[-1])
+    assert save_end < src.index("S.pendingFiles = [];", cross_start)
+    assert save_end < src.index("S.messages = [];", cross_start), (
+        "cross-session draft save must finish before navigation clears session state"
     )
 
 
@@ -1044,7 +1058,7 @@ def test_ui_js_does_not_hide_anchor_segments_that_contain_thinking(cleanup_test_
         "provider reasoning metadata should feed the Worklog Thinking Card after exact duplicate suppression"
     assert "data-worklog-thinking-card" in src, \
         "Thinking Cards should be explicit Worklog items, not tool cards"
-    assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey)" in src, \
+    assert "_thinkingActivityNode(thinkingText, false, thinkingDisclosureKey, !!(opts&&opts.live))" in src, \
         "settled reasoning should render as a collapsed Worklog Thinking Card"
 
 

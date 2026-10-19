@@ -50,6 +50,7 @@ from api.agent_sessions import (
     read_session_lineage_report,
 )
 from api.compression_anchor import visible_messages_for_anchor
+from api.process_event_utils import is_hidden_transcript_row
 from api.compression_recovery import (
     COMPRESSION_RECOVERY_ACTION_START_FOCUSED,
     clear_compression_recovery,
@@ -1294,6 +1295,27 @@ def _normalize_disabled_set(values) -> set:
     return {str(v).strip() for v in values if str(v).strip()}
 
 
+def _skill_listing_order_key(skill: dict) -> tuple:
+    return (skill.get("category") or "", skill["name"])
+
+
+def _resolve_agent_sort_skills(skills_tool_module):
+    """Return the Agent's skill-listing order helper under whichever name it exports.
+
+    Agent commit 93fafc4d6ff (2026-10-18) renamed ``_sort_skills`` to
+    ``sort_skills`` with no underscore alias, while older Agents only export the
+    private name. WebUI runs against both, so resolve the helper by attribute
+    instead of importing one spelling (an ImportError here took down
+    ``/api/skills`` and ``/api/skills/usage`` on newer Agents). If neither name
+    exists, fall back to the same ``(category, name)`` order the helper uses.
+    """
+    for attr in ("sort_skills", "_sort_skills"):
+        candidate = getattr(skills_tool_module, attr, None)
+        if callable(candidate):
+            return candidate
+    return lambda skills: sorted(skills, key=_skill_listing_order_key)
+
+
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
     """List skills using an explicit local skills directory.
 
@@ -1301,14 +1323,17 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     scan root explicit so per-client WebUI profile switches do not race on or
     leak through the skills tool's module-global ``SKILLS_DIR``.
     """
+    import importlib
+
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import (
         MAX_DESCRIPTION_LENGTH,
         _EXCLUDED_SKILL_DIRS,
         _parse_frontmatter,
-        _sort_skills,
         skill_matches_platform,
     )
+
+    sort_skills = _resolve_agent_sort_skills(importlib.import_module("tools.skills_tool"))
 
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
@@ -1366,7 +1391,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 
     if category:
         all_skills = [s for s in all_skills if s.get("category") == category]
-    all_skills = _sort_skills(all_skills)
+    all_skills = sort_skills(all_skills)
     categories = sorted(set(s.get("category") for s in all_skills if s.get("category")))
     result = {
         "success": True,
@@ -6783,6 +6808,71 @@ def _check_csrf(handler) -> bool:
 _EXTENSION_SIDECAR_PROXY_RE = _re.compile(
     r"^/api/extensions/(?P<extension_id>[^/]+)/sidecar(?:/(?P<proxy_path>.*))?$"
 )
+_EXTENSION_SIDECAR_PROXY_RE_IC = _re.compile(
+    r"^/api/extensions/(?P<extension_id>[^/]+)/sidecar(?:/(?P<proxy_path>.*))?$",
+    _re.IGNORECASE,
+)
+
+
+def _original_api_path(handler, parsed):
+    """Return the request path exactly as received by the server.
+
+    server.py case-folds ``/api/*`` paths for case-insensitive route matching
+    and retains the original-case path on the handler (``_raw_api_path``).
+    Dynamic path captures — share tokens, MCP server names, sidecar proxy
+    paths, opaque IDs — are case-sensitive and must be extracted from the
+    original path, never from the folded matching path. Falls back to
+    ``parsed.path`` when the request did not pass through server.py's
+    normalization (e.g. direct unit-test calls).
+    """
+    raw = getattr(handler, "_raw_api_path", None)
+    return raw if isinstance(raw, str) else parsed.path
+
+
+def _match_api_segments(handler, parsed, template):
+    """Match a fixed-shape /api/ route case-insensitively and return the
+    dynamic capture sliced from the ORIGINAL-case path (#6589 re-gate).
+
+    ``template`` lists every server-owned segment, with ``None`` marking the
+    single dynamic slot that is a case-sensitive capture (session id, board
+    id, …): e.g. ``("api", "sessions", None, "events")``. Static segments are
+    compared case-insensitively, so ``/API/Sessions/AbC/events`` matches the
+    template while still returning ``AbC`` (never the case-folded ``abc``).
+    Returns None when the path shape does not match.
+    """
+    raw = _original_api_path(handler, parsed) or ""
+    parts = raw.strip("/").split("/")
+    if len(parts) != len(template):
+        return None
+    capture = None
+    for i, expected in enumerate(template):
+        if expected is None:
+            capture = parts[i]
+            continue
+        if parts[i].casefold() != str(expected).casefold():
+            return None
+    return capture or None
+
+
+def fold_api_path(handler, parsed):
+    """Case-fold ``/api/*`` paths for route matching; retain the original on the handler.
+
+    Only the *matching* path is folded (``/API/Settings`` dispatches like
+    ``/api/settings``). The original-case path is kept as ``handler._raw_api_path``
+    so handlers slice case-sensitive dynamic values (share tokens, MCP server
+    names, session ids) via ``_original_api_path`` / ``_match_api_segments``.
+    The handler instance is reused across HTTP/1.1 keep-alive requests, so the
+    retained path is reset for EVERY request: a non-API request must never see
+    a stale ``_raw_api_path`` left by an earlier /api/ request (#6589).
+    """
+    handler._raw_api_path = None
+    raw_path = parsed.path
+    if raw_path.casefold().startswith("/api/"):
+        handler._raw_api_path = raw_path
+        return parsed._replace(path=raw_path.casefold())
+    return parsed
+
+
 _HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -6949,6 +7039,12 @@ def _handle_extension_sidecar_proxy(
     matched = _match_extension_sidecar_proxy_path(parsed.path)
     if matched is None:
         return False
+    # The sidecar extension id and proxy path are case-sensitive dynamic
+    # values: re-extract them from the original-case request path (see
+    # _original_api_path) instead of the case-folded matching path.
+    raw_matched = _EXTENSION_SIDECAR_PROXY_RE_IC.match(_original_api_path(handler, parsed) or "")
+    if raw_matched:
+        matched = (raw_matched.group("extension_id"), raw_matched.group("proxy_path") or "")
     # Require same-origin browser provenance on EVERY proxied method, not just
     # GET. Browser extensions (the only legitimate caller) always send Origin/
     # Referer/Sec-Fetch-Site, so this costs nothing on the real path while
@@ -8377,6 +8473,108 @@ def _ordered_custom_provider_model_ids(entry: dict) -> list[str]:
     return ordered
 
 
+def _custom_provider_allowlist_ids(_cp: dict) -> list[str]:
+    """Plural ``models`` list only — the explicit allowlist signal.
+
+    The singular ``model`` field is sticky/default metadata, NOT an
+    allowlist: it must not gate live-catalog filtering, otherwise a
+    provider configured with only ``model: assistant`` (no ``models``
+    list) would be collapsed to a single model.  Only an explicit
+    ``models`` allowlist expresses "show exactly these models".
+
+    An auto-discovered catalog is NOT an allowlist: when Hermes
+    persisted discovery results back into config (``models: {...}``
+    plus ``models_discovered: true``), that mapping is a snapshot
+    of what the gateway exposed at discovery time.  Gating on it
+    would permanently pin the live catalog to the first-discovery
+    set, silently dropping any model the user pulls in later
+    (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
+    is the shared predicate the ``/api/models`` path already uses;
+    when it says "discovered", return no allowlist and let the
+    live probe win.  An explicit ``discover_models: false`` opt-out
+    re-pins the catalog (the predicate accounts for it), so a
+    hand-pinned discovered catalog still filters.
+
+    A dict-shaped ``models`` mapping that is NOT marked discovered is
+    *per-model metadata* written by the Hermes Agent setup flow
+    (``hermes_cli/model_switch.py::_save_custom_provider`` and the
+    setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
+    not a catalog narrow: treating its keys as an allowlist would
+    collapse the live picker to the single saved default (keyless
+    Ollama) while the CLI live-probe shows the full catalog.  Only an
+    explicit ``discover_models: false`` opts into treating the dict
+    keys as a pinned allowlist.  List/JSON-array-string/Python-literal
+    shapes remain plain allowlists.
+
+    The plural value is decoded through ``_parse_config_string_list()``
+    because ``hermes config set`` / JSON-mode editor saves persist
+    lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
+    Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
+    made a serialized allowlist fall through to ``[]``, which the
+    caller reads as "no allowlist configured" and floods the picker
+    with the full upstream catalog — the same class of bug as the
+    ``skills.disabled`` regression (#7120 / #7134).
+    """
+    from api.config import (
+        _provider_discover_allowed,
+        _provider_models_are_discovered_catalog,
+    )
+
+    if _provider_models_are_discovered_catalog(_cp):
+        return []
+    _ids = []
+    _models = _cp.get("models")
+    # Serialized shapes only: ``hermes config set`` / JSON-mode
+    # editor saves persist lists as quoted JSON-array strings
+    # (``'["chat-a","chat-b"]'``) or Python literals
+    # (``"['chat-a']"``).  Decode the array itself (JSON first, then a
+    # Python literal) and walk it below, so mapping members keep their
+    # id|model|name metadata; the shared decoder str()-ifies members
+    # (``"{'id': 'a'}"``).  Anything else goes through
+    # ``_parse_config_string_list()`` as before.
+    if isinstance(_models, str):
+        import ast
+
+        _decoded = None
+        _stripped = _models.strip()
+        if _stripped.startswith("["):
+            try:
+                _decoded = json.loads(_stripped)
+            except ValueError:
+                try:
+                    _decoded = ast.literal_eval(_stripped)
+                except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                    _decoded = None
+        if isinstance(_decoded, list):
+            _models = _decoded
+        else:
+            _models = _parse_config_string_list(_models)
+    if isinstance(_models, dict):
+        # A dict-shaped ``models`` is per-model metadata written by
+        # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
+        # ``discover_models: false`` opt-out treats the dict keys as a
+        # pinned allowlist; otherwise return the empty allowlist so the
+        # live probe returns the full catalog.
+        if _provider_discover_allowed(_cp):
+            return []
+        for _mid in _models:
+            # Pre-fix Hermes wrote these sentinels inside the mapping;
+            # skip them like the Agent's ``_declared_model_ids``.
+            if _mid in ("__explicit_model_allowlist__", "__discovered_model_catalog__"):
+                continue
+            if isinstance(_mid, str) and _mid.strip():
+                _ids.append(_mid.strip())
+    elif isinstance(_models, (list, tuple)):
+        for _item in _models:
+            if isinstance(_item, str) and _item.strip():
+                _ids.append(_item.strip())
+            elif isinstance(_item, dict):
+                _mid = _item.get("id") or _item.get("model") or _item.get("name")
+                if _mid and str(_mid).strip():
+                    _ids.append(str(_mid).strip())
+    return _ids
+
+
 def _repair_bare_custom_provider_model(
     bare_model: str,
     provider: str | None,
@@ -8439,6 +8637,91 @@ def _repair_bare_custom_provider_model(
         return None
 
 
+def _repair_removed_qualified_custom_provider_model(
+    model: str,
+    provider: str | None,
+    *,
+    config_obj: dict | None,
+    profile: str | None = None,
+) -> str | None:
+    """Move a removed named-custom model to that provider's pinned list.
+
+    The target is the configured default when it's in the pinned list,
+    otherwise the first pinned model. A session on the configured default
+    (``${VAR}`` expanded with ``profile``'s env) is kept even outside the
+    list, since the picker still offers it. Only a pinned allowlist (``_custom_provider_allowlist_ids``) can prove a
+    model was removed: a discovered catalog snapshot or dict-shaped metadata
+    may omit models the live probe still serves. Needs the session's own
+    profile config; ``None`` is ambiguous (no profile, unreadable profile, or
+    a caller that doesn't pass one) and the shared ``cfg`` may belong to
+    another profile, so it never repairs from it. Colliding slugs fail closed.
+    """
+    prov = _clean_session_model_provider(provider)
+    bare_model, qualified_provider = _split_provider_qualified_model(model)
+    if (
+        not isinstance(config_obj, dict)
+        or not prov
+        or not prov.startswith("custom:")
+        or qualified_provider != prov
+    ):
+        return None
+
+    from api.config import (
+        AmbiguousCustomProviderError,
+        _custom_provider_slug_key,
+        _unique_custom_provider_entry,
+    )
+
+    try:
+        entry = _unique_custom_provider_entry(
+            config_obj.get("custom_providers"),
+            _custom_provider_slug_key(prov),
+        )
+    except AmbiguousCustomProviderError:
+        return None
+    if not entry:
+        return None
+    pinned = _custom_provider_allowlist_ids(entry)
+    raw_models = entry.get("models")
+    if (
+        isinstance(raw_models, str)
+        and raw_models.strip().startswith("[")
+        and pinned == [raw_models.strip()]
+    ):
+        # Serialized list that failed to decode: not proof of anything.
+        # A plain single-model string is still a valid one-model allowlist.
+        return None
+    if any("${" in item for item in pinned):
+        # Unresolved env reference: the raw profile YAML isn't the real ID.
+        return None
+
+    def _own_bare(item: str) -> str:
+        # Unwrap only this provider's own wrapper; ``@safe:x`` is a real ID.
+        bare, item_provider = _split_provider_qualified_model(item)
+        return bare if item_provider == prov else item
+
+    pinned_bare = [_own_bare(item) for item in pinned]
+    if not pinned or bare_model in pinned_bare:
+        return None
+    default_raw = str(entry.get("model") or "").strip()
+    if "${" in default_raw:
+        # Expand with the session profile's env, root included (read-only,
+        # fail-closed); left unresolved, it falls back to the pinned list.
+        from api.config import _expand_env_vars
+        from api.profiles import profile_env_for_thread_readonly
+
+        with profile_env_for_thread_readonly(
+            profile or "", "custom provider default", include_root=True,
+        ):
+            default_raw = _expand_env_vars(default_raw).strip()
+    default_bare = _own_bare(default_raw)
+    # The singular default stays a picker entry even outside ``models``.
+    if bare_model == default_bare:
+        return None
+    replacement = default_bare if default_bare in pinned_bare else pinned_bare[0]
+    return f"@{prov}:{replacement}"
+
+
 def _moa_fast_path_model_state(model: str) -> tuple[str, str, bool]:
     """Strip an optional ``@moa:``/``moa/`` prefix from an MoA-routed model.
 
@@ -8465,6 +8748,7 @@ def _resolve_compatible_session_model_state(
     profile_config: dict | None = None,
     explicit_model_pick: bool = False,
     prefer_cached_catalog: bool = False,
+    profile: str | None = None,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -8502,6 +8786,25 @@ def _resolve_compatible_session_model_state(
     if model and requested_provider == "moa":
         return _moa_fast_path_model_state(model)
     if model and requested_provider and model.startswith(f"@{requested_provider}:"):
+        # A fresh explicit pick is never second-guessed as stale.
+        repaired_model = None if explicit_model_pick else _repair_removed_qualified_custom_provider_model(
+            model,
+            requested_provider,
+            config_obj=profile_config,
+            profile=profile,
+        )
+        if repaired_model:
+            return repaired_model, requested_provider, True
+        if (
+            requested_provider.startswith("custom:")
+            and _split_provider_qualified_model(model)[1] == requested_provider
+        ):
+            # Keeping a pick rewrites nothing, so a session without a profile
+            # config may check the active config (repair above may not).
+            from api.config import _named_custom_provider_slug_for_provider
+
+            if _named_custom_provider_slug_for_provider(requested_provider, profile_config):
+                return model, requested_provider, False
         try:
             from api.config import cfg as _active_cfg
 
@@ -8917,6 +9220,7 @@ def _resolve_effective_session_model_for_display(session) -> str:
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(session, "profile", None),
         # GET /api/session is a hot, side-effect-free per-tab/per-poll path.
         # It must never pay the cold live provider-catalog rebuild (a
         # botocore IMDS probe that cannot resolve on a non-AWS / WSL / corp
@@ -8941,6 +9245,7 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(session, "profile", None),
         # See _resolve_effective_session_model_for_display: same hot
         # side-effect-free GET /api/session path; must not trigger the cold
         # live rebuild. prefer_cached_catalog resolves from warm/disk cache
@@ -9918,8 +10223,14 @@ def _message_counts_as_renderable_for_window(message) -> bool:
     to keep thinking/tool details inspectable, but they are not reply text. A
     tail page containing only transient metadata makes the frontend open to
     collapsed activity while newer real replies sit behind "load older messages".
+    Hidden internal rows (``delegation_wakeup``) are retained in storage for
+    model/recovery state but are never renderable, so they cannot consume the
+    visible-row budget — otherwise the 30-row restore window can be all-hidden
+    and the transcript opens blank (#quiet-delegation gate review).
     """
     if not isinstance(message, dict):
+        return False
+    if is_hidden_transcript_row(message):
         return False
     if _is_empty_partial_activity_message(message):
         return False
@@ -10310,6 +10621,13 @@ def _limited_webui_messages_for_display_with_sidecar(
             owner_positions.update(sidecar_owners)
         return sidecar_messages
     state_db_messages = _suppress_native_image_display_mirrors(
+        session,
+        state_db_messages,
+    )
+    # #quiet-delegation: stamp pending-turn provenance here too, so the
+    # paginated (msg_limit) load path matches the full-load path's behaviour
+    # during the deferred-save window.
+    state_db_messages = _stamp_pending_source_for_display(
         session,
         state_db_messages,
     )
@@ -11791,6 +12109,7 @@ from api.models import (
     _reindex_tool_owners_after_message_reorder,
     _project_native_image_payload_conflicts_for_display,
     _suppress_native_image_display_mirrors,
+    _stamp_pending_source_for_display,
     _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
@@ -11800,6 +12119,7 @@ from api.models import (
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
+    _persisted_session_meta_prefix,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
@@ -11810,6 +12130,8 @@ from api.models import (
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,
+    _save_session_draft,
+    _delete_session_draft,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -12000,6 +12322,81 @@ def _pre_compression_continuation_session_id(session) -> str | None:
 
     rows.extend(_child_rows_from_sidecars(memory_seen_ids))
     return _resolve_from_rows(rows)
+
+
+def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile) -> bool:
+    """Confirm one bounded compression edge from current on-disk metadata."""
+    snapshot_meta = _persisted_session_meta_prefix(snapshot_sid)
+    continuation_meta = _persisted_session_meta_prefix(continuation_sid)
+    return bool(
+        snapshot_meta
+        and continuation_meta
+        and _profiles_match(snapshot_meta.get("profile"), request_profile)
+        and snapshot_meta.get("pre_compression_snapshot")
+        and _safe_first(snapshot_meta.get("pre_compression_continuation_session_id"))
+        == continuation_sid
+        and _profiles_match(continuation_meta.get("profile"), request_profile)
+        and _safe_first(continuation_meta.get("parent_session_id")) == snapshot_sid
+    )
+
+
+def _draft_pre_compression_continuation_session_authority(
+    session,
+    *,
+    request_profile,
+    seen_authority_sids: set[str],
+    validated_edges: list[tuple[str, str]] | None = None,
+) -> tuple[str | None, str]:
+    """Validate one authoritative compression transition from a snapshot.
+
+    Returns:
+        (next_session, next_sid) when a validated transition exists.
+        (None, best_known_sid) when authority cannot be confirmed.
+    """
+    snapshot_sid = _safe_first(getattr(session, "session_id", None))
+    if not snapshot_sid or not is_safe_session_id(snapshot_sid):
+        return None, snapshot_sid
+
+    continuation_sid = _safe_first(
+        getattr(session, "pre_compression_continuation_session_id", None)
+    )
+    if not continuation_sid or not is_safe_session_id(continuation_sid):
+        return None, snapshot_sid
+    if continuation_sid in seen_authority_sids:
+        return None, continuation_sid
+
+    # Cached session freshness is message-count based and can miss a
+    # profile- or parent-only edit. Check only the bounded metadata prefixes.
+    if not _draft_compression_edge_is_authorized(
+        snapshot_sid, continuation_sid, request_profile
+    ):
+        return None, continuation_sid
+
+    try:
+        continuation_session = get_session(continuation_sid)
+    except KeyError:
+        return None, continuation_sid
+
+    if not _profiles_match(
+        getattr(continuation_session, "profile", None), request_profile
+    ):
+        return None, continuation_sid
+
+    if _safe_first(getattr(continuation_session, "parent_session_id", None)) != snapshot_sid:
+        return None, continuation_sid
+
+    if validated_edges is not None:
+        validated_edges.append((snapshot_sid, continuation_sid))
+
+    return continuation_session, continuation_sid
+
+
+def _draft_compression_edges_still_authorized(edges, request_profile) -> bool:
+    """Recheck each bounded lineage edge after acquiring the final target lock."""
+    return all(
+        _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile)
+        for snapshot_sid, continuation_sid in edges
+    )
 
 from api.workspace import (
     load_workspaces,
@@ -13174,21 +13571,355 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
+    import math as _math
     import time as _time
+    from datetime import datetime as _datetime, timedelta as _timedelta
 
     from api.usage import prompt_cache_hit_percent
 
-    query = parse_qs(parsed.query)
-    try:
-        days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
-    except (ValueError, TypeError):
-        days = 30
+    # keep_blank_values: parse_qs() DROPS empty values by default, so a blank
+    # bound (`start=2026-05-01&end=`) looked ABSENT here and the documented
+    # fail-closed check below never saw it - the request was then served as a
+    # custom [start, now] window (the blank `end` silently defaulted to "now")
+    # instead of the trailing window a malformed input must fall back to.  With
+    # blanks preserved, `_window_ts` rejects them the same way it rejects an
+    # unparseable value, so BOTH bounds fall back together (Greptile P1
+    # 2026-10-10T03:29:18Z: "Blank bounds change the range").
+    query = parse_qs(parsed.query, keep_blank_values=True)
 
+    def _window_ts(vals):
+        # Parse one time-window endpoint.  Returns (kind, ts) where kind is
+        # 'date' (a YYYY-MM-DD calendar string, ts = local midnight of that
+        # day) or 'num' (Unix epoch seconds, ts = the exact float), or None
+        # when absent/invalid.  PROVENANCE MATTERS: a date string selects a
+        # whole calendar day (its bound is a local midnight), while a numeric
+        # endpoint is an EXACT point in time and must keep its precision -
+        # it is never rounded down to the day's midnight nor widened to the
+        # next one (Greptile P1: 'Numeric Unix endpoints retain precision
+        # only on one special date').
+        if not vals:
+            return None
+        v = vals[0]
+        if not isinstance(v, str):
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            try:
+                y, mo, d = map(int, v.split("-"))
+                ts = _time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1))
+                # Reject impossible calendar dates (e.g. 2026-02-31):
+                # mktime silently normalizes them to another day, which
+                # would return analytics for the wrong interval.  A
+                # round-trip must land back on the requested local
+                # midnight, otherwise the value is invalid -> fall back.
+                lt = _time.localtime(ts)
+                if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, mo, d):
+                    return None
+                return ("date", ts)
+            except (OverflowError, ValueError, OSError):
+                return None
+        # Numeric epoch seconds.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not _math.isfinite(f):
+            return None
+        return ("num", f)
+
+    # Absolute time-window mode: start/end Unix timestamps (seconds) or
+    # YYYY-MM-DD date strings.  end defaults to "now"; start defaults to 30
+    # days before end.  Falls back to trailing `days`-window mode when neither
+    # is present.
+    start_meta = _window_ts(query.get("start", []))
+    end_meta = _window_ts(query.get("end", []))
+    # A SUPPLIED-but-invalid endpoint must fail closed to the trailing
+    # window, not masquerade as an OMITTED one: `_window_ts` returns None
+    # for both absent and unparseable values, and the omitted-endpoint
+    # defaults (30 days before end; end = now) would fabricate a custom
+    # interval the caller never requested when the endpoint was actually
+    # supplied but unparseable (e.g. 2026-02-31, rejected by the calendar
+    # round-trip check).  This applies symmetrically to BOTH bounds: an
+    # invalid SUPPLIED start used to invent a 30-days-before-end window,
+    # and an invalid SUPPLIED end still widens a valid start through the
+    # current server time into a fabricated [start, now] interval (Greptile
+    # P1: "Invalid start invents custom range"; 2026-08-17 re-review: a
+    # valid start plus an impossible end).  Reject the whole custom request
+    # so the response reports the trailing window actually served.
+    if ("start" in query and start_meta is None) or ("end" in query and end_meta is None):
+        start_meta = None
+        end_meta = None
+    start_kind = start_meta[0] if start_meta else None
+    end_kind = end_meta[0] if end_meta else None
+    start_ts_v = start_meta[1] if start_meta else None
+    end_ts_v = end_meta[1] if end_meta else None
+    # Platform-range guard for SUPPLIED endpoints, BEFORE any calendar
+    # arithmetic runs.  A pre-epoch calendar date is a perfectly valid
+    # YYYY-MM-DD string (Chromium's <input type=date> submits 0001-01-15
+    # happily) and yields a huge negative epoch.  The end-only default below
+    # then evaluates `date - 30 days` from date.min and raises
+    # `OverflowError: date value out of range` -> HTTP 500.  Reject any
+    # supplied PRE-EPOCH endpoint here (no session predates 1970) and fail
+    # closed to the trailing `days` window - the same fallback an unparseable
+    # endpoint already gets - so no downstream localtime()/mktime()/date
+    # arithmetic can ever see a pre-epoch value.  A supplied endpoint ABOVE
+    # the ceiling is deliberately NOT rejected here: `min(end, now)` clamps a
+    # future end and the post-arithmetic range check below already falls back
+    # for an absurd start, so the documented "valid start + huge end" window
+    # (start..now) keeps working.
+    _PLATFORM_MIN_TS = 0           # 1970-01-01 local (no sessions predate it)
+    # The DERIVED start of an end-only DATE request needs the SAME guard.  An
+    # `end=1970-01-15` is itself >= 0, so the supplied-endpoint check below
+    # cannot see that its implicit `end - 30 calendar days` start lands on
+    # 1969-12-16 - and mktime() on that pre-epoch day raises on Windows BEFORE
+    # the post-arithmetic range check can fall back, so /api/insights answered
+    # HTTP 500 instead of the trailing window (Greptile P1: 'Derived start
+    # bypasses platform guard').  Probe the derivation the same way the real
+    # arithmetic will (a local-midnight mktime) rather than comparing against a
+    # hard-coded 1970-01-01: east-of-UTC zones make even local midnight
+    # 1970-01-01 pre-epoch, so the date comparison alone would still miss
+    # `end=1970-01-31` -> start 1970-01-01.  On any platform failure, fail
+    # closed to the trailing `days` window exactly like a pre-epoch supplied
+    # endpoint does.
+    derived_start_pre_epoch = False
+    if start_ts_v is None and end_kind == "date" and end_ts_v is not None:
+        try:
+            _end_day_v = _datetime.fromtimestamp(
+                min(end_ts_v, 4102444800)).date()
+            _time.mktime((_end_day_v - _timedelta(days=30)).timetuple())
+        except (OverflowError, ValueError, OSError):
+            derived_start_pre_epoch = True
+    if derived_start_pre_epoch \
+            or (start_ts_v is not None and start_ts_v < _PLATFORM_MIN_TS) \
+            or (end_ts_v is not None and end_ts_v < _PLATFORM_MIN_TS):
+        start_meta = None
+        end_meta = None
+        start_kind = None
+        end_kind = None
+        start_ts_v = None
+        end_ts_v = None
     now = _time.time()
-    today = _time.localtime(now)
-    today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
-    day_secs = 86400
-    first_day_ts = today_midnight - ((days - 1) * day_secs)
+    start_ts = None
+    end_ts = None
+
+    # end_from_clock: True when the EFFECTIVE end is the server clock because
+    # the caller did not pin it to a concrete timestamp - an omitted `end`, or
+    # an explicit endpoint the server clamped down to `now`.  An explicitly
+    # supplied numeric end is NOT clock-derived even when its value happens to
+    # equal `now`: the numeric contract is an exact [start, end) interval, so
+    # it must remain an EXCLUSIVE boundary (gate re-gate: 'explicit numeric
+    # boundaries lose provenance').  The flag is tracked through the swap and
+    # the future clamp below.
+    end_from_clock = False
+    if start_ts_v is not None or end_ts_v is not None:
+        if end_ts_v is not None:
+            end_ts = min(end_ts_v, now)
+            end_from_clock = end_ts_v > now
+            if start_ts_v is not None:
+                start_ts = start_ts_v
+            else:
+                # End-only with a calendar-date end: default the start to
+                # 30 calendar days before the end's local midnight (DST-safe).
+                # Using `end_ts - 30*86400` drifts by the DST offset and can
+                # fall on the wrong calendar date (see gate repro:
+                # end=2026-03-10 in America/New_York → elapsed gives 2026-02-07
+                # instead of the calendar 2026-02-08).  `end_ts` is guaranteed
+                # inside the platform window here (the guard above rejected any
+                # pre-epoch / out-of-range supplied endpoint AND any end-only
+                # DATE whose derived start would not survive mktime() on this
+                # platform), so neither fromtimestamp() nor the 30-day
+                # back-step can underflow.
+                if end_kind == "date":
+                    # Derive from the endpoint the CALLER sent, not from the
+                    # end already clamped to `now`: for a future `end` the
+                    # clamp must clamp the INTERVAL only, otherwise the whole
+                    # window shifts backwards and serves days outside the
+                    # requested [end - 30d, end] range (Greptile P1: 'Future
+                    # end shifts start').  The clamps below still keep every
+                    # served boundary at/behind the clock.
+                    end_day_tmp = _datetime.fromtimestamp(
+                        min(end_ts_v, 4102444800)).date()
+                    start_day_tmp = end_day_tmp - _timedelta(days=30)
+                    start_ts = _time.mktime(start_day_tmp.timetuple())
+                    start_kind = "date"
+                else:
+                    start_ts = end_ts_v - 30 * 86400
+        else:
+            start_ts = start_ts_v
+            end_ts = now
+            end_from_clock = True
+        # Reversal test.  A DATE `end` means the WHOLE calendar day and is
+        # served as an exclusive bound at the NEXT local midnight
+        # (``end_cutoff`` below), so the comparison must use that SAME resolved
+        # bound: measured against the date's local MIDNIGHT, a numeric start
+        # later the same day looked reversed and the swap served the day's
+        # EARLIER hours instead of the requested tail (Greptile P1
+        # 2026-10-10T02:20:04Z: start = May 2 noon with end = 2026-05-02
+        # returned midnight..noon).  Equality counts as reversed for a
+        # whole-day end - a start at exactly the end day's exclusive close
+        # means "all of that day", which is what the old swap produced.
+        _cmp_end = end_ts
+        _end_is_whole_day = False
+        if end_kind == "date" and end_ts is not None:
+            try:
+                _cmp_day = _datetime.fromtimestamp(end_ts).date()
+                _cmp_end = _time.mktime((_cmp_day + _timedelta(days=1)).timetuple())
+                _end_is_whole_day = True
+            except (OverflowError, ValueError, OSError):
+                _cmp_end = end_ts
+        if start_ts > _cmp_end or (_end_is_whole_day and start_ts == _cmp_end):
+            start_ts, end_ts = end_ts, start_ts
+            start_kind, end_kind = end_kind, start_kind
+            # The value that lands in the `end` slot is the OLD start, which is
+            # never clock-derived (it is either explicit, or derived from the
+            # end) - so the flag resets and is re-derived by the clamp below.
+            end_from_clock = False
+        # A custom window must never extend into the future.  An explicit
+        # future `end` is already clamped to now via min(end, now) above,
+        # but the swap can re-introduce a future value as the new end - e.g.
+        # a future `start` with no `end` becomes [now, future_start].
+        # Clamp the end to now again.
+        if end_ts > now:
+            end_ts = now
+            end_from_clock = True
+        # STRICT-future detection: a window whose effective START lies at or
+        # after the server clock is wholly in the future (every daily bucket
+        # zero-filled), so it fails closed to the trailing `days` fallback and
+        # the analytics window keeps ending at or before now.  The ONE exempt
+        # case is a zero-length window anchored exactly on the clock that the
+        # caller asked for directly - an explicit `start == now` with no future
+        # endpoint to clamp.  That is not a future request: it stays a custom
+        # (zero-length, therefore empty) interval instead of silently serving
+        # the trailing window (gate re-gate: 'explicit numeric boundaries lose
+        # provenance').  A strictly-future start - including a future start
+        # swapped against the implicit clock end - still falls back.
+        clock_zero_window = (
+            start_ts is not None and end_ts is not None
+            and start_ts >= now and end_ts >= now
+            and not (start_ts_v is not None and start_ts_v > now)
+            and not (end_ts_v is not None and end_ts_v > now)
+        )
+        if start_ts >= now and not clock_zero_window:
+            start_ts = None
+            end_ts = None
+        # Clamp both endpoints into the platform-safe localtime range so an
+        # absurd-but-finite timestamp (e.g. 1e20, -1e20) cannot reach
+        # localtime()/mktime() and return HTTP 500. Windows msvcrt localtime
+        # supports roughly 1970..~3000; 4102444800 = 2100-01-01 is a
+        # conservative upper bound, 0 = 1970-01-01 the lower bound (no
+        # sessions predate the Unix epoch). Out-of-range -> fail closed to
+        # the trailing `days` fallback.
+        if start_ts is not None and (not (0 <= start_ts <= 4102444800) or not (0 <= end_ts <= 4102444800)):
+            start_ts = None
+            end_ts = None
+        if start_ts is not None:
+            # Operate on local calendar dates (DST-safe), not fixed 86400s, so
+            # a spring-forward/fall-back day yields exactly one bucket and the
+            # daily series stays aligned with the filtered totals.
+            start_day = _datetime.fromtimestamp(start_ts).date()
+            end_day = _datetime.fromtimestamp(end_ts).date()
+            now_day = _datetime.fromtimestamp(now).date()
+            # Cap absurd custom windows at 5 CALENDAR years so the daily series
+            # cannot balloon into millions of buckets.  Walk end_day back 5
+            # calendar years instead of subtracting a fixed 5*365*86400 seconds:
+            # a valid five-calendar-year span containing a leap day (e.g.
+            # 2021-05-04..2026-05-04, 1826 days) would exceed the fixed-seconds
+            # cap and silently lose its first requested day (Greptile P1).
+            # The window is clamped BEFORE filtering so totals and the chart
+            # are always computed over the same interval.
+            try:
+                min_start = end_day.replace(year=end_day.year - 5)
+            except ValueError:
+                # Feb 29 in a non-leap target year -> Feb 28
+                min_start = end_day.replace(year=end_day.year - 5, day=28)
+            if start_day < min_start:
+                start_day = min_start
+                start_ts = _time.mktime(start_day.timetuple())
+            today_midnight = _time.mktime((now_day.year, now_day.month, now_day.day, 0, 0, 0, 0, 0, -1))
+            days = max((end_day - start_day).days + 1, 1)
+            # Admission cutoffs, end-exclusivity.  A DATE endpoint uses a
+            # calendar-day bound (local midnight); a NUMERIC endpoint keeps the
+            # exact [start, end) boundary on every date - never a rounded-down
+            # start nor a widened-to-next-midnight end.
+            if start_kind == "date":
+                cutoff = _time.mktime((start_day.year, start_day.month, start_day.day, 0, 0, 0, 0, 0, -1))
+            else:
+                cutoff = start_ts  # exact numeric (or 30-day-derived implicit) start
+            # Whether the effective `end` is the server clock.  PROVENANCE, not
+            # value equality: True only when the caller did NOT pin the end to
+            # a concrete timestamp (an omitted end, or one the server clamped
+            # down to now).  A clock-derived end is an inclusive "up to the
+            # server clock" bound (trailing-like): keep sessions at/behind now,
+            # exclude any stamped after.  An explicit NUMERIC end keeps its
+            # exact [start, end) contract even when its value equals now - a
+            # session stamped exactly at that boundary must stay out.
+            end_is_now = end_from_clock
+            if end_is_now:
+                end_cutoff = now
+                # A zero-length [now, now] window admits nothing (a half-open
+                # interval is empty): explicit `start == now` resolves to an
+                # EMPTY custom interval rather than leaking the trailing-like
+                # inclusive at-now session.
+                end_exclusive = (start_ts is not None and start_ts >= end_ts)
+            elif end_kind == "date":
+                # Whole calendar day: exclusive NEXT local midnight (DST-safe).
+                end_cutoff = _time.mktime((end_day + _timedelta(days=1)).timetuple())
+                end_exclusive = True
+                if end_day == now_day:
+                    # A whole-day "today" DATE selection: that day is not over
+                    # from the server's view, so clamp to now (inclusive) to
+                    # keep sessions stamped after the server clock out.
+                    end_cutoff = min(end_cutoff, now)
+                    end_exclusive = False
+            else:
+                # Exact NUMERIC end: keep the requested boundary as the
+                # exclusive stop.  This includes a numeric end earlier today
+                # (e.g. today 10:00 while now is 14:00 - the old code widened
+                # it to now) and a numeric end on a past date (the old code
+                # widened it to the following local midnight), both of which
+                # leaked sessions after the requested timestamp in.
+                end_cutoff = end_ts
+                end_exclusive = True
+            first_day_ts = cutoff
+            # Effective bounds (server-local calendar days actually queried),
+            # so the client footer always agrees with what was filtered even
+            # after the server clamps/swaps the input range.
+            effective_start = start_day.isoformat()
+            effective_end = end_day.isoformat()
+            mode = "custom"
+    if start_ts is None and end_ts is None:
+        # Trailing-window mode (legacy): last N calendar days up to today.
+        try:
+            days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
+        except (ValueError, TypeError):
+            days = 30
+        end_cutoff = now
+        effective_start = None
+        effective_end = None
+        # Trailing mode: end_cutoff = now is INCLUSIVE - sessions stamped
+        # exactly at "now" belong to the current trailing window.
+        end_exclusive = False
+        # Explicit response mode: the client footer must know whether a
+        # custom-range request RESOLVED to a real custom window ("custom") or
+        # fell back to the trailing window ("trailing") - e.g. an all-future
+        # or fully-invalid custom request.  Without this a "custom" request
+        # that fell back would render the rejected raw inputs instead of the
+        # trailing window the server actually queried (Greptile P1: 'custom
+        # range that normalizes to trailing still displays the raw range').
+        mode = "trailing"
+
+        today = _time.localtime(now)
+        # Walk back by CALENDAR days, not fixed 86400s intervals: across a
+        # DST transition a fixed-step subtraction lands first_day_ts at
+        # 23:00/01:00 instead of local midnight, admitting or dropping the
+        # boundary hour while the daily series still advances by calendar
+        # dates (totals disagree with the series).  The absolute branch
+        # above uses the same calendar-day arithmetic; keep them aligned.
+        today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
+        start_day = _datetime.fromtimestamp(today_midnight).date() - _timedelta(days=days - 1)
+        first_day_ts = _time.mktime(start_day.timetuple())
     cutoff = first_day_ts
 
     def _safe_usage_int(value) -> int:
@@ -13224,10 +13955,20 @@ def _handle_insights(handler, parsed) -> bool:
         idx = []
 
     for entry in idx:
-        created = entry.get("created_at", 0) or 0
-        updated = entry.get("updated_at", 0) or 0
-        # Session is relevant if it was created or updated within the calendar window.
-        if max(created, updated) < cutoff:
+        # One canonical timestamp (updated_at or created_at) drives BOTH
+        # admission and daily attribution, so totals and the daily series
+        # always describe the same window.  Interval-overlap admission
+        # previously let a crossing session into totals while its daily
+        # bucket fell outside the returned series.
+        ts = _session_usage_ts(entry)
+        # Session whose usage ts falls entirely before the window
+        if ts < cutoff:
+            continue
+        # Session whose usage ts falls entirely after the window.
+        # end_cutoff is an exclusive upper bound in absolute mode (next
+        # local midnight) and an inclusive one in trailing mode (now):
+        # equality is only excluded when the bound itself is exclusive.
+        if ts > end_cutoff or (end_exclusive and ts == end_cutoff):
             continue
         sessions_data.append(entry)
 
@@ -13298,31 +14039,37 @@ def _handle_insights(handler, parsed) -> bool:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
+            # end_cutoff is exclusive (absolute mode) or inclusive (trailing).
+            end_cmp = "<" if end_exclusive else "<="
             with closing(open_state_db_readonly(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
                 # cache_read_tokens may not exist on older agent state DBs;
                 # fall back to a query without it if the column is missing.
                 try:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT id, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                               started_at, ended_at
+                               started_at, ended_at,
+                               COALESCE(ended_at, started_at, 0) AS usage_ts
                         FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
+                        WHERE COALESCE(ended_at, started_at, 0) >= ?
+                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
                           AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
+                    """, (cutoff, end_cutoff))
                 except sqlite3.OperationalError:
-                    cur.execute("""
+                    cur.execute(f"""
                         SELECT id, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                0 AS cache_read_tokens,
-                               started_at, ended_at
+                               started_at, ended_at,
+                               COALESCE(ended_at, started_at, 0) AS usage_ts
                         FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
+                        WHERE COALESCE(ended_at, started_at, 0) >= ?
+                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
                           AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
+                    """, (cutoff, end_cutoff))
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
@@ -13350,7 +14097,7 @@ def _handle_insights(handler, parsed) -> bool:
                     bucket["cache_read_tokens"] += _cache_read
                     bucket["cost"] += _cost
 
-                    _ts = row["started_at"] or row["ended_at"] or 0
+                    _ts = row["usage_ts"] or 0
                     if _ts:
                         _dt = _time.localtime(_ts)
                         _day_key = _time.strftime("%Y-%m-%d", _dt)
@@ -13403,8 +14150,8 @@ def _handle_insights(handler, parsed) -> bool:
 
     daily_series = []
     for i in range(days):
-        day_ts = first_day_ts + (i * day_secs)
-        day_key = _time.strftime("%Y-%m-%d", _time.localtime(day_ts))
+        day = start_day + _timedelta(days=i)
+        day_key = day.isoformat()
         bucket = daily_tokens.get(day_key, {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -13430,6 +14177,18 @@ def _handle_insights(handler, parsed) -> bool:
 
     return j(handler, {
         "period_days": days,
+        # Explicit response mode: "custom" when a real absolute window was
+        # queried, "trailing" when the request fell back to the trailing
+        # days-window (all-future / fully-invalid custom input).  The client
+        # footer keys off this so a fell-back custom request is rendered as
+        # the trailing window actually served, never the rejected raw inputs.
+        "mode": mode,
+        # Effective server-local calendar range actually queried (after
+        # clamping, swap, and DST alignment).  ISO date strings, or None
+        # in trailing-window mode.  The client footer uses these instead
+        # of raw input values, never disagreeing with the filtered window.
+        "effective_start": effective_start,
+        "effective_end": effective_end,
         "total_sessions": total_sessions,
         "total_messages": total_messages,
         "total_input_tokens": total_input_tokens,
@@ -14592,6 +15351,14 @@ def _handle_session_get(handler, parsed) -> bool:
                     s,
                     state_db_messages,
                 )
+                # #quiet-delegation: stamp the pending turn's _source onto the
+                # freshly-read state.db rows BEFORE merge/projection, so a
+                # reload during the deferred-save window cannot adopt the
+                # hidden handoff as a visible user row.
+                state_db_messages = _stamp_pending_source_for_display(
+                    s,
+                    state_db_messages,
+                )
                 lineage_owners = {}
                 sidecar_messages = _webui_sidecar_lineage_messages_for_display(
                     s, owner_positions=lineage_owners,
@@ -14847,6 +15614,16 @@ def _handle_session_get(handler, parsed) -> bool:
             # keep the raw count available as ``actual_message_count`` but
             # do not let it make the frontend expect phantom messages.
             raw["message_count"] = _merged_message_count
+        if load_messages and _all_msgs:
+            # #quiet-delegation gate review finding 3: after state.db has
+            # grown past the sidecar, compact()'s visible total can be stale
+            # (it trusts the sidecar prefix / metadata counts). On message
+            # loads the merged display transcript is the authority — derive
+            # the visible total from it.
+            raw["visible_message_count"] = sum(
+                1 for m in _all_msgs
+                if isinstance(m, dict) and not is_hidden_transcript_row(m)
+            )
         # Signal to the frontend that older messages were omitted. The
         # message window cursor already reflects visible-row pagination and
         # avoids false positives when raw hidden tool rows exceed msg_limit.
@@ -14900,7 +15677,8 @@ def _handle_session_get(handler, parsed) -> bool:
         # Always log when slow (>2s) so we don't need HERMES_DEBUG_SLOW env var
         # to diagnose latency regressions. Opt-in env var still forces
         # logging on every request for development.
-        if _debug_slow or _total_ms >= 2000:
+        _slow_print = getattr(handler, '_safe_webui_print', None)
+        if callable(_slow_print) and (_debug_slow or _total_ms >= 2000):
             # perf(webui/session-load-latency) tier2c: route the [SLOW] line
             # through handler._safe_webui_print() rather than logger.warning().
             # The WebUI process starts the root logger without any handler, so
@@ -14910,7 +15688,7 @@ def _handle_session_get(handler, parsed) -> bool:
             # _safe_webui_print writes to the systemd journal socket directly,
             # same as the per-request ms line — which is why THAT line keeps
             # working.
-            handler._safe_webui_print(
+            _slow_print(
                 "[SLOW] session_id=%s get_session=%.1fms model_resolve=%.1fms "
                 "compact=%.1fms redact=%.1fms json_write=%.1fms total=%.1fms" % (
                     sid,
@@ -15268,7 +16046,10 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, payload)
 
     if parsed.path.startswith("/api/share/"):
-        token = parsed.path[len("/api/share/"):].strip()
+        # Share tokens are case-sensitive (secrets.token_urlsafe), so the
+        # capture must come from the original-case path, not the folded
+        # matching path (server.py normalizes /api/ paths for matching).
+        token = _original_api_path(handler, parsed)[len("/api/share/"):].strip()
         share = load_share(token)
         if not share:
             return bad(handler, "Shared conversation not found", 404)
@@ -16056,7 +16837,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == '/api/sessions/events':
         return _handle_session_events_stream(handler)
 
-    session_events_session_id = _session_events_path_session_id(parsed.path)
+    session_events_session_id = _match_api_segments(
+        handler, parsed, ("api", "sessions", None, "events")
+    )
     if session_events_session_id is not None:
         return _handle_session_sse_stream_for_session(handler, parsed, session_events_session_id)
 
@@ -16405,6 +17188,12 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Plugin static assets ──
     if parsed.path.startswith("/dashboard-plugins/"):
+        # Plugin names and asset paths are case-sensitive (config keys + disk
+        # paths). This route is NOT API-folded (server.py folds only /api/*),
+        # so parsed.path already carries the original case — and it must come
+        # from the CURRENT request: the handler is reused across keep-alive
+        # requests, so an API-only retained path (_raw_api_path) from an
+        # earlier request would be stale here (#6589 re-gate).
         parts = parsed.path.split("/", 3)
         if len(parts) >= 3:
             plugin_name = parts[2]
@@ -17617,41 +18406,185 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
         unchanged = False
-        with _get_session_agent_lock(sid):
-            _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
-            else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
-                _draft_mark("after_save")
-                saved_draft = s.composer_draft
+        request_sid = sid
+        request_session = s
+        request_profile = getattr(request_session, "profile", None)
+        authoritative_sid = request_sid
+        _MAX_DRAFT_AUTHORITY_HOPS = 4
+        _seen_authority_sids = {authoritative_sid}
+        _validated_compression_edges = []
+        resolved_once = False
+
+        def _draft_authority_unconfirmed():
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": "Draft authority could not be confirmed",
+                    "code": "draft_authority_unconfirmed",
+                },
+                status=409,
+            )
+
+        for _hop in range(_MAX_DRAFT_AUTHORITY_HOPS):
+            with _get_session_agent_lock(authoritative_sid):
+                _draft_mark("acquired_lock")
+                # A successful parent check releases that lock before this hop
+                # acquires the child lock. Revalidate every traversed edge here
+                # so a cleared/deleted snapshot cannot authorize the write.
+                if _validated_compression_edges and not _draft_compression_edges_still_authorized(
+                    _validated_compression_edges, request_profile
+                ):
+                    return _draft_authority_unconfirmed()
+                try:
+                    request_session = get_session(authoritative_sid)
+                except KeyError:
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "error": "Session no longer active",
+                            "session_id": authoritative_sid,
+                        },
+                        status=409,
+                    )
+
+                resolved_sid = str(getattr(request_session, "session_id", "") or "").strip()
+                if not resolved_sid or not is_safe_session_id(resolved_sid):
+                    return _draft_authority_unconfirmed()
+                if not _profiles_match(getattr(request_session, "profile", None), request_profile):
+                    return _draft_authority_unconfirmed()
+
+                if resolved_sid != authoritative_sid:
+                    if resolved_sid in _seen_authority_sids:
+                        return _draft_authority_unconfirmed()
+                    _seen_authority_sids.add(resolved_sid)
+                    authoritative_sid = resolved_sid
+                    continue
+
+                continuation_sid = None
+                if getattr(request_session, "pre_compression_snapshot", False):
+                    continuation_session, continuation_sid = (
+                        _draft_pre_compression_continuation_session_authority(
+                            request_session,
+                            request_profile=request_profile,
+                            seen_authority_sids=_seen_authority_sids,
+                            validated_edges=_validated_compression_edges,
+                        )
+                    )
+                    if not continuation_session:
+                        return _draft_authority_unconfirmed()
+                    request_session = continuation_session
+                    _seen_authority_sids.add(continuation_sid)
+                    authoritative_sid = continuation_sid
+                    continue
+
+                if authoritative_sid != request_sid:
+                    if (
+                        not _validated_compression_edges
+                        or not _draft_compression_edges_still_authorized(
+                            _validated_compression_edges, request_profile
+                        )
+                    ):
+                        return _draft_authority_unconfirmed()
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "code": "session_moved",
+                            "session_id": authoritative_sid,
+                            "error": "Session moved",
+                        },
+                        status=409,
+                    )
+
+                current_draft = dict(getattr(request_session, "composer_draft", {}) or {})
+                next_draft = dict(current_draft)
+                if text is not None:
+                    next_draft["text"] = text
+                if files is not None:
+                    next_draft["files"] = files
+                if next_draft == current_draft:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    _draft_text = str(next_draft.get("text", "") or "")
+                    _draft_files = next_draft.get("files", []) or []
+                    _has_meaningful_draft = bool(_draft_text) or bool(_draft_files)
+                    if not (SESSION_DIR / f"{authoritative_sid}.json").exists() and _has_meaningful_draft:
+                        with LOCK:
+                            if SESSIONS.get(authoritative_sid) is not request_session:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if len(getattr(request_session, "messages", []) or []) != 0:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if (SESSION_DIR / f"{authoritative_sid}.json").exists():
+                                # Owner appeared while acquiring the shared lock; skip
+                                # materialization and proceed with sidecar save only.
+                                pass
+                            else:
+                                # Publish the small owner record while cache state is locked
+                                # so deletion cannot race first-draft ownership.
+                                draft_session = copy.copy(request_session)
+                                draft_session.composer_draft = {}
+                                # LOCK is non-reentrant; indexing here would acquire it again.
+                                draft_session.save(
+                                    touch_updated_at=False,
+                                    skip_index=True,
+                                )
+                    # Draft persistence is not conversation activity. Touching updated_at
+                    # here makes the active-session external-refresh poll force-reload the
+                    # current chat every few seconds while the user is typing, and that
+                    # delayed reload can restore an older draft over newer local input.
+                    if _validated_compression_edges and not _draft_compression_edges_still_authorized(
+                        _validated_compression_edges, request_profile
+                    ):
+                        return _draft_authority_unconfirmed()
+                    _draft_mark("before_save")
+                    _save_session_draft(authoritative_sid, next_draft)
+                    _draft_mark("after_save")
+                    request_session.composer_draft = next_draft
+                    saved_draft = request_session.composer_draft
+                sid = authoritative_sid
+                resolved_once = True
+                break
+        if not resolved_once:
+            # A bounded walk can stop on another snapshot whose own continuation
+            # authority has not yet been checked; keep that SID out of client replay.
+            return _draft_authority_unconfirmed()
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
             payload["unchanged"] = True
+        payload["session_id"] = sid
         _draft_mark("before_json")
         j(handler, payload)
         _draft_mark("after_json")
         _draft_stages.append(("end", _draft_time.monotonic()))
-        if _draft_stages[-1][1] - _draft_t0 > 0.2:
+        # Diagnostics only, after the response is written: like every other [SLOW]
+        # site, tolerate a handler without _safe_webui_print instead of raising.
+        _slow_print = getattr(handler, '_safe_webui_print', None)
+        if callable(_slow_print) and _draft_stages[-1][1] - _draft_t0 > 0.2:
             parts = " ".join(
                 f"{n}={((t - prev[1]) * 1000):.1f}ms"
                 for (n, t), prev in zip(_draft_stages[1:], _draft_stages[:-1], strict=True)
             )
-            handler._safe_webui_print(
+            _slow_print(
                 "[SLOW] /api/session/draft total=%.1fms stages: %s" % (
                     (_draft_stages[-1][1] - _draft_t0) * 1000,
                     parts,
@@ -17758,25 +18691,102 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
+        try:
+            p = (SESSION_DIR / f"{sid}.json").resolve()
+            p.relative_to(SESSION_DIR.resolve())
+        except Exception:
+            return bad(handler, "Invalid session_id", 400)
+        # Evict outside the mutation lock: the lifecycle commit performs provider
+        # I/O (it can wait on another commit) and must not hold a per-session
+        # lock. It runs before the DB delete because that commit writes state.db
+        # and would otherwise recreate the session being deleted.
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
+        draft_delete_failed = False
         try:
+            # Delete state.db rows BEFORE any user-visible file. A refusal (live
+            # gateway work, unfenceable ledger) or a failed commit must leave the
+            # whole session intact instead of stranding an unrecoverable
+            # half-delete: the sidecar, index entry, backups and tombstone are
+            # not restored by the DB rollback.
+            state_db_cleanup_failed = False
+            delete_raised = False
+            if not is_messaging_session:
+                try:
+                    from api.models import SessionDeleteRefused, delete_cli_session
+
+                    state_db_cleanup_failed = not delete_cli_session(sid)
+                except SessionDeleteRefused as exc:
+                    return j(
+                        handler,
+                        {"ok": False, "error": exc.code, "action": "session_delete"},
+                        status=409,
+                    )
+                except Exception:
+                    state_db_cleanup_failed = True
+                    delete_raised = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
+                if state_db_cleanup_failed:
+                    # A False return covers an aborted transaction and a commit
+                    # whose artifact cleanup is still pending (its manifest
+                    # retries it). Only a surviving row proves nothing was
+                    # committed; then user files must stay. Otherwise the
+                    # conversation is already gone and the remaining cleanup
+                    # must still run, or the sidecar, index entry and tombstone
+                    # would strand a deleted session. An exception proves
+                    # nothing either way, so it keeps failing closed.
+                    from api.models import state_db_session_presence
+
+                    if delete_raised or state_db_session_presence(sid) is not False:
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "error": "state_db_cleanup_failed",
+                                "action": "session_delete",
+                            },
+                            status=500,
+                        )
+                    logger.warning(
+                        "Session %s committed; transcript cleanup is still pending",
+                        sid,
+                    )
+            # Runtime cleanup only after the delete is durable: closing the
+            # terminal of a refused delete would kill the very work that made
+            # the Agent refuse it.
+            # Prune the completion-dedup entry too. The reaper sweeps it once the
+            # completion is delivered (drained from PENDING); a session deleted
+            # while a completion is still pending would otherwise keep its entry.
+            try:
+                from api.background_process import forget_bg_task_completion_dedup
+
+                forget_bg_task_completion_dedup(sid)
+            except Exception:
+                logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
+            try:
+                from api.terminal import close_terminal
+                close_terminal(sid)
+            except Exception:
+                logger.debug("Failed to close workspace terminal for deleted session %s", sid)
+            sidecar_deleted = False
             with LOCK:
                 SESSIONS.pop(sid, None)
-            try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            try:
+                draft_deleted = bool(_delete_session_draft(sid))
+            except Exception:
+                logger.debug("Failed to delete draft sidecar for session %s", sid, exc_info=True)
+                draft_deleted = False
+            draft_delete_failed = not draft_deleted
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -17792,10 +18802,6 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
-        # Evict outside the mutation lock: lifecycle commit may perform provider
-        # I/O and must not hold a per-session Session lock.
-        from api.config import _evict_session_agent
-        _evict_session_agent(sid)
         try:
             from api.upload import _session_attachment_dir
 
@@ -17821,40 +18827,19 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
-        # Prune the completion-dedup entry too. The reaper sweeps it once the
-        # completion is delivered (drained from PENDING); a session deleted
-        # while a completion is still pending would otherwise keep its entry.
-        try:
-            from api.background_process import forget_bg_task_completion_dedup
-
-            forget_bg_task_completion_dedup(sid)
-        except Exception:
-            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
-        try:
-            from api.terminal import close_terminal
-            close_terminal(sid)
-        except Exception:
-            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
-        return j(
-            handler,
-            {
-                "ok": True,
-                "state_db_cleanup_failed": state_db_cleanup_failed,
-                **worktree_retained,
-            },
-        )
+        response = {
+            "state_db_cleanup_failed": state_db_cleanup_failed,
+            **worktree_retained,
+        }
+        if draft_delete_failed:
+            response["draft_delete_failed"] = True
+            response.update(
+                {"ok": False, "error": "Failed to delete session draft"}
+            )
+            return j(handler, response, status=500)
+        response["ok"] = True
+        return j(handler, response)
 
     if parsed.path == "/api/session/clear":
         try:
@@ -19914,7 +20899,9 @@ def handle_patch(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PATCH"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_toggle(handler, name, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
@@ -19946,7 +20933,9 @@ def handle_delete(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="DELETE"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
@@ -19986,7 +20975,9 @@ def handle_put(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
     return False
 
@@ -20031,8 +21022,13 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 def _serve_static(handler, parsed):
     static_root = api_config.get_static_root().resolve()
-    # Strip the leading '/static/' prefix, then resolve and sandbox
-    rel = parsed.path[len("/static/") :]
+    # Strip the leading '/static/' prefix, then resolve and sandbox. The
+    # server-owned prefix is matched case-insensitively upstream, but the file
+    # path is case-sensitive on disk. This route is NOT API-folded (server.py
+    # folds only /api/*), so parsed.path is the CURRENT request's original-case
+    # path — never an API-only retained path left behind by an earlier
+    # keep-alive request (#6589 re-gate).
+    rel = parsed.path[len("/static/"):]
     static_file = (static_root / rel).resolve()
     try:
         static_file.relative_to(static_root)
@@ -20284,7 +21280,13 @@ def _handle_sessions_search(handler, parsed):
                 sess = get_session_for_scan(s["session_id"])
                 if sess is None:
                     continue
-                msgs = sess.messages[:depth] if depth else sess.messages
+                # Hidden internal rows neither match nor consume the search
+                # depth budget (#quiet-delegation gate review).
+                scan_pool = [
+                    m for m in (sess.messages or [])
+                    if not is_hidden_transcript_row(m)
+                ]
+                msgs = scan_pool[:depth] if depth else scan_pool
                 for m in msgs:
                     c = _session_search_message_text(m)
                     if q in str(c).lower():
@@ -23912,99 +24914,6 @@ def _handle_live_models(handler, parsed):
                 _env = str(_cp.get("key_env") or "").strip()
                 return os.getenv(_env, "").strip() if _env else ""
 
-            def _custom_provider_models_discover_is_false(_cp):
-                """True when ``discover_models`` is an explicit ``false`` opt-out.
-
-                Mirrors ``api.config._provider_discover_allowed`` / Hermes
-                Agent ``model_switch_providers._discover_flag``: ``discover_models``
-                defaults to True, and the string forms ``"false"``/``"no"``/``"0"``
-                (case-insensitive) mean False.  Used to decide whether a
-                dict-shaped ``models`` mapping is a hand-pinned allowlist (only
-                when discovery is off) rather than per-model metadata.
-                """
-                _discover = _cp.get("discover_models", True) if isinstance(_cp, dict) else True
-                if isinstance(_discover, str):
-                    return _discover.strip().lower() in {"false", "no", "0"}
-                return not bool(_discover)
-
-            def _custom_provider_allowlist_ids(_cp):
-                """Plural ``models`` list only — the explicit allowlist signal.
-
-                The singular ``model`` field is sticky/default metadata, NOT an
-                allowlist: it must not gate live-catalog filtering, otherwise a
-                provider configured with only ``model: assistant`` (no ``models``
-                list) would be collapsed to a single model.  Only an explicit
-                ``models`` allowlist expresses "show exactly these models".
-
-                An auto-discovered catalog is NOT an allowlist: when Hermes
-                persisted discovery results back into config (``models: {...}``
-                plus ``models_discovered: true``), that mapping is a snapshot
-                of what the gateway exposed at discovery time.  Gating on it
-                would permanently pin the live catalog to the first-discovery
-                set, silently dropping any model the user pulls in later
-                (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
-                is the shared predicate the ``/api/models`` path already uses;
-                when it says "discovered", return no allowlist and let the
-                live probe win.  An explicit ``discover_models: false`` opt-out
-                re-pins the catalog (the predicate accounts for it), so a
-                hand-pinned discovered catalog still filters.
-
-                A dict-shaped ``models`` mapping that is NOT marked discovered is
-                *per-model metadata* written by the Hermes Agent setup flow
-                (``hermes_cli/model_switch.py::_save_custom_provider`` and the
-                setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
-                not a catalog narrow: treating its keys as an allowlist would
-                collapse the live picker to the single saved default (keyless
-                Ollama) while the CLI live-probe shows the full catalog.  Only an
-                explicit ``discover_models: false`` opts into treating the dict
-                keys as a pinned allowlist.  List/JSON-array-string/Python-literal
-                shapes remain plain allowlists.
-
-                The plural value is decoded through ``_parse_config_string_list()``
-                because ``hermes config set`` / JSON-mode editor saves persist
-                lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
-                Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
-                made a serialized allowlist fall through to ``[]``, which the
-                caller reads as "no allowlist configured" and floods the picker
-                with the full upstream catalog — the same class of bug as the
-                ``skills.disabled`` regression (#7120 / #7134).
-                """
-                from api.config import _provider_models_are_discovered_catalog
-
-                if _provider_models_are_discovered_catalog(_cp):
-                    return []
-                _ids = []
-                _models = _cp.get("models")
-                # Serialized shapes only: ``hermes config set`` / JSON-mode
-                # editor saves persist lists as quoted JSON-array strings
-                # (``'["chat-a","chat-b"]'``) or Python literals
-                # (``"['chat-a']"``).  Decode those through the shared helper so
-                # they are honored; native dict/list values are walked below so
-                # dict *entries* keep their id|model|name metadata (the decoder
-                # str()-ifies list members, which would mangle them).
-                if isinstance(_models, str):
-                    _models = _parse_config_string_list(_models)
-                if isinstance(_models, dict):
-                    # A dict-shaped ``models`` is per-model metadata written by
-                    # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
-                    # ``discover_models: false`` opt-out treats the dict keys as a
-                    # pinned allowlist; otherwise return the empty allowlist so the
-                    # live probe returns the full catalog.
-                    if not _custom_provider_models_discover_is_false(_cp):
-                        return []
-                    for _mid in _models:
-                        if isinstance(_mid, str) and _mid.strip():
-                            _ids.append(_mid.strip())
-                elif isinstance(_models, (list, tuple)):
-                    for _item in _models:
-                        if isinstance(_item, str) and _item.strip():
-                            _ids.append(_item.strip())
-                        elif isinstance(_item, dict):
-                            _mid = _item.get("id") or _item.get("model") or _item.get("name")
-                            if _mid and str(_mid).strip():
-                                _ids.append(str(_mid).strip())
-                return _ids
-
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
             # Fall back to the custom_providers entries from config.yaml so
@@ -24766,25 +25675,76 @@ def _handle_memory_read(handler, parsed=None):
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
     phase1_removed_ids = set()
+    draft_delete_failed = False
 
     # Phase 1: Clean orphan session files (existing behavior).
     for p in SESSION_DIR.glob("*.json"):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            session_lock = _get_session_agent_lock(p.stem)
+            if not session_lock.acquire(timeout=5):
+                logger.debug("Session %s is busy; leaving it for later cleanup", p.stem)
+                continue
+            try:
+                s = Session.load(p.stem)
+                if zero_only:
+                    should_delete = s and len(s.messages) == 0
+                else:
+                    should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                if should_delete:
+                    with LOCK:
+                        SESSIONS.pop(p.stem, None)
+                        p.unlink(missing_ok=True)
+                    session_deleted = not p.exists()
+                    if session_deleted:
+                        phase1_removed_ids.add(p.stem)
+                    try:
+                        draft_deleted = bool(_delete_session_draft(p.stem))
+                    except Exception:
+                        logger.debug("Failed to delete draft sidecar during cleanup for %s", p.stem, exc_info=True)
+                        draft_delete_failed = True
+                        draft_deleted = False
+                    if not draft_deleted:
+                        draft_delete_failed = True
+                    if session_deleted:
+                        cleaned += 1
+            finally:
+                session_lock.release()
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
+
+    # Retry dedicated drafts whose owner sidecar was removed by an earlier
+    # cleanup attempt. Coordinate with draft writes before checking ownership.
+    try:
+        for draft_path in (SESSION_DIR / ".drafts").glob("*.json"):
+            sid = draft_path.stem
+            if not is_safe_session_id(sid) or sid in phase1_removed_ids:
+                continue
+            if (SESSION_DIR / f"{sid}.json").exists():
+                continue
+            try:
+                session_lock = _get_session_agent_lock(sid)
+                acquired = session_lock.acquire(timeout=5)
+            except Exception:
+                logger.debug("Failed to acquire session lock during draft cleanup for %s", sid, exc_info=True)
+                draft_delete_failed = True
+                continue
+            if not acquired:
+                logger.debug("Session %s is busy; leaving its orphan draft for retry", sid)
+                draft_delete_failed = True
+                continue
+            try:
+                if not (SESSION_DIR / f"{sid}.json").exists() and not _delete_session_draft(sid):
+                    draft_delete_failed = True
+            except Exception:
+                logger.debug("Failed to retry draft cleanup for %s", sid, exc_info=True)
+                draft_delete_failed = True
+            finally:
+                session_lock.release()
+    except Exception:
+        logger.debug("Failed to scan dedicated session drafts during cleanup", exc_info=True)
+        draft_delete_failed = True
 
     phase1_touched = bool(cleaned)
     phase2_rewrote_index = False
@@ -24863,6 +25823,17 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
 
+    if draft_delete_failed:
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": "Failed to delete one or more session drafts",
+                "cleaned": cleaned,
+                "draft_delete_failed": True,
+            },
+            status=500,
+        )
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
@@ -25075,25 +26046,54 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     """
     if not msg:
         return
+    # Fork-internal delegation wakeup: the row's _source stays
+    # delegation_wakeup (the hidden-row predicate keys on it), but the
+    # fork-ownership proof regeneration authorization reads rides on
+    # _fork_child_turn. The deferred producer stamps that proof at
+    # settlement (streaming.py _materialize_active_turn_user /
+    # _settle_current_turn_boundary); the eager checkpoint must carry it
+    # from chat-start too, or a regeneration after an async delegation in
+    # a fork hits regeneration_read_only (403) for every turn saved before
+    # settlement (#7882 re-gate must-fix, eager mode).
+    _checkpoint_source = str(source or "").strip().lower()
+    _fork_owned_wakeup = _checkpoint_source == "delegation_wakeup" and (
+        str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+    )
     existing = list(getattr(s, "messages", None) or [])
+    from api.process_event_utils import build_active_turn_token, stamp_message_source
+
     if existing:
         latest = existing[-1]
         if isinstance(latest, dict) and latest.get("role") == "user":
             latest_text = " ".join(str(latest.get("content") or "").split())
             msg_text = " ".join(str(msg or "").split())
             if latest_text == msg_text:
-                if str(source or "").strip().lower() == "fork":
+                if _checkpoint_source == "fork" or _fork_owned_wakeup:
+                    # Fork turns keep the copied-row identity: the branch
+                    # route copies transcript rows up to the fork point and
+                    # the re-sent prompt rides the copied row; the
+                    # `_fork_child_turn` marker stamps it (unchanged).
                     latest["_fork_child_turn"] = s.session_id
-                return
+                    return
+                # Text alone is not turn ownership (re-gate 2026-10-06 item
+                # 3): a second interrupt of the same prompt inside one second
+                # carries a DIFFERENT stream token and must checkpoint its
+                # own row instead of collapsing into the previous turn's.
+                # Token-less rows (legacy data) keep the established
+                # content check.
+                current_token = build_active_turn_token(
+                    getattr(s, "active_stream_id", None), started_at,
+                )
+                latest_token = latest.get("_active_turn_token")
+                if not (latest_token and current_token and latest_token != current_token):
+                    return
     user_msg = {"role": "user", "content": msg}
-    from api.process_event_utils import build_active_turn_token, stamp_message_source
-
     stamp_message_source(
         user_msg,
         source,
         active_turn_token=build_active_turn_token(getattr(s, "active_stream_id", None), started_at),
     )
-    if str(source or "").strip().lower() == "fork":
+    if _checkpoint_source == "fork" or _fork_owned_wakeup:
         user_msg["_fork_child_turn"] = s.session_id
     if isinstance(started_at, (int, float)) and started_at > 0:
         user_msg["timestamp"] = float(started_at)
@@ -25355,9 +26355,19 @@ def _prepare_chat_start_session_for_stream(
     a normal session message. Empty sessions are never saved here because this
     helper only runs after a non-empty message is validated.
     """
+    # The internal delegation producer's explicit ``delegation_wakeup`` stamp
+    # is ROW provenance: the hidden-row predicate keys on it, so a fork
+    # session's ``session_source`` ownership override must never clobber it —
+    # otherwise the handoff renders as a human bubble in a fork (#7882 gate
+    # review, finding 3). Ordinary fork-human rows keep the fork identity via
+    # ``_fork_child_turn``, which is stamped from ``session_source`` below.
+    _prompt_is_delegation_wakeup = str(source or "").strip().lower() == "delegation_wakeup"
     effective_source = (
         "fork"
-        if str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+        if (
+            str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
+            and not _prompt_is_delegation_wakeup
+        )
         else source
     )
     s.workspace = workspace
@@ -25417,7 +26427,14 @@ def _prepare_chat_start_session_for_stream(
                     context_row["_fork_child_turn"] = s.session_id
                 break
     current_title = getattr(s, "title", None)
-    if retained_user is None and _is_default_or_empty_session_title(current_title):
+    # A delegation_wakeup handoff is not a human prompt: never let it name an
+    # untitled session (#quiet-delegation gate review).
+    _prompt_is_hidden_row = effective_source == "delegation_wakeup"
+    if (
+        retained_user is None
+        and not _prompt_is_hidden_row
+        and _is_default_or_empty_session_title(current_title)
+    ):
         provisional_title = _provisional_title_from_prompt(msg, current_title or "Untitled")
         if provisional_title and not _is_default_or_empty_session_title(provisional_title):
             s.title = provisional_title
@@ -25483,7 +26500,15 @@ def _restore_chat_start_entry_sidecar(provenance) -> None:
     if sidecar_bytes is None:
         sidecar_path.unlink(missing_ok=True)
     else:
-        _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
+        from api.models import _note_sidecar_write
+
+        # Count this replace like Session.save does (#8267), so a concurrent
+        # cold get_session() does not publish the pre-restore object.
+        _note_sidecar_write(sidecar_path.stem)
+        try:
+            _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
+        finally:
+            _note_sidecar_write(sidecar_path.stem)
 
 
 def _cleanup_chat_start_launch_failure(
@@ -26857,6 +27882,7 @@ def start_session_turn(
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(s, "profile", None),
         prefer_cached_catalog=True,
     )
     _paused_wakeup_response = None
@@ -26878,7 +27904,7 @@ def start_session_turn(
                     session_id,
                     exc_info=True,
                 )
-        if turn_source == "process_wakeup":
+        if turn_source in ("process_wakeup", "delegation_wakeup"):
             _credential_state_changed = False
             try:
                 _credential_state_changed = process_wakeup_pause_credential_state_changed(s)
@@ -27291,6 +28317,7 @@ def _handle_goal_command(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
             explicit_model_pick=explicit_model_pick,
         )
         alias_refusal = _external_model_alias_lane_response(
@@ -27402,6 +28429,7 @@ def _handle_goal_command(handler, body):
                 profile_provider=_pp_provider,
                 profile_default_model=_pp_default,
                 profile_config=_pp_cfg,
+                profile=getattr(s, "profile", None),
                 explicit_model_pick=explicit_model_pick,
             )
             # #6703 parity: same explicit-pick signature stamping on the
@@ -27705,6 +28733,7 @@ def _handle_chat_start(handler, body, diag=None):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
             explicit_model_pick=explicit_model_pick,
         )
         from api.runtime_adapter import runtime_adapter_runner_enabled
@@ -27976,6 +29005,7 @@ def _handle_chat_sync(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
         )[:2]
         s.model = model
         s.model_provider = model_provider

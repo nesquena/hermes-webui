@@ -330,11 +330,12 @@ def _check_single(page, seed):
     if not page.evaluate(FOCUSED_TRIGGER_JS, alpha):
         fail("after Escape focus is not on the conversation's ⋮ trigger")
 
-    # The same after a sidebar repaint replaced the trigger the picker opened from.
+    # The same after a background sidebar repaint replaced the trigger the
+    # picker opened from.
     problem = _open_single_picker(page, alpha)
     if problem:
         return failures + [f"  [single] reopen: {problem}"]
-    page.evaluate("renderSessionListFromCache()")
+    page.evaluate("_repaintSidebarForBackgroundChurn()")
     if not _wait_until(page, f"!!document.querySelector('{SINGLE}')", 500):
         fail("a sidebar repaint closed the picker")
     else:
@@ -639,7 +640,7 @@ def _check_fork_parent(page, seed):
         if not _wait_until(page, f"!!document.querySelector('{SINGLE}')", 1500):
             return failures + ["  [fork parent] the picker did not open from the parent's menu"]
         if repaint:
-            page.evaluate("renderSessionListFromCache()")
+            page.evaluate("_repaintSidebarForBackgroundChurn()")
             page.evaluate(f"document.querySelector('{SINGLE} .project-picker-item').focus()")
         page.keyboard.press("Escape")
         page.wait_for_timeout(100)
@@ -1115,7 +1116,7 @@ def _check_resize(browser):
             ctx.close()
             continue
         if repaint:
-            page.evaluate("renderSessionListFromCache()")
+            page.evaluate("_repaintSidebarForBackgroundChurn()")
         page.set_viewport_size({"width": after[0], "height": after[1]})
         page.wait_for_timeout(400)
         state = page.evaluate(OPEN_PICKER_JS, target)

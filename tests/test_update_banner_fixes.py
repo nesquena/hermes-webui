@@ -2331,6 +2331,226 @@ class TestUpdateBannerUx:
         assert "formatUpdatePart('Agent',data.agent)" in fn
         assert "data.webui&&data.webui.no_git&&!data.webui.manual_update" in fn
 
+    def test_check_updates_now_tag_fallback_is_webui_first_and_spaced(self):
+        """PR #6859 — the tag suffix must keep the WebUI-first chain and an
+        explicit space before the localized suffix on both status branches.
+
+        Pins the two frontend shapes the backend tests cannot see: the source
+        ORDER (WebUI tag data wins over agent tag data) and the separator that
+        needed the follow-up spacing commit. NO latest_version fallback: on
+        the stable up-to-date payload it holds the CURRENT tag, which would
+        mislabel it as "Latest" (review item S1) — the backend emits
+        latest_tag on both payload shapes instead.
+        """
+        src = read('static/panels.js')
+        m = re.search(r'async function checkUpdatesNow\b.*?\n\}', src, re.DOTALL)
+        assert m, "checkUpdatesNow() not found"
+        fn = m.group(0)
+        # Frontend must use latest_tag only — no latest_version fallback.
+        assert 'data.webui.latest_tag' in fn, 'WebUI tag chain missing'
+        assert 'data.agent.latest_tag' in fn, 'agent tag chain missing'
+        assert fn.index('data.webui.latest_tag') < fn.index('data.agent.latest_tag'), (
+            'WebUI tag data must be preferred over agent tag data'
+        )
+        assert 'latest_version' not in fn, (
+            'latest_version fallback must be gone (S1: it holds the CURRENT '
+            'tag on the stable up-to-date payload and would mislabel "Latest")'
+        )
+        # Both the updates-available and up-to-date branches must append the
+        # suffix with an explicit space (never a cramped '·').
+        assert fn.count("' ' + t('settings_latest_tag_suffix')") == 2, (
+            'both status branches must append the tag suffix with a leading space'
+        )
+
+    def test_check_updates_now_renders_tag_suffix_spaced_and_webui_first(self):
+        """Behavioral twin: checkUpdatesNow() must render ' · Latest tag: …'
+        with the space, prefer the WebUI tag over the agent tag, fall back to
+        latest_version on the release path, and omit the suffix when no tag
+        data exists anywhere.
+        """
+        ui_src = read('static/ui.js')
+        panels_src = read('static/panels.js')
+        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus') + '\n' + extract_js_function(ui_src, '_updateTargetArrowNamesTag')
+        instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
+        error_fn = extract_js_function(ui_src, '_formatUpdateCheckError')
+        check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
+        script = f"""
+global.window = {{}};
+const state = {{
+  btnCheckUpdatesNow: {{ disabled: false }},
+  checkUpdatesLabel: {{ textContent: '' }},
+  checkUpdatesSpinner: {{ style: {{ display: 'none' }} }},
+  checkUpdatesStatus: {{ textContent: '', style: {{ color: '' }} }},
+}};
+let apiData = {{
+  webui: {{ latest_tag: 'v0.51.913', behind: 1 }},
+  agent: {{ latest_tag: 'v9.9.9', behind: 2 }},
+}};
+function $(id) {{ return state[id] || null; }}
+function t(key, ...args) {{
+  const values = {{
+    settings_checking: 'Checking',
+    settings_check_now: 'Check now',
+    settings_updates_available: '{{count}} update(s) available',
+    settings_update_no_git: 'Cannot check for updates',
+    settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
+    settings_up_to_date: 'Up to date',
+    settings_update_check_failed: 'Check failed',
+    settings_latest_tag_suffix: '· Latest tag: {{0}}',
+  }};
+  // Match the real t(): numbered placeholders are only interpolated when
+  // args are passed — callers of settings_latest_tag_suffix do the {0}
+  // substitution themselves, so the placeholder must survive t() intact.
+  if(!args.length) return values[key] || key;
+  return (values[key] || key).replace(/\\{{(\\d+)\\}}/g, (_, i) => args[Number(i)] ?? '');
+}}
+async function api() {{ return apiData; }}
+function _showUpdateBanner() {{}}
+{format_fn}
+{instruction_fn}
+{error_fn}
+{check_fn}
+(async () => {{
+  // Branch path, both tags present → WebUI tag wins, spaced suffix.
+  await checkUpdatesNow();
+  const txt = state.checkUpdatesStatus.textContent;
+  if(txt.indexOf('v0.51.913') === -1) throw new Error('webui tag missing: '+txt);
+  if(txt.indexOf('v9.9.9') !== -1) throw new Error('agent tag must not win over webui: '+txt);
+  if(txt.indexOf(' · Latest tag: v0.51.913') === -1) throw new Error('tag suffix must be spaced: '+txt);
+  // Release path (stable channel): backend now emits latest_tag on the
+  // release payload too — no latest_version fallback in the frontend (S1).
+  apiData = {{ webui: {{ latest_tag: 'v0.51.900', behind: 1 }}, agent: null }};
+  state.checkUpdatesStatus.textContent = '';
+  await checkUpdatesNow();
+  if(state.checkUpdatesStatus.textContent.indexOf(' · Latest tag: v0.51.900') === -1) throw new Error('release-path fallback failed: '+state.checkUpdatesStatus.textContent);
+  // Up-to-date branch also carries the suffix.
+  apiData = {{ webui: {{ latest_tag: 'v0.51.913', behind: 0 }}, agent: null }};
+  state.checkUpdatesStatus.textContent = '';
+  await checkUpdatesNow();
+  if(state.checkUpdatesStatus.textContent.indexOf('Up to date · Latest tag: v0.51.913') === -1) throw new Error('up-to-date branch must show spaced tag suffix: '+state.checkUpdatesStatus.textContent);
+  // #6859 fold r3: the suffix is dropped ONLY when the tag's own target arrow names it.
+  apiData = {{ webui: {{ latest_tag: 'v0.52.1', behind: 0 }}, agent: {{ behind: 1, branch: 'origin/fix-v0.52.1' }} }};
+  state.checkUpdatesStatus.textContent = '';
+  await checkUpdatesNow();
+  if(state.checkUpdatesStatus.textContent.indexOf(' · Latest tag: v0.52.1') === -1) throw new Error('agent branch containing the tag must not hide it: '+state.checkUpdatesStatus.textContent);
+  apiData = {{ webui: {{ latest_tag: 'v0.52.1', behind: 0 }}, agent: {{ behind: 1, release_based: true, current_version: 'v0.52.9', latest_version: 'v0.52.10', latest_tag: 'v0.52.10' }} }};
+  state.checkUpdatesStatus.textContent = '';
+  await checkUpdatesNow();
+  if(state.checkUpdatesStatus.textContent.indexOf(' · Latest tag: v0.52.1') === -1) throw new Error('agent v0.52.10 must not hide webui v0.52.1: '+state.checkUpdatesStatus.textContent);
+  apiData = {{ webui: {{ latest_tag: 'v0.52.1', behind: 1, release_based: true, current_version: 'v0.52.0', latest_version: 'v0.52.1' }}, agent: null }};
+  state.checkUpdatesStatus.textContent = '';
+  await checkUpdatesNow();
+  if(state.checkUpdatesStatus.textContent.indexOf('Latest tag') !== -1) throw new Error('arrow already names the tag; suffix must be skipped: '+state.checkUpdatesStatus.textContent);
+  // No tag fields anywhere → no suffix.
+  apiData = {{ webui: {{ behind: 1 }}, agent: null }};
+  state.checkUpdatesStatus.textContent = '';
+  await checkUpdatesNow();
+  if(state.checkUpdatesStatus.textContent.indexOf('Latest tag') !== -1) throw new Error('no-tags payload must omit suffix: '+state.checkUpdatesStatus.textContent);
+}})().catch(err => {{ console.error(err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
+    def test_check_updates_status_wraps_on_narrow_viewports(self):
+        """PR #6859 review — mixed updates-available + tag suffix must wrap.
+
+        The production status (`WebUI: 1 update, Agent: 2 updates update(s)
+        available · Latest tag: v0.51.913`) is wider than a ~296–351 px phone
+        content area. Pin
+        both the real checkUpdatesNow() string and the CSS wrap rules so a
+        later refactor cannot restore nowrap overflow.
+        """
+        css = read('static/style.css')
+        global_rule = re.search(r'#checkUpdatesStatus\{[^}]*\}', css)
+        assert global_rule, '#checkUpdatesStatus rule missing'
+        global_compact = global_rule.group(0).replace(' ', '')
+        assert 'white-space:nowrap' not in global_compact, (
+            'global #checkUpdatesStatus must not force a single unbreakable line'
+        )
+        assert 'white-space:normal' in global_compact
+        assert 'overflow-wrap:anywhere' in global_compact
+        assert 'min-width:0' in global_compact
+
+        # Search every 768px block: master has other (nested) 768px blocks earlier in the file, e.g. the #6978
+        # todo tray, so the first match is not necessarily the one carrying this override.
+        medias = list(re.finditer(
+            r'@media\s*\(\s*max-width\s*:\s*768px\s*\)\s*\{',
+            css,
+        ))
+        assert medias, '@media (max-width: 768px) missing'
+        mobile_rule = None
+        for media in medias:
+            open_brace = media.end() - 1
+            depth = 0
+            end = None
+            for idx in range(open_brace, len(css)):
+                if css[idx] == '{':
+                    depth += 1
+                elif css[idx] == '}':
+                    depth -= 1
+                    if depth == 0:
+                        end = idx
+                        break
+            assert end is not None
+            mobile_block = css[open_brace:end + 1]
+            mobile_rule = re.search(r'#checkUpdatesStatus\{[^}]*\}', mobile_block)
+            if mobile_rule:
+                break
+        assert mobile_rule, (
+            '#checkUpdatesStatus wrap override missing from the 768px block'
+        )
+        mobile_compact = mobile_rule.group(0).replace(' ', '')
+        assert 'white-space:normal' in mobile_compact
+        assert 'overflow-wrap:anywhere' in mobile_compact
+        assert 'min-width:0' in mobile_compact
+
+        ui_src = read('static/ui.js')
+        panels_src = read('static/panels.js')
+        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus') + '\n' + extract_js_function(ui_src, '_updateTargetArrowNamesTag')
+        instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
+        error_fn = extract_js_function(ui_src, '_formatUpdateCheckError')
+        check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
+        script = f"""
+global.window = {{}};
+const state = {{
+  btnCheckUpdatesNow: {{ disabled: false }},
+  checkUpdatesLabel: {{ textContent: '' }},
+  checkUpdatesSpinner: {{ style: {{ display: 'none' }} }},
+  checkUpdatesStatus: {{ textContent: '', style: {{ color: '' }} }},
+}};
+const apiData = {{
+  webui: {{ latest_tag: 'v0.51.913', behind: 1 }},
+  agent: {{ latest_tag: 'v9.9.9', behind: 2 }},
+}};
+function $(id) {{ return state[id] || null; }}
+function t(key, ...args) {{
+  const values = {{
+    settings_checking: 'Checking',
+    settings_check_now: 'Check now',
+    settings_updates_available: '{{count}} update(s) available',
+    settings_update_no_git: 'Cannot check for updates',
+    settings_update_manual_docker: 'Manual update required: run {{0}}, then recreate the container.',
+    settings_up_to_date: 'Up to date',
+    settings_update_check_failed: 'Check failed',
+    settings_latest_tag_suffix: '· Latest tag: {{0}}',
+  }};
+  if(!args.length) return values[key] || key;
+  return (values[key] || key).replace(/\\{{(\\d+)\\}}/g, (_, i) => args[Number(i)] ?? '');
+}}
+async function api() {{ return apiData; }}
+function _showUpdateBanner() {{}}
+{format_fn}
+{instruction_fn}
+{error_fn}
+{check_fn}
+(async () => {{
+  await checkUpdatesNow();
+  const txt = state.checkUpdatesStatus.textContent;
+  const expected = 'WebUI: 1 update, Agent: 2 updates update(s) available · Latest tag: v0.51.913';
+  if(txt !== expected) throw new Error('narrow-viewport production status mismatch: '+txt);
+}})().catch(err => {{ console.error(err.message); process.exit(1); }});
+"""
+        subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True)
+
     def test_manual_webui_no_git_updates_are_bannerable_but_plain_no_git_stays_hidden(self):
         src = read('static/ui.js')
         format_fn = extract_js_function(src, '_formatUpdateTargetStatus')
@@ -2497,7 +2717,7 @@ if(state.btnClearUpdateLock.style.display !== 'inline-block' || state.btnClearUp
     def test_settings_manual_webui_update_includes_pull_guidance(self):
         ui_src = read('static/ui.js')
         panels_src = read('static/panels.js')
-        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus')
+        format_fn = extract_js_function(ui_src, '_formatUpdateTargetStatus') + '\n' + extract_js_function(ui_src, '_updateTargetArrowNamesTag')
         instruction_fn = extract_js_function(ui_src, '_formatManualUpdateInstruction')
         error_fn = extract_js_function(ui_src, '_formatUpdateCheckError')
         check_fn = extract_js_function(panels_src, 'checkUpdatesNow')
