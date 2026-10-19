@@ -43,6 +43,7 @@ from api.agent_sessions import (
     is_cli_session_row,
     normalize_agent_session_source,
     open_state_db_readonly,
+    read_agent_session_row_by_id,
     read_assigned_project_row_counts,
     read_importable_agent_session_rows,
     read_session_lineage_metadata,
@@ -7510,6 +7511,136 @@ def state_db_has_session(sid: str) -> bool:
     resolved separately via ``get_last_workspace()``.
     """
     return state_db_session_presence(sid) is True
+
+
+def get_cli_session_metadata_by_id(session_id: str, *, all_profiles: bool = False) -> dict:
+    """Resolve ONE agent session's metadata by exact id, outside the sidebar window.
+
+    ``get_cli_sessions()`` is a bounded, recency-ordered sidebar projection: with
+    ``HERMES_WEBUI_VISIBLE_SESSION_LIMIT`` unset it returns the newest
+    ``CLI_VISIBLE_SESSION_LIMIT`` conversations (20, clamped to 200) and its
+    cron/project passes narrow that further. Because a window miss is
+    indistinguishable from an unknown id, a sidecar-less Hermes
+    Desktop/TUI/CLI conversation that has aged out of the window answered
+    ``404 Session not found`` on ``GET /api/session`` — and the same lookup
+    backing rename/move/archive/delete reported the same for a session that was
+    still there (#8061).
+
+    This resolver is the profile-scoped single-row fallback for that miss: it
+    reads exactly one row by id straight from ``state.db`` — the active
+    profile's DB, or every profile DB when ``all_profiles=True`` — and returns
+    it in the sidebar's row shape, so the existing ownership, tombstone and
+    foreign-source gates keep deciding what a caller may see. The sidebar window
+    itself is untouched: one indexed primary-key fetch plus the row's own
+    ``message_count`` aggregate, never a window-filling history scan. That
+    aggregate spans the target session's own messages, so the read is bounded by
+    the row's history, not by the size of the table.
+
+    The deleted-WebUI tombstone is honored here for the same reason the sidebar
+    projection honors it: a deleted WebUI session must stay gone even though its
+    state.db row survives (#2782/#5498). Genuine foreign-origin rows (cli, tui,
+    desktop, acp, …) are exempt from that suppression, exactly as in the
+    projection.
+
+    Returns ``{}`` for a genuinely unknown id, and never raises.
+    """
+    sid = str(session_id or '').strip()
+    if not sid:
+        return {}
+
+    contexts: list[tuple[Path, Path, str | None]] = []
+    if all_profiles:
+        try:
+            contexts = list(_all_profiles_cli_contexts()[0])
+        except Exception:
+            contexts = []
+    if not contexts:
+        try:
+            hermes_home, db_path, cli_profile, _cache_key = _resolve_cli_sessions_context(None)
+        except Exception:
+            db_path = _active_state_db_path()
+            hermes_home, cli_profile = db_path.parent, None
+        contexts = [(hermes_home, db_path, str(cli_profile or 'default').strip() or 'default')]
+
+    for _hermes_home, db_path, profile_value in contexts:
+        row = read_agent_session_row_by_id(db_path, sid, log=logger)
+        if not row:
+            continue
+        # No ``or 'cli'`` default (#8061 review): turning an absent/NULL source
+        # into a foreign origin would exempt exactly the rows this tombstone
+        # exists for. Keep the raw value for the decision and report ``unknown``
+        # for display; treat unknown provenance as possibly WebUI-owned, so an
+        # older WebUI row (which may predate source tracking) stays suppressed.
+        # A live sidecar still beats a stale tombstone, as in the projection.
+        _raw_source = str(row.get('source') or '').strip().lower()
+        _source = _raw_source or 'unknown'
+        if _raw_source in {'webui', 'fork'} or not _raw_source:
+            try:
+                tombstoned = sid in _load_webui_deleted_session_tombstone()
+            except Exception:
+                tombstoned = False
+            if tombstoned:
+                # A live sidecar always beats a stale tombstone — the same rule
+                # the sidebar projection applies before it skips the row.
+                try:
+                    sidecar_live = bool((SESSION_DIR / f"{sid}.json").exists())
+                except OSError:
+                    sidecar_live = False
+                if not sidecar_live:
+                    continue
+        _source_meta = normalize_agent_session_source(_source)
+        # UI-owned metadata (title/archived/project) lives on the WebUI sidecar
+        # when it exists — /api/session/move writes project_id ONLY there. The
+        # sidebar projection consults it for the same reason, so the fallback
+        # row must not disagree with the sidebar about a moved conversation.
+        try:
+            _sidecar_meta = _state_projection_sidecar_metadata(sid)
+        except Exception:
+            _sidecar_meta = {}
+        title = str(row.get('title') or '').strip()
+        if _sidecar_meta.get('title'):
+            title = _sidecar_meta['title']
+        if _sidecar_meta.get('archived') is not None:
+            archived = bool(_sidecar_meta['archived'])
+        else:
+            archived = bool(row.get('archived'))
+        project_id = _sidecar_meta.get('project_id') or (str(row.get('project_id') or '').strip() or None)
+        # Same keys and same fallbacks as the sidebar projection's row builder
+        # (_load_cli_sessions_uncached) so every caller of
+        # _lookup_cli_session_metadata() sees one row shape regardless of whether
+        # the row came from the window or from this exact-id read. ``exact_id_fallback``
+        # is the one addition: it tells the write paths that this row came from
+        # outside the sidebar window, so they can apply the admission the claim
+        # path applies (#8061 review) without changing the contract of rows the
+        # window already served.
+        return {
+            'session_id': sid,
+            'exact_id_fallback': True,
+            'title': title or f"{_source.title()} Session",
+            'model': row.get('model') or None,
+            'message_count': row.get('message_count') or row.get('actual_message_count') or 0,
+            'created_at': row.get('started_at'),
+            'updated_at': row.get('last_activity') or row.get('started_at'),
+            'pinned': False,
+            'archived': archived,
+            'project_id': project_id,
+            'profile': profile_value,
+            'source_tag': _source,
+            'raw_source': row.get('raw_source') or _source_meta.get('raw_source'),
+            'user_id': row.get('user_id'),
+            'chat_id': row.get('chat_id') or row.get('origin_chat_id'),
+            'chat_type': row.get('chat_type'),
+            'thread_id': row.get('thread_id'),
+            'session_key': row.get('session_key'),
+            'platform': row.get('platform'),
+            'session_source': row.get('session_source') or _source_meta.get('session_source'),
+            'source_label': row.get('source_label') or _source_meta.get('source_label'),
+            'parent_session_id': row.get('parent_session_id'),
+            'end_reason': row.get('end_reason'),
+            'actual_message_count': row.get('actual_message_count'),
+            'is_cli_session': is_cli_session_row({**row, **_source_meta}),
+        }
+    return {}
 
 
 class _ExternalSessionView:
