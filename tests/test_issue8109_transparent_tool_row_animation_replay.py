@@ -334,13 +334,13 @@ def test_live_tool_row_refresh_is_byte_stable_across_frames():
     assert data["stampAfter"] is not None
 
 
-def test_live_row_stamp_is_quantized_to_visible_minute_resolution():
-    """The synthetic live stamp is stored at the resolution it is DISPLAYED at,
-    so it cannot churn the row's serialized HTML frame over frame."""
+def test_live_row_stamp_is_exact_first_observed_second():
+    """The synthetic live stamp keeps the EXACT first-observed second verbatim —
+    #5700 depends on that value. The mid-stream replay fix does not quantize it;
+    instead the re-rendered candidate INHERITS the row's observed stamp before
+    the innerHTML diff, so the row stays byte-stable without degrading the stamp."""
     data = _run_refresh("ls -la", "ls -la", FRAME_A, FRAME_B)
-    stamp = float(data["stampAfter"])
-    assert stamp == float(int(stamp))
-    assert stamp % 60 == 0
+    assert data["stampAfter"] == str(FRAME_A)
 
 
 def test_explicit_event_timestamp_keeps_exact_precision():
@@ -361,28 +361,26 @@ process.stdout.write(JSON.stringify({
     assert data["source"] == "event"
 
 
-def test_live_stamp_advances_when_the_visible_minute_changes():
-    """Quantization is to the displayed minute, not a frozen value: crossing a
-    minute boundary still updates the row.
-
-    Each candidate is a FRESH node (no `data-event-at` yet), which is what makes
-    the live render fall through to the wall clock on every frame.
-    """
+def test_fresh_candidate_stamp_is_verbatim_wall_clock():
+    """A fresh live row (no `data-event-at` yet) stores the exact wall-clock
+    second verbatim — not quantized to the display minute. #5700 depends on the
+    observed second; #8109's stability comes from the refresh path's stamp
+    INHERITANCE (see test_live_tool_row_refresh_is_byte_stable_across_frames),
+    not from degrading the stamp here."""
     script = _PRELUDE + _FAKE_DOM + _HELPERS + r"""
 function stampAt(clock){
   global.__CLOCK = clock;
   const row = makeRunningToolRow('ls -la');
   return row.querySelector('.transparent-event-time').getAttribute('data-event-at');
 }
-const inMinuteA = stampAt(1700000000);  // 13:33:20
-const inMinuteB = stampAt(1700000016);  // 13:33:36, same minute
-const nextMinute = stampAt(1700000060); // 13:34:20, next minute
+const inMinuteA = stampAt(1700000000);  // verbatim, not floored
+const inMinuteB = stampAt(1700000016);  // same minute, but a distinct second
 process.stdout.write(JSON.stringify({
-  inMinuteA, inMinuteB, nextMinute,
-  sameMinuteStable: inMinuteA === inMinuteB,
-  advancedOnMinuteChange: inMinuteA !== nextMinute,
+  inMinuteA, inMinuteB,
+  verbatim: inMinuteA === '1700000000' && inMinuteB === '1700000016',
+  distinct: inMinuteA !== inMinuteB,
 }));
 """
     data = _run_node_script(script, str(ROOT / "static" / "ui.js"))
-    assert data["sameMinuteStable"] is True
-    assert data["advancedOnMinuteChange"] is True
+    assert data["verbatim"] is True
+    assert data["distinct"] is True
