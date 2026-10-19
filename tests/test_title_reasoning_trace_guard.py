@@ -178,18 +178,18 @@ def test_aux_title_request_uses_strict_json_schema():
     assert captured["extra_body"]["response_format"] == EXPECTED_RESPONSE_FORMAT
 
 
-def test_aux_schema_request_does_not_send_reasoning_extension():
+def test_aux_schema_request_sends_reasoning_disabler():
+    """Re-gate finding 3: the schema request carries the same route-gated
+    reasoning disable as the compatibility request, so reasoning models do
+    not burn the 512-token title budget on the first call (#2083 class)."""
     calls = []
 
     def fake_call_llm(**kwargs):
         calls.append(kwargs)
-        extra = kwargs.get("extra_body") or {}
-        if "reasoning" in extra:
-            raise ValueError("strict gateway rejects reasoning")
         return _response('{"title": "Schema Works"}')
 
     with auxiliary_client_modules():
-        with patch_tg_config({"provider": "custom", "model": "strict-gateway"}):
+        with patch_tg_config({"provider": "custom", "model": "schema-route"}):
             with patch("agent.auxiliary_client.call_llm", side_effect=fake_call_llm, create=True):
                 result, status = streaming.generate_title_raw_via_aux(
                     "Use a strict schema route.",
@@ -197,6 +197,31 @@ def test_aux_schema_request_does_not_send_reasoning_extension():
                 )
 
     assert result == "Schema Works"
+    assert status == "llm_aux"
+    assert len(calls) == 1
+    assert calls[0]["extra_body"]["response_format"] == EXPECTED_RESPONSE_FORMAT
+    assert calls[0]["extra_body"]["reasoning"] == {"enabled": False}
+
+
+def test_aux_schema_request_omits_reasoning_for_routes_that_reject_it():
+    calls = []
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        extra = kwargs.get("extra_body") or {}
+        if "reasoning" in extra:
+            raise ValueError("strict gateway rejects reasoning")
+        return _response("No Reasoning Route Title")
+
+    with auxiliary_client_modules():
+        with patch_tg_config({"provider": "openai", "model": "gpt-4o-mini"}):
+            with patch("agent.auxiliary_client.call_llm", side_effect=fake_call_llm, create=True):
+                result, status = streaming.generate_title_raw_via_aux(
+                    "Use an OpenAI-compatible title route.",
+                    "OpenAI routes reject the reasoning extra (#4161).",
+                )
+
+    assert result == "No Reasoning Route Title"
     assert status == "llm_aux"
     assert len(calls) == 1
     assert "reasoning" not in calls[0]["extra_body"]
@@ -389,17 +414,22 @@ LEGITIMATE_PERSISTED_TITLES = (
     "Something Like Summer Discussion",
     '"Merge" or "Rebase" in Git',
     "Parsing <analysis> Tags",
-        "Title Shoulders of Giants",
-        "The Title Shoulders Story",
-        "Good Title: A Style Guide",
-        "Options: Portfolio Optimization",
-        'Something Like "Summer" Discussion',
+    "Title Shoulders of Giants",
+    "The Title Shoulders Story",
+    "Good Title: A Style Guide",
+    "Options: Portfolio Optimization",
+    'Something Like "Summer" Discussion',
+    "Analysis: Q3 Sales Trends",
+    "Thinking: Fast and Slow Summary",
+    "Reasoning: Deductive vs Inductive",
+    "Thought: Experiments in Ethics",
+    "Options: Stocks, Bonds, ETFs",
+    "Title Should Reflect Content",
 )
 
 SCREENSHOT_PERSISTED_TRACES = (
     "The title should be 3-8 words, matching the user's language (English), as a topi",
     'Something like "Project Docs Review and Filing" or "File Project Documents in Sub...',
-    "The title should be concise",
 )
 
 ADVERSARIAL_TRACE_TITLES = (
@@ -435,6 +465,12 @@ def test_persisted_title_check_accepts_ordinary_subject_matter(candidate):
         "Good Title: A Style Guide",
         "Options: Portfolio Optimization",
         'Something Like "Summer" Discussion',
+        "Analysis: Q3 Sales Trends",
+        "Thinking: Fast and Slow Summary",
+        "Reasoning: Deductive vs Inductive",
+        "Thought: Experiments in Ethics",
+        "Options: Stocks, Bonds, ETFs",
+        "Title Should Reflect Content",
     ),
 )
 def test_persisted_subject_matter_survives_normal_send(candidate, monkeypatch):
@@ -487,6 +523,10 @@ def test_new_candidates_still_reject_embedded_traces_and_quoted_alternatives():
     assert streaming._sanitize_generated_title('"Merge" or "Rebase" in Git') == ""
     assert streaming._looks_invalid_generated_title("Parsing <analysis> Tags") is False
     assert streaming._looks_invalid_generated_title('"Merge" or "Rebase" in Git') is False
+    # Persisted keeps only unambiguous trace anchors, but sentence echoes of
+    # the prompt (previously persisted-only) remain candidate-only rejects.
+    assert streaming._looks_invalid_generated_title("The title should be concise") is False
+    assert streaming._is_bad_new_title("The title should be concise") is True
 
 
 @pytest.mark.parametrize("candidate", SCREENSHOT_PERSISTED_TRACES)
@@ -746,14 +786,148 @@ def test_minimax_aux_schema_request_keeps_reasoning_split():
     extra = captured["extra_body"]
     assert extra["response_format"] == EXPECTED_RESPONSE_FORMAT
     assert extra["reasoning_split"] is True
-    assert "reasoning" not in extra
+    # Re-gate finding 3: MiniMax is not a reasoning-extra-rejecting route, so
+    # the schema request carries the reasoning disable too (not just the split).
+    assert extra["reasoning"] == {"enabled": False}
 
 
 @pytest.mark.parametrize("candidate", (
     "Good Title: A Style Guide",
     "Options: Portfolio Optimization",
     'Something Like "Summer" Discussion',
+    "Analysis: Q3 Sales Trends",
+    "Thinking: Fast and Slow Summary",
+    "Reasoning: Deductive vs Inductive",
+    "Thought: Experiments in Ethics",
+    "Options: Stocks, Bonds, ETFs",
+    "Title Should Reflect Content",
+    "The title should be concise",
 ))
 def test_ambiguous_headings_are_candidate_only(candidate):
     assert not streaming._looks_invalid_generated_title(candidate)
     assert streaming._is_bad_new_title(candidate)
+
+
+@pytest.mark.parametrize("trace", (
+    "Analysis: We need to fix login button",
+    "Thinking: Let me reconsider the scope",
+    "Reasoning: They asked for a summary",
+    "Thought: I should double-check the parser",
+    "The title should be 3-8 words, as a topic label",
+    "Title should be a concise topic label",
+    "Title should: Something Else Entirely",
+    "Title options: Stocks; Bonds; ETFs",
+))
+def test_unambiguous_traces_still_self_heal_after_persisted_split(trace):
+    """Re-gate finding 1: narrowing the persisted predicate to unambiguous
+    traces must not stop self-healing the shapes that actually leak."""
+    assert streaming._looks_invalid_generated_title(trace) is True
+    assert streaming._is_bad_new_title(trace)
+
+
+def test_aux_schema_prose_response_is_reused_without_second_provider_call():
+    """Re-gate finding 2 (aux route): transports that silently strip
+    ``response_format`` answer the schema request with a valid plain title.
+    Parse that SAME response with the compatibility extractor instead of
+    re-sending the identical request (2 provider calls -> 1)."""
+    calls = []
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        return _response("Reuse Prose Title")
+
+    with auxiliary_client_modules():
+        with patch_tg_config({"provider": "custom", "model": "strips-response-format"}):
+            with patch("agent.auxiliary_client.call_llm", side_effect=fake_call_llm, create=True):
+                result, status = streaming.generate_title_raw_via_aux(
+                    "Use a schema-stripping route.",
+                    "The route ignores response_format.",
+                )
+
+    assert result == "Reuse Prose Title"
+    assert status == "llm_aux"
+    assert len(calls) == 1
+    assert "response_format" in (calls[0]["extra_body"] or {})
+
+
+def test_agent_schema_prose_response_is_reused_without_second_provider_call():
+    """Re-gate finding 2 (agent route): same prose-reuse contract as the aux
+    route when the transport drops the schema request shape."""
+    calls = []
+
+    def fake_create(**kwargs):
+        calls.append(kwargs)
+        return _response("Reuse Agent Prose Title")
+
+    client = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=fake_create))
+    )
+    agent = MagicMock()
+    agent.api_mode = "openai"
+    agent.provider = "custom"
+    agent.model = "strips-response-format"
+    agent.base_url = "https://strips.example/v1"
+    agent.reasoning_config = None
+    agent._build_api_kwargs.return_value = {}
+    agent._ensure_primary_openai_client.return_value = client
+
+    result, status = streaming.generate_title_raw_via_agent(
+        agent,
+        "Why is the schema response prose?",
+        "The transport strips response_format.",
+    )
+
+    assert result == "Reuse Agent Prose Title"
+    assert status == "llm"
+    assert len(calls) == 1
+    assert "response_format" in (calls[0].get("extra_body") or {})
+
+
+def test_aux_schema_unshaped_error_fails_without_schema_fallback_call():
+    """Re-gate finding (low): a 401/429/timeout on the schema attempt is a
+    transport failure, not proof the route lacks JSON-schema support — do not
+    re-label it 'schema unavailable' and re-send the identical request."""
+    calls = []
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        raise ValueError("Too Many Requests (429)")
+
+    with auxiliary_client_modules():
+        with patch_tg_config({"provider": "custom", "model": "rate-limited"}):
+            with patch("agent.auxiliary_client.call_llm", side_effect=fake_call_llm, create=True):
+                result, status = streaming.generate_title_raw_via_aux(
+                    "Probe the rate limited route.",
+                    "The provider throttles every call.",
+                )
+
+    assert result is None
+    assert status == "llm_error_aux"
+    # One attempt per prompt only: no silent compatibility-mode re-send.
+    assert len(calls) == 2
+
+
+def test_aux_schema_response_format_rejection_still_falls_back():
+    """A schema-shaped 4xx (naming response_format/json_schema) is a real
+    schema rejection and keeps the existing compatibility fallback."""
+    calls = []
+
+    def fake_call_llm(**kwargs):
+        calls.append(kwargs)
+        if "response_format" in (kwargs.get("extra_body") or {}):
+            raise ValueError("400 Bad Request: response_format is not supported")
+        return _response("Schema Rejection Fallback Title")
+
+    with auxiliary_client_modules():
+        with patch_tg_config({"provider": "custom", "model": "legacy-gateway"}):
+            with patch("agent.auxiliary_client.call_llm", side_effect=fake_call_llm, create=True):
+                result, status = streaming.generate_title_raw_via_aux(
+                    "Use a legacy title route.",
+                    "The route rejects response_format.",
+                )
+
+    assert result == "Schema Rejection Fallback Title"
+    assert status == "llm_aux_retry"
+    assert len(calls) == 2
+    assert "response_format" in (calls[0]["extra_body"] or {})
+    assert calls[1]["extra_body"] == {"reasoning": {"enabled": False}}

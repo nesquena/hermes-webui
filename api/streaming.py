@@ -4842,8 +4842,25 @@ _TITLE_MENU_COMMA_VERB_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Re-gate 2026-10-19 finding 1: the persisted self-heal keeps only
+# unmistakable ``title should`` prompt echoes — an explicit ``Title should:``
+# clause or a sentence that echoes the title prompt's instruction tokens.
+# Ordinary subject matter such as "Title Should Reflect Content" stays;
+# freshly generated candidates with the bare shape are still rejected whole
+# by ``_is_bad_new_title``.
+_TITLE_SHOULD_ECHO_RE = re.compile(
+    r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should\b'
+    r'(?:'
+    r'\s*:'
+    r'|\s+[^.\n]{0,90}\b(?:3(?:\s*[-\u2013]\s*)?8\s*words?|three\s+to\s+eight\s*words?'
+    r'|topic\s+labels?|noun[-\s]phrase\s+titles?|short\s+session\s+titles?'
+    r'|full\s+sentences?|internal\s+reasoning|meta\s+commentary)\b'
+    r')',
+    flags=re.IGNORECASE,
+)
 
-def _looks_like_title_option_menu(text: str) -> bool:
+
+def _looks_like_title_option_menu(text: str, *, require_list_syntax: bool = False) -> bool:
     """Return True for a title-model menu rather than one selected title.
 
     The preamble alone is not enough: legitimate single titles like
@@ -4853,6 +4870,12 @@ def _looks_like_title_option_menu(text: str) -> bool:
     two or more list entries, or delimiter-separated standalone alternatives.
     Matching works on both raw stored text and the whitespace-collapsed sanitize
     form. A grammatical comma inside one title is not a candidate boundary.
+
+    ``require_list_syntax`` (persisted self-heal, re-gate 2026-10-19 finding 1)
+    trusts only structural menu evidence: quoted alternatives, list markers,
+    quoted items, newline/semicolon separators, or an explicit "or" choice.
+    Bare comma-separated noun fragments are ordinary saved-title subject
+    matter there ("Options: Stocks, Bonds, ETFs") and must survive.
     """
     s = str(text or '')
     s_m = _TITLE_OPTION_MENU_RE.match(s)
@@ -4902,6 +4925,25 @@ def _looks_like_title_option_menu(text: str) -> bool:
         alternative = bool(re.match(r'^or\b', candidates[-1], re.IGNORECASE))
         if not (quoted or marked or alternative):
             return False
+    if require_list_syntax:
+        # Rewritten ambiguous preambles ("Options:", "Good title:",
+        # "Something like") must show structural menu evidence before a
+        # persisted title is renamed (re-gate 2026-10-19 finding 1): fully
+        # quoted items, a leading list marker, or an explicit "or" choice
+        # between exactly two fragments. Bare comma-separated noun fragments
+        # are ordinary saved-title subject matter there.
+        if any(
+            (item.startswith('"') and item.endswith('"'))
+            or (item.startswith('\u201c') and item.endswith('\u201d'))
+            for item in candidates
+            if item
+        ):
+            return True
+        if bool(re.match(r'^\s*(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+', s)):
+            return True
+        if len(candidates) == 2 and alternative:
+            return True
+        return False
     # A comma can also join clauses in ONE title ("Compare REST, GraphQL and
     # gRPC"). Require short standalone alternatives: a leading action verb,
     # boundary-spanning preposition, or a connective joining the final segment
@@ -4928,11 +4970,15 @@ def _looks_invalid_generated_title(text: str) -> bool:
     """True when an existing/persisted title is structurally invalid (CoT leak).
 
     This is the persisted-title self-heal predicate. Keep it unambiguous:
-    leading thinking/analysis/reasoning wrappers, a full "The title should…"
-    sentence, candidate-list syntax, and leading meta-commentary. Do not
-    reject ordinary subject matter such as "Maybe Monad Error Handling",
-    "Something Like Summer Discussion", or "Parsing <analysis> Tags". Use
-    ``_is_bad_new_title`` for freshly generated candidates.
+    leading thinking/analysis/reasoning wrappers, unmistakable prompt-echo
+    sentences (``Title should: …`` / "3-8 words" / "topic label" language),
+    structural candidate-list syntax, and meta-commentary continuations after
+    a heading prefix. Ordinary subject matter — "Analysis: Q3 Sales Trends",
+    "Options: Stocks, Bonds, ETFs", "Title Should Reflect Content",
+    "Maybe Monad Error Handling", "Something Like Summer Discussion",
+    "Parsing <analysis> Tags" — must survive (re-gate 2026-10-19 finding 1).
+    Use ``_is_bad_new_title`` for freshly generated candidates, which keeps
+    the aggressive bare-heading/menu/echo shapes candidate-only.
     """
     s = str(text or '')
     if not s.strip():
@@ -4953,16 +4999,16 @@ def _looks_invalid_generated_title(text: str) -> bool:
             s,
             flags=re.IGNORECASE,
         )
-        or re.search(
-            r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should\b',
-            s,
-            flags=re.IGNORECASE,
-        )
+        or _TITLE_SHOULD_ECHO_RE.search(s)
+        # Direct "title options:/suggestions:/ideas:" preambles already name a
+        # menu, so comma/semicolon fragments are real candidates there; only
+        # the rewritten bare-prefix forms (plain "Options:"/"Good title:"/
+        # "Something like") need structural list evidence (re-gate finding 1).
         or _looks_like_title_option_menu(s)
         or _looks_like_title_option_menu(re.sub(
             r'^\s*(?:[*_`~]+\s*)?(?:(?:a\s+)?good title\s*:|options\s*:|something like\s+)',
             'Title options:', s, flags=re.IGNORECASE,
-        ))
+        ), require_list_syntax=True)
         or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
         or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
@@ -4970,7 +5016,8 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
         or re.search(
-            r'^\s*(?:analysis|thinking|reasoning|thought)\s*:',
+            r'^\s*(?:[*_`~]+\s*)?(?:analysis|thinking|reasoning|thought)\s*:'
+            r'\s*(?:(?:the\s+)?user|we|i(?:\'m)?|let me|they|you|okay|ok)\b',
             s,
             flags=re.IGNORECASE,
         )
@@ -5018,6 +5065,25 @@ def _is_bad_new_title(text: str) -> bool:
     if re.fullmatch(
         r'(?:pong|ping|yes|no|yep|nope|hi|hello|hey|thanks|thank you|sure|k|kk|cool|nice|lol|ok|okay|done)',
         _token,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    # Candidate-only (re-gate 2026-10-19 finding 1): these shapes are fine for
+    # rejecting a fresh candidate (it costs one retry, not a silent rename),
+    # but ordinary persisted titles like "Analysis: Q3 Sales Trends",
+    # "Options: Stocks, Bonds, ETFs" and "Title Should Reflect Content" must
+    # survive `_looks_invalid_generated_title` untouched.
+    if re.search(
+        r'^\s*(?:[*_`~]+\s*)?(?:analysis|thinking|reasoning|thought)\s*:',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if _looks_like_title_option_menu(s):
+        return True
+    if re.search(
+        r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should\b',
+        s,
         flags=re.IGNORECASE,
     ):
         return True
@@ -6329,6 +6395,22 @@ def _title_retry_completion_budget(provider: str = '', model: str = '', base_url
     return max(1024, _title_completion_budget(provider, model, base_url) * 2)
 
 
+# Re-gate finding (low): only these markers in a schema-attempt failure prove
+# the route itself rejected the JSON-schema request shape (a 4xx naming
+# `response_format`/`json_schema`). A 401/429/timeout must not be re-labeled
+# "schema unavailable" — that silently re-sends the identical request in
+# compatibility mode and pays a second failing provider call.
+_SCHEMA_REJECTION_TEXT_RE = re.compile(
+    r'\b(?:response_format|response format|json_schema|json schema)\b',
+    flags=re.IGNORECASE,
+)
+
+
+def _schema_rejection_error(error) -> bool:
+    """True when an exception names the title-response schema it rejected."""
+    return bool(_SCHEMA_REJECTION_TEXT_RE.search(str(error or '')))
+
+
 def _title_retry_status(status: str) -> bool:
     # Whether to grant a second budget attempt within the same prompt+model
     # combination.  ``llm_length`` indicates the model would have produced
@@ -6525,6 +6607,10 @@ def generate_title_raw_via_aux(
     reasoning_extra = {}
     if not _route_rejects_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
+        # Re-gate 2026-10-19 finding 3: the schema request carries the same
+        # route-gated reasoning disable, so reasoning models do not burn the
+        # 512-token title budget on hidden thoughts during the first call.
+        schema_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         schema_extra["reasoning_split"] = True
         reasoning_extra["reasoning_split"] = True
@@ -6560,12 +6646,31 @@ def generate_title_raw_via_aux(
                             )
                         except Exception as e:
                             last_status = 'llm_error_aux'
-                            if mode == 'schema':
+                            # Re-gate finding (low): only a schema-shaped
+                            # rejection proves the route cannot do JSON schema.
+                            # A 401/429/timeout is a transport failure —
+                            # re-sending the identical request in compatibility
+                            # mode would just pay a second failing provider call.
+                            if mode == 'schema' and _schema_rejection_error(e):
                                 schema_unavailable = True
                                 logger.debug("Aux title schema attempt %s failed: %s", idx + 1, e)
                                 continue
                             raise
                         raw, empty_status = _extract_title_response(resp, aux=True, mode=mode)
+                        if not raw and mode == 'schema':
+                            # Re-gate finding 2: a transport that silently
+                            # strips `response_format` still answers the schema
+                            # request with a valid plain-text title. Parse the
+                            # SAME response with the compatibility extractor
+                            # instead of re-sending the identical request;
+                            # empty/reasoning-only responses keep falling
+                            # through to the retry path below.
+                            prose_raw, prose_status = _extract_title_response(resp, aux=True, mode='compatibility')
+                            if prose_raw:
+                                raw = prose_raw
+                                empty_status = ''
+                            elif prose_status:
+                                empty_status = prose_status
                         if raw:
                             return raw, ('llm_aux' if attempted == 1 else 'llm_aux_retry')
                         last_status = empty_status or 'llm_empty_aux'
@@ -6690,12 +6795,29 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                                     **api_kwargs,
                                 )
                             except Exception as e:
-                                if mode == 'schema':
+                                # Same rule as the aux route: only a
+                                # schema-shaped rejection proves the route
+                                # cannot do JSON schema; 401/429/timeouts stay
+                                # transport failures instead of triggering a
+                                # compatibility-mode re-send (#7539 re-gate).
+                                if mode == 'schema' and _schema_rejection_error(e):
                                     schema_unavailable = True
                                     logger.debug("Agent title schema attempt %s failed: %s", idx + 1, e)
                                     continue
                                 raise
                             raw, empty_status = _extract_title_response(resp, mode=mode)
+                            if not raw and mode == 'schema':
+                                # Re-gate finding 2 (agent route): a transport
+                                # that stripped `response_format` answered with
+                                # valid prose — parse the SAME response with
+                                # the compatibility extractor rather than
+                                # re-sending the identical request.
+                                prose_raw, prose_status = _extract_title_response(resp, mode='compatibility')
+                                if prose_raw:
+                                    raw = prose_raw
+                                    empty_status = ''
+                                elif prose_status:
+                                    empty_status = prose_status
                             if mode == 'schema' and empty_status in {'llm_empty', 'llm_empty_reasoning'}:
                                 schema_unavailable = True
                                 continue

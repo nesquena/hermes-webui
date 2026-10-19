@@ -196,7 +196,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
                 )
 
         self.assertEqual(result, 'Gemini Title')
-        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(status, 'llm_aux')
         self.assertEqual(captured.get('provider'), 'gemini')
         self.assertEqual(captured.get('model'), 'gemini-3.1-flash-lite')
 
@@ -238,7 +238,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
                 )
 
         self.assertEqual(result, 'Configured Model Title')
-        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(status, 'llm_aux')
         self.assertEqual(captured.get('task'), 'title_generation')
         self.assertEqual(captured.get('provider'), 'openrouter')
         self.assertEqual(captured.get('model'), 'anthropic/claude-haiku-title')
@@ -282,7 +282,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
                 )
 
         self.assertEqual(result, 'Configured Key Title')
-        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(status, 'llm_aux')
         self.assertEqual(captured.get('task'), 'title_generation')
         self.assertIsNone(captured.get('provider'))
         self.assertEqual(captured.get('model'), 'gemma-4-31b-it')
@@ -315,7 +315,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
                 )
 
         self.assertEqual(result, 'Alte Session Bilder')
-        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(status, 'llm_aux')
         messages = captured.get('messages') or []
         self.assertIn('Match the language of the user question', messages[0]['content'])
         self.assertNotIn('If the user writes German', messages[0]['content'])
@@ -447,7 +447,7 @@ class TestGenerateTitleRawViaAuxTimeout(unittest.TestCase):
                 )
 
         self.assertEqual(result, 'Agent Route Title')
-        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(status, 'llm_aux')
         self.assertEqual(captured.get('task'), 'title_generation')
         self.assertEqual(captured.get('provider'), 'custom:agent-route')
         self.assertEqual(captured.get('model'), 'agent-title-model')
@@ -1121,7 +1121,7 @@ class TestAuxTitleConversationContext(unittest.TestCase):
                 )
 
         self.assertEqual(title, 'Weather Title')
-        self.assertEqual(status, 'llm_aux_retry')
+        self.assertEqual(status, 'llm_aux')
         # Context published before the aux call and visible inside call_llm.
         self.assertEqual(seen['context_during_call'], 'sid-123')
         state = self._portal_state()

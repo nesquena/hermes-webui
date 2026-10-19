@@ -55,11 +55,26 @@ OpenAI-compatible title routes first request a strict JSON object with one
 `title` string. Unsupported schemas, empty schema results, and reasoning-only
 schema results retry the same prompt and budget with the existing compatibility
 request shape. Compatibility reasoning-only output still stops further attempts.
+When a transport silently strips the schema request and answers with a valid
+plain-text title, that same response is parsed with the compatibility
+extractor and accepted after validation — one provider call, no re-send. A
+schema attempt that fails without naming `response_format`/`json_schema`
+(401/429/timeout) is a transport failure: it surfaces as an error status
+instead of triggering a compatibility-mode re-send. The schema request carries
+the same route-gated reasoning disable as the compatibility request, so
+reasoning models do not spend the title budget on hidden thoughts first.
+
 Fresh candidates reject reasoning traces, option lists, and output over 12 words.
-Saved-title self-healing is narrower: ambiguous headings or a single quoted term
-are preserved unless there is actual multiple-option/list evidence. Manual titles
-remain protected. Invalid output retains the provisional title until a later
-exchange or the existing bounded recovery cap; this does not change retry ownership.
+Saved-title self-healing is narrower: ambiguous headings, single quoted terms,
+and comma-separated noun lists are preserved unless there is actual
+multiple-option/list evidence (numbered/bulleted markers, quoted alternatives,
+or explicit list separators). A persisted title is regenerated only for
+unambiguous traces — thinking/analysis wrappers, `Title should:`/prompt-echo
+sentences ("3-8 words", "topic label"), structural option menus, or
+meta-commentary continuations after an `Analysis:`/`Thinking:`/`Reasoning:`/
+`Thought:` heading. Manual titles remain protected. Invalid output retains the
+provisional title until a later exchange or the existing bounded recovery cap;
+this does not change retry ownership.
 
 Hermes WebUI derives a provisional session title from the first user message
 and, after the first response, may call an LLM to generate a better title
