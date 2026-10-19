@@ -4954,7 +4954,7 @@ def _looks_invalid_generated_title(text: str) -> bool:
             flags=re.IGNORECASE,
         )
         or re.search(
-            r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should',
+            r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should\b',
             s,
             flags=re.IGNORECASE,
         )
