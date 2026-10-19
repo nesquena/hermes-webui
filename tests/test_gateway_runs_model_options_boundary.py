@@ -2895,7 +2895,7 @@ def test_owner_config_placeholder_ignores_a_parked_worker_env_mirror(
     monkeypatch.setattr(profiles, "_DEFAULT_HERMES_HOME", tmp_path)
     monkeypatch.setattr(profiles, "_PROCESS_PROFILE_HOME", str(tmp_path))
     monkeypatch.setattr(profiles, "list_profiles_api", lambda: [])
-    monkeypatch.setattr(profiles, "_PROCESS_OWNER_DOTENV", {})
+    monkeypatch.setattr(profiles, "_PROCESS_OWNER_DOTENV", {}, raising=False)
     monkeypatch.setitem(
         profiles._INITIAL_PROCESS_ENV, "OWNER_GATEWAY_URL", "http://owner-gw.test"
     )
