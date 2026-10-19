@@ -9590,7 +9590,14 @@ function _syncTransparentEventTimestamp(row, header, opts){
       row.getAttribute('data-activity-at')
     )
     : null;
-  const ts=explicitTs||toolTs||attrTs||(live?_activityNowSeconds():null);
+  // The live fallback has no event of its own, so it is derived from the wall
+  // clock on every render frame. Store it at the resolution it is DISPLAYED at
+  // (minute): a sub-second stamp makes the row's serialized innerHTML differ on
+  // each frame, so `_refreshTransparentLiveRow` sees "changed HTML", rebuilds
+  // the card, and restarts the entrance/shimmer animation on a row the reader
+  // is already watching (#8109). Real event timestamps stay verbatim.
+  const nowSeconds=_activityNowSeconds();
+  const ts=explicitTs||toolTs||attrTs||(live?Math.floor(nowSeconds/60)*60:null);
   const label=ts?_activityClockLabel(ts):'';
   let timeEl=header.querySelector('.transparent-event-time');
   if(!label){
