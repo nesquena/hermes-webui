@@ -600,9 +600,7 @@ def test_a_new_level_supersedes_the_qualified_spelling(tmp_path, monkeypatch):
     _write_cfg_with(cfgfile, {"openai/gpt-5.4": "low"})
     _patch_reasoning_scope(tmp_path, monkeypatch, cfgfile)
 
-    status = config.set_reasoning_effort(
-        "high", model_id="gpt-5.4", provider_id="openai"
-    )
+    config.set_reasoning_effort("high", model_id="gpt-5.4", provider_id="openai")
 
     on_disk = yaml.safe_load(cfgfile.read_text(encoding="utf-8"))
     overrides = (on_disk.get("agent") or {}).get("reasoning_overrides") or {}

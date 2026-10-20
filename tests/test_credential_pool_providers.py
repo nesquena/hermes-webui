@@ -1,7 +1,10 @@
 """Regression tests for credential_pool provider detection in /api/models."""
 
 import json
+import logging
+import socket
 import sys
+import time
 import types
 
 import api.config as config
@@ -973,3 +976,49 @@ def test_seeded_config_survives_a_stale_loaded_config_path(monkeypatch, tmp_path
     the seed and only the auth.json provider survived ("got ['OpenAI Codex']")."""
     monkeypatch.setattr(config, "_cfg_path", config.Path("/nonexistent/elsewhere/config.yaml"))
     test_custom_provider_detected_by_get_available_models(monkeypatch, tmp_path)
+
+
+# --- Hermetic network: a slow runner network must not decide these tests ---
+
+
+def test_seeded_custom_provider_never_waits_on_dns(monkeypatch, tmp_path, caplog):
+    """Shard-4 CI flake: the bothub seed above made get_available_models() resolve bothub.chat for real.
+
+    The SSRF pre-check in _read_custom_endpoint_models (api/config.py) calls socket.getaddrinfo() with no
+    timeout, on the catalog rebuild worker, and conftest's network isolation used to block connects but not
+    DNS. A runner resolver slower than _LIVE_REBUILD_BUDGET_SECONDS (4 s) kept the worker from finishing, so
+    the budget fallback was served ("live provider-catalog rebuild exceeded 4.0s budget") and the seed failed
+    with "got ['OpenAI Codex']" in about 4.1 s.
+
+    Here the C resolver below conftest's socket.getaddrinfo guard hangs past the budget. The seed must still
+    be answered in-band, and no lookup of a public name may reach the resolver."""
+    import _socket
+
+    hang = max(float(config._LIVE_REBUILD_BUDGET_SECONDS), 0.0) + 1.0
+    reached = []
+    real_c_getaddrinfo = _socket.getaddrinfo
+
+    def slow_resolver(host, *args, **kwargs):
+        h = host.decode("ascii", "ignore") if isinstance(host, (bytes, bytearray)) else str(host or "")
+        if h in ("", "localhost") or h.replace(".", "").isdigit() or ":" in h:
+            return real_c_getaddrinfo(host, *args, **kwargs)
+        reached.append(h)
+        time.sleep(hang)
+        raise socket.gaierror(socket.EAI_AGAIN, "simulated resolver timeout")
+
+    monkeypatch.setattr(_socket, "getaddrinfo", slow_resolver)
+    caplog.set_level(logging.INFO, logger="api.config")
+
+    seed_failure = None
+    try:
+        test_seeded_config_survives_a_stale_loaded_config_path(monkeypatch, tmp_path)
+    except AssertionError as exc:
+        seed_failure = exc
+    budget_fallbacks = [
+        r.getMessage() for r in caplog.records
+        if r.name == "api.config" and "budget" in r.getMessage() and "fallback" in r.getMessage()
+    ]
+    assert not reached and not budget_fallbacks and seed_failure is None, (
+        "the seeded catalog must be built in-band without a DNS lookup; "
+        f"resolver reached={reached}, budget fallbacks={budget_fallbacks}, seed assertion={seed_failure}"
+    )
