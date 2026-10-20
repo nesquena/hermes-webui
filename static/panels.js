@@ -5043,9 +5043,14 @@ function _renderSkillUsage(d) {
 
 function _renderInsights(d, box, wikiStatus, skillUsage) {
   const fmtNum = n => Number(n || 0).toLocaleString();
-  const fmtCost = c => {
+  // #8185: status-aware cost formatting.  $0.00 is a KNOWN zero (free route
+  // via `free: true` override or cost_status='free'); N/A is reserved for
+  // genuinely unknown pricing so the card stops lying about free routes.
+  const fmtCost = (c, status) => {
     const value = Number(c || 0);
-    return value > 0 ? '$' + value.toFixed(value < 1 ? 4 : 2) : t('insights_no_cost');
+    if (value > 0) return '$' + value.toFixed(value < 1 ? 4 : 2);
+    if (status === 'free' || status === 'override') return '$0.00';
+    return t('insights_no_cost');
   };
   const fmtTokens = n => {
     const value = Number(n || 0);
@@ -5053,11 +5058,22 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
   };
 
   // Overview cards
+  // #8185: the Estimated Cost card now explains WHY it says N/A — count of
+  // sessions the aggregation still cannot price + the models behind them,
+  // pointing at the pricing-overrides setting.
+  const unknownCostSessions = Number(d.unknown_cost_sessions || 0);
+  const unpricedModels = Array.isArray(d.models_without_pricing) ? d.models_without_pricing : [];
+  const totalCostStatus = Number(d.total_cost || 0) > 0
+    ? 'priced'
+    : (Number(d.total_sessions || 0) > 0 && !unknownCostSessions ? 'free' : 'unknown');
+  const costCardHint = unknownCostSessions > 0
+    ? t('insights_cost_unknown_hint', String(unknownCostSessions), unpricedModels.map(m => m.model).join(', '))
+    : '';
   const overviewCards = [
     { label: t('insights_sessions'), value: fmtNum(d.total_sessions), icon: li('message-square', 18) },
     { label: t('insights_messages'), value: fmtNum(d.total_messages), icon: li('hash', 18) },
     { label: t('insights_tokens'), value: fmtTokens(d.total_tokens), icon: li('cpu', 18) },
-    { label: t('insights_cost'), value: fmtCost(d.total_cost), icon: li('dollar-sign', 18) },
+    { label: t('insights_cost'), value: fmtCost(d.total_cost, totalCostStatus), icon: li('dollar-sign', 18), hint: costCardHint },
   ];
 
   // Daily token trend — bucket long ranges to avoid horizontal overflow
@@ -5101,7 +5117,7 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
         const cacheCell = cachePct === null
           ? '<span class="insights-model-cache insights-model-cache-empty">—</span>'
           : `<span class="insights-model-cache" title="${esc(t('insights_cache_hit'))}: ${fmtTokens(m.cache_read_tokens || 0)}">${cachePct}%</span>`;
-        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span>${cacheCell}<span class="insights-model-cost">${fmtCost(m.cost)}</span><span>${share}%</span></div>`;
+        return `<div class="insights-table-row"><span class="insights-model-name" title="${esc(m.model)}">${esc(m.model)}</span><span>${fmtNum(m.sessions)}</span><span class="insights-model-tokens" title="${esc(title)}">${fmtTokens(m.total_tokens || 0)}</span>${cacheCell}<span class="insights-model-cost"${m.cost_status ? ` data-cost-status="${esc(m.cost_status)}"` : ''}>${fmtCost(m.cost, m.cost_status)}</span><span>${share}%</span></div>`;
       }).join('') +
       `</div></div>`;
   } else {
@@ -5192,7 +5208,7 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
       ${_renderLlmWikiStatus(wikiStatus)}
       ${_renderSkillUsage(skillUsage)}
       <div class="insights-grid">
-        ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
+        ${overviewCards.map(c => `<div class="insights-stat"${c.hint ? ` title="${esc(c.hint)}"` : ''}><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div>${c.hint ? `<div class="insights-stat-hint" style="font-size:10px;color:var(--muted);margin-top:2px;line-height:1.3">${esc(c.hint)}</div>` : ''}</div></div>`).join('')}
       </div>
       ${dailyHtml}
       ${modelHealthHtml}
@@ -9393,6 +9409,21 @@ function _preferencesPayloadFromUi(){
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
   if(syncCb) payload.sync_to_insights=syncCb.checked;
+  // #8185: pricing overrides (JSON textarea). Invalid JSON is left out of the
+  // payload entirely so the stored map is never clobbered by a typo; blank
+  // means "delete all overrides" ({}).
+  const pricingOverridesTa=$('settingsPricingOverrides');
+  if(pricingOverridesTa){
+    const rawOverrides=String(pricingOverridesTa.value||'').trim();
+    if(!rawOverrides){
+      payload.pricing_overrides={};
+    }else{
+      try{
+        const parsedOverrides=JSON.parse(rawOverrides);
+        if(parsedOverrides&&typeof parsedOverrides==='object'&&!Array.isArray(parsedOverrides)) payload.pricing_overrides=parsedOverrides;
+      }catch(_){/* invalid JSON: omit key, server keeps stored map */}
+    }
+  }
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
   // update_channel is NOT included here — it has its own dedicated write path
@@ -10207,6 +10238,12 @@ async function loadSettingsPanel(){
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
     if(syncCb){syncCb.checked=!!settings.sync_to_insights;syncCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
+    const pricingOverridesTa=$('settingsPricingOverrides');
+    if(pricingOverridesTa){
+      const storedOverrides=settings.pricing_overrides;
+      pricingOverridesTa.value=(storedOverrides&&typeof storedOverrides==='object'&&!Array.isArray(storedOverrides))?JSON.stringify(storedOverrides,null,2):'';
+      pricingOverridesTa.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+    }
     const updateCb=$('settingsCheckUpdates');
     if(updateCb){updateCb.checked=settings.check_for_updates!==false;updateCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const updateChannelSel=$('settingsUpdateChannel');
@@ -13618,6 +13655,20 @@ async function saveSettings(andClose){
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
+  // #8185: pricing overrides (JSON textarea) — same rules as the autosave
+  // path: blank = delete all ({}), invalid JSON is omitted so the stored map
+  // survives a typo until the user fixes it.
+  {
+    const pricingOverridesRaw=String((($('settingsPricingOverrides')||{}).value||'')).trim();
+    if(!pricingOverridesRaw){
+      body.pricing_overrides={};
+    }else{
+      try{
+        const pricingOverridesParsed=JSON.parse(pricingOverridesRaw);
+        if(pricingOverridesParsed&&typeof pricingOverridesParsed==='object'&&!Array.isArray(pricingOverridesParsed)) body.pricing_overrides=pricingOverridesParsed;
+      }catch(_){/* invalid JSON: omit key, server keeps stored map */}
+    }
+  }
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;

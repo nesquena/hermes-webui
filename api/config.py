@@ -13253,6 +13253,14 @@ _SETTINGS_DEFAULTS = {
     "show_kanban_sessions": False,  # surface kanban worker sessions in the sidebar (subordinate to show_cli_sessions)
     "show_previous_messaging_sessions": False,  # show older Telegram/Discord/etc. reset segments
     "sync_to_insights": False,  # mirror WebUI token usage to state.db for /insights
+    # #8185: per-model pricing overrides for local/Ollama routes the Agent core
+    # has no pricing source for.  Keyed by model name (or "provider:model");
+    # each entry is either {"free": true} (known-zero route, renders $0.00) or
+    # per-million-token USD rates {"input": .., "output": .., "cache_read": ..,
+    # "cache_write": ..}.  Applied by the insights aggregation ONLY where the
+    # stored cost is 0/unknown — stored history with a real cost is never
+    # repriced.
+    "pricing_overrides": {},
     "check_for_updates": True,  # check if webui/agent repos are behind upstream
     "update_channel": "stable",  # stable | experimental — which release stream to track (stable = soaked/promoted; experimental = every batch)
     "ignore_agent_updates": False,  # keep WebUI update notices but suppress Agent update checks
@@ -13741,6 +13749,52 @@ def _coerce_provider_cost_budget(value: Any) -> float | None:
     return rounded
 
 
+# #8185: per-million-token USD rate keys accepted in a pricing-override entry.
+_PRICING_OVERRIDE_RATE_KEYS = ("input", "output", "cache_read", "cache_write")
+_PRICING_OVERRIDE_MAX_ENTRIES = 500
+
+
+def _coerce_pricing_overrides(raw: Any) -> dict:
+    """Sanitize a user-supplied pricing_overrides map.
+
+    Each entry is keyed by model name (or ``provider:model``) and valued with
+    either ``{"free": true}`` (known-zero route) or a dict of per-million-token
+    USD rates.  Malformed keys/entries are dropped rather than raising — a
+    crafted POST must never 500 the settings endpoint or poison the stored map.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    cleaned: dict[str, dict] = {}
+    for key, value in list(raw.items())[:_PRICING_OVERRIDE_MAX_ENTRIES]:
+        if not isinstance(key, str):
+            continue
+        key = key.strip()
+        if not key or len(key) > 200 or "\x00" in key:
+            continue
+        if not isinstance(value, dict):
+            continue
+        if value.get("free") is True:
+            cleaned[key] = {"free": True}
+            continue
+        rates: dict[str, float] = {}
+        for rate_key in _PRICING_OVERRIDE_RATE_KEYS:
+            if rate_key not in value:
+                continue
+            try:
+                rate = float(value[rate_key])
+            except (TypeError, ValueError):
+                # Per-key drop: one bad rate must not discard the model's
+                # other valid rates (a typo'd cache_read would otherwise
+                # silently unprice the whole route).
+                continue
+            if not math.isfinite(rate) or rate < 0:
+                continue
+            rates[rate_key] = rate
+        if rates:
+            cleaned[key] = rates
+    return cleaned
+
+
 def save_settings(settings: dict) -> dict:
     """Save settings to disk. Returns the merged settings. Ignores unknown keys."""
     raw_settings = _read_raw_settings_file()
@@ -13788,10 +13842,20 @@ def save_settings(settings: dict) -> dict:
             # polluted with non-bool/non-str junk from a crafted POST.
             current_dash.update({k: bool(v) for k, v in _dashboard_plugins.items() if isinstance(k, str)})
             current["dashboard_plugins"] = current_dash
+    # #8185: pricing overrides are REPLACED wholesale (not merged) so deleting
+    # an entry in the settings UI actually removes it, but the payload is
+    # sanitized first: only str-keyed entries survive, and each value must be
+    # either {"free": true} or a dict of non-negative finite per-million-token
+    # USD rates.  A non-dict payload is ignored entirely (keeps the stored map).
+    _pricing_overrides = settings.get("pricing_overrides")
+    if isinstance(_pricing_overrides, dict):
+        current["pricing_overrides"] = _coerce_pricing_overrides(_pricing_overrides)
     for k, v in settings.items():
         key_is_speech = k in _SETTINGS_SPEECH_KEYS
         # dashboard_plugins is deep-merged above (not a flat allowlisted scalar).
         if k == "dashboard_plugins":
+            continue
+        if k == "pricing_overrides":
             continue
         if k in _SETTINGS_ALLOWED_KEYS:
             if k == "theme":

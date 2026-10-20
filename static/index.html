@@ -1485,6 +1485,11 @@
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_sync_insights">Mirrors WebUI token usage to state.db so <code>hermes /insights</code> includes browser session data. Off by default.</div>
             </div>
             <div class="settings-field">
+              <label for="settingsPricingOverrides" data-i18n="settings_label_pricing_overrides">Pricing overrides (JSON)</label>
+              <div style="font-size:11px;color:var(--muted);margin-top:4px;margin-bottom:6px" data-i18n="settings_desc_pricing_overrides">Per-model costs for routes the Agent cannot price (Ollama cloud, LM Studio, local OpenAI-compatible servers). Map of model name (or "provider:model") to {"free": true} or per-million-token USD rates, e.g. {"qwen3-coder": {"free": true}, "kimi-k2.7-code": {"input": 1.0, "output": 3.0}}. Applied to Insights only where no cost was recorded.</div>
+              <textarea id="settingsPricingOverrides" rows="4" spellcheck="false" placeholder='{"qwen3-coder": {"free": true}}' style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:monospace;resize:vertical"></textarea>
+            </div>
+            <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsCheckUpdates" style="width:15px;height:15px;accent-color:var(--accent)">
                 <span data-i18n="settings_label_check_updates">Check for updates</span>

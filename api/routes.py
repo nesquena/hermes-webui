@@ -13593,6 +13593,76 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
     return True
 
 
+# ── #8185: pricing overrides for local/Ollama routes ──────────────────────────
+# The Agent core has no pricing source for local or Ollama-cloud routes
+# (ollama-cloud, LM Studio, any local OpenAI-compatible endpoint): stored
+# estimated_cost_usd is 0 and the Estimated Cost card rendered N/A forever.
+# `pricing_overrides` (settings) lets the user declare per-model rates — or an
+# explicit `free: true` marker — that this aggregation applies ONLY where the
+# stored cost is 0/unknown.  Stored history with a real cost is never repriced.
+
+
+def _pricing_overrides_from_settings() -> dict:
+    """Load pricing_overrides from settings, re-sanitized at read time.
+
+    Re-running the sanitizer at aggregation time keeps a hand-edited
+    settings.json (rates as strings, negative/NaN values) from poisoning the
+    cost math; anything malformed simply drops out and the session stays
+    unknown-priced, exactly as before this setting existed.
+    """
+    try:
+        from api.config import _coerce_pricing_overrides
+
+        raw = load_settings().get("pricing_overrides")
+        return _coerce_pricing_overrides(raw)
+    except Exception:
+        logger.debug("Failed to load pricing overrides for insights", exc_info=True)
+        return {}
+
+
+def _override_cost_for_session(
+    overrides: dict,
+    model: str | None,
+    provider: str | None,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+):
+    """Resolve the pricing override for a session's route.
+
+    Key resolution: `provider:model` first (most specific), then the bare
+    model name.  Returns `(cost_usd, status)` where status is "free" (explicit
+    `free: true` marker — a KNOWN zero) or "override" (per-million-token USD
+    rates applied), or None when no override matches the route.
+    """
+    if not overrides or not model:
+        return None
+    entry = None
+    if provider:
+        qualified = overrides.get(f"{provider}:{model}")
+        if isinstance(qualified, dict):
+            entry = qualified
+    if entry is None:
+        bare = overrides.get(model)
+        if isinstance(bare, dict):
+            entry = bare
+    if entry is None:
+        return None
+    if entry.get("free") is True:
+        return 0.0, "free"
+    try:
+        cost = (
+            input_tokens * float(entry.get("input", 0) or 0)
+            + output_tokens * float(entry.get("output", 0) or 0)
+            + cache_read_tokens * float(entry.get("cache_read", 0) or 0)
+        ) / 1_000_000.0
+    except (TypeError, ValueError):
+        return None
+    if cost < 0:
+        return None
+    return cost, "override"
+
+
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
@@ -14010,31 +14080,58 @@ def _handle_insights(handler, parsed) -> bool:
     dow_activity = collections.Counter()
     # Activity by hour of day (0-23)
     hod_activity = collections.Counter()
+    # #8185: pricing overrides for local/Ollama routes.  Loaded once per
+    # request and applied ONLY where the stored cost is 0/unknown — a real
+    # stored cost is authoritative history and is never repriced.  Sessions
+    # that remain unpriceable are counted so the card can explain its N/A.
+    pricing_overrides = _pricing_overrides_from_settings()
+    unknown_cost_sessions = 0
 
     for s in sessions_data:
         input_tokens = _safe_usage_int(s.get("input_tokens"))
         output_tokens = _safe_usage_int(s.get("output_tokens"))
         cache_read_tokens = _safe_usage_int(s.get("cache_read_tokens"))
         cost_value = _safe_cost_float(s.get("estimated_cost"))
+        model = s.get("model") or "unknown"
+        # #8185: a zero stored cost means the Agent core had no pricing source
+        # for this route (ollama-cloud, LM Studio, local OpenAI-compatible
+        # endpoint).  Try the user-declared override before declaring the
+        # session unknown-priced; `free: true` makes it a KNOWN zero.
+        if cost_value > 0:
+            _cost_status = "priced"
+        else:
+            _override = _override_cost_for_session(
+                pricing_overrides, model, None, input_tokens, output_tokens, cache_read_tokens
+            )
+            if _override is not None:
+                cost_value, _cost_status = _override
+            else:
+                _cost_status = "unknown"
+                unknown_cost_sessions += 1
         total_messages += _safe_usage_int(s.get("message_count"))
         total_input_tokens += input_tokens
         total_output_tokens += output_tokens
         total_cache_read_tokens += cache_read_tokens
         total_cost += cost_value
 
-        model = s.get("model") or "unknown"
         bucket = model_stats.setdefault(model, {
             "sessions": 0,
             "input_tokens": 0,
             "output_tokens": 0,
             "cache_read_tokens": 0,
             "cost": 0.0,
+            "priced_sessions": 0,
+            "override_sessions": 0,
+            "free_sessions": 0,
+            "unknown_sessions": 0,
         })
         bucket["sessions"] += 1
         bucket["input_tokens"] += input_tokens
         bucket["output_tokens"] += output_tokens
         bucket["cache_read_tokens"] += cache_read_tokens
         bucket["cost"] += cost_value
+        # #8185: per-session pricing status feeds the model-level cost_status.
+        bucket[f"{_cost_status}_sessions"] += 1
 
         # Activity patterns
         ts = _session_usage_ts(s)
@@ -14071,11 +14168,17 @@ def _handle_insights(handler, parsed) -> bool:
                 cur = conn.cursor()
                 # cache_read_tokens may not exist on older agent state DBs;
                 # fall back to a query without it if the column is missing.
+                # #8185: billing_provider/cost_status are newer still, so the
+                # fallback ladder degrades one column-set at a time — every
+                # tier selects the SAME output columns (missing ones become
+                # '' / 0) so the row loop below is schema-agnostic.
                 try:
                     cur.execute(f"""
                         SELECT id, model, message_count, input_tokens, output_tokens,
                                estimated_cost_usd,
                                COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
+                               COALESCE(billing_provider, '') AS billing_provider,
+                               COALESCE(cost_status, '') AS cost_status,
                                started_at, ended_at,
                                COALESCE(ended_at, started_at, 0) AS usage_ts
                         FROM sessions
@@ -14084,23 +14187,61 @@ def _handle_insights(handler, parsed) -> bool:
                           AND COALESCE(source, '') != 'webui'
                     """, (cutoff, end_cutoff))
                 except sqlite3.OperationalError:
-                    cur.execute(f"""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               0 AS cache_read_tokens,
-                               started_at, ended_at,
-                               COALESCE(ended_at, started_at, 0) AS usage_ts
-                        FROM sessions
-                        WHERE COALESCE(ended_at, started_at, 0) >= ?
-                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, end_cutoff))
+                    try:
+                        cur.execute(f"""
+                            SELECT id, model, message_count, input_tokens, output_tokens,
+                                   estimated_cost_usd,
+                                   COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
+                                   '' AS billing_provider,
+                                   '' AS cost_status,
+                                   started_at, ended_at,
+                                   COALESCE(ended_at, started_at, 0) AS usage_ts
+                            FROM sessions
+                            WHERE COALESCE(ended_at, started_at, 0) >= ?
+                              AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
+                              AND COALESCE(source, '') != 'webui'
+                        """, (cutoff, end_cutoff))
+                    except sqlite3.OperationalError:
+                        cur.execute(f"""
+                            SELECT id, model, message_count, input_tokens, output_tokens,
+                                   estimated_cost_usd,
+                                   0 AS cache_read_tokens,
+                                   '' AS billing_provider,
+                                   '' AS cost_status,
+                                   started_at, ended_at,
+                                   COALESCE(ended_at, started_at, 0) AS usage_ts
+                            FROM sessions
+                            WHERE COALESCE(ended_at, started_at, 0) >= ?
+                              AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
+                              AND COALESCE(source, '') != 'webui'
+                        """, (cutoff, end_cutoff))
                 for row in cur.fetchall():
                     _input = _safe_usage_int(row["input_tokens"])
                     _output = _safe_usage_int(row["output_tokens"])
                     _cache_read = _safe_usage_int(row["cache_read_tokens"])
                     _cost = _safe_cost_float(row["estimated_cost_usd"])
                     _msgs = _safe_usage_int(row["message_count"])
+                    _model = row["model"] or "unknown"
+                    # #8185: same policy as the WebUI pass — a real stored cost
+                    # wins; cost_status='free' (agent core KNOWS the route is
+                    # free, e.g. local Ollama) is a known zero; otherwise try
+                    # the user-declared override before counting the session
+                    # as unknown-priced.
+                    if _cost > 0:
+                        _cost_status = "priced"
+                    elif str(row["cost_status"] or "").strip().lower() in ("free", "included"):
+                        _cost_status = "free"
+                    else:
+                        _override = _override_cost_for_session(
+                            pricing_overrides, _model,
+                            str(row["billing_provider"] or "").strip() or None,
+                            _input, _output, _cache_read,
+                        )
+                        if _override is not None:
+                            _cost, _cost_status = _override
+                        else:
+                            _cost_status = "unknown"
+                            unknown_cost_sessions += 1
                     total_sessions += 1
                     total_messages += _msgs
                     total_input_tokens += _input
@@ -14108,19 +14249,23 @@ def _handle_insights(handler, parsed) -> bool:
                     total_cache_read_tokens += _cache_read
                     total_cost += _cost
 
-                    _model = row["model"] or "unknown"
                     bucket = model_stats.setdefault(_model, {
                         "sessions": 0,
                         "input_tokens": 0,
                         "output_tokens": 0,
                         "cache_read_tokens": 0,
                         "cost": 0.0,
+                        "priced_sessions": 0,
+                        "override_sessions": 0,
+                        "free_sessions": 0,
+                        "unknown_sessions": 0,
                     })
                     bucket["sessions"] += 1
                     bucket["input_tokens"] += _input
                     bucket["output_tokens"] += _output
                     bucket["cache_read_tokens"] += _cache_read
                     bucket["cost"] += _cost
+                    bucket[f"{_cost_status}_sessions"] += 1
 
                     _ts = row["usage_ts"] or 0
                     if _ts:
@@ -14146,7 +14291,26 @@ def _handle_insights(handler, parsed) -> bool:
     # Build model breakdown
     total_tokens = total_input_tokens + total_output_tokens
     models_breakdown = []
+    # #8185: models whose sessions the aggregation still cannot price, so the
+    # Estimated Cost card can explain WHY it says N/A instead of N/A forever.
+    models_without_pricing = []
     for model, stats in model_stats.items():
+        # Model-level pricing status (most-informed session wins): priced >
+        # override > free > unknown.  A model is only "unknown" when NONE of
+        # its sessions has a real cost, a known-free marker, or an override.
+        if stats.get("priced_sessions"):
+            model_cost_status = "priced"
+        elif stats.get("override_sessions"):
+            model_cost_status = "override"
+        elif stats.get("free_sessions"):
+            model_cost_status = "free"
+        else:
+            model_cost_status = "unknown"
+        if stats.get("unknown_sessions"):
+            models_without_pricing.append({
+                "model": model,
+                "sessions": stats["unknown_sessions"],
+            })
         row_total_tokens = stats["input_tokens"] + stats["output_tokens"]
         row_cost = round(stats["cost"], 6)
         row_cache_read = stats["cache_read_tokens"]
@@ -14167,11 +14331,15 @@ def _handle_insights(handler, parsed) -> bool:
             "cache_hit_percent": row_cache_hit_percent,
             "total_tokens": row_total_tokens,
             "cost": row_cost,
+            # #8185: pricing status drives the cost cell — "$0.00" for a known-
+            # free route vs "N/A" only for genuinely unknown pricing.
+            "cost_status": model_cost_status,
             "session_share": int(round((stats["sessions"] / total_sessions) * 100)) if total_sessions else 0,
             "token_share": int(round((row_total_tokens / total_tokens) * 100)) if total_tokens else 0,
             "cost_share": int(round((row_cost / total_cost) * 100)) if total_cost else 0,
         })
     models_breakdown.sort(key=lambda r: (-r["cost"], -r["sessions"], r["model"]))
+    models_without_pricing.sort(key=lambda r: (-r["sessions"], r["model"]))
 
     daily_series = []
     for i in range(days):
@@ -14226,6 +14394,11 @@ def _handle_insights(handler, parsed) -> bool:
         ),
         "total_tokens": total_tokens,
         "total_cost": round(total_cost, 6),
+        # #8185: sessions the aggregation still cannot price (0 cost, no
+        # override) and the models behind them, so the Estimated Cost card can
+        # explain its N/A instead of showing it forever.
+        "unknown_cost_sessions": unknown_cost_sessions,
+        "models_without_pricing": models_without_pricing,
         "models": models_breakdown,
         "daily_tokens": daily_series,
         "activity_by_day": dow_data,
