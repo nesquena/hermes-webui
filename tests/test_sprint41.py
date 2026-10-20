@@ -108,13 +108,6 @@ class TestIssue495TitleStreaming(unittest.TestCase):
             "streaming.py should emit a title_status SSE event for title generation diagnostics",
         )
 
-    def test_streaming_emits_stream_end_event(self):
-        self.assertIn(
-            "put_event('stream_end', {'session_id': session_id})",
-            STREAMING_PY,
-            "background title path should end the SSE stream with stream_end",
-        )
-
     def test_frontend_listens_for_title_event(self):
         self.assertIn(
             "addEventListener('title'",

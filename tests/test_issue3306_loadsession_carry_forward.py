@@ -102,6 +102,14 @@ def _load_older_messages_body() -> str:
 
 
 def _start_gateway_sse_body() -> str:
+    # #7882 (greptile round-6): the import_cli refresh logic moved out of
+    # startGatewaySSE() into the module-local _applyGatewayCliImportRefresh()
+    # helper so tests can execute it. Extract whichever shape is present.
+    if "function _applyGatewayCliImportRefresh(" in SESSIONS_JS:
+        return _function_body(
+            "function _applyGatewayCliImportRefresh(",
+            "function startGatewaySSE",
+        )
     return _function_body(
         "function startGatewaySSE(){",
         "function stopGatewaySSE",
@@ -129,7 +137,18 @@ def test_load_older_messages_tail_match_carries_forward():
 def test_start_gateway_sse_import_cli_carries_forward():
     """#3306 follow-up: the gateway SSE → import_cli refresh path also does a
     wholesale `S.messages = next` for CLI sessions; it must carry forward
-    ephemeral turn fields too."""
+    ephemeral turn fields too. #7882 moved that logic into the
+    _applyGatewayCliImportRefresh() helper (executed coverage), so the pin
+    now targets the helper — and startGatewaySSE must still delegate to it."""
+    gateway_body = _function_body(
+        "function startGatewaySSE(){",
+        "function stopGatewaySSE",
+    )
+    assert "_applyGatewayCliImportRefresh(" in gateway_body, (
+        "#7882: startGatewaySSE must delegate the import_cli refresh to "
+        "_applyGatewayCliImportRefresh — the carry-forward pin below has no "
+        "target otherwise"
+    )
     body = _start_gateway_sse_body()
     cf_idx = body.find("_carryForwardEphemeralTurnFields(S.messages || [], next)")
     assign_idx = body.find("S.messages = _nextToAssign;")

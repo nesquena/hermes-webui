@@ -55,7 +55,9 @@ def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
         "Both browser TTS completion callbacks must clear watchdog/keep-alive handles."
     )
     assert "_browserTtsSuppressNextErrorRearm=false;" in speak_body
-    assert "_voiceModeActive&&_voiceModeState==='speaking'" in speak_body
+    # Round 6: the onend rearm goes through the owner-aware helper, whose
+    # timer re-checks active/speaking/generation before reopening the mic.
+    assert "_scheduleVoiceMicRearm(500);" in speak_body
     assert "if(_browserTtsSuppressNextErrorRearm){" in speak_body
     assert "_armBrowserTtsRecovery(clean, utter.rate);" in speak_body
 
@@ -63,7 +65,22 @@ def test_browser_tts_callbacks_and_deactivate_clear_recovery_handles():
     assert "_clearBrowserTtsRecovery();" in deactivate_body, (
         "_deactivate() must clear browser TTS watchdog/keep-alive handles."
     )
+    assert "_clearVoiceMicRearm();" in deactivate_body, (
+        "_deactivate() must clear the owner-aware mic rearm timer."
+    )
     assert "_browserTtsSuppressNextErrorRearm=false;" in deactivate_body
+
+
+def test_delayed_mic_rearm_is_owner_aware():
+    src = (REPO / "static" / "boot.js").read_text(encoding="utf-8")
+    body = _extract_function(src, "_scheduleVoiceMicRearm")
+    assert "_voiceModeState!=='speaking'" in body, (
+        "The delayed rearm must require voice mode to still be speaking."
+    )
+    assert "_ttsGeneration!==_gen" in body, (
+        "The delayed rearm must require the scheduling generation to still own TTS."
+    )
+    assert "_startListening();" in body
 
 
 def test_edge_audio_branch_stays_separate():
