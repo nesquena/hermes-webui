@@ -26,9 +26,9 @@ import json
 import urllib.request
 
 BASE = {
-    "name": "New-API-Chat",
-    "base_url": "http://192.168.2.76:3000/v1",
-    "key_env": "HERMES_CUSTOM_NEW_API_CHAT_API_KEY",
+    "name": "Example-Relay",
+    "base_url": "http://relay.invalid/v1",
+    "key_env": "EXAMPLE_RELAY_API_KEY",
     "api_mode": "chat_completions",
     "models": {"model-a": {}, "model-b": {}},
 }
@@ -40,7 +40,7 @@ def _wire(monkeypatch, tmp_path, entry, live_ids):
 
     monkeypatch.setattr(
         config, "cfg",
-        {"model": {"default": "model-a", "provider": "custom:new-api-chat"},
+        {"model": {"default": "model-a", "provider": "custom:example-relay"},
          "custom_providers": [entry]},
         raising=False,
     )
@@ -79,7 +79,7 @@ def _wire(monkeypatch, tmp_path, entry, live_ids):
     return config, calls
 
 
-def _ids(config, pid="custom:new-api-chat"):
+def _ids(config, pid="custom:example-relay"):
     payload = config.get_available_models(force_refresh=True)
     for group in payload.get("groups", []):
         if group.get("provider_id") == pid:
