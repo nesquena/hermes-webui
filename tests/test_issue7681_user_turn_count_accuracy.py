@@ -1689,10 +1689,12 @@ def test_blank_user_echo_is_not_a_user_turn():
     assert predicate({"role": "user", "content": ""}) is False
     assert predicate({"role": "user", "content": None}) is False
     assert predicate({"role": "user", "content": [{"type": "text", "text": "  "}]}) is False
-    # A non-text part is not a BLANK echo (that is `_is_blank_user_turn`'s
-    # contract), but the mirror still cannot see any human text in it, so the
-    # turn count does not increase either.
-    assert predicate({"role": "user", "content": [{"type": "image_url", "image_url": {}}]}) is False
+    # #7681 media-only re-gate: the OpenAI ``image_url`` shape is REAL payload
+    # to the agent's ``_blank_part``, so an image_url-only row is a human turn
+    # the Agent counts (verified: the installed predicate returns True for
+    # ``{'type':'image_url','image_url':{'url':'data:image/png;base64,...'}}``
+    # and even for an empty ``image_url`` dict). The mirror must agree.
+    assert predicate({"role": "user", "content": [{"type": "image_url", "image_url": {}}]}) is True
 
 
 def test_blank_user_turn_predicate_itself_excludes_empty_payloads():

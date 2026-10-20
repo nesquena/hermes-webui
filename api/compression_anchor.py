@@ -53,6 +53,38 @@ def _content_has_part_type(content, part_types):
     )
 
 
+# The only part types whose text can be blank: every other dict part (``image``,
+# ``input_image``, ``image_url``, ``document``, ``file``, ``tool_use``, ...) is
+# real payload to the agent's ``_blank_part`` (agent/context_compressor.py:4367-
+# 4372). Both classifiers below are defined from this single notion so they can
+# never disagree about a media-only row (#7681 media-only re-gate).
+_BLANK_TEXT_PART_TYPES = frozenset({"text", "input_text"})
+
+
+def _content_has_real_payload(content) -> bool:
+    """True when *content* carries a non-text payload block the Agent counts.
+
+    Mirrors the agent's ``_blank_part`` (agent/context_compressor.py:4367-4372):
+    only ``text`` / ``input_text`` parts with blank text — and whitespace-only
+    bare string parts — are blank; every other part is real payload. The old
+    allowlist here (``image`` / ``input_image`` / ``document`` / ``file``) was
+    missing the OpenAI ``image_url`` shape, so every ``image_url``-only row was
+    condemned as scaffolding and counted 0 where the Agent counts 1. An empty
+    list or an all-blank list has no real payload.
+    """
+    if not isinstance(content, list):
+        return False
+
+    def _blank_part(part) -> bool:
+        if isinstance(part, str):
+            return not part.strip()
+        if isinstance(part, dict) and part.get("type") in _BLANK_TEXT_PART_TYPES:
+            return not str(part.get("text") or "").strip()
+        return False
+
+    return bool(content) and not all(_blank_part(part) for part in content)
+
+
 def is_context_compression_marker(message):
     """Return true for synthetic compression/reference cards, not user turns."""
     if not isinstance(message, dict):
@@ -296,10 +328,13 @@ def _is_internal_user_row(message) -> bool:
         # payload. An image-only row has real content the Agent counts, and
         # ``_is_blank_user_turn`` already accepts non-text payloads as
         # non-blank — this classifier must agree instead of condemning every
-        # media-only turn as internal. Only a genuinely blank row (no text and
-        # no non-text payload) is scaffolding here.
-        content = message.get("content")
-        if _content_has_part_type(content, {"image", "input_image", "document", "file"}):
+        # media-only turn as internal. ``_content_has_real_payload`` mirrors
+        # the agent's ``_blank_part`` exactly, so the OpenAI ``image_url``
+        # shape (``{'type':'image_url','image_url':{'url':...}}``) counts as
+        # a real payload too — the old allowlist missed it and every
+        # image_url-only row returned 0 where the Agent returns 1. Only a
+        # genuinely blank row (no text and no non-text payload) is scaffolding.
+        if _content_has_real_payload(message.get("content")):
             return False
         return True  # blank echo — no human ask
     if any(text.startswith(prefix) for prefix in USER_TURN_INTERNAL_PREFIXES):
@@ -496,6 +531,14 @@ def _unwrap_carrier_candidate(message: dict):
         found_delimiter = False
         for item in content:
             if _MERGED_SUMMARY_DELIMITER in _part_text(item):
+                # The agent keeps the text BEFORE the delimiter even when it
+                # shares the delimiter's own part (context_compressor.py:4528-
+                # 4533, ``text.split(delim, 1)[0]``); dropping it loses a
+                # supported text ask that shares the part with the delimiter
+                # (#7681 re-gate finding 2, merged twin).
+                before_text = _part_text(item).split(_MERGED_SUMMARY_DELIMITER, 1)[0]
+                if before_text.strip():
+                    before.append(_with_part_text(item, before_text))
                 found_delimiter = True
                 break
             before.append(item)
@@ -513,7 +556,12 @@ def _unwrap_carrier_candidate(message: dict):
                 return _candidate(media_blocks)
         else:
             # Legacy list form: the live ask follows the end marker in whichever
-            # part carries it.
+            # part carries it — INCLUDING the marker part's own post-marker
+            # text. The agent's list walk keeps ``text.split(marker, 1)[1]``
+            # and every later block (context_compressor.py:4536-4543); the
+            # previous mirror only kept later parts, so an ask sharing its part
+            # with the end marker was dropped and the carrier read as
+            # scaffolding (#7681 re-gate finding 2).
             joined = _join_parts(content)
             if _SUMMARY_END_MARKER not in joined:
                 return None
@@ -522,7 +570,12 @@ def _unwrap_carrier_candidate(message: dict):
             for item in content:
                 if seen_marker:
                     tail.append(item)
-                elif _SUMMARY_END_MARKER in _part_text(item):
+                    continue
+                part_text = _part_text(item)
+                if _SUMMARY_END_MARKER in part_text:
+                    remainder = part_text.split(_SUMMARY_END_MARKER, 1)[1].lstrip()
+                    if remainder:
+                        tail.append(_with_part_text(item, remainder))
                     seen_marker = True
             payload = _join_parts_text([_part_text(item) for item in tail]).lstrip()
             media_blocks = [
@@ -584,6 +637,17 @@ def _part_text(item) -> str:
         if isinstance(text, str):
             return text
     return ""
+
+
+def _with_part_text(item, text: str):
+    """Copy of a content part carrying ``text`` (mirror of the agent's helper).
+
+    The agent uses this to keep the text before a delimiter / after an end
+    marker that shares its part with the marker
+    (context_compressor.py:1401-1403, :4529-4542). String parts become the
+    text itself; dict parts keep every other field and swap ``text``.
+    """
+    return {**item, "text": text} if isinstance(item, dict) else text
 
 
 def _join_parts(content: list) -> str:

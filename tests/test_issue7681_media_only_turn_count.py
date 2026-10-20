@@ -62,9 +62,20 @@ _IMAGE_PART = {
     "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="},
 }
 
+# The maintainer's re-gate probe shape (2026-10-18): the OpenAI-style
+# ``image_url`` part with a base64 data-URI. The Agent's predicate counts this
+# as a non-blank real payload; the WebUI mirror's old allowlist
+# (image/input_image/document/file) missed it, so every image_url-only row
+# returned 0 where the Agent returns 1.
+_IMAGE_URL_PART = {
+    "type": "image_url",
+    "image_url": {"url": "data:image/png;base64,iVBORw0KGgo="},
+}
+
 # The production constant (api/compression_anchor.py): the merged carrier's
 # own delimiter. Imported so the fixture can never drift from it.
 from api.compression_anchor import _MERGED_SUMMARY_DELIMITER as _MERGED_DELIMITER  # noqa: E402
+from api.compression_anchor import _SUMMARY_END_MARKER as _END_MARKER  # noqa: E402
 
 
 # ── ① an ordinary image-only user row ───────────────────────────────────
@@ -218,6 +229,145 @@ def test_a_legacy_carrier_list_form_with_an_image_after_the_marker_counts(
     assert is_user_originated_turn(carrier) is True
 
 
+# ── re-gate 2026-10-18: the maintainer's image_url reproduction shapes ──────
+#
+# The 10-14 review replayed the real ``Session._compute_user_message_count``
+# against the OpenAI ``image_url`` part shape
+# (``{'type':'image_url','image_url':{'url':'data:image/png;base64,...'}}``),
+# NOT ``type='image'``. The installed Agent predicate returns True for each
+# shape below; the previous head counted 0 for each because
+# ``_is_internal_user_row``'s non-text allowlist missed ``image_url``. These
+# tests use the maintainer's exact shape so green closes the reproduction.
+
+
+def test_an_ordinary_image_url_only_row_counts(monkeypatch) -> None:
+    """Maintainer shape ①: the plain OpenAI ``image_url`` turn."""
+    _fallback_only(monkeypatch)
+    row = {"role": "user", "content": [dict(_IMAGE_URL_PART)]}
+    assert is_user_originated_turn(row) is True, (
+        "an ordinary image_url-only row is a real human turn — the Agent "
+        "counts it and the mirror's allowlist must include image_url "
+        "(#7681 re-gate)"
+    )
+
+
+def test_an_image_url_row_with_an_empty_image_url_object_counts(monkeypatch) -> None:
+    """Even an empty ``image_url`` dict is real payload to the Agent."""
+    _fallback_only(monkeypatch)
+    row = {"role": "user", "content": [{"type": "image_url", "image_url": {}}]}
+    assert is_user_originated_turn(row) is True
+
+
+def test_a_merged_carrier_with_an_image_url_before_the_delimiter_counts(
+    monkeypatch,
+) -> None:
+    """Maintainer shape ②: the live ask is an ``image_url`` in front of the
+    merged prior-context delimiter — the purest form, media only."""
+    _fallback_only(monkeypatch)
+    carrier = {
+        "role": "user",
+        "_compressed_summary": True,
+        "content": [
+            dict(_IMAGE_URL_PART),
+            {"type": "text", "text": _MERGED_DELIMITER},
+            {"type": "text", "text": "[CONTEXT SUMMARY]: prior turns"},
+        ],
+    }
+    assert is_user_originated_turn(carrier) is True, (
+        "a merged carrier whose live ask is an image_url in front of the "
+        "delimiter must be counted — the Agent counts it (#7681 re-gate)"
+    )
+
+
+def test_a_legacy_carrier_list_form_with_an_image_url_after_the_marker_counts(
+    monkeypatch,
+) -> None:
+    """Maintainer shape ③: the legacy list carrier's live payload is an
+    ``image_url`` after the end marker."""
+    _fallback_only(monkeypatch)
+    carrier = {
+        "role": "user",
+        "display_kind": "hidden",
+        "_compressed_summary": True,
+        "content": [
+            {"type": "text", "text": "[CONTEXT SUMMARY]: prior turns"},
+            {"type": "text", "text": _END_MARKER},
+            dict(_IMAGE_URL_PART),
+        ],
+    }
+    assert is_user_originated_turn(carrier) is True, (
+        "a legacy carrier whose live payload is an image_url after the end "
+        "marker must be counted — the Agent counts it (#7681 re-gate)"
+    )
+
+
+def test_a_legacy_list_carrier_with_the_ask_sharing_the_marker_part_counts(
+    monkeypatch,
+) -> None:
+    """Re-gate finding 2: the marker and the text ask share ONE part.
+
+    The agent's list walk keeps ``text.split(marker, 1)[1]``
+    (context_compressor.py:4536-4543); the previous mirror only kept later
+    parts, so the ask after the marker inside the same part was dropped and
+    the carrier read as scaffolding.
+    """
+    _fallback_only(monkeypatch)
+    carrier = {
+        "role": "user",
+        "display_kind": "hidden",
+        "_compressed_summary": True,
+        "content": [
+            {"type": "text", "text": "[CONTEXT SUMMARY]: prior turns"},
+            {"type": "text", "text": _END_MARKER + "\n\nnow do the thing"},
+        ],
+    }
+    assert is_user_originated_turn(carrier) is True, (
+        "a legacy carrier whose text ask shares the end-marker part must be "
+        "counted — the Agent counts it (#7681 re-gate finding 2)"
+    )
+
+
+def test_a_merged_list_carrier_with_text_sharing_the_delimiter_part_counts(
+    monkeypatch,
+) -> None:
+    """Re-gate finding 2 (merged twin): the text ask shares the delimiter part.
+
+    The agent keeps ``text.split(delim, 1)[0]`` inside the delimiter part
+    (context_compressor.py:4528-4533); the previous mirror dropped it.
+    """
+    _fallback_only(monkeypatch)
+    carrier = {
+        "role": "user",
+        "_compressed_summary": True,
+        "content": [
+            {"type": "text", "text": "please fix the login bug " + _MERGED_DELIMITER},
+            {"type": "text", "text": "[CONTEXT SUMMARY]: prior turns"},
+        ],
+    }
+    assert is_user_originated_turn(carrier) is True, (
+        "a merged carrier whose text ask shares the delimiter part must be "
+        "counted — the Agent counts it (#7681 re-gate finding 2)"
+    )
+
+
+def test_an_image_url_only_standalone_legacy_carrier_is_scaffolding(
+    monkeypatch,
+) -> None:
+    """Negative for the image_url shapes: a standalone carrier with nothing
+    after the marker — text or media — stays scaffolding."""
+    _fallback_only(monkeypatch)
+    carrier = {
+        "role": "user",
+        "display_kind": "hidden",
+        "_compressed_summary": True,
+        "content": [
+            {"type": "text", "text": "[CONTEXT SUMMARY]: prior turns"},
+            {"type": "text", "text": _END_MARKER},
+        ],
+    }
+    assert is_user_originated_turn(carrier) is False
+
+
 # ── negatives retained: a media-only row is still not a blank echo ───────
 
 
@@ -311,4 +461,60 @@ def test_the_sidecar_counter_counts_each_media_shape_once(monkeypatch) -> None:
     assert Session._compute_user_message_count(messages) == 3, (
         "each media-only human turn must count exactly once — the Agent "
         "counts 3, the previous head counted 0 (#7681 media-only finding)"
+    )
+
+
+def test_the_sidecar_counter_counts_each_image_url_shape_once(monkeypatch) -> None:
+    """The re-gate probe end to end: ``Session._compute_user_message_count``
+    over the maintainer's ``image_url`` shapes, each counted exactly once.
+
+    The 10-14 review replayed exactly this walk with ``type='image_url'``
+    parts and the Agent delegation unavailable; the previous head returned 0
+    for all three rows. This test pins the counter, not just the predicate.
+    """
+    from api.models import Session
+
+    _fallback_only(monkeypatch)
+    messages = [
+        {"role": "assistant", "content": "here you go"},
+        # ① ordinary image_url-only row
+        {"role": "user", "content": [dict(_IMAGE_URL_PART)]},
+        {"role": "assistant", "content": "got it"},
+        # ② merged carrier with an image_url before the delimiter
+        {
+            "role": "user",
+            "_compressed_summary": True,
+            "content": [
+                dict(_IMAGE_URL_PART),
+                {"type": "text", "text": _MERGED_DELIMITER},
+                {"type": "text", "text": "[CONTEXT SUMMARY]: prior turns"},
+            ],
+        },
+        {"role": "assistant", "content": "noted"},
+        # ③ legacy carrier with an image_url after the end marker
+        {
+            "role": "user",
+            "display_kind": "hidden",
+            "_compressed_summary": True,
+            "content": [
+                {"type": "text", "text": "[CONTEXT SUMMARY]: prior turns"},
+                {"type": "text", "text": _END_MARKER},
+                dict(_IMAGE_URL_PART),
+            ],
+        },
+        # ④ re-gate finding 2: the text ask shares the end-marker part
+        {
+            "role": "user",
+            "display_kind": "hidden",
+            "_compressed_summary": True,
+            "content": [
+                {"type": "text", "text": "[CONTEXT SUMMARY]: prior turns"},
+                {"type": "text", "text": _END_MARKER + "\n\nnow do the thing"},
+            ],
+        },
+    ]
+    assert Session._compute_user_message_count(messages) == 4, (
+        "each image_url / shared-part media turn must count exactly once — "
+        "the Agent counts 4, the previous head counted 0 "
+        "(#7681 re-gate finding 2)"
     )
