@@ -163,3 +163,51 @@ assert.deepStrictEqual(third.rows, ['user:hello', 'assistant:authoritative settl
 """
     out = _run_node(script)
     assert out.returncode == 0, out.stderr
+
+
+def test_provisional_candidate_with_saved_answer_is_a_duplicate():
+    """#6649 re-gate 2026-10-19: a provisional candidate must be allowed BEFORE
+    the completed-answer veto in the marker branch.
+
+    The recovery tail's user row is ``_pending``, unmarked, id-less and still
+    carries the client stamp (``_ts: 100``), while the server row for the SAME
+    turn is marked ``_active_turn_user`` and carries ``pending_started_at``
+    (200). The stamps therefore never precision-match, and the assistant row
+    the server already saved for this very turn makes ``_sawCompletedAnswer``
+    true — so vetoing on it first rejected the pair, ``_mergeInflightTailMessages``
+    appended the turn again, and the transcript showed the current prompt and
+    answer twice. Master renders one copy for the same input.
+    """
+    script = f"""
+const assert = require('assert');
+{_helper_block()}
+
+// Server side: the marked user plus the answer it already saved for this turn.
+const base = [
+  {{ role:'user', content:'export the data', timestamp:200, _active_turn_user:true }},
+  {{ role:'assistant', content:'Export is ready.', timestamp:201 }},
+];
+
+// Client side: the speculative row for the SAME turn — _pending, unmarked,
+// id-less, still carrying the client stamp.
+const provisional = {{
+  role:'user', content:'export the data', _pending:true, _ts:100,
+}};
+
+assert.strictEqual(_hasInflightTailUserDuplicate(base, provisional), true,
+  'A provisional candidate whose answer is already saved must dedupe (the turn appeared twice)');
+
+// Control: the SAME shape without _pending is NOT provisional — an anonymous
+// unstamped row across a completed answer stays a different turn, so the
+// allowance cannot be widened by dropping the flag.
+const anonymous = {{ role:'user', content:'export the data', _ts:100 }};
+assert.strictEqual(_hasInflightTailUserDuplicate(base, anonymous), false,
+  'Without _pending the completed answer still separates the turns');
+
+// Control: a provisional row whose text differs is still a different turn.
+const otherText = {{ role:'user', content:'import the data', _pending:true, _ts:100 }};
+assert.strictEqual(_hasInflightTailUserDuplicate(base, otherText), false,
+  'The provisional allowance still requires the same prompt text');
+"""
+    out = _run_node(script)
+    assert out.returncode == 0, out.stderr

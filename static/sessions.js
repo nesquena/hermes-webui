@@ -4445,10 +4445,22 @@ function _hasInflightTailUserDuplicate(messages,candidate){
         // No precision-matched identity: a completed answer between the rows
         // still means different settled turns (the marker branch must never
         // pair across it with text equality alone).
-        if(_sawCompletedAnswer) return false;
-        // The provisional candidate is the client's own speculative row for
-        // the active turn: skip the stamp veto, text equality decides.
+        // #6649 re-gate (2026-10-19): a PROVISIONAL candidate is exempt from
+        // that veto and is allowed FIRST. The recovery tail's user row is
+        // `_pending`, unmarked and id-less and still carries the client stamp
+        // (`_ts: 100`), while the server row for the SAME turn carries
+        // `pending_started_at` (200) — so the stamps never precision-match,
+        // and the assistant row the server already saved for this very turn
+        // makes `_sawCompletedAnswer` true. Vetoing first then rejected the
+        // pair, `_mergeInflightTailMessages` appended the turn again, and the
+        // transcript showed the current prompt and answer twice (master shows
+        // one copy). A provisional candidate is the client's own speculative
+        // row for the active turn by construction, so a saved answer between
+        // the rows is that turn's answer, not a settled boundary — the same
+        // reasoning the marker branch already applies to an authoritative
+        // marker pair.
         if(_provisionalCandidate) return _sameText(msg,candidate);
+        if(_sawCompletedAnswer) return false;
         // A marked pair whose stamps are a whole second apart is a different
         // turn; with no stamps at all the marker alone keeps the text rule.
         if(_aTs&&_bTs) return false;
