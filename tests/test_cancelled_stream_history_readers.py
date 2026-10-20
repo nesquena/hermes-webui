@@ -30,6 +30,12 @@ def _worker(monkeypatch, tmp_path, session, prompt, captured):
                         {'role': 'assistant', 'content': 'NEXT_ANSWER'}]}
 
     monkeypatch.setattr(streaming, '_get_ai_agent', lambda: OlderAgent)
+    # The fake agent ignores session_db. Without this stub the real worker opens
+    # hermes_state.SessionDB at the default profile home, which is the live test
+    # server's shared state dir, and leaves an Agent-schema state.db there. Its
+    # unique title index then makes later INSERT OR REPLACE fixtures that reuse a
+    # title (tests/test_gateway_sync.py) silently delete their own rows.
+    monkeypatch.setattr(streaming, '_build_session_db_for_stream', lambda _: None)
     monkeypatch.setattr(streaming, 'resolve_model_provider',
                         lambda *args, **kwargs: ('test-model', None, None))
     monkeypatch.setattr(streaming, 'get_config', lambda: {})
