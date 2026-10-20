@@ -4105,7 +4105,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
     // values to the server so the next refresh won't revert. Skip the push for a
     // still-pending extension skin (don't persist it server-side until it's a
     // confirmed-registered skin — avoids writing a skin the server can't validate).
-    if((lsHasExplicitTheme||lsHasExplicitSkin)&&!lsSkinIsPendingExt&&(theme!==srvAppearance.theme||skin!==srvAppearance.skin)){
+    if(!(window.__HERMES_WORKPLACE__&&window.__HERMES_WORKPLACE__.enabled)&&(lsHasExplicitTheme||lsHasExplicitSkin)&&!lsSkinIsPendingExt&&(theme!==srvAppearance.theme||skin!==srvAppearance.skin)){
       try{
         api('/api/settings',{method:'POST',body:JSON.stringify({theme,skin})});
       }catch(_){}

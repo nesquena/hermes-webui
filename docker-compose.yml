@@ -45,6 +45,8 @@ services:
       # Optional: enable password auth. Set HERMES_WEBUI_PASSWORD in .env
       # (required if you expose the port beyond 127.0.0.1).
       - HERMES_WEBUI_PASSWORD=${HERMES_WEBUI_PASSWORD:-}
+      - HERMES_WEBUI_MANAGED_MODE=${HERMES_WEBUI_MANAGED_MODE:-1}
+      - HERMES_WEBUI_ADMIN_PIN=${HERMES_WEBUI_ADMIN_PIN:-}
       #
       # Bind-mount permission handling (fixes #1389, #1399):
       #   When you mount an EXISTING ~/.hermes directory (the common case),

@@ -13583,7 +13583,8 @@ def load_settings() -> dict:
     # values (including a legacy English pick written before this change)
     # win via the merge above and are never touched here.
     settings.setdefault("language", None)
-    return settings
+    from api.workplace import apply_policy
+    return apply_policy(settings)
 
 
 _SETTINGS_ALLOWED_KEYS = set(_SETTINGS_DEFAULTS.keys()) - {

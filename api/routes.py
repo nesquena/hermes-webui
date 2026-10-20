@@ -15938,6 +15938,8 @@ def handle_get(handler, parsed) -> bool:
                     json.dumps(csp_img_extra_sources(extra_img_src)).replace("<", "\\u003c"),
                 )
             )
+            from api.workplace import status as workplace_status
+            html = html.replace("__WORKPLACE_JSON__", json.dumps(workplace_status(handler)))
             return t(
                 handler,
                 inject_extension_tags(html),

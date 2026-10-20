@@ -1,5 +1,13 @@
 # Hermes Web UI
 
+## Company workstation preset (this fork)
+
+This fork includes a chat-first workplace mode with server-enforced temporary
+PIN administration. Compose enables it by default; configure a private
+`HERMES_WEBUI_ADMIN_PIN` on the WebUI server to unlock Settings. See
+[workplace setup, defaults and scope](docs/workplace.md). Set
+`HERMES_WEBUI_MANAGED_MODE=0` to restore the upstream interface.
+
 [Hermes Agent](https://hermes-agent.nousresearch.com/) is a sophisticated autonomous agent that lives on your server, accessed via a terminal or messaging apps, that remembers what it learns and gets more capable the longer it runs.
 
 Hermes WebUI is a lightweight, dark-themed web app interface in your browser for [Hermes Agent](https://hermes-agent.nousresearch.com/).

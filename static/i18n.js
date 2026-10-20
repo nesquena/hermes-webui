@@ -5,6 +5,13 @@
 
 const LOCALES = {
   en: {
+    workplace_admin_active: 'Administration unlocked for up to 10 minutes.',
+    workplace_lock: 'Lock administration',
+    workplace_unlock: 'Unlock administration',
+    workplace_pin_prompt: 'Enter the administrator PIN. Access expires after 10 minutes.',
+    workplace_pin_missing: 'An administrator must configure a PIN on the server first.',
+    workplace_unlock_failed: 'Administration could not be unlocked.',
+    workplace_welcome: 'Ask a work-related question or attach a document to get started.',
     offline_title: 'Connection lost',
     offline_browser_detail: 'Your browser reports that this device is offline.',
     offline_network_detail: 'Hermes is unreachable from this browser right now.',

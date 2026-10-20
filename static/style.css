@@ -7624,3 +7624,37 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
 /* Settings field highlight (mirrors msg-question-highlight / _highlightQuestionRow pattern) */
 .settings-field-highlight { animation: settings-field-pulse 1.6s ease-out; }
 @keyframes settings-field-pulse { 0% { box-shadow: 0 0 0 0 var(--focus-ring); } 35% { box-shadow: 0 0 0 4px var(--focus-ring); } 100% { box-shadow: 0 0 0 0 rgba(0, 0, 0, 0); } }
+/* Workplace policy applies before first paint, independently of the user's
+   cached tab/control preferences. All selectors cover desktop and mobile. */
+html[data-workplace="locked"] .nav-tab:not([data-panel="chat"]):not([data-panel="settings"]),
+html[data-workplace="locked"] .dashboard-link,
+html[data-workplace="locked"] .composer-model-wrap,
+html[data-workplace="locked"] #profileChipWrap,
+html[data-workplace="locked"] #titlebarProfileBtn,
+html[data-workplace="locked"] .composer-ws-wrap,
+html[data-workplace="locked"] #composerReasoningWrap,
+html[data-workplace="locked"] #composerToolsetsWrap,
+html[data-workplace="locked"] #yoloPill,
+html[data-workplace="locked"] #btnMic,
+html[data-workplace="locked"] #btnVoiceMode,
+html[data-workplace="locked"] #btnSavedPrompts,
+html[data-workplace="locked"] #composerMobileConfigBtn,
+html[data-workplace="locked"] #btnWorkspacePanelToggle,
+html[data-workplace="locked"] #btnWorkspacePanelEdgeToggle,
+html[data-workplace="locked"] .rightpanel,
+html[data-workplace="locked"] #rightpanelResize,
+html[data-workplace="locked"] #mainSettings,
+html[data-workplace="locked"] .composer-divider,
+html[data-workplace="locked"] .empty-suggestions { display:none !important; }
+html[data-workplace="admin"] .nav-tab.nav-tab-hidden { display:inline-flex !important; }
+.workplace-admin-bar:not([hidden]) {
+  display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between;
+  gap:12px; padding:12px; margin-bottom:16px; border:1px solid var(--border);
+  border-radius:8px; color:var(--muted); font-size:12px;
+}
+.workplace-admin-bar button {
+  font:inherit; min-height:40px; padding:8px 12px; color:var(--text);
+  background:var(--input-bg); border:1px solid var(--border); border-radius:6px;
+  cursor:pointer;
+}
+.workplace-admin-bar button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }

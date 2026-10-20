@@ -452,6 +452,7 @@ function syncOnboardingProvider(value){
 }
 
 async function loadOnboardingWizard(){
+  if(typeof workplaceLocked==='function'&&workplaceLocked())return false;
   try{
     const status=await api('/api/onboarding/status');
     ONBOARDING.status=status;

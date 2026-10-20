@@ -402,6 +402,8 @@ function _syncMobileSidebarPanelFromMainView(){
 
 async function switchPanel(name, opts = {}) {
   const nextPanel = name || 'chat';
+  if(typeof workplaceLocked==='function'&&workplaceLocked()&&nextPanel!=='chat'
+      && !await workplaceAllowsPanel(nextPanel)) return false;
   const prevPanel = _currentPanel;
   // ── Desktop sidebar collapse toggle (rail-click only) ──
   // If the click came from a rail icon AND we're on desktop, the rail icon
