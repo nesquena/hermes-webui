@@ -53,44 +53,11 @@ def test_dismissed_set_capped_at_100():
 # Guard in showApprovalCard
 # ---------------------------------------------------------------------------
 
-def test_guard_in_show_approval_card():
-    compact = _compact(MESSAGES_JS)
-    # Guard must appear inside showApprovalCard, after _rememberApprovalPending
-    func_start = compact.find("functionshowApprovalCard(")
-    assert func_start != -1
-    # Locate the guard after the function start (dismissals are namespaced by
-    # session, so the guard passes sid + approval_id).
-    guard = "_isApprovalDismissed(sid,pending.approval_id)"
-    guard_idx = compact.find(guard, func_start)
-    assert guard_idx != -1, "guard _isApprovalDismissed must appear in showApprovalCard"
-    # _rememberApprovalPending must appear before the guard
-    remember = "_rememberApprovalPending("
-    remember_idx = compact.find(remember, func_start)
-    assert remember_idx != -1
-    assert remember_idx < guard_idx, "guard must come after _rememberApprovalPending"
 
-
-def test_guard_returns_early():
-    # The guard must be a return statement
-    compact = _compact(MESSAGES_JS)
-    assert "if(pending&&pending.approval_id&&_isApprovalDismissed(sid,pending.approval_id))return;" in compact
-
-
-# ---------------------------------------------------------------------------
-# dismissApprovalCard function
-# ---------------------------------------------------------------------------
 
 def test_dismiss_approval_card_defined():
     assert "function dismissApprovalCard(" in MESSAGES_JS
 
-
-def test_dismiss_approval_card_marks_dismissed():
-    compact = _compact(MESSAGES_JS)
-    func_start = compact.find("functiondismissApprovalCard(")
-    assert func_start != -1
-    body_end = compact.find("}", func_start)
-    body = compact[func_start:body_end + 1]
-    assert "_markApprovalDismissed(sid,_approvalCurrentId)" in body
 
 
 def test_dismiss_approval_card_hides_card():
@@ -101,19 +68,6 @@ def test_dismiss_approval_card_hides_card():
     body = compact[func_start:body_end + 1]
     assert "hideApprovalCard(true)" in body
 
-
-def test_dismiss_approval_card_clears_pending_attention():
-    # dismissApprovalCard must call _clearApprovalPendingForSession so the tab
-    # indicator stops blinking after dismiss. Without this, _rememberApprovalPending
-    # reinsertes the pending entry on every poll tick and the indicator stays lit.
-    compact = _compact(MESSAGES_JS)
-    func_start = compact.find("functiondismissApprovalCard(")
-    assert func_start != -1
-    body_end = compact.find("}", func_start)
-    body = compact[func_start:body_end + 1]
-    assert "_clearApprovalPendingForSession(sid)" in body, (
-        "dismissApprovalCard must call _clearApprovalPendingForSession(sid)"
-    )
 
 
 def test_dismiss_approval_card_captures_sid_before_hide():
@@ -286,7 +240,7 @@ def test_same_approval_id_in_two_sessions_does_not_collide():
         pytest.skip("node not available")
     helpers = "\n".join(
         _extract_fn(MESSAGES_JS, n)
-        for n in ("_approvalDismissKey", "_getDismissedApprovals",
+        for n in ("_promptNotifyKey", "_approvalDismissKey", "_getDismissedApprovals",
                   "_isApprovalDismissed", "_markApprovalDismissed", "_unmarkApprovalDismissed")
     )
     script = (

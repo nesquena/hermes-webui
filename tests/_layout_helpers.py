@@ -137,6 +137,32 @@ function collectRenderViolations(scopeSelector, options) {
     return null
   }
 
+  // An interactive element that currently sits outside the viewport is NOT a
+  // "degenerate/off-viewport" defect when it lives inside a scrollable ancestor
+  // (overflow-y/x auto|scroll whose content actually overflows): it is reachable
+  // by scrolling that container. Flagging it produces a false positive for a
+  // valid pattern — e.g. a tall dialog with overflow-y:auto on a short viewport,
+  // where a lower field is momentarily below the fold but scrolls into view.
+  // Only report off-viewport when the element is genuinely unreachable (no
+  // scrollable ancestor can bring the off-axis edge back on-screen).
+  function reachableByScrollableAncestor(node, offLeft, offRight, offTop, offBottom) {
+    var cur = node.parentElement
+    while (cur && cur !== root.parentElement) {
+      var cs = getComputed(cur)
+      var scrollsY = (cs.overflowY === "auto" || cs.overflowY === "scroll") &&
+        cur.scrollHeight > cur.clientHeight + 1
+      var scrollsX = (cs.overflowX === "auto" || cs.overflowX === "scroll") &&
+        cur.scrollWidth > cur.clientWidth + 1
+      // A vertical off-viewport (top past the fold, or bottom above it) is
+      // absorbed by a Y-scrollable ancestor; likewise X off-viewport by an
+      // X-scrollable ancestor.
+      if ((offTop || offBottom) && scrollsY) return true
+      if ((offLeft || offRight) && scrollsX) return true
+      cur = cur.parentElement
+    }
+    return false
+  }
+
   function walk(node) {
     if (node.nodeType !== 1) return
     var cs = getComputed(node)
@@ -226,7 +252,15 @@ function collectRenderViolations(scopeSelector, options) {
         } else if (isVisibleForDegenerate(child)) {
           var dr = child.getBoundingClientRect()
           var zeroSize = dr.width === 0 || dr.height === 0
-          var offViewport = dr.right < 0 || dr.bottom < 0 || dr.left > win.innerWidth || dr.top > win.innerHeight
+          var offLeft = dr.right < 0
+          var offRight = dr.left > win.innerWidth
+          var offTop = dr.bottom < 0
+          var offBottom = dr.top > win.innerHeight
+          var offViewport = offLeft || offRight || offTop || offBottom
+          // Reachable-by-scroll inside a scrollable ancestor is not a defect.
+          if (offViewport && reachableByScrollableAncestor(child, offLeft, offRight, offTop, offBottom)) {
+            offViewport = false
+          }
           if (zeroSize || offViewport) {
             violations.push({
               type: "degenerate",
@@ -302,7 +336,14 @@ function collectRenderViolations(scopeSelector, options) {
           if (dNode.tagName === "INPUT" && dNode.getAttribute("type") === "hidden") continue
           var dr2 = dNode.getBoundingClientRect()
           var zs = dr2.width === 0 || dr2.height === 0
-          var ov = dr2.right < 0 || dr2.bottom < 0 || dr2.left > win.innerWidth || dr2.top > win.innerHeight
+          var off2Left = dr2.right < 0
+          var off2Right = dr2.left > win.innerWidth
+          var off2Top = dr2.bottom < 0
+          var off2Bottom = dr2.top > win.innerHeight
+          var ov = off2Left || off2Right || off2Top || off2Bottom
+          if (ov && reachableByScrollableAncestor(dNode, off2Left, off2Right, off2Top, off2Bottom)) {
+            ov = false
+          }
           if (zs || ov) {
             violations.push({
               type: "degenerate",

@@ -1,3 +1,7 @@
+const _WEBUI_DISPATCHABLE_AGENT_COMMANDS = new Set([
+  'reload-mcp','reload-skills','codex-runtime','credits',
+  'moa','sessions','resume','pet'
+]);
 // ── Slash commands ──────────────────────────────────────────────────────────
 // Built-in commands intercepted before send(). Each command runs locally
 // (no round-trip to the agent) and shows feedback via toast or local message.
@@ -182,11 +186,37 @@ function executeCommand(text){
   return {noEcho:!!cmd.noEcho};
 }
 
+// Agent-registry slash commands that the WebUI actually dispatches when
+// submitted. The autocomplete must not advertise anything outside this set:
+// a non-dispatchable registry command (e.g. /agents) would otherwise fall
+// through send() to the ordinary chat path and trigger an unintended
+// model/API request.
+//
+// This set holds canonical registry names only. getMatchingCommands() matches
+// cmd.name (the canonical metadata name), so alias/underscore forms such as
+// /reload_mcp are covered implicitly: typing one resolves through
+// getAgentCommandMetadata() at dispatch time and the canonical name is what
+// gets tested against the dispatcher allowlist (#6951).
+//
+// Keep this in sync with _AGENT_COMMANDS_RUN_ON_WEBUI in messages.js and
+// _ALLOWED_AGENT_COMMANDS in api/commands.py -- the announced list is a
+// subset of the dispatched list (fail-closed), never a superset.
+// Plugin-category commands are always dispatchable via the plugin exec
+// transport. #6951.
+
+function _isWebuiDispatchableAgentCommand(cmd){
+  const name=String(cmd&&cmd.name||'').trim().toLowerCase();
+  if(_WEBUI_DISPATCHABLE_AGENT_COMMANDS.has(name))return true;
+  // Plugin-registered commands execute via the /api/commands/exec plugin transport.
+  return String(cmd&&cmd.category||'').trim()==='Plugin';
+}
+
 function getMatchingCommands(prefix){
   const q=prefix.toLowerCase();
   const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
   const seen=new Set(matches.map(c=>c.name));
   const reserved=_getReservedSlashCommandSlugs();
+  const bundleSlugs=new Set(_bundleCommandCache.map(bundle=>bundle.name));
   for(const [name, spec] of Object.entries(SLASH_SUBARG_SOURCES)){
     if(!name.startsWith(q)||seen.has(name))continue;
     matches.push({
@@ -213,9 +243,14 @@ function getMatchingCommands(prefix){
     const name=String(cmd&&cmd.name||'').toLowerCase();
     if(!name.startsWith(q)||seen.has(name))continue;
     if(cmd.cli_only&&name!=='pet')continue;
+    // #6951: only announce commands send() actually dispatches -- anything
+    // else would silently fall through to the normal chat path as plain text.
+    if(!_isWebuiDispatchableAgentCommand(cmd))continue;
     matches.push({
       name,
       desc:String(cmd&&cmd.description||'').trim()||'Agent command',
+      // Surface the registry's argument hint on the autocomplete row (#6951).
+      arg:String(cmd&&cmd.args_hint||'').trim()||undefined,
       source:cmd.category==='Plugin'?'plugin':'agent',
     });
     seen.add(name);
@@ -227,10 +262,16 @@ function getMatchingCommands(prefix){
       seen.add(bundle.name);
     }
   }
+  // A same-slug bundle owns dispatch. Hold plain skills until the independent
+  // bundle metadata request settles so a slow bundle response cannot briefly
+  // expose a selectable, shadowed skill.
+  if(!_bundleCommandCacheReady)return matches;
   for(const skill of _skillCommandCache){
-    if(!skill.name.startsWith(q)||seen.has(skill.name)||reserved.has(skill.name))continue;
+    const name=String(skill&&skill.name||'').toLowerCase();
+    const description=String(skill&&skill.desc||'').toLowerCase();
+    if((!name.includes(q)&&!description.includes(q))||seen.has(name)||reserved.has(name)||bundleSlugs.has(name))continue;
     matches.push(skill);
-    seen.add(skill.name);
+    seen.add(name);
   }
   return matches;
 }
@@ -243,8 +284,15 @@ let _slashPersonalityCachePromise=null;
 let _bundleCommandCache=[];
 let _bundleCommandLoadPromise=null;
 let _bundleCommandCacheReady=false;
+// Bumped by invalidateSlashSkillCaches(). The two skill-cache loaders below capture
+// it when they issue /api/skills and refuse to commit when it moved while their
+// response was in flight: a reply generated for the previous profile would otherwise
+// land after a profile switch and repopulate the caches with that profile's
+// disabled-filtered payload, keeping a skill that is enabled in the new profile
+// hidden (#7509).
 let _slashSkillCache=null;
 let _slashSkillCachePromise=null;
+let _slashSkillCacheGen=0;
 let _agentCommandCache=null;
 let _agentCommandCachePromise=null;
 
@@ -344,31 +392,47 @@ async function _loadSlashPersonalitySubArgs(force=false){
   return _slashPersonalityCachePromise;
 }
 
+// Disabled skills are excluded from the backend skill-command map, so the slash
+// picker surfaces must agree. Single gate for every place that turns /api/skills
+// entries into selectable completions.
+function _isSkillDisabled(skill){
+  return !!(skill&&skill.disabled);
+}
+
 async function _loadSlashSkillSubArgs(force=false){
   if(_slashSkillCache&&!force) return _slashSkillCache;
   if(_slashSkillCachePromise&&!force) return _slashSkillCachePromise;
+  const gen=_slashSkillCacheGen;
   _slashSkillCachePromise=(async()=>{
     try{
       const data=await api('/api/skills');
       const values=[];
       for(const skill of (data&&data.skills)||[]){
+        if(_isSkillDisabled(skill)) continue;
         const name=_normalizeSlashSubArg(skill&&skill.name);
         if(name) values.push(name);
       }
       const deduped=Array.from(new Set(values)).sort((a,b)=>a.localeCompare(b));
+      // A profile switch during the request bumped the generation: this payload
+      // belongs to the previous profile, so leave the cache empty for the fresh
+      // read instead of publishing stale names (#7509).
+      if(gen!==_slashSkillCacheGen) return _slashSkillCache||[];
       _slashSkillCache=deduped;
       return deduped;
     }catch(_){
-      _slashSkillCache=null;
+      if(gen===_slashSkillCacheGen) _slashSkillCache=null;
       return [];
     }finally{
-      _slashSkillCachePromise=null;
+      if(gen===_slashSkillCacheGen) _slashSkillCachePromise=null;
     }
   })();
   return _slashSkillCachePromise;
 }
 
 function invalidateSlashSkillCaches(){
+  // Bump before dropping the caches: an /api/skills response still in flight was
+  // generated for the previous profile and must not commit once it lands (#7509).
+  _slashSkillCacheGen++;
   _slashSkillCache=null;
   _slashSkillCachePromise=null;
   _skillCommandCache=[];
@@ -625,6 +689,41 @@ function _buildModelCandidates(sel,groups){
   }
   return {options,providerMap};
 }
+// Configured aliases are routing instructions, not fuzzy search terms. Hermes
+// encodes them as `provider/model`, while duplicate-provider picker rows use
+// `@provider:model`. Preserve that provider across the representation boundary;
+// if the model is not currently catalogued, keep the explicit routed value so
+// the eventual provider error is visible rather than silently choosing a
+// same-named model from another provider.
+function _resolveModelAliasTarget(options,providerMap,target){
+  if(target&&typeof target==='object'){
+    const model=String(target.model||'').trim();
+    const routeProvider=String(target.route_provider||'').trim();
+    if(model&&routeProvider){
+      return {value:`@${routeProvider}:${model}`,provider:routeProvider};
+    }
+    return null;
+  }
+  const raw=String(target||'').trim();
+  const slash=raw.indexOf('/');
+  if(slash<=0||slash===raw.length-1) return null;
+  const provider=raw.slice(0,slash);
+  const model=raw.slice(slash+1);
+  const routedPrefix=`@${provider}:`;
+  for(const option of (options||[])){
+    const value=String(option&&option.value!==undefined?option.value:option);
+    let optionProvider=String((providerMap&&providerMap[value])||'');
+    if(!optionProvider&&typeof _providerFromModelValue==='function'){
+      optionProvider=String(_providerFromModelValue(value)||'');
+    }
+    if(optionProvider.toLowerCase()!==provider.toLowerCase()) continue;
+    const nativeModel=value.toLowerCase().startsWith(routedPrefix.toLowerCase())
+      ?value.slice(routedPrefix.length)
+      :value;
+    if(nativeModel.toLowerCase()===model.toLowerCase()) return {value,provider};
+  }
+  return {value:`${routedPrefix}${model}`,provider};
+}
 function _bestModelMatch(options,query){
   let best=null;
   const versioned=_looksLikeVersionedModel(query);
@@ -678,24 +777,42 @@ async function cmdModel(args){
   // models; the rest live in extra_models and are absent from sel.options. The
   // CLI resolves against the full catalog, so /model must too. (#3368)
   let modelsData=null;
+  let aliasTarget=null;
   try {
     const resp=await fetch(new URL('api/models',document.baseURI||location.href).href);
     if(resp.ok){
       modelsData=await resp.json();
-      const aliases=modelsData.aliases||{};
-      for(const [alias,modelId] of Object.entries(aliases)){
+      let routedAliasMatched=false;
+      const routedAliases=modelsData.model_alias_routes||{};
+      for(const [alias,target] of Object.entries(routedAliases)){
         if(alias.toLowerCase()===q){
-          q=modelId.toLowerCase(); // resolve alias to real model id e.g. "deepseek/deepseek-v4-flash"
+          routedAliasMatched=true;
+          aliasTarget=target;
+          q=String(target&&typeof target==='object'?target.model:target).toLowerCase();
           break;
+        }
+      }
+      if(!routedAliasMatched){
+        const aliases=modelsData.aliases||{};
+        for(const [alias,modelId] of Object.entries(aliases)){
+          if(alias.toLowerCase()===q){
+            aliasTarget=modelId;
+            q=String(modelId||'').toLowerCase();
+            break;
+          }
         }
       }
     }
   } catch(_){/* non-critical, fall through to fuzzy match */}
   const {options:candidates,providerMap}=_buildModelCandidates(sel,modelsData&&modelsData.groups);
-  // First: try exact match within active provider's optgroup.
-  // Use _findModelInDropdown (ui.js) which supports preferredProviderId.
-  const preferred=(S&&S.session&&S.session.model_provider)||window._activeProvider||null;
-  let match=(typeof _findModelInDropdown==='function')?_findModelInDropdown(q,sel,preferred):null;
+  const aliasRoute=aliasTarget?_resolveModelAliasTarget(candidates,providerMap,aliasTarget):null;
+  // A provider-qualified alias is authoritative. For ordinary text, first try an
+  // exact match within the active provider's optgroup, then retain the existing
+  // fuzzy lookup behavior.
+  const preferred=(aliasRoute&&aliasRoute.provider)||(S&&S.session&&S.session.model_provider)||window._activeProvider||null;
+  let match=aliasRoute
+    ?aliasRoute.value
+    :(typeof _findModelInDropdown==='function'?_findModelInDropdown(q,sel,preferred):null);
   // Fallback: fuzzy match across the FULL catalog (featured + extras), so an
   // exact bare model living in the extras tail (e.g. "mimo-v2.5" alongside the
   // featured "mimo-v2.5-pro") still wins — exact/shortest-match in _bestModelMatch.
@@ -759,8 +876,9 @@ async function cmdModel(args){
   // end-to-end. _ensureModelOptionInDropdown reuses the existing option when one
   // is already rendered. (#3368)
   const hasOption=Array.from(sel.options||[]).some(o=>o.value===match);
-  if(!hasOption && typeof _ensureModelOptionInDropdown==='function'){
-    _ensureModelOptionInDropdown(match,sel,providerMap[match]||null);
+  const matchProvider=(aliasRoute&&aliasRoute.provider)||providerMap[match]||null;
+  if((aliasRoute||!hasOption) && typeof _ensureModelOptionInDropdown==='function'){
+    _ensureModelOptionInDropdown(match,sel,matchProvider);
   }else{
     sel.value=match;
   }
@@ -804,7 +922,6 @@ async function cmdTerminal(){
     // System-minted session (#6022): opening the terminal auto-creates a
     // session — explicit worktree:false so the config default can't leak.
     await newSession(false, {worktree: false});
-    if(typeof renderSessionList==='function') await renderSessionList();
   }
   if(!S.session||!S.session.workspace){
     showToast(t('terminal_no_workspace_title'),2600,'warning');
@@ -816,8 +933,9 @@ async function cmdTerminal(){
 
 async function cmdNew(){
   if(typeof clearCompressionUi==='function') clearCompressionUi();
+  // newSession() refreshes the sidebar itself; a second awaited render only
+  // queued another full list read in front of the focus (#7996).
   await newSession();
-  await renderSessionList();
   $('msg').focus();
   showToast(t('new_session'));
 }
@@ -866,6 +984,12 @@ async function _applyManualCompressionResult(data, focusTopic, visibleCount, com
       clearLiveToolCards();
       try{localStorage.setItem('hermes-webui-session',S.session.session_id);}catch(_){}
       if(typeof _setActiveSessionUrl==='function') _setActiveSessionUrl(S.session.session_id);
+      // Restore paging signals from the (possibly full) transcript response.
+      // A successful /compress returns the full transcript, so the bounded
+      // preflight's _messagesTruncated/_oldestIdx must be reset before render
+      // (#7628). Same restore-before-render ordering as the settle/cancel paths.
+      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!data.session._messages_truncated;
+      if(typeof _oldestIdx!=='undefined') _oldestIdx=data.session._messages_offset||0;
       syncTopbar();
       renderMessages();
       await renderSessionList();
@@ -927,6 +1051,12 @@ async function resumeManualCompressionForSession(sid){
     // No active compression job or transient server error — not a real failure.
     // 404: route missed or session gone; 5xx: backend exception during status check.
     if(e&&(!e.status||e.status===404||e.status>=500)) return;
+    // #7710: a cross-profile refusal now arrives as 409
+    // (``session_profile_mismatch``) where it used to be a 404 that hit the
+    // benign early-return above. It is not a compression failure, so do not
+    // render the error state or locally settle the compression UI.
+    if(e&&e.status===409&&typeof _sessionProfileMismatchFromError==='function'
+       &&_sessionProfileMismatchFromError(e)) return;
     if(S.session&&S.session.session_id===sid&&typeof setCompressionUi==='function'){
       const visibleMessages=_manualCompressionVisibleMessages();
       setCompressionUi({
@@ -958,14 +1088,18 @@ async function _runManualCompression(focusTopic){
     // Preflight: verify the viewed session still exists before compressing.
     // This avoids a confusing "not found" toast when the UI is stale.
     try{
-      const live=await api(`/api/session?session_id=${encodeURIComponent(sid)}`);
+      // Bounded tail: a bare preflight used to pull and re-redact the whole
+      // transcript before every manual compression (#7310/#7625). Session
+      // existence + the current tail is all this preflight needs.
+      const live=await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);
       if(!live||!live.session||live.session.session_id!==sid){
         throw new Error('session no longer available');
       }
       S.session=live.session;
       S.messages=live.session.messages||[];
       S.toolCalls=live.session.tool_calls||[];
-      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=false;
+      if(typeof _messagesTruncated!=='undefined') _messagesTruncated=!!(live.session._messages_truncated);
+      if(typeof _oldestIdx!=='undefined') _oldestIdx=live.session._messages_offset||0;
     }catch(preflightErr){
       if(typeof clearCompressionUi==='function') clearCompressionUi();
       if(typeof _setCompressionSessionLock==='function') _setCompressionSessionLock(null);
@@ -1094,47 +1228,59 @@ async function cmdTheme(args){
   showToast(t('theme_usage')+themes.join('|')+' | '+skins.join('|')+' | legacy:'+legacyThemes.join('|'));
 }
 
-async function cmdSkills(args){
-  try{
-    const data = await api('/api/skills');
-    let skills = data.skills || [];
-    if(args){
-      const q = args.toLowerCase();
-      skills = skills.filter(s =>
-        (s.name||'').toLowerCase().includes(q) ||
-        (s.description||'').toLowerCase().includes(q) ||
-        (s.category||'').toLowerCase().includes(q)
-      );
-    }
-    if(!skills.length){
-      const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
-      S.messages.push(msg); renderMessages(); return;
-    }
-    // Group by category
-    const byCategory = {};
-    skills.forEach(s => {
-      const cat = s.category || 'General';
-      if(!byCategory[cat]) byCategory[cat] = [];
-      byCategory[cat].push(s);
-    });
-    const lines = [];
-    for(const [cat, items] of Object.entries(byCategory).sort()){
-      lines.push(`**${cat}**`);
-      items.forEach(s => {
-        const desc = s.description ? ` — ${s.description.slice(0,80)}${s.description.length>80?'...':''}` : '';
-        lines.push(`  \`${s.name}\`${desc}`);
+// Subcommands owned by the agent's own /skills write-approval handler
+// (hermes_cli/write_approval_commands.py via gateway/slash_commands.py) — these must
+// fall through to the normal send path rather than be swallowed by the local search below.
+// Includes every alias that handler accepts: approve/apply, reject/deny/drop, approval/mode.
+// Keep in sync with handle_pending_subcommand() — a missing alias is silently swallowed here.
+const SKILLS_AGENT_SUBCOMMANDS=['pending','approve','apply','reject','deny','drop','diff','approval','mode'];
+
+function cmdSkills(args){
+  const sub=(args||'').trim().split(/\s+/)[0].toLowerCase();
+  if(SKILLS_AGENT_SUBCOMMANDS.includes(sub)) return false;
+  (async()=>{
+    try{
+      const data = await api('/api/skills');
+      let skills = data.skills || [];
+      if(args){
+        const q = args.toLowerCase();
+        skills = skills.filter(s =>
+          (s.name||'').toLowerCase().includes(q) ||
+          (s.description||'').toLowerCase().includes(q) ||
+          (s.category||'').toLowerCase().includes(q)
+        );
+      }
+      if(!skills.length){
+        const msg = {role:'assistant', content: args ? `No skills matching "${args}".` : 'No skills found.'};
+        S.messages.push(msg); renderMessages(); return;
+      }
+      // Group by category
+      const byCategory = {};
+      skills.forEach(s => {
+        const cat = s.category || 'General';
+        if(!byCategory[cat]) byCategory[cat] = [];
+        byCategory[cat].push(s);
       });
-      lines.push('');
+      const lines = [];
+      for(const [cat, items] of Object.entries(byCategory).sort()){
+        lines.push(`**${cat}**`);
+        items.forEach(s => {
+          const desc = s.description ? ` — ${s.description.slice(0,80)}${s.description.length>80?'...':''}` : '';
+          lines.push(`  \`${s.name}\`${desc}`);
+        });
+        lines.push('');
+      }
+      const header = args
+        ? `Skills matching "${args}" (${skills.length}):\n\n`
+        : `Available skills (${skills.length}):\n\n`;
+      S.messages.push({role:'assistant', content: header + lines.join('\n')});
+      renderMessages();
+      showToast(t('type_slash'));
+    }catch(e){
+      showToast('Failed to load skills: '+e.message);
     }
-    const header = args
-      ? `Skills matching "${args}" (${skills.length}):\n\n`
-      : `Available skills (${skills.length}):\n\n`;
-    S.messages.push({role:'assistant', content: header + lines.join('\n')});
-    renderMessages();
-    showToast(t('type_slash'));
-  }catch(e){
-    showToast('Failed to load skills: '+e.message);
-  }
+  })();
+  return true;
 }
 
 async function cmdUse(args){
@@ -1221,16 +1367,43 @@ async function cmdStop(){
 }
 
 async function cmdGoal(args){
-  if(!S.session){await newSession();await renderSessionList();}
+  if(!S.session){await newSession();}
   if(!S.session||!S.session.session_id){showToast(t('no_active_session'));return;}
   const activeSid=S.session.session_id;
   try{
+    // #6703: re-assert the explicit-pick marker on /api/goal the same way
+    // /api/chat/start does. Without it the server's model resolver treats a
+    // persisted cross-provider pick as stale and silently reverts the session
+    // to the profile default mid-session (e.g. while /goal is running).
+    const _goalModel=S.session.model||($('modelSelect')&&$('modelSelect').value)||'';
+    const _goalProvider=S.session.model_provider||null;
+    const _pendingPick=(typeof _readPendingSessionModel==='function')
+      ? _readPendingSessionModel(activeSid)
+      : null;
+    const _pendingPickMatch=_pendingPick
+      && _pendingPick.model===_goalModel
+      && String(_pendingPick.model_provider||'')===String(_goalProvider||'');
+    const _defaultModel=(typeof window!=='undefined' && window._defaultModel)||'';
+    const _activeProvider=(typeof window!=='undefined' && window._activeProvider)||null;
+    const _isCrossProviderPick=_goalModel
+      && _goalProvider
+      && _defaultModel
+      && _activeProvider
+      && _goalModel !== _defaultModel
+      && String(_goalProvider||'') !== String(_activeProvider||'');
+    const _explicitPick=(_pendingPickMatch||_isCrossProviderPick)||undefined;
+    // Do NOT consume the pending explicit-pick marker here: a control-only
+    // invocation (e.g. /goal status) skips server-side model resolution, so a
+    // pre-request clear would drop the pick without using it. Consume it below,
+    // only after a successful kickoff (r.stream_id), re-checking that the stored
+    // marker still matches the model/provider captured for this kickoff (#6705).
     const r=await api('/api/goal',{method:'POST',body:JSON.stringify({
       session_id:activeSid,
       args:args||'',
       workspace:S.session.workspace,
-      model:S.session.model||($('modelSelect')&&$('modelSelect').value)||'',
-      model_provider:S.session.model_provider||null,
+      model:_goalModel,
+      model_provider:_goalProvider,
+      explicit_model_pick:_explicitPick,
       profile:S.activeProfile||S.session.profile||'default',
     })});
     const msg = (() => {
@@ -1250,6 +1423,19 @@ async function cmdGoal(args){
       showToast(msg.split('\n')[0],2600);
     }
     if(!r||!r.stream_id)return;
+    // #6705: consume the one-shot pending explicit-pick marker only after a
+    // successful kickoff. Re-read the stored marker and clear it only if it
+    // still matches the model/provider captured above — a control command (no
+    // stream_id) must leave the marker intact for the next real send, and a
+    // marker re-recorded mid-flight (newer onchange) must not be clobbered.
+    if(_pendingPickMatch && typeof _readPendingSessionModel==='function' && typeof _clearPendingSessionModel==='function'){
+      const _stillPending=_readPendingSessionModel(activeSid);
+      if(_stillPending
+        && _stillPending.model===_goalModel
+        && String(_stillPending.model_provider||'')===String(_goalProvider||'')){
+        _clearPendingSessionModel(activeSid);
+      }
+    }
     S.toolCalls=[];
     if(typeof clearLiveToolCards==='function')clearLiveToolCards();
     appendThinking();setBusy(true);
@@ -1504,8 +1690,19 @@ function _steerIndicatorText(originalMsg, filesSnapshot){
 }
 
 async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){
-  if(!ownerSid||typeof _saveComposerDraftNow!=='function')return;
-  await _saveComposerDraftNow(ownerSid,_steerRestoreText(originalMsg,explicitSteer),filesSnapshot);
+  if(!ownerSid||typeof _saveComposerDraftNow!=='function') return false;
+  const persistedText = _steerRestoreText(originalMsg,explicitSteer);
+  const persistedFiles = Array.isArray(filesSnapshot) ? [...filesSnapshot] : [];
+  try{
+    const result = _saveComposerDraftNow(ownerSid,persistedText,persistedFiles);
+    if(result&&typeof result.catch==='function'){
+      return result.catch((error)=>_handleComposerDraftPostFailure(error,ownerSid,persistedText,persistedFiles));
+    }
+    return result;
+  }catch(error){
+    _handleComposerDraftPostFailure(error,ownerSid,persistedText,persistedFiles);
+    return false;
+  }
 }
 
 // #5459 gate: cache successful steer uploads by owner session so a failed-steer
@@ -1513,6 +1710,183 @@ async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, 
 // Keyed by ownerSid; invalidated when the staged file set changes or on accepted
 // steer (see _steerUploadCacheMatches / clearing below).
 let _steerUploadCache = null; // { sid, sig, paths }
+// Gateway steers whose outcome is unknown, by owner session, so a later
+// pending_steer_leftover carrying this submission can mark them delivered.
+// owned = the exact draft {text, files} this steer restored for its owner.
+// Several may be outstanding per session: each keeps its own record.
+const _steerUncertainBySid = new Map(); // sid -> Set<{ text, delivered, settled, ended, owned, rev }>
+// Steers the Gateway accepted for the owner's current run. A leftover joins
+// pending submissions with "\n", so these claim their lines before an uncertain
+// steer may match (an accepted steer's lines are not proof for another one).
+const _steerAcceptedBySid = new Map(); // sid -> [text]
+// Owned drafts whose compare-and-clear is still in flight; never restore them.
+const _steerRetiringBySid = new Map(); // sid -> { text, files }
+
+function _steerOwnedPayloadMatches(owned, text, files){
+  if(!owned)return false;
+  if(typeof _composerDraftPayloadSignature!=='function')return false;
+  return _composerDraftPayloadSignature(text,files)===_composerDraftPayloadSignature(owned.text,owned.files);
+}
+
+// True only for the exact retiring payload (text AND files): a newer draft with
+// the same text but other attachments is not owned by the retiring steer.
+// A draft saved after retirement began (revision bump) is newer, never retiring.
+function _steerDraftIsRetiring(sid, text, files){
+  const owned=_steerRetiringBySid.get(sid);
+  return !!owned&&owned.rev===_steerDraftRevision(sid)&&_steerOwnedPayloadMatches(owned,text,files);
+}
+
+function _steerUncertainDrop(sid, entry){
+  const set=_steerUncertainBySid.get(sid);
+  if(!set||!set.delete(entry))return false;
+  if(!set.size)_steerUncertainBySid.delete(sid);
+  return true;
+}
+
+function _steerLines(text){
+  return String(text||'').trim().split('\n').map(x=>x.trim());
+}
+
+// The Agent joins its unconsumed steers with "\n", so a leftover is a sequence
+// of whole submitted bodies (each at most once) plus text this tab never sent.
+// Text was delivered only if explaining the leftover with it leaves strictly
+// fewer unexplained lines than every explanation without it. Every other
+// submission takes part (no recency cut-off): an omitted body could be the
+// real explanation. Iterative forward DP over reachable (line, used-bodies)
+// states, so line count never touches the call stack. Past the body/state
+// budget nothing is proven: recovery is kept.
+const _STEER_MATCH_MAX_RELEVANT_BODIES = 24;
+const _STEER_MATCH_MAX_STATES = 200000;
+function _steerFewestUnexplained(lines, bodies){
+  const n=lines.length;
+  const starts=bodies.map(b=>{
+    const at=new Set();
+    for(let pos=0;pos+b.length<=n;pos++){
+      let ok=true;
+      for(let k=0;k<b.length;k++)if(lines[pos+k]!==b[k]){ok=false;break;}
+      if(ok)at.add(pos);
+    }
+    return at;
+  });
+  // dp[pos]: Map(mask -> fewest unexplained lines before pos).
+  const dp=new Array(n+1);
+  dp[0]=new Map([[0,0]]);
+  let states=0;
+  for(let pos=0;pos<n;pos++){
+    const cur=dp[pos];
+    if(!cur)continue;
+    dp[pos]=null;
+    for(const [mask,cost] of cur){
+      if(++states>_STEER_MATCH_MAX_STATES)return null;
+      const put=(p,m,c)=>{const d=dp[p]||(dp[p]=new Map());if(!(d.get(m)<=c))d.set(m,c);};
+      put(pos+1,mask,cost+1);
+      for(let i=0;i<bodies.length;i++){
+        if(mask&(1<<i)||!starts[i].has(pos))continue;
+        put(pos+bodies[i].length,mask|(1<<i),cost);
+      }
+    }
+  }
+  return dp[n]||new Map();
+}
+function _steerLeftoverContains(leftover, text, others){
+  const lines=_steerLines(leftover);
+  const want=_steerLines(text);
+  const has=b=>{
+    for(let pos=0;pos+b.length<=lines.length;pos++){
+      let ok=true;
+      for(let k=0;k<b.length;k++)if(lines[pos+k]!==b[k]){ok=false;break;}
+      if(ok)return true;
+    }
+    return false;
+  };
+  if(!has(want))return false;
+  // A body absent from the leftover cannot explain any of it.
+  const relevant=(Array.isArray(others)?others:[]).map(_steerLines).filter(has);
+  if(relevant.length+1>_STEER_MATCH_MAX_RELEVANT_BODIES)return false;
+  const withWant=_steerFewestUnexplained(lines,[want].concat(relevant));
+  if(!withWant)return false;
+  let bestWith=Infinity,bestWithout=Infinity;
+  for(const [mask,cost] of withWant){
+    if(mask&1)bestWith=Math.min(bestWith,cost);
+    else bestWithout=Math.min(bestWithout,cost);
+  }
+  return bestWith<bestWithout;
+}
+
+function _steerDraftRevision(sid){
+  return typeof _composerDraftRevision==='function'?_composerDraftRevision(sid):0;
+}
+
+// The owner's run ended (done/cancel/apperror): any leftover was emitted before
+// this, so an undelivered settled record can never reconcile. Drop it.
+function _steerSettleTerminal(sid){
+  _steerAcceptedBySid.delete(sid);
+  for(const entry of [...(_steerUncertainBySid.get(sid)||[])]){
+    if(entry.settled)_steerUncertainDrop(sid,entry);
+    else entry.ended=true;
+  }
+}
+
+// Retire only the draft this steer restored: the visible composer when it still
+// shows exactly that payload (text and staged files), and the owner's saved
+// draft via compare-and-clear. Newer text/files and other sessions' composers
+// are left alone.
+function _steerClearVisibleOwned(sid, owned){
+  if(!_steerOwnerIsCurrent(sid))return;
+  const inp=$('msg');
+  const staged=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?S.pendingFiles:[];
+  if(inp&&owned.rev===_steerDraftRevision(sid)&&_steerOwnedPayloadMatches(owned,inp.value,staged)){
+    inp.value='';
+    if(typeof _noteComposerDraftPayload==='function')_noteComposerDraftPayload(sid,'',[]);
+    if(typeof autoResize==='function')autoResize();
+    if(staged.length){
+      S.pendingFiles=[];
+      if(typeof renderTray==='function')renderTray();
+    }
+  }
+  const bar=document.getElementById('msgInner');
+  const rec=bar&&bar.querySelector('.steer-recovery');
+  if(rec)rec.remove();
+}
+
+// owned.rev is the draft revision the recovery restored; a draft saved since
+// then (even an identical retype) is newer and is never cleared or cancelled.
+function _steerRetireOwnedDraft(sid, owned){
+  if(!owned)return Promise.resolve();
+  const retiring={text:owned.text,files:owned.files,rev:owned.rev};
+  if(retiring.rev!==_steerDraftRevision(sid)){
+    _steerClearVisibleOwned(sid,retiring);  // removes only the recovery chip
+    return Promise.resolve();
+  }
+  _steerRetiringBySid.set(sid,retiring);
+  _steerClearVisibleOwned(sid,retiring);
+  const settle=cleared=>{
+    if(_steerRetiringBySid.get(sid)!==retiring)return;
+    _steerRetiringBySid.delete(sid);
+    // Server removed exactly this payload: drop it from view if it was shown
+    // meanwhile; a mismatch means a newer draft won and stays visible.
+    if(cleared===true&&retiring.rev===_steerDraftRevision(sid))_steerClearVisibleOwned(sid,retiring);
+  };
+  const clear=typeof _clearComposerDraftIfUnchanged==='function'?_clearComposerDraftIfUnchanged(sid,owned.text,owned.files,retiring.rev):null;
+  return Promise.resolve(clear).then(settle,()=>settle(false));
+}
+
+// Called by the pending_steer_leftover handler. A leftover matching an in-flight
+// or uncertain steer means it was delivered. Before the response: mark it so the
+// response settles. After the response: retire the restored draft and settle.
+function _steerReconcileLeftover(sid, text){
+  const entries=[...(_steerUncertainBySid.get(sid)||[])];
+  const accepted=_steerAcceptedBySid.get(sid)||[];
+  const proven=entries.filter(entry=>_steerLeftoverContains(text,entry.text,
+    accepted.concat(entries.filter(o=>o!==entry).map(o=>o.text))));
+  for(const entry of proven){
+    entry.delivered=true;
+    if(!entry.settled)continue;
+    _steerUncertainDrop(sid,entry);
+    _steerRetireOwnedDraft(sid,entry.owned);
+  }
+  return proven.length>0;
+}
 function _steerFilesSignature(files){
   try{
     return (Array.isArray(files)?files:[]).map(f=>f&&(f.name+':'+(f.size||0)+':'+(f.lastModified||0))).join('|');
@@ -1591,20 +1965,51 @@ async function _trySteer(msg, explicitSteer){
     showToast(t('cmd_steer_no_msg'));
     return false;
   }
+  const inflight={text:steerText,delivered:false,settled:false,ended:false,owned:null,rev:_steerDraftRevision(ownerSid)};
+  if(!_steerUncertainBySid.has(ownerSid))_steerUncertainBySid.set(ownerSid,new Set());
+  _steerUncertainBySid.get(ownerSid).add(inflight);
   try{
+    // Steering is not idempotent: never resend it automatically.
     result=await api('/api/chat/steer',{
       method:'POST',
+      retries:0,
       body:JSON.stringify({session_id:ownerSid,text:steerText}),
     });
   }catch(e){
-    // Network or server error — keep the active stream running and restore the draft.
-    result={accepted:false, fallback:'network_error'};
+    // Keep the active stream running and restore the draft. With no HTTP reply
+    // (connection dropped, timeout) the server may already have delivered the
+    // steer: keep it as an uncertain record so a later leftover can settle it.
+    result={accepted:false, fallback:'network_error', uncertain:!(e&&e.status)};
+  }
+  const uncertain=!!(result&&(result.fallback==='gateway_steer_uncertain'||result.uncertain===true));
+  if(!uncertain)_steerUncertainDrop(ownerSid,inflight);
+  if(uncertain&&inflight.delivered){
+    // The Gateway already handed this text back as a queued leftover: it was
+    // delivered. Nothing was restored; clear the saved draft only if it is still
+    // the submitted text, so a draft typed during the await survives.
+    _steerUncertainDrop(ownerSid,inflight);
+    _steerUploadCache=null;
+    if(_steerDraftRevision(ownerSid)===inflight.rev){
+      // No draft saved since submit: clear like an accepted steer (also drops a
+      // debounced prefix of the submitted text).
+      if(typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
+    }else{
+      _steerRetireOwnedDraft(ownerSid,{text:_steerRestoreText(originalMsg,explicitSteer),files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)});
+    }
+    return true;
   }
   if(result&&result.accepted){
     // The captured files+text were delivered to ownerSid — clear that session's
     // draft (it may not be the live session anymore if the user switched during
     // the upload/API await, which is fine: we're clearing the OWNER's draft).
     _steerUploadCache=null; // delivered — invalidate the retry cache
+    // A reply that arrives after the run ended (done/cancel/apperror) belongs
+    // to that run: never let it explain a later run's leftover.
+    if(ownerSid&&!inflight.ended){
+      const acc=_steerAcceptedBySid.get(ownerSid)||[];
+      acc.push(steerText);
+      _steerAcceptedBySid.set(ownerSid,acc);
+    }
     if(ownerSid&&typeof _clearComposerDraft==='function') _clearComposerDraft(ownerSid,_steerRestoreText(originalMsg,explicitSteer),pendingFilesSnapshot);
     // Show a transient steer indicator in the chat (NOT in S.messages — it must
     // survive the done event's S.messages=d.session.messages replacement).
@@ -1649,15 +2054,29 @@ async function _trySteer(msg, explicitSteer){
   const fallbackCode = result && result.fallback;
   const deadRunFallback = _steerFallbackIsDeadRun(fallbackCode);
   const applyCurrentFailure = !deadRunFallback||_steerOwnerStreamIsCurrent(ownerSid,ownerStreamId);
+  const restoreText=_steerRestoreText(originalMsg,explicitSteer);
+  // A draft saved or typed during the request is newer than the steer: keep it.
+  let restored=_steerDraftRevision(ownerSid)===inflight.rev;
   if(_steerOwnerIsCurrent(ownerSid)&&applyCurrentFailure){
     const inp=$('msg');
-    if(inp){
-      inp.value=_steerRestoreText(originalMsg,explicitSteer);
+    if(inp&&inp.value&&inp.value!==restoreText)restored=false;
+    if(inp&&restored){
+      inp.value=restoreText;
+      if(typeof _noteComposerDraftPayload==='function')_noteComposerDraftPayload(ownerSid,restoreText,pendingFilesSnapshot);
       if(typeof autoResize==='function')autoResize();
     }
     if(typeof renderTray==='function')renderTray();
-  }else{
+  }else if(restored){
     await _steerPersistDraftForOwner(ownerSid,originalMsg,explicitSteer,pendingFilesSnapshot);
+  }
+  if(uncertain){
+    // rev identifies the restored draft itself; later saves are newer drafts.
+    inflight.owned=restored?{text:restoreText,files:pendingFilesSnapshot,rev:_steerDraftRevision(ownerSid)}:null;
+    inflight.settled=true;
+    // A leftover or run end may have arrived during the draft persist above.
+    if((inflight.delivered||inflight.ended)&&_steerUncertainDrop(ownerSid,inflight)){
+      if(inflight.delivered)_steerRetireOwnedDraft(ownerSid,inflight.owned);
+    }
   }
   const clearedDeadRun=deadRunFallback&&_steerClearCurrentOwnerDeadRun(ownerSid,ownerStreamId);
   if(!deadRunFallback||applyCurrentFailure)showToast(t(_steerFailureMessageKey(fallbackCode)), 3500);
@@ -1701,11 +2120,13 @@ async function cmdRetry(){
     const r=await api('/api/session/retry',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
+    // Bounded tail: a bare reload used to pull and re-redact the whole
+    // transcript on every /retry recovery (#7310/#7625).
+    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid)+'&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1');
     // #5924 SILENT-race guard: a session switch during the GET await must not let
     // this recovery apply session A's intent to whatever session is now visible.
     if(!S.session||S.session.session_id!==activeSid)return;
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!(data.session._messages_truncated);if(typeof _oldestIdx!=='undefined')_oldestIdx=data.session._messages_offset||0;renderMessages();}
     $('msg').value=r.last_user_text||'';if(typeof autoResize==='function')autoResize();
     // Re-arm the single-shot explicit-pick marker from the captured non-default
     // pick — but only if it's still safe at fire time (session unchanged, current
@@ -1723,8 +2144,10 @@ async function cmdUndo(){
     const r=await api('/api/session/undo',{method:'POST',body:JSON.stringify({session_id:activeSid})});
     if(r&&r.error){showToast(r.error);return;}
     if(!S.session||S.session.session_id!==activeSid)return;
-    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid));
-    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=false;renderMessages();}
+    // Bounded tail: a bare reload used to pull and re-redact the whole
+    // transcript on every /undo recovery (#7310/#7625).
+    const data=await api('/api/session?session_id='+encodeURIComponent(activeSid)+'&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1');
+    if(data&&data.session){S.messages=data.session.messages||[];S.toolCalls=[];if(typeof clearLiveToolCards==='function')clearLiveToolCards();if(typeof _messagesTruncated!=='undefined')_messagesTruncated=!!(data.session._messages_truncated);if(typeof _oldestIdx!=='undefined')_oldestIdx=data.session._messages_offset||0;renderMessages();}
     showToast(`↩ ${t('undid_n_messages')} ${r.removed_count} ${t('undid_messages_suffix')}`);
   }catch(e){showToast(t('undo_failed')+e.message);}
 }
@@ -1799,7 +2222,7 @@ function _statusCardFromSession(s){
     {label:t('status_started'), value:_formatStatusTimestamp(s.created_at)},
     {label:t('status_updated'), value:_formatStatusTimestamp(s.updated_at||s.last_message_at)},
     {label:t('status_tokens'), value:_formatStatusTokens(s)},
-    {label:t('status_messages'), value:String(s.message_count??(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool').length)},
+    {label:t('status_messages'), value:String((typeof s.visible_message_count==='number'&&s.visible_message_count>=0)?s.visible_message_count:(s.message_count??(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length))},
     {label:t('status_agent_running'), value:running?t('status_yes'):t('status_no')},
   ];
   return {
@@ -1894,22 +2317,50 @@ function cmdVoice(){
 async function cmdYolo(){
   const sid=S.session&&S.session.session_id;
   if(!sid){showToast(t('yolo_no_session'));return;}
+  const generation=_loadSessionGeneration;
+  const viewIsCurrent=()=>!!(
+    S.session&&S.session.session_id===sid&&_loadSessionGeneration===generation
+  );
+  let approvalOwner=null;
   try{
-    // Check current state first to toggle
+    // Check current state first to toggle.
     const status=await api('/api/session/yolo?session_id='+encodeURIComponent(sid));
+    if(!viewIsCurrent())return;
     const enable=!status.yolo_enabled;
-    await api('/api/session/yolo',{
+    // A visible approval must belong to this exact session load before any
+    // command handler may POST through it. Otherwise fail closed.
+    const card=$('approvalCard');
+    if(card&&card.classList.contains('visible')){
+      approvalOwner=typeof _captureApprovalResponseOwner==='function'
+        ?_captureApprovalResponseOwner()
+        :null;
+      if(!approvalOwner)return;
+      if(enable&&typeof toggleYoloFromApproval==='function'){
+        await toggleYoloFromApproval();
+        return;
+      }
+    }
+    const result=await api('/api/session/yolo',{
       method:'POST',
       body:JSON.stringify({session_id:sid,enabled:enable}),
     });
-    _yoloEnabled=enable;
+    if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
+    const settled=(result&&typeof result.yolo_enabled==='boolean')?result.yolo_enabled:enable;
+    _yoloEnabled=settled;
     _updateYoloPill();
-    showToast(enable?t('yolo_enabled'):t('yolo_disabled'));
-    if(enable){
-      // Dismiss any visible approval card
-      hideApprovalCard(true);
+    showToast(settled?t('yolo_enabled'):t('yolo_disabled'));
+  }catch(e){
+    if(!viewIsCurrent()||(approvalOwner&&!_approvalResponseOwnerIsCurrent(approvalOwner)))return;
+    let errorPayload=null;
+    if(e&&typeof e.body==='string'){
+      try{errorPayload=JSON.parse(e.body);}catch(_){}
     }
-  }catch(e){showToast('YOLO: '+e.message);}
+    if(errorPayload&&typeof errorPayload.yolo_enabled==='boolean'){
+      _yoloEnabled=errorPayload.yolo_enabled;
+      _updateYoloPill();
+    }
+    showToast('YOLO: '+((errorPayload&&(errorPayload.error||errorPayload.message))||e.message));
+  }
 }
 
 // ── Branch / fork command ──
@@ -1950,8 +2401,13 @@ async function cmdBranch(args){
 // from the beginning of the full transcript.  We capture the absolute
 // count (_oldestIdx + msgIdx) BEFORE awaiting _ensureAllMessagesLoaded,
 // which resets _oldestIdx to 0 after its wholesale replace.  See #2184.
-async function forkFromMessage(msgIdx){
+async function forkFromMessage(msgIdx, btn){
   if(!S.session)return;
+  // The button bakes its 1-based index at render time; re-read it from the row,
+  // since loading full history (e.g. the outline) re-bases indices without a
+  // re-render (#2184).
+  const forkRow=btn&&btn.closest?btn.closest('[data-msg-idx]'):null;
+  if(forkRow&&typeof _rowCurrentRawIdx==='function') msgIdx=_rowCurrentRawIdx(forkRow,msgIdx-1)+1;
   // During streaming, only block fork if the clicked message is the
   // currently-streaming (live) message itself.  Past messages that are
   // already committed server-side can be forked immediately without
@@ -2021,6 +2477,7 @@ function _getReservedSlashCommandSlugs(){
   return reserved;
 }
 function _buildSkillCommandEntry(skill){
+  if(_isSkillDisabled(skill))return null;
   const skillName=String(skill&&skill.name||'').trim();
   const slug=_skillCommandSlug(skillName);
   if(!slug)return null;
@@ -2042,14 +2499,32 @@ function _buildBundleCommandEntry(bundle){
 async function loadSkillCommands(force=false){
   if(_skillCommandCacheReady&&!force)return _skillCommandCache;
   if(_skillCommandLoadPromise&&!force)return _skillCommandLoadPromise;
+  const gen=_slashSkillCacheGen;
+  let _committed=false;
   _skillCommandLoadPromise=(async()=>{
     try{
       const data=await api('/api/skills');
       const deduped=new Map();
       for(const skill of (data&&data.skills)||[]){const entry=_buildSkillCommandEntry(skill);if(entry&&!deduped.has(entry.name))deduped.set(entry.name,entry);}
+      // Bumped by a profile switch while we were awaiting: keep the cache empty
+      // (and not "ready") so the composer's next pass loads the new profile (#7509).
+      if(gen!==_slashSkillCacheGen) return _skillCommandCache;
       _skillCommandCache=Array.from(deduped.values()).sort((a,b)=>a.name.localeCompare(b.name));
-    }catch(_){_skillCommandCache=[];}
-    finally{_skillCommandCacheReady=true;_skillCommandLoadPromise=null;}
+      _committed=true;
+    }catch(_){
+      if(gen===_slashSkillCacheGen)_skillCommandCache=[];
+    }
+    finally{
+      // Only publish the cache as "ready" after a SUCCESSFUL current-generation
+      // commit. Marking it ready in the failure path (what master does
+      // unconditionally) permanently wedges the picker: a single transient
+      // /api/skills rejection leaves ready=true + cache=[], and
+      // ensureSkillCommandsLoadedForAutocomplete() only retries when
+      // !ready && !promise — so skill commands stay missing until a page
+      // reload even after the API recovers. Clear the promise either way so the
+      // next picker pass can retry.
+      if(gen===_slashSkillCacheGen){_skillCommandCacheReady=_committed;_skillCommandLoadPromise=null;}
+    }
     return _skillCommandCache;
   })();
   return _skillCommandLoadPromise;
@@ -2076,18 +2551,37 @@ async function getBundleCommandMetadata(name){
   const bundles=await loadBundleCommands();
   return bundles.find(bundle=>String(bundle&&bundle.name||'').toLowerCase()===needle)||null;
 }
+// The composer text the user last closed the list on, by picking a command or pressing
+// Escape. A refresh that was not caused by typing (a slash-command loader landing late,
+// or a lookup still in flight) must not re-open the list for that same text; any edit
+// clears it. Without this, a failing /api/skills (agent-free server) is retried on every
+// keystroke and its late refresh re-opened the list after `/new` was taken, so the next
+// Enter picked again instead of sending (#8050). Closing because nothing matched is not
+// a dismissal: a loader that lands later may still have matches to show.
+let _slashDismissedText=null;
+function markSlashDropdownDismissed(){
+  const ta=$('msg');
+  _slashDismissedText=ta?String(ta.value||''):null;
+}
+function clearSlashDropdownDismissed(){ _slashDismissedText=null; }
+function slashDropdownDismissedFor(text){
+  return _slashDismissedText!==null&&_slashDismissedText===String(text||'');
+}
 function refreshSlashCommandDropdown(){
   const ta=$('msg');if(!ta)return;
   const text=ta.value||'';
   if(text.indexOf('\n')!==-1||_activeSlashCommandOffset(text)<0){hideCmdDropdown();return;}
+  if(slashDropdownDismissedFor(text)) return;
   getSlashAutocompleteMatches(text).then(matches=>{
     if(($('msg').value||'')!==text) return;
+    if(slashDropdownDismissedFor(text)) return;
     if(matches.length)showCmdDropdown(matches);else hideCmdDropdown();
   });
 }
 function ensureSkillCommandsLoadedForAutocomplete(){
-  if(_skillCommandCacheReady||_skillCommandLoadPromise)return;
-  loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+  if(!_skillCommandCacheReady&&!_skillCommandLoadPromise){
+    loadSkillCommands().then(()=>{refreshSlashCommandDropdown();});
+  }
   if(!_bundleCommandCacheReady&&!_bundleCommandLoadPromise){
     loadBundleCommands().then(()=>{refreshSlashCommandDropdown();});
   }
@@ -2163,6 +2657,7 @@ function showCmdDropdown(matches){
         });
       }else{
         hideCmdDropdown();
+        markSlashDropdownDismissed();
       }
     };
     dd.appendChild(el);
@@ -2199,6 +2694,10 @@ function selectCmdDropdownItem(){
     items[_cmdSelectedIdx].onmousedown({preventDefault:()=>{}});
   } else if(items.length===1){
     items[0].onmousedown({preventDefault:()=>{}});
+  } else {
+    hideCmdDropdown();
+    markSlashDropdownDismissed();
+    return;
   }
   hideCmdDropdown();
 }

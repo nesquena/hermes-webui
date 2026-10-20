@@ -36,6 +36,7 @@ from api.config import (
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
     _coerce_provider_cost_budget,
+    _configured_model_ids,
     _custom_provider_slug_from_name,
     _get_label_for_model,
     _models_from_live_provider_ids,
@@ -208,6 +209,7 @@ def _snapshot_payload(snapshot):
             "used_percent": getattr(window, "used_percent", None),
             "reset_at": _iso(getattr(window, "reset_at", None)),
             "detail": getattr(window, "detail", None),
+            "limit_window_seconds": _number(getattr(window, "limit_window_seconds", None)),
         })
     payload = {
         "provider": str(getattr(snapshot, "provider", "") or ""),
@@ -307,10 +309,14 @@ def _codex_usage_headers(access_token):
     }
     auth_claim = _jwt_claims(access_token).get("https://api.openai.com/auth")
     account_id = None
+    residency = None
     if isinstance(auth_claim, dict):
         account_id = auth_claim.get("chatgpt_account_id")
+        residency = auth_claim.get("chatgpt_data_residency") or auth_claim.get("chatgpt_compute_residency")
     if isinstance(account_id, str) and account_id.strip():
         headers["ChatGPT-Account-ID"] = account_id.strip()
+    if isinstance(residency, str) and residency.strip():
+        headers["x-openai-internal-codex-residency"] = residency.strip()
     return headers
 
 
@@ -335,18 +341,22 @@ def _codex_snapshot_from_usage_payload(payload):
     if not isinstance(rate_limit, dict):
         rate_limit = {}
     windows = []
-    for key, label in (("primary_window", "Session"), ("secondary_window", "Weekly")):
+    for key, fallback in (("primary_window", "Session"), ("secondary_window", "Weekly")):
         window = rate_limit.get(key)
         if not isinstance(window, dict):
             continue
         used = _number(window.get("used_percent"))
         if used is None:
             continue
+        seconds = window.get("limit_window_seconds")
+        numeric = isinstance(seconds, (int, float)) and not isinstance(seconds, bool)
+        label = {18000: "Session", 604800: "Weekly"}.get(int(seconds), fallback) if numeric else fallback
         windows.append(SimpleNamespace(
             label=label,
             used_percent=float(used),
             reset_at=_parse_dt(window.get("reset_at")),
             detail=None,
+            limit_window_seconds=_number(window.get("limit_window_seconds")),
         ))
 
     details = []
@@ -387,6 +397,7 @@ def _snapshot_windows_payload(snapshot):
             "remaining_percent": remaining_percent,
             "reset_at": _iso(getattr(window, "reset_at", None)),
             "detail": getattr(window, "detail", None),
+            "limit_window_seconds": _number(getattr(window, "limit_window_seconds", None)),
         })
     return windows
 
@@ -424,6 +435,19 @@ def _entry_exhausted_ttl_seconds(error_code):
     code = str(error_code or "").strip()
     if code == "401":
         return 5 * 60
+    if code == "402":
+        # #6626: keep WebUI's eligibility decision tied to the installed
+        # runtime contract. The runtime routes 402 via
+        # credential_pool._exhausted_ttl() (120s when the new
+        # EXHAUSTED_TTL_402_SECONDS is present, 1h fallback otherwise).
+        # Hard-coding 120s here would let display/probe code mark an entry
+        # usable before CredentialPool.select() is willing to lease it on
+        # mixed-version installations.
+        try:
+            from agent.credential_pool import _exhausted_ttl as _runtime_exhausted_ttl
+            return _runtime_exhausted_ttl(int(code))
+        except Exception:
+            return 60 * 60
     return 60 * 60
 
 
@@ -473,6 +497,78 @@ def _fetch_codex_entry_snapshot(entry):
     return _codex_snapshot_from_usage_payload(payload), True, None
 
 
+def _fetch_codex_singleton_snapshot(api_key=None):
+    try:
+        from agent.account_usage import _resolve_codex_usage_credentials
+
+        access_token, base_url, account_id = _resolve_codex_usage_credentials(None, api_key)
+        headers = _codex_usage_headers(access_token)
+        if account_id:
+            headers["ChatGPT-Account-ID"] = str(account_id).strip()
+        request = urllib_request.Request(
+            _resolve_codex_usage_url(base_url),
+            headers=headers,
+        )
+        with urllib_request.urlopen(request, timeout=_CODEX_POOL_USAGE_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8") or "{}")
+        return _codex_snapshot_from_usage_payload(payload)
+    except Exception:
+        return None
+
+
+def _codex_durations_ready(payload):
+    windows = payload.get("windows") if isinstance(payload, dict) else None
+    return bool(windows) and all(window.get("limit_window_seconds") is not None for window in windows)
+
+
+def _apply_codex_duration_source(payload, raw_payload, same_response=False):
+    if not isinstance(raw_payload, dict):
+        return payload
+    if not isinstance(payload, dict):
+        return raw_payload
+    # Two windows can share a label (86400s and 18000s both read "Session").
+    # The same response joins by position, guarded by label; a separate probe
+    # joins only on a label that is unique on both sides.
+    def _label(window):
+        return str(window.get("label") or "").strip().lower()
+
+    raw_windows = list(raw_payload.get("windows") or ())
+    raw_labels = [_label(w) for w in raw_windows]
+    windows = list(payload.get("windows") or ())
+    labels = [_label(w) for w in windows]
+    for index, window in enumerate(windows):
+        if window.get("limit_window_seconds") is not None or not labels[index]:
+            continue
+        if same_response:
+            if index >= len(raw_windows) or raw_labels[index] != labels[index]:
+                continue
+            raw_window = raw_windows[index]
+        else:
+            if labels.count(labels[index]) != 1 or raw_labels.count(labels[index]) != 1:
+                continue
+            raw_window = raw_windows[raw_labels.index(labels[index])]
+        window["limit_window_seconds"] = raw_window.get("limit_window_seconds")
+    return payload
+
+
+def _codex_singleton_payload(snapshot, api_key=None):
+    payload = _snapshot_payload(snapshot)
+    if _codex_durations_ready(payload):
+        return payload
+    # Older Agent windows omit duration: backfill snapshot.raw first, then make
+    # an extra usage request only if a window duration is still missing.
+    raw_body = getattr(snapshot, "raw", None)
+    if isinstance(raw_body, dict):
+        payload = _apply_codex_duration_source(
+            payload, _snapshot_payload(_codex_snapshot_from_usage_payload(raw_body)), same_response=True
+        )
+        if _codex_durations_ready(payload):
+            return payload
+    return _apply_codex_duration_source(
+        payload, _snapshot_payload(_fetch_codex_singleton_snapshot(api_key))
+    )
+
+
 def _best_remaining_by_window(rows):
     best = {}
     for row in rows:
@@ -486,20 +582,27 @@ def _best_remaining_by_window(rows):
             remaining = _number(window.get("remaining_percent"))
             if not window_label or remaining is None:
                 continue
+            limit_window_seconds = _number(window.get("limit_window_seconds"))
+            window_key = (
+                ("duration", limit_window_seconds)
+                if limit_window_seconds is not None
+                else ("label", window_label.lower())
+            )
             candidate = {
                 "label": window_label,
                 "remaining_percent": remaining,
                 "used_percent": window.get("used_percent"),
                 "reset_at": window.get("reset_at"),
                 "detail": window.get("detail"),
+                "limit_window_seconds": limit_window_seconds,
                 "credential_label": label,
             }
-            current = best.get(window_label.lower())
+            current = best.get(window_key)
             # The normalized Codex account-limit payload currently exposes
             # percentages, not absolute request/token capacity. If absolute
             # remaining capacity becomes available, prefer it here.
             if current is None or float(remaining) > float(current.get("remaining_percent") or -1):
-                best[window_label.lower()] = candidate
+                best[window_key] = candidate
     return list(best.values())
 
 
@@ -555,6 +658,7 @@ def _codex_pool_snapshot(entries, rows, queried):
             used_percent=window.get("used_percent"),
             reset_at=window.get("reset_at"),
             detail="Best of " + str(len(available_rows)) + " available credentials",
+            limit_window_seconds=window.get("limit_window_seconds"),
         )
         for window in best_windows
     )
@@ -656,6 +760,8 @@ def _fetch_snapshot(provider, api_key, env_var=None):
             pool_snapshot = _fetch_codex_account_usage_from_pool()
             if isinstance(getattr(pool_snapshot, "pool", None), dict):
                 snapshot = pool_snapshot
+            else:
+                return _codex_singleton_payload(snapshot, api_key)
         return _snapshot_payload(snapshot)
     finally:
         if env_var and api_key:
@@ -823,6 +929,19 @@ def _entry_exhausted_ttl_seconds(error_code):
     code = str(error_code or "").strip()
     if code == "401":
         return 5 * 60
+    if code == "402":
+        # #6626: keep WebUI's eligibility decision tied to the installed
+        # runtime contract. The runtime routes 402 via
+        # credential_pool._exhausted_ttl() (120s when the new
+        # EXHAUSTED_TTL_402_SECONDS is present, 1h fallback otherwise).
+        # Hard-coding 120s here would let display/probe code mark an entry
+        # usable before CredentialPool.select() is willing to lease it on
+        # mixed-version installations.
+        try:
+            from agent.credential_pool import _exhausted_ttl as _runtime_exhausted_ttl
+            return _runtime_exhausted_ttl(int(code))
+        except Exception:
+            return 60 * 60
     return 60 * 60
 
 
@@ -1545,6 +1664,7 @@ def _serialize_account_usage_snapshot(snapshot: Any) -> dict[str, Any] | None:
             "remaining_percent": remaining_percent,
             "reset_at": _isoformat_utc(getattr(window, "reset_at", None)),
             "detail": str(getattr(window, "detail", "") or "").strip() or None,
+            "limit_window_seconds": _quota_number(getattr(window, "limit_window_seconds", None)),
         })
 
     details = [
@@ -1635,6 +1755,7 @@ def _account_usage_payload_to_snapshot(payload: Any) -> Any:
             used_percent=window.get("used_percent"),
             reset_at=window.get("reset_at"),
             detail=window.get("detail"),
+            limit_window_seconds=window.get("limit_window_seconds"),
         )
         for window in (payload.get("windows") or ())
         if isinstance(window, dict)
@@ -2666,14 +2787,11 @@ def get_providers() -> dict[str, Any]:
         models = list(_PROVIDER_MODELS.get(pid, []))
         models_total = len(models)
         # OpenAI Codex account catalogs drift independently from WebUI releases.
-        # The model picker already prefers hermes_cli + Codex local cache for
-        # this provider (the agent's `provider_model_ids("openai-codex")` filters
-        # IDs with `supported_in_api: false`, but Codex CLI still surfaces some
-        # of those — notably `gpt-5.3-codex-spark` from #1680 — in its picker).
-        # Merge both sources here so the providers card matches the picker
-        # exactly. Static entries remain the offline fallback when live
-        # discovery and the local Codex cache are both unavailable. (#1807
-        # follow-up to v0.51.19 #1812.)
+        # The model picker combines hermes_cli discovery with visible local
+        # Codex cache entries. Merge both sources here so the providers card
+        # matches the picker. Static entries are the offline fallback when live
+        # discovery and the local cache are unavailable. (#1807 follow-up to
+        # v0.51.19 #1812.)
         if pid == "openai-codex":
             live_ids = _read_live_provider_model_ids("openai-codex")
             live_id_set = set(live_ids)
@@ -2809,12 +2927,20 @@ def get_providers() -> dict[str, Any]:
                     cp_name,
                 )
                 continue
-            # Collect models from `models` list or `model` single
-            cp_models = []
-            if isinstance(cp.get("models"), list):
-                cp_models = [{"id": str(m), "label": str(m)} for m in cp["models"]]
-            elif cp.get("model"):
-                cp_models = [{"id": cp["model"], "label": cp["model"]}]
+            # Build the model list using the same sticky-before-plural
+            # ordering as the model picker (api/config.py:7308-7314):
+            # the singular ``model`` field goes first, then unique IDs from
+            # the ``models`` catalog are appended via _configured_model_ids
+            # (which strips whitespace, drops empty IDs, and de-duplicates).
+            # This keeps the Providers card consistent with the picker.
+            cp_model_ids: list[str] = []
+            _singular_model = str(cp.get("model") or "").strip()
+            if _singular_model:
+                cp_model_ids.append(_singular_model)
+            for _mid in _configured_model_ids(cp.get("models")):
+                if _mid not in cp_model_ids:
+                    cp_model_ids.append(_mid)
+            cp_models = [{"id": mid, "label": mid} for mid in cp_model_ids]
             # Check for env var reference (${VAR_NAME} pattern)
             cp_api_key = str(cp.get("api_key") or "")
             cp_has_key = bool(cp_api_key.strip())
@@ -2975,7 +3101,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
         return
 
     try:
-        import yaml as _yaml
+        from api import yaml_compat as _yaml
 
         changed = False
 

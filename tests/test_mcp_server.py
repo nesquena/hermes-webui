@@ -22,6 +22,25 @@ import pytest
 # runtime environments can still collect the rest of the suite without it.
 pytest.importorskip("mcp", reason="mcp package not installed (optional MCP server dep)")
 
+# The `mcp` package being importable is not sufficient: mcp>=2.0.0 dropped the
+# Server.list_tools / Server.call_tool decorator API that mcp_server.py is built
+# on (it hard-exits at import when that API is absent — see mcp_server.py's "MCP
+# SDK version guard"). On a box whose environment has an out-of-range mcp SDK
+# installed (e.g. the shared agent venv carrying mcp 2.x), importing mcp_server
+# raises SystemExit and every test in this module errors at setup instead of
+# skipping. Reuse the SAME capability predicate the server uses so the module
+# skips cleanly on an unsupported SDK on any box, while CI (which pins
+# mcp>=1.28,<2 via requirements-dev.txt) still runs the full module.
+from mcp.server import Server as _McpServer  # noqa: E402  (after importorskip guard)
+
+if not hasattr(_McpServer, "list_tools"):
+    pytest.skip(
+        "mcp SDK out of supported range (requires mcp>=1.28,<2 with the "
+        "list_tools/call_tool decorator API); mcp_server.py hard-exits on this "
+        "SDK, so its tests skip rather than error on an incompatible environment.",
+        allow_module_level=True,
+    )
+
 # pytest-asyncio is also optional but always installed alongside mcp tests
 # in our local runs. If absent, importorskip the asyncio plugin gracefully.
 pytest.importorskip("pytest_asyncio", reason="pytest-asyncio required for MCP server tests")

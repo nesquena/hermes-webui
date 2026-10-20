@@ -159,6 +159,113 @@ def _safe_error(metric: str, exc: Exception) -> dict[str, str]:
     return {"metric": metric, "code": type(exc).__name__}
 
 
+def _zero_webui_runtime_payload() -> dict[str, Any]:
+    return {
+        "sessions": {"available": False, "resident": 0, "cap": 0},
+        "streams": {
+            "available": False, "active": 0, "agent_instances": 0,
+            "subscribers": 0, "offline_buffered_events": 0,
+            "offline_dropped_events": 0, "subscriber_dropped_events": 0,
+            "unavailable_channels": 0,
+        },
+        "session_list_cache": {
+            "available": False, "entries": 0, "inflight_rebuilds": 0, "cap": 0,
+        },
+        "models_cache": {
+            "available": False, "groups": 0, "models": 0, "age_seconds": None,
+        },
+    }
+
+
+def _safe_runtime_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _webui_runtime_payload(errors: list[dict[str, str]]) -> dict[str, Any]:
+    runtime = _zero_webui_runtime_payload()
+    # The three owner modules stay lazily imported so this small diagnostics
+    # module cannot create an eager import cycle. The import-lock wait that
+    # implies is only reachable while a first import is in flight, and
+    # api/routes.py imports all three at load, before any request can dispatch.
+    try:
+        from api import config
+    except Exception as exc:
+        config = None
+        config_import_error = exc
+    else:
+        config_import_error = None
+    try:
+        from api import route_session_list_cache
+    except Exception as exc:
+        route_session_list_cache = None
+        cache_import_error = exc
+    else:
+        cache_import_error = None
+    try:
+        from api import streaming
+    except Exception as exc:
+        streaming = None
+        streaming_import_error = exc
+    else:
+        streaming_import_error = None
+
+    # Collect the config owner exactly once per payload: two calls would double
+    # the blocking edge and let `sessions` and `models_cache` come from two
+    # different snapshots of the same process.
+    config_snapshot: Any = None
+    config_error = config_import_error
+    if config is not None and config_error is None:
+        try:
+            config_snapshot = config.get_runtime_diagnostics_snapshot()
+        except Exception as exc:
+            config_error = exc
+
+    def _config_section(section: str):
+        def project():
+            if not isinstance(config_snapshot, dict):
+                raise TypeError("runtime_snapshot_invalid")
+            return config_snapshot[section]
+
+        return project
+
+    sources = {
+        "sessions": (_config_section("sessions"), config_error),
+        "models_cache": (_config_section("models_cache"), config_error),
+        "streams": (
+            (lambda: streaming.get_stream_runtime_snapshot())
+            if streaming is not None else None,
+            streaming_import_error,
+        ),
+        "session_list_cache": (
+            (lambda: route_session_list_cache.get_session_list_cache_snapshot())
+            if route_session_list_cache is not None else None,
+            cache_import_error,
+        ),
+    }
+    for name, (collect, import_error) in sources.items():
+        try:
+            if import_error is not None:
+                raise import_error
+            source = collect()
+            if not isinstance(source, dict):
+                raise TypeError("runtime_snapshot_invalid")
+            target = runtime[name]
+            for key in target:
+                if key == "available":
+                    target[key] = bool(source.get(key, False))
+                elif key == "age_seconds":
+                    age = source.get(key)
+                    target[key] = None if age is None else max(0.0, float(age))
+                else:
+                    target[key] = _safe_runtime_int(source.get(key, 0))
+        except Exception as exc:
+            errors.append(_safe_error(f"webui_runtime.{name}", exc))
+    return runtime
+
+
 def build_system_health_payload() -> dict[str, Any]:
     metrics: dict[str, Any] = {"cpu": None, "memory": None, "disk": None}
     errors: list[dict[str, str]] = []
@@ -182,6 +289,15 @@ def build_system_health_payload() -> dict[str, Any]:
         except Exception as exc:
             errors.append(_safe_error(name, exc))
 
+    try:
+        runtime = _webui_runtime_payload(errors)
+    except Exception as exc:
+        # Terminal fail-open: an unexpected failure in the runtime compositor
+        # itself must not fail the whole authenticated response, which returned
+        # host metrics before this subtree existed.
+        runtime = _zero_webui_runtime_payload()
+        errors.append(_safe_error("webui_runtime", exc))
+
     available = any(metrics[name] is not None for name in metrics)
     status = "ok" if available and not errors else "partial" if available else "unavailable"
     return {
@@ -191,5 +307,6 @@ def build_system_health_payload() -> dict[str, Any]:
         "cpu": metrics["cpu"],
         "memory": metrics["memory"],
         "disk": metrics["disk"],
+        "webui_runtime": runtime,
         "errors": errors,
     }

@@ -87,6 +87,176 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Startup-health gate for UID/GID auto-detection (#7027).
+  #
+  # The compose variants above all mount a hermes-home volume, so they never
+  # exercise the plain single-container shape from the issue: a state directory
+  # bind-mounted from a host directory owned by a non-1024 user, /workspace left
+  # as the image's own build-time 1024, and no explicit WANTED_UID/WANTED_GID.
+  # Before the fix the auto-detector read /workspace, remapped to 1024, failed
+  # its own state-dir writability check and restart-looped. Source-level
+  # invariants can't catch that — only actually booting the container can.
+  state-dir-uid:
+    name: State-dir UID detection (#7027)
+    runs-on: ubuntu-latest
+    needs: [compose-config, build-image]
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Restore Docker image from cache
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ghcr.io/nesquena/hermes-webui:latest
+          cache-from: type=gha
+
+      - name: Boot on a host-owned state mount with no explicit IDs
+        run: |
+          set -euo pipefail
+
+          CONTAINER="hermes-smoke-uid-${{ github.run_id }}-${{ github.run_attempt }}"
+          HOST_UID=1001
+          STATE_DIR="$(mktemp -d -t hermes-smoke-uidstate-XXXXXX)"
+          sudo chown -R "$HOST_UID:$HOST_UID" "$STATE_DIR"
+
+          cleanup() {
+            local rc=$?
+            echo "::group::Cleanup (rc=$rc)"
+            docker logs "$CONTAINER" 2>&1 | tail -200 || true
+            docker rm -f "$CONTAINER" || true
+            sudo rm -rf "$STATE_DIR" || true
+            echo "::endgroup::"
+            return $rc
+          }
+          trap cleanup EXIT
+
+          # Deliberately NOT mounting /workspace: the point of this gate is that
+          # the stock image's own /workspace (owned 1024:1024) must not win over
+          # the host-owned state mount.
+          echo "::group::docker run"
+          docker run -d --name "$CONTAINER" \
+            -p 127.0.0.1:8788:8787 \
+            -e HERMES_WEBUI_STATE_DIR=/app/data \
+            -v "$STATE_DIR":/app/data \
+            ghcr.io/nesquena/hermes-webui:latest
+          echo "::endgroup::"
+
+          # ----- The product gate: the container must reach /health -----
+          echo "::group::Probe /health"
+          attempts=0
+          max_attempts=60
+          until curl --fail --silent --max-time 5 http://127.0.0.1:8788/health > /dev/null; do
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge "$max_attempts" ]; then
+              echo "❌ WebUI /health never returned 200 after $max_attempts attempts (~5m)"
+              echo "   Startup logs follow in the cleanup group below."
+              exit 1
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
+              echo "❌ Container exited before /health came up — this is the #7027 restart loop"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo "✅ /health = 200 after $attempts attempts"
+          echo "::endgroup::"
+
+          echo "::group::Verify the detected identity"
+          LOGS="$(docker logs "$CONTAINER" 2>&1)"
+
+          # The identity must have been detected from the state dir, not /workspace.
+          if ! echo "$LOGS" | grep -qE -- "-- Auto-detected UID: ${HOST_UID} \(from /app/data\)"; then
+            echo "❌ UID was not auto-detected from the state directory (#7027)"
+            echo "$LOGS" | grep -E -- "-- (Auto-detected|WANTED_)" || true
+            exit 1
+          fi
+          if ! echo "$LOGS" | grep -qE -- "-- Auto-detected GID: ${HOST_UID} \(from /app/data\)"; then
+            echo "❌ GID was not auto-detected from the state directory (#7027)"
+            echo "$LOGS" | grep -E -- "-- (Auto-detected|WANTED_)" || true
+            exit 1
+          fi
+
+          # And the runtime user must really carry it.
+          ACTUAL_UID="$(docker exec "$CONTAINER" id -u hermeswebui)"
+          ACTUAL_GID="$(docker exec "$CONTAINER" id -g hermeswebui)"
+          if [ "$ACTUAL_UID" != "$HOST_UID" ] || [ "$ACTUAL_GID" != "$HOST_UID" ]; then
+            echo "❌ hermeswebui runs as ${ACTUAL_UID}:${ACTUAL_GID}, expected ${HOST_UID}:${HOST_UID}"
+            exit 1
+          fi
+          echo "✅ hermeswebui runs as ${ACTUAL_UID}:${ACTUAL_GID}, detected from the state mount"
+          echo "::endgroup::"
+
+          echo "::group::Startup log scan"
+          BAD_PATTERNS='!! ERROR|!! Exiting script|Failed to verify state directory|Permission denied'
+          if echo "$LOGS" | grep -E -i "$BAD_PATTERNS"; then
+            echo "❌ Startup logs contain known-bad pattern (see above)"
+            exit 1
+          fi
+          echo "✅ No known-bad patterns in startup logs"
+          echo "::endgroup::"
+
+      - name: Explicit WANTED_UID=1024 must survive auto-detection
+        run: |
+          set -euo pipefail
+
+          CONTAINER="hermes-smoke-uid1024-${{ github.run_id }}-${{ github.run_attempt }}"
+          STATE_DIR="$(mktemp -d -t hermes-smoke-uid1024-XXXXXX)"
+          HERMES_DIR="$(mktemp -d -t hermes-smoke-uid1024home-XXXXXX)"
+          # Both mounts are owned by a *different* UID than the one requested.
+          # The hermes-home mount is what makes this discriminating: it is a
+          # probe candidate the pre-fix script already read, so if the explicit
+          # 1024 is still treated as "unset" the container remaps to 1001 and
+          # the assertion below fails. World-writable state dir so the only
+          # thing under test is which identity wins, not mount permissions.
+          sudo chown -R 1001:1001 "$STATE_DIR" "$HERMES_DIR"
+          sudo chmod 0777 "$STATE_DIR"
+
+          cleanup() {
+            local rc=$?
+            echo "::group::Cleanup (rc=$rc)"
+            docker logs "$CONTAINER" 2>&1 | tail -100 || true
+            docker rm -f "$CONTAINER" || true
+            sudo rm -rf "$STATE_DIR" "$HERMES_DIR" || true
+            echo "::endgroup::"
+            return $rc
+          }
+          trap cleanup EXIT
+
+          docker run -d --name "$CONTAINER" \
+            -p 127.0.0.1:8789:8787 \
+            -e HERMES_WEBUI_STATE_DIR=/app/data \
+            -e WANTED_UID=1024 \
+            -e WANTED_GID=1024 \
+            -v "$STATE_DIR":/app/data \
+            -v "$HERMES_DIR":/home/hermeswebui/.hermes \
+            ghcr.io/nesquena/hermes-webui:latest
+
+          attempts=0
+          max_attempts=60
+          until curl --fail --silent --max-time 5 http://127.0.0.1:8789/health > /dev/null; do
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge "$max_attempts" ]; then
+              echo "❌ WebUI /health never returned 200 with explicit WANTED_UID=1024"
+              exit 1
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER")" != "true" ]; then
+              echo "❌ Container exited before /health came up"
+              exit 1
+            fi
+            sleep 5
+          done
+
+          ACTUAL_UID="$(docker exec "$CONTAINER" id -u hermeswebui)"
+          if [ "$ACTUAL_UID" != "1024" ]; then
+            echo "❌ explicit WANTED_UID=1024 was overwritten by auto-detection — got ${ACTUAL_UID} (#7027)"
+            exit 1
+          fi
+          echo "✅ explicit WANTED_UID=1024 preserved (sentinel no longer shadows the valid value)"
+
   smoke:
     name: Smoke ${{ matrix.variant }}
     runs-on: ubuntu-latest

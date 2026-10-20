@@ -15,6 +15,12 @@ const TERMINAL_UI={
   resizing:false,
   resizeStartY:0,
   resizeStartHeight:0,
+  lastAppliedTheme:null,
+  lastAppliedFontFamily:null,
+  fontFitFrame:null,
+  fontLoadGeneration:0,
+  fontLoadRequest:null,
+  inputQueues:new Map(),
 };
 
 const TERMINAL_HEIGHT_DEFAULT=260;
@@ -75,6 +81,70 @@ function _trackTerminalInput(data){
   return null;
 }
 
+// Send terminal input one request at a time per session. Parallel POSTs can
+// reach the shell out of order (the server handles each on its own thread), so
+// keys typed while a request is in flight wait and go out together in the next
+// one. A session has a queue exactly while a request is in flight. The queue
+// outlives close and restart (only its unsent keys are dropped), so a reopened
+// shell's keys still wait for an earlier request.
+const TERMINAL_INPUT_MAX_CHARS=8192; // api/routes.py rejects longer input with 413
+
+function _sendTerminalInput(sid,data){
+  // The server counts code points (Python len); [...data] does too.
+  if(data.length>TERMINAL_INPUT_MAX_CHARS&&[...data].length>TERMINAL_INPUT_MAX_CHARS){
+    // One paste over the limit is refused whole, as the server would refuse it.
+    showToast(t('terminal_input_failed')+'input too large',2600,'error');
+    return;
+  }
+  const queue=TERMINAL_UI.inputQueues.get(sid);
+  if(queue){
+    queue.pending+=data;
+    return;
+  }
+  const fresh={pending:data,generation:0};
+  TERMINAL_UI.inputQueues.set(sid,fresh);
+  _flushTerminalInput(sid,fresh);
+}
+
+function _dropUnsentTerminalInput(sid){
+  const queue=sid&&TERMINAL_UI.inputQueues.get(sid);
+  if(!queue)return;
+  queue.pending='';
+  queue.generation+=1;
+}
+
+function _flushTerminalInput(sid,queue){
+  if(!queue.pending){
+    TERMINAL_UI.inputQueues.delete(sid);
+    return;
+  }
+  // Keys joined while waiting can exceed the server's limit; send them in pieces
+  // (JS length counts UTF-16 units, never fewer than Python's len) without
+  // splitting a surrogate pair.
+  let end=Math.min(queue.pending.length,TERMINAL_INPUT_MAX_CHARS);
+  if(end<queue.pending.length){
+    const last=queue.pending.charCodeAt(end-1);
+    if(last>=0xd800&&last<=0xdbff)end-=1;
+  }
+  const data=queue.pending.slice(0,end);
+  queue.pending=queue.pending.slice(end);
+  const generation=queue.generation;
+  api('/api/terminal/input',{method:'POST',body:JSON.stringify({
+    session_id:sid,
+    data,
+  })})
+    .catch(e=>{
+      // A request for a shell that has since been closed or restarted says
+      // nothing about the keys typed into the new one.
+      if(queue.generation!==generation)return;
+      // Keys queued after the lost ones would leave a gap in the command line,
+      // possibly followed by Enter, so drop them too.
+      queue.pending='';
+      showToast(t('terminal_input_failed')+e.message,2600,'error');
+    })
+    .finally(()=>_flushTerminalInput(sid,queue));
+}
+
 function _terminalCssVar(name,fallback){
   const value=getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value||fallback;
@@ -114,8 +184,78 @@ function _terminalTheme(){
   };
 }
 
-function syncComposerTerminalTheme(){
-  if(TERMINAL_UI.term)TERMINAL_UI.term.options.theme=_terminalTheme();
+function _terminalMonoFont(){
+  return _terminalCssVar(
+    '--font-mono',
+    'ui-monospace,"SFMono-Regular","SF Mono",Menlo,Consolas,"Liberation Mono",monospace'
+  );
+}
+
+function _terminalThemesEqual(left,right){
+  if(left===right)return true;
+  if(!left||!right)return false;
+  const leftKeys=Object.keys(left);
+  const rightKeys=Object.keys(right);
+  return leftKeys.length===rightKeys.length&&leftKeys.every(key=>Object.prototype.hasOwnProperty.call(right,key)&&left[key]===right[key]);
+}
+
+function _scheduleTerminalFontFit(term){
+  if(TERMINAL_UI.fontFitFrame!==null)return;
+  TERMINAL_UI.fontFitFrame=requestAnimationFrame(()=>{
+    TERMINAL_UI.fontFitFrame=null;
+    if(TERMINAL_UI.term!==term||!TERMINAL_UI.open||TERMINAL_UI.collapsed)return;
+    _fitTerminal();
+  });
+}
+
+function _watchTerminalFontLoad(term,fontFamily){
+  const request={
+    generation:TERMINAL_UI.fontLoadGeneration+1,
+    term,
+    fontFamily,
+  };
+  TERMINAL_UI.fontLoadGeneration=request.generation;
+  TERMINAL_UI.fontLoadRequest=request;
+  const fontSet=document.fonts;
+  if(!fontSet||typeof fontSet.load!=='function')return;
+  const fontSize=Number(term.options&&term.options.fontSize);
+  const fontShorthand=(Number.isFinite(fontSize)&&fontSize>0?fontSize:13)+'px '+fontFamily;
+  let load;
+  try{
+    load=document.fonts.load(fontShorthand);
+  }catch(_){
+    return;
+  }
+  Promise.resolve(load).then(fontFaces=>{
+    if(!fontFaces||fontFaces.length===0)return;
+    if(TERMINAL_UI.fontLoadRequest!==request
+      ||TERMINAL_UI.fontLoadGeneration!==request.generation
+      ||TERMINAL_UI.term!==term
+      ||!TERMINAL_UI.open
+      ||TERMINAL_UI.collapsed
+      ||TERMINAL_UI.lastAppliedFontFamily!==fontFamily)return;
+    _scheduleTerminalFontFit(term);
+  },()=>{});
+}
+
+function syncComposerTerminalAppearance(forceFontLoad=false){
+  if(!TERMINAL_UI.term)return;
+  const term=TERMINAL_UI.term;
+  const theme=_terminalTheme();
+  const fontFamily=_terminalMonoFont();
+  if(!_terminalThemesEqual(TERMINAL_UI.lastAppliedTheme,theme)){
+    term.options.theme=theme;
+    TERMINAL_UI.lastAppliedTheme={...theme};
+  }
+  const fontFamilyChanged=TERMINAL_UI.lastAppliedFontFamily!==fontFamily;
+  if(fontFamilyChanged){
+    term.options.fontFamily=fontFamily;
+    TERMINAL_UI.lastAppliedFontFamily=fontFamily;
+    _scheduleTerminalFontFit(term);
+  }
+  if(fontFamilyChanged||forceFontLoad){
+    _watchTerminalFontLoad(term,fontFamily);
+  }
 }
 
 function _xtermReady(){
@@ -130,13 +270,15 @@ function _ensureXterm(){
     surface.textContent='Terminal library failed to load. Check network access to cdn.jsdelivr.net.';
     return null;
   }
+  const theme=_terminalTheme();
+  const fontFamily=_terminalMonoFont();
   const term=new window.Terminal({
     cursorBlink:true,
     fontSize:13,
-    fontFamily:'Menlo, Monaco, Consolas, "Liberation Mono", monospace',
+    fontFamily,
     scrollback:1000,
     convertEol:false,
-    theme:_terminalTheme(),
+    theme,
   });
   let fitAddon=null;
   if(window.FitAddon&&typeof window.FitAddon.FitAddon==='function'){
@@ -155,14 +297,14 @@ function _ensureXterm(){
     }
     const sid=TERMINAL_UI.sessionId||_terminalSessionId();
     if(!sid)return;
-    api('/api/terminal/input',{method:'POST',body:JSON.stringify({
-      session_id:sid,
-      data,
-    })}).catch(e=>showToast(t('terminal_input_failed')+e.message,2600,'error'));
+    _sendTerminalInput(sid,data);
   });
   TERMINAL_UI.term=term;
   TERMINAL_UI.fitAddon=fitAddon;
+  TERMINAL_UI.lastAppliedTheme={...theme};
+  TERMINAL_UI.lastAppliedFontFamily=fontFamily;
   _fitTerminal();
+  _watchTerminalFontLoad(term,fontFamily);
   return term;
 }
 
@@ -571,12 +713,20 @@ function expandComposerTerminal(opts){
 }
 
 function _disposeXterm(){
+  TERMINAL_UI.fontLoadGeneration+=1;
+  TERMINAL_UI.fontLoadRequest=null;
+  if(TERMINAL_UI.fontFitFrame!==null){
+    if(typeof cancelAnimationFrame==='function')cancelAnimationFrame(TERMINAL_UI.fontFitFrame);
+    TERMINAL_UI.fontFitFrame=null;
+  }
   if(TERMINAL_UI.term){
     try{TERMINAL_UI.term.dispose();}catch(_){}
   }
   TERMINAL_UI.term=null;
   TERMINAL_UI.fitAddon=null;
   TERMINAL_UI.typedLine='';
+  TERMINAL_UI.lastAppliedTheme=null;
+  TERMINAL_UI.lastAppliedFontFamily=null;
   const {surface}= _terminalEls();
   if(surface)surface.textContent='';
 }
@@ -610,6 +760,8 @@ async function closeComposerTerminal(sessionId,opts){
   if(composerWrap)composerWrap.classList.remove('terminal-dock-visible');
   TERMINAL_UI.sessionId=null;
   TERMINAL_UI.workspace=null;
+  // Keys not yet sent belonged to the closed shell.
+  _dropUnsentTerminalInput(sid);
   syncTerminalButton();
 }
 
@@ -620,6 +772,8 @@ async function restartComposerTerminal(){
     TERMINAL_UI.source=null;
   }
   if(TERMINAL_UI.term)TERMINAL_UI.term.reset();
+  // Keys not yet sent belonged to the old shell.
+  _dropUnsentTerminalInput(TERMINAL_UI.sessionId||_terminalSessionId());
   try{await _startComposerTerminal(true);}
   catch(e){showToast(t('terminal_start_failed')+e.message,3200,'error');}
 }
@@ -696,8 +850,29 @@ window.addEventListener('resize',()=>{
 });
 
 if(window.MutationObserver){
-  new MutationObserver(syncComposerTerminalTheme).observe(document.documentElement,{
+  new MutationObserver(()=>syncComposerTerminalAppearance()).observe(document.documentElement,{
     attributes:true,
-    attributeFilter:['class','data-skin'],
+    attributeFilter:['class','data-skin','style'],
   });
+
+  const terminalHead=document.head;
+  if(terminalHead){
+    const terminalHeadStylesheetLoadListener=(event)=>{
+      const target=event && event.target;
+      if(!target||typeof target.tagName!=='string'||target.tagName.toLowerCase()!=='link')return;
+      const rel=typeof target.getAttribute==='function'
+        ? target.getAttribute('rel')
+        : target.rel;
+      if(!String(rel||'').toLowerCase().split(/\s+/).includes('stylesheet'))return;
+      syncComposerTerminalAppearance(true);
+    };
+    terminalHead.addEventListener('load',terminalHeadStylesheetLoadListener,true);
+    new MutationObserver(()=>syncComposerTerminalAppearance(true)).observe(terminalHead,{
+      attributes:true,
+      attributeFilter:['href','media','disabled'],
+      childList:true,
+      subtree:true,
+      characterData:true,
+    });
+  }
 }

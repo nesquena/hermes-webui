@@ -86,11 +86,16 @@ def clear_pending(session_key: str) -> int:
 def _with_timeout_metadata(data: dict) -> dict:
     item = dict(data or {})
     requested_at = float(item.get("requested_at") or time.time())
-    timeout_seconds = int(item.get("timeout_seconds") or DEFAULT_TIMEOUT_SECONDS)
-    expires_at = float(item.get("expires_at") or requested_at + timeout_seconds)
+    raw_timeout = item.get("timeout_seconds")
+    timeout_seconds = int(raw_timeout) if raw_timeout is not None else DEFAULT_TIMEOUT_SECONDS
     item["requested_at"] = requested_at
     item["timeout_seconds"] = timeout_seconds
-    item["expires_at"] = expires_at
+    if timeout_seconds <= 0:
+        # Unlimited: no expiry. The frontend renders no countdown and the card
+        # waits until the user answers (or the run is cancelled).
+        item["expires_at"] = 0
+        return item
+    item["expires_at"] = float(item.get("expires_at") or requested_at + timeout_seconds)
     return item
 
 

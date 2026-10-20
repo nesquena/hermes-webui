@@ -155,6 +155,7 @@ def test_session_compress_stale_runtime_returns_typed_409_before_mutation(
         "error": "restart required",
         "type": "agent_runtime_stale",
         "retryable": True,
+        "restart_scheduled": False,
     }
     loaded_after = Session.load(sid)
     assert loaded_after is not None
@@ -187,6 +188,7 @@ def test_session_compress_start_stale_runtime_returns_409_before_job_creation(
         "error": "restart required",
         "type": "agent_runtime_stale",
         "retryable": True,
+        "restart_scheduled": False,
     }
     with routes._MANUAL_COMPRESSION_JOBS_LOCK:
         assert sid not in routes._MANUAL_COMPRESSION_JOBS

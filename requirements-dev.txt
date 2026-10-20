@@ -8,7 +8,7 @@ pytest-timeout
 pytest-asyncio
 pytest-shard
 ruff
-mcp<2
+mcp>=1.28,<2
 # Optional Office parsers — runtime-optional (commented in requirements.txt), but
 # installed here so the workspace Office-preview tests (tests/test_issue540_*.py)
 # run under the documented ./scripts/test.sh entry point. These files
@@ -16,3 +16,6 @@ mcp<2
 python-docx
 openpyxl
 python-pptx
+# ruamel.yaml: the YAML fallback used when WebUI runs inside a Hermes Agent managed
+# environment that has no PyYAML (api/yaml_compat.py). Installed here so its tests run.
+ruamel.yaml>=0.18

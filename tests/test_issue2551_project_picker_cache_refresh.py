@@ -131,8 +131,9 @@ console.log(JSON.stringify(_allSessions.map(s => ({id: s.session_id, project_id:
 
 def test_new_project_branch_still_uses_authoritative_refetch():
     """The '+ New project' path was already correct: it calls
-    `await renderSessionList()` (a full /api/sessions refetch) after
-    creating the project. The minimal fix must not change that.
+    `await renderSessionList(...)` (a full /api/sessions refetch) after
+    creating the project. The completion must also paint immediately without
+    dismissing a newer picker opened while the request was in flight.
 
     #3746 wrapped the move call in try/catch (so a 503 from a streaming
     session shows a toast instead of an unhandled rejection); the refetch is
@@ -140,14 +141,19 @@ def test_new_project_branch_still_uses_authoritative_refetch():
     create-branch block (up to the next picker item) rather than a fixed byte
     window so the assertion tracks intent, not exact offsets.
     """
-    create_idx = PICKER_BODY.find("'+ New project'")
+    # Located by the create row's own handler: its label is translated (#8044),
+    # so the English text is no longer in the source to search for.
+    create_idx = PICKER_BODY.find("createItem.onclick=")
     assert create_idx != -1, "'+ New project' branch not located"
     # Bound the window at the end of the create handler (the picker.appendChild
     # that follows the createItem.onclick), falling back to a generous slice.
     end_idx = PICKER_BODY.find("picker.appendChild(createItem)", create_idx)
     window = PICKER_BODY[create_idx: end_idx if end_idx != -1 else create_idx + 1600]
-    assert "await renderSessionList()" in window, (
-        "'+ New project' branch must keep its authoritative refetch — the "
-        "new project_id is only known to the server until /api/sessions is "
-        "re-fetched."
+    refresh = (
+        "await renderSessionList({deferWhileInteracting:false,"
+        "keepProjectPicker:true})"
+    )
+    assert window.count(refresh) == 2, (
+        "Both success and failed-move paths must keep their authoritative "
+        "refetch and publish it immediately without closing a newer picker."
     )

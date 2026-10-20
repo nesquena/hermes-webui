@@ -1854,7 +1854,7 @@ def install_extension(id: object, download_url: object, sha256: object) -> Dict[
     ext_dir_resolved = ext_dir.resolve()
     for member_name in file_members:
         decoded = _fully_unquote_path(_stripped(member_name))
-        if not decoded or not _is_safe_relative_path(decoded):
+        if not decoded or not _is_safe_archive_member(decoded):
             raise ExtensionInstallError("Unsafe archive member")
         resolved = (ext_dir / decoded).resolve()
         try:
@@ -1956,7 +1956,7 @@ def uninstall_extension(id: object) -> Dict[str, Any]:
             raise ExtensionInstallError("Extension not installed", 404)
         ext_dir = root / ext_id
         for rel_path in entry.get("files", []):
-            if not _is_safe_relative_path(rel_path):
+            if not _is_safe_archive_member(rel_path):
                 continue
             target = (ext_dir / rel_path).resolve()
             try:
@@ -2068,11 +2068,39 @@ def inject_extension_tags(index_html: str) -> str:
 
 
 def _is_safe_relative_path(rel: str) -> bool:
+    # Strict: reject empty, traversal, AND any dot-prefixed segment. This is shared
+    # by static serving, asset URLs and manifest paths, where a hidden file must
+    # never become reachable. Archive members use _is_safe_archive_member() below.
     if not rel or "\x00" in rel or "\\" in rel:
         return False
     for segment in rel.split("/"):
         if not segment or segment in (".", "..") or segment.startswith("."):
             return False
+    return True
+
+
+# Benign hidden LEAF files that extension archives legitimately ship. A dot-prefixed
+# name is permitted only as the final path segment and only if it is one of these;
+# dot-directories (e.g. ".git/") and every other dotfile (".env", ".secret") stay rejected.
+_ALLOWED_ARCHIVE_DOTFILES = frozenset({".gitkeep", ".gitignore", ".gitattributes", ".env.example"})
+
+
+def _is_safe_archive_member(rel: str) -> bool:
+    """Path validator for archive install/uninstall ONLY. Same containment as
+    _is_safe_relative_path(), but permits a narrow allowlist of benign hidden leaf
+    files so extensions can ship ".gitkeep"/".env.example" without loosening the
+    shared validator that also gates static serving."""
+    if not rel or "\x00" in rel or "\\" in rel:
+        return False
+    segments = rel.split("/")
+    for segment in segments[:-1]:
+        if not segment or segment in (".", "..") or segment.startswith("."):
+            return False
+    leaf = segments[-1]
+    if not leaf or leaf in (".", ".."):
+        return False
+    if leaf.startswith(".") and leaf not in _ALLOWED_ARCHIVE_DOTFILES:
+        return False
     return True
 
 

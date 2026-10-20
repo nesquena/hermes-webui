@@ -37,6 +37,13 @@ if (after < 0) throw new Error('getModelLabel end boundary not found');
 const fnSrc = ui.slice(start, after);
 const _dynamicModelLabels = {};
 function _fmtOllamaLabel(s){ return s; }
+// getModelLabel() calls the dotted Bedrock/Vertex prefix normalizer, which lives
+// just above it with two Sets it closes over. Pull all three in, or the eval'd
+// function ReferenceErrors on the first dotted id.
+const _stripStart = ui.indexOf('const _BEDROCK_REGION_PREFIXES');
+const _stripEnd = ui.indexOf('function getModelLabel(');
+if (_stripStart < 0 || _stripStart > _stripEnd) throw new Error('_stripDottedModelPrefix block not found');
+eval(ui.slice(_stripStart, _stripEnd));
 eval(fnSrc);
 const out = {};
 for (const m of JSON.parse(process.argv[2])) out[m] = getModelLabel(m);

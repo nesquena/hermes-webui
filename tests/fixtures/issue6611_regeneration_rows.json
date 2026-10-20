@@ -1,0 +1,14 @@
+{
+  "issue": 6611,
+  "rows": [
+    {
+      "role": "user",
+      "content": "same prompt"
+    },
+    {
+      "role": "assistant",
+      "content": "provider failed",
+      "_error": true
+    }
+  ]
+}

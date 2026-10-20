@@ -48,11 +48,12 @@ def _run_node(script: str) -> dict:
     assert NODE is not None
     result = subprocess.run(
         [NODE, "-e", script],
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
         timeout=30,
     )
+    assert result.returncode == 0, f"node failed: {result.stderr}"
     return json.loads(result.stdout)
 
 
@@ -378,6 +379,7 @@ def test_cron_recent_does_not_cross_match_newer_long_prefix_session_when_only_sh
             "status": "success",
             "completed_at": 250.0,
             "toast_notifications": True,
+            "badge_notifications": True,
             "session_id": "cron_backup_20260610_090000",
             "message_count": 4,
         }
@@ -410,6 +412,7 @@ function _isSessionActivelyViewedForList() {{ return false; }}
 function _setSessionViewedCount(sid, count) {{ viewed.push([sid, count]); }}
 function _markSessionCompletionUnread(sid, count) {{ unread.push([sid, count]); }}
 function renderSessionListFromCache() {{ renders += 1; }}
+function _repaintSidebarForBackgroundChurn() {{ renderSessionListFromCache(); }}
 global.window = {{}};
     eval(extractFunc('_markSessionCompletionUnreadIfBackground'));
     const result = _markSessionCompletionUnreadIfBackground('cron_1');
@@ -451,6 +454,7 @@ function _isSessionActivelyViewedForList(sid) {{ return sid === 'cron_2'; }}
 function _setSessionViewedCount(sid, count) {{ viewed.push([sid, count]); }}
 function _markSessionCompletionUnread(sid, count) {{ unread.push([sid, count]); }}
 function renderSessionListFromCache() {{ renders += 1; }}
+function _repaintSidebarForBackgroundChurn() {{ renderSessionListFromCache(); }}
 global.window = {{}};
 eval(extractFunc('_markSessionCompletionUnreadIfBackground'));
 const result = _markSessionCompletionUnreadIfBackground('cron_2');
@@ -488,6 +492,8 @@ let _cronPollTimer = null;
 let _cronUnreadCount = 0;
 let _cronPollGeneration = 0;
 const _cronNewJobIds = new Set();
+const _cronPendingToasts = [];
+let _cronPollInFlight = false;
 const markCalls = [];
 const toastCalls = [];
 let badgeUpdates = 0;
@@ -511,6 +517,15 @@ function t(...args) {{ return args.join('|'); }}
 function updateCronBadge() {{ badgeUpdates += 1; }}
 function _markSessionCompletionUnreadIfBackground(sid, count) {{ markCalls.push([sid, count]); }}
 eval(extractFunc('startCronPolling'));
+// The tick is async (`await api(...)`) and its declaration must reach the
+// harness scope, so eval it directly. extractFunc matches `function <name>(`
+// without the `async` keyword, so restore it here.
+const tickFnSource = extractFunc('_runCronPollTick');
+if (!/^async\s/.test(tickFnSource)) {{
+  eval(tickFnSource.replace(/^function\\s+(\\w+)/, 'async function $1'));
+}} else {{
+  eval(tickFnSource);
+}}
 (async() => {{
   startCronPolling();
   await global.__tick();
@@ -535,3 +550,119 @@ eval(extractFunc('startCronPolling'));
         "toastCalls": [],
         "badgeUpdates": 1,
     }
+
+
+# ── #6767 live-refresh guard (active-panel + present cron list) ──────────────
+#
+# The existing polling harness above stops at updateCronBadge(). PR #6767 added
+# one line after it: `if (_currentPanel === 'tasks' && $('cronList')) loadCrons();`
+# Those three free names (_currentPanel, $, loadCrons) are all undefined in the
+# old harness, so the line can throw into startCronPolling's broad catch and be
+# silently swallowed while the old assertions still pass. These tests stub all
+# three and pin the four behaviours the reviewer asked for.
+#
+# StartCronPolling body is extracted and eval'd with the shared helper plus new
+# deps: _currentPanel (active panel), $ (DOM lookup returning a cronList node
+# when present) and a loadCrons spy.
+
+def _cron_polling_refresh_script(current_panel, cron_list_present):
+    return f"""
+const fs = require('fs');
+const src = fs.readFileSync({json.dumps(str(PANELS_JS_PATH))}, 'utf8');
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+let _cronPollSince = 10;
+let _cronPollTimer = null;
+let _cronUnreadCount = 0;
+let _cronPollGeneration = 0;
+const _cronNewJobIds = new Set();
+let badgeUpdates = 0;
+let loadCronsCalls = 0;
+let refreshOptions = null;
+let _cronPollInFlight = false;
+const _cronPendingToasts = [];
+let _currentPanel = {json.dumps(current_panel)};
+global.document = {{ hidden: false }};
+global.setInterval = (fn, _ms) => {{ global.__tick = fn; return 1; }};
+async function api(_url) {{
+  return {{
+    completions: [{{
+      job_id: 'job6767',
+      session_id: 'cron_job6767_20260610_080000',
+      message_count: 3,
+      name: 'Nightly Backup',
+      status: 'success',
+      completed_at: 25,
+      toast_notifications: false
+    }}]
+  }};
+}}
+function showToast(...args) {{}}
+function t(...args) {{ return args.join('|'); }}
+function updateCronBadge() {{ badgeUpdates += 1; }}
+function _markSessionCompletionUnreadIfBackground(sid, count) {{}}
+function $(id) {{ return id === 'cronList' && {json.dumps(cron_list_present)} ? {{ tagName: 'UL' }} : null; }}
+function loadCrons(animate, options) {{ loadCronsCalls += 1; refreshOptions = options; }}
+const tickSource = extractFunc('_runCronPollTick');
+eval('async ' + tickSource);
+eval(extractFunc('startCronPolling'));
+(async() => {{
+  startCronPolling();
+  await global.__tick();
+  console.log(JSON.stringify({{
+    unreadJobs: Array.from(_cronNewJobIds),
+    badgeUpdates,
+    loadCronsCalls,
+    refreshOptions,
+    inFlight: _cronPollInFlight
+  }}));
+}})().catch(err => {{
+  console.error(err);
+  process.exit(1);
+}});
+"""
+
+@pytest.mark.parametrize(
+    "current_panel,cron_list_present,expected_refresh",
+    [
+        # 1. active Scheduled Tasks panel + existing list → refresh exactly once
+        ("tasks", True, 1),
+        # 2. another panel open → no live refresh (hidden list, avoidable request)
+        ("sessions", True, 0),
+        # 3. tasks panel but no cron list element yet → no refresh
+        ("tasks", False, 0),
+        # 4. other panel + no list → definitely no refresh (defensive)
+        ("sessions", False, 0),
+    ],
+)
+def test_cron_polling_live_refresh_guard(
+    current_panel, cron_list_present, expected_refresh
+):
+    """#6767: loadCrons() is called precisely when the Scheduled Tasks panel is
+    active AND its list is mounted — and unread-set/badge updates always happen."""
+    script = _cron_polling_refresh_script(current_panel, cron_list_present)
+    payload = _run_node(script)
+
+    # The guard decides whether the list is refreshed...
+    assert payload["loadCronsCalls"] == expected_refresh, (
+        f"panel={current_panel}, list={cron_list_present}: "
+        f"expected {expected_refresh} loadCrons() call(s), "
+        f"got {payload['loadCronsCalls']}"
+    )
+
+    # ...but the unread bookkeeping always runs regardless of panel/list state.
+    assert payload["unreadJobs"] == ["job6767"], "job must always be marked unread"
+    assert payload["badgeUpdates"] == 1, "badge must always be updated"
+    assert payload["inFlight"] is False
+    assert payload["refreshOptions"] == ({"background": True} if expected_refresh else None)

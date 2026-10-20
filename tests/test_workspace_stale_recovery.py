@@ -119,6 +119,169 @@ def test_resolve_chat_workspace_with_recovery_preserves_explicit_errors(monkeypa
     assert saved["count"] == 0
 
 
+def _post_new_session_with_workspace(
+    monkeypatch,
+    body,
+    previous_session,
+    fallback,
+    *,
+    previous_visible=True,
+):
+    import api.session_lifecycle as session_lifecycle
+
+    captured = {"new": [], "fallback": 0}
+
+    class _NewSession:
+        session_id = "new-session"
+        profile = "default"
+        messages = []
+
+        def __init__(self, workspace):
+            self.workspace = workspace
+
+        def compact(self):
+            return {
+                "session_id": self.session_id,
+                "profile": self.profile,
+                "workspace": self.workspace,
+            }
+
+    def get_fallback():
+        captured["fallback"] += 1
+        return str(fallback)
+
+    def create_session(**kwargs):
+        captured["new"].append(kwargs)
+        return _NewSession(kwargs["workspace"])
+
+    monkeypatch.setattr(routes, "read_body", lambda _handler: body)
+    monkeypatch.setattr(routes, "_check_csrf", lambda _handler: True)
+    monkeypatch.setattr(routes, "_csrf_exempt_path", lambda _path: False)
+    monkeypatch.setattr(routes, "_handle_extension_sidecar_proxy", lambda *_a, **_k: False)
+    monkeypatch.setattr(routes, "_guard_request_session_visibility", lambda *_a, **_k: True)
+    monkeypatch.setattr(
+        routes,
+        "_session_id_visible_to_request_profile",
+        lambda *_a, **_k: previous_visible,
+    )
+    monkeypatch.setattr(
+        routes,
+        "get_session",
+        lambda sid, metadata_only=False: previous_session
+        if sid == body.get("prev_session_id")
+        else (_ for _ in ()).throw(KeyError(sid)),
+    )
+    monkeypatch.setattr(routes, "get_last_workspace", get_fallback)
+    monkeypatch.setattr(routes, "_session_model_state_from_request", lambda *_a: (None, None))
+    monkeypatch.setattr(routes, "new_session", create_session)
+    monkeypatch.setattr(
+        session_lifecycle,
+        "_register_background_commit_thread",
+        lambda _thread: False,
+    )
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _handler, payload, status=200, **_kwargs: captured.setdefault(
+            "response", (status, payload)
+        ),
+    )
+    monkeypatch.setattr(
+        routes,
+        "bad",
+        lambda _handler, message, status=400, **_kwargs: captured.setdefault(
+            "error", (status, message)
+        ),
+    )
+
+    handler = SimpleNamespace(command="POST", headers={})
+    routes.handle_post(handler, urlparse("/api/session/new"))
+    return captured
+
+
+def test_session_new_recovers_deleted_workspace_inherited_from_visible_previous_session(
+    monkeypatch, tmp_path
+):
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    stale = tmp_path / "deleted-workspace"
+    previous = SimpleNamespace(
+        session_id="previous-session",
+        profile="default",
+        workspace=str(stale),
+    )
+    body = {
+        "workspace": str(stale),
+        "workspace_inherited_from_prev_session": True,
+        "prev_session_id": previous.session_id,
+        "profile": "default",
+        "worktree": False,
+    }
+
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+    monkeypatch.setattr(workspace, "load_workspaces", lambda: [])
+    captured = _post_new_session_with_workspace(
+        monkeypatch,
+        body,
+        previous,
+        fallback,
+    )
+
+    assert "error" not in captured
+    assert captured["response"][0] == 200
+    assert captured["response"][1]["session"]["workspace"] == str(fallback.resolve())
+    assert captured["new"][0]["workspace"] == str(fallback.resolve())
+    assert captured["fallback"] == 1
+
+
+@pytest.mark.parametrize(
+    ("mark_inherited", "previous_visible", "stored_workspace"),
+    [
+        pytest.param(False, True, "requested", id="explicit-request"),
+        pytest.param(True, False, "requested", id="foreign-previous-session"),
+        pytest.param(True, True, "different", id="stored-workspace-mismatch"),
+    ],
+)
+def test_session_new_keeps_deleted_unverified_workspace_strict(
+    monkeypatch,
+    tmp_path,
+    mark_inherited,
+    previous_visible,
+    stored_workspace,
+):
+    fallback = tmp_path / "fallback"
+    fallback.mkdir()
+    stale = tmp_path / "deleted-workspace"
+    previous = SimpleNamespace(
+        session_id="previous-session",
+        profile="default",
+        workspace=(str(stale) if stored_workspace == "requested" else str(tmp_path / "other")),
+    )
+    body = {
+        "workspace": str(stale),
+        "prev_session_id": previous.session_id,
+        "profile": "default",
+        "worktree": False,
+    }
+    if mark_inherited:
+        body["workspace_inherited_from_prev_session"] = True
+
+    monkeypatch.setattr(workspace, "_home_path", lambda: tmp_path)
+    monkeypatch.setattr(workspace, "load_workspaces", lambda: [])
+    captured = _post_new_session_with_workspace(
+        monkeypatch,
+        body,
+        previous,
+        fallback,
+        previous_visible=previous_visible,
+    )
+
+    assert captured["error"][0] == 400
+    assert "does not exist" in captured["error"][1].lower()
+    assert captured["new"] == []
+    assert captured["fallback"] == 0
+
+
 def test_chat_recovery_preserves_existing_implicit_trust_error(monkeypatch, tmp_path):
     home = tmp_path / "home"
     fallback = home / "fallback"

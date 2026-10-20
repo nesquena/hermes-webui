@@ -100,22 +100,58 @@ def render_md(raw):
     def handle_ul(block):
         lines = block.strip().split("\n")
         out = "<ul>"
+        prev = 0
+        first = True
         for l in lines:
-            indent = bool(re.match(r"^ {2,}", l))
-            text = re.sub(r"^ {0,4}[-*+] ", "", l)
-            style = ' style="margin-left:16px"' if indent else ""
-            out += f"<li{style}>{inline_md(text)}</li>"
-        return out + "</ul>"
+            m = re.match(r"^( *)([-*+]) (.*)$", l)
+            if not m:
+                continue
+            depth = 0 if len(m.group(1)) < 2 else len(m.group(1)) // 2
+            if depth > prev:
+                # Deeper: the previous <li> stays OPEN so the nested <ul>
+                # renders INSIDE it (matches renderMd(): parent<li>child<ul>).
+                out += "<ul>" * (depth - prev)
+            elif depth < prev:
+                # Shallower: close the deepest <li>, each nested <ul> and the
+                # <li> it hung from, then the current item's parent <li>.
+                out += "</li></ul>" * (prev - depth) + "</li>"
+            elif not first:
+                # Same depth: close the previous sibling <li> only.
+                out += "</li>"
+            prev = depth
+            first = False
+            out += f"<li>{inline_md(m.group(3))}"
+        out += "</li></ul>" * (prev + 1)
+        return out
 
     s = re.sub(r"((?:^(?:  )?[-*+] .+\n?)+)", lambda m: handle_ul(m.group()), s, flags=re.M)
 
     def handle_ol(block):
         lines = block.strip().split("\n")
         out = "<ol>"
+        prev = 0
+        first = True
         for l in lines:
-            text = re.sub(r"^ {0,4}\d+\. ", "", l)
-            out += f"<li>{inline_md(text)}</li>"
-        return out + "</ol>"
+            m = re.match(r"^( *)(\d+)\. (.*)$", l)
+            if not m:
+                continue
+            depth = 0 if len(m.group(1)) < 2 else len(m.group(1)) // 2
+            if depth > prev:
+                # Deeper: the previous <li> stays OPEN so the nested <ol>
+                # renders INSIDE it (matches renderMd(): parent<li>child<ol>).
+                out += "<ol>" * (depth - prev)
+            elif depth < prev:
+                # Shallower: close the deepest <li>, each nested <ol> and the
+                # <li> it hung from, then the current item's parent <li>.
+                out += "</li></ol>" * (prev - depth) + "</li>"
+            elif not first:
+                # Same depth: close the previous sibling <li> only.
+                out += "</li>"
+            prev = depth
+            first = False
+            out += f"<li>{inline_md(m.group(3))}"
+        out += "</li></ol>" * (prev + 1)
+        return out
 
     s = re.sub(r"((?:^(?:  )?\d+\. .+\n?)+)", lambda m: handle_ol(m.group()), s, flags=re.M)
 
@@ -559,10 +595,25 @@ def test_ordered_list_code_spans(cleanup_test_sessions):
     assert "<code>npm start</code>" in out
 
 def test_indented_list_item_bold(cleanup_test_sessions):
-    """Bold inside indented (nested) list item."""
+    """Bold inside indented (nested) list item — nested items now build a
+    structural nested <ul> instead of a margin-left sibling (#6700)."""
     out = render_md("- top level\n  - **nested bold**")
     assert "<strong>nested bold</strong>" in out
-    assert "margin-left:16px" in out
+    assert "<ul><li><strong>nested bold</strong></li></ul>" in out
+    assert "margin-left:16px" not in out
+
+def test_mirror_nests_same_marker_child_list_inside_parent_li(cleanup_test_sessions):
+    """greptile P2 (#6700): the mirror's handle_ul/handle_ol must nest a
+    same-marker child list INSIDE the parent <li>, exactly like renderMd()
+    in ui.js — not close the parent <li> before opening the child <ul>/<ol>.
+    The old shape (<li>parent</li><ul>…) let structural assertions pass
+    without validating the production renderer's parent-child hierarchy."""
+    assert render_md("- parent\n  - child") == (
+        "<ul><li>parent<ul><li>child</li></ul></li></ul>"
+    )
+    assert render_md("1. parent\n  1. child") == (
+        "<ol><li>parent<ol><li>child</li></ol></li></ol>"
+    )
 
 # --- Blockquote variants ---
 

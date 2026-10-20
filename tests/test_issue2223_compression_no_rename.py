@@ -152,13 +152,19 @@ class TestNoRenameDuringCompression:
             ],
         )
 
-        boundary = streaming._preserve_pre_compression_snapshot(
+        assert streaming._preserve_pre_compression_snapshot(
+            disjoint_child,
+            "disjoint_parent",
+        ) is True
+        boundary = streaming._compression_disjoint_parent_boundary(
             disjoint_child,
             "disjoint_parent",
         )
         assert boundary == {
             "parent_session_id": "disjoint_parent",
             "message_count": len(parent_messages),
+            "visible_message_count": len(parent_messages),
+            "last_message_at": 999.0,
             "parent_updated_at": parent.updated_at,
             "child_message_count": len(disjoint_child.messages),
             "child_messages_digest": models._compression_child_messages_digest(
@@ -181,6 +187,10 @@ class TestNoRenameDuringCompression:
         assert streaming._preserve_pre_compression_snapshot(
             suffix_replay_child,
             "replay_parent",
+        ) is True
+        assert streaming._compression_disjoint_parent_boundary(
+            suffix_replay_child,
+            "replay_parent",
         ) is None
 
         noncanonical_messages = list(parent_messages[:-1])
@@ -198,9 +208,9 @@ class TestNoRenameDuringCompression:
             ],
         )
 
-        assert streaming._preserve_pre_compression_snapshot(
-            canonical_child,
-            "noncanonical_parent",
+        assert streaming._disjoint_compression_parent_message_count(
+            noncanonical_messages,
+            canonical_child.messages,
         ) is None
 
 

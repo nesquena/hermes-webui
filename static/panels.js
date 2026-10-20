@@ -25,6 +25,7 @@ let _currentCronDetail = null; // full cron job object
 let _currentCronDetailKey = '';
 let _cronMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _cronPreFormDetail = null; // snapshot of prior selection when entering a form
+let _cronModelPickerTouched = false; // true once the user changes the model picker in the current form
 let _showAllCronProfiles = false;
 let _cronOtherProfileCount = 0;
 let _currentWorkspaceDetail = null; // { path, name, is_default }
@@ -111,6 +112,14 @@ function syncAppTitlebar() {
       inp.type = 'text';
       inp.className = 'app-titlebar-rename-input';
       inp.value = S.session.title || (typeof t === 'function' ? t('untitled') : 'Untitled');
+      // #7542: this is a chat-title editor, not a credentials field.
+      // Chrome and password-manager extensions (1Password, LastPass,
+      // Bitwarden, Dashlane) mis-classify it as a login form because
+      // it accepts arbitrary user input and is rendered next to the
+      // chat UI. Disable autofill / form-fill explicitly so the
+      // browser does not surface the "save password" dialog after
+      // the user renames a conversation.
+      _markNonCredentialInput(inp);
 
       // Prevent click/dblclick on the input from bubbling — we don't want
       // panel switches, session switches, or any other handler firing.
@@ -330,7 +339,8 @@ function _resyncChatSidebarAfterPanelSwitch() {
     // rebuilds rows, which is correct for normal list refreshes but hostile to
     // this one-shot panel-transition repair.
     if (typeof _sessionActionMenu !== 'undefined' && _sessionActionMenu) return;
-    renderSessionListFromCache();
+    if (typeof _repaintSidebarForBackgroundChurn === 'function') _repaintSidebarForBackgroundChurn();
+    else if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   };
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
   else run();
@@ -353,6 +363,32 @@ function _panelFromCurrentMainView(){
 }
 
 function _syncMobileSidebarPanelFromMainView(){
+  const mainEl=document.querySelector('main.main');
+  // Extension panels are intentionally outside MAIN_VIEW_PANELS: the host must
+  // not try to lazy-load or own their main view. They do, however, publish the
+  // visible view as `showing-x-<token>` and install a matching sidebar
+  // `.panel-view[data-panel-token]`. The mobile drawer is reopened through this
+  // sync helper, so treating that state as Chat deactivated the extension's
+  // sidebar view every time the operator opened the hamburger or edge drawer.
+  // The frame remained behind the drawer, but its content had no reachable
+  // navigation state on the phone.
+  const extensionClass=mainEl&&Array.from(mainEl.classList)
+    .find(name=>name.startsWith('showing-x-'));
+  const extensionToken=extensionClass&&extensionClass.slice('showing-x-'.length);
+  if(extensionToken){
+    const extensionView=Array.from(document.querySelectorAll('.sidebar .panel-view'))
+      .find(view=>view.dataset.panelToken===extensionToken);
+    if(extensionView){
+      const extensionPanel=`x-${extensionToken}`;
+      document.querySelectorAll('[data-panel]').forEach(t=>t.classList.toggle('active',t.dataset.panel===extensionPanel));
+      document.querySelectorAll('.panel-view').forEach(p=>p.classList.remove('active'));
+      extensionView.classList.add('active');
+      // Do not put an extension token in _currentPanel: switchPanel owns that
+      // state and only accepts its native panel names. Returning the token keeps
+      // this helper truthful without corrupting the host state machine.
+      return extensionPanel;
+    }
+  }
   const panel=_panelFromCurrentMainView();
   if(!panel)return _currentPanel||'chat';
   const panelEl=$('panel'+panel.charAt(0).toUpperCase()+panel.slice(1));
@@ -388,6 +424,8 @@ async function switchPanel(name, opts = {}) {
     }
   }
   if (!opts.bypassSettingsGuard && !_beforePanelSwitch(nextPanel)) return false;
+  if (prevPanel === 'chat' && nextPanel !== 'chat'
+      && typeof _dismissAttachChoice === 'function') _dismissAttachChoice();
   if (prevPanel !== 'settings' && nextPanel === 'settings') _beginSettingsPanelSession();
   // Close any long-lived Kanban SSE stream when leaving the kanban panel
   // so we don't keep a stale connection open in the background.
@@ -395,6 +433,20 @@ async function switchPanel(name, opts = {}) {
     if (typeof _kanbanStopPolling === 'function') _kanbanStopPolling();
   }
   _currentPanel = nextPanel;
+  // Mobile drawer visibility: a rail/tab click on a phone should surface the
+  // panel synchronously, NOT after the panel's async data load. If the re-open
+  // stayed at the bottom of this function, a form opened from inside the drawer
+  // (e.g. openWorkspaceCreate closing the drawer) would race the deferred
+  // re-open and the drawer would win, covering the main-view form.
+  if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
+    const sidebar = document.querySelector('.sidebar');
+    if (sidebar) {
+      sidebar.classList.remove('mobile-session-page');
+      sidebar.classList.add('mobile-panel-drawer', 'mobile-open');
+      // #7924: an open drawer must never stay inert (see mobileSwitchPanel).
+      if (typeof _setPanelInert === 'function') _setPanelInert(sidebar, true);
+    }
+  }
   // Update nav tabs (rail + mobile sidebar-nav share data-panel)
   document.querySelectorAll('[data-panel]').forEach(t => t.classList.toggle('active', t.dataset.panel === nextPanel));
   // Refresh aria-expanded on the newly-active rail button to mirror sidebar state.
@@ -426,13 +478,6 @@ async function switchPanel(name, opts = {}) {
   if (nextPanel === 'settings') {
     switchSettingsSection(_currentSettingsSection);
     loadSettingsPanel();
-  }
-  if (opts.fromRailClick && typeof _isDesktopWidth === 'function' && !_isDesktopWidth()) {
-    const sidebar = document.querySelector('.sidebar');
-    if (sidebar) {
-      sidebar.classList.remove('mobile-session-page');
-      sidebar.classList.add('mobile-panel-drawer', 'mobile-open');
-    }
   }
   _resyncChatSidebarAfterPanelSwitch();
   if (nextPanel === 'chat' && typeof syncTopbar === 'function') syncTopbar();
@@ -1001,10 +1046,35 @@ async function loadCronGatewayNotice() {
   }
 }
 
-async function loadCrons(animate) {
+let _cronLoadGeneration = 0;  // monotonically bumped per loadCrons() entry; stale loads bail
+let _cronAcceptedLoadGeneration = 0;  // latest load that published _cronList
+let _cronLatestLoadSettled = Promise.resolve();  // lets save completion await a superseding reader
+let _cronDetailRefreshKey = null;  // explicit refresh intent survives a superseding poll
+
+async function loadCrons(animate, options) {
+  const background = !!(options && options.background);
+  const hasDetailRefreshKey = !!(options && Object.prototype.hasOwnProperty.call(options, 'detailRefreshKey'));
+  const requestedDetailRefreshKey = hasDetailRefreshKey ? options.detailRefreshKey : null;
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
   loadCronGatewayNotice();
+  // #6767 stale-refresh guard: loadCrons() is async, and both the poller and
+  // switchPanel('tasks') can fire it. If a request started earlier resolves
+  // after a newer one (e.g. the poller fired, then the user reopened the panel
+  // and switchPanel started a fresh load), applying the older response would
+  // overwrite the newer list/detail with stale data. Bump a generation token
+  // at entry and bail once a superseded request realises it is no longer the
+  // latest, so only the newest render wins.
+  const _cronLoadSeq = ++_cronLoadGeneration;
+  let _resolveCronLoadSettled;
+  const _cronLoadSettled = new Promise(resolve => { _resolveCronLoadSettled = resolve; });
+  _cronLatestLoadSettled = _cronLoadSettled;
+  if (!background) {
+    _cronDetailRefreshKey = hasDetailRefreshKey
+      ? (requestedDetailRefreshKey || null)
+      : (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit'
+          ? _currentCronDetailKey : null);
+  }
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
@@ -1013,12 +1083,16 @@ async function loadCrons(animate) {
     await loadCronProfiles();
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
+    if (_cronLoadSeq !== _cronLoadGeneration) return data;  // callers still need their fetched jobs
+    _cronAcceptedLoadGeneration = _cronLoadSeq;
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
     if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
       _showAllCronProfiles = false;
       _cronOtherProfileCount = 0;
     }
+    // Capture after the await: the reader may have scrolled during the request.
+    const listScrollTop = background ? box.scrollTop : 0;
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
     // _cronList stays the single source of truth — only the render is split,
@@ -1064,7 +1138,8 @@ async function loadCrons(animate) {
       box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(emptyText)}</div>`;
       _appendCronProfileToggle(box);
       if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
-      return;
+      _cronDetailRefreshKey = null;
+      return data;
     }
     for (const entry of _activeJobs) _appendCronItem(box, entry);
     if (_pausedJobs.length) {
@@ -1089,14 +1164,36 @@ async function loadCrons(animate) {
       box.appendChild(details);
     }
     _appendCronProfileToggle(box);
-    // Re-render current detail with fresh data if we have one and we're not in a form
+    // Background polls update unread markers without discarding loaded output
+    // or collapsing a run the user is reading.
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
-      if (refreshed) _renderCronDetail(refreshed);
+      const differentDetailSelected = hasDetailRefreshKey && _currentCronDetailKey !== requestedDetailRefreshKey;
+      const selectedDetailRefreshPending = background && _cronDetailRefreshKey === _currentCronDetailKey;
+      if (refreshed && !selectedDetailRefreshPending &&
+          (differentDetailSelected || background)) {
+        const runs = $('cronDetailRuns');
+        if (runs) runs.classList.toggle('has-new-run', !!(refreshed && !refreshed.read_only && _cronNewJobIds.has(String(refreshed.id))));
+      }
+      else if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+    _cronDetailRefreshKey = null;
+    if (background) box.scrollTop = listScrollTop;
+    return data;
+  } catch(e) {
+    if (_cronLoadSeq !== _cronLoadGeneration) return;
+    // Retry one foreground read when a poll displaced an explicit refresh.
+    // Foreground failures do not recurse, and cancelled/hidden views do not retry.
+    if (background && _currentPanel === 'tasks' && _currentCronDetail &&
+        _cronDetailRefreshKey === _currentCronDetailKey &&
+        _cronMode !== 'create' && _cronMode !== 'edit') {
+      return await loadCrons(false);
+    }
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
   finally {
+    _resolveCronLoadSettled();
     if (animate && refreshBtn) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
@@ -1186,13 +1283,17 @@ function _cronAgentPromptCardHtml(job){
   return `<div class="detail-card">
         <div class="detail-card-title detail-card-title-row">
           <span>${esc(t('cron_prompt_label') || 'Prompt')}</span>
-          <button type="button" class="detail-expand-toggle" onclick="toggleCronPromptExpanded('${esc(job.id)}')" title="${esc(promptToggleLabel)}" aria-label="${esc(promptToggleLabel)}">${esc(promptExpanded ? '▴' : '▾')}</button>
+          <button type="button" class="detail-expand-toggle" onclick="toggleCronPromptExpanded(${jsArg(job.id)})" title="${esc(promptToggleLabel)}" aria-label="${esc(promptToggleLabel)}">${esc(promptExpanded ? '▴' : '▾')}</button>
         </div>
         <div class="detail-prompt ${promptExpanded ? 'expanded' : ''}">${esc(job.prompt || '')}</div>
       </div>`;
 }
 
 function _renderCronDetail(job){
+  // A same-selection presentation redraw (e.g. Prompt expansion) is not
+  // authoritative fresh data and must not cancel a pending action refresh.
+  // loadCrons consumes that intent after applying the latest list response.
+  if (_currentCronDetailKey !== _cronJobKey(job)) _cronDetailRefreshKey = null;
   _currentCronDetail = job;
   _currentCronDetailKey = _cronJobKey(job);
   const title = $('taskDetailTitle');
@@ -1201,8 +1302,29 @@ function _renderCronDetail(job){
   if (!title || !body) return;
   title.textContent = job.name || job.schedule_display || '(unnamed)';
   const status = _cronStatusMeta(job);
-  const nextRun = job.next_run_at ? new Date(job.next_run_at).toLocaleString() : t('not_available');
-  const lastRun = job.last_run_at ? new Date(job.last_run_at).toLocaleString() : t('never');
+  // #7140: render `next_run_at` / `last_run_at` in the zone the timestamp
+  // itself was stamped in — NOT the operator's browser zone, and NOT a
+  // single process-wide server zone.
+  //
+  // The agent serialises these timestamps with the offset of the zone the
+  // job was scheduled in (per-profile: `hermes_time._resolve_timezone_name()`
+  // reads the ACTIVE PROFILE's config.yaml `timezone`).  So on a UTC
+  // container whose profile configures `timezone: America/New_York` the
+  // value on the wire is "2026-09-24T09:00:00-07:00" and the operator must
+  // read 9:00 AM — neither the browser zone nor `_server_tz_offset()` knows
+  // that, and per-profile the same process can host jobs on different
+  // offsets (DST flips the offset twice a year too).
+  //
+  // `_formatInIsoTz()` parses the ±HH:MM out of the string, shifts the
+  // instant by it and formats with timeZone:'UTC' — so the wall clock comes
+  // from the job's own data.  Fallback for a value with no offset (naive):
+  // render it in the browser zone exactly like the pre-fix panel did
+  // (`new Date(value).toLocaleString()`) — a naive string has no
+  // trustworthy server offset to apply, so the panel always renders.
+  const _isoTz = (typeof _formatInIsoTz === 'function') ? _formatInIsoTz : () => null;
+  const _fmtDate = (value) => _isoTz(value) || new Date(value).toLocaleString();
+  const nextRun = job.next_run_at ? _fmtDate(job.next_run_at) : t('not_available');
+  const lastRun = job.last_run_at ? _fmtDate(job.last_run_at) : t('never');
   const schedule = job.schedule_display || (job.schedule && job.schedule.expression) || '';
   const skills = Array.isArray(job.skills) && job.skills.length ? job.skills.join(', ') : '—';
   const deliver = job.deliver || 'local';
@@ -1242,6 +1364,7 @@ function _renderCronDetail(job){
         <p>Switch to ${esc(ownerProfileLabel)} to run, edit, or inspect live status and output for this cron job.</p>
       </div>` : '';
   const toastNotifications = job.toast_notifications !== false;
+  const badgeNotifications = job.badge_notifications !== false;
   const outputTitle = _cronOutputTitle(job);
   const skillsRow = isNoAgent ? '' : `<div class="detail-row"><div class="detail-row-label">${esc(t('cron_skills_label') || 'Skills')}</div><div class="detail-row-value">${esc(skills)}</div></div>`;
   const instructionCard = isNoAgent ? _cronScriptCardHtml(job) : _cronAgentPromptCardHtml(job);
@@ -1261,6 +1384,7 @@ function _renderCronDetail(job){
         ${showOwnerRow ? `<div class="detail-row"><div class="detail-row-label">Owner profile</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(ownerProfileTitle)}">${esc(ownerProfileLabel)}</span></div></div>` : ''}
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_profile_label') || 'Profile')}</div><div class="detail-row-value"><span class="detail-badge active" title="${esc(profileTitle)}">${esc(profileLabel)}</span></div></div>
         <div class="detail-row"><div class="detail-row-label">${esc(t('cron_toast_notifications_label') || 'Completion toasts')}</div><div class="detail-row-value"><span class="detail-badge ${toastNotifications ? 'active' : ''}">${esc(toastNotifications ? (t('cron_toast_notifications_enabled') || 'Enabled') : (t('cron_toast_notifications_disabled') || 'Disabled'))}</span></div></div>
+        <div class="detail-row"><div class="detail-row-label">${esc(t('cron_badge_notifications_label') || 'Tasks badge')}</div><div class="detail-row-value"><span class="detail-badge ${badgeNotifications ? 'active' : ''}">${esc(badgeNotifications ? (t('cron_badge_notifications_enabled') || 'Enabled') : (t('cron_badge_notifications_disabled') || 'Disabled'))}</span></div></div>
         ${skillsRow}
         ${lastError}
       </div>
@@ -1335,11 +1459,11 @@ async function _loadCronDetailRuns(jobId, detailKey){
       const usageStrip = isScriptJob ? '' : _formatCronRunUsageStrip(run.usage);
       const runExpanded = _cronExpansionGet(_cronRunExpandKey(jobId, run.filename));
       const runToggleLabel = runExpanded ? (t('cron_collapse_output') || 'Collapse output') : (t('cron_expand_output') || 'Expand output');
-      return `<div class="detail-run-item" id="${rid}">
-        <div class="detail-run-head" onclick="_loadRunContent('${esc(jobId)}','${esc(run.filename)}','${rid}')">
+      return `<div class="detail-run-item" id="${esc(rid)}">
+        <div class="detail-run-head" onclick="_loadRunContent(${jsArg(jobId)},${jsArg(run.filename)},${jsArg(rid)})">
           <span><span style="opacity:.7">${esc(ts)}</span> <span style="opacity:.4;font-size:11px">${esc(sizeStr)}</span>${usageStrip ? ` <span class="cron-run-usage-strip">${esc(usageStrip)}</span>` : ''}</span>
           <span class="detail-run-actions">
-            <button type="button" class="detail-expand-toggle" onclick="event.stopPropagation();toggleCronRunExpanded('${esc(jobId)}','${esc(run.filename)}','${rid}')" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>
+            <button type="button" class="detail-expand-toggle" onclick="event.stopPropagation();toggleCronRunExpanded(${jsArg(jobId)},${jsArg(run.filename)},${jsArg(rid)})" title="${esc(runToggleLabel)}" aria-label="${esc(runToggleLabel)}">${esc(runExpanded ? '▴' : '▾')}</button>
             <span style="opacity:.6">▸</span>
           </span>
         </div>
@@ -1432,6 +1556,7 @@ async function _loadRunContent(jobId, filename, runId){
 function openCronDetail(jobOrId, el){
   const job = _findCronJob(jobOrId);
   if (!job) return;
+  const refreshPending = typeof _cronDetailRefreshKey !== 'undefined' && !!_cronDetailRefreshKey;
   const detailKey = _cronJobKey(job);
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
   const target = el || $(_cronItemId(job));
@@ -1444,11 +1569,16 @@ function openCronDetail(jobOrId, el){
   _editingCronId = null;
   _stopCronWatch();
   _renderCronDetail(job);
+  // A pending action refresh belongs to the visible selection. Retarget it so
+  // the next authoritative load updates this detail without starting a request
+  // for every selection change.
+  if (refreshPending) _cronDetailRefreshKey = detailKey;
   if (!job.read_only) _checkCronWatchOnDetail(job.id, detailKey);
   _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearCronDetail(){
+  _cronDetailRefreshKey = null;
   _currentCronDetail = null;
   _currentCronDetailKey = '';
   _cronMode = 'empty';
@@ -1476,11 +1606,50 @@ function editCurrentCron(){
   if (!_currentCronDetail) return;
   openCronEdit(_currentCronDetail);
 }
+function _cronScheduleForEdit(job){
+  // #7352: when the user opens an existing job for edit or duplicate, the
+  // editable field must hold the canonical Agent-parseable schedule, not
+  // the human-readable ``schedule_display`` ("once at ..."). The Agent
+  // parser at cron/jobs.py rejects the display form with ValueError and
+  // the resulting round-trip has been failing with HTTP 500 since the
+  // initial WebUI release.
+  if(!job) return '';
+  const sched = job.schedule;
+  // Only the "once at ..." label is unparseable; every other schedule_display
+  // form the Agent emits (`every monday 9am`, `every 30m`, ...) round-trips
+  // through parse_schedule() AND is what the user actually typed. Prefer it
+  // over the canonical `expr`, otherwise editing or duplicating a
+  // natural-language recurring job silently rewrites it to raw cron
+  // (`every monday 9am` -> `0 9 * * 1`) — the Agent rebuilds schedule_display
+  // from whatever we submit, so the rewrite sticks.
+  const display = job.schedule_display;
+  const displayIsParseable = Boolean(display) && !/^\s*once at\s+/i.test(display);
+  if(sched && typeof sched === 'object'){
+    // One-shot: schedule_display is purely presentation; run_at is what the
+    // parser accepts.
+    if(sched.kind === 'once' && sched.run_at) return sched.run_at;
+    if(displayIsParseable) return display;
+    // Recurring cron: the current Agent schema is ``expr``; some legacy
+    // payloads still expose ``expression`` — accept either.
+    if(sched.expr) return sched.expr;
+    if(sched.expression) return sched.expression;
+    if(sched.run_at) return sched.run_at;
+  }
+  // Final fallback: only use schedule_display if it isn't the "once at ..."
+  // presentation label (which the parser rejects). For any other text
+  // (e.g. interval/every-30m) the display form is also a valid input.
+  if(displayIsParseable){
+    return display;
+  }
+  return '';
+}
+
 function duplicateCurrentCron(){
   if (!_currentCronDetail) return;
   const job = _currentCronDetail;
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
   _cronPreFormDetail = { ...job };
+  _cronModelPickerTouched = false;
   _editingCronId = null;
   _cronMode = 'create';
   _cronIsDuplicate = true;
@@ -1498,11 +1667,12 @@ function duplicateCurrentCron(){
   }
   _renderCronForm({
     name: dupName,
-    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    schedule: _cronScheduleForEdit(job),
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
     toast_notifications: job.toast_notifications !== false,
+    badge_notifications: job.badge_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
     model: job.model || '',
@@ -1537,6 +1707,7 @@ let _cronDeliveryOptionsCache=null;
 function openCronCreate(){
   if (typeof switchPanel === 'function' && _currentPanel !== 'tasks') switchPanel('tasks');
   _cronPreFormDetail = _currentCronDetail ? { ..._currentCronDetail } : null;
+  _cronModelPickerTouched = false;
   _editingCronId = null;
   _cronMode = 'create';
   _cronIsDuplicate = false;
@@ -1545,21 +1716,27 @@ function openCronCreate(){
   _cronSkillsCache = null;
   api('/api/skills').then(d=>{_cronSkillsCache=d.skills||[]; _bindCronSkillPicker();}).catch(()=>{});
   loadCronProfiles().then(()=>_refreshCronProfileSelect('')).catch(()=>{});
+  // Mobile: the cron form lives in the main view, which is covered by the
+  // full-screen sidebar drawer. Close the drawer so the form is visible (mirror
+  // openCronDetail's behaviour); no-op on desktop.
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function openCronEdit(job){
   if (!job) return;
   _cronPreFormDetail = { ...job };
+  _cronModelPickerTouched = false;
   _editingCronId = job.id;
   _cronMode = 'edit';
   _cronSelectedSkills = Array.isArray(job.skills) ? [...job.skills] : [];
   _renderCronForm({
     name: job.name || '',
-    schedule: job.schedule_display || (job.schedule && job.schedule.expression) || '',
+    schedule: _cronScheduleForEdit(job),
     prompt: job.prompt || '',
     deliver: job.deliver || 'local',
     profile: job.profile || '',
     toast_notifications: job.toast_notifications !== false,
+    badge_notifications: job.badge_notifications !== false,
     no_agent: !!job.no_agent,
     script: job.script || '',
     model: job.model || '',
@@ -1574,13 +1751,14 @@ function openCronEdit(job){
   loadCronProfiles().then(()=>_refreshCronProfileSelect(job.profile || '')).catch(()=>{});
 }
 
-function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
+function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notifications=true, badge_notifications=true, no_agent=false, script='', model='', provider='', isEdit }){
   const title = $('taskDetailTitle');
   const body = $('taskDetailBody');
   const empty = $('taskDetailEmpty');
   if (!body || !title) return;
   const isNoAgent = !!no_agent;
   const toastNotifications = toast_notifications !== false;
+  const badgeNotifications = badge_notifications !== false;
   title.textContent = isEdit ? (t('edit') + ' · ' + (name || schedule || t('scheduled_jobs'))) : t('new_job');
   const promptBlock = isNoAgent ? '' : `
         <div class="detail-form-row">
@@ -1683,6 +1861,13 @@ function _renderCronForm({ name, schedule, prompt, deliver, profile, toast_notif
             <span>${esc(t('cron_toast_notifications_hint') || 'Show a toast when this cron finishes.')}</span>
           </label>
         </div>
+        <div class="detail-form-row">
+          <label for="cronFormBadgeNotifications">${esc(t('cron_badge_notifications_label') || 'Tasks badge')}</label>
+          <label class="detail-form-check" for="cronFormBadgeNotifications">
+            <input type="checkbox" id="cronFormBadgeNotifications" ${badgeNotifications ? 'checked' : ''}>
+            <span>${esc(t('cron_badge_notifications_hint') || 'Count this job\u0027s completions in the Tasks badge and new-run marker. Turn off for high-frequency silent jobs.')}</span>
+          </label>
+        </div>
         ${skillsBlock}
         <div id="cronFormError" class="detail-form-error" style="display:none"></div>
       </form>
@@ -1782,6 +1967,9 @@ async function _populateCronFormModelSelect(selectedModel, selectedProvider, dis
       sel.appendChild(opt);
     }
     sel.dataset.loaded = '1';
+    // Track deliberate picker changes so an untouched "Default" can keep a
+    // hidden provider-only pin on save (see _cronProviderForClear).
+    sel.addEventListener('change', () => { _cronModelPickerTouched = true; });
   } catch (e) {
     console.warn('Failed to load cron model picker:', e.message);
     // Load failed: dataset.loaded stays unset so saveCronForm omits model/provider
@@ -1847,22 +2035,37 @@ function cancelCronForm(){
   if (_cronPreFormDetail) {
     const snap = _cronPreFormDetail;
     _cronPreFormDetail = null;
-    _renderCronDetail(snap);
+    const accepted = _cronList.find(job => _cronJobKey(job) === _cronJobKey(snap));
+    _renderCronDetail(accepted || snap);
     return;
   }
   _cronPreFormDetail = null;
   _clearCronDetail();
 }
 
-function _cronModelBareName(model, provider) {
+function _modelBareNameForProvider(model, provider) {
   // Strip @provider: prefix from a model value when provider is stored separately.
-  // The model dropdown may contain values like "@custom:9router:chat" (from
-  // _apply_provider_prefix) but cron jobs store model and provider separately,
-  // so the model should be just "chat".
   if (model && provider && model.startsWith('@' + provider + ':')) {
     return model.slice(('@' + provider + ':').length);
   }
   return model;
+}
+
+function _cronModelBareName(model, provider) {
+  // Cron jobs store model and provider separately, just like auxiliary slots.
+  return _modelBareNameForProvider(model, provider);
+}
+
+function _cronProviderForClear(prevDetail, pickerTouched) {
+  // Provider to submit when the picker shows "Default" (no model) on save.
+  // An explicit return to Default honors "Default = no overrides" (#4030) and
+  // clears the provider. An untouched picker must not: provider-only jobs
+  // (a pinned provider with no model) render as "Default" in the combined
+  // picker, so saving any other field would silently erase the pin the user
+  // never touched.
+  const prev = prevDetail || {};
+  if (pickerTouched) return null;
+  return (prev.model == null) ? prev.provider : null;
 }
 
 async function saveCronForm(){
@@ -1872,6 +2075,7 @@ async function saveCronForm(){
   const delivEl=$('cronFormDeliver');
   const profileEl=$('cronFormProfile');
   const toastEl=$('cronFormToastNotifications');
+  const badgeEl=$('cronFormBadgeNotifications');
   const errEl=$('cronFormError');
   if(!schEl||!errEl) return;
   const isNoAgent = !!(_cronPreFormDetail && _cronPreFormDetail.no_agent);
@@ -1882,15 +2086,68 @@ async function saveCronForm(){
   const deliver=delivEl?delivEl.value:'local';
   const profile=profileEl?profileEl.value:'';
   const toastNotifications=toastEl?!!toastEl.checked:true;
+  const badgeNotifications=badgeEl?!!badgeEl.checked:true;
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  // Save completion owns only this form/view. Navigation or a replacement
+  // form must not be undone by either the write or its subsequent list read.
+  const formMode = _cronMode;
+  const formPanel = _currentPanel;
+  const formDetailKey = _currentCronDetailKey;
+  const formStillCurrent = () => $('cronFormError') === errEl &&
+    _currentPanel === formPanel && _cronMode === formMode && _currentCronDetailKey === formDetailKey;
+  const acceptedJobForCurrentForm = async (data, savedId) => {
+    if (!formStillCurrent()) return null;
+    const savedJob = () => {
+      if (!formStillCurrent()) return null;
+      return savedId
+        ? (_cronList.find(job => job.id === savedId) || null)
+        : (_cronList[_cronList.length - 1] || null);
+    };
+    if (data && data.jobs === _cronList) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // A completion poll can supersede this save's list request. If its accepted
+    // response has not landed yet, take one foreground read so the still-current
+    // form completes from the authoritative list rather than remaining saveable.
+    const recoveryGeneration = _cronLoadGeneration + 1;
+    data = await loadCrons(false, {detailRefreshKey: formDetailKey});
+    if (!formStillCurrent()) return null;
+    if (data && data.jobs === _cronList) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // The recovery read can itself be superseded. Await a bounded number of
+    // later readers instead of starting an unbounded chain of foreground reads.
+    // Each accepted reader publishes both its generation and _cronList.
+    let waitedFor = null;
+    for (let i = 0; i < 4 && formStillCurrent(); i++) {
+      if (_cronAcceptedLoadGeneration > recoveryGeneration) {
+        const job = savedJob();
+        if (job) return job;
+      }
+      const latestSettlement = _cronLatestLoadSettled;
+      if (!latestSettlement || latestSettlement === waitedFor) break;
+      waitedFor = latestSettlement;
+      await latestSettlement;
+    }
+    if (_cronAcceptedLoadGeneration > recoveryGeneration) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // The write already succeeded. Do not leave Create/Edit available for a
+    // duplicate submission when bounded list reconciliation could not settle it.
+    if (formStillCurrent()) _clearCronDetail();
+    return null;
+  };
   try{
     const modelEl = $('cronFormModel');
     const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
     const selectedModel = modelEl ? (modelEl.value || '').trim() : '';
     if (_editingCronId) {
-      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications};
+      const updates = {job_id: _editingCronId, schedule, profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications};
       if (!isNoAgent) updates.prompt = prompt;
       if (name) updates.name = name;
       if (deliver) updates.deliver = deliver;
@@ -1902,22 +2159,35 @@ async function saveCronForm(){
           updates.model = _cronModelBareName(modelState.model, modelState.model_provider) || null;
           updates.provider = modelState.model_provider || null;
         } else if (modelLoaded) {
+          // "Default" selected (no model). An untouched picker preserves a
+          // hidden provider-only pin; a deliberate return to Default clears
+          // it (#4030 "Default = no overrides").
           updates.model = null;
-          updates.provider = null;
+          updates.provider = _cronProviderForClear(_cronPreFormDetail, _cronModelPickerTouched);
         }
         // else: select not yet populated — omit model/provider to preserve saved value
       }
-      await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
-      _editingCronId = null;
-      _cronPreFormDetail = null;
+      await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       showToast(t('cron_job_updated'));
-      await loadCrons();
-      const job = _cronList && _cronList.find(j => j.id === editedId);
-      if (job) openCronDetail(job);
+      const saveViewCurrent = formStillCurrent();
+      if (!saveViewCurrent && _currentPanel !== 'tasks') return;
+      // Cancel returns an edit form to the same job's read view. That visible
+      // detail must receive the successful write; other navigation stays quiet.
+      const editedDetailShown = !saveViewCurrent && _cronMode === 'read' &&
+        !!_currentCronDetail && _currentCronDetailKey === formDetailKey;
+      const data = await loadCrons(false, {
+        background: !saveViewCurrent && !editedDetailShown,
+        detailRefreshKey: formDetailKey,
+      });
+      // A background refresh keeps a newer selection/output untouched. Only the
+      // still-current form may auto-open its saved job from the accepted list.
+      if (!saveViewCurrent) return;
+      const job = await acceptedJobForCurrentForm(data, editedId);
+      if (job && formStillCurrent()) openCronDetail(job);
       return;
     }
-    const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications};
+    const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications};
     if(_cronIsDuplicate) body.enabled=false;
     if(name)body.name=name;
     if(_cronSelectedSkills.length)body.skills=_cronSelectedSkills;
@@ -1934,13 +2204,20 @@ async function saveCronForm(){
       body.provider = _cronPreFormDetail.provider || null;
     }
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
-    _cronPreFormDetail = null;
-    _cronIsDuplicate = false;
     showToast(t('cron_job_created'));
-    await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
-    if (newId) openCronDetail(newId);
-    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1]);
+    const saveViewCurrent = formStillCurrent();
+    if (!saveViewCurrent && _currentPanel !== 'tasks') return;
+    const data = await loadCrons(false, {
+      background: !saveViewCurrent,
+      detailRefreshKey: formDetailKey,
+    });
+    if (!saveViewCurrent) return;
+    const job = await acceptedJobForCurrentForm(data, newId);
+    if (job && formStillCurrent()) {
+      _cronIsDuplicate = false;
+      openCronDetail(job);
+    }
   }catch(e){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
   }
@@ -2176,7 +2453,7 @@ function _kanbanRenderSidebar(columns){
   }
   list.innerHTML = tasks.map(task => {
     const meta = _kanbanTaskMeta(task);
-    return `<button class="kanban-list-item" onclick="loadKanbanTask('${esc(task.id)}')">
+    return `<button class="kanban-list-item" onclick="loadKanbanTask(${jsArg(task.id)})">
       <span class="kanban-list-status">${esc(_kanbanColumnLabel(task.status))}</span>
       <span class="kanban-list-title">${esc(_kanbanTaskTitle(task))}</span>
       ${meta.length ? `<span class="kanban-meta">${esc(meta.join(' · '))}</span>` : ''}
@@ -2394,10 +2671,9 @@ function _kanbanCardStalenessClass(task){
 }
 
 function _kanbanCardQuickActions(task){
-  const id = esc(task.id || '');
   const status = task.status || '';
-  const complete = status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,'${id}','done')">${esc(t('kanban_card_complete'))}</button>` : '';
-  const archive = status !== 'archived' ? `<button type="button" class="kanban-card-action danger" onclick="quickKanbanCardAction(event,'${id}','archived')">${esc(t('kanban_card_archive'))}</button>` : '';
+  const complete = status !== 'done' && status !== 'archived' ? `<button type="button" class="kanban-card-action" onclick="quickKanbanCardAction(event,${jsArg(task.id)},'done')">${esc(t('kanban_card_complete'))}</button>` : '';
+  const archive = status !== 'archived' ? `<button type="button" class="kanban-card-action danger" onclick="quickKanbanCardAction(event,${jsArg(task.id)},'archived')">${esc(t('kanban_card_archive'))}</button>` : '';
   return `<div class="kanban-card-actions" onclick="event.stopPropagation()">${complete}${archive}</div>`;
 }
 
@@ -2480,7 +2756,7 @@ function _kanbanLaneNames(columns){
 
 function _kanbanRenderColumn(col){
   const tasks = col.tasks || [];
-  return `<section class="kanban-column" data-status="${esc(col.name)}" data-kanban-status="${esc(col.name)}" ondragover="allowKanbanDrop(event)" ondragenter="event.currentTarget.classList.add('drop-target')" ondragleave="clearKanbanDrop(event)" ondrop="dropKanbanTask(event, '${esc(col.name)}')">
+  return `<section class="kanban-column" data-status="${esc(col.name)}" data-kanban-status="${esc(col.name)}" ondragover="allowKanbanDrop(event)" ondragenter="event.currentTarget.classList.add('drop-target')" ondragleave="clearKanbanDrop(event)" ondrop="dropKanbanTask(event, ${jsArg(col.name)})">
       <div class="kanban-column-head">
         <span>${esc(_kanbanColumnLabel(col.name))}</span>
         <span class="kanban-count">${tasks.length}</span>
@@ -2548,7 +2824,7 @@ function _kanbanCard(task, status){
   const stale = _kanbanCardStalenessClass(task);
   const body = _kanbanTaskBody(task);
   const assignee = task.assignee ? `<span class="kanban-card-assignee">@${esc(task.assignee)}</span>` : `<span class="kanban-card-unassigned">${esc(t('kanban_unassigned'))}</span>`;
-  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, '${esc(task.id)}')" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, '${esc(task.id)}')" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask('${esc(task.id)}')}">
+  return `<article class="kanban-card ${esc(stale)}" data-kanban-task-id="${esc(task.id)}" draggable="true" ondragstart="dragKanbanTask(event, ${jsArg(task.id)})" ondragend="finishKanbanDrag(event)" onclick="return openKanbanCard(event, ${jsArg(task.id)})" tabindex="0" role="button" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();loadKanbanTask(${jsArg(task.id)})}">
     <div class="kanban-card-topline"><span class="kanban-card-id">${esc(task.id || '')}</span>${priority ? `<span class="kanban-badge priority">P${priority}</span>` : ''}${task.tenant ? `<span class="kanban-badge tenant">${esc(task.tenant)}</span>` : ''}</div>
     <div class="kanban-card-title">${esc(_kanbanTaskTitle(task))}</div>
     ${body ? `<div class="kanban-card-body">${_kanbanRenderMarkdown(body)}</div>` : ''}
@@ -3057,14 +3333,6 @@ function _kanbanRunHtml(run){
   </div>`;
 }
 
-function _kanbanJsArg(s){
-  // Encode a value for safe interpolation inside an inline on* handler's JS
-  // string literal. JSON.stringify quotes/escapes for JS context; esc() then
-  // makes it safe inside the HTML attribute. Without this, a task id containing
-  // a quote breaks out of the handler (esc() alone is HTML-escaping, which the
-  // browser decodes BEFORE executing the inline handler). (#3797)
-  return esc(JSON.stringify(String(s == null ? '' : s)));
-}
 function _kanbanLinkableTaskOptions(excludeId){
   // Datalist of existing task ids (with title as the option label) so the
   // dependency field is a pick-from-real-tasks autocomplete rather than a blind
@@ -3089,7 +3357,7 @@ function _kanbanLinksHtml(links){
   const item = (id, isParent) => {
     const parentId = isParent ? id : taskId;
     const childId = isParent ? taskId : id;
-    return `<code>${esc(id)} <button class="btn mini" onclick="removeKanbanDependency(${_kanbanJsArg(parentId)},${_kanbanJsArg(childId)})" data-i18n="kanban_remove_dependency" title="${esc(t('kanban_remove_dependency') || 'Remove')}">✕</button></code>`;
+    return `<code>${esc(id)} <button class="btn mini" onclick="removeKanbanDependency(${jsArg(parentId)},${jsArg(childId)})" data-i18n="kanban_remove_dependency" title="${esc(t('kanban_remove_dependency') || 'Remove')}">✕</button></code>`;
   };
   const hasLinks = parents.length || children.length;
   return `<div class="kanban-detail-links-section">
@@ -3100,7 +3368,7 @@ function _kanbanLinksHtml(links){
     <div class="kanban-detail-links-controls">
       <input type="text" id="kanbanDependencyInput" class="kanban-detail-links-input" list="kanbanDependencyOptions" maxlength="255" autocomplete="off" data-i18n-placeholder="kanban_dependency_placeholder" placeholder="Task ID to link">
       <datalist id="kanbanDependencyOptions">${_kanbanLinkableTaskOptions(taskId)}</datalist>
-      <button class="btn secondary" onclick="addKanbanDependency(${_kanbanJsArg(taskId)})" data-i18n="kanban_add_dependency">Add dependency</button>
+      <button class="btn secondary" onclick="addKanbanDependency(${jsArg(taskId)})" data-i18n="kanban_add_dependency">Add dependency</button>
     </div>
   </div>`;
 }
@@ -3727,13 +3995,18 @@ function _kanbanRenderTaskDetail(data){
   // bridge rejects PATCH status='running' with HTTP 400 to match the agent
   // dashboard plugin's contract. UI users want to claim/promote a ready task
   // via the dispatcher Nudge button, not flip it to running by hand.
-  const statusButtons = ['triage', 'todo', 'ready', 'blocked', 'done', 'archived'].map(status =>
-    `<button class="btn secondary" onclick="updateKanbanTask('${esc(task.id)}',{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
-  ).join('') + `<button class="btn secondary" onclick="blockKanbanTask('${esc(task.id)}')">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask('${esc(task.id)}')">${esc(t('kanban_unblock'))}</button>`;
+  // 'scheduled' mirrors the board's column order (right after 'todo'): the
+  // cards are HTML5-draggable only, so this button is the only way a
+  // touch/tablet user can move a task INTO the Scheduled column. It reuses
+  // _kanbanColumnLabel + the same PATCH path, which the bridge routes through
+  // the Agent's schedule_task() verb.
+  const statusButtons = ['triage', 'todo', 'scheduled', 'ready', 'blocked', 'done', 'archived'].map(status =>
+    `<button class="btn secondary" onclick="updateKanbanTask(${jsArg(task.id)},{status:'${status}'})">${esc(_kanbanColumnLabel(status))}</button>`
+  ).join('') + `<button class="btn secondary" onclick="blockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_block'))}</button><button class="btn secondary" onclick="unblockKanbanTask(${jsArg(task.id)})">${esc(t('kanban_unblock'))}</button>`;
   return `<div class="kanban-task-preview-header">
       <button class="btn secondary kanban-back-btn" onclick="closeKanbanTaskDetail()">${esc(t('kanban_back_to_board'))}</button>
       <div class="kanban-task-preview-title">${esc(title)}</div>
-      <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit('${esc(task.id)}')" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
+      <button class="btn secondary kanban-edit-btn" onclick="openKanbanEdit(${jsArg(task.id)})" data-i18n="kanban_edit_task" title="${esc(t('kanban_edit_task') || 'Edit task')}">${esc(t('kanban_edit_task') || 'Edit task')}</button>
     </div>
     <div class="kanban-task-preview-body">${_kanbanRenderMarkdown(body)}</div>
     ${meta.length ? `<div class="kanban-meta">${esc(meta.join(' · '))}</div>` : ''}
@@ -3747,7 +4020,7 @@ function _kanbanRenderTaskDetail(data){
     </div>
     <div class="kanban-comment-form">
       <textarea id="kanbanCommentInput" rows="2" placeholder="${esc(t('kanban_add_comment'))}"></textarea>
-      <button class="btn primary" onclick="addKanbanComment('${esc(task.id)}')">${esc(t('kanban_add_comment'))}</button>
+      <button class="btn primary" onclick="addKanbanComment(${jsArg(task.id)})">${esc(t('kanban_add_comment'))}</button>
     </div>`;
 }
 
@@ -3898,12 +4171,8 @@ async function loadKanbanBoards(){
     _kanbanSetSavedBoard('default');
   }
   _kanbanCurrentBoard = (active === 'default') ? null : active;
-  // The switcher is visible whenever ≥1 non-default board exists OR the
-  // current board is non-default. (If you only have 'default', a switcher
-  // adds clutter without value.)
-  const hasMultiple = boards.length > 1 || (active !== 'default');
-  switcher.hidden = !hasMultiple;
-  if (!hasMultiple) return;
+  // Keep the switcher visible because it is also the default-board settings path.
+  switcher.hidden = false;
   // Update the toggle label/icon
   const activeMeta = boards.find(b => b.slug === active) || {slug: active, name: active, icon: '', color: ''};
   const nameEl = document.getElementById('kanbanBoardSwitcherName');
@@ -3941,16 +4210,13 @@ function _renderKanbanBoardMenu(boards, current){
     const icon = b.icon ? esc(b.icon) : '';
     const safeColor = _kanbanSafeColor(b.color);
     const colorStyle = safeColor ? `color:${safeColor}` : '';
-    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard('${esc(b.slug)}')">
+    return `<button type="button" class="kanban-board-switcher-item ${isCurrent ? 'is-current' : ''}" role="menuitem" data-board-slug="${esc(b.slug)}" onclick="switchKanbanBoard(${jsArg(b.slug)})">
       <span class="kanban-board-switcher-item-icon" style="${colorStyle}">${icon || (isCurrent ? '✓' : '')}</span>
       <span class="kanban-board-switcher-item-name">${esc(b.name || b.slug)}</span>
       <span class="kanban-board-switcher-item-count">${esc(String(total))}</span>
     </button>`;
   }).join('');
-  // Actions row — disable rename/archive when the only option is `default`
-  // (the default board's display metadata is editable but the slug isn't,
-  // and `default` cannot be archived).
-  const renameDisabled = current === 'default';
+  // The default board is editable but cannot be archived.
   const archiveDisabled = current === 'default';
   const actions = `
     <div class="kanban-board-switcher-divider" role="separator"></div>
@@ -3958,9 +4224,9 @@ function _renderKanbanBoardMenu(boards, current){
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       <span>${esc(t('kanban_new_board') || 'New board…')}</span>
     </button>
-    <button type="button" class="kanban-board-switcher-action" onclick="openKanbanRenameBoard()" ${renameDisabled ? 'disabled' : ''} data-i18n="kanban_rename_board">
+    <button type="button" class="kanban-board-switcher-action" onclick="openKanbanRenameBoard()" data-i18n="kanban_rename_board">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
-      <span>${esc(t('kanban_rename_board') || 'Rename current board…')}</span>
+      <span>${esc(t('kanban_rename_board') || 'Board settings…')}</span>
     </button>
     <button type="button" class="kanban-board-switcher-action danger" onclick="archiveKanbanBoard()" ${archiveDisabled ? 'disabled' : ''} data-i18n="kanban_archive_board">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/></svg>
@@ -4035,6 +4301,16 @@ async function switchKanbanBoard(slug){
 
 // ── Create / rename / archive board modals ──────────────────────────────────
 
+async function _loadKanbanBoardWorkdirOptions(){
+  await loadWorkspaceList();
+  const list = document.getElementById('kanbanBoardModalWorkdirs');
+  if (!list) return;
+  list.innerHTML = (_workspaceList || []).map(ws => {
+    const path = typeof ws === 'string' ? ws : ws && ws.path;
+    return path ? `<option value="${esc(path)}"></option>` : '';
+  }).join('');
+}
+
 function openKanbanCreateBoard(){
   const modal = document.getElementById('kanbanBoardModal');
   if (!modal) return;
@@ -4048,6 +4324,9 @@ function openKanbanCreateBoard(){
   document.getElementById('kanbanBoardModalDesc').value = '';
   document.getElementById('kanbanBoardModalIcon').value = '';
   document.getElementById('kanbanBoardModalColor').value = '#7aa2ff';
+  document.getElementById('kanbanBoardModalDefaultWorkdir').value = '';
+  document.getElementById('kanbanBoardModalOriginalDefaultWorkdir').value = '';
+  _loadKanbanBoardWorkdirOptions();
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -4078,12 +4357,11 @@ function openKanbanRenameBoard(){
   const modal = document.getElementById('kanbanBoardModal');
   if (!modal) return;
   const current = _kanbanCurrentBoard || 'default';
-  if (current === 'default') return;  // default's slug is immutable
   const meta = (_kanbanBoardsList || []).find(b => b.slug === current);
   if (!meta) return;
   document.getElementById('kanbanBoardModalMode').value = 'rename';
   document.getElementById('kanbanBoardModalSlug').value = current;
-  document.getElementById('kanbanBoardModalTitle').textContent = t('kanban_rename_board') || 'Rename board';
+  document.getElementById('kanbanBoardModalTitle').textContent = t('kanban_board_settings') || 'Board settings';
   document.getElementById('kanbanBoardModalName').value = meta.name || '';
   document.getElementById('kanbanBoardModalSlugInput').value = current;
   document.getElementById('kanbanBoardModalSlugInput').disabled = true;  // slug is immutable
@@ -4092,6 +4370,10 @@ function openKanbanRenameBoard(){
   document.getElementById('kanbanBoardModalDesc').value = meta.description || '';
   document.getElementById('kanbanBoardModalIcon').value = meta.icon || '';
   document.getElementById('kanbanBoardModalColor').value = meta.color || '#7aa2ff';
+  const originalDefaultWorkdir = (meta.default_workdir || '').trim();
+  document.getElementById('kanbanBoardModalDefaultWorkdir').value = originalDefaultWorkdir;
+  document.getElementById('kanbanBoardModalOriginalDefaultWorkdir').value = originalDefaultWorkdir;
+  _loadKanbanBoardWorkdirOptions();
   document.getElementById('kanbanBoardModalError').textContent = '';
   modal.hidden = false;
   if (_kanbanBoardModalFocusCleanup) {
@@ -4126,6 +4408,8 @@ async function submitKanbanBoardModal(){
   const description = (document.getElementById('kanbanBoardModalDesc').value || '').trim();
   const icon = (document.getElementById('kanbanBoardModalIcon').value || '').trim();
   const color = (document.getElementById('kanbanBoardModalColor').value || '').trim();
+  const defaultWorkdir = (document.getElementById('kanbanBoardModalDefaultWorkdir').value || '').trim();
+  const originalDefaultWorkdir = (document.getElementById('kanbanBoardModalOriginalDefaultWorkdir').value || '').trim();
   const submitBtn = document.getElementById('kanbanBoardModalSubmit');
   if (!name) {
     errEl.textContent = t('kanban_board_name_required') || 'Name is required';
@@ -4138,9 +4422,11 @@ async function submitKanbanBoardModal(){
     }
     if (submitBtn) submitBtn.disabled = true;
     try {
+      const payload = {slug: slugInput, name, description, icon, color, switch: true};
+      if (defaultWorkdir) payload.default_workdir = defaultWorkdir;
       const res = await api('/api/kanban/boards', {
         method: 'POST',
-        body: JSON.stringify({slug: slugInput, name, description, icon, color, switch: true}),
+        body: JSON.stringify(payload),
       });
       closeKanbanBoardModal();
       // Switch to the new board and reload
@@ -4162,9 +4448,11 @@ async function submitKanbanBoardModal(){
     if (!slug) { errEl.textContent = 'Missing slug'; return; }
     if (submitBtn) submitBtn.disabled = true;
     try {
+      const payload = {name, description, icon, color};
+      if (defaultWorkdir !== originalDefaultWorkdir) payload.default_workdir = defaultWorkdir;
       await api('/api/kanban/boards/' + encodeURIComponent(slug), {
         method: 'PATCH',
-        body: JSON.stringify({name, description, icon, color}),
+        body: JSON.stringify(payload),
       });
       closeKanbanBoardModal();
       await loadKanbanBoards();  // refresh switcher label/icon
@@ -4359,6 +4647,9 @@ async function copyLogsAll() {
 }
 
 // ── Insights panel ──
+// Latest-request generation counter: an older /api/insights response that
+// resolves after a newer request must not overwrite the newer render.
+let _insightsReqToken = 0;
 const STATIC_MODEL_HEALTH_ROWS = [
   {id:'openai/gpt-5.4-mini', provider:'OpenAI', inputCostPerM:0.25, outputCostPerM:2.00, replacement:'Default economical general-purpose model'},
   {id:'openai/gpt-5.4', provider:'OpenAI', inputCostPerM:2.00, outputCostPerM:10.00, replacement:'Use for complex synthesis; fall back to Mini for routine turns'},
@@ -4392,23 +4683,113 @@ async function loadInsights(animate) {
     refreshBtn.disabled = true;
   }
   const period = ($('insightsPeriod') || {}).value || '30';
+  // Re-cap the custom-range pickers on every refresh: a tab left open across
+  // midnight otherwise keeps yesterday as `max` and today stays unselectable
+  // (greptile P2, 2026-10-15T22:36:54Z, static/panels.js:4604).
+  _insightsSyncDateLimits();
+  const qs = new URLSearchParams();
+  if (period === 'custom') {
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    const startVal = startEl && startEl.value;
+    const endVal = endEl && endEl.value;
+    // Send RAW YYYY-MM-DD strings, not browser-local epoch seconds: the
+    // server interprets them in ITS OWN timezone, so a browser in another
+    // timezone can never shift the selected calendar day.
+    if (startVal) qs.set('start', startVal);
+    if (endVal) qs.set('end', endVal);
+  } else {
+    qs.set('days', period);
+  }
+  // Latest-request guard: date inputs fire one load per change; a slower
+  // earlier response must never overwrite a newer range.  Each call takes
+  // its own token; only the newest token may render.
+  const reqToken = ++_insightsReqToken;
   try {
     const [data, wikiStatus, skillUsage] = await Promise.all([
-      api(`/api/insights?days=${period}`),
+      api(`/api/insights?${qs.toString()}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
     ]);
+    if (reqToken !== _insightsReqToken) return;
     _renderInsights(data, box, wikiStatus, skillUsage);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
+    if (reqToken !== _insightsReqToken) return;
     box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
   } finally {
-    if (animate && refreshBtn) {
+    // Restore the refresh button when THIS request is the latest, regardless
+    // of whether it initiated the animation.  A superseding NON-animated
+    // request (e.g. a date change while an animated refresh is in flight)
+    // owns the shared control now; gating restoration on `animate` would
+    // leave the button permanently disabled after A(superseded)->B(latest).
+    if (refreshBtn && reqToken === _insightsReqToken) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
   }
+}
+
+// A future bound is not a servable window: cap both date controls at today so
+// the platform picker cannot offer dates the server will reject (#6970).
+// Lives in one helper because the cap must be recomputed whenever it could have
+// aged: entering Custom, every refresh, and whenever a picker is opened. Writing
+// it only from insightsPeriodChange left a panel that stayed open across
+// midnight with yesterday as the cap, so today was unselectable until the user
+// detoured through a preset (greptile P2, 2026-10-15T22:36:54Z,
+// static/panels.js:4604).
+//
+// Write `max` ONLY when the value actually changes.  Assigning it
+// unconditionally re-set the `<input type="date">` control on every segment
+// edit (the inputs run loadInsights() from onchange, which calls this helper),
+// and Chromium drops the in-progress segment editor when `max` is written -
+// even to the same string - so typing "09012026" into the month/day/year
+// segments ended with both fields empty and the request losing its range
+// (maintainer re-gate, 2026-10-16T01:48:06Z).
+function _insightsSyncDateLimits() {
+  const startEl = $('insightsStart');
+  const endEl = $('insightsEnd');
+  if (!startEl || !endEl) return;
+  const today = _toDateLocal(new Date());
+  if (startEl.max !== today) startEl.max = today;
+  if (endEl.max !== today) endEl.max = today;
+}
+
+function insightsPeriodChange() {
+  const sel = $('insightsPeriod');
+  const customWrap = $('insightsCustomRange');
+  if (!sel || !customWrap) return;
+  const isCustom = sel.value === 'custom';
+  customWrap.style.display = isCustom ? 'flex' : 'none';
+  if (isCustom) {
+    // Default the range to the last 30 calendar days only when the user
+    // hasn't already picked a custom range — so Custom(A/B) → preset →
+    // Custom still shows A/B instead of silently erasing it.
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    _insightsSyncDateLimits();
+    if (startEl && endEl && !startEl.value && !endEl.value) {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 29);  // inclusive: start..today = 30 days
+      endEl.value = _toDateLocal(end);
+      startEl.value = _toDateLocal(start);
+    }
+  }
+  loadInsights();
+}
+
+function insightsRangeInputs() {
+  // Each date change is its own request generation; the guard in
+  // loadInsights() drops any stale in-flight response.
+  _insightsReqToken++;
+  loadInsights();
+}
+
+function _toDateLocal(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function _formatLlmWikiTimestamp(value) {
@@ -4585,7 +4966,8 @@ async function _openWikiBrowser() {
  *   31–90 days → 2-day buckets
  *   91–180 days → 3-day buckets
  *   181–365 days → 8-day buckets
- * Result is always <= ~52 bars.
+ *   >365 days → dynamic (ceil(len/52)) to keep chart bounded
+ * Result is always <= ~52 bars (tested up to 5 calendar years ≈1826 days).
  * Each bucket row has:
  *   - label: short label for axis (e.g. MM-DD or MM-DD–MM-DD)
  *   - title: full tooltip title (e.g. 2026-01-01 – 2026-01-05)
@@ -4597,7 +4979,7 @@ function _bucketDailyTokensForChart(rows) {
   const len = rows.length;
   if (len <= 30) return rows;  // per-day resolution for 7/30-day ranges
 
-  // Target <= 75 bars; derive bucket size
+  // Target <= 52 bars; derive bucket size
   let bucketSize;
   if (len <= 90) {
     bucketSize = 2;
@@ -4606,7 +4988,7 @@ function _bucketDailyTokensForChart(rows) {
   } else if (len <= 365) {
     bucketSize = 8;  // <=52 bars for 365 days (ceil(365/8)=46)
   } else {
-    bucketSize = 8;  // fallback for >365 (shouldn't occur in practice)
+    bucketSize = Math.ceil(len / 52);  // 5-year ≈1826 → 36 → 51 bars, preserves invariant
   }
 
   const result = [];
@@ -4771,23 +5153,57 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
       </div>
     </div>`;
 
-  box.innerHTML = `
-    ${_renderSystemHealthPanel()}
-    ${_renderLlmWikiStatus(wikiStatus)}
-    ${_renderSkillUsage(skillUsage)}
-    <div class="insights-grid">
-      ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
-    </div>
-    ${dailyHtml}
-    ${modelHealthHtml}
-    <div class="insights-row insights-usage-grid">
-      ${tokenCards}
-      ${modelsHtml}
-    </div>
-    ${dowHtml}
-    ${hodHtml}
-    <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(t('insights_footer').replace('{days}', d.period_days))}</div>
-  `;
+  const periodSel = $('insightsPeriod');
+  // The server tells us which window it ACTUALLY served: "custom" means a
+  // real absolute window was queried (after swap/clamp/DST/5yr-cap), while
+  // "trailing" means the request fell back to the trailing days-window (e.g.
+  // an all-future or fully-invalid custom range).  Never trust the raw
+  // selector/inputs for a range that the server rejected and replaced - that
+  // would render a future/invalid range while the cards/chart show the
+  // trailing query (Greptile P1: 'custom range normalizes to trailing').
+  // Selective fall-back disclosure (#6970 UX r1): the selector says "custom"
+  // but the server served a trailing window instead (an all-future or
+  // fully-invalid range).  Say so right next to the inputs - the footer that
+  // carries the served window sits below the fold.
+  const fellBack = !!(periodSel && periodSel.value === 'custom' && d.mode !== 'custom');
+  const rangeNoteEl = $('insightsRangeNote');
+  if (rangeNoteEl) {
+    rangeNoteEl.textContent = fellBack
+      ? t('insights_range_fallback').replace('{days}', d.period_days)
+      : '';
+    rangeNoteEl.classList.toggle('is-visible', fellBack);
+  }
+  for (const dateEl of [$('insightsStart'), $('insightsEnd')]) {
+    if (!dateEl) continue;
+    if (fellBack) dateEl.setAttribute('aria-invalid', 'true');
+    else dateEl.removeAttribute('aria-invalid');
+  }
+  const isCustomRange = periodSel && periodSel.value === 'custom' && d.mode === 'custom';
+  // The server reports the EFFECTIVE calendar window it actually queried
+  // (after swap, DST alignment, and the 5-year cap).  Use it verbatim; the
+  // trailing footer shows the literal day count instead.
+  const effStart = isCustomRange && d.effective_start;
+  const effEnd = isCustomRange && d.effective_end;
+  const rangeLabel = isCustomRange
+    ? (effStart && effEnd ? t('insights_footer_range').replace('{start}', effStart).replace('{end}', effEnd) : t('insights_footer').replace('{days}', d.period_days))
+    : t('insights_footer').replace('{days}', d.period_days);
+    box.innerHTML = `
+      ${_renderSystemHealthPanel()}
+      ${_renderLlmWikiStatus(wikiStatus)}
+      ${_renderSkillUsage(skillUsage)}
+      <div class="insights-grid">
+        ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
+      </div>
+      ${dailyHtml}
+      ${modelHealthHtml}
+      <div class="insights-row insights-usage-grid">
+        ${tokenCards}
+        ${modelsHtml}
+      </div>
+      ${dowHtml}
+      ${hodHtml}
+      <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(rangeLabel)}</div>
+    `;
 }
 
 async function clearConversation() {
@@ -4800,6 +5216,21 @@ async function clearConversation() {
     S.session = data.session;
     S.messages = [];
     S.toolCalls = [];
+    // The in-chat todos tray renders from S.todos + the INFLIGHT snapshot
+    // (ui.js), so clearing the transcript must drop BOTH: otherwise the tray
+    // keeps painting the cleared conversation's tasks and _currentTodos() hands
+    // the stale list back even after the tray is re-expanded (Greptile P1
+    // 2026-10-10T02:22:20Z).  Purge the in-flight TODO payload FIRST —
+    // _hydrateTodosFromSession() treats a present INFLIGHT[sid] as
+    // authoritative, so hydrating alone would install the very list we are
+    // clearing.  The stream payload (messages/uploads) is deliberately left
+    // alone.
+    if(typeof INFLIGHT==='object'&&INFLIGHT&&S.session&&S.session.session_id
+       &&INFLIGHT[S.session.session_id]){
+      delete INFLIGHT[S.session.session_id].todos;
+      delete INFLIGHT[S.session.session_id].todoStateMeta;
+    }
+    if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
     syncTopbar();
     renderMessages();
     showToast(t('conversation_cleared'));
@@ -5090,6 +5521,10 @@ function openSkillCreate() {
   _editingSkillName = null;
   _skillMode = 'create';
   _renderSkillForm({ name: '', category: '', content: '', isEdit: false });
+  // Mobile: the new-skill form lives in the main view, which is covered by the
+  // full-screen sidebar drawer. Close the drawer so the form is visible (mirror
+  // openSkillDetail's behaviour); no-op on desktop.
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function _renderSkillForm({ name, category, content, isEdit }) {
@@ -5234,7 +5669,7 @@ const MEMORY_SECTIONS = [
   { key: 'memory', labelKey: 'my_notes', emptyKey: 'no_notes_yet', iconKey: 'brain' },
   { key: 'user',   labelKey: 'user_profile', emptyKey: 'no_profile_yet', iconKey: 'user' },
   { key: 'soul',   labelKey: 'agent_soul', emptyKey: 'no_soul_yet', iconKey: 'sparkles' },
-  { key: 'project_context', label: 'Project Context', empty: 'No project context file found for this workspace.', iconKey: 'file-text', readOnly: true },
+  { key: 'project_context', labelKey: 'memory_project_context_title', emptyKey: 'memory_project_context_empty', iconKey: 'file-text', readOnly: true },
   { key: 'external_notes', labelKey: 'external_notes_sources', emptyKey: 'external_notes_empty', iconKey: 'book-open' },
 ];
 
@@ -5308,8 +5743,13 @@ function _renderExternalNotesSources() {
   const recall = data.automatic_recall_unchanged !== false
     ? `<div class="memory-detail-mtime">${esc(t('external_notes_auto_recall_hint'))}</div>`
     : '';
+  // Same withheld-runtime state as the MCP panel: sources still list, but their
+  // live status/tools are hidden until the profile's runtime scope is confirmed.
+  const scopeNotice = data.runtime_scope === 'unavailable'
+    ? `<div class="memory-detail-mtime">${esc(t('mcp_runtime_scope_unavailable'))}</div>`
+    : '';
   if (!sources.length) {
-    body.innerHTML = `<div class="main-view-content">${recall}<div class="memory-empty">${esc(t('external_notes_empty'))}</div></div>`;
+    body.innerHTML = `<div class="main-view-content">${recall}${scopeNotice}<div class="memory-empty">${esc(t('external_notes_empty'))}</div></div>`;
   } else {
     const selected = sources.find(src => (src.name || '').toLowerCase() === (_notesSelectedSource || '').toLowerCase()) || sources[0];
     _notesSelectedSource = (selected && selected.name) || 'joplin';
@@ -5320,13 +5760,13 @@ function _renderExternalNotesSources() {
           <div class="notes-source-card-head notes-ai-recent-head"><strong>${li('bot', 14)}${esc(t('external_notes_recent_ai'))}</strong><span class="detail-badge">${esc(t('external_notes_auto'))}</span></div>
           <div class="notes-ai-recent-list">${recentAiNotes.map(note => {
             const updated = note.updated_time ? new Date(Number(note.updated_time)).toLocaleString() : '';
-            return `<button type="button" class="notes-result-card notes-ai-recent-item" onclick="previewExternalNote('${esc(note.source||'joplin')}','${esc(note.id||'')}')"><strong>${esc(note.title||note.label||'Untitled')}</strong><span>${li('clock', 14)}${esc(note.label||t('external_notes_recent_ai_reason'))}${updated ? ` · ${esc(updated)}` : ''}</span></button>`;
+            return `<button type="button" class="notes-result-card notes-ai-recent-item" onclick="previewExternalNote(${jsArg(note.source||'joplin')},${jsArg(note.id||'')})"><strong>${esc(note.title||note.label||'Untitled')}</strong><span>${li('clock', 14)}${esc(note.label||t('external_notes_recent_ai_reason'))}${updated ? ` · ${esc(updated)}` : ''}</span></button>`;
           }).join('')}</div>
         </section>`
       : '';
     const searchError = _notesSearchError ? `<div class="detail-form-error">${esc(_notesSearchError)}</div>` : '';
     const resultHtml = _notesSearchResults.length
-      ? `<div class="notes-search-results">${_notesSearchResults.map(note => `<button type="button" class="notes-result-card" onclick="previewExternalNote('${esc(note.source||_notesSelectedSource)}','${esc(note.id||'')}')"><strong>${esc(note.title||'Untitled')}</strong>${note.snippet?`<span>${esc(note.snippet)}</span>`:''}</button>`).join('')}</div>`
+      ? `<div class="notes-search-results">${_notesSearchResults.map(note => `<button type="button" class="notes-result-card" onclick="previewExternalNote(${jsArg(note.source||_notesSelectedSource)},${jsArg(note.id||'')})"><strong>${esc(note.title||'Untitled')}</strong>${note.snippet?`<span>${esc(note.snippet)}</span>`:''}</button>`).join('')}</div>`
       : `<div class="memory-empty">${esc(t('external_notes_search_empty'))}</div>`;
     const previewHtml = _notesPreviewNote
       ? `<section class="notes-source-card notes-preview-card"><div class="notes-source-card-head"><strong>${esc(_notesPreviewNote.title||'Untitled')}</strong><span class="detail-badge">${esc(_notesPreviewNote.source||_notesSelectedSource)}</span></div><div class="memory-content preview-md">${renderMd(_notesPreviewNote.body||'')}</div></section>`
@@ -5356,7 +5796,7 @@ function _renderExternalNotesSources() {
       ${searchError}
       ${resultHtml}
     </section>`;
-    body.innerHTML = `<div class="main-view-content">${recall}${recentAiHtml}${searchUi}${previewHtml}${cards}</div>`;
+    body.innerHTML = `<div class="main-view-content">${recall}${scopeNotice}${recentAiHtml}${searchUi}${previewHtml}${cards}</div>`;
   }
   body.style.display = '';
   if (empty) empty.style.display = 'none';
@@ -5778,9 +6218,11 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
   const sc=searchRow.querySelector('.ws-search-clear');
   dd.appendChild(searchRow);
 
-  // ── Workspace list ──────────────────────────────────────────────────────
-  // Sort alphabetically by name (case-insensitive) before rendering.
-  const sorted=[...workspaces].sort((a,b)=>(a.name||'').localeCompare(b.name||''));
+  // Render in the server's stored order — the same order shown in the
+  // Workspaces settings panel (user-controlled via drag-and-drop reorder,
+  // with the default "Home" workspace first). No client-side re-sorting.
+  // Shallow copy so later in-place mutations can't touch the caller's array.
+  const sorted=[...workspaces];
   const listContainer=document.createElement('div');
   listContainer.className='ws-list-container';
   dd.appendChild(listContainer);
@@ -5834,7 +6276,13 @@ function renderWorkspaceDropdownInto(dd, workspaces, currentWs){
     async()=>{
       closeWsDropdown();
       try{
-        await newSession(false,{worktree:true});
+        // Pass the DISPLAYED workspace explicitly: with a project bound to a
+        // different workspace, newSession()'s active-project merge would
+        // otherwise fill `workspace` with the project's default and the
+        // worktree would be created there (a non-git default made the request
+        // 400). An explicit `workspace` option wins over any project binding —
+        // same opt-out switchToWorkspace() below uses for the same reason.
+        await newSession(false,{worktree:true,workspace:currentWs});
         await renderSessionList();
         const msg=$('msg');
         if(msg)msg.focus();
@@ -6138,6 +6586,10 @@ function openWorkspaceCreate(){
   _workspacePreFormDetail = _currentWorkspaceDetail ? { ..._currentWorkspaceDetail } : null;
   _workspaceMode = 'create';
   _renderWorkspaceForm({ name:'', path:'', isEdit:false });
+  // Mobile: the add-space form lives in the main view, which is covered by the
+  // full-screen sidebar drawer. Close the drawer so the form is visible (mirror
+  // openWorkspaceDetail's behaviour); no-op on desktop.
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function editCurrentWorkspace(){
@@ -6380,7 +6832,12 @@ async function switchToWorkspace(path,name){
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
-    if(typeof newSession==='function') await newSession(false);
+    // Also pass the workspace explicitly: with a project bound to workspace A,
+    // an active project filter would otherwise merge the project's default
+    // workspace into the request and the explicit B choice would lose (the
+    // chip-new-chat path posts A, master posts B). An explicit `workspace`
+    // option wins over any project binding in newSession().
+    if(typeof newSession==='function') await newSession(false,{workspace:path});
     showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
@@ -6546,6 +7003,43 @@ async function _profileSwitchPanelLoad(){
   if (_currentPanel === 'workspaces') await loadWorkspacesPanel();
 }
 
+// ── Tab-visibility reconciliation guard ────────────────────────────────────
+// hidden_tabs / tab_order are per-profile settings mirrored into localStorage.
+// From the moment a profile switch's settings reconciliation is in flight, that
+// mirror still holds the PREVIOUS profile's snapshot. Anything that re-derives
+// tab visibility from the mirror inside that window — the in-chat todos tray
+// hands the Todos rail entry back with _applyTabVisibility(_getHiddenTabs()) —
+// would reimpose the old profile's tab visibility on the profile now in effect:
+// a Todos entry the current profile hides pops back, or one it shows stays
+// hidden, until settings refresh (greptile P1, static/ui.js:10501,
+// 2026-10-08T20:06:51Z). Callers use this to skip the stale window; the pending
+// reconciliation applies that profile's own snapshot itself.
+let _tabVisReconcilePending = 0;
+// Profile switches currently in flight: bumped the instant a switch takes a new
+// generation and dropped in its finally. A switch is the ONLY other thing that
+// arms nothing here but will still rewrite the mirror later, so the replay
+// below needs to tell "a NEWER switch is still running and will reconcile"
+// apart from "the switch that superseded this reconciliation already failed"
+// (a failed switch runs no reconciliation of its own, so the last release to
+// see a zero counter is then the SUPERSEDED one). greptile P1,
+// static/panels.js:6783, 2026-10-09T00:15:45Z.
+let _profileSwitchInFlight = 0;
+function _tabVisibilitySnapshotStale(){ return _tabVisReconcilePending > 0; }
+
+// Replay the tray's rail release once the localStorage hidden_tabs mirror is
+// authoritative again for the profile now in effect: no /api/settings
+// reconciliation is in flight and no switch is running that would rewrite it
+// afterwards. Skipped for a superseded reconciliation whose newer switch is
+// still in flight (greptile P1, 2026-10-08T23:51:52Z) — but NOT for one whose
+// newer switch already FAILED: that switch ran no reconciliation of its own, so
+// without the replay a tray disabled during the window leaves the Todos rail
+// entry stale until the next settings refresh (greptile P1, 2026-10-09T00:15:45Z).
+function _maybeReplayChatTodosRailSync(){
+  if (_tabVisReconcilePending > 0) return;
+  if (_profileSwitchInFlight > 0) return;
+  if (typeof _syncChatTodosRailVisibility === 'function') _syncChatTodosRailVisibility();
+}
+
 function _refreshProfileSwitchBackground(gen){
   window._modelDropdownReady=null;
   if (typeof window._ensureModelDropdownReady === 'function') {
@@ -6559,6 +7053,9 @@ function _refreshProfileSwitchBackground(gen){
   // appearance setting; without this fetch, Profile A's hidden-tabs choice
   // would remain in effect under Profile B until the user opens Settings.
   // Stage-394 follow-up to #2636 deep review.
+  // The mirror is about to be re-derived from the new profile's settings, so it
+  // is stale from here until the fetch below settles (see the guard above).
+  _tabVisReconcilePending++;
   Promise.resolve(api('/api/settings')).then(function(s){
     if (gen !== _profileSwitchGeneration) return;
     var hidden = (s && Array.isArray(s.hidden_tabs)) ? s.hidden_tabs : [];
@@ -6579,7 +7076,28 @@ function _refreshProfileSwitchBackground(gen){
     if(typeof _applyComposerFooterVisibilitySettings==='function') _applyComposerFooterVisibilitySettings();
     window._showTitlebarProfile=!!(s&&s.show_titlebar_profile);
     if(typeof _applyTitlebarProfileVisibility==='function') _applyTitlebarProfileVisibility();
-  }).catch(function(){});
+  }).catch(function(){}).then(function(){
+    // Release on BOTH settle paths (the catch above swallows rejections), so a
+    // superseded or failed reconciliation can never strand tab visibility
+    // behind the stale-snapshot guard.
+    _tabVisReconcilePending--;
+    // Replay the tray's rail release once the mirror is authoritative again
+    // (reviewer re-gate 2026-10-08T23:19:27Z, static/panels.js:6766). Every
+    // release path cleared the guard by skipping _syncChatTodosRailVisibility
+    // while the mirror still held the PREVIOUS profile's snapshot, but nothing
+    // re-ran it afterwards: disabling the tray during a failed reconciliation
+    // left the Todos entry hidden although the guard was already clear.
+    //
+    // The decision lives in _maybeReplayChatTodosRailSync(): a SUPERSEDED
+    // reconciliation must NOT replay while its newer switch is still in flight
+    // (it can be the last release to see a zero counter there, and re-deriving
+    // from the then-stale mirror would reimpose the previous profile's
+    // hidden_tabs — greptile P1, 2026-10-08T23:51:52Z), but it MUST replay once
+    // that switch has FAILED: a failed switch runs no reconciliation of its own,
+    // so nothing else would ever re-run the sync and a tray disabled during the
+    // window left the Todos rail entry stale (greptile P1, 2026-10-09T00:15:45Z).
+    _maybeReplayChatTodosRailSync();
+  });
 }
 
 async function loadProfilesPanel() {
@@ -6903,6 +7421,8 @@ function _openProfileSwitchSessionBrowser(){
     try{if(typeof _syncMobileSidebarPanelFromMainView==='function')_syncMobileSidebarPanelFromMainView();}catch(_){}
     sidebar.classList.remove('mobile-session-page');
     sidebar.classList.add('mobile-panel-drawer','mobile-open');
+    // #7924: an open drawer must never stay inert (see mobileSwitchPanel).
+    if(typeof _setPanelInert==='function')_setPanelInert(sidebar,true);
   }catch(_){}
 }
 
@@ -6945,6 +7465,14 @@ async function switchToProfile(name) {
   const _titlebarLabel = $('titlebarProfileLabel');
   const _prevProfileName = S.activeProfile || 'default';
   const _switchGen = ++_profileSwitchGeneration;
+  // Hold a switch-in-flight marker for the whole run: the stale-snapshot arm
+  // below only lands once this POST resolves, and the gap before it is exactly
+  // where a superseded reconciliation's release must NOT replay the previous
+  // profile's mirror (greptile P1, 2026-10-08T22:06:59Z). Dropped in the finally,
+  // where a FAILED switch then lets that release replay (see
+  // _maybeReplayChatTodosRailSync). typeof-tolerant like the other counter ops
+  // because the frontend test harnesses eval these statements in isolation.
+  if (typeof _profileSwitchInFlight === 'number') _profileSwitchInFlight++;
   const _openingExistingSidebarSession = !!(typeof _profileSwitchOpeningExistingSession !== 'undefined' && _profileSwitchOpeningExistingSession);
   if (_chip) { _chip.classList.add('switching'); _chip.disabled = true; }
   if (_titlebarBtn) { _titlebarBtn.classList.add('switching'); _titlebarBtn.disabled = true; }
@@ -6983,6 +7511,12 @@ async function switchToProfile(name) {
     sessionInProgress = true;
   }
   const _workspaceVisibleAtStart = typeof _workspacePanelMode !== 'undefined' && _workspacePanelMode !== 'closed';
+  // Stale-snapshot guard ownership for THIS switch: armed the instant
+  // S.activeProfile changes (see below), handed to the settings reconciliation
+  // on success, released in `finally` on every other exit. The counter arms are
+  // `typeof`-tolerant because the frontend test harnesses eval this function in
+  // isolation, without panels.js's module scope (where the counter lives).
+  let _tabVisGuardHeld = false;
 
   // #4671 CORE: the skeleton/embargo/generation setup is INSIDE the try so the
   // _switchGen-guarded finally always lifts the embargo — a throw in this synchronous
@@ -7012,10 +7546,35 @@ async function switchToProfile(name) {
     // error surfaces ONLY when the CURRENT switch genuinely fails (@rodboev review, #4662).
     const data = await api('/api/profile/switch', { method: 'POST', body: JSON.stringify({ name }), timeoutToast: false });
     if (_switchGen !== _profileSwitchGeneration) return false;
+    // A retained empty-composer pick belongs to the old profile's providers; keeping it
+    // would make New Chat / Send post the old profile's model (#6506 gate).
+    if (typeof _clearEmptyComposerModelOverride === 'function') _clearEmptyComposerModelOverride();
     S.activeProfile = data.active || name;
     S.activeProfileIsDefault = !!data.is_default;
+    // The switch's optimistic chip already claims the new profile, but the
+    // localStorage hidden_tabs / tab_order mirror still holds the PREVIOUS
+    // profile's snapshot until _refreshProfileSwitchBackground()'s
+    // /api/settings reconciliation settles. Arm the stale-snapshot guard at
+    // THIS instant rather than inside that reconciliation: everything between
+    // here and the call at the bottom of this function is async, and a tray-off
+    // release landing in the gap would re-derive tab visibility from the
+    // previous profile's mirror — revealing a Todos entry the new profile hides
+    // or keeping a visible one hidden until settings refresh (greptile P1,
+    // static/panels.js:6741, 2026-10-08T22:06:59Z). Ownership is handed to the
+    // reconciliation below; every other exit releases it in `finally`.
+    _tabVisGuardHeld = true;
+    if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending++;
     if (typeof _resetCronUnreadForProfileSwitch === 'function') {
       _resetCronUnreadForProfileSwitch();
+    }
+    // #7509: the slash-skill caches hold the previous profile's disabled-filtered
+    // /api/skills payload, so drop them once the switch has actually succeeded —
+    // otherwise a skill that is enabled in the new profile stays hidden behind the
+    // old payload. Invalidating here (rather than before the POST) also kills any
+    // response still in flight, so the previous profile's reply can't repopulate
+    // the caches after this point (see invalidateSlashSkillCaches in commands.js).
+    if (typeof window !== 'undefined' && typeof window.invalidateSlashSkillCaches === 'function') {
+      window.invalidateSlashSkillCaches();
     }
     const targetActiveProfile = S.activeProfile || 'default';
     let sessionProfileMatchesTarget = true;
@@ -7193,6 +7752,13 @@ async function switchToProfile(name) {
     }
 
     await _profileSwitchPanelLoad();
+    // Hand the stale-snapshot guard over to the /api/settings reconciliation
+    // (it releases on both settle paths). The decrement here and the
+    // synchronous re-arm at the top of _refreshProfileSwitchBackground are
+    // neighbours in the same task, so no handler can observe a zero counter
+    // between them.
+    if (_tabVisGuardHeld && typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending--;
+    _tabVisGuardHeld = false;
     _refreshProfileSwitchBackground(_switchGen);
     return true;
 
@@ -7233,6 +7799,22 @@ async function switchToProfile(name) {
     if (_switchGen === _profileSwitchGeneration && typeof _setProfileSwitchListEmbargo === 'function') {
       _setProfileSwitchListEmbargo(false);
     }
+    // Release the stale-snapshot guard on every exit that did NOT hand it to the
+    // settings reconciliation (switch failure, superseded switch, early return).
+    // The count is a plain counter and this arm is ours, so the release is
+    // unconditional; a stranded arm would pin tab visibility to the stale window
+    // for the rest of the session (greptile P1, static/panels.js:6741).
+    if (_tabVisGuardHeld) { _tabVisGuardHeld = false; if (typeof _tabVisReconcilePending === 'number') _tabVisReconcilePending--; }
+    // This switch is no longer in flight. A switch that FAILED (or was
+    // superseded) never runs a /api/settings reconciliation of its own, so the
+    // release that brought the counter to zero can be a SUPERSEDED
+    // reconciliation's, which must still replay the tray rail sync — otherwise a
+    // tray disabled during the window leaves the Todos rail entry stale until
+    // the next settings refresh (greptile P1, static/panels.js:6783,
+    // 2026-10-09T00:15:45Z). A successful switch hands the mirror to its own
+    // reconciliation, so the counter is still > 0 here and that one replays.
+    if (typeof _profileSwitchInFlight === 'number' && _profileSwitchInFlight > 0) _profileSwitchInFlight--;
+    if (typeof _maybeReplayChatTodosRailSync === 'function') _maybeReplayChatTodosRailSync();
   }
 }
 
@@ -7241,6 +7823,10 @@ function openProfileCreate(){
   _profilePreFormDetail = _currentProfileDetail ? { ..._currentProfileDetail } : null;
   _profileMode = 'create';
   _renderProfileForm();
+  // Mobile: the new-profile form lives in the main view, which is covered by the
+  // full-screen sidebar drawer. Close the drawer so the form is visible (mirror
+  // openWorkspaceDetail's behaviour); no-op on desktop.
+  _closeMobileSidebarAfterPanelSelection();
 }
 
 function _renderProfileForm(){
@@ -7502,13 +8088,40 @@ function _sanitizeTabPanelList(panels){
   return out;
 }
 
+// The localStorage key is a CACHE of the resolved preference, never the
+// authority (gate certificate 2026-10-13, "stale hidden-tabs replay,
+// including when the tray is off"): _setHiddenTabs tolerates a failed write
+// (quota exhausted, storage blocked/disabled), which leaves the READABLE
+// mirror holding the PREVIOUS list.  A later reader then restored that stale
+// preference over the hidden_tabs the server had just resolved - the in-chat
+// tray's rail-sync replay calls _applyTabVisibility(_getHiddenTabs()), so a
+// tray-off profile switch reversed the freshly applied tabs (Todos hidden /
+// Memory visible became Todos visible / Memory hidden).  Remember the
+// resolved list in memory and prefer it over the mirror.
+let _hiddenTabsResolved = null;
+
 function _getHiddenTabs(){
+  if(_hiddenTabsResolved) return _hiddenTabsResolved.slice();
   try{var h=localStorage.getItem(_HIDDEN_TABS_LS_KEY);if(h)return _sanitizeTabPanelList(JSON.parse(h));}catch(e){}
   return[];
 }
 
 function _setHiddenTabs(panels){
-  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(_sanitizeTabPanelList(panels)));}catch(e){}
+  var resolved=_sanitizeTabPanelList(panels);
+  _hiddenTabsResolved=resolved;
+  try{localStorage.setItem(_HIDDEN_TABS_LS_KEY,JSON.stringify(resolved));}catch(e){}
+}
+
+// The mirror is ALSO shared with other tabs. A successful write from another
+// tab fires a `storage` event here, and that newer value must win over the
+// copy this page resolved - otherwise an appearance autosave in the second
+// tab posts its OLD hidden_tabs list and undoes the first tab's choice
+// (greptile P1, 2026-10-15T14:49:46Z). A write by THIS page never fires the
+// event here, so an in-page reconciliation keeps the authority it needs.
+if(typeof window!=='undefined'&&window.addEventListener){
+  window.addEventListener('storage',function(e){
+    if(e&&e.key===_HIDDEN_TABS_LS_KEY) _hiddenTabsResolved=null;
+  });
 }
 
 function _getTabOrder(){
@@ -7590,11 +8203,17 @@ function _applyTabOrder(order){
 function _applyTabVisibility(hidden){
   hidden=_sanitizeTabPanelList(hidden);
   _applyTabOrder(_getTabOrder());
+  // Chat-todos: when the in-chat tray is enabled, the sidebar Todos entry
+  // must remain hidden regardless of hidden_tabs content (avoid duplication).
+  // We re-apply this preference after every hidden_tabs change so profile
+  // switches or settings saves cannot overwrite it.
+  var chatTodosOn=(typeof chatTodosEnabled==='function'?chatTodosEnabled():false);
   // Hide/unhide all [data-panel] elements (sidebar-nav buttons + rail buttons)
   document.querySelectorAll('[data-panel]').forEach(function(el){
     var panel=el.dataset.panel;
     if(!panel)return;
     var shouldHide=hidden.indexOf(panel)!==-1;
+    if(panel==='todos'&&chatTodosOn) shouldHide=true;
     // Never hide always-visible panels (chat, settings) even if present in hidden_tabs
     if(_ALWAYS_VISIBLE_TABS.has(panel)) shouldHide=false;
     el.classList.toggle('nav-tab-hidden',shouldHide);
@@ -7606,6 +8225,13 @@ function _applyTabVisibility(hidden){
   if(activeEl&&activeEl.classList.contains('nav-tab-hidden')){
     if(typeof switchPanel==='function') switchPanel('chat');
   }
+}
+
+function _tabVisibilityChipForcedOff(panel){
+  // The in-chat tray force-hides the sidebar Todos entry, so that panel's own
+  // chip must render OFF and its click must resolve the tray, not flip a
+  // hidden_tabs bit that cannot change what is on screen.
+  return panel==='todos'&&typeof chatTodosEnabled==='function'&&chatTodosEnabled();
 }
 
 function _renderTabVisibilityChips(){
@@ -7623,7 +8249,7 @@ function _renderTabVisibilityChips(){
     var chip=document.createElement('button');
     chip.type='button';
     chip.className='tab-visibility-chip';
-    var isOff=hidden.indexOf(panel)!==-1;
+    var isOff=hidden.indexOf(panel)!==-1||_tabVisibilityChipForcedOff(panel);
     if(isOff)chip.classList.add('chip-off');
     chip.textContent=label;
     chip.setAttribute('data-tab-panel',panel);
@@ -7684,6 +8310,28 @@ function _handleTabVisibilityChipDrop(e,targetPanel){
 
 function _toggleTabVisibilityChip(panel){
   if(_ALWAYS_VISIBLE_TABS.has(panel))return;
+  // A tray-forced chip cannot be turned on by editing hidden_tabs: the tray
+  // re-hides the tab on every pass, so two clicks left the chip ON with the
+  // tab still hidden. Turn the tray off instead — it is what owns the hide —
+  // so the click actually restores the sidebar Todos tab.
+  if(_tabVisibilityChipForcedOff(panel)){
+    // The tray owns the hide — turn it off. But the user may ALSO have hidden
+    // this tab independently (hidden_tabs), and that bit survives the tray
+    // being disabled: the click then left the tab hidden and the chip still
+    // OFF, i.e. it took a second click to reveal a tab the user had just
+    // switched on (re-gate 2026-10-07, static/panels.js:7878). Drop the
+    // independent hide in the same explicit chip-enable branch.
+    var forced=_getHiddenTabs();
+    var forcedIdx=forced.indexOf(panel);
+    if(forcedIdx!==-1){
+      forced.splice(forcedIdx,1);
+      _setHiddenTabs(forced);
+    }
+    if(typeof _chatTodosToggleEnabled==='function') _chatTodosToggleEnabled(false);
+    _renderTabVisibilityChips();
+    _scheduleAppearanceAutosave();
+    return;
+  }
   var hidden=_getHiddenTabs();
   var idx=hidden.indexOf(panel);
   if(idx!==-1){
@@ -7988,113 +8636,82 @@ function _extractSettingsValueText(field) {
   return chunks.join(' ');
 }
 
-async function _buildSettingsIndex() {
-  if (_settingsIndex) return;
-  // Memoize the in-flight build so concurrent searches share one pass; the
-  // lazy pane loaders are not guaranteed re-entrant.
+function _settingsSearchIdentityBase(entry) {
+  return JSON.stringify([
+    entry.sectionKey || '',
+    entry.i18nKey || '',
+    entry.cardName || '',
+    entry.fieldLabel || '',
+    entry.label || '',
+  ]);
+}
+
+function _buildSettingsIndex() {
+  // Share one lazy-pane build across concurrent searches.
   if (_settingsIndexPromise) return _settingsIndexPromise;
+  if (_settingsIndex) return null;
+  _settingsIndex = _collectSettingsIndex(false);
   const promise = (async () => {
-    // Ensure lazy-loaded panes are populated before reading the DOM
     await Promise.all([loadProvidersPanel(), loadPluginsPanel(), loadExtensionsPanel()]);
-    const index = [];
-    const add = (entry) => {
-      index.push({ ...entry, _settingsSearchIndex: index.length });
-    };
-    const sectionMap = {
-      settingsPaneConversation: 'conversation',
-      settingsPaneAppearance: 'appearance',
-      settingsPanePreferences: 'preferences',
-      settingsPaneProviders: 'providers',
-      settingsPanePlugins: 'plugins',
-      settingsPaneExtensions: 'extensions',
-      settingsPaneSystem: 'system',
-      settingsPaneHelp: 'help',
-    };
-    for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
-      const pane = $(paneId);
-      if (!pane) continue;
-      pane.querySelectorAll('.settings-field').forEach(field => {
-        // The i18n key may live on the <label> itself (label[data-i18n]) OR on
-        // a child of the label — the common toggle shape is
-        // <label><input><span data-i18n="..."></span></label>. Match both, plus
-        // a plain <label> with no i18n key, so every field is searchable
-        // (previously only label[data-i18n] indexed, silently dropping most
-        // checkbox settings). #4340 review fix.
-        const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
-        if (!labelEl) return;
-        const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
-        const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
-        if (!titleText) return;
-        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
-        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
-        const searchBlob = [titleText, valueText, descriptionText, field.textContent]
-          .filter(Boolean)
-          .join(' ')
-          .replace(/\s+/g, ' ')
-          .trim();
-        add({
-          label: titleText,
-          titleText,
-          valueText,
-          descriptionText,
-          searchBlob,
-          sectionKey,
-          i18nKey,
-          el: field,
-        });
+    // Do not resurrect an index invalidated by a panel-session reset.
+    if (_settingsIndexPromise === promise) {
+      _settingsIndex = _collectSettingsIndex(true);
+      _settingsIndexPromise = null;
+    }
+  })().catch(e => { if (_settingsIndexPromise === promise) { _settingsIndex = null; _settingsIndexPromise = null; } throw e; });
+  _settingsIndexPromise = promise;
+  return promise;
+}
+
+function _collectSettingsIndex(includeDynamic = true) {
+  const index = [];
+  const add = (entry) => {
+    index.push({ ...entry, _settingsSearchIndex: index.length });
+  };
+  const sectionMap = {
+    settingsPaneConversation: 'conversation',
+    settingsPaneAppearance: 'appearance',
+    settingsPanePreferences: 'preferences',
+    settingsPaneProviders: 'providers',
+    settingsPanePlugins: 'plugins',
+    settingsPaneExtensions: 'extensions',
+    settingsPaneSystem: 'system',
+    settingsPaneHelp: 'help',
+  };
+  for (const [paneId, sectionKey] of Object.entries(sectionMap)) {
+    if (!includeDynamic && ['providers', 'plugins', 'extensions'].includes(sectionKey)) continue;
+    const pane = $(paneId);
+    if (!pane) continue;
+    pane.querySelectorAll('.settings-field').forEach(field => {
+      // Cover i18n keys on labels, nested spans, and plain labels so toggle
+      // settings remain searchable. #4340 review fix.
+      const labelEl = field.querySelector('label[data-i18n], label [data-i18n], label');
+      if (!labelEl) return;
+      const i18nKey = labelEl.dataset ? labelEl.dataset.i18n : undefined;
+      const titleText = (i18nKey && t(i18nKey)) || labelEl.textContent.trim();
+      if (!titleText) return;
+      const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+      const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field, labelEl));
+      const searchBlob = [titleText, valueText, descriptionText, field.textContent]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      add({
+        label: titleText,
+        titleText,
+        valueText,
+        descriptionText,
+        searchBlob,
+        sectionKey,
+        i18nKey,
+        el: field,
       });
-      if (sectionKey === 'providers') {
-        pane.querySelectorAll('.provider-card').forEach(card => {
-          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (cardName) {
-            const titleText = cardName;
-            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
-            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
-            const searchBlob = [cardName, valueText, descriptionText, card.textContent]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            add({
-              label: cardName,
-              titleText,
-              valueText,
-              descriptionText,
-              searchBlob,
-              sectionKey,
-              el: card,
-              cardName,
-            });
-          }
-          card.querySelectorAll('.provider-card-field').forEach(field => {
-            const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
-            const label = [cardName, fieldLabel].filter(Boolean).join(' ');
-            if (!label) return;
-            const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
-            const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
-            const searchBlob = [label, valueText, descriptionText, field.textContent]
-              .filter(Boolean)
-              .join(' ')
-              .replace(/\s+/g, ' ')
-              .trim();
-            add({
-              label,
-              titleText: label,
-              valueText,
-              descriptionText,
-              searchBlob,
-              sectionKey,
-              el: field,
-              cardName,
-              fieldLabel,
-            });
-          });
-        });
-      }
-      if (sectionKey === 'plugins') {
-        pane.querySelectorAll('.plugin-card').forEach(card => {
-          const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
-          if (!cardName) return;
+    });
+    if (sectionKey === 'providers') {
+      pane.querySelectorAll('.provider-card').forEach(card => {
+        const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+        if (cardName) {
           const titleText = cardName;
           const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
           const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
@@ -8113,15 +8730,58 @@ async function _buildSettingsIndex() {
             el: card,
             cardName,
           });
+        }
+        card.querySelectorAll('.provider-card-field').forEach(field => {
+          const fieldLabel = ((field.querySelector('.provider-card-label') || {}).textContent || '').trim();
+          const label = [cardName, fieldLabel].filter(Boolean).join(' ');
+          if (!label) return;
+          const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(field));
+          const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(field));
+          const searchBlob = [label, valueText, descriptionText, field.textContent]
+            .filter(Boolean)
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+          add({
+            label,
+            titleText: label,
+            valueText,
+            descriptionText,
+            searchBlob,
+            sectionKey,
+            el: field,
+            cardName,
+            fieldLabel,
+          });
         });
-      }
+      });
     }
-    // A panel-session reset while building clears the memo; drop this result
-    // instead of resurrecting a stale index for the new session.
-    if (_settingsIndexPromise === promise) _settingsIndex = index;
-  })().catch(e => { if (_settingsIndexPromise === promise) _settingsIndexPromise = null; throw e; });
-  _settingsIndexPromise = promise;
-  return promise;
+    if (sectionKey === 'plugins') {
+      pane.querySelectorAll('.plugin-card').forEach(card => {
+        const cardName = ((card.querySelector('.provider-card-name') || {}).textContent || '').trim();
+        if (!cardName) return;
+        const titleText = cardName;
+        const valueText = _normalizeSettingsSearchText(_extractSettingsValueText(card));
+        const descriptionText = _normalizeSettingsSearchText(_extractSettingsDescriptionText(card));
+        const searchBlob = [cardName, valueText, descriptionText, card.textContent]
+          .filter(Boolean)
+          .join(' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        add({
+          label: cardName,
+          titleText,
+          valueText,
+          descriptionText,
+          searchBlob,
+          sectionKey,
+          el: card,
+          cardName,
+        });
+      });
+    }
+  }
+  return index;
 }
 
 async function filterSettings(query) {
@@ -8130,55 +8790,96 @@ async function filterSettings(query) {
   const q = (query || '').trim().toLowerCase();
   if (!q) { ++_settingsSearchSeq; resultsEl.style.display = 'none'; resultsEl.innerHTML = ''; return; }
   const seq = ++_settingsSearchSeq;
-  await _buildSettingsIndex();
-  // A newer keystroke superseded this query while the index was building.
-  if (seq !== _settingsSearchSeq) return;
-  const sectionLabels = {
-    conversation: t('settings_tab_conversation') || 'Conversation',
-    appearance: t('settings_tab_appearance') || 'Appearance',
-    preferences: t('settings_tab_preferences') || 'Preferences',
-    providers: t('providers_tab_title') || 'Providers',
-    plugins: t('settings_tab_plugins') || 'Plugins',
-    extensions: t('settings_tab_extensions') || 'Extensions',
-    system: t('settings_tab_system') || 'System',
-    help: t('settings_tab_help') || 'Help',
-  };
-  const matches = (_settingsIndex || []).map((entry) => {
-    const score = _scoreSettingsSearchMatch(entry, q);
-    return score ? { entry, score, index: entry._settingsSearchIndex } : null;
-  }).filter(Boolean);
-  if (!matches.length) {
-    resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
-    resultsEl.style.display = '';
-    return;
-  }
-  resultsEl.innerHTML = '';
-  matches.sort((left, right) => {
-    if (left.score.bucketIndex !== right.score.bucketIndex) {
-      return left.score.bucketIndex - right.score.bucketIndex;
+  const buildPromise = _buildSettingsIndex();
+  const renderResults = (dynamicPanesLoading = false) => {
+    const sectionLabels = {
+      conversation: t('settings_tab_conversation') || 'Conversation',
+      appearance: t('settings_tab_appearance') || 'Appearance',
+      preferences: t('settings_tab_preferences') || 'Preferences',
+      providers: t('providers_tab_title') || 'Providers',
+      plugins: t('settings_tab_plugins') || 'Plugins',
+      extensions: t('settings_tab_extensions') || 'Extensions',
+      system: t('settings_tab_system') || 'System',
+      help: t('settings_tab_help') || 'Help',
+    };
+    const matches = (_settingsIndex || []).map((entry) => {
+      const score = _scoreSettingsSearchMatch(entry, q);
+      return score ? { entry, score, index: entry._settingsSearchIndex } : null;
+    }).filter(Boolean);
+    if (!matches.length) {
+      if (dynamicPanesLoading) {
+        resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
+        return;
+      }
+      resultsEl.innerHTML = `<div class="settings-search-empty">${esc(t('settings_search_no_results') || 'No settings found.')}</div>`;
+      resultsEl.style.display = '';
+      return;
     }
-    if (left.score.matchIndex !== right.score.matchIndex) {
-      return left.score.matchIndex - right.score.matchIndex;
-    }
-    return left.index - right.index;
-  });
-  for (const { entry: m } of matches.slice(0, 12)) {
-    const item = document.createElement('button');
-    item.type = 'button';
-    item.className = 'settings-search-result';
-    item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
-      `<span class="settings-search-arrow">›</span>` +
-      `<span class="settings-search-label">${esc(m.label)}</span>`;
-    item.addEventListener('click', () => {
-      _navigateToSettingsField(m);
-      resultsEl.style.display = 'none';
-      resultsEl.innerHTML = '';
-      const input = $('settingsSearch');
-      if (input) input.value = '';
+    matches.sort((left, right) => {
+      if (left.score.bucketIndex !== right.score.bucketIndex) {
+        return left.score.bucketIndex - right.score.bucketIndex;
+      }
+      if (left.score.matchIndex !== right.score.matchIndex) {
+        return left.score.matchIndex - right.score.matchIndex;
+      }
+      return left.index - right.index;
     });
-    resultsEl.appendChild(item);
-  }
-  resultsEl.style.display = '';
+    const visibleMatches = matches.slice(0, 12);
+    const identityCounts = new Map();
+    const nextIdentities = visibleMatches.map(({ entry }) => {
+      const identityBase = _settingsSearchIdentityBase(entry);
+      const identityIndex = identityCounts.get(identityBase) || 0;
+      identityCounts.set(identityBase, identityIndex + 1);
+      return `${identityBase}:${identityIndex}`;
+    });
+    const currentItems = [...resultsEl.querySelectorAll('.settings-search-result')];
+    const identitiesUnchanged = currentItems.length === nextIdentities.length &&
+      currentItems.every((item, index) => item.dataset.settingsSearchIdentity === nextIdentities[index]);
+    if (identitiesUnchanged) {
+      resultsEl.style.display = '';
+      return;
+    }
+    const activeResult = document.activeElement && typeof document.activeElement.closest === 'function'
+      ? document.activeElement.closest('.settings-search-result')
+      : null;
+    const focusedIdentity = activeResult && resultsEl.contains(activeResult)
+      ? activeResult.dataset.settingsSearchIdentity
+      : null;
+    resultsEl.innerHTML = '';
+    let focusTarget = null;
+    for (const [matchIndex, { entry: m }] of visibleMatches.entries()) {
+      const identity = nextIdentities[matchIndex];
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'settings-search-result';
+      item.dataset.settingsSearchIdentity = identity;
+      item.innerHTML = `<span class="settings-search-section">${esc(sectionLabels[m.sectionKey] || m.sectionKey)}</span>` +
+        `<span class="settings-search-arrow">›</span>` +
+        `<span class="settings-search-label">${esc(m.label)}</span>`;
+      item.addEventListener('click', () => {
+        ++_settingsSearchSeq;
+        _navigateToSettingsField(m);
+        resultsEl.style.display = 'none';
+        resultsEl.innerHTML = '';
+        const input = $('settingsSearch');
+        if (input) input.value = '';
+      });
+      resultsEl.appendChild(item);
+      if (focusedIdentity === identity) focusTarget = item;
+    }
+    resultsEl.style.display = '';
+    const focusDestination = focusTarget || (focusedIdentity ? $('settingsSearch') : null);
+    if (focusDestination && typeof focusDestination.focus === 'function') {
+      focusDestination.focus({ preventScroll: true });
+    }
+  };
+  renderResults(!!buildPromise);
+  if (!buildPromise) return;
+  await buildPromise;
+  // A newer keystroke superseded this query while the dynamic panes loaded.
+  if (seq !== _settingsSearchSeq) return;
+  renderResults(false);
 }
 
 function _scoreSettingsSearchMatch(entry, q) {
@@ -8520,7 +9221,7 @@ function _scheduleAppearanceAutosave(){
 
 async function _autosaveAppearanceSettings(payload){
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     _settingsAppearanceAutosaveRetryPayload=null;
     _rememberAppearanceSaved(payload);
     if(saved&&saved.font_size){
@@ -8542,6 +9243,14 @@ async function _autosaveAppearanceSettings(payload){
     }
     window._sessionEndlessScrollEnabled=!!(saved&&saved.session_endless_scroll);
     window._autoScrollFollow=!saved||saved.auto_scroll_follow!==false;
+    // #6819: persist ONLY from an explicit boolean in the server response.
+    // A failed autosave (`saved` falsy) or a partial response without the key
+    // would otherwise write the synthesized default (ON) into the mirror,
+    // corrupting the value a later boot-failure fallback would restore
+    // (Greptile P1 review on #6856).
+    if(saved&&typeof saved.auto_scroll_follow==='boolean'&&typeof _persistAutoScrollFollow==='function'){
+      _persistAutoScrollFollow(saved.auto_scroll_follow);
+    }
     window._largeTextPasteAsAttachment=!saved||saved.large_text_paste_as_attachment!==false;
     window._projectQuickCreate=!!(saved&&saved.project_quick_create_buttons);
     if(saved&&Object.prototype.hasOwnProperty.call(saved,'structured_code_default_view')){
@@ -8678,14 +9387,17 @@ function _preferencesPayloadFromUi(){
   if(showCronCb) payload.show_cron_sessions=!!(showCliCb&&showCliCb.checked&&showCronCb.checked);
   const showWebhookCb=$('settingsShowWebhookSessions');
   if(showWebhookCb) payload.show_webhook_sessions=!!(showCliCb&&showCliCb.checked&&showWebhookCb.checked);
+  const showKanbanCb=$('settingsShowKanbanSessions');
+  if(showKanbanCb) payload.show_kanban_sessions=!!(showCliCb&&showCliCb.checked&&showKanbanCb.checked);
   const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
   if(showPreviousMessagingCb) payload.show_previous_messaging_sessions=showPreviousMessagingCb.checked;
   const syncCb=$('settingsSyncInsights');
   if(syncCb) payload.sync_to_insights=syncCb.checked;
   const updateCb=$('settingsCheckUpdates');
   if(updateCb) payload.check_for_updates=updateCb.checked;
-  const updateChannelSel=$('settingsUpdateChannel');
-  if(updateChannelSel) payload.update_channel=updateChannelSel.value;
+  // update_channel is NOT included here — it has its own dedicated write path
+  // (_saveUpdateChannelFromSelector) so a stale tab's generic autosave cannot
+  // overwrite a newer channel selection made in another tab. (#6612)
   const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
   if(ignoreAgentUpdatesCb) payload.ignore_agent_updates=ignoreAgentUpdatesCb.checked;
   const whatsNewSummaryCb=$('settingsWhatsNewSummary');
@@ -8738,9 +9450,42 @@ function _speechPreferencesPayloadFromUi(){
   return payload;
 }
 
-function _setPreferencesAutosaveStatus(state){
+// Keep same-page settings merges FIFO so one response cannot race the next read-modify-write.
+let _settingsPanelPostQueue=Promise.resolve();
+
+function _enqueueSettingsPost(options){
+  const requestOptions={...(options||{})};
+  if(typeof requestOptions.body==='string') requestOptions.body=String(requestOptions.body);
+  const run=_settingsPanelPostQueue.then(async()=>{
+    const saved=await api('/api/settings',requestOptions);
+    if(!saved||typeof saved!=='object'||Array.isArray(saved)){
+      throw new Error('Invalid settings response');
+    }
+    return saved;
+  });
+  _settingsPanelPostQueue=run.catch(()=>{});
+  return run;
+}
+
+// Ownership token for the shared preferences autosave status slot. Prevents
+// the channel writer from clearing or overwriting a 'failed'+Retry state the
+// generic preferences autosave set; that Retry button has exactly one call
+// site and becomes unreachable if another writer replaces the node.
+let _preferencesAutosaveStatusOwner=null;
+
+function _setPreferencesAutosaveStatus(state,owner){
+  owner=owner||'preferences';
   const el=$('settingsPreferencesAutosaveStatus');
   if(!el) return;
+  // Guard: if the slot shows 'failed' from a different writer, do not overwrite.
+  // The DOM class is the source of truth; an external clear would remove
+  // 'is-failed' and unblock writes without needing an extra variable.
+  if(_preferencesAutosaveStatusOwner&&
+     _preferencesAutosaveStatusOwner!==owner&&
+     el.classList.contains('is-failed')){
+    return;
+  }
+  _preferencesAutosaveStatusOwner=state?owner:null;
   el.className='settings-autosave-status';
   if(!state){
     el.textContent='';
@@ -8763,10 +9508,26 @@ function _rememberPreferencesSaved(payload){
 }
 
 function _applyWorkspaceTodosTabVisibility(){
+  // The in-chat task-list tray replaces every other Todos surface, so while it
+  // is on it also owns the workspace-panel Todos tab. The setting row stays
+  // VISIBLE but disabled, with an explanation, instead of vanishing: hiding it
+  // left the user staring at a tab that refused to appear with no way to see
+  // why (reviewer re-gate 2026-10-08T03:10:50Z).
+  const trayOn=(typeof chatTodosEnabled==='function')&&chatTodosEnabled();
+  const want=!!window._workspaceTodosTab&&!trayOn;
   const tab=$('workspaceTodosTab');
-  if(tab) tab.hidden=!window._workspaceTodosTab;
+  if(tab) tab.hidden=!want;
+  const field=$('settingsWorkspaceTodosTabField');
+  const box=$('settingsWorkspaceTodosTab');
+  if(box) box.disabled=!!trayOn;
+  if(field){
+    if(field.classList) field.classList.toggle('is-disabled',!!trayOn);
+    field.hidden=false;
+  }
+  const note=$('settingsWorkspaceTodosTabNote');
+  if(note) note.hidden=!trayOn;
   const rp=document.querySelector('.rightpanel');
-  if(!window._workspaceTodosTab && rp && rp.dataset.activeTab==='todos'){
+  if(!want && rp && rp.dataset.activeTab==='todos'){
     if(typeof switchWorkspacePanelTab==='function') switchWorkspacePanelTab('files');
   }
 }
@@ -8782,7 +9543,7 @@ function _schedulePreferencesAutosave(){
 
 async function _autosavePreferencesSettings(payload){
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     if(payload&&payload.terminal_auto_expand_on_output!==undefined){
       window._terminalAutoExpandOnOutput=!!(saved&&saved.terminal_auto_expand_on_output);
     }
@@ -8836,12 +9597,53 @@ async function _autosavePreferencesSettings(payload){
     const pwField=$('settingsPassword');
     const pwDirty=!!(pwField&&pwField.value);
     const modelSel=$('settingsModel');
+    // The raw select value and _settingsHermesDefaultModelOnOpen speak the same
+    // language — both are the qualified dropdown value (@<provider>:<model> for
+    // catalog options), as written on open (models.default_model) and on save
+    // (body.default_model). Comparing the provider-stripped modelState.model
+    // against it marked the picker dirty on every autosave after a qualified
+    // default was saved (#7865 re-gate), so only the provider is taken from
+    // modelState — a same-value/different-provider re-pick still counts.
+    //
+    // The model half of that comparison must also accept the normalized form:
+    // when the catalog producer (_deduplicate_model_ids) hits a collision it
+    // qualifies the custom provider's option (@custom:foo:claude-sonnet-5)
+    // while the saved default is stored as the bare model + provider
+    // (claude-sonnet-5 / custom:foo). An unchanged default then only matches
+    // on the captured model, so the raw-value side alone reports a phantom
+    // edit and the unsaved-changes bar never clears (#7865 re-gate 2). The
+    // provider still decides on its own, so a same-model/different-provider
+    // re-pick keeps reading dirty.
     const modelState=(typeof _captureModelDropdownSelection==='function'&&modelSel)
       ? (_captureModelDropdownSelection(modelSel)||{model:String((modelSel&&modelSel.value)||''),model_provider:null})
       : {model:String((modelSel&&modelSel.value)||''),model_provider:null};
+    const rawModelValue=String((modelSel&&modelSel.value)||'');
+    const capturedModelValue=String((modelState&&modelState.model)||'');
+    const savedModelOnOpen=String(_settingsHermesDefaultModelOnOpen||'');
+    // #7865 SHOULD-FIX (re-gate): a THIRD form. After "Save Settings" the server
+    // stores the bare model while the default-model global still holds the raw
+    // qualified value the picker rendered. Re-opening Settings therefore shows
+    // the qualified option, and _modelStateForSelect now SKIPS the strip for a
+    // configured default — so captured and raw are both
+    // "@custom:foo:claude-sonnet-5" while saved-on-open is the bare
+    // "claude-sonnet-5". Neither of the two comparisons above matches, and the
+    // unsaved-changes bar reappears on the next autosaved edit even though
+    // nothing was changed.
+    //
+    // Accept the raw value with the captured provider's own "@<provider>:"
+    // prefix removed. It is still anchored on the captured provider, so a
+    // same-model/different-provider re-pick keeps reading dirty.
+    const _capturedProvider=String((modelState&&modelState.model_provider)||'').trim();
+    const _ownPrefix=_capturedProvider?`@${_capturedProvider}:`:'';
+    const prefixStrippedValue=(_ownPrefix&&rawModelValue.toLowerCase().startsWith(_ownPrefix.toLowerCase()))
+      ?rawModelValue.slice(_ownPrefix.length)
+      :rawModelValue;
+    const modelUnchanged=rawModelValue===savedModelOnOpen
+      ||capturedModelValue===savedModelOnOpen
+      ||prefixStrippedValue===savedModelOnOpen;
     const modelDirty=!!(
       modelSel&&(
-        (modelState.model||'')!==(_settingsHermesDefaultModelOnOpen||'')||
+        !modelUnchanged||
         ((modelState.model_provider||null)!==(_settingsHermesDefaultModelProviderOnOpen||null))
       )
     );
@@ -8867,6 +9669,57 @@ function _retryPreferencesAutosave(){
   const payload=_settingsPreferencesAutosaveRetryPayload||_preferencesPayloadFromUi();
   _setPreferencesAutosaveStatus('saving');
   _autosavePreferencesSettings(payload);
+}
+
+let _channelSaveSeq=0;
+// Last server-confirmed update_channel value. Seeded at panel hydration so the
+// failure-revert path always has a known-good value. _confirmedUpdateChannel is
+// the only reliable "previous" value: by the time a change event fires the
+// browser has already applied the picked option to the <select>, so
+// channelSel.value inside the handler IS the new value, not the old one.
+let _confirmedUpdateChannel=null;
+
+async function _saveUpdateChannelFromSelector(channelSel){
+  // #6612: dedicated write path for update_channel so the generic preferences
+  // autosave payload never carries this field. A stale tab toggling an unrelated
+  // preference must not overwrite a newer channel selection from another tab.
+  if(!channelSel) return;
+  const val=channelSel.value==='experimental'?'experimental':'stable';
+  const seq=++_channelSaveSeq;
+  if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saving','channel');
+  try{
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify({update_channel:val})});
+    const confirmed=(saved&&(saved.update_channel==='experimental'||saved.update_channel==='stable'))
+      ?saved.update_channel:val;
+    _confirmedUpdateChannel=confirmed;
+    // The queue makes the server state FIFO; the sequence guard protects only
+    // the selector and other response-driven UI from stale completions.
+    if(seq!==_channelSaveSeq) return;
+    channelSel.value=confirmed;
+    if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus('saved','channel');
+    // Run the update check and badge sync against the confirmed server value,
+    // not the optimistic pre-save value.
+    if(typeof checkUpdatesNow==='function'){
+      try{checkUpdatesNow(confirmed);}catch(_){}
+    }
+    if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(confirmed);
+  }catch(e){
+    console.warn('[settings] update_channel save failed',e);
+    // Revert selector and badge to the last server-confirmed value so both
+    // controls agree with what the server actually holds. Status clear and
+    // revert are both inside the seq guard so a superseded in-flight failure
+    // does not clear status that a newer write or the generic autosave owns.
+    if(seq===_channelSaveSeq){
+      const revertTo=_confirmedUpdateChannel||'stable';
+      channelSel.value=revertTo;
+      if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(revertTo);
+      // Do not call _setPreferencesAutosaveStatus('failed','channel'): its retry
+      // button replays _retryPreferencesAutosave(), which cannot contain
+      // update_channel (#6612). Clear the saving indicator instead; the selector
+      // snap-back is the user's signal.
+      if(typeof _setPreferencesAutosaveStatus==='function') _setPreferencesAutosaveStatus(null,'channel');
+    }
+  }
 }
 
 function _syncSettingsMaxTokensPlaceholder(field, fallbackValue){
@@ -8960,10 +9813,30 @@ async function loadSettingsPanel(){
         _scheduleAppearanceAutosave();
       };
     }
+    const chatTodosCb=$('settingsChatTodosInChat');
+    if(chatTodosCb){
+      chatTodosCb.checked=!!(typeof chatTodosEnabled==='function'&&chatTodosEnabled());
+      // No appearance autosave here (reviewer re-gate 2026-10-08T23:19:27Z,
+      // static/panels.js:9355): the checkbox only drives the tray preference
+      // (localStorage), and an appearance save would POST this client's stale
+      // hidden_tabs mirror, overwriting a newer server snapshot written by
+      // another client. Explicit visibility-chip edits still autosave.
+      chatTodosCb.onchange=function(){
+        if(typeof _chatTodosToggleEnabled==='function') _chatTodosToggleEnabled(this.checked);
+      };
+    }
     const autoScrollFollowCb=$('settingsAutoScrollFollow');
     if(autoScrollFollowCb){
       autoScrollFollowCb.checked=settings.auto_scroll_follow!==false;
       window._autoScrollFollow=autoScrollFollowCb.checked;
+      // #6819/#6856: a successful settings GET is an authoritative resolve, so
+      // sync the global mirror too — otherwise an explicit OFF applied here
+      // leaves a stale ON mirror that a later boot-fetch failure would restore.
+      // Persist ONLY when the server explicitly sent a boolean (never persist a
+      // synthesized default from an absent field — matches the boot contract).
+      if(typeof settings.auto_scroll_follow==='boolean'&&typeof _persistAutoScrollFollow==='function'){
+        _persistAutoScrollFollow(settings.auto_scroll_follow);
+      }
       autoScrollFollowCb.onchange=function(){
         window._autoScrollFollow=this.checked;
         _scheduleAppearanceAutosave();
@@ -9093,8 +9966,17 @@ async function loadSettingsPanel(){
     _setHiddenTabs(hiddenTabs);
     _applyTabVisibility(hiddenTabs);
     _renderTabVisibilityChips();
+    // #7622 (round 3): the settings payload's `settings.language` is
+    // absent (None) for a fresh install, so an explicit non-empty
+    // value is the user's genuine saved choice.  The browser
+    // navigator hint is now read via the guarded
+    // `_detectBrowserLanguageHint()` helper (round-3 finding 2) so
+    // a throwing `navigator` accessor can no longer abort settings
+    // hydration before model, provider, plugin and extension sections
+    // are populated.  The fallback ternary preserves the pre-#7622
+    // settings-modal behaviour when neither helper is in scope.
     const resolvedLanguage=(typeof resolvePreferredLocale==='function')
-      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'))
+      ? resolvePreferredLocale(settings.language, localStorage.getItem('hermes-lang'), _detectBrowserLanguageHint())
       : (settings.language || localStorage.getItem('hermes-lang') || 'en');
     // Keep settings modal and current page strings in sync with the resolved locale.
     if(typeof setLocale==='function'){
@@ -9195,7 +10077,12 @@ async function loadSettingsPanel(){
       window._showQuotaChip=showQuotaChipCb.checked;
       showQuotaChipCb.addEventListener('change',()=>{
         window._showQuotaChip=showQuotaChipCb.checked;
-        if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+        if(typeof refreshProviderQuotaIndicator==='function'){
+          const provider=(typeof _currentQuotaProvider==='function')
+            ? _currentQuotaProvider()
+            : ((typeof S!=='undefined'&&S&&S.session&&S.session.model_provider)||null);
+          void refreshProviderQuotaIndicator(provider);
+        }
         _schedulePreferencesAutosave();
       },{once:false});
     }
@@ -9309,6 +10196,13 @@ async function loadSettingsPanel(){
       showWebhookCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
       if(showCliCb){showCliCb.addEventListener('change',function(){showWebhookCb.disabled=!showCliCb.checked;},{once:false});}
     }
+    const showKanbanCb=$('settingsShowKanbanSessions');
+    if(showKanbanCb){
+      showKanbanCb.checked=!!settings.show_kanban_sessions;
+      showKanbanCb.disabled=showCliCb?!showCliCb.checked:true;
+      showKanbanCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});
+      if(showCliCb){showCliCb.addEventListener('change',function(){showKanbanCb.disabled=!showCliCb.checked;},{once:false});}
+    }
     const showPreviousMessagingCb=$('settingsShowPreviousMessagingSessions');
     if(showPreviousMessagingCb){showPreviousMessagingCb.checked=!!settings.show_previous_messaging_sessions;showPreviousMessagingCb.addEventListener('change',_schedulePreferencesAutosave,{once:false});}
     const syncCb=$('settingsSyncInsights');
@@ -9318,19 +10212,13 @@ async function loadSettingsPanel(){
     const updateChannelSel=$('settingsUpdateChannel');
     if(updateChannelSel){
       updateChannelSel.value=settings.update_channel==='experimental'?'experimental':'stable';
+      _confirmedUpdateChannel=updateChannelSel.value; // #6612: seed revert baseline
       updateChannelSel.addEventListener('change',function(){
-        // Persist the channel, then invalidate the cached update check and
-        // re-check so the banner reflects the newly-selected channel. Changing
-        // the channel changes WHAT is offered, never WHAT is installed — the
-        // update banner still gates the actual apply behind "Update Now".
-        _schedulePreferencesAutosave();
-        if(typeof checkUpdatesNow==='function'){
-          // Pass the just-selected channel EXPLICITLY so the re-check cannot race
-          // the debounced autosave PUT and answer for the previous channel.
-          const _picked=updateChannelSel.value;
-          setTimeout(function(){try{checkUpdatesNow(_picked);}catch(e){}},400);
-        }
-        if(typeof _syncUpdateChannelBadge==='function') _syncUpdateChannelBadge(updateChannelSel.value);
+        // #6612: use the dedicated channel writer so generic preference autosaves
+        // from a stale tab cannot overwrite a newer explicit channel selection.
+        // Update check, badge sync, and failure status are handled inside
+        // _saveUpdateChannelFromSelector after the POST is confirmed.
+        _saveUpdateChannelFromSelector(updateChannelSel);
       },{once:false});
     }
     const ignoreAgentUpdatesCb=$('settingsIgnoreAgentUpdates');
@@ -9455,14 +10343,40 @@ async function loadSettingsPanel(){
           {value:'zh-CN-YunyangNeural',label:'Yunyang (Chinese, Male)'},
           {value:'en-US-AriaNeural',label:'Aria (English, Female)'},
           {value:'en-US-GuyNeural',label:'Guy (English, Male)'},
+          {value:'en-US-AndrewMultilingualNeural',label:'Andrew (English, Male, Multilingual)'},
+          {value:'en-US-AvaMultilingualNeural',label:'Ava (English, Female, Multilingual)'},
+          {value:'en-US-BrianMultilingualNeural',label:'Brian (English, Male, Multilingual)'},
+          {value:'en-US-EmmaMultilingualNeural',label:'Emma (English, Female, Multilingual)'},
           {value:'id-ID-GadisNeural',label:'Gadis (Indonesian, Female)'},
+          {value:'fr-FR-RemyMultilingualNeural',label:'Rémy (French, Male, Multilingual)'},
+          {value:'fr-FR-VivienneMultilingualNeural',label:'Vivienne (French, Female, Multilingual)'},
+          {value:'fr-FR-DeniseNeural',label:'Denise (French, Female)'},
+          {value:'fr-FR-EloiseNeural',label:'Eloise (French, Female, Child)'},
+          {value:'fr-FR-HenriNeural',label:'Henri (French, Male)'},
+          {value:'fr-CA-AntoineNeural',label:'Antoine (French Canadian, Male)'},
+          {value:'fr-CA-JeanNeural',label:'Jean (French Canadian, Male)'},
+          {value:'fr-CA-SylvieNeural',label:'Sylvie (French Canadian, Female)'},
+          {value:'fr-CA-ThierryNeural',label:'Thierry (French Canadian, Male)'},
         ];
         ttsVoiceSel.innerHTML='<option value="">Default (Xiaoxiao)</option>';
-        edgeVoices.forEach(v=>{
-          const opt=document.createElement('option');
-          opt.value=v.value;opt.textContent=v.label;
-          if(v.value===current) opt.selected=true;
-          ttsVoiceSel.appendChild(opt);
+        // Group by language (macOS / Windows / Edge Read Aloud convention) now that
+        // the list spans five locales; order inside each group is unchanged.
+        const edgeVoiceGroups=[
+          ['zh-CN','Chinese'],['en-US','English'],['id-ID','Indonesian'],
+          ['fr-FR','French'],['fr-CA','French (Canada)'],
+        ];
+        edgeVoiceGroups.forEach(([prefix,groupLabel])=>{
+          const voices=edgeVoices.filter(v=>v.value.startsWith(prefix+'-'));
+          if(!voices.length) return;
+          const og=document.createElement('optgroup');
+          og.label=groupLabel;
+          voices.forEach(v=>{
+            const opt=document.createElement('option');
+            opt.value=v.value;opt.textContent=v.label;
+            if(v.value===current) opt.selected=true;
+            og.appendChild(opt);
+          });
+          ttsVoiceSel.appendChild(og);
         });
       } else {
         if(!('speechSynthesis' in window)){
@@ -9470,7 +10384,10 @@ async function loadSettingsPanel(){
           return;
         }
         const voices=speechSynthesis.getVoices();
-        ttsVoiceSel.innerHTML='<option value="">Default system voice</option>';
+        // #7582: the rebuilt default option would otherwise be hardcoded
+        // English; route it through the same key the static HTML option
+        // uses so locale switching keeps both call sites in sync.
+        ttsVoiceSel.innerHTML=`<option value="" data-i18n="settings_tts_voice_default_system">${t('settings_tts_voice_default_system')}</option>`;
         voices.forEach(v=>{
           const opt=document.createElement('option');
           opt.value=v.name;opt.textContent=v.name+(v.lang?' ('+v.lang+')':'');
@@ -9605,31 +10522,31 @@ async function loadSettingsPanel(){
 // ── Extensions panel (browser-origin diagnostics + local enable controls) ──
 
 function _extensionStatusLabel(value){
-  return value ? 'Enabled' : 'Disabled';
+  return value ? t('plugins_enabled') : t('plugins_disabled');
 }
 
 function _extensionBooleanBadge(value){
   const cls=value?'extension-status-badge-on':'extension-status-badge-off';
-  return `<span class="extension-status-badge ${cls}">${value?'true':'false'}</span>`;
+  return `<span class="extension-status-badge ${cls}">${value?t('ext_status_true'):t('ext_status_false')}</span>`;
 }
 
 function _extensionAssetList(urls){
   if(!Array.isArray(urls)||urls.length===0){
-    return '<div class="extension-url-empty">None</div>';
+    return '<div class="extension-url-empty">'+t('ext_none')+'</div>';
   }
   return '<ul class="extension-url-list">'+urls.map(url=>`<li><code>${esc(url)}</code></li>`).join('')+'</ul>';
 }
 
 function _extensionWarningList(warnings){
   if(!Array.isArray(warnings)||warnings.length===0){
-    return '<div class="extension-url-empty">No warnings.</div>';
+    return '<div class="extension-url-empty">'+t('ext_no_warnings')+'</div>';
   }
   return '<ul class="extension-warning-list">'+warnings.map(item=>{
     const rawCode=(item&&item.code)||'unknown_warning';
     const code=esc(rawCode);
     const source=esc((item&&item.source)||'unknown');
     const hint=rawCode==='extension_state_unknown_ids'
-      ? '<span>Some saved disabled-extension overrides no longer match the current manifest; re-added extensions with the same id may stay disabled.</span>'
+      ? '<span>'+t('ext_state_unknown_ids_hint')+'</span>'
       : '';
     return `<li><code>${code}</code><span>${source}</span>${hint}</li>`;
   }).join('')+'</ul>';
@@ -9715,11 +10632,22 @@ function _extensionSettingsControls(entry){
   </div>`;
 }
 
-function _extensionInstalledList(extensions,extensionDirConfigured){
+function _extensionConfigureButton(entry,surface){
+  if(surface!=='installed'||!(entry&&entry.effective_enabled)) return '';
+  const id=(entry&&entry.id)||'';
+  const runtime=window.HermesExtensionSettings;
+  if(!id||!runtime||typeof runtime._configureStateForExtension!=='function') return '';
+  const state=runtime._configureStateForExtension(id);
+  if(!state||!state.available) return '';
+  const pending=state.pending===true;
+  return `<button class="sm-btn extension-configure-btn" type="button" data-extension-configure-id="${esc(id)}" aria-busy="${pending?'true':'false'}"${pending?' disabled':''}>${pending?'Opening…':'Configure'}</button>`;
+}
+
+function _extensionInstalledList(extensions,extensionDirConfigured,surface){
   const list=Array.isArray(extensions)?extensions:[];
   if(!list.length){
-    if(!extensionDirConfigured) return '<div class="extension-url-empty">No extension directory is configured.</div>';
-    return '<div class="extension-url-empty">No manifest extensions are installed in the configured bundle.</div>';
+    if(!extensionDirConfigured) return '<div class="extension-url-empty">'+t('settings_extensions_no_dir')+'</div>';
+    return '<div class="extension-url-empty">'+t('settings_extensions_installed_empty')+'</div>';
   }
   return `<div class="extension-installed-list">${list.map(entry=>{
     const id=(entry&&entry.id)||'';
@@ -9732,6 +10660,7 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
     const note=canToggle
       ? 'Toggles the WebUI-managed override for the next app load.'
       : 'Manifest-disabled entries cannot be enabled from WebUI.';
+    const configureButton=_extensionConfigureButton(entry,surface);
     return `<div class="extension-installed-row" data-extension-id="${esc(id)}">
       <div class="extension-installed-main">
         <div class="extension-installed-title-row">
@@ -9741,7 +10670,10 @@ function _extensionInstalledList(extensions,extensionDirConfigured){
         <div class="extension-installed-meta"><code>${esc(id)}</code><span>${esc(note)}</span></div>
         ${_extensionSettingsControls(entry)}
       </div>
-      <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+      <div class="extension-installed-actions">
+        ${configureButton}
+        <button class="sm-btn extension-toggle-btn" type="button" data-extension-toggle-id="${esc(id)}" data-extension-next-enabled="${nextEnabled}"${disabledAttr}>${esc(buttonText)}</button>
+      </div>
     </div>`;
   }).join('')}</div>`;
 }
@@ -9859,23 +10791,23 @@ function _extensionSidecarCard(sidecars){
       </div>
       <div class="extension-sidecar-meta">${esc(meta)}</div>
       <div class="extension-sidecar-fields">
-        <div><span>Origin</span><code>${esc(origin)}</code></div>
-        <div><span>Health path</span><code>${esc(healthPath)}</code></div>
-        <div><span>Health URL</span><code>${esc(healthUrl)}</code></div>
-        <div><span>Proxy</span><code>${esc(proxyStatus)}</code></div>
-        <div><span>Proxy path</span><code>${esc(proxyPath)}</code></div>
+        <div><span>${esc(t('ext_sidecar_origin'))}</span><code>${esc(origin)}</code></div>
+        <div><span>${esc(t('ext_sidecar_health_path'))}</span><code>${esc(healthPath)}</code></div>
+        <div><span>${esc(t('ext_sidecar_health_url'))}</span><code>${esc(healthUrl)}</code></div>
+        <div><span>${esc(t('ext_sidecar_proxy'))}</span><code>${esc(proxyStatus)}</code></div>
+        <div><span>${esc(t('ext_sidecar_proxy_path'))}</span><code>${esc(proxyPath)}</code></div>
       </div>
       <div class="extension-sidecar-actions">${proxyButton}</div>
       ${proxyWarning}
       <div class="extension-sidecar-runtime" data-sidecar-runtime-index="${index}" hidden></div>
     </div>`;
-  }).join('')}</div>`:'<div class="extension-url-empty">No loopback sidecars declared.</div>';
+  }).join('')}</div>`:'<div class="extension-url-empty">'+t('ext_sidecars_none')+'</div>';
   return `
     <div class="provider-card extension-sidecars-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Loopback sidecars</div>
-          <div class="provider-card-meta">Declared local companions; health is checked directly from this browser with WebUI credentials omitted.</div>
+          <div class="provider-card-name">${esc(t('ext_sidecars_title'))}</div>
+            <div class="provider-card-meta">${esc(t('ext_sidecars_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
@@ -9949,6 +10881,7 @@ function _renderExtensionsPanel(data,seq){
   const copyBtn=$('extensionsCopyDiagnosticsBtn');
   if(!target) return;
   _extensionsStatusData=data||null;
+  if(_extensionsGalleryData) _extensionsGalleryData.statusData=data||null;
   _configureExtensionSettingsFromStatus(data);
   if(copyBtn) copyBtn.disabled=!data;
   const manifest=(data&&data.manifest)||{};
@@ -9967,52 +10900,52 @@ function _renderExtensionsPanel(data,seq){
     <div class="provider-card extension-status-card ${statusClass}">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Extension runtime</div>
-          <div class="provider-card-meta">Status from /api/extensions/status; toggles persist a local override for installed manifest entries.</div>
+          <div class="provider-card-name">${esc(t('settings_extensions_runtime_title'))}</div>
+          <div class="provider-card-meta">${esc(t('settings_extensions_runtime_status_from'))}</div>
         </div>
         <span class="provider-card-badge ${data&&data.enabled?'':'plugin-card-badge-disabled'}">${_extensionStatusLabel(!!(data&&data.enabled))}</span>
       </div>
       <div class="provider-card-body extension-card-body">
         <div class="extension-summary-grid">
-          <div><span>Extension dir configured</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_configured))}</div>
-          <div><span>Extension dir valid</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_valid))}</div>
-          <div><span>Manifest configured</span>${_extensionBooleanBadge(!!manifest.configured)}</div>
-          <div><span>Manifest loaded</span>${_extensionBooleanBadge(!!manifest.loaded)}</div>
-          <div><span>Manifest status</span><code>${esc(manifest.status||'unknown')}</code></div>
-          <div><span>Manifest entries inspected</span><code>${Number(manifest.entry_count)||0}</code></div>
-          <div><span>Manifest script count</span><code>${Number(manifest.script_count)||0}</code></div>
-          <div><span>Manifest stylesheet count</span><code>${Number(manifest.stylesheet_count)||0}</code></div>
-          <div><span>Manifest sidecar count</span><code>${Number(manifest.sidecar_count)||0}</code></div>
-          <div><span>Final script count</span><code>${scriptCount}</code></div>
-          <div><span>Final stylesheet count</span><code>${styleCount}</code></div>
-          <div><span>Loopback sidecar count</span><code>${sidecarCount}</code></div>
-          <div><span>Installed manifest extensions</span><code>${manifestExtensionCount}</code></div>
-          <div><span>User-disabled extensions</span><code>${userDisabledCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_extension_dir_configured'))}</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_configured))}</div>
+          <div><span>${esc(t('settings_extensions_diag_extension_dir_valid'))}</span>${_extensionBooleanBadge(!!(data&&data.extension_dir_valid))}</div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_configured'))}</span>${_extensionBooleanBadge(!!manifest.configured)}</div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_loaded'))}</span>${_extensionBooleanBadge(!!manifest.loaded)}</div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_status'))}</span><code>${esc(manifest.status||'unknown')}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_entries'))}</span><code>${Number(manifest.entry_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_scripts'))}</span><code>${Number(manifest.script_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_stylesheets'))}</span><code>${Number(manifest.stylesheet_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_manifest_sidecars'))}</span><code>${Number(manifest.sidecar_count)||0}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_final_scripts'))}</span><code>${scriptCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_final_stylesheets'))}</span><code>${styleCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_loopback_sidecars'))}</span><code>${sidecarCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_installed_extensions'))}</span><code>${manifestExtensionCount}</code></div>
+          <div><span>${esc(t('settings_extensions_diag_user_disabled'))}</span><code>${userDisabledCount}</code></div>
         </div>
       </div>
     </div>
     <div class="provider-card extension-installed-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Installed manifest extensions</div>
-          <div class="provider-card-meta">Enable or disable already-present local extensions. Reload WebUI to apply injected asset changes to this browser tab.</div>
+          <div class="provider-card-name">${esc(t('settings_extensions_installed_section_title'))}</div>
+          <div class="provider-card-meta">${esc(t('settings_extensions_installed_section_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
-        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured))}
+        ${_extensionInstalledList(extensions,!!(data&&data.extension_dir_configured),'diagnostics')}
       </div>
     </div>
     <div class="provider-card extension-assets-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Final public asset URLs</div>
-          <div class="provider-card-meta">Same-origin URLs that may be injected into the app shell.</div>
+          <div class="provider-card-name">${esc(t('ext_assets_title'))}</div>
+          <div class="provider-card-meta">${esc(t('ext_assets_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
-        <div class="provider-card-label">Scripts</div>
+        <div class="provider-card-label">${esc(t('ext_assets_scripts'))}</div>
         ${_extensionAssetList(scripts)}
-        <div class="provider-card-label extension-section-label">Stylesheets</div>
+        <div class="provider-card-label extension-section-label">${esc(t('ext_assets_styles'))}</div>
         ${_extensionAssetList(styles)}
       </div>
     </div>
@@ -10020,8 +10953,8 @@ function _renderExtensionsPanel(data,seq){
     <div class="provider-card extension-warnings-card">
       <div class="provider-card-header plugin-card-header">
         <div class="provider-card-info">
-          <div class="provider-card-name">Sanitized warnings</div>
-          <div class="provider-card-meta">Codes and coarse sources only; paths and rejected values are not shown.</div>
+          <div class="provider-card-name">${esc(t('ext_warnings_title'))}</div>
+          <div class="provider-card-meta">${esc(t('ext_warnings_meta'))}</div>
         </div>
       </div>
       <div class="provider-card-body extension-card-body">
@@ -10033,6 +10966,37 @@ function _renderExtensionsPanel(data,seq){
   _bindExtensionSidecarProxyButtons(target);
   _bindExtensionSettingsButtons(target);
   _monitorExtensionSidecars(sidecars,seq);
+}
+
+function _bindExtensionConfigureButtons(root){
+  if(!root) return;
+  root.querySelectorAll('[data-extension-configure-id]').forEach(btn=>{
+    btn.addEventListener('click',()=>handleExtensionConfigure(btn));
+  });
+}
+
+function _syncExtensionConfigureButtonState(id){
+  const runtime=window.HermesExtensionSettings;
+  if(!runtime||typeof runtime._configureStateForExtension!=='function') return;
+  const state=runtime._configureStateForExtension(id);
+  document.querySelectorAll('[data-extension-configure-id]').forEach(btn=>{
+    if(!btn.dataset||btn.dataset.extensionConfigureId!==id) return;
+    const pending=!!(state&&state.available&&state.pending);
+    btn.disabled=pending;
+    btn.setAttribute('aria-busy',pending?'true':'false');
+    btn.textContent=pending?'Opening…':'Configure';
+  });
+}
+
+function handleExtensionConfigure(btn){
+  if(!btn||btn.disabled) return;
+  const id=btn.dataset.extensionConfigureId||'';
+  const runtime=window.HermesExtensionSettings;
+  if(!id||!runtime||typeof runtime._invokeConfigure!=='function') return;
+  runtime._invokeConfigure(id,{
+    opener:btn,
+    onError:()=>showToast('Extension configuration failed.',4200,'error'),
+  });
 }
 
 function _bindExtensionToggleButtons(root){
@@ -10196,6 +11160,21 @@ function switchExtensionsTab(tab){
   if(tab==='gallery'&&!_extensionsGalleryLoaded) loadExtensionsGallery();
 }
 
+function _handleExtensionConfigureChange(change){
+  if(!change||!change.id) return;
+  if(change.reason==='pending'){
+    _syncExtensionConfigureButtonState(change.id);
+    return;
+  }
+  if(_extensionsGalleryData&&_extensionsGalleryData.statusData){
+    _renderInstalledExtensionsSurface(_extensionsGalleryData.statusData);
+  }
+}
+
+if(window.HermesExtensionSettings&&typeof window.HermesExtensionSettings._onConfigureChange==='function'){
+  window.HermesExtensionSettings._onConfigureChange(_handleExtensionConfigureChange);
+}
+
 function _extensionSafeHttpUrl(value){
   if(!value) return '';
   const raw=String(value).trim();
@@ -10351,6 +11330,19 @@ function _extensionPostInstallNote(entry,isInstalled){
   </div>`;
 }
 
+function _renderInstalledExtensionsSurface(statusData){
+  const installedEl=$('extensionsInstalled');
+  if(!installedEl) return;
+  installedEl.innerHTML=_extensionInstalledList(
+    statusData&&statusData.extensions,
+    !!(statusData&&statusData.extension_dir_configured),
+    'installed'
+  );
+  _bindExtensionToggleButtons(installedEl);
+  _bindExtensionSettingsButtons(installedEl);
+  _bindExtensionConfigureButtons(installedEl);
+}
+
 async function loadExtensionsGallery(){
   _extensionsGalleryLoaded=true;
   const galleryEl=$('extensionsGallery');
@@ -10374,7 +11366,6 @@ async function loadExtensionsGallery(){
 
 function _renderExtensionsGallery(entries,statusData){
   const galleryEl=$('extensionsGallery');
-  const installedEl=$('extensionsInstalled');
   _configureExtensionSettingsFromStatus(statusData);
   const installedIds=new Set();
   if(statusData&&statusData.gallery_installed){
@@ -10385,11 +11376,7 @@ function _renderExtensionsGallery(entries,statusData){
   }
   if(!Array.isArray(entries)||entries.length===0){
     if(galleryEl) galleryEl.innerHTML='<div class="extensions-empty">No extensions found in the registry.</div>';
-    if(installedEl){
-      installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
-      _bindExtensionToggleButtons(installedEl);
-      _bindExtensionSettingsButtons(installedEl);
-    }
+    _renderInstalledExtensionsSurface(statusData);
     return;
   }
   const galleryCards=[];
@@ -10433,11 +11420,7 @@ function _renderExtensionsGallery(entries,statusData){
     galleryCards.push(card);
   }
   if(galleryEl) galleryEl.innerHTML=galleryCards.length?galleryCards.join(''):'<div class="extensions-empty">No extensions found.</div>';
-  if(installedEl){
-    installedEl.innerHTML=_extensionInstalledList(statusData&&statusData.extensions,!!(statusData&&statusData.extension_dir_configured));
-    _bindExtensionToggleButtons(installedEl);
-    _bindExtensionSettingsButtons(installedEl);
-  }
+  _renderInstalledExtensionsSurface(statusData);
   _bindExtensionGalleryButtons(entries);
 }
 
@@ -10517,7 +11500,7 @@ async function handlePluginEnableToggle(pluginKey, checked){
   try{
     const body={dashboard_plugins:{}};
     body.dashboard_plugins[pluginKey]=!!checked;
-    await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    await _enqueueSettingsPost({method:'POST',body:JSON.stringify(body)});
     loadPluginsPanel();
   }catch(e){
     showToast(t('settings_save_failed')+e.message);
@@ -10821,11 +11804,20 @@ function _formatProviderQuotaReset(value){
 }
 
 function _formatProviderQuotaWindowLabel(accountLimits,w){
-  const raw=((w&&w.label)||t('provider_quota_window_fallback')).trim();
+  const label=String((w&&w.label)||'').trim();
+  const raw=label||t('provider_quota_window_fallback');
   const provider=((accountLimits&&accountLimits.provider)||'').toLowerCase();
   if(provider==='openai-codex'){
-    if(raw.toLowerCase()==='session') return t('provider_quota_session_limit');
-    if(raw.toLowerCase()==='weekly') return t('provider_quota_weekly_limit');
+    const durationValue=w&&w.limit_window_seconds;
+    const absent=durationValue===null||durationValue===undefined||durationValue==='';
+    const duration=Math.trunc(Number(durationValue));
+    if(duration===18000) return t('provider_quota_session_limit');
+    if(duration===604800) return t('provider_quota_weekly_limit');
+    if(absent){
+      const mapped={session:t('provider_quota_session_limit'),weekly:t('provider_quota_weekly_limit')}[label.toLowerCase()];
+      if(mapped) return mapped;
+    }
+    if(!label||label.toLowerCase()==='session'||label.toLowerCase()==='weekly') return t('provider_quota_usage_limit');
   }
   return raw||t('provider_quota_window_fallback');
 }
@@ -11132,7 +12124,7 @@ function _attachBudgetControls(wrap,history,card,paceNum){
 
   async function _saveBudget(value){
     try{
-      await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
+      await _enqueueSettingsPost({method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({provider_cost_budget:value})});
       const existing=card.querySelector('.provider-cost-chart-wrap');
       if(existing) existing.remove();
       renderProviderCostChart(card);
@@ -11166,11 +12158,25 @@ function _buildProviderCard(p){
   const modelCount=Number.isFinite(p.models_total)
     ? p.models_total
     : (Array.isArray(p.models) ? p.models.length : 0);
-  const sourceLabel=p.key_source==='oauth'
-    ? t('providers_status_oauth')
-    : p.key_source==='config_yaml'
-      ? t('providers_status_configured')||'Configured'
-      : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
+  const isConfigured=p.is_self_hosted===true
+    ? typeof p.base_url==='string' && p.base_url.trim().length>0
+    : p.has_key;
+  // The meta line names the credential source and the pill carries the status: a keyed
+  // card reads "API key" + "API key configured". A configured keyless self-hosted card
+  // names its endpoint (host[:port] only: no path, no userinfo) instead of repeating
+  // "Configured" in both slots.
+  const selfHostedEndpoint=(raw)=>{
+    const value=String(raw||'').trim();
+    try{ const u=new URL(value); if(u.host) return u.host; }catch(_){}
+    return value.replace(/^[a-z][a-z0-9+.-]*:\/\//i,'').replace(/^[^@/]*@/,'').split(/[/?#]/)[0];
+  };
+  const sourceLabel=p.is_self_hosted
+    ? (isConfigured ? (selfHostedEndpoint(p.base_url)||t('providers_status_configured_label')||'Configured') : t('providers_status_not_configured_label'))
+    : p.key_source==='oauth'
+      ? t('providers_status_oauth')
+      : p.key_source==='config_yaml'
+        ? t('providers_status_configured')||'Configured'
+        : (p.has_key ? t('providers_status_api_key') : t('providers_status_not_configured_label'));
   const metaParts=[];
   if(modelCount>0) metaParts.push(modelCount+(modelCount===1?' model':' models'));
   metaParts.push(sourceLabel);
@@ -11185,7 +12191,7 @@ function _buildProviderCard(p){
       <div class="provider-card-name">${esc(p.display_name)}</div>
       <div class="provider-card-meta">${esc(metaText)}</div>
     </div>
-    ${p.has_key?`<span class="provider-card-badge">${esc(t('providers_status_configured'))}</span>`:''}
+    ${isConfigured?`<span class="provider-card-badge">${esc(t(p.is_self_hosted?'providers_status_configured_label':'providers_status_configured'))}</span>`:''}
     <svg class="provider-card-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" width="16" height="16"><path d="M6 9l6 6 6-6"/></svg>
   `;
   card.appendChild(header);
@@ -11749,7 +12755,7 @@ function _updateAuthDisabledWarning(authStatus){
 
 async function _setAuthDisabledAck(checked){
   try{
-    await api('/api/settings',{method:'POST',body:JSON.stringify({_auth_disabled_acknowledged:!!checked})});
+    await _enqueueSettingsPost({method:'POST',body:JSON.stringify({_auth_disabled_acknowledged:!!checked})});
     try{
       const authStatus=await api('/api/auth/status');
       _updateAuthWarningBadge(authStatus);
@@ -11805,7 +12811,7 @@ async function loadPasskeys(){
     }
     const creds=(data&&data.credentials)||[];
     if(!creds.length){list.textContent='No passkeys registered.';return;}
-    list.innerHTML=creds.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px"><span>${esc(c.label||'Passkey')}</span><button class="btn-tiny" onclick="deletePasskey('${esc(c.id)}')">Remove</button></div>`).join('');
+    list.innerHTML=creds.map(c=>`<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;border:1px solid var(--border);border-radius:8px;padding:8px;margin-top:6px"><span>${esc(c.label||'Passkey')}</span><button class="btn-tiny" onclick="deletePasskey(${jsArg(c.id)})">Remove</button></div>`).join('');
   }catch(e){list.textContent='Failed to load passkeys: '+e.message;}
 }
 
@@ -11869,7 +12875,13 @@ function _applySavedSettingsUi(saved, body, opts){
     ? _persistDefaultMessageMode(body.default_message_mode||body.busy_input_mode)
     : (body.default_message_mode||body.busy_input_mode||'steer');
   window._sessionEndlessScrollEnabled=!!body.session_endless_scroll;
-  window._autoScrollFollow=body.auto_scroll_follow!==false;
+  // #6819: only override auto-follow when the body actually carries the key.
+  // A partial settings body without it must not silently re-enable follow
+  // (`undefined !== false` evaluates true — the old clobber).
+  if(Object.prototype.hasOwnProperty.call(body,'auto_scroll_follow')){
+    window._autoScrollFollow=body.auto_scroll_follow!==false;
+    if(typeof _persistAutoScrollFollow==='function') _persistAutoScrollFollow(window._autoScrollFollow);
+  }
   window._largeTextPasteAsAttachment=body.large_text_paste_as_attachment!==false;
   window._projectQuickCreate=!!body.project_quick_create_buttons;
   if(Object.prototype.hasOwnProperty.call(body,'structured_code_default_view')){
@@ -11956,7 +12968,8 @@ async function checkUpdatesNow(channelOverride){
     // saved setting. (Fable UX gate.)
     const _checkBody={force:true};
     if(channelOverride==='stable'||channelOverride==='experimental') _checkBody.channel=channelOverride;
-    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:60000});
+    const _recoveryGenerationAtCheck=Number(window._updateRecoveryGeneration)||0;
+    const data=await api('/api/updates/check',{method:'POST',body:JSON.stringify(_checkBody),timeoutMs:300000});
     if(data.disabled){
       if(status){status.textContent=t('settings_updates_disabled');status.style.color='var(--muted)';}
     } else {
@@ -11985,20 +12998,33 @@ async function checkUpdatesNow(channelOverride){
       const noGitParts=[];
       if(data.webui&&data.webui.no_git&&!data.webui.manual_update) noGitParts.push('WebUI');
       if(data.agent&&data.agent.no_git&&!data.agent.ignored) noGitParts.push('Agent');
+      // Release-tag context for the status line (display-only; update
+      // decisions are made by the per-target checks above).  WebUI-first so
+      // the suffix matches the panel's own version line order. No fallback to
+      // the release-path version field: on the stable up-to-date payload it
+      // holds the CURRENT tag, which would mislabel it as "Latest". Both
+      // payload shapes carry latest_tag from the backend (#6859 review S1).
+      const tagInfo=(data.webui&&data.webui.latest_tag)
+        ||(data.agent&&data.agent.latest_tag)||'';
+      // The target whose tag is shown. Its own release arrow may already name the tag (#6859 Fable r1).
+      const tagOwner=(data.webui&&data.webui.latest_tag)?data.webui:data.agent;
       if(parts.length){
         let txt=t('settings_updates_available').replace('{count}',parts.join(', '));
         if(manualInstruction) txt+=' · '+manualInstruction;
         if(noGitParts.length) txt+=' · '+t('settings_update_no_git');
+        if(tagInfo&&!_updateTargetArrowNamesTag(tagOwner,tagInfo)) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
         if(status){status.textContent=txt;status.style.color='var(--accent)';}
         // Also trigger the update banner
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       } else if(errorParts.length){
         if(status){status.textContent=t('settings_update_check_failed')+': '+errorParts.join(', ');status.style.color='var(--error)';}
       } else if(noGitParts.length){
         if(status){status.textContent=t('settings_update_no_git');status.style.color='var(--muted)';}
       } else {
-        if(status){status.textContent=t('settings_up_to_date');status.style.color='var(--success)';}
-        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data);
+        let txt=t('settings_up_to_date');
+        if(tagInfo) txt += ' ' + t('settings_latest_tag_suffix').replace('{0}', tagInfo);
+        if(status){status.textContent=txt;status.style.color='var(--success)';}
+        if(typeof _showUpdateBanner==='function') _showUpdateBanner(data,_recoveryGenerationAtCheck);
       }
     }
   } catch(e){
@@ -12082,11 +13108,22 @@ function _buildAuxProviderOptions(sel,providers,currentProvider){
  autoOpt.value='auto';autoOpt.textContent='auto ('+t('settings_aux_provider_auto')+')';
  if(currentProvider==='auto'||!currentProvider) autoOpt.selected=true;
  sel.appendChild(autoOpt);
+ let matched=currentProvider==='auto'||!currentProvider;
  for(const p of providers){
   const opt=document.createElement('option');
   opt.value=p.slug;opt.textContent=p.name;
-  if(p.slug===currentProvider) opt.selected=true;
+  if(p.slug===currentProvider){opt.selected=true;matched=true;}
   sel.appendChild(opt);
+ }
+ // The configured provider can be absent from the /api/models catalog (e.g. its
+ // group exposes no models). Keep it selectable: with no matching option the
+ // select falls back to its first entry ('auto') and the next Apply would
+ // persist that, silently discarding the configured value.
+ if(!matched&&currentProvider){
+  const configuredOpt=document.createElement('option');
+  configuredOpt.value=currentProvider;configuredOpt.textContent=currentProvider+' (configured)';
+  configuredOpt.selected=true;
+  sel.appendChild(configuredOpt);
  }
 }
 
@@ -12095,17 +13132,35 @@ function _buildAuxModelOptions(sel,provider,providers,currentModel){
  const emptyOpt=document.createElement('option');
  emptyOpt.value='';emptyOpt.textContent=t('settings_aux_model_auto')||'auto (use provider default)';
  sel.appendChild(emptyOpt);
+ const canonicalCurrent=_modelBareNameForProvider(currentModel,provider)||'';
  if(!provider||provider==='auto'){
-  sel.value=currentModel||'';
-  return;
+  sel.value=canonicalCurrent;
+  return canonicalCurrent;
  }
  // Find matching provider in cached list
  const pData=providers.find(p=>p.slug===provider);
+ // A provider kept in the list only because its models endpoint failed would
+ // otherwise render as a silent, empty model select. Echo the same hint the
+ // main picker shows instead of implying "no models to choose from". (#7521)
+ if(pData&&pData.modelsEndpointError){
+  const errOpt=document.createElement('option');
+  errOpt.value='';errOpt.disabled=true;
+  errOpt.dataset.modelsEndpointError='1';
+  errOpt.textContent='\u26a0 '+(pData.modelsEndpointError.message||'Models endpoint could not be reached for this provider.');
+  sel.appendChild(errOpt);
+ }
+ const modelValues=new Set();
  if(pData&&pData.models){
-  for(const mId of pData.models){
+  for(const modelEntry of pData.models){
+   const routeId=typeof modelEntry==='string'?modelEntry:String(modelEntry?.id||'');
+   const mId=_modelBareNameForProvider(routeId,provider)||'';
+   if(!mId||modelValues.has(mId)) continue;
+   modelValues.add(mId);
+   const routeLabel=typeof modelEntry==='string'?'':String(modelEntry?.label||'');
+   const modelLabel=_modelBareNameForProvider(routeLabel,provider)||mId;
    const opt=document.createElement('option');
-   opt.value=mId;opt.textContent=mId;
-   if(mId===currentModel) opt.selected=true;
+   opt.value=mId;opt.textContent=modelLabel;
+   if(mId===canonicalCurrent) opt.selected=true;
    sel.appendChild(opt);
   }
  }
@@ -12114,12 +13169,13 @@ function _buildAuxModelOptions(sel,provider,providers,currentModel){
  customOpt.value='__custom__';customOpt.textContent=t('settings_aux_model_custom')||'Custom model…';
  sel.appendChild(customOpt);
  // If currentModel not in list and not empty, add it as a custom option
- if(currentModel&&!pData?.models?.includes(currentModel)){
+ if(canonicalCurrent&&!modelValues.has(canonicalCurrent)){
   const existingOpt=document.createElement('option');
-  existingOpt.value=currentModel;existingOpt.textContent=currentModel+' (configured)';
+  existingOpt.value=canonicalCurrent;existingOpt.textContent=canonicalCurrent+' (configured)';
   existingOpt.selected=true;
   sel.insertBefore(existingOpt,customOpt);
  }
+ return canonicalCurrent;
 }
 
 function _onAuxProviderChange(taskKey,providers){
@@ -12137,13 +13193,16 @@ async function _onAuxModelChange(taskKey){
  if(modelSel.value==='__custom__'){
   const customModel=await showPromptDialog({title:t('settings_aux_model_custom')||'Custom model',message:t('settings_aux_model_custom_prompt')||'Enter model ID:',placeholder:'model/provider:model-id',confirmLabel:t('settings_btn_apply_aux_models')||'Apply'});
   if(customModel&&customModel.trim()){
+   const provider=$('aux-prov-'+taskKey)?.value||'';
+   const enteredModel=customModel.trim();
+   const canonicalModel=_modelBareNameForProvider(enteredModel,provider)||enteredModel;
    // Insert custom model option before the __custom__ option
    const opt=document.createElement('option');
-   opt.value=customModel.trim();opt.textContent=customModel.trim();
+   opt.value=canonicalModel;opt.textContent=canonicalModel;
    // Remove __custom__ selection
    const customIdx=[...modelSel.options].findIndex(o=>o.value==='__custom__');
    if(customIdx>=0) modelSel.insertBefore(opt,modelSel.options[customIdx]);
-   modelSel.value=customModel.trim();
+   modelSel.value=canonicalModel;
   }else{
    modelSel.value='';
   }
@@ -12233,7 +13292,7 @@ function _openAuxAdvancedOptions(taskCfg,cfg){
    _auxAdvancedInputHtml('auxAdvancedBaseUrl',t('settings_aux_advanced_base_url')||'Base URL',_auxAdvancedValue(cfg,'base_url'),t('settings_aux_advanced_base_url_desc')||'Optional provider endpoint override.','text','inputmode="url"')+
    serviceTierField+
    timingFields+
-   `<label style="display:grid;gap:4px;font-size:12px;color:var(--text)"><span style="font-weight:600">${esc(t('settings_aux_advanced_extra_body')||'Extra body JSON')}</span><textarea id="auxAdvancedExtraBody" rows="6" style="width:100%;box-sizing:border-box;padding:7px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:var(--mono,monospace)">${esc(extraBody)}</textarea><span style="font-size:10px;color:var(--muted);line-height:1.35">${esc(t('settings_aux_advanced_extra_body_desc')||'Optional JSON object merged into the model request body.')}</span></label>`+
+    `<label style="display:grid;gap:4px;font-size:12px;color:var(--text)"><span style="font-weight:600">${esc(t('settings_aux_advanced_extra_body')||'Extra body JSON')}</span><textarea id="auxAdvancedExtraBody" rows="6" style="width:100%;box-sizing:border-box;padding:7px 8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:12px;font-family:var(--font-mono)">${esc(extraBody)}</textarea><span style="font-size:10px;color:var(--muted);line-height:1.35">${esc(t('settings_aux_advanced_extra_body_desc')||'Optional JSON object merged into the model request body.')}</span></label>`+
    _auxAdvancedInputHtml('auxAdvancedApiKey',t('settings_aux_advanced_api_key')||'API key override','',apiKeyHint,'text','autocomplete="one-time-code" inputmode="text" readonly onfocus="this.removeAttribute(&quot;readonly&quot;)"',';-webkit-text-security:disc')+
    `<label style="display:${cfg&&cfg.api_key_set?'flex':'none'};align-items:center;gap:8px;font-size:12px;color:var(--text)"><input id="auxAdvancedApiKeyClear" type="checkbox" style="width:15px;height:15px;accent-color:var(--accent)"><span>${esc(t('settings_aux_advanced_api_key_clear')||'Clear existing API key override')}</span></label>`;
  }
@@ -12333,6 +13392,22 @@ function _bindMainAdvancedOptionsButton(){
  btn.addEventListener('click',()=>{if(_mainAdvancedConfig!==null)_openAuxAdvancedOptions('__main__',_mainAdvancedConfig||{});});
 }
 
+// Build the auxiliary picker provider list from /api/models groups.
+// A named custom provider whose /v1/models probe failed still reaches the UI as
+// a group with an empty ``models`` list plus ``models_endpoint_error``
+// (api/config.py). Zero-model groups used to be filtered out here, which made
+// the provider vanish from every auxiliary select even though the main model
+// picker renders that same group together with its unreachable-endpoint hint. (#7521)
+function _auxProvidersFromModelGroups(groups){
+ const list=Array.isArray(groups)?groups:[];
+ return list.filter(g=>g&&g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0)||g.models_endpoint_error)).map(g=>({
+  slug:g.provider_id||g.provider,
+  name:g.provider,
+  modelsEndpointError:g.models_endpoint_error||null,
+  models:[...(g.models||[]),...(g.extra_models||[])].map(m=>({id:m.id,label:m.label||m.id})),
+ }));
+}
+
 async function _loadAuxiliaryModels(){
  const container=$('auxModelsContainer');
  if(!container) return;
@@ -12347,11 +13422,7 @@ async function _loadAuxiliaryModels(){
   // Build provider list from /api/models groups
   // /api/models returns: { groups: [{ provider: str, provider_id: str, models: [{id,label}] }] }
   const groups=(modelsData&&modelsData.groups)||[];
-  _auxProviders=groups.filter(g=>g.provider&&((g.models&&g.models.length>0)||(g.extra_models&&g.extra_models.length>0))).map(g=>({
-   slug:g.provider_id||g.provider,
-   name:g.provider,
-   models:[...(g.models||[]),...(g.extra_models||[])].map(m=>m.id),
-  }));
+  _auxProviders=_auxProvidersFromModelGroups(groups);
   if(auxData&&Object.prototype.hasOwnProperty.call(auxData,'main')){
    _mainAdvancedConfig=auxData.main||{};
   }else{
@@ -12365,6 +13436,7 @@ async function _loadAuxiliaryModels(){
   _auxOriginalConfig=JSON.parse(JSON.stringify(taskMap));
 
   container.innerHTML='';
+  let needsCanonicalSave=false;
   for(const task of _auxTasks){
    const cfg=taskMap[task.task]||{provider:'auto',model:''};
    const row=document.createElement('div');
@@ -12388,7 +13460,8 @@ async function _loadAuxiliaryModels(){
    const modelSel=document.createElement('select');
    modelSel.id='aux-model-'+task.task;
    modelSel.style.cssText=_auxSelectStyle();
-   _buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   const canonicalModel=_buildAuxModelOptions(modelSel,cfg.provider,_auxProviders,cfg.model);
+   if(canonicalModel!==cfg.model) needsCanonicalSave=true;
    modelSel.addEventListener('change',()=>_onAuxModelChange(task.task));
    row.appendChild(modelSel);
 
@@ -12405,9 +13478,9 @@ async function _loadAuxiliaryModels(){
 
    container.appendChild(row);
   }
-  // Hide apply button (no changes yet)
+  // Matching legacy @provider:model values can be repaired with one explicit Apply.
   const applyBtn=$('btnApplyAuxModels');
-  if(applyBtn) applyBtn.style.display='none';
+  if(applyBtn) applyBtn.style.display=needsCanonicalSave?'':'none';
 
   // Reset button
   const resetBtn=$('btnResetAuxModels');
@@ -12452,7 +13525,13 @@ async function _applyAuxModels(){
     saved++;
    }catch(e){
     console.warn('[settings] failed to save aux task',task.task,e);
-    if(typeof showToast==='function') showToast(t('settings_aux_save_failed')||'Failed to save auxiliary model');
+    // Surface the server's actionable message (e.g. an ambiguous custom-provider
+    // slug collision: rename one provider so its slug is unique) instead of a
+    // generic failure, and abort the loop so the dirty selection is retained for
+    // the user to fix and retry — the reload that would clear it is skipped.
+    const _msg=(e&&e.message)?e.message:'';
+    const _base=t('settings_aux_save_failed')||'Failed to save auxiliary model';
+    if(typeof showToast==='function') showToast(_msg?(_base+': '+_msg):_base,6000,'error');
     return;
    }
   }
@@ -12478,6 +13557,7 @@ async function saveSettings(andClose){
   const showClaudeCodeSessions=!!($('settingsShowClaudeCodeSessions')||{}).checked;
   const showCronSessions=!!($('settingsShowCronSessions')||{}).checked;
   const showWebhookSessions=!!($('settingsShowWebhookSessions')||{}).checked;
+  const showKanbanSessions=!!($('settingsShowKanbanSessions')||{}).checked;
   const showPreviousMessagingSessions=!!($('settingsShowPreviousMessagingSessions')||{}).checked;
   const pinnedSessionsLimit=parseInt(($('settingsPinnedSessionsLimit')||{}).value,10)||3;
   const pw=($('settingsPassword')||{}).value;
@@ -12534,11 +13614,11 @@ async function saveSettings(andClose){
   // mirror the autosave path so the explicit Save Settings button persists them too. (#3514)
   body.show_cron_sessions=showCliSessions&&showCronSessions;
   body.show_webhook_sessions=showCliSessions&&showWebhookSessions;
+  body.show_kanban_sessions=showCliSessions&&showKanbanSessions;
   body.show_previous_messaging_sessions=showPreviousMessagingSessions;
   body.pinned_sessions_limit=pinnedSessionsLimit;
   body.sync_to_insights=!!($('settingsSyncInsights')||{}).checked;
   body.check_for_updates=!!($('settingsCheckUpdates')||{}).checked;
-  body.update_channel=($('settingsUpdateChannel')||{}).value==='experimental'?'experimental':'stable';
   body.ignore_agent_updates=!!($('settingsIgnoreAgentUpdates')||{}).checked;
   body.whats_new_summary_enabled=!!($('settingsWhatsNewSummary')||{}).checked;
   body.sound_enabled=!!($('settingsSoundEnabled')||{}).checked;
@@ -12562,14 +13642,27 @@ async function saveSettings(andClose){
     const payload={...body,_set_password:pw.trim()};
     if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
     try{
-      const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+      const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
       if(modelChanged && model){
         try{
-          await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
-          body.default_model=model;
-          body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
+        await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
+        body.default_model=model;
+        // The provider comes from the same dropdown selection as `model` above
+        // (both captured from $('settingsModel')), so there is no cross-check to
+        // perform against the raw select value: the raw value can be a qualified
+        // @<provider>:<model> id while modelState.model carries the
+        // provider-stripped model, and comparing them directly would write null
+        // for every qualified option — clearing window._activeProvider on save
+        // (#7865 re-gate).
+        body.default_model_provider=modelState.model_provider||null;
         }catch(_modelErr){
-          if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
+          // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
+          // one provider) is user-fixable, not a partial success. Surface the
+          // message, abort before "settings saved", and retain dirty state so the
+          // user can fix and retry instead of the error being swallowed.
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast('Failed to update default model'+(_msg?(': '+_msg):''),6000,'error');
+          return;
         }
       }
       _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
@@ -12592,15 +13685,28 @@ async function saveSettings(andClose){
     }catch(e){showToast(t('settings_save_failed')+e.message);return;}
   }
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(body)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(body)});
     if(modelChanged && model){
       try{
         await api('/api/default-model',{method:'POST',body:JSON.stringify({model,provider:modelState.model_provider||null})});
         body.default_model=model;
-        body.default_model_provider=(modelState&&modelState.model===model)?(modelState.model_provider||null):null;
-      }catch(_modelErr){
-        if(typeof showToast==='function') showToast('Failed to update default model — settings saved');
-      }
+        // The provider comes from the same dropdown selection as `model` above
+        // (both captured from $('settingsModel')), so there is no cross-check to
+        // perform against the raw select value: the raw value can be a qualified
+        // @<provider>:<model> id while modelState.model carries the
+        // provider-stripped model, and comparing them directly would write null
+        // for every qualified option — clearing window._activeProvider on save
+        // (#7865 re-gate).
+        body.default_model_provider=modelState.model_provider||null;
+        }catch(_modelErr){
+          // A 400 here (e.g. an ambiguous custom-provider slug collision: rename
+          // one provider) is user-fixable, not a partial success. Surface the
+          // message, abort before "settings saved", and retain dirty state so the
+          // user can fix and retry instead of the error being swallowed.
+          const _msg=(_modelErr&&_modelErr.message)?_modelErr.message:'';
+          if(typeof showToast==='function') showToast('Failed to update default model'+(_msg?(': '+_msg):''),6000,'error');
+          return;
+        }
     }
     _applySavedSettingsUi(saved, body, {sendKey,showTokenUsage,showQuotaChip,showConversationOutline,showBusyPlaceholderHint,showTps,fadeTextEffect,showCliSessions,theme,skin,language,sidebarDensity,fontSize});
     showToast(t('settings_saved'));
@@ -12629,7 +13735,7 @@ async function goPasswordless(){
   const payload={_passwordless:true};
   if(_settingsPasswordAuthEnabled && currentPw) payload._current_password=currentPw;
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     showToast('Password removed. Passkey sign-in remains enabled.');
     _setSettingsAuthButtonsVisible(!!saved.auth_enabled);
     _syncPasswordlessButton({auth_enabled:saved.auth_enabled,password_auth_enabled:false,passkeys_count:1});
@@ -12659,7 +13765,7 @@ async function disableAuth(){
   const payload={_clear_password:true};
   if(_settingsPasswordAuthEnabled) payload._current_password=currentPw;
   try{
-    const saved=await api('/api/settings',{method:'POST',body:JSON.stringify(payload)});
+    const saved=await _enqueueSettingsPost({method:'POST',body:JSON.stringify(payload)});
     showToast(t('auth_disabled'));
     const disableBtn=$('btnDisableAuth');
     if(disableBtn) disableBtn.style.display='none';
@@ -12688,11 +13794,20 @@ let _cronPollSince=Date.now()/1000;  // track from page load
 let _cronPollTimer=null;
 let _cronUnreadCount=0;
 let _cronPollGeneration=0;
+// #7652 review follow-up: completions that fired while the tab was hidden
+// but reached no surface (the user has notifications disabled or denied) are
+// queued here so a reload of the page (or a visibility change) can flush them
+// as a toast. Without this the completion is consumed with no surface at all.
+const _cronPendingToasts=[];
+let _cronPollInFlight=false;  // one tick at a time (overlapping ticks double-notify)
 const _cronNewJobIds=new Set();  // track which job IDs had new completions (unread)
 
 function _resetCronUnreadForProfileSwitch(){
   _cronPollGeneration++;
   _cronNewJobIds.clear();
+  // Queued completions belong to the profile being left; never flush their
+  // toasts into the incoming profile's timeline (#5960 gate).
+  _cronPendingToasts.length=0;
   _cronPollSince=Date.now()/1000;
   // Clear persisted cron sidebar markers from the profile we left. Non-cron
   // completion unread stays intact (#5960 gate: sticky all-profile leak).
@@ -12711,32 +13826,129 @@ window.addEventListener('hermes:cron_created', () => {
 
 function startCronPolling(){
   if(_cronPollTimer) return;
-  _cronPollTimer=setInterval(async()=>{
-    if(document.hidden) return;  // don't poll when tab is in background
-    try{
-      const pollGeneration=_cronPollGeneration;
-      const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
-      if(pollGeneration!==_cronPollGeneration) return;
-      if(data.completions&&data.completions.length>0){
-        for(const c of data.completions){
-          if(c.toast_notifications !== false){
-            showToast(t('cron_completion_status', c.name, c.status==='error' ? t('status_failed') : t('status_completed')),4000);
-          }
-          _cronPollSince=Math.max(_cronPollSince,c.completed_at);
-          if(c.job_id) _cronNewJobIds.add(String(c.job_id));
-          if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
-            const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
-            _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
-              source:'cron',
-              profile:activeProfile,
-            });
+  _cronPollTimer=setInterval(_runCronPollTick,30000);
+}
+
+// One recent-completions tick. Split out of the interval callback so the
+// in-flight guard can span the whole await (see _cronPollInFlight): two
+// overlapping ticks would each read the same _cronPollSince and each notify
+// the same completion (#7652 review).
+async function _runCronPollTick(){
+  if(_cronPollInFlight) return;
+  _cronPollInFlight=true;
+  try{
+    const pollGeneration=_cronPollGeneration;
+    const data=await api(`/api/crons/recent?since=${_cronPollSince}`);
+    if(pollGeneration!==_cronPollGeneration) return;
+    if(data.completions&&data.completions.length>0){
+      for(const c of data.completions){
+        if(c.toast_notifications !== false){
+          // #7257: even when the tab is backgrounded we still want the
+          // user to know a cron job just completed. With the old
+          // ``if(document.hidden) return`` gate, the entire recent-fetch
+          // skipped silently and no surface (toast or notification) ever
+          // fired. Now: visible tabs keep the existing showToast,
+          // hidden tabs get a browser notification routed through
+          // sendBrowserNotification (which itself honors the user's
+          // notification permission and enabled setting). _cronPollSince,
+          // _cronNewJobIds, and the session-unread marker all advance
+          // regardless of which surface fires.
+          const statusText = c.status==='error' ? t('status_failed') : t('status_completed');
+          if(document.hidden){
+            // A hidden completion only counts as delivered when the
+            // notification actually reached the user's channel. The helper
+            // awaits the real display result, so a display failure is NOT
+            // mistaken for delivery and the completion is queued instead
+            // (#7652 review: SILENT gap).
+            const notified=await _cronSendHiddenCompletionNotification(c.name,statusText,c.session_id);
+            // The await yields: the profile may have switched (the queue
+            // state belongs to the old profile) or the tab may have become
+            // visible (the user is already looking at a live surface). Skip
+            // a stale tick's fallback entirely.
+            if(pollGeneration!==_cronPollGeneration) return;
+            if(!notified){
+              if(typeof document!=='undefined'&&document.hidden){
+                // Notification channel closed or the display failed: queue
+                // the completion so the user still gets it as a toast when
+                // the tab comes back. Otherwise _cronPollSince advances past
+                // it and the completion is consumed with no surface at all.
+                _cronPendingToasts.push({name:c.name,statusText});
+              }else{
+                // The tab became visible while the delivery was pending:
+                // surface it immediately rather than waiting for another
+                // visibility change.
+                showToast(t('cron_completion_status', c.name, statusText), 4000);
+              }
+            }
+          } else {
+            showToast(t('cron_completion_status', c.name, statusText), 4000);
           }
         }
-        // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
-        updateCronBadge();
+        _cronPollSince=Math.max(_cronPollSince,c.completed_at);
+        if(c.job_id && c.badge_notifications !== false) _cronNewJobIds.add(String(c.job_id));
+        if(c.session_id && typeof _markSessionCompletionUnreadIfBackground === 'function'){
+          const activeProfile=(typeof S!=='undefined'&&S&&S.activeProfile)||'default';
+          _markSessionCompletionUnreadIfBackground(c.session_id, c.message_count, {
+            source:'cron',
+            profile:activeProfile,
+          });
+        }
       }
-    }catch(e){}
-  },30000);
+      // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
+      updateCronBadge();
+      if (_currentPanel === 'tasks' && $('cronList')) loadCrons(false, { background: true });
+    }
+  }catch(e){}
+  finally{ _cronPollInFlight=false; }
+}
+
+// True when a notification for a completion would actually reach the user
+// right now. sendBrowserNotification silently no-ops otherwise, so a hidden
+// tab must not treat its completion as delivered (#7652 review).
+function _cronCanNotify(){
+  return !!(window._notificationsEnabled && typeof Notification!=='undefined'
+    && Notification.permission==='granted');
+}
+
+// Notify for a completion that arrived while the tab was hidden. Resolves true
+// only when sendBrowserNotification reports that the notification actually
+// reached the user's notification channel, so the caller can decide whether to
+// queue a fallback toast. This must be AWAITED: `_cronCanNotify()` is only a
+// permission pre-check, and the real primitive still resolves false when the
+// service-worker path finds no active registration while the direct
+// Notification constructor throws — the normal case on some mobile browsers
+// and installed-PWA contexts that only allow SW notifications. Returning true
+// without awaiting made such a completion vanish (#7652 review).
+async function _cronSendHiddenCompletionNotification(name,statusText,sessionId){
+  if(!_cronCanNotify()) return false;
+  if(typeof sendBrowserNotification!=='function') return false;
+  // #7652 review: pass an explicit sessionless marker when the completion has
+  // no session_id. Without it _notificationOptions falls back to the user's
+  // CURRENT session, so clicking the notification opens the wrong chat (and
+  // reuses that session's notification tag). The `panel` intent is the click
+  // target: a sessionless completion belongs to no chat, so the click must
+  // land on the Tasks panel the run lives in — not the root, which would
+  // restore the last chat the user had open (#7652 review round 4).
+  try{
+    const delivered=await sendBrowserNotification(name,statusText,{sid:sessionId||null,sessionless:!sessionId,panel:!sessionId?'tasks':''});
+    // Fail closed on anything that is not an explicit success: the primitive
+    // returns undefined when it short-circuits before delivery.
+    return delivered===true;
+  }catch(_err){
+    return false;
+  }
+}
+
+// Flush completions that arrived while hidden but reached no surface, as
+// toasts. Runs from the visibilitychange handler below; a no-op while the
+// document is still hidden.
+function _flushCronPendingToasts(){
+  if(!_cronPendingToasts.length) return;
+  if(typeof document!=='undefined'&&document.hidden) return;
+  while(_cronPendingToasts.length){
+    const queued=_cronPendingToasts.shift();
+    showToast(t('cron_completion_status', queued.name, queued.statusText), 4000);
+  }
 }
 
 function updateCronBadge(){
@@ -12772,6 +13984,14 @@ switchPanel=async function(name,opts){ return _origSwitchPanel(name,opts); };
 
 // Start polling on page load
 startCronPolling();
+
+// #7652 review: a completion that fired while the tab was hidden and could not
+// notify (notifications disabled/denied) is queued in _cronPendingToasts.
+// Flushing on becoming visible is what turns it into a toast — without this
+// listener the queued completion would sit there forever.
+document.addEventListener('visibilitychange',()=>{
+  if(!document.hidden) _flushCronPendingToasts();
+});
 
 // ── Background agent error tracking ──────────────────────────────────────────
 
@@ -12857,7 +14077,12 @@ function loadMcpServers(){
       list.innerHTML=`<div class="mcp-empty-state" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_no_servers'))}</div>`;
       return;
     }
-    list.innerHTML=r.servers.map(s=>{
+    // Live status is withheld while the profile's runtime scope cannot be confirmed
+    // (e.g. a chat turn on this profile is running); say so instead of "not connected".
+    const scopeNotice=r.runtime_scope==='unavailable'
+      ?`<div class="mcp-runtime-notice" style="color:var(--muted);font-size:12px;padding:6px 0">${esc(t('mcp_runtime_scope_unavailable'))}</div>`
+      :'';
+    list.innerHTML=scopeNotice+r.servers.map(s=>{
       const transportLabel=s.transport==='http'?'HTTP':s.transport==='stdio'?'stdio':(''+(s.transport||'unknown'));
       const transportClass=s.transport==='http'?'mcp-http':s.transport==='stdio'?'mcp-stdio':'mcp-unknown';
       const transportBadge=`<span class="mcp-transport-badge ${transportClass}">${esc(transportLabel)}</span>`;
@@ -13014,7 +14239,7 @@ function loadMcpTools(){
 let _gatewayActionInFlight=false;
 function _gatewayActionButton(action){
   const labels={start:t('gateway_start'),stop:t('gateway_stop'),restart:t('gateway_restart')};
-  return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction('${esc(action)}')" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
+  return `<button class="sm-btn gateway-action-btn" data-gateway-action="${esc(action)}" onclick="_gatewayAction(${jsArg(action)})" ${_gatewayActionInFlight?'disabled':''} style="padding:5px 10px;font-size:12px">${esc(labels[action]||action)}</button>`;
 }
 function _gatewayActionControls(r){
   const actions=(r&&r.running)?['stop','restart']:['start'];
@@ -13107,10 +14332,10 @@ async function _loadCheckpoints(workspace){
             </div>
           </div>
           <div style="display:flex;gap:4px;flex-shrink:0;margin-left:8px">
-            <button class="panel-head-btn" title="${esc(t('checkpoint_view_diff'))}" onclick="event.stopPropagation();_viewCheckpointDiff('${esc(workspace)}','${esc(ck.id)}')">
+            <button class="panel-head-btn" title="${esc(t('checkpoint_view_diff'))}" onclick="event.stopPropagation();_viewCheckpointDiff(${jsArg(workspace)},${jsArg(ck.id)})">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
             </button>
-            <button class="panel-head-btn" title="${esc(t('checkpoint_restore'))}" onclick="event.stopPropagation();_restoreCheckpoint('${esc(workspace)}','${esc(ck.id)}','${esc(msg.replace(/'/g,"\\'"))}')">
+            <button class="panel-head-btn" title="${esc(t('checkpoint_restore'))}" onclick="event.stopPropagation();_restoreCheckpoint(${jsArg(workspace)},${jsArg(ck.id)},${jsArg(msg)})">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" width="16" height="16"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
             </button>
           </div>
