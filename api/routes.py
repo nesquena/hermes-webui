@@ -10050,12 +10050,16 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, msg_a
 
     ``msg_after`` selects the append-only fast-path window (#7925 re-gate):
     the client holds rows ``[0, msg_after]`` (its last rendered absolute index
-    is ``msg_after``) and wants only the rows strictly after it. Return the
-    smallest prefix of ``messages[msg_after + 1:]`` containing the first
-    ``msg_limit`` renderable rows, plus any trailing tool rows whose
-    tool_call_id matches a call already in the window. Rows between the anchor
-    and the first renderable row belong to the anchor's own trailing tool
-    results (already rendered by the client), so they are deliberately skipped.
+    is ``msg_after``) and wants only the rows strictly after it. The window is
+    the CONTIGUOUS suffix starting at ``msg_after + 1``: renderable rows decide
+    how many rows fit the ``msg_limit`` budget, but they no longer decide where
+    the window begins. The earlier shape scanned forward for the first
+    renderable row and started there, which dropped any tool-result row that
+    landed after the anchor was captured (a tab loading mid-turn, an external
+    or CLI run, a hidden tab) — the client then never received that output and
+    its next anchor check failed off-by-one into a full fetch. Trailing
+    tool-result rows whose tool_call_id matches a call already inside the
+    window are kept, mirroring the tail-window rule.
 
     ``expand_renderable`` is accepted for compatibility with older frontend
     callers. Visible-row expansion is now the default for every limited window.
@@ -10076,21 +10080,43 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, msg_a
         if not msg_limit:
             return source, after_idx + 1
         limit = max(1, int(msg_limit))
-        first_renderable_idx = None
-        for idx in range(len(source)):
-            if _message_counts_as_renderable_for_window(source[idx]):
-                first_renderable_idx = idx
-                break
-        if first_renderable_idx is None:
-            return [], len(messages)
-        last_renderable_idx = first_renderable_idx
+        first_renderable_idx = 0
         renderable_count = 0
-        for idx in range(first_renderable_idx, len(source)):
+        last_renderable_idx = None
+        # The window starts at the anchor's NEXT row and is contiguous from
+        # there (#7925 re-gate, 2026-10-19): the previous shape scanned forward
+        # for the first renderable row and started there, on the theory that
+        # everything between the anchor and that row was the anchor's own
+        # trailing tool output. That is wrong when the client captured the
+        # anchor before its results were saved — a tab that loads mid-turn (an
+        # external or CLI run, or a hidden tab) then never receives the tool
+        # row, and the next reload's anchor check fails off-by-one and falls
+        # back to a full fetch. Skipping rows can also hide the output
+        # permanently when the count happens to match afterwards.
+        # Renderable rows still decide how many rows fit the budget; they no
+        # longer decide where the window begins.
+        for idx in range(len(source)):
             if _message_counts_as_renderable_for_window(source[idx]):
                 renderable_count += 1
                 last_renderable_idx = idx
                 if renderable_count >= limit:
                     break
+        if last_renderable_idx is None:
+            # No renderable row in the suffix: the rows are all tool/support
+            # rows. Return them anyway when they match a call the anchor
+            # already made (the client needs the output), else nothing.
+            window_tool_call_ids = _tool_call_ids_in_messages(
+                messages[max(0, after_idx - 64) : after_idx + 1]
+            )
+            end_idx = 0
+            while end_idx < len(source) and not _message_counts_as_renderable_for_window(
+                source[end_idx]
+            ):
+                if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
+                    end_idx += 1
+                else:
+                    break
+            return source[:end_idx], after_idx + 1
         # Keep trailing tool-result rows whose tool_call_id matches a
         # tool-call on a renderable row already in the window (mirror of the
         # tail-window rule below; #4070 ship-review).
