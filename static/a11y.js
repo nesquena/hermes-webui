@@ -10,6 +10,8 @@ let _a11yAssertiveTimerOwner = null;
 let _a11yPendingPoliteRaf = null;
 let _a11yPendingAssertiveRaf = null;
 let _a11yAnnounceGeneration = 0;
+let _a11yLastPoliteText = '';
+let _a11yLastAssertiveText = '';
 let _a11yLastToolAnnounceAt = 0;
 let _a11yActiveStreamSid = null;
 let _a11yActiveStreamId = null;
@@ -79,6 +81,16 @@ function _ensureA11yLiveRegion(id, role, ariaLive) {
   return el;
 }
 
+function _a11yAlternateIdentical(text, lastText) {
+  const base = String(text || '').trim();
+  if (!base) return '';
+  const lastBase = String(lastText || '').trim().replace(/\u00A0+$/, '');
+  if (base === lastBase) {
+    return String(lastText || '').endsWith('\u00A0') ? base : `${base}\u00A0`;
+  }
+  return base;
+}
+
 function announceA11yPolite(message, durationMs = 2500, opts = {}) {
   const text = String(message || '').trim();
   if (!text) return;
@@ -97,18 +109,18 @@ function announceA11yPolite(message, durationMs = 2500, opts = {}) {
     _a11yPendingPoliteRaf = null;
   }
   const generation = ++_a11yAnnounceGeneration;
-  // Clear first so identical consecutive announcements (e.g. repeated Copy)
-  // still trigger a DOM mutation event for screen readers.
+  const finalText = _a11yAlternateIdentical(text, _a11yLastPoliteText);
+  _a11yLastPoliteText = finalText;
   el.textContent = '';
   const applyText = () => {
     _a11yPendingPoliteRaf = null;
     if (generation !== _a11yAnnounceGeneration) return;
     if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
-    el.textContent = text;
+    el.textContent = finalText;
     if (durationMs > 0) {
       _a11yPoliteTimerOwner = ownerSid;
       _a11yPoliteTimer = setTimeout(() => {
-        if (generation === _a11yAnnounceGeneration && el.textContent === text) {
+        if (generation === _a11yAnnounceGeneration && el.textContent === finalText) {
           el.textContent = '';
         }
         _a11yPoliteTimer = null;
@@ -141,16 +153,18 @@ function announceA11yAssertive(message, durationMs = 4000, opts = {}) {
     _a11yPendingAssertiveRaf = null;
   }
   const generation = ++_a11yAnnounceGeneration;
+  const finalText = _a11yAlternateIdentical(text, _a11yLastAssertiveText);
+  _a11yLastAssertiveText = finalText;
   el.textContent = '';
   const applyText = () => {
     _a11yPendingAssertiveRaf = null;
     if (generation !== _a11yAnnounceGeneration) return;
     if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
-    el.textContent = text;
+    el.textContent = finalText;
     if (durationMs > 0) {
       _a11yAssertiveTimerOwner = ownerSid;
       _a11yAssertiveTimer = setTimeout(() => {
-        if (generation === _a11yAnnounceGeneration && el.textContent === text) {
+        if (generation === _a11yAnnounceGeneration && el.textContent === finalText) {
           el.textContent = '';
         }
         _a11yAssertiveTimer = null;

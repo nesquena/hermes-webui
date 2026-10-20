@@ -523,9 +523,107 @@ def test_a11y_navigation_and_recovery_lifecycle_retires_busy_and_start_state():
         {"step": "switched_to_idle_B", "busy": "false"},
         {"step": "reconnect_same_turn", "busy": "true", "announcement": ""},
         {"step": "stream_end_recovery", "busy": "false"},
-        {"step": "fresh_same_sid_turn", "busy": "true", "announcement": "Hermes: Thinking…"},
+        {"step": "fresh_same_sid_turn", "busy": "true", "announcement": "Hermes: Thinking…\u00a0"},
         {"step": "fenced_announcement", "announcement": ""},
     ]
+
+
+def test_identical_consecutive_announcements_alternate_whitespace_for_screen_readers():
+    a11y_js = (ROOT / "static" / "a11y.js").read_text(encoding="utf-8")
+    script = f"""
+    const elements = {{
+      a11yAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      a11yAlertAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      messages: {{ attrs: {{}}, setAttribute(k, v) {{ this.attrs[k] = String(v); }} }},
+      liveAssistantTurn: {{ attrs: {{}}, setAttribute(k, v) {{ this.attrs[k] = String(v); }} }},
+    }};
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      getElementById(id) {{ return elements[id] || null; }},
+      activeElement: null,
+      body: {{}},
+    }};
+    globalThis.S = {{ session: {{ session_id: 's1' }} }};
+    globalThis.assistantDisplayName = () => 'Hermes';
+    globalThis.t = (k) => ({{
+      a11y_response_error: 'Response interrupted by an error',
+      a11y_response_complete: 'Response complete',
+    }})[k] || k;
+    let rAFCallbacks = [];
+    globalThis.requestAnimationFrame = (fn) => {{ rAFCallbacks.push(fn); return rAFCallbacks.length; }};
+    globalThis.cancelAnimationFrame = (id) => {{ rAFCallbacks[id - 1] = null; }};
+    globalThis.setTimeout = () => 1;
+    globalThis.clearTimeout = () => {{}};
+
+    {a11y_js}
+
+    const log = [];
+
+    // --- Case 1: Identical consecutive errors from Hermes ---
+    // Error 1
+    a11yOnStreamError('s1', 'Rate limit exceeded');
+    rAFCallbacks.forEach(fn => fn && fn());
+    rAFCallbacks = [];
+    log.push({{
+      kind: 'error1',
+      text: elements.a11yAlertAnnouncer.textContent,
+    }});
+
+    // Error 2 (identical error from Hermes)
+    a11yOnStreamError('s1', 'Rate limit exceeded');
+    rAFCallbacks.forEach(fn => fn && fn());
+    rAFCallbacks = [];
+    log.push({{
+      kind: 'error2',
+      text: elements.a11yAlertAnnouncer.textContent,
+    }});
+
+    // Error 3 (identical error from Hermes again)
+    a11yOnStreamError('s1', 'Rate limit exceeded');
+    rAFCallbacks.forEach(fn => fn && fn());
+    rAFCallbacks = [];
+    log.push({{
+      kind: 'error3',
+      text: elements.a11yAlertAnnouncer.textContent,
+    }});
+
+    // --- Case 2: Identical consecutive responses from Hermes ---
+    // Response 1
+    a11yOnStreamDone('s1', {{
+      message: {{ role: 'assistant', content: 'Yes, that is correct.' }},
+    }});
+    rAFCallbacks.forEach(fn => fn && fn());
+    rAFCallbacks = [];
+    log.push({{
+      kind: 'reply1',
+      text: elements.a11yAnnouncer.textContent,
+    }});
+
+    // Response 2 (identical reply)
+    a11yOnStreamDone('s1', {{
+      message: {{ role: 'assistant', content: 'Yes, that is correct.' }},
+    }});
+    rAFCallbacks.forEach(fn => fn && fn());
+    rAFCallbacks = [];
+    log.push({{
+      kind: 'reply2',
+      text: elements.a11yAnnouncer.textContent,
+    }});
+
+    console.log(JSON.stringify(log));
+    """
+    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    base_err = "Response interrupted by an error: Rate limit exceeded"
+    base_reply = "Hermes: Yes, that is correct."
+    assert out == [
+        {"kind": "error1", "text": base_err},
+        {"kind": "error2", "text": f"{base_err}\u00a0"},
+        {"kind": "error3", "text": base_err},
+        {"kind": "reply1", "text": base_reply},
+        {"kind": "reply2", "text": f"{base_reply}\u00a0"},
+    ]
+    for item in out:
+        assert item["text"].strip() in (base_err, base_reply)
 
 
 def test_a11y_compression_rotation_admits_continuation_and_rejects_unrelated():
