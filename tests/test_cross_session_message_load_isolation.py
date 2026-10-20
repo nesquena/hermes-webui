@@ -1174,14 +1174,16 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert superseded["newerTargetDraftWins"]["sameFile"] is True
     assert len(superseded["newerTargetClearWins"]["calls"]) == 2
     assert superseded["newerTargetClearWins"]["calls"][0]["session_id"] == "sid-parent"
+    # #7855: a clear posts an explicit empty continuation token so the stored
+    # token is dropped with the draft it belonged to.
     assert superseded["newerTargetClearWins"]["calls"][1] == {
-        "session_id":"sid-target", "text":"", "files":[],
+        "session_id":"sid-target", "text":"", "files":[], "goal_continuation_id":"",
     }
     assert superseded["newerTargetClearWins"]["staleStatus"] == 409
     assert superseded["newerTargetClearWins"]["targetDraft"] == {"text":"", "files":[]}
     assert superseded["clearReplay"]["sids"] == ["sid-clear-parent", "sid-clear-target"]
     assert superseded["clearReplay"]["payload"] == {
-        "session_id":"sid-clear-target", "text":"", "files":[],
+        "session_id":"sid-clear-target", "text":"", "files":[], "goal_continuation_id":"",
     }
     assert superseded["clearReplay"]["targetDraft"] == {"text":"", "files":[]}
     replay_order = superseded["serializedReplayOrdering"]
