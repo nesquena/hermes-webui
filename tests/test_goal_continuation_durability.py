@@ -477,20 +477,36 @@ class TestSourceShapes:
 
     def test_streaming_arms_via_locked_mutator(self):
         src = Path("api/streaming.py").read_text(encoding="utf-8")
-        m = re.search(r"PENDING_GOAL_CONTINUATION\.add\(session_id\)", src)
-        assert m is not None
-        tail = src[m.end():m.end() + 700]
-        assert "arm_pending_goal_continuation" in tail
+        m = re.search(r"register_pending_goal_continuation\(", src)
+        if m is None:
+            m = re.search(r"PENDING_GOAL_CONTINUATION\.add\(session_id\)", src)
+            assert m is not None, (
+                "streaming.py must arm a goal continuation through a locked "
+                "mutator (register_pending_goal_continuation or "
+                "arm_pending_goal_continuation)"
+            )
+            tail = src[m.end():m.end() + 700]
+            assert "arm_pending_goal_continuation" in tail
+        else:
+            tail = src[m.start():m.start() + 700]
         # #7862 round 3: the minted token must reach both the store and the
         # SSE payload in the same window.
         assert "continuation_id" in tail
 
     def test_gateway_arms_via_locked_mutator(self):
         src = Path("api/gateway_chat.py").read_text(encoding="utf-8")
-        m = re.search(r"PENDING_GOAL_CONTINUATION\.add\(session_id\)", src)
-        assert m is not None
-        tail = src[m.end():m.end() + 700]
-        assert "arm_pending_goal_continuation" in tail
+        m = re.search(r"register_pending_goal_continuation\(", src)
+        if m is None:
+            m = re.search(r"PENDING_GOAL_CONTINUATION\.add\(session_id\)", src)
+            assert m is not None, (
+                "streaming.py must arm a goal continuation through a locked "
+                "mutator (register_pending_goal_continuation or "
+                "arm_pending_goal_continuation)"
+            )
+            tail = src[m.end():m.end() + 700]
+            assert "arm_pending_goal_continuation" in tail
+        else:
+            tail = src[m.start():m.start() + 700]
         # #7862 round 3: the minted token must reach both the store and the
         # SSE payload in the same window.
         assert "continuation_id" in tail

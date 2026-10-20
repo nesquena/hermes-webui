@@ -99,7 +99,11 @@ def test_routes_consumer_discards_atomically_on_read():
     """
     src = _read_routes()
 
-    # Find the consumption check.
+    # 1. The admission block routes through the helper.
+    # #7855: admission is by continuation ID, not message text.
+    # #7855 rebase compat (#7249): admission runs INSIDE the session lock, in
+    # consume_continuation_markers() — never up front — so a rejected start
+    # rolls back the whole admission (see the receipt guards below).
     m = re.search(
         r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?"
         r"consume_pending_goal_continuation\(\s*"
@@ -110,7 +114,7 @@ def test_routes_consumer_discards_atomically_on_read():
         r"(?:\s*,\s*explicit_continue\s*=\s*\w+\s*,\s*goal_active\s*=\s*\w+)?"
         r"\s*,?\s*\)",
         src,
-        re.DOTALL,
+        re.S,
     )
     assert m is not None, (
         "routes.py must consume PENDING_GOAL_CONTINUATION atomically via "
@@ -187,18 +191,27 @@ def test_stream_goal_related_release_is_keyed_by_stream_id():
 
 
 def test_goal_continue_set_marker_before_emitting_event():
-    """Source-code ordering check: PENDING_GOAL_CONTINUATION.add must
-    happen BEFORE the goal_continue SSE event is put on the queue, so the
-    marker is observable by the time the frontend reacts."""
-    src = _read_streaming()
-    add_idx = src.find("PENDING_GOAL_CONTINUATION.add(session_id)")
-    if add_idx == -1:
-        # Tolerate slight phrasing variations.
-        m = re.search(r"PENDING_GOAL_CONTINUATION\.add\([^)]*\)", src)
-        assert m is not None, "PENDING_GOAL_CONTINUATION.add not found"
-        add_idx = m.start()
+    """Source-code ordering check: the continuation record must be
+    registered BEFORE the goal_continue SSE event is put on the queue, so
+    the marker is observable by the time the frontend reacts.
 
-    # Find the next goal_continue SSE event AFTER the add.
+    #6885 round 2: the add runs through
+    ``api.goals.register_pending_goal_continuation`` (marker + prompt +
+    expiry as one record), and the SSE emission is gated on its return so a
+    failed registration cannot leave the frontend queued without a server
+    record to consume."""
+    src = _read_streaming()
+    m = re.search(
+        r"register_pending_goal_continuation\(session_id, continuation_prompt\)",
+        src,
+    )
+    assert m is not None, (
+        "streaming.py must register the continuation record via "
+        "register_pending_goal_continuation(session_id, continuation_prompt)"
+    )
+    add_idx = m.start()
+
+    # Find the next goal_continue SSE event AFTER the registration.
     after_add = src[add_idx:]
     event_idx = after_add.find("goal_continue")
     assert event_idx != -1, "no goal_continue emission after marker add"
@@ -207,4 +220,14 @@ def test_goal_continue_set_marker_before_emitting_event():
     assert event_idx < 900, (
         "PENDING_GOAL_CONTINUATION.add must immediately precede the "
         "goal_continue SSE emission"
+    )
+    # The SSE event fires only when the registration succeeded.
+    # #7855: registration returns the continuation ID (not a bool), so the
+    # gate is now ``if not continuation_id``.
+    assert "if not register_pending_goal_continuation(" in src or (
+        "continuation_id = register_pending_goal_continuation(" in src
+        and "if not continuation_id:" in src
+    ), (
+        "the goal_continue SSE event must be gated on the record "
+        "registration return value"
     )

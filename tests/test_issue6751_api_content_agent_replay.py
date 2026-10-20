@@ -1170,7 +1170,7 @@ def test_issue6751_stale_user_cleanup_drops_obsolete_api_content_on_both_paths()
         "old turn",
         previous_context=previous,
     )
-    reconciled = _dedupe_replayed_context_messages(
+    reconciled, _protected = _dedupe_replayed_context_messages(
         previous,
         [stale, {"role": "assistant", "content": "answer"}],
         "new turn",

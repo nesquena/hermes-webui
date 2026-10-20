@@ -266,7 +266,7 @@ class TestRoutesAndFrontendShape:
         """
         src = Path("static/messages.js").read_text(encoding="utf-8")
         m = re.search(
-            r"if\(!\(options&&options\.goal_continuation_id\)\)\s*"
+            r"if\(!\(options&&options\.goalContinuationId\)\)\s*"
             r"_flushSelectionBlocksToComposer\(\);",
             src,
         )

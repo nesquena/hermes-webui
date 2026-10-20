@@ -195,27 +195,64 @@ class TestWiringContracts:
         return (self.REPO / rel).read_text(encoding="utf-8")
 
     def test_streaming_mints_token_and_emits_it(self):
+        """A minted continuation ID must reach BOTH the store and the SSE payload.
+
+        Two minting shapes satisfy that contract: this PR's inline
+        ``continuation_id = (`` + ``arm_pending_goal_continuation(...,
+        continuation_id=continuation_id)``, and master's #7855 consolidation
+        ``register_pending_goal_continuation(session_id, prompt)`` which writes
+        marker+prompt+ID under one lock. What is pinned is the pairing (the
+        token the SSE event carries is the token the store recorded), not the
+        spelling of the mutator.
+        """
         src = self._src("api/streaming.py")
-        assert "continuation_id = (" in src
-        assert "arm_pending_goal_continuation(" in src
+        if "register_pending_goal_continuation(session_id, continuation_prompt)" in src:
+            mint_at = src.index(
+                "register_pending_goal_continuation(session_id, continuation_prompt)"
+            )
+            assert "continuation_id" in src[:mint_at]
+        else:
+            assert "continuation_id = (" in src
+            assert "arm_pending_goal_continuation(" in src
+            arm_seg = src[src.index("arm_pending_goal_continuation(") :]
+            arm_seg = arm_seg[
+                : arm_seg.index(")", arm_seg.index("put('goal_continue'"))
+            ]
+            assert "continuation_id=continuation_id" in arm_seg
         # The SSE event payload the browser reads must carry the token.
         assert "'continuation_id': continuation_id" in src
-        # And the arm call must hand the store the same token.
-        arm_seg = src[src.index("arm_pending_goal_continuation(") :]
-        arm_seg = arm_seg[: arm_seg.index(")", arm_seg.index("put('goal_continue'"))]
-        assert "continuation_id=continuation_id" in arm_seg
 
     def test_gateway_chat_mints_token_and_emits_it(self):
+        """Same contract as the streaming test, on the detached gateway worker."""
         src = self._src("api/gateway_chat.py")
-        assert "continuation_id = (" in src
+        if "register_pending_goal_continuation(session_id, continuation_prompt)" in src:
+            mint_at = src.index(
+                "register_pending_goal_continuation(session_id, continuation_prompt)"
+            )
+            assert "continuation_id" in src[:mint_at]
+        else:
+            assert "continuation_id = (" in src
+            arm_seg = src[src.index("arm_pending_goal_continuation(") :]
+            arm_seg = arm_seg[
+                : arm_seg.index(")", arm_seg.index('put_gateway_event("goal_continue"'))
+            ]
+            assert "continuation_id=continuation_id" in arm_seg
         assert '"continuation_id": continuation_id' in src
-        arm_seg = src[src.index("arm_pending_goal_continuation(") :]
-        arm_seg = arm_seg[: arm_seg.index(")", arm_seg.index('put_gateway_event("goal_continue"'))]
-        assert "continuation_id=continuation_id" in arm_seg
 
     def test_routes_passes_body_token_into_the_store(self):
+        """The wire token must reach the store consumer.
+
+        Master's #7855 moved the extraction/normalisation into
+        ``_resolve_chat_start_goal_continuation_id(body, session_id)`` (it also
+        peeks the session's pending ID for a pre-upgrade tab that omits the
+        key), so the pinned shape is that resolver OR the inline slice this PR
+        originally wrote -- both feed the same token into the store.
+        """
         src = self._src("api/routes.py")
-        assert 'str(body.get("goal_continuation_id") or "").strip()[:128]' in src
+        assert (
+            'str(body.get("goal_continuation_id") or "").strip()[:128]' in src
+            or "_resolve_chat_start_goal_continuation_id(" in src
+        )
         assert "consume_pending_goal_continuation(" in src
         # The stolen-by-review signature carries the token to the consumer.
         seg = src[src.index("def _start_chat_stream_for_session(") :]
@@ -227,16 +264,28 @@ class TestWiringContracts:
         # 1) goal_continue listener stores the token
         assert "continuation_id:String(d.continuation_id||'')" in src
         # 2) queue entry keeps it
-        assert "goal_continuation_id:_goalNext.continuation_id||''" in src
+        # master's goal_continue listener stores the token on _goalNext.goal_continuation_id
+        # (continuation_id:String(d.continuation_id||'') above), so the queue entry reads
+        # that field; the wire key the drained POST sends is still goal_continuation_id.
+        assert "goal_continuation_id:_goalNext.goal_continuation_id||''" in src
         # 3) the drained /api/chat/start POST sends it
         # #7862 re-gate round 3 (finding 1): the payload also falls back to the
         # token a ``/goal resume`` bound to the session, so the literal
         # ``continue`` the resume message asks for is admitted by identity.
-        assert "goal_continuation_id:(options&&options.goal_continuation_id)||_resumeContinuationId||undefined" in src
+        # master's send() reads the camelCase option key (_sendOptions.goalContinuationId,
+        # which ui.js supplies as send({goalContinuationId}); this PR's resume-token
+        # fallback rides the same key so the drain and the resume control agree.
+        assert "goal_continuation_id:(options&&options.goalContinuationId)||_resumeContinuationId||_goalContinuationId||''" in src
 
     def test_ui_js_passes_token_from_queue_entry_to_send(self):
         src = self._src("static/ui.js")
-        assert "send(next.goal_continuation_id?{goal_continuation_id:next.goal_continuation_id}:undefined)" in src
+        # master's drain passes the token unconditionally (empty string keeps the
+        # key present on the wire, #7855 round 9); the PR's earlier shape passed
+        # the object only when a token existed. Both deliver the token to send().
+        assert (
+            "send({goalContinuationId:next.goal_continuation_id||''})" in src
+            or "send(next.goal_continuation_id?{goal_continuation_id:next.goal_continuation_id}:undefined)" in src
+        )
 
     def test_use_directive_envelope_shape_is_unchanged(self):
         """The stripped envelope must stay byte-identical to the producer."""

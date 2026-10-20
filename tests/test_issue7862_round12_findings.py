@@ -338,8 +338,8 @@ class TestResumeReturnsAndBindsTheContinuationToken:
         # The bound token must ride on the /api/chat/start payload.
         post = _first_match(
             src,
-            r"goal_continuation_id:\s*\(options&&options\.goal_continuation_id\)"
-            r"\|\|_resumeContinuationId\|\|undefined",
+            r"goal_continuation_id:\s*\(options&&options\.goalContinuationId\)"
+            r"\|\|_resumeContinuationId\|\|_goalContinuationId\|\|''",
         )
         assert post is not None, (
             "the chat-start payload does not fall back to the resume-bound "

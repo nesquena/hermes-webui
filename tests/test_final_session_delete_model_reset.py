@@ -165,6 +165,7 @@ const readComposerModelPickSrc=extractFunctionIfPresent(src, 'function _readComp
 if(readComposerModelPickSrc) eval(readComposerModelPickSrc);
 eval(extractFunction(src, 'function _settleEmptyComposerModelAfterFinalSessionDelete('));
 eval(extractFunction(src, 'async function deleteSession('));
+eval(extractFunction(src, 'async function _deleteSelectedSessionsBatch('));
 eval(extractFunction(src, 'function _renderBatchActionBar('));
 eval(extractStatementBefore(
   bootSrc,

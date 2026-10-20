@@ -144,6 +144,9 @@ COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
         "_composerDraftFileSignature",
         "_composerDraftPayloadSignature",
         "_composerDraftPayloadSignatureForSid",
+        "_composerDraftRevision",
+        "_noteComposerDraftPayload",
+        "_bumpComposerDraftRevision",
         "_clearComposerDraftRestoreSuppression",
         "_isComposerDraftRestoreSuppressed",
         "_suppressComposerDraftRestoreAfterSubmit",
@@ -422,6 +425,11 @@ let toastCalls = [];
 
 // Source under test
 let _draftSaveTimer = null;
+let _draftSaveTimerSid = null;
+let _draftSaveTimerPayload = null;
+let _draftSaveTimerRev = 0;
+const _composerDraftRevBySid = new Map();
+const _composerDraftLastPayloadBySid = new Map();
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
@@ -1166,14 +1174,16 @@ def test_loadsession_cross_session_ordering_and_stale_reject_behavior(tmp_path):
     assert superseded["newerTargetDraftWins"]["sameFile"] is True
     assert len(superseded["newerTargetClearWins"]["calls"]) == 2
     assert superseded["newerTargetClearWins"]["calls"][0]["session_id"] == "sid-parent"
+    # #7855: a clear posts an explicit empty continuation token so the stored
+    # token is dropped with the draft it belonged to.
     assert superseded["newerTargetClearWins"]["calls"][1] == {
-        "session_id":"sid-target", "text":"", "files":[],
+        "session_id":"sid-target", "text":"", "files":[], "goal_continuation_id":"",
     }
     assert superseded["newerTargetClearWins"]["staleStatus"] == 409
     assert superseded["newerTargetClearWins"]["targetDraft"] == {"text":"", "files":[]}
     assert superseded["clearReplay"]["sids"] == ["sid-clear-parent", "sid-clear-target"]
     assert superseded["clearReplay"]["payload"] == {
-        "session_id":"sid-clear-target", "text":"", "files":[],
+        "session_id":"sid-clear-target", "text":"", "files":[], "goal_continuation_id":"",
     }
     assert superseded["clearReplay"]["targetDraft"] == {"text":"", "files":[]}
     replay_order = superseded["serializedReplayOrdering"]

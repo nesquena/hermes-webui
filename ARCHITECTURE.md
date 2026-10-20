@@ -1836,6 +1836,11 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/session/new           {"model"?, "workspace"?} -> new session
     /api/session/update        {"session_id", "workspace"?, "model"?} -> updated session
     /api/session/delete        {"session_id"} -> {"ok": true}
+                               -> 409 {"ok": false, "error": <code>} when the gateway
+                                  ledger refuses (session_busy / unknown_execution /
+                                  runtime_ledger_unavailable); files and rows are kept.
+                               -> 500 {"ok": false, "error": "state_db_cleanup_failed"}
+                                  when the state.db delete fails; files are kept.
     /api/chat/start            {"session_id", "message", "model"?, "workspace"?}
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
