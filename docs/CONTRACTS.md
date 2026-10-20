@@ -122,6 +122,15 @@ contributor guidance; it does not change runtime behavior or CI gates.
   retarget or transient resolve fallback is always observed on the next call.
   Start here before widening this cache's scope or adding a similar
   call-scoped cache elsewhere (#7636).
+- [`docs/architecture/session-archive-cross-profile.md`](architecture/session-archive-cross-profile.md):
+  current contract for `POST /api/session/archive`: the request fields
+  (`all_profiles` plus the required validated `profile` owner claim), the rule
+  that the route owns its own profile boundary because it is exempt from the
+  generic request-session guard (so an archived foreign session stays
+  restorable), the invariant that a refused archive never mutates the sidecar,
+  the profile-limit matrix, and the 400/403/404/409 failure responses.
+  Start here before changing the archive handler, the all-profiles archive
+  path, or session profile-visibility rules (#7549, #7731).
 - [`docs/architecture/session-channel-lifecycle.md`](architecture/session-channel-lifecycle.md):
   current contract for the per-session SSE channel and the per-turn stream lifecycle: the state
   layers and their authoritative writers, the writer-side subscriber-liveness signal plus the

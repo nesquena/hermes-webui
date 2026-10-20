@@ -5651,8 +5651,11 @@ function _renderBatchActionBar(){
     if(!ok)return;
     try{
       const results=await Promise.all(ids.map(async sid=>{
-        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true})});
-        return {response,session:sessionsById.get(sid)||null};
+        const _batchPayload={session_id:sid,archived:true};
+        const _snap=sessionsById.get(sid);
+        if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&_snap&&_snap.profile){_batchPayload.all_profiles=true;_batchPayload.profile=_snap.profile;}
+        const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(_batchPayload)});
+        return {response,session:_snap||null};
       }));
       const retainedCount=_worktreeResponseCount(results);
       showToast(retainedCount?t('session_archived_worktree'):t('session_archived'));exitSessionSelectMode();await renderSessionList({deferWhileInteracting:false,keepProjectPicker:true});
@@ -6299,7 +6302,9 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   const reflowPositions=_captureSessionReflowPositions();
   const renderHold=beforeListRender?Promise.resolve().then(beforeListRender):null;
   try{
-    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived})});
+    const _archivePayload={session_id:session.session_id,archived};
+    if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&session.profile){_archivePayload.all_profiles=true;_archivePayload.profile=session.profile;}
+    const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify(_archivePayload)});
     session.archived=archived;
     const cached=(_allSessions||[]).find(s=>s&&s.session_id===session.session_id);
     if(cached) cached.archived=archived;
@@ -6506,7 +6511,9 @@ function _openSessionActionMenu(session, anchorEl){
       async()=>{
         closeSessionActionMenu();
         try{
-          await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:session.session_id,archived:true})});
+          const _hidePayload={session_id:session.session_id,archived:true};
+          if(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&session.profile){_hidePayload.all_profiles=true;_hidePayload.profile=session.profile;}
+          await api('/api/session/archive',{method:'POST',body:JSON.stringify(_hidePayload)});
           _optimisticallyArchiveSessionInList(session.session_id,true);
           session.archived=true;
           if(S.session&&S.session.session_id===session.session_id) S.session.archived=true;
