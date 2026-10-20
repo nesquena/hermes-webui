@@ -1396,6 +1396,51 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+// ── Bot Mode (#7174): cross-bot @mention handoff ──
+// A message that OPENS with @<bot> is a handoff, mirroring Hermes Desktop's
+// hermes-bots plugin: the remainder is delivered to the mentioned profile's
+// session instead of the current one. Anywhere-but-start mentions, @@, bare
+// @, and emails stay literal text.
+
+function _parseBotMention(text){
+  if(typeof text!=='string')return null;
+  const trimmed=text.trim();
+  if(!trimmed)return null;
+  const m=trimmed.match(/^@([A-Za-z0-9][A-Za-z0-9_-]{0,63})(?:\s+([\s\S]*))?$/);
+  if(!m)return null;
+  return {target:m[1].toLowerCase(),text:(m[2]||'').trim()};
+}
+
+async function _routeBotMentionHandoff(mention){
+  if(!mention||!mention.target)return false;
+  if(_pendingSelections&&_pendingSelections.length)return false;
+  let data=(typeof _profileDropdownBestCachedData==='function')?_profileDropdownBestCachedData():null;
+  if(!data||!Array.isArray(data.profiles)){
+    try{data=await api('/api/profiles',{timeoutToast:false});}catch(e){return false;}
+  }
+  const profiles=(data&&Array.isArray(data.profiles))?data.profiles:[];
+  const active=(typeof S!=='undefined'&&S.activeProfile)||(data&&data.active)||'default';
+  // Only a VISIBLE profile (the roster) resolves; unknown handles and
+  // self-mentions fall through so the text sends literally.
+  const target=profiles.find(p=>p&&typeof p.name==='string'&&p.name===mention.target&&p.visible!==false);
+  if(!target||target.name===active)return false;
+  if(typeof switchToProfile!=='function')return false;
+  const ok=await switchToProfile(target.name);
+  if(!ok)return false;
+  if(mention.text){
+    const composer=(typeof $==='function')?$('msg'):null;
+    if(composer)composer.value=mention.text;
+    // Clear the in-flight guard before re-entering send() so the handed-off
+    // message dispatches instead of queueing behind this invocation.
+    _sendInProgress=false;
+    _sendInProgressSid=null;
+    await send();
+  }else if(typeof showToast==='function'){
+    showToast(`Switched to @${target.name}`,2000);
+  }
+  return true;
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1430,6 +1475,17 @@ async function send(){
   _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
+  // Bot Mode (#7174): a message that opens with @<bot> is a cross-bot handoff
+  // — switch to the mentioned profile and deliver there. Falls through (sends
+  // literally) when the handle matches no visible roster profile, and is
+  // skipped while files are staged (uploads belong to the current profile).
+  if(text[0]==='@'&&!S.pendingFiles.length&&typeof _parseBotMention==='function'&&typeof _routeBotMentionHandoff==='function'){
+    const _botMention=_parseBotMention(text);
+    if(_botMention){
+      const _handedOff=await _routeBotMentionHandoff(_botMention);
+      if(_handedOff){_sendInProgress=false;_sendInProgressSid=null;return;}
+    }
+  }
   if(typeof shouldInterceptCompressionRecoveryContinuation==='function'&&shouldInterceptCompressionRecoveryContinuation(text,S.pendingFiles)){
     if(typeof showCompressionRecoveryContinuationHint==='function') showCompressionRecoveryContinuationHint();
     _sendInProgress=false;_sendInProgressSid=null;

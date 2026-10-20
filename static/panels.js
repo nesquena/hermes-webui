@@ -6962,6 +6962,111 @@ function _warmProfileDropdownCache(){
   _profileDropdownFetchFresh().catch(()=>{});
 }
 
+// ── Bot Mode (#7174): @mention autocomplete over the bot roster ──
+// Typing @ in the composer opens a popup of visible profiles (the roster,
+// presented by Bot title when set); picking an entry inserts @name so a
+// leading mention becomes a cross-bot handoff in send().
+
+let _botMentionPopupEl=null;
+let _botMentionState=null; // {matches, start, end, sel}
+
+function _botRosterForMentions(){
+  // Visible profiles only — hidden profiles are not routable handoff targets.
+  const data=_profileDropdownBestCachedData();
+  const profiles=(data&&Array.isArray(data.profiles))?data.profiles:[];
+  return profiles.filter(p=>p&&typeof p.name==='string'&&p.visible!==false);
+}
+
+function _hideBotMentionPopup(){
+  if(_botMentionPopupEl&&_botMentionPopupEl.parentNode)_botMentionPopupEl.parentNode.removeChild(_botMentionPopupEl);
+  _botMentionPopupEl=null;
+  _botMentionState=null;
+}
+
+function _insertBotMention(name){
+  const ta=$('msg');
+  if(!ta||!_botMentionState)return;
+  const {start,end}=_botMentionState;
+  const before=ta.value.slice(0,start);
+  const after=ta.value.slice(end);
+  ta.value=`${before}@${name} ${after}`;
+  const caret=(before.length+name.length+2)||ta.value.length;
+  ta.focus();
+  try{ta.setSelectionRange(caret,caret);}catch(_){}
+  _hideBotMentionPopup();
+}
+
+function _renderBotMentionPopup(state){
+  const ta=$('msg');
+  if(!ta){_hideBotMentionPopup();return;}
+  _botMentionState=state;
+  if(!_botMentionPopupEl){
+    _botMentionPopupEl=document.createElement('div');
+    _botMentionPopupEl.id='botMentionPopup';
+    _botMentionPopupEl.className='bot-mention-popup';
+    document.body.appendChild(_botMentionPopupEl);
+  }
+  _botMentionPopupEl.innerHTML=state.matches.map((p,i)=>{
+    const title=(p.bot&&typeof p.bot.title==='string'&&p.bot.title)?p.bot.title:p.name;
+    return `<div class="bot-mention-option${i===state.sel?' selected':''}" data-name="${esc(p.name)}">`
+      +`<span class="bot-mention-name">${esc(title)}</span>`
+      +`<span class="bot-mention-handle">@${esc(p.name)}</span></div>`;
+  }).join('');
+  _botMentionPopupEl.querySelectorAll('.bot-mention-option').forEach(el=>{
+    el.addEventListener('pointerdown',e=>{e.preventDefault();_insertBotMention(el.dataset.name);});
+  });
+  const rect=ta.getBoundingClientRect();
+  _botMentionPopupEl.style.left=`${Math.max(8,rect.left)}px`;
+  _botMentionPopupEl.style.bottom=`${Math.max(8,window.innerHeight-rect.top+6)}px`;
+  _botMentionPopupEl.style.display='';
+}
+
+function _updateBotMentionFromComposer(){
+  const ta=$('msg');
+  if(!ta)return;
+  const caret=(typeof ta.selectionStart==='number')?ta.selectionStart:ta.value.length;
+  const beforeCaret=ta.value.slice(0,caret);
+  // Only a @token being typed right before the caret (start of line or after
+  // whitespace) opens the popup — mid-word @ (emails) must not.
+  const m=beforeCaret.match(/(?:^|\s)@([A-Za-z0-9_-]*)$/);
+  if(!m){_hideBotMentionPopup();return;}
+  const query=m[1].toLowerCase();
+  const start=beforeCaret.lastIndexOf('@');
+  const roster=_botRosterForMentions().filter(p=>{
+    if(!query)return true;
+    const title=(p.bot&&typeof p.bot.title==='string')?p.bot.title.toLowerCase():'';
+    return p.name.toLowerCase().includes(query)||title.includes(query);
+  }).slice(0,8);
+  if(!roster.length){_hideBotMentionPopup();return;}
+  _renderBotMentionPopup({matches:roster,start,end:caret,sel:0});
+}
+
+function _wireBotMentionAutocomplete(){
+  const ta=$('msg');
+  if(!ta||ta._botMentionWired)return;
+  ta._botMentionWired=true;
+  ta.addEventListener('input',()=>{
+    try{_updateBotMentionFromComposer();}catch(_){_hideBotMentionPopup();}
+  });
+  ta.addEventListener('keydown',e=>{
+    if(!_botMentionPopupEl||!_botMentionState)return;
+    const n=_botMentionState.matches.length;
+    if(e.key==='ArrowDown'){e.preventDefault();_botMentionState.sel=(_botMentionState.sel+1)%n;_renderBotMentionPopup(_botMentionState);}
+    else if(e.key==='ArrowUp'){e.preventDefault();_botMentionState.sel=(_botMentionState.sel-1+n)%n;_renderBotMentionPopup(_botMentionState);}
+    else if(e.key==='Enter'||e.key==='Tab'){
+      const pick=_botMentionState.matches[_botMentionState.sel];
+      if(pick){e.preventDefault();_insertBotMention(pick.name);}
+    }
+    else if(e.key==='Escape'){_hideBotMentionPopup();}
+  });
+  ta.addEventListener('blur',()=>{setTimeout(()=>{if(document.activeElement!==_botMentionPopupEl)_hideBotMentionPopup();},150);});
+}
+
+if(typeof document!=='undefined'&&document.getElementById){
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',()=>{_wireBotMentionAutocomplete();},{once:true});
+  else _wireBotMentionAutocomplete();
+}
+
 if(typeof window!=='undefined'){
   window.addEventListener('load',()=>{
     setTimeout(()=>{
@@ -7157,10 +7262,17 @@ async function loadProfilesPanel() {
       const activeBadge = isActive ? `<span style="color:var(--link);font-size:10px;font-weight:600;margin-left:6px">${esc(t('profile_active'))}</span>` : '';
       const defaultBadge = p.is_default ? ` <span style="opacity:.5">${esc(t('profile_default_label'))}</span>` : '';
       const hiddenBadge = p.visible === false ? ' <span class="detail-badge" title="Hidden from chat">Hidden from chat</span>' : '';
+      // Bot Mode (#7174): a profile with ui_meta['hermes-bots'].title presents
+      // as a named Bot in the roster. Title leads the card; the profile id
+      // stays visible because it's what @mention handoffs resolve against.
+      const botTitle = (p.bot && typeof p.bot.title === 'string') ? p.bot.title : '';
+      const botTitleBadge = botTitle
+        ? `<span class="detail-badge" style="margin-left:6px" title="${esc(t('tab_profiles'))}">${esc(botTitle)}</span>`
+        : '';
       card.innerHTML = `
         <div class="profile-card-header">
           <div style="min-width:0;flex:1">
-            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(p.name)}${defaultBadge}${activeBadge}${hiddenBadge}</div>
+            <div class="profile-card-name${isActive ? ' is-active' : ''}">${gwDot}${esc(botTitle || p.name)}${botTitle ? `<span style="opacity:.5"> @${esc(p.name)}</span>` : ''}${botTitleBadge}${defaultBadge}${activeBadge}${hiddenBadge}</div>
             ${meta.length ? `<div class="profile-card-meta">${esc(meta.join(' \u00b7 '))}</div>` : `<div class="profile-card-meta">${esc(t('profile_no_configuration'))}</div>`}
           </div>
         </div>`;

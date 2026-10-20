@@ -2235,6 +2235,7 @@ def _build_profile_rows_fast() -> list | None:
             'provider': provider,
             'has_env': (home / '.env').exists(),
             'visible': _profile_visible_from_meta(home),
+            'bot': _profile_bot_meta(home),
             'skill_count': enabled_count,
             'enabled_skills': enabled_count,
             'total_skills': total_count,
@@ -2303,6 +2304,7 @@ def list_profiles_api() -> list:
                         'provider': p.provider,
                         'has_env': p.has_env,
                         'visible': _profile_visible_from_meta(p.path),
+                        'bot': _profile_bot_meta(p.path),
                         'skill_count': enabled_count,
                         'enabled_skills': enabled_count,
                         'total_skills': total_count,
@@ -2321,6 +2323,7 @@ def list_profiles_api() -> list:
             'provider': None,
             'has_env': (hermes_home / '.env').exists(),
             'visible': _profile_visible_from_meta(hermes_home),
+            'bot': _profile_bot_meta(hermes_home),
             'skill_count': enabled_count,
             'enabled_skills': enabled_count,
             'total_skills': total_count,
@@ -2368,6 +2371,7 @@ def list_profiles_api() -> list:
                 'provider': p.provider,
                 'has_env': p.has_env,
                 'visible': _profile_visible_from_meta(p.path),
+                'bot': _profile_bot_meta(p.path),
                 'skill_count': enabled_count,
                 'enabled_skills': enabled_count,
                 'total_skills': total_count,
@@ -2376,6 +2380,39 @@ def list_profiles_api() -> list:
 
     active = get_active_profile_name()
     return [{**p, 'is_active': p['name'] == active} for p in rows]
+
+
+def _profile_bot_meta(profile_path: Path) -> dict:
+    """Read Bot Mode presentation metadata from ``profile.yaml`` (#7174).
+
+    Mirrors Hermes Desktop's hermes-bots plugin mapping (profiles.configure
+    ui_meta 'hermes-bots'): each agent profile is presented as a named Bot in
+    a roster. Presentation-only — resolution/switching always uses ``name``.
+    Returns ``{'title', 'display_name', 'description'}`` with empty strings
+    when missing/unreadable. Never raises: a corrupt file on one profile must
+    not break the whole roster.
+    """
+    empty = {'title': '', 'display_name': '', 'description': ''}
+    try:
+        meta_path = Path(profile_path) / 'profile.yaml'
+        if not meta_path.exists():
+            return empty
+        data = yaml.safe_load(meta_path.read_text(encoding='utf-8'))
+    except Exception:
+        return empty
+    if not isinstance(data, dict):
+        return empty
+    title = ''
+    ui_meta = data.get('ui_meta')
+    if isinstance(ui_meta, dict):
+        hermes_bots = ui_meta.get('hermes-bots')
+        if isinstance(hermes_bots, dict):
+            title = str(hermes_bots.get('title') or '').strip()
+    return {
+        'title': title,
+        'display_name': str(data.get('display_name') or '').strip(),
+        'description': str(data.get('description') or '').strip(),
+    }
 
 
 def _profile_visible_from_meta(profile_path: Path) -> bool:
@@ -2406,6 +2443,7 @@ def _default_profile_dict() -> dict:
         'provider': None,
         'has_env': (_DEFAULT_HERMES_HOME / '.env').exists(),
         'visible': True,
+        'bot': _profile_bot_meta(_DEFAULT_HERMES_HOME),
         'skill_count': enabled_count,
         'enabled_skills': enabled_count,
         'total_skills': compatible_count,
