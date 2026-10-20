@@ -1852,11 +1852,14 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                -> blocks until agent finishes. Returns full result.
     /api/share/create          {"session_id"} -> creates or refreshes a public read-only snapshot link
     /api/share/revoke          {"session_id"} -> revokes the current public snapshot link.
-                               The token is resolved from the durable session sidecar under the
-                               per-session lock (not from the LRU-cached session, whose share
-                               fields are not part of the cache freshness check). The call fails
-                               with an error if the snapshot still resolves afterwards, and a
-                               session with no share revokes idempotently with {"ok": true}.
+                               The token is resolved from the durable session sidecar under a
+                               per-session *share* lock (create/revoke only — never the agent
+                               turn lock) and not from the LRU-cached session, whose share
+                               fields are not part of the cache freshness check. The session is
+                               re-read inside that lock, so a concurrent writer's save is not
+                               reverted. The call fails with an error if the snapshot still
+                               resolves afterwards, and a session with no share revokes
+                               idempotently with {"ok": true}.
     /api/approval/respond      {"session_id", "choice": once|session|always|deny}
                                -> {"ok": true, "choice": choice}
 

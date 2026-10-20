@@ -13207,6 +13207,19 @@ def _clear_thread_env():
 SESSION_AGENT_LOCKS = weakref.WeakValueDictionary()
 SESSION_AGENT_LOCKS_LOCK = threading.Lock()
 
+# Per-session lock for share create/revoke only (#8255 review). Kept separate from
+# the agent-turn lock on purpose: the agent lock is held across a turn's retry and
+# credential refresh, so coordinating shares on it would make a revoke wait for a
+# whole agent operation, and a create would block the streaming worker while it
+# redacts and embeds a large snapshot. This lock covers token resolution, the
+# snapshot write/mark and the token persist, nothing else.
+SHARE_SESSION_LOCKS = weakref.WeakValueDictionary()
+SHARE_SESSION_LOCKS_LOCK = threading.Lock()
+
+# A share call waits at most this long for another share call on the same session
+# (the repo's other handlers use the same bound and answer 503 instead of hanging).
+SHARE_SESSION_LOCK_TIMEOUT_SECONDS = 5.0
+
 
 def _get_session_agent_lock(session_id: str) -> threading.Lock:
     """Return the per-session Lock used to serialize all Session mutations.
@@ -13230,6 +13243,23 @@ def _get_session_agent_lock(session_id: str) -> threading.Lock:
         if lock is None:
             lock = threading.Lock()
             SESSION_AGENT_LOCKS[session_id] = lock
+        return lock
+
+
+def _get_session_share_lock(session_id: str) -> threading.Lock:
+    """Return the per-session Lock that serializes share create/revoke (#8255).
+
+    Deliberately separate from ``_get_session_agent_lock``: the agent lock is held
+    across an agent turn (including its credential-refresh retry), so coordinating
+    shares on it would make a revoke wait for a whole agent operation and a create
+    would lock the streaming worker out while it redacts a large snapshot. Weak
+    registry, same lifecycle as the agent locks.
+    """
+    with SHARE_SESSION_LOCKS_LOCK:
+        lock = SHARE_SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = threading.Lock()
+            SHARE_SESSION_LOCKS[session_id] = lock
         return lock
 
 
