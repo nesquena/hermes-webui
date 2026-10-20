@@ -473,3 +473,61 @@ def test_same_width_force_reload_invalidates_visible_message_cache():
     invalidate_pos = ensure_body.index("if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();")
     replace_pos = ensure_body.index("S.messages = msgs;")
     assert invalidate_pos < replace_pos
+
+
+def test_active_session_external_refresh_ignores_probe_raced_by_local_settle():
+    """A turn settling while the metadata probe is in flight must not force a reload.
+
+    The probe compares server metadata with local state. If a reply settles
+    during the probe, the pre-probe snapshot is stale: comparing against it
+    force-reloads (and blanks) an up-to-date transcript, and comparing against
+    the post-settle state turns a probe served before persistence into a fake
+    shrink. Either way the settled turn already delivered fresh state, so the
+    probe result is discarded. Without a local settle, real growth and shrink
+    must still reload.
+    """
+    fn = _function_body(SESSIONS_JS, "refreshActiveSessionIfExternallyUpdated")
+
+    def run(settle_to, remote):
+        script = textwrap.dedent(
+            f"""
+            let _activeSessionExternalRefreshInFlight = false, _loadingSessionId = null;
+            const reloads = [];
+            global.window = {{_streamJustFinished: false}};
+            global.document = {{hidden: false}};
+            const S = {{session: {{session_id: 's', message_count: 10, last_message_at: 100}},
+                       messages: new Array(10), busy: false, activeStreamId: null}};
+            function _isExternalSession() {{ return true; }}
+            function _isMessageReaderUnpinned() {{ return false; }}
+            function _drainSessionUpdatedPendingCount() {{}}
+            async function loadSession(sid, opts) {{ reloads.push(sid); }}
+            let resolveProbe;
+            async function api() {{ return new Promise((resolve) => {{ resolveProbe = resolve; }}); }}
+            {fn}
+            (async () => {{
+              const pending = refreshActiveSessionIfExternallyUpdated('idle-reconcile', {{ignoreStreamJustFinished: true}});
+              await Promise.resolve();
+              const settleTo = {json.dumps(settle_to)};
+              if (settleTo !== null) {{
+                S.session.message_count = settleTo;
+                S.session.last_message_at = 200;
+                S.messages = new Array(settleTo);
+              }}
+              resolveProbe({{session: {{message_count: {remote}, last_message_at: 200}}}});
+              const outcome = await pending;
+              process.stdout.write(JSON.stringify({{outcome, reloads: reloads.length}}));
+            }})().catch((err) => {{
+              process.stderr.write(String(err.stack || err) + '\\\\n');
+              process.exit(1);
+            }});
+            """
+        )
+        return _run_node(script)
+
+    # Reply settled during the probe; server already reflects it.
+    assert run(12, 12) == {"outcome": "skipped", "reloads": 0}
+    # Reply settled during the probe; server answer predates persistence.
+    assert run(12, 10) == {"outcome": "skipped", "reloads": 0}
+    # No local settle: real external growth and shrink still reload.
+    assert run(None, 14) == {"outcome": "reloaded", "reloads": 1}
+    assert run(None, 8) == {"outcome": "reloaded", "reloads": 1}

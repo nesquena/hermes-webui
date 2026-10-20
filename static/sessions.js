@@ -7675,14 +7675,22 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(!opts.ignoreStreamJustFinished && typeof window !== 'undefined' && window._streamJustFinished) return 'skipped';
   if(typeof document !== 'undefined' && document.hidden) return 'skipped';
   const sid = S.session.session_id;
-  const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
-  const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
+  const readLocalState = () => [
+    Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0),
+    Number(S.session.last_message_at || S.session.updated_at || 0),
+  ];
+  const [localCount, localLast] = readLocalState();
   _activeSessionExternalRefreshInFlight = true;
   try{
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
     if(!data || !data.session) return 'unchanged';
     if(!S.session || S.session.session_id !== sid) return 'skipped';
     if(S.busy || S.activeStreamId) return 'skipped';
+    // A turn that settled while the probe was in flight already applied newer
+    // local state. The probe may predate or match it, so comparing it with the
+    // pre-probe snapshot would force a destructive reload of a current transcript.
+    const [settledCount, settledLast] = readLocalState();
+    if(settledCount !== localCount || settledLast !== localLast) return 'skipped';
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
     // Force-reload the whole transcript whenever the visible conversation's
