@@ -931,3 +931,93 @@ def test_aux_schema_response_format_rejection_still_falls_back():
     assert len(calls) == 2
     assert "response_format" in (calls[0]["extra_body"] or {})
     assert calls[1]["extra_body"] == {"reasoning": {"enabled": False}}
+
+
+@pytest.mark.parametrize("route", ("aux", "agent"))
+@pytest.mark.parametrize("payload", ('{"foo": "bar', '{"title": "Broken', '["Broken', '```json\n{"foo": "bar\n```'))
+def test_malformed_schema_recovers_on_both_routes(route, payload, monkeypatch):
+    calls = []
+    def respond(**kwargs):
+        calls.append(kwargs)
+        return _response(payload if len(calls) == 1 else "Valid Recovery Title")
+    if route == "aux":
+        with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+            with patch("agent.auxiliary_client.call_llm", side_effect=respond, create=True):
+                result, _ = streaming.generate_title_raw_via_aux("Fix login.", "Inspect login.")
+    else:
+        agent = MagicMock()
+        agent.api_mode = "openai"
+        agent.provider = "custom"
+        agent.model = "fixture"
+        agent.base_url = "https://example.invalid/v1"
+        agent.reasoning_config = None
+        agent._build_api_kwargs.return_value = {}
+        agent._ensure_primary_openai_client.return_value = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=respond)))
+        result, _ = streaming.generate_title_raw_via_agent(agent, "Fix login.", "Inspect login.")
+    assert result == "Valid Recovery Title"
+    assert len(calls) == 2
+    assert "response_format" not in (calls[1].get("extra_body") or {})
+
+
+@pytest.mark.parametrize("status", (401, 403, 408, 429, 500, 503))
+def test_non_schema_http_errors_never_retry_as_schema_rejections(status):
+    error = RuntimeError(f"HTTP {status}: request included response_format json_schema")
+    error.status_code = status
+    assert not streaming._schema_rejection_error(error)
+
+
+@pytest.mark.parametrize("message", (
+    "429 Too Many Requests: response_format", "401 unauthorized response_format",
+    "timeout waiting for response_format", "connection error json_schema",
+))
+def test_non_schema_text_errors_never_retry_as_schema_rejections(message):
+    assert not streaming._schema_rejection_error(RuntimeError(message))
+
+
+@pytest.mark.parametrize("route", ("aux", "agent"))
+def test_malformed_schema_worker_saves_and_publishes_recovered_title(route, tmp_path, monkeypatch):
+    import json
+    import api.models as models
+    from api.models import Session
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    session = Session(session_id="malformed-schema-worker", title="Untitled", messages=[
+        {"role": "user", "content": "Fix login."},
+        {"role": "assistant", "content": "Inspect login."},
+    ], llm_title_generated=False, manual_title=False)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(streaming, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(streaming, "LOCK", threading.Lock())
+    monkeypatch.setattr(streaming, "_aux_title_generation_enabled", lambda: True)
+    monkeypatch.setattr(streaming, "_aux_title_configured", lambda: route == "aux")
+    monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *a, **k: nullcontext())
+    monkeypatch.setattr("api.state_sync.sync_session_title", lambda *a, **k: None)
+    calls = []
+    def respond(**kwargs):
+        calls.append(kwargs)
+        return _response('{"foo": "bar' if len(calls) == 1 else "Valid Recovery Title")
+    agent = None
+    if route == "agent":
+        agent = MagicMock()
+        agent.api_mode = "openai"
+        agent.provider = "custom"
+        agent.model = "fixture"
+        agent.base_url = "https://example.invalid/v1"
+        agent.reasoning_config = None
+        agent._build_api_kwargs.return_value = {}
+        agent._ensure_primary_openai_client.return_value = types.SimpleNamespace(
+            chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=respond)))
+    events = []
+    with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+        with patch("agent.auxiliary_client.call_llm", side_effect=respond, create=True):
+            streaming._run_background_title_update(
+                session_id=session.session_id, user_text="Fix login.", assistant_text="Inspect login.",
+                placeholder_title="Untitled", put_event=lambda name, data: events.append((name, data)), agent=agent)
+    assert len(calls) == 2
+    saved = json.loads((session_dir / (session.session_id + ".json")).read_text(encoding="utf-8"))
+    assert saved["title"] == "Valid Recovery Title"
+    assert saved["llm_title_generated"] is True
+    assert [data["title"] for name, data in events if name == "title"] == ["Valid Recovery Title"]

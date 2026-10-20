@@ -57,10 +57,12 @@ schema results retry the same prompt and budget with the existing compatibility
 request shape. Compatibility reasoning-only output still stops further attempts.
 When a transport silently strips the schema request and answers with a valid
 plain-text title, that same response is parsed with the compatibility
-extractor and accepted after validation — one provider call, no re-send. A
-schema attempt that fails without naming `response_format`/`json_schema`
-(401/429/timeout) is a transport failure: it surfaces as an error status
-instead of triggering a compatibility-mode re-send. The schema request carries
+extractor and accepted after validation — one provider call, no re-send.
+Malformed JSON-looking objects or arrays are rejected, not reused as prose;
+the compatibility request may still supply a valid recovery title.
+Only explicit unsupported-schema evidence permits a compatibility-mode re-send.
+Authentication, rate-limit, server and timeout failures remain transport errors
+even when their messages mention `response_format`/`json_schema`. The schema request carries
 the same route-gated reasoning disable as the compatibility request, so
 reasoning models do not spend the title budget on hidden thoughts first.
 

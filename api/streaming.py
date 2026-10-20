@@ -6407,8 +6407,19 @@ _SCHEMA_REJECTION_TEXT_RE = re.compile(
 
 
 def _schema_rejection_error(error) -> bool:
-    """True when an exception names the title-response schema it rejected."""
-    return bool(_SCHEMA_REJECTION_TEXT_RE.search(str(error or '')))
+    """Only an unsupported-schema error permits a compatibility resend."""
+    message = str(error or '')
+    status = getattr(error, 'status_code', None)
+    if status is None:
+        status = getattr(getattr(error, 'response', None), 'status_code', None)
+    if status is not None and status not in (400, 422):
+        return False
+    if re.search(r'\b(?:401|403|408|429|5\d\d|unauthorized|forbidden|timeout|timed out|rate.limit|too many requests|connection)\b', message, re.IGNORECASE):
+        return False
+    return bool(
+        _SCHEMA_REJECTION_TEXT_RE.search(message)
+        and re.search(r'unsupported|not supported|not support|not permitted|not allowed|unknown|unrecognized|invalid|reject', message, re.IGNORECASE)
+    )
 
 
 def _title_retry_status(status: str) -> bool:
@@ -6515,7 +6526,7 @@ def _extract_title_text(content: str, *, mode: str = 'compatibility') -> str:
     try:
         parsed = json.loads(raw)
     except (TypeError, ValueError):
-        if schema_mode:
+        if schema_mode or raw.startswith(('{', '[')):
             return ''
         parsed = None
     else:
