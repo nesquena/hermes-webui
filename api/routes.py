@@ -3414,6 +3414,9 @@ from api.config import (
     get_config_snapshot,
     STREAM_GOAL_RELATED,
     PENDING_GOAL_CONTINUATION,
+    pending_goal_continuation_matches,
+    pop_pending_goal_continuation_prompt,
+    restore_pending_goal_continuation,
     _get_config_path,
     _load_yaml_config_file,
     _save_yaml_config_file,
@@ -27392,21 +27395,30 @@ def _start_chat_stream_for_session(
         _clear_stale_stream_state(s)
 
     consumed_goal_continuation = False
+    consumed_goal_prompt = ""
     consumed_bg_task_completion = False
 
     def consume_continuation_markers() -> None:
-        nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
+        nonlocal goal_related, consumed_goal_continuation, consumed_goal_prompt
+        nonlocal consumed_bg_task_completion
         if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-            goal_related = True
-            PENDING_GOAL_CONTINUATION.discard(s.session_id)
-            consumed_goal_continuation = True
+            # #6885: a bare session marker cannot identify WHICH turn is the
+            # continuation. Only the turn carrying the exact prompt the worker
+            # emitted may claim it. A genuine user follow-up that arrives while
+            # a continuation is pending therefore keeps the marker, and is not
+            # classified goal-related (#1932).
+            if pending_goal_continuation_matches(s.session_id, msg):
+                goal_related = True
+                consumed_goal_prompt = pop_pending_goal_continuation_prompt(s.session_id)
+                PENDING_GOAL_CONTINUATION.discard(s.session_id)
+                consumed_goal_continuation = True
         if s.session_id in PENDING_BG_TASK_COMPLETIONS:
             PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
             consumed_bg_task_completion = True
 
     def restore_consumed_continuation_markers() -> None:
         if consumed_goal_continuation:
-            PENDING_GOAL_CONTINUATION.add(s.session_id)
+            restore_pending_goal_continuation(s.session_id, consumed_goal_prompt)
         if consumed_bg_task_completion:
             PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
 
