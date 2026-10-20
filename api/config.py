@@ -6210,6 +6210,62 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+def _reasoning_override_keys_for_model(
+    model_id: str, overrides: dict, provider_id: str | None = None
+) -> list[str]:
+    """Every existing override key that refers to *model_id*.
+
+    ``configured_reasoning_effort_for_model`` resolves a model through a
+    tolerant candidate list (the bare id, its lowercase form, the
+    ``@provider:id`` tail, every slash-qualified form and the
+    provider-prefixed variants), so an override written under ANY of those
+    spellings wins on read. The setter must therefore be able to enumerate the
+    same set when it writes or clears, otherwise a config carrying
+    ``openai/gpt-5.4: low`` keeps answering for ``gpt-5.4`` after the user
+    picked a different level or ``Default`` for the bare id (#7170,
+    droopanu 2026-10-20).
+
+    Returns only keys that are actually present in *overrides*, so the caller
+    can pop them without touching unrelated entries.
+    """
+    model = str(model_id or "").strip()
+    if not model or not isinstance(overrides, dict) or not overrides:
+        return []
+    parsed = _parse_provider_qualified_model_id(model)
+    if parsed:
+        bare, _provider = parsed
+        model = bare
+    candidates = [model, model.lower()]
+    if model.startswith("@") and ":" in model:
+        candidates.append(model.rsplit(":", 1)[-1])
+    for cand in list(candidates):
+        if "/" not in cand:
+            continue
+        parts = cand.split("/")
+        if len(parts) >= 3:
+            candidates.append("/".join(parts[1:]))
+        candidates.append(parts[-1])
+    # Provider-qualified keys must also be superseded/cleared: the read side
+    # accepts ``<provider>/<model>`` for a bare model id, so a stored
+    # ``openai/gpt-5.4`` answers for ``gpt-5.4``. Only the CALLER's provider is
+    # expanded (plus the known-prefix list the read side mirrors), never an
+    # arbitrary guess, so an unrelated provider's entry is left alone.
+    _MODEL_PREFIX_PROVIDERS = (
+        "anthropic", "openai", "google", "openrouter", "groq", "mistral",
+        "xai", "cohere", "perplexity", "together", "fireworks", "deepseek",
+    )
+    bare_candidates = [c for c in candidates if c and "/" not in c and not c.startswith("@")]
+    prefixes = list(_MODEL_PREFIX_PROVIDERS)
+    prov = str(provider_id or "").strip().lower()
+    if prov and prov not in prefixes:
+        prefixes.append(prov)
+    for cand in bare_candidates:
+        for prefix in prefixes:
+            candidates.append(f"{prefix}/{cand}")
+    wanted = {c for c in candidates if c}
+    return [key for key in overrides if key in wanted or key.lower() in wanted]
+
+
 def configured_reasoning_effort_for_model(
     config_data: dict | None,
     *,
@@ -6601,18 +6657,36 @@ def set_reasoning_effort(
             # "Default" clears it) so the chip reads its own selection back
             # instead of snapping to the stale override (#7170 round-2
             # finding 3). The historical global write is kept alongside for
-            # master/CLI parity (zai gating contract). Key spelling mirrors
-            # the read-side matchers in
-            # configured_reasoning_effort_for_model (lowercased exact id).
+            # master/CLI parity (zai gating contract).
             overrides = agent_cfg.get("reasoning_overrides")
             if not isinstance(overrides, dict):
                 overrides = {}
+            # #7170 (droopanu, 2026-10-20): the read side matches several
+            # spellings of one model (bare id, lowercased id, ``@provider:id``
+            # tail, every slash-qualified form and the provider-prefixed
+            # variants — see configured_reasoning_effort_for_model), but the
+            # setter stored only ``model.lower()``. A config that already
+            # carried ``openai/gpt-5.4: low`` therefore kept that entry when
+            # the user picked ``high`` and then ``Default`` for ``gpt-5.4``:
+            # the bare key was removed, the qualified one survived, and the
+            # effective effort silently fell back to ``low``. Writing must
+            # supersede every spelling the reader would accept, and clearing
+            # must remove them all, so the write and the read agree on one
+            # identity.
             override_key = model.lower()
             if raw:
                 overrides[override_key] = raw
+                for stale in _reasoning_override_keys_for_model(
+                    model, overrides, provider_id
+                ):
+                    if stale != override_key:
+                        overrides.pop(stale, None)
                 agent_cfg["reasoning_effort"] = raw
             else:
-                overrides.pop(override_key, None)
+                for stale in _reasoning_override_keys_for_model(
+                    model, overrides, provider_id
+                ):
+                    overrides.pop(stale, None)
                 # Default also clears the global key (historical empty-effort
                 # contract, #6219 round-3): the provider default applies.
                 agent_cfg.pop("reasoning_effort", None)

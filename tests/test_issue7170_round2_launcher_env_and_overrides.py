@@ -544,3 +544,93 @@ def test_set_reasoning_effort_without_model_still_writes_global(tmp_path, monkey
     assert not (agent_cfg.get("reasoning_overrides") or {}), (
         "an unscoped selection must not create per-model overrides."
     )
+
+
+# ---------------------------------------------------------------------------
+# droopanu (real user, 2026-10-20): the write key and the read matchers
+# disagreed on spelling.
+# ---------------------------------------------------------------------------
+
+
+def _write_cfg_with(cfgfile: Path, overrides: dict, effort: str = "high") -> None:
+    cfgfile.write_text(
+        yaml.safe_dump(
+            {
+                "model": {"default": "gpt-5.4", "provider": "openai"},
+                "agent": {
+                    "reasoning_effort": effort,
+                    "reasoning_overrides": overrides,
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_default_clears_every_spelling_the_reader_accepts(tmp_path, monkeypatch):
+    """Default for ``gpt-5.4`` must not leave ``openai/gpt-5.4`` behind.
+
+    The read side matches the bare id, its lowercase form, the ``@provider:id``
+    tail and every slash-qualified form, so a config carrying
+    ``openai/gpt-5.4: low`` still answered for ``gpt-5.4``. Picking ``high``
+    for the bare model and then ``Default`` removed only the bare key, and the
+    effective effort silently fell back to ``low``.
+    """
+    cfgfile = tmp_path / "config.yaml"
+    _write_cfg_with(cfgfile, {"openai/gpt-5.4": "low"})
+    _patch_reasoning_scope(tmp_path, monkeypatch, cfgfile)
+
+    config.set_reasoning_effort("", model_id="gpt-5.4", provider_id="openai")
+
+    on_disk = yaml.safe_load(cfgfile.read_text(encoding="utf-8"))
+    overrides = (on_disk.get("agent") or {}).get("reasoning_overrides") or {}
+    assert not overrides, (
+        f"Default must clear every spelling the reader accepts, got {overrides!r}"
+    )
+
+
+def test_a_new_level_supersedes_the_qualified_spelling(tmp_path, monkeypatch):
+    """Picking a level for the bare model must beat the qualified entry.
+
+    With ``openai/gpt-5.4: low`` stored, choosing ``high`` for ``gpt-5.4``
+    must not leave the stale qualified entry able to win the read.
+    """
+    cfgfile = tmp_path / "config.yaml"
+    _write_cfg_with(cfgfile, {"openai/gpt-5.4": "low"})
+    _patch_reasoning_scope(tmp_path, monkeypatch, cfgfile)
+
+    status = config.set_reasoning_effort(
+        "high", model_id="gpt-5.4", provider_id="openai"
+    )
+
+    on_disk = yaml.safe_load(cfgfile.read_text(encoding="utf-8"))
+    overrides = (on_disk.get("agent") or {}).get("reasoning_overrides") or {}
+    assert overrides.get("gpt-5.4") == "high", (
+        f"the bare key must carry the new level, got {overrides!r}"
+    )
+    assert overrides.get("openai/gpt-5.4") != "low", (
+        "the stale qualified entry must not survive with its old value"
+    )
+    # ...and the read side must agree with what was written.
+    assert (
+        config.configured_reasoning_effort_for_model(
+            on_disk, model_id="gpt-5.4", provider_id="openai"
+        )
+        == "high"
+    ), "the effective effort must be the level the user just picked"
+
+
+def test_unrelated_override_entries_survive(tmp_path, monkeypatch):
+    """Clearing one model must not touch another model's override."""
+    cfgfile = tmp_path / "config.yaml"
+    _write_cfg_with(cfgfile, {"gpt-5.4": "low", "claude-opus-4-5": "medium"})
+    _patch_reasoning_scope(tmp_path, monkeypatch, cfgfile)
+
+    config.set_reasoning_effort("", model_id="gpt-5.4", provider_id="openai")
+
+    on_disk = yaml.safe_load(cfgfile.read_text(encoding="utf-8"))
+    overrides = (on_disk.get("agent") or {}).get("reasoning_overrides") or {}
+    assert overrides == {"claude-opus-4-5": "medium"}, (
+        f"unrelated override entries must survive, got {overrides!r}"
+    )
