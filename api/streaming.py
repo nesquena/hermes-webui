@@ -625,6 +625,274 @@ def _install_streaming_cronjob_profile_wrapper() -> None:
     _STREAMING_CRONJOB_WRAPPER_INSTALLED = installed
 
 
+# ── In-chat cron tool: profile-pinned child boundary (#6753) ───────────────────────────────────────
+# ``cronjob(action="run")`` runs a full agent job (minutes). Executing that inside
+# ``cron_profile_context_for_home()`` held the process-wide ``_cron_env_lock`` for the
+# entire run, so every other cron/profile request in this process (chat, a second
+# window, /api/session, SSE) blocked on ``_cron_env_lock.acquire()`` and the UI froze.
+# The long actions now run in a spawned child that owns its own HERMES_HOME and cron
+# module globals; the parent waits for the JSON tool result with NO lock held. Short
+# metadata actions keep the existing serialized in-process context.
+_CRON_TOOL_RUN_ACTIONS = frozenset({"run", "run_now", "trigger"})
+# Same recovery bound as the panel subprocess default: legitimate long runs are
+# allowed through, a wedged child is reaped.
+_CRON_TOOL_CHILD_TIMEOUT_SECONDS = 6 * 60 * 60.0
+_CRON_TOOL_HEARTBEAT_INTERVAL = 10.0
+_CRON_TOOL_HEARTBEAT_CEILING = 6 * 60 * 60.0
+
+
+def _cron_tool_action(args) -> str:
+    """Normalized cron tool action (``"run"``, ``"list"``, ...) from the tool args."""
+    try:
+        return str((args or {}).get("action") or "").strip().lower()
+    except (TypeError, AttributeError):
+        return ""
+
+
+def _cron_tool_uses_live_gateway_handles() -> bool:
+    """True when this process owns live gateway delivery handles for a run.
+
+    ``tools.cronjob_tools._run_claimed_job`` delivers through the gateway runner's
+    adapter map and event loop when ``gateway.run`` is already loaded in-process
+    (Matrix/aiohttp clients cannot be driven from another process' loop). Those
+    handle-backed runs stay on the parent path so delivery keeps its live clients;
+    lifting them out of the lock needs a serializable delivery bridge, tracked
+    separately exactly as in #7328. Handle-free runs — the WebUI case, which never
+    imports ``gateway.run`` — call ``run_one_job(adapters=None)`` and are safe in a
+    child. Mirrors ``_run_claimed_job``'s detection: sys.modules lookup only, never
+    importing ``gateway.run`` here.
+    """
+    ref = getattr(sys.modules.get("gateway.run"), "_gateway_runner_ref", None)
+    if not callable(ref):
+        return False
+    try:
+        return ref() is not None
+    except Exception:
+        return False
+
+
+def _cron_tool_error(message: str) -> str:
+    """Tool-error JSON, the same body shape ``cronjob()`` returns for its own failures."""
+    try:
+        from tools.registry import tool_error
+
+        return tool_error(message, success=False)
+    except Exception:
+        return json.dumps({"error": str(message), "success": False}, ensure_ascii=False)
+
+
+@contextlib.contextmanager
+def _cron_tool_activity_heartbeat(label: str):
+    """Feed the calling turn's activity watchdog while a child runs the job (#76502).
+
+    The agent's own ``_run_heartbeat`` now runs on the child's thread, and the
+    activity callback is thread-local, so it can no longer reach this turn —
+    without it the gateway inactivity watchdog would kill a turn that waits minutes
+    for the job. Capture the callback on the calling thread first (the contract
+    ``get_activity_callback`` documents) and feed it from a side thread while we
+    wait. Best-effort: no callback (direct or test callers) -> no thread.
+    """
+    try:
+        from tools.environments.base import get_activity_callback
+
+        callback = get_activity_callback()
+    except Exception:
+        callback = None
+    if callback is None:
+        yield
+        return
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def _loop():
+        while not stop.wait(_CRON_TOOL_HEARTBEAT_INTERVAL):
+            if time.monotonic() - started > _CRON_TOOL_HEARTBEAT_CEILING:
+                return
+            try:
+                callback(f"{label} ({int(time.monotonic() - started)}s elapsed)")
+            except Exception:
+                return
+
+    heartbeat = threading.Thread(target=_loop, name="webui-cron-tool-heartbeat", daemon=True)
+    heartbeat.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        heartbeat.join(timeout=5)
+
+
+def _drain_child_background_work() -> None:
+    """Let work the child dispatched to its own daemon executor finish.
+
+    ``_action_run`` may hand the run to the async-delegation executor and return a
+    "running in the background" note immediately; those executor threads are daemon
+    threads, so exiting now would kill the very job the JSON result just promised was
+    running. Wait (bounded) for the child's own units to settle — their completions
+    are persisted to state.db, so the parent delivers them later.
+    """
+    try:
+        from tools.async_delegation import active_count
+    except Exception:
+        return
+    deadline = time.monotonic() + _CRON_TOOL_CHILD_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        try:
+            if active_count() <= 0:
+                return
+        except Exception:
+            return
+        time.sleep(0.5)
+
+
+def _cron_tool_subprocess_main(handler, args, kwargs, profile_home, session_key, result_queue):
+    """Run one in-chat cron tool call inside a child pinned to a profile home."""
+    try:
+        from api.profiles import cron_profile_context_for_home
+
+        # Never re-enter the WebUI wrapper inside the child: the child's lock is its
+        # own and non-reentrant, so a double wrap would deadlock it.
+        while getattr(handler, "_webui_streaming_profile_wrapper", False):
+            handler = handler.__dict__["_webui_original_handler"]
+        # Detached-completion routing lives in a thread-LOCAL contextvar on the parent
+        # turn, which does not cross the process boundary; rebind it here so a
+        # background dispatch inside the child still routes to this session.
+        if session_key:
+            try:
+                from tools.approval_context import set_current_session_key
+
+                set_current_session_key(str(session_key))
+            except Exception:
+                logger.debug("cron child: could not rebind session key", exc_info=True)
+        if profile_home:
+            with cron_profile_context_for_home(Path(profile_home)):
+                result = handler(args, **kwargs)
+        else:
+            result = handler(args, **kwargs)
+        result_queue.put(("ok", result))
+        _drain_child_background_work()
+    except BaseException as exc:  # pragma: no cover - surfaced in the parent
+        result_queue.put(("error", f"{type(exc).__name__}: {exc}", traceback.format_exc()))
+
+
+def _cron_tool_subprocess_result_timeout_seconds() -> float:
+    """How long the in-chat wrapper waits for the child's tool result."""
+    return _CRON_TOOL_CHILD_TIMEOUT_SECONDS
+
+
+def _run_cron_tool_inline(handler, args, kwargs, profile_home):
+    """Legacy in-process path: serialized under the cron profile context."""
+    from api.profiles import cron_profile_context_for_home
+
+    with cron_profile_context_for_home(Path(profile_home)):
+        return handler(args, **kwargs)
+
+
+def _run_cron_tool_in_profile_subprocess(handler, args, kwargs, profile_home):
+    """Run ``action=run`` in a profile-pinned child so the parent holds no lock.
+
+    ``cron.jobs``/``cron.scheduler`` snapshot process-global HERMES_HOME and module
+    path constants, so the long job body gets its own globals in a spawned child —
+    the same boundary the Scheduled Jobs panel has used since #1746. The parent waits
+    for the JSON tool result without touching ``_cron_env_lock``, leaving unrelated
+    cron/profile requests responsive for the whole run (#6753), while the tool's
+    immediate-result and at-most-once claim semantics are unchanged: the original
+    handler still claims, runs and reports exactly as before, only in a child.
+    """
+    import multiprocessing
+    import pickle
+    import queue
+
+    try:
+        # The detached-completion routing key is thread-local on this turn; capture it
+        # before the child starts (the same contract get_activity_callback documents).
+        from tools.approval_context import get_current_session_key
+
+        session_key = str(get_current_session_key(default="") or "")
+    except Exception:
+        session_key = ""
+
+    child_args = (
+        handler,
+        args,
+        kwargs,
+        str(profile_home) if profile_home else None,
+        session_key,
+    )
+    try:
+        # spawn pickles the Process args; fail fast so an unpicklable handler or
+        # args degrade to the legacy path instead of dying inside process.start().
+        pickle.dumps(child_args)
+    except Exception:
+        logger.warning(
+            "in-chat cron run: cannot pickle tool call for a child; running it in-process",
+            exc_info=True,
+        )
+        return _run_cron_tool_inline(handler, args, kwargs, profile_home)
+
+    ctx = multiprocessing.get_context("spawn")
+    result_queue = ctx.Queue(maxsize=1)
+    process = ctx.Process(target=_cron_tool_subprocess_main, args=(*child_args, result_queue))
+    try:
+        process.start()
+    except Exception:
+        logger.warning("in-chat cron run: child start failed; running it in-process", exc_info=True)
+        return _run_cron_tool_inline(handler, args, kwargs, profile_home)
+
+    timeout = _cron_tool_subprocess_result_timeout_seconds()
+    status, payload = "error", ["cron run subprocess failed before producing a result", ""]
+    try:
+        # Heartbeat captures the thread-local activity callback on THIS thread.
+        with _cron_tool_activity_heartbeat("cronjob run"):
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    # Drain before join: a >~64 KiB pickled result deadlocks a plain
+                    # join while the child's feeder thread waits for us to read it.
+                    status, *payload = result_queue.get(timeout=0.1)
+                    break
+                except queue.Empty:
+                    if not process.is_alive():
+                        status, *payload = "error", [
+                            f"cron run subprocess exited with code {process.exitcode} "
+                            "without producing a result",
+                            "",
+                        ]
+                        break
+                    if time.monotonic() >= deadline:
+                        process.terminate()
+                        process.join(timeout=5)
+                        status, *payload = "error", [
+                            f"cron run subprocess produced no result within {timeout:g}s "
+                            "and was terminated",
+                            "",
+                        ]
+                        break
+    finally:
+        result_queue.close()
+        result_queue.join_thread()
+
+    if status == "ok":
+        # Never terminate a child that already delivered: it may still be running work
+        # it dispatched to its own background executor. Reap it from a side thread.
+        if process.is_alive():
+            threading.Thread(
+                target=process.join, name="webui-cron-tool-child-reaper", daemon=True
+            ).start()
+        return payload[0]
+
+    # Error/timeout: the child is wedged or dead — reap it before reporting.
+    process.join(timeout=5)
+    if process.is_alive():
+        process.terminate()
+        process.join(timeout=5)
+    message = str(payload[0])
+    traceback_text = payload[1] if len(payload) > 1 else ""
+    if traceback_text:
+        logger.error("In-chat cron run subprocess failed:\n%s", traceback_text)
+    return _cron_tool_error(message)
+
+
 def _streaming_cronjob_profile_handler(original_handler):
     """Return a cron tool handler that enters the streaming cron profile.
 
@@ -632,13 +900,32 @@ def _streaming_cronjob_profile_handler(original_handler):
     using an unfiltered ``contextvars.copy_context()`` so this WebUI-owned
     contextvar reaches the sync cronjob handler even when the tool call runs
     on the agent's ThreadPoolExecutor worker.
+
+    Long-running run actions do NOT execute here: they are handed to a
+    profile-pinned child so the process-wide ``_cron_env_lock`` is never held
+    across a whole job (#6753). Metadata actions keep the short serialized
+    context.
     """
 
     def _profile_scoped_cronjob_handler(args, **kwargs):
         profile_home = _STREAMING_CRON_PROFILE_HOME.get()
         if not profile_home:
             return original_handler(args, **kwargs)
+        # #6753: `run`/`run_now`/`trigger` execute the entire job body (minutes)
+        # under the lock in the naive wrapper, freezing every other cron/profile
+        # request in this process. Move them behind the child boundary; anything
+        # else is short metadata work that stays on the serialized path. Runs
+        # that would deliver through live gateway handles stay on the parent
+        # path with their delivery context intact (#7328 residual).
+        if (
+            _cron_tool_action(args) in _CRON_TOOL_RUN_ACTIONS
+            and not _cron_tool_uses_live_gateway_handles()
+        ):
+            return _run_cron_tool_in_profile_subprocess(
+                original_handler, args, kwargs, profile_home
+            )
         from api.profiles import cron_profile_context_for_home
+
         with cron_profile_context_for_home(Path(profile_home)):
             return original_handler(args, **kwargs)
 
