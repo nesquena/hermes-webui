@@ -304,8 +304,17 @@ def test_child_start_uses_spawn_context():
 
 def test_child_target_runs_handler_under_profile_context():
     """Module-level spawn target exists and pins the profile context itself."""
-    assert multiprocessing.get_start_method(allow_none=True) is not None
+    # The child is spawned through an explicit spawn context (see
+    # test_child_start_uses_spawn_context), so the process-global default
+    # start method is irrelevant to this contract. Asserting on it made the
+    # test order-dependent: get_start_method(allow_none=True) is None until
+    # some *other* test calls set_start_method(), so this test passed or
+    # failed depending on which tests ran earlier in the same CI shard.
+    assert multiprocessing.get_context("spawn").get_start_method() == "spawn"
+    # Spawn ships the target to the child by reference, so it must be a
+    # module-level function reachable by qualified name (not a closure).
     assert hasattr(st, "_cron_tool_subprocess_main")
+    assert st._cron_tool_subprocess_main.__qualname__ == "_cron_tool_subprocess_main"
     assert st._cron_tool_subprocess_main.__module__ == st.__name__
     source = Path(st.__file__).read_text(encoding="utf-8")
     start = source.find("def _cron_tool_subprocess_main")
