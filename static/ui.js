@@ -7302,6 +7302,13 @@ function _fitComposerFooter(){
   const _btnStyle=sendBtn&&sendBtn.style?sendBtn.style:null;
   const prevBtnWidth=_btnStyle?_btnStyle.width:'';
   const prevBtnMinWidth=_btnStyle?_btnStyle.minWidth:'';
+  // #7686 re-gate (2026-10-18): the busy button's horizontal padding and gap
+  // must be zeroed for the icon measurement too. Hiding the label alone leaves
+  // `padding: 0px 12px 0px 10px; gap: 6px` active, so native measurement reads
+  // 38px busy versus 34px idle — a stage-boundary window survives the minimum.
+  // Zeroing padding/gap alongside width/minWidth produces the required 34px.
+  const prevBtnPadding=_btnStyle?_btnStyle.padding:'';
+  const prevBtnGap=_btnStyle?_btnStyle.gap:'';
   // Hide the label so the measured footprint is the icon's, not the pill's.
   if(sendBtnLabel) sendBtnLabel.style.display='none';
   if(_btnStyle){
@@ -7316,6 +7323,11 @@ function _fitComposerFooter(){
     // Reserve 34px desktop / 44px phone during the measurement; `finally`
     // still restores the previous value afterwards.
     _btnStyle.minWidth=(window.innerWidth<=640?'44px':'34px');
+    // The icon footprint carries no horizontal padding and no gap (see
+    // .send-btn.cf-action-icon in style.css); mirror that here so the
+    // measurement and the collapsed paint agree.
+    _btnStyle.padding='0';
+    _btnStyle.gap='0';
   }
   // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
   // boundary crossing (this fit path measures real overflow at any width,
@@ -7363,7 +7375,19 @@ function _fitComposerFooter(){
     if(_btnStyle){
       _btnStyle.width=prevBtnWidth;
       _btnStyle.minWidth=prevBtnMinWidth;
+      _btnStyle.padding=prevBtnPadding;
+      _btnStyle.gap=prevBtnGap;
     }
+    // #7686 re-gate (2026-10-18): remove any PREVIOUS collapse BEFORE probing
+    // the fully restored pill for overflow. The check reads .composer-left's
+    // scrollWidth, and while the previous pass's .cf-action-icon is still on
+    // the button the probe sees the collapsed geometry: when the collapsed icon
+    // fits, the check removes the class, restoring a pill that does NOT fit —
+    // so the next fit collapses it again. A 480px footer with a 400px budget
+    // and the Interrupt action alternated 34px/0px -> 107.75px/58px across six
+    // consecutive fits (three independent browser runs). Clearing the class
+    // first makes the six-pass control stable with no clipping.
+    if(sendBtn&&sendBtn.classList) sendBtn.classList.remove('cf-action-icon');
     // #7686 re-gate (must fix): the stage was resolved against the ICON
     // footprint, so restoring the busy pill can now overflow .composer-left.
     // Absorb that by collapsing only the label/button geometry through
@@ -7372,9 +7396,8 @@ function _fitComposerFooter(){
     // The label still shows at widths where the pill fits (the maintainer's
     // prototype keeps "Interrupt" at 107px), so the collapse is conditional
     // on a real overflow, not unconditional.
-    if(sendBtn&&sendBtn.classList){
-      if(left.scrollWidth>left.clientWidth+1) sendBtn.classList.add('cf-action-icon');
-      else sendBtn.classList.remove('cf-action-icon');
+    if(sendBtn&&sendBtn.classList&&left.scrollWidth>left.clientWidth+1){
+      sendBtn.classList.add('cf-action-icon');
     }
     // Releasing the frozen box is the LAST write of the pass: the height and
     // visibility go back together, so no sample between the probe and the

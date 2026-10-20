@@ -234,3 +234,74 @@ def test_the_translated_value_still_wins_when_present() -> None:
     assert "?_val:" in body, (
         "when t() returns a real translation it must win over the fallback"
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-18 re-gate: the fitter's measurement box and the collapse ordering.
+# ---------------------------------------------------------------------------
+
+
+def _fitter_body() -> str:
+    start = UI_JS.find("function _fitComposerFooter(")
+    assert start >= 0, "_fitComposerFooter not found in static/ui.js"
+    return UI_JS[start : UI_JS.find("\nwindow._fitComposerFooter", start)]
+
+
+def test_the_icon_measurement_zeroes_padding_and_gap() -> None:
+    """The busy button must measure as the 34px icon, not a 38px pill.
+
+    Hiding the label alone leaves the busy button's horizontal padding and gap
+    active (``padding: 0px 12px 0px 10px; gap: 6px``), so the native measurement
+    reads 38px busy against 34px idle and a stage-boundary window survives the
+    new minimum. Zeroing padding/gap alongside width/minWidth removes it.
+    """
+    body = _fitter_body()
+    assert "_btnStyle.padding='0'" in body, (
+        "the icon measurement must zero the button's horizontal padding"
+    )
+    assert "_btnStyle.gap='0'" in body, (
+        "the icon measurement must zero the button's gap"
+    )
+    # ...and both must be restored in finally, or the pill loses its shape.
+    assert "_btnStyle.padding=prevBtnPadding" in body, (
+        "the zeroed padding must be restored in finally"
+    )
+    assert "_btnStyle.gap=prevBtnGap" in body, (
+        "the zeroed gap must be restored in finally"
+    )
+
+
+def test_the_collapse_class_is_cleared_before_the_overflow_probe() -> None:
+    """Consecutive fits must not oscillate between collapsed and overflowing.
+
+    The overflow check reads .composer-left's scrollWidth. While the previous
+    pass's .cf-action-icon is still on the button the probe sees the collapsed
+    geometry, so a fit that fits removes the class, restores a pill that does
+    not fit, and the next fit collapses it again -- the 34px/0px <-> 107.75px/58px
+    alternation the maintainer reproduced over six consecutive fits. The class
+    must therefore be removed BEFORE the probe and re-added only on a real
+    overflow of the fully restored pill.
+    """
+    body = _fitter_body()
+    # Only the `finally` tail matters: the same scrollWidth expression also
+    # appears in the stage-selection probe near the top of the function, so the
+    # ordering must be judged inside the restore block.
+    tail_at = body.find("if(sendBtnLabel) sendBtnLabel.style.display=prevLabelDisplay;")
+    assert tail_at >= 0, "the restore block was not found"
+    tail = body[tail_at:]
+    remove_at = tail.find("sendBtn.classList.remove('cf-action-icon')")
+    probe_at = tail.find("left.scrollWidth>left.clientWidth+1")
+    add_at = tail.find("sendBtn.classList.add('cf-action-icon')")
+    assert remove_at >= 0, "the previous collapse class must be cleared"
+    assert probe_at > remove_at, (
+        "the overflow probe must run against the fully restored pill, i.e. "
+        "after the previous .cf-action-icon has been removed"
+    )
+    assert add_at > probe_at, (
+        "the collapse must be re-applied only after the probe measured the "
+        "restored pill"
+    )
+    # The collapse stays conditional: a footer that fits keeps its label.
+    assert "if(sendBtn&&sendBtn.classList&&left.scrollWidth>left.clientWidth+1){" in body, (
+        "the collapse must remain conditional on a real overflow"
+    )
