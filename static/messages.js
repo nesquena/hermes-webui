@@ -2344,6 +2344,7 @@ function closeLiveStream(sessionId, streamId, source, reconnecting=false){
   if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
+  if(typeof a11yResetStreamState==='function') a11yResetStreamState(sessionId);
   _resumeSessionStreamAfterLiveChat(sessionId);
   // closeLiveStream() is called during session-switch teardown for any session
   // the user is no longer viewing. The stream is still active on the server,
@@ -2443,7 +2444,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let assistantText='';
   let reasoningText='';
   if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-  if(typeof a11yOnStreamStart==='function') a11yOnStreamStart(activeSid,{reconnecting});
+  if(typeof a11yOnStreamStart==='function') a11yOnStreamStart(activeSid,{reconnecting,streamId});
   const existingLive=LIVE_STREAMS[activeSid];
   if(
     existingLive&&existingLive.streamId===streamId&&existingLive.source&&
@@ -2637,7 +2638,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _setActivePaneIdleIfOwner(){
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
-      if(typeof a11ySetStreamBusy==='function') a11ySetStreamBusy(false, activeSid);
+      if(typeof a11yResetStreamState==='function') a11yResetStreamState(activeSid,{streamId});
+      else if(typeof a11ySetStreamBusy==='function') a11ySetStreamBusy(false, activeSid);
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
@@ -7067,6 +7069,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         _setActivePaneIdleIfOwner();
         if(typeof a11yOnStreamDone==='function'){
           a11yOnStreamDone(activeSid,{
+            completedSid,
+            streamId,
             message:lastAsst,
             liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
           });
@@ -7363,10 +7367,11 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
       _setActivePaneIdleIfOwner();
+      const _appErrSid=(d&&d.session&&d.session.session_id)||activeSid;
       if(_extensionErrorType==='turn:cancel'){
-        if(typeof a11yOnStreamCancel==='function') a11yOnStreamCancel(activeSid);
+        if(typeof a11yOnStreamCancel==='function') a11yOnStreamCancel(activeSid,{completedSid:_appErrSid,streamId});
       }else{
-        if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, d.message||'');
+        if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, d.message||'',{completedSid:_appErrSid,streamId});
       }
       renderSessionList(); // clear streaming indicator immediately on apperror
       _dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId,{
@@ -7582,7 +7587,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;
       renderSessionList();
       _setActivePaneIdleIfOwner();
-      if(typeof a11yOnStreamCancel==='function') a11yOnStreamCancel(activeSid);
+      const _cancelSid=(_cancelSessionPayload&&_cancelSessionPayload.session_id)||activeSid;
+      if(typeof a11yOnStreamCancel==='function') a11yOnStreamCancel(activeSid,{completedSid:_cancelSid,streamId});
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
@@ -7982,7 +7988,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     _setActivePaneIdleIfOwner();
-    if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, 'Connection lost');
+    if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, 'Connection lost', {streamId});
     _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
       status:'connection_lost',
       endedAt:Date.now()/1000,
