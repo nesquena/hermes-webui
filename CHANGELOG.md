@@ -82,6 +82,30 @@
 
 ### Fixed
 
+- **A message you send while a /goal continuation is pending runs as your own turn.** The pending continuation no longer claims the next message for the goal: each continuation carries its own ID, and only that continuation is treated as goal-related. A continuation restored into the composer after a reload, or saved while a clarify question is open, keeps its ID while the text is unchanged. A regenerate no longer uses up the pending continuation, and deleting a session clears it. (#7855, part of #6885, thanks @happy5318)
+
+- **Insights cache hit rate is no longer stuck at or below 50%.** Cache reads are already counted inside input tokens, so the rate now divides cache reads by the full prompt total, in the daily chart and the per-model and overall figures. Thanks @balabommablock-cpu. (#8372, fixes #8345)
+
+- **Today's messaging DM stays in Today.** After a Telegram/Discord `session_reset`, the new session is shown as its own top-level conversation (keeping its lineage link) instead of being nested under the old chat, so it no longer drops out of "Today". Branches, subagents, CLI and compression children are grouped as before. (#8298, thanks @solarmaster961)
+
+- **Test suite: no real DNS lookups.** The shared test network guard now blocks DNS as well as connections (IP literals and `localhost` still resolve). A real lookup in the custom-provider address check could take longer than the 4-second model-list limit on a slow CI resolver, which made `test_seeded_config_survives_a_stale_loaded_config_path` fail on unrelated PRs. (#8396)
+
+- **The finished reply stays on screen in Transparent Stream.** When a long Transparent Stream turn settles, the reply is finalized in place instead of re-rendering the whole transcript, so it no longer blanks for a moment at the end of a turn; disclosure choices, detail scroll and table sort/filter controls survive. (#7833, closes #7676, thanks @MuhammadUsamaMX)
+
+- **Steer goes to the live Gateway run.** With the Gateway backend, Steer now forwards your message to the running turn instead of queueing it as the next one. If the connection to the Gateway drops and the run finishes before it reads the steer text, the text is replayed instead of lost. (#7919, thanks @carlotestor)
+
+- **Long chats stop jumping while you scroll.** In long virtualized transcripts, rows measured during a scroll no longer pull the view back and forth or teleport it mid-gesture, the scrollbar thumb lands where you drop it, and jump-to-question lands on the answer. Older-row loading and streaming tail-follow keep their place. (#8122, closes #7591, thanks @MuhammadUsamaMX)
+
+- **Archiving a session from another profile works.** With All profiles on, archiving or restoring a CLI or imported session that belongs to another profile no longer fails with "Session not found", keeps the session's CLI source details, and never writes a copy into the wrong profile. A request that names the wrong owner gets a clear profile-mismatch error. (#7731, closes #7549, thanks @MuhammadUsamaMX)
+
+- **Long messages no longer show another message's text.** The render cache identified messages over 500 characters by their length plus their first and last 20 characters, so two equal-length messages from the same template (status reports, cron summaries, regenerated answers) shared an entry and the second displayed the first one's body. Long messages are now keyed on a hash of the whole text. Saved data was never affected. (#8387)
+
+- **Tool calls without a result no longer break a conversation.** An assistant tool call whose result never arrived (an interrupted run, a crash between call and result) is now repaired the same way the Agent repairs it, so the next reply stays in the saved model context instead of being dropped, including when an older tool call had empty or broken arguments. (#7237, thanks @happy5318)
+
+- **Subagent runs stay with their parent conversation in the sidebar.** With All profiles on and a project filter such as Unassigned, delegated subagent sessions whose parent was filed in another project, or belonged to another profile, or was itself a subagent, showed up as contextless top-level "Subagent Session" rows (18 on one real install). They now follow their parent: nested when the parent is visible, hidden with it when it is filtered out, and still listed as an openable orphan when the parent is missing, compressed, or a CLI conversation. (#7771, thanks @carlotestor)
+
+- **Windows file links open the right file.** A `file:///C:/...` link or image in a reply now reaches the media route with its drive letter intact, so it previews or downloads on a Windows server (on a POSIX server a `/C:/...` path stays absolute and can never alias a workspace file). Streaming and finished replies convert links the same way, a network-share `file://server/...` link is left as a plain link, and a `#` or `?` in a file name is kept. (#8243, closes #8033, thanks @happy5318)
+
 - **The quota chip follows the open conversation's provider.** The chip by the model picker (and the Quota pill in the phone composer) used to show the server default's numbers: a DeepSeek chat showed Codex's 5-hour window. It now shows the conversation's own provider in its units (percent windows for plans, a balance for prepaid accounts), refreshes on a conversation, provider or profile switch, and clears at once so another account's numbers never show. Thanks @sheldon-im. (#6506)
 
 - **Test suite: the mobile camera-choice test no longer fails in full runs.** `test_issue6942_mobile_camera_choice_render` started its own server with the shared test server's config path, so after earlier tests configured a provider there it auto-completed and saved onboarding, and later browser contexts skipped the request the test waited for. The test's server now uses its own config and workspace. Test-only. (PR #8382)

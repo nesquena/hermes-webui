@@ -5076,8 +5076,9 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
         const showLabel = idx === 0 || idx === chartRows.length - 1 || idx % labelEvery === 0;
         const titleDate = r.title || r.date;
         const cacheRead = Number(r.cache_read_tokens || 0);
-        // Bounded daily cache hit rate: reads / (input + reads), 0-100%.
-        const cacheDenom = input + cacheRead;
+        // Daily cache hit rate: reads over the full prompt total. The server
+        // already counts cache reads and writes inside input_tokens.
+        const cacheDenom = input;
         const cacheStr = (cacheRead > 0 && cacheDenom > 0)
           ? ` · ${Math.min(100, Math.round((cacheRead / cacheDenom) * 100))}% ${t('insights_model_cache')}`
           : '';

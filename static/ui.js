@@ -574,6 +574,83 @@ function _messageVirtualDefaultHeightForRole(role){
     role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role)?role:'default'
   ];
 }
+// #7591: the flat per-role constants above are only a PRIOR. On long sessions
+// with tall tool outputs, tables and inline images they ran 3.6x the measured
+// row height (#7591) — and 34% short on a 2,000-message session (#7283) — so
+// every virtual pad built from them was wrong by tens of thousands of px, which
+// is the error that flings the viewport on each mid-gesture re-window. Seed
+// unmeasured rows with what THIS transcript actually renders: per-role samples
+// shrink toward that role's flat prior until they carry the estimate alone, and
+// a role's mean freezes once it has MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES
+// samples so a live running mean cannot wobble the pads while the restore layer
+// chases the wobble. Measured rows never use this path (the height cache wins).
+const MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES=5;
+const MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES=20;
+let _messageVirtualRoleHeightSamples=Object.create(null);
+function _resetMessageVirtualRoleCalibration(){
+  _messageVirtualRoleHeightSamples=Object.create(null);
+}
+function _recordMessageVirtualRoleMeasurement(role,rawIdx,height){
+  const h=Number(height);
+  const idx=Number(rawIdx);
+  if(!(h>0)||!Number.isFinite(idx)) return;
+  const key=(role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role))?role:'default';
+  if(!(Number(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[key])>0)) return;
+  let slot=_messageVirtualRoleHeightSamples[key];
+  // Rows, not render passes: the measure pass runs on every render over the SAME
+  // handful of mounted rows, so counting passes would freeze a role's mean on a
+  // couple of rows before the rest of the transcript was ever seen (#7591 P2).
+  if(!slot){ slot={rows:new Map(),frozen:0}; _messageVirtualRoleHeightSamples[key]=slot; }
+  if(slot.frozen>0) return;
+  if(slot.rows.get(idx)===h) return;
+  slot.rows.set(idx,h);
+  if(slot.rows.size>=MESSAGE_VIRTUAL_CALIBRATION_FREEZE_SAMPLES){
+    let sum=0;
+    for(const value of slot.rows.values()) sum+=value;
+    slot.frozen=sum/slot.rows.size;
+  }
+}
+function _shiftMessageVirtualRoleSamples(previousEntries, nextEntries, prependedCount){
+  const count=Math.max(0, Number(prependedCount)||0);
+  if(!(count>0)) return;
+  if(!Array.isArray(previousEntries)||!Array.isArray(nextEntries)) return;
+  // #7591: rawIdx is POSITIONAL over S.messages (see _getVisibleMessagesWithIdx),
+  // so prepending older history moves every key. The height cache is shifted for
+  // exactly this reason in _syncMessageVirtualHeightCache; these per-role samples
+  // must travel with it, or re-measuring the same rows after a prepend lands under
+  // fresh keys and counts them twice toward the freeze.
+  const remap=new Map();
+  for(let i=0;i<previousEntries.length;i++){
+    const previous=previousEntries[i];
+    const next=nextEntries[i+count];
+    if(!previous||!next) continue;
+    const from=Number(previous.rawIdx);
+    const to=Number(next.rawIdx);
+    if(Number.isFinite(from)&&Number.isFinite(to)&&from!==to) remap.set(from,to);
+  }
+  if(!remap.size) return;
+  for(const role in _messageVirtualRoleHeightSamples){
+    const slot=_messageVirtualRoleHeightSamples[role];
+    if(!slot||!slot.rows||!slot.rows.size) continue;
+    // A frozen role already carries its mean and ignores these rows; shifting
+    // them would be inert, so leave the slot untouched.
+    if(slot.frozen>0) continue;
+    const shifted=new Map();
+    for(const [idx,height] of slot.rows) shifted.set(remap.has(idx)?remap.get(idx):idx, height);
+    slot.rows=shifted;
+  }
+}
+function _messageVirtualCalibratedRoleHeight(role){
+  const key=(role&&Object.prototype.hasOwnProperty.call(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS,role))?role:'default';
+  const prior=Number(MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS[key])||MESSAGE_VIRTUAL_DEFAULT_ROW_HEIGHTS.default;
+  const slot=_messageVirtualRoleHeightSamples[key];
+  if(!slot||!slot.rows.size) return Math.max(1,Math.round(prior));
+  if(slot.frozen>0) return Math.max(1,Math.round(slot.frozen));
+  let sum=0;
+  for(const value of slot.rows.values()) sum+=value;
+  const blended=(sum+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES*prior)/(slot.rows.size+MESSAGE_VIRTUAL_CALIBRATION_PRIOR_SAMPLES);
+  return Math.max(1,Math.round(blended));
+}
 // Cycle-aware measurement burst tracking (#6654/#6717): instead of a flat
 // render cap, the burst remembers every window cycle key it has already seen.
 // An UNSEEN key means the window is still converging forward (A->B->C->settled
@@ -632,16 +709,28 @@ const _recycleResetAttrs=[
   'data-live-assistant-turn',
 ];
 let _scrollbarDragActive=false;
+// #7591: blank-viewport recovery clamps at most once per detection cycle (see
+// _clampVirtualizedBlankViewportToRenderedEdge); reset when a render lands on
+// rendered rows and on session switch (_clearMessageVirtualHeightCache).
+let _messageVirtualBlankClampAttempts=0;
+// #7591: the blank-viewport clamp writes scrollTop from INSIDE a render that
+// _compensateScrollForMeasurementDelta wraps. That wrapper then reads its own
+// deliberate jump as a measurement delta and writes scrollTopBefore+delta over
+// the recovered position, dropping the reader back into the blank gap it just
+// escaped (scrollbar-driven and measurement-driven renders alike). The clamp
+// stamps a FRESH token here; the wrapper compares the token it saw before its
+// render against the stamp, so only a recovery performed by ITS OWN render is
+// recognised — a stale stamp from an unwrapped render (jumpToTurnQuestion calls
+// renderMessages directly) can never suppress a legitimate compensation. The
+// stamp is cleared in the wrapper's finally so a throw cannot leak it.
+let _blankViewportRecoveryToken=0;
+let _blankViewportRecoveryApplied=0;
 function _markMessageVirtualScrollActive(){
   _messageVirtualScrollActive=true;
   clearTimeout(_messageVirtualScrollSettleTimer);
   _messageVirtualScrollSettleTimer=setTimeout(()=>{
     _messageVirtualScrollActive=false;
-    if(_messageVirtualDeferredMeasurement){
-      const deferred=_messageVirtualDeferredMeasurement;
-      _messageVirtualDeferredMeasurement=null;
-      _scheduleMessageVirtualMeasurementRefresh(deferred);
-    }
+    _resumeDeferredMessageVirtualMeasurement();
   },150);
 }
 // Cached visWithIdx array — invalidated when S.messages.length changes.
@@ -658,6 +747,10 @@ function _clearMessageVirtualHeightCache(){
   _messageVirtualHeightCacheEntries=[];
   _messageVirtualHeightCacheLen=0;
   _messageVirtualHeightCacheSrc=null;
+  // Per-session geometry state: the role calibration (#7591) and the blank-viewport
+  // clamp budget both describe THIS transcript and must not leak into the next one.
+  if(typeof _resetMessageVirtualRoleCalibration==='function') _resetMessageVirtualRoleCalibration();
+  _messageVirtualBlankClampAttempts=0;
   _messageVirtualEstimatedRowHeight=_messageVirtualDefaultHeightForRole('default');
   _messageVirtualWindowKey='';
   _messageVirtualMeasurementCycleKey='';
@@ -755,10 +848,17 @@ function _messageVirtualWindow(opts){
   const tailStart=Math.max(0, total-keepTailCount);
   const heights=Array.isArray(opts&&opts.heights)?opts.heights:[];
   const roleForIdx=typeof (opts&&opts.roleForIdx)==='function'?opts.roleForIdx:null;
+  // #7591: callers may hand in a calibrated per-role height (measured mean for
+  // this transcript) so unmeasured rows estimate reality instead of the flat
+  // prior; absent that hook the flat role constants remain the fallback.
+  const roleDefaultFor=typeof (opts&&opts.defaultHeightForRole)==='function'?opts.defaultHeightForRole:null;
   const rowHeightFor=(idx)=>{
     const cached=Number(heights[idx]);
     if(Number.isFinite(cached)&&cached>0) return cached;
-    return roleForIdx?Math.max(1,_messageVirtualDefaultHeightForRole(roleForIdx(idx))):defaultHeight;
+    if(!roleForIdx) return defaultHeight;
+    const role=roleForIdx(idx);
+    if(roleDefaultFor) return Math.max(1,roleDefaultFor(role));
+    return Math.max(1,_messageVirtualDefaultHeightForRole(role));
   };
   if(total<=Math.max(threshold, keepTailCount)){
     return {virtualized:false,start:0,end:total,topPad:0,bottomPad:0,total,tailStart};
@@ -830,8 +930,28 @@ function _resetMessageVirtualMeasurementBurst(){
   // an internal marker survive onto a render that fires later (#6717 re-gate).
   _messageVirtualRenderQueuedOrigin=null;
 }
+function _resumeDeferredMessageVirtualMeasurement(){
+  const deferred=_messageVirtualDeferredMeasurement;
+  if(!deferred) return;
+  _messageVirtualDeferredMeasurement=null;
+  _scheduleMessageVirtualMeasurementRefresh(deferred);
+}
+function _messageJumpScrollOwnsViewport(){
+  return typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner;
+}
 function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   if(_messageVirtualScrollActive){
+    _messageVirtualDeferredMeasurement=windowMetrics;
+    return;
+  }
+  // #7591: a jump-to-question is smooth-scrolling toward an answer row the
+  // render window does not contain yet, and it holds ownership of the viewport
+  // while it settles. An internal measurement render fired in that window
+  // re-derives the window from a stale key and restores its own anchor, which
+  // REPLACES the smooth-scroll target — the requested answer then settles above
+  // the viewport. Hold the measurement chain until the jump releases ownership
+  // (_finishMessageJumpScroll / _cancelMessageJumpScroll flush it back).
+  if(typeof _messageJumpScrollOwnsViewport==='function'&&_messageJumpScrollOwnsViewport()){
     _messageVirtualDeferredMeasurement=windowMetrics;
     return;
   }
@@ -882,7 +1002,16 @@ function _scheduleMessageVirtualMeasurementRefresh(windowMetrics){
   // external request coalesces into the queued rAF, EXTERNAL wins and the
   // render that fires degrades to an unmarked (burst-resetting) render
   // (#6717 re-gate).
-  requestAnimationFrame(()=>{ _scheduleMessageVirtualizedRender(true,{origin:'internal'}); });
+  requestAnimationFrame(()=>{
+    // Re-check ownership at FIRE time: a jump can begin between this schedule
+    // and the next frame, and rendering then would replace the jump's
+    // smooth-scroll target. Hold it for the jump's own settlement to flush.
+    if(typeof _messageJumpScrollOwnsViewport==='function'&&_messageJumpScrollOwnsViewport()){
+      _messageVirtualDeferredMeasurement=windowMetrics;
+      return;
+    }
+    _scheduleMessageVirtualizedRender(true,{origin:'internal'});
+  });
 }
 function _markMessageVirtualMeasurementsSettled(windowMetrics){
   _messageVirtualMeasurementCycleKey=_messageVirtualMeasurementCycleKeyFor(windowMetrics);
@@ -946,6 +1075,9 @@ function _syncMessageVirtualHeightCache(visWithIdx){
         for(let i=0;i<previousEntries.length;i++){
           nextHeights[prependedCount+i]=previousHeights[i];
         }
+        // #7591: the role calibration samples are keyed by the same positional
+        // rawIdx, so they shift with the heights they were measured for.
+        if(typeof _shiftMessageVirtualRoleSamples==='function') _shiftMessageVirtualRoleSamples(previousEntries, nextEntries, prependedCount);
       }
     }
   }
@@ -993,6 +1125,7 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
     heights:_messageVirtualHeightCache,
     defaultHeight:_messageVirtualEstimatedRowHeight,
     roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
+    defaultHeightForRole:(typeof _messageVirtualCalibratedRoleHeight==='function')?_messageVirtualCalibratedRoleHeight:null,
     keepTailCount,
   });
 }
@@ -1006,7 +1139,11 @@ function _messageVirtualPrependedHeightDelta(prependedRenderableCount){
   let total=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    total+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    if(Number.isFinite(cached)&&cached>0){ total+=cached; continue; }
+    const role=_messageVirtualRoleForEntry(visWithIdx[i]);
+    total+=(typeof _messageVirtualCalibratedRoleHeight==='function')
+      ? _messageVirtualCalibratedRoleHeight(role)
+      : _messageVirtualDefaultHeightForRole(role);
   }
   return Math.max(0,Math.round(total));
 }
@@ -1088,7 +1225,11 @@ function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container
   let offset=0;
   for(let i=0;i<limit;i++){
     const cached=Number(_messageVirtualHeightCache[i]);
-    offset+=(Number.isFinite(cached)&&cached>0)?cached:_messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[i]));
+    if(Number.isFinite(cached)&&cached>0){ offset+=cached; continue; }
+    const role=_messageVirtualRoleForEntry(visWithIdx[i]);
+    offset+=(typeof _messageVirtualCalibratedRoleHeight==='function')
+      ? _messageVirtualCalibratedRoleHeight(role)
+      : _messageVirtualDefaultHeightForRole(role);
   }
   const viewport=container?Math.max(0,Number(container.clientHeight)||0):0;
   return Math.max(0,Math.round(offset-(viewport*0.35)));
@@ -1359,8 +1500,29 @@ function _compensateScrollForMeasurementDelta(renderFn){
   if(!container) return renderFn();
   const anchorBefore=_captureMessageViewportAnchor();
   const scrollTopBefore=container.scrollTop;
+  // A stamp left by an earlier, unwrapped render must never be mistaken for a
+  // recovery performed by THIS render (#7591).
+  _blankViewportRecoveryApplied=0;
+  const tokenBefore=_blankViewportRecoveryToken;
   container.classList.add('vscroll-measuring');
-  try{ renderFn(); }finally{ container.classList.remove('vscroll-measuring'); }
+  let recoveryApplied=false;
+  try{
+    renderFn();
+    recoveryApplied=_blankViewportRecoveryApplied>tokenBefore;
+  }finally{
+    container.classList.remove('vscroll-measuring');
+    // Read-then-clear in one finally, so a throw inside the render cannot leak
+    // the stamp into the next render and suppress a legitimate correction.
+    _blankViewportRecoveryApplied=0;
+  }
+  // #7591: the blank-viewport clamp moved scrollTop ON PURPOSE from inside this
+  // render. That deliberate jump is indistinguishable from a measurement delta,
+  // so the old-anchor compensation below would write scrollTopBefore+delta over
+  // the recovered position and put the reader back in the blank gap. The
+  // recovered position is the settled one for this render: the clamp already put
+  // a rendered row on screen, and the anchor it was captured against is no longer
+  // a reading position worth preserving.
+  if(recoveryApplied) return;
   if(!anchorBefore) return;
   if(scrollTopBefore<1){
     const spacer=container.querySelector('[data-virtual-spacer="before"]');
@@ -1409,7 +1571,10 @@ function _compensateScrollForMeasurementDelta(renderFn){
   const delta=actualOffset-anchorBefore.topOffset;
   if(Math.abs(delta)<2) return;
   _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
-  container.scrollTop=scrollTopBefore+delta;
+  // Correct from the CURRENT position. The render may already have moved scrollTop (the renderer restores its
+  // own anchor after calibration changes the spacer geometry); `delta` is measured against that position, so
+  // writing scrollTopBefore+delta threw the reader ~95 messages back on mobile (#8122 re-gate).
+  container.scrollTop+=delta;
   _lastScrollTop=container.scrollTop;
   _deferClearProgrammaticScroll();
 }
@@ -1552,6 +1717,11 @@ function _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, 
       _messageVirtualHeightCache[visibleIdx]=totalHeight;
       changed=true;
     }
+    // #7591: publish what this row really rendered so unmeasured rows of the
+    // same role estimate from the measured mean instead of the flat constant.
+    if(typeof _recordMessageVirtualRoleMeasurement==='function'){
+      _recordMessageVirtualRoleMeasurement(_messageVirtualRoleForEntry(entry), entry&&entry.rawIdx, totalHeight);
+    }
     measuredTotal+=totalHeight;
     measuredCount++;
   }
@@ -1666,6 +1836,20 @@ function _scheduleMessageVirtualizedRender(force, request){
     // unrelated render could steal (#6717 re-gate).
     const internalMeasurement=_messageVirtualRenderQueuedOrigin==='internal';
     _messageVirtualRenderQueuedOrigin=null;
+    // #7591: THIS callback is the LAST asynchronous hop of the internal
+    // measurement chain (measurement rAF -> here). The ownership re-check above
+    // runs in the first frame, so a jump that takes ownership BETWEEN the two
+    // frames used to render anyway: an internal measurement render re-derives
+    // the window from a stale key and restores its own anchor, which REPLACES
+    // the jump's smooth-scroll target and strands the requested answer above
+    // the viewport. Re-check before any compensation, programmatic-latch write
+    // or render, hold only INTERNAL work (genuine external renders must never
+    // be blanket-suppressed while a jump runs), and let finish/cancel flush it.
+    if(internalMeasurement&&typeof _messageJumpScrollOwnsViewport==='function'&&_messageJumpScrollOwnsViewport()){
+      const heldVisWithIdx=_getVisibleMessagesWithIdx();
+      _messageVirtualDeferredMeasurement=_currentMessageVirtualWindow(heldVisWithIdx,_messageVirtualKeepTailCount());
+      return;
+    }
     const liveVisWithIdx=_getVisibleMessagesWithIdx();
     const liveWindow=_currentMessageVirtualWindow(liveVisWithIdx,_messageVirtualKeepTailCount());
     const liveKey=_messageVirtualWindowKeyFor(liveWindow);
@@ -1693,15 +1877,28 @@ function _scheduleMessageVirtualizedRender(force, request){
 const _renderCache = new Map();
 const _renderCacheMax = 300;
 function _clearRenderCache(){ _renderCache.clear(); }
+// Two independent 32-bit multiplicative hashes over every UTF-16 unit of `text` (~64 bits together). Used for
+// long render-cache keys: the key must change whenever ANY character changes.
+function _renderCacheTextHash(text){
+  let a=0x811c9dc5, b=0x9e3779b9;
+  for(let i=0;i<text.length;i++){
+    const c=text.charCodeAt(i);
+    a=Math.imul(a^c,16777619)>>>0;
+    b=Math.imul(b^c,0x5bd1e995)>>>0;
+    b=(b^(b>>>15))>>>0;
+  }
+  return a.toString(36)+'.'+b.toString(36);
+}
 function _renderCacheKey(text, isUser){
   // Fold render_user_markdown state into user-message keys so toggling the
   // setting invalidates cached plain-text renders (#3870).
   const p = isUser ? (window._renderUserMarkdown ? 'um' : 'u') : 'a';
   // Short content: use the full string as key (cheap Map lookup).
-  // Long content: length + prefix + suffix is good enough — collisions on
-  // 20-char prefix+suffix are vanishingly rare for chat messages.
   if(text.length <= 500) return p + ':' + text;
-  return p + ':' + text.length + ':' + text.slice(0,20) + ':' + text.slice(-20);
+  // Long content: length + a hash of the whole text. The old length + first/last 20 characters key collided for
+  // equal-length messages that differ only in the middle (templated reports, regenerated answers, edited code),
+  // and the second message then displayed the first one's body.
+  return p + ':' + text.length + ':' + _renderCacheTextHash(text);
 }
 function _getCachedRender(text, isUser){
   const key = _renderCacheKey(text, isUser);
@@ -3092,8 +3289,22 @@ function _inlineMediaHtmlForRef(ref, sessionId, altText){
   if(/^file:\/\//i.test(ref)){
     try{
       const u=new URL(ref);
+      // #8033: file:///C:/Users/me/x parses to pathname '/C:/Users/me/x' —
+      // the file-URI grammar keeps the leading separator before the drive
+      // letter. The once-decoded pathname is forwarded to the backend AS-IS
+      // (no client-side strip): the server gates the drive-letter conversion
+      // on its own OS, so on a POSIX server '/C:/...' stays absolute and can
+      // never alias a cwd-relative drive-shaped path. Non-local file
+      // authorities (UNC: file://server/share/...) are explicitly rejected
+      // here — never silently rewired to a local path.
+      if(u.hostname&&!/^(localhost|127\.0\.0\.1|\[::1\])$/i.test(u.hostname)) return '';
       ref=decodeURIComponent(u.pathname||ref.replace(/^file:\/\//i,''));
     }catch(_){
+      // Fail-closed on a parse failure (AGENTS.md): the raw string may hide
+      // a non-local authority that the URL parse above never got to check.
+      // Reject anything shaped like 'file://<authority>/...' rather than
+      // silently rendering a local media element from it.
+      if(/^file:\/\/[^/?#]+/i.test(ref)) return '';
       try{ref=decodeURIComponent(ref.replace(/^file:\/\//i,''));}
       catch(__){ref=ref.replace(/^file:\/\//i,'');}
     }
@@ -7097,6 +7308,10 @@ function _finishMessageJumpScroll(generation){
   _lastMessageClientHeight=container.clientHeight;
   _messageJumpScrollOwner=null;
   _programmaticScroll=false;
+  // The jump no longer owns the viewport, so the measurement chain held during
+  // it can run (#7591). Guarded internally: if the reader is actively scrolling
+  // again the refresh is re-held for the scroll-settle timer instead.
+  if(typeof _resumeDeferredMessageVirtualMeasurement==='function') _resumeDeferredMessageVirtualMeasurement();
   if(typeof _syncScrollToBottomCue==='function'){
     _syncScrollToBottomCue(!_scrollPinned&&bottomDistance>80,{newMessage:_newMessageCueVisible});
   }
@@ -7125,6 +7340,9 @@ function _cancelMessageJumpScroll(){
   }
   _messageJumpScrollOwner=null;
   _programmaticScroll=false;
+  // A cancelled jump releases viewport ownership too, so a measurement refresh
+  // held for it must not be stranded (#7591).
+  if(typeof _resumeDeferredMessageVirtualMeasurement==='function') _resumeDeferredMessageVirtualMeasurement();
 }
 let _nearBottomCount=0;
 let _lastScrollTop=null;
@@ -9544,11 +9762,19 @@ function renderMd(raw){
       }
     }
     if(/^file:\/\//i.test(href)){
+      // #8033: same policy as the streaming converter (_smdLinkHref) and media refs (_inlineMediaHtmlForRef): only
+      // local authorities are served, a UNC 'file://server/share/...' link stays an inert file:// href, and the
+      // once-decoded pathname (with its '?…'/'#…' suffix) is forwarded with its leading separator.
       try{
-        const path=decodeURIComponent(href.replace(/^file:\/\//i,''));
+        const u=new URL(href);
+        if(u.hostname&&!/^(localhost|127\.0\.0\.1|\[::1\])$/i.test(u.hostname)) return href;
+        const path=decodeURIComponent((u.pathname||'')+((href.match(/[?#][\s\S]*$/)||[''])[0]));
         return 'api/media?path='+encodeURIComponent(path)+'&inline=1';
       }catch(_){
-        return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1';
+        // Fail closed: an unparseable URI with an authority may hide a non-local host.
+        if(/^file:\/\/[^/?#]+/i.test(href)) return href;
+        try{ return 'api/media?path='+encodeURIComponent(decodeURIComponent(href.replace(/^file:\/\//i,'')))+'&inline=1'; }
+        catch(__){ return 'api/media?path='+encodeURIComponent(href.replace(/^file:\/\//i,''))+'&inline=1'; }
       }
     }
     return href;
@@ -9802,8 +10028,18 @@ function lockComposerForClarify(placeholderText){
   if (sid && typeof _saveComposerDraftNow === 'function') {
     const saveText = String(input.value || '');
     const saveFiles = Array.isArray(S && S.pendingFiles) ? [...S.pendingFiles] : [];
+    // #7855: an unchanged restored goal continuation keeps its token in this save. Without it the
+    // payload stores goal_continuation_id '' and the continuation sent after a reload is no longer
+    // goal-related, which stops the goal loop. Edited text carries no token (round-7 rule).
+    const restoredCont = (typeof _peekRestoredGoalContinuationDraft === 'function')
+      ? _peekRestoredGoalContinuationDraft()
+      : null;
+    const saveContId = (restoredCont && restoredCont.id
+      && String(restoredCont.text || '').trim() === saveText.trim()) ? restoredCont.id : '';
     try {
-      const saveResult = _saveComposerDraftNow(sid, saveText, saveFiles);
+      const saveResult = saveContId
+        ? _saveComposerDraftNow(sid, saveText, saveFiles, saveContId)
+        : _saveComposerDraftNow(sid, saveText, saveFiles);
       if (saveResult && typeof saveResult.catch === 'function') {
         saveResult.catch((error)=>_handleComposerDraftPostFailure(error,sid,saveText,saveFiles));
       }
@@ -10025,7 +10261,11 @@ function setBusy(v){
         }
         autoResize();
         renderTray();
-        send();
+        // #7855 (round 5): pass the queued entry's continuation ID straight
+        // into THIS send() invocation. Round 4 published it to a shared module
+        // slot that any concurrent send could read, letting a genuine user
+        // turn consume the goal. An argument cannot leak across calls.
+        send({goalContinuationId:next.goal_continuation_id||''});
       },120);
     }
   }
@@ -10129,7 +10369,12 @@ function _renderQueueChips(sid){
         const liveQ=_getSessionQueue(sid,false);
         const first=snapshot.find(e=>e)||{};
         const firstFiles=(snapshot.find(e=>e&&Array.isArray(e.files)&&e.files.length)||{files:[]}).files;
-        liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,_queued_at:Date.now()});
+        // #7855: the combined entry keeps the FIRST continuation ID among the
+        // merged items. Combining a continuation with later user text still
+        // admits it (its ID is intact) — and a combine of pure user messages
+        // carries no ID, so it stays an ordinary turn.
+        const _contId=(snapshot.find(e=>e&&String(e.goal_continuation_id||'').trim())||{}).goal_continuation_id||'';
+        liveQ.length=0;liveQ.push({text:combined,files:firstFiles,model:first.model||'',model_provider:first.model_provider||null,goal_continuation_id:_contId,_queued_at:Date.now()});
         SESSION_QUEUES[sid]=liveQ;
         _persistSessionQueueStorage(sid,liveQ);
         delete _queueRenderKeys[sid];
@@ -10210,7 +10455,11 @@ function _renderQueueChips(sid){
         const liveQ=_getSessionQueue(sid,false);
         const idx=_entryTs!=null?liveQ.findIndex(e=>e&&e._queued_at===_entryTs):i;
         if(idx!==-1){
+          // #7855: keep the continuation ID when the user edits the text — the
+          // queue may rewrite the message, but the admission token stays with
+          // the entry (spread preserves it explicitly).
           liveQ[idx]={...liveQ[idx],text:newText};
+          if(liveQ[idx].goal_continuation_id==null) liveQ[idx].goal_continuation_id='';
           _persistSessionQueueStorage(sid,liveQ);
           delete _queueRenderKeys[sid];
           updateQueueBadge(sid);
@@ -12138,6 +12387,56 @@ function _liveTurnCarriesUnsettledContent(turn){
     '.tool-card-row,.wl-reason,.agent-activity-thinking,.thinking-card-row,.transparent-event-row'
   ).length) return true;
   return turn.querySelectorAll('[data-live-assistant="1"]').length>1;
+}
+function _normalizeTransferredLiveProse(turn){
+  // #7676 (Transparent Stream): a transferred live turn can carry the final
+  // answer in a segment that is deliberately hidden while its scene rows render
+  // the activity — `assistant-segment-worklog-source` + aria-hidden + hidden.
+  // If that node lands as the pane's ONLY copy of the reply (scene rows already
+  // removed by the settle render), the settled reply renders blank. After the
+  // node is attached, un-hide the retained final prose as the fallback — unless
+  // another visible scene row actually owns the prose.
+  //
+  // Visibility here is STRUCTURAL (hidden/aria-hidden/display), not geometric:
+  // this runs before the node is attached, where getClientRects() is empty for
+  // everything.
+  if(!turn||!turn.querySelectorAll) return turn;
+  const _segs=turn.querySelectorAll('.assistant-segment.assistant-segment-worklog-source[data-live-assistant="1"]');
+  if(!_segs||!_segs.length) return turn;
+  const _structVisible=(el)=>!!(el
+    && !el.hidden
+    && el.getAttribute('aria-hidden')!=='true'
+    && !(el.style&&el.style.display==='none'));
+  const _rows=Array.prototype.slice.call(turn.querySelectorAll(
+    '[data-anchor-scene-row="1"],.transparent-event-row,.tool-worklog-group,.tool-card-row'
+  ));
+  // While a stream is still attached, the transparent live scene keeps the
+  // streaming prose hidden ON PURPOSE (the rows are the progress surface) — a
+  // mid-stream render must not start showing it early. A reconnecting pane has
+  // no attached stream (S.activeStreamId null) and may reveal.
+  const _streaming=(typeof S!=='undefined'&&S&&!!S.activeStreamId);
+  const _otherVisibleContent=(()=>{
+    for(const other of turn.querySelectorAll('.assistant-segment')){
+      if(Array.prototype.indexOf.call(_segs,other)!==-1) continue;
+      if(other.classList.contains('assistant-segment-worklog-source')) continue;
+      if(_structVisible(other)&&(other.textContent||'').trim()) return true;
+    }
+    return _rows.some(row=>_structVisible(row)&&(row.textContent||'').trim());
+  })();
+  Array.prototype.slice.call(_segs).forEach(seg=>{
+    const text=(seg.textContent||'').trim();
+    if(!text) return;
+    const tail=text.slice(-Math.min(40,text.length));
+    const _owned=_rows.some(row=>_structVisible(row)&&(row.textContent||'').indexOf(tail)!==-1);
+    if(_owned) return;             // another visible scene row already shows this prose
+    if(_streaming&&_otherVisibleContent) return;  // live scene still owns the frame
+    seg.classList.remove('assistant-segment-worklog-source');
+    seg.removeAttribute('aria-hidden');
+    seg.removeAttribute('hidden');
+    seg.hidden=false;
+    if(seg.style) seg.style.display='';
+  });
+  return turn;
 }
 function _settledTranscriptOwnsLiveTurn(sid, turn){
   if(!turn) return false;
@@ -17325,6 +17624,67 @@ function _collapseJustSettledWorklogInPlace(streamId){
   }
   return true;
 }
+function _finalizeJustSettledTransparentScene(streamId){
+  // #7676 (Transparent Stream): the settled transparent scene is written by the
+  // FIRST settle render while the keep-open token is still armed, so it renders
+  // uncapped — and the compact path above cannot act on it (transparent activity
+  // rows are flat; there is no disclosure group to collapse). STREAM_DONE
+  // therefore used to fall through to a SECOND full render (`innerHTML=''`
+  // rebuild of the entire transcript) purely to reach the final state — the
+  // widest possible blank window, once per turn end.
+  //
+  // Finalize in place instead: re-render ONLY this turn's settled scene now that
+  // the token is disarmed (so the row cap and the retained-final-prose state are
+  // applied), never touching the rest of the transcript. Returns true only when
+  // that in-place finalize actually happened AND the turn is visibly non-blank;
+  // otherwise the caller must keep the full rebuild as the fallback.
+  if(!streamId) return false;
+  if(typeof isTransparentStream!=='function'||!isTransparentStream()) return false;
+  const inner=$('msgInner');
+  if(!inner||!Array.isArray(S.messages)) return false;
+  const msgs=S.messages;
+  let ownerIdx=-1;
+  for(let i=msgs.length-1;i>=0;i--){
+    const msg=msgs[i];
+    if(msg&&msg.role==='assistant'&&msg._anchor_activity_scene
+       &&typeof _settledAssistantStreamId==='function'
+       &&_settledAssistantStreamId(msg)===String(streamId)){
+      ownerIdx=i;break;
+    }
+  }
+  if(ownerIdx<0) return false;
+  const segment=inner.querySelector('.assistant-segment[data-msg-idx="'+ownerIdx+'"]');
+  if(!segment) return false;
+  const turn=typeof segment.closest==='function'?segment.closest('.assistant-turn'):null;
+  if(!turn) return false;
+  // The scene renderer replaces this turn's rows with the global default
+  // detail state; bracket it with the existing capture/restore pair (the same
+  // bracket renderMessages uses) so the reader's disclosure choices and detail
+  // body scroll survive the in-place finalize.
+  const detailDisclosureState=typeof _captureWorklogDetailDisclosureState==='function'
+    ? _captureWorklogDetailDisclosureState(turn)
+    : null;
+  const settledSceneRendered=_renderSettledAnchorSceneTransparentForMessage(msgs[ownerIdx],segment,ownerIdx);
+  if(typeof _restoreWorklogDetailDisclosureState==='function')
+    _restoreWorklogDetailDisclosureState(turn,detailDisclosureState);
+  if(!settledSceneRendered) return false;
+  const _visibleRows=turn.querySelectorAll('.transparent-event-row:not([hidden]):not([aria-hidden="true"])');
+  if(_assistantTurnHasVisibleRenderedSegment(turn)!==true&&!_visibleRows.length) return false;
+  // The skipped full render was also the pass that enhanced Markdown tables (sort buttons and filter, wired by
+  // the renderMessages wrapper in messages.js). The scene renderer replaced this turn's rows, so enhance them
+  // here; tables in retained activity rows otherwise lose sorting and filtering (#7833 re-gate).
+  if(typeof enhanceMarkdownTables==='function') enhanceMarkdownTables(turn);
+  // The skipped full render was also the one that (re)wrote _sessionHtmlCache:
+  // the first settle render is excluded while the keep-open token is armed, so
+  // drop any older entry for this session — a later switch must rebuild from
+  // S.messages instead of restoring pre-settle HTML.
+  if(typeof _sessionHtmlCache!=='undefined'&&_sessionHtmlCache
+     &&typeof _sessionHtmlCache.delete==='function'){
+    _sessionHtmlCache.delete(S.session&&S.session.session_id);
+    if(typeof _sessionHtmlCacheSid!=='undefined') _sessionHtmlCacheSid=null;
+  }
+  return true;
+}
 // True while a just-settled worklog is being force-rendered open (between
 // _armKeepSettledWorklogOpen and _disarmKeepSettledWorklogOpen). renderMessages()
 // consults this so it does NOT write the forced-open DOM into _sessionHtmlCache:
@@ -18571,9 +18931,9 @@ window._bindHermesExtensionMessageActions=function(){
 // constant-allocation cost: strings are streamed char-by-char (no copy) and
 // object fields are walked key-by-key so only scalar string forms are ever
 // allocated — no integral JSON.stringify() of a whole payload, and no
-// head/tail slice copies. _renderCacheKey's length+edges shortcut is only
-// safe for the render-window geometry key, where equal span+edges means
-// equal window; here equal signature must mean equal CONTENT.
+// head/tail slice copies. Equal signature must mean equal CONTENT (the
+// per-message _renderCacheKey hashes every character of long bodies for the
+// same reason).
 function _addBoundedHash(add, value, depth){
   if(value==null){ add('null'); return; }
   const t=typeof value;
@@ -19723,14 +20083,117 @@ function _scrollAfterMessageRender(preserveScroll, scrollSnapshot){
   scrollToBottom();
 }
 
-function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow){
+// #7591: blank-viewport recovery runs immediately after the render's OWN scroll
+// restore, and that restore re-arms _programmaticScroll with a fresh timestamp
+// (see _restoreMessageScrollSnapshot). So by the time recovery runs it can no
+// longer tell that write apart from an INDEPENDENT programmatic scroll that was
+// already settling — a depth counter read from inside recovery was therefore
+// always non-zero and the guard never consulted the latch at all. Capture the
+// ownership BEFORE the restore at the render call sites and pass it in, so the
+// render's own write can use the bounded clamp while a genuinely foreign write
+// stays protected. A jump-to-question also holds viewport ownership outright.
+function _captureMessageRecoveryOwnership(){
+  return {
+    programmatic:(typeof _freshProgrammaticScrollActive==='function')?_freshProgrammaticScrollActive():false,
+    jumpOwner:(typeof _messageJumpScrollOwner!=='undefined'&&!!_messageJumpScrollOwner),
+  };
+}
+function _maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, ownership){
   if(!preserveScroll||!virtualWindow||!virtualWindow.virtualized||!!(options&&options._virtualFallback)) return false;
-  if(_messageViewportIntersectsRenderedRow()) return false;
+  if(_messageViewportIntersectsRenderedRow()){
+    _messageVirtualBlankClampAttempts=0;
+    return false;
+  }
   if(_sessionHtmlCacheSid&&S.session&&S.session.session_id===_sessionHtmlCacheSid){
     _sessionHtmlCache.delete(_sessionHtmlCacheSid);
   }
   _messageVirtualWindowKey='';
+  // #7591: the full-render fallback below re-mounts the WHOLE transcript, which
+  // collapses scrollHeight to its real height; the browser then clamps scrollTop
+  // into the tail, the window re-derives from the clamped position, and the next
+  // blank detection repeats it — the measured windowed<->full-render oscillation
+  // (29 flips / 90s) that reads as "scrolling is stuck". While rows exist, clamp
+  // the viewport to the nearest rendered edge and refresh the WINDOW instead:
+  // that never changes scrollHeight, so nothing fights the input direction. The
+  // full render stays as the bounded escalation when the clamp cannot help (no
+  // rows, an in-flight programmatic write, or a clamp that did not take).
+  if(_clampVirtualizedBlankViewportToRenderedEdge(ownership)){
+    renderMessages({preserveScroll:true});
+    return true;
+  }
   renderMessages({preserveScroll:true,_virtualFallback:true});
+  return true;
+}
+// One clamp per blank detection: the attempt counter is cleared as soon as a
+// render intersects a rendered row again (in _maybeRecoverVirtualizedBlankViewport),
+// so a healthy transcript never accumulates budget and a still-blank viewport
+// escalates to the full render after exactly one geometry clamp instead of recursing.
+function _clampVirtualizedBlankViewportToRenderedEdge(ownership){
+  if(_messageVirtualBlankClampAttempts>=1) return false;
+  // A programmatic scroll write that was ALREADY settling when this render
+  // started is independent of the render's own restore, and a jump-to-question
+  // deliberately owns the viewport while it settles — clamping would fight
+  // either one. `ownership` is captured before _scrollAfterMessageRender at the
+  // render call sites (see _captureMessageRecoveryOwnership), so the restore's
+  // own fresh latch is never mistaken for a foreign write. With no captured
+  // ownership (direct/helper call) fall back to the live latch.
+  if(ownership){
+    if(ownership.programmatic||ownership.jumpOwner) return false;
+  }else if(typeof _freshProgrammaticScrollActive==='function'&&_freshProgrammaticScrollActive()){
+    return false;
+  }
+  const container=(typeof $==='function')?$('messages'):null;
+  if(!container||!container.querySelectorAll) return false;
+  const rows=container.querySelectorAll('[data-msg-idx]');
+  if(!rows||!rows.length) return false;
+  const containerRect=container.getBoundingClientRect();
+  if(!containerRect) return false;
+  const scrollTop=Math.max(0,Number(container.scrollTop)||0);
+  const clientHeight=Math.max(0,Number(container.clientHeight)||0);
+  if(!(clientHeight>0)) return false;
+  const viewBottom=scrollTop+clientHeight;
+  // Nearest ROW edge, not the union block: the render window is head rows plus
+  // the retained tail with a bottomPad gap between them, so the viewport can sit
+  // inside that gap — a position that is neither above the union top nor below
+  // the union bottom, and which the single-block clamp above could never fix.
+  let bestDistance=Infinity;
+  let bestEdge=null;
+  for(const row of rows){
+    if(!row||typeof row.getBoundingClientRect!=='function') continue;
+    // #7591: assistant-segment-worklog-source / assistant-segment-anchor keep
+    // data-msg-idx but are display:none, so their rects are zero. Left in the
+    // comparison they look like nearby edges above the viewport and can beat the
+    // real rows, sending recovery toward an invisible row — it stays blank and
+    // escalates to the full render this clamp exists to avoid. Only rows that
+    // actually generated a client rect are candidates.
+    if(typeof row.getClientRects==='function'&&row.getClientRects().length===0) continue;
+    const rect=row.getBoundingClientRect();
+    if(!rect||!Number.isFinite(rect.top)||!Number.isFinite(rect.bottom)) continue;
+    // Rows are measured in viewport space; lift them into document space.
+    const rowTop=rect.top-containerRect.top+scrollTop;
+    const rowBottom=rect.bottom-containerRect.top+scrollTop;
+    let distance=null;
+    let edge=null;
+    if(rowBottom<=scrollTop){ distance=scrollTop-rowBottom; edge=rowBottom; }
+    else if(rowTop>=viewBottom){ distance=rowTop-viewBottom; edge=rowTop; }
+    else continue; // straddles the viewport: not a blank-region edge
+    if(distance<bestDistance){ bestDistance=distance; bestEdge=edge; }
+  }
+  if(bestEdge===null) return false;
+  // Put the nearest edge at the middle of the viewport so the closest rendered
+  // row is unambiguously on screen after the clamp.
+  const maxScroll=Math.max(0,(Number(container.scrollHeight)||viewBottom)-clientHeight);
+  const next=Math.max(0,Math.min(maxScroll,Math.round(bestEdge-clientHeight*0.5)));
+  if(Math.abs(next-scrollTop)<2) return false;
+  _messageVirtualBlankClampAttempts++;
+  _programmaticScroll=true;_programmaticScrollSetAt=performance.now();
+  container.scrollTop=next;
+  _lastScrollTop=container.scrollTop;
+  // #7591: tell the enclosing _compensateScrollForMeasurementDelta that this
+  // render moved scrollTop deliberately, so it skips its old-anchor
+  // compensation instead of writing scrollTopBefore+delta over the recovery.
+  _blankViewportRecoveryApplied=++_blankViewportRecoveryToken;
+  if(typeof _deferClearProgrammaticScroll==='function') _deferClearProgrammaticScroll();
   return true;
 }
 
@@ -19891,8 +20354,10 @@ function renderMessages(options){
       if(typeof addCopyButtons==='function') addCopyButtons(inner);
       if(typeof initTreeViews==='function') initTreeViews(inner);
       }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
+      // #7591: capture ownership before the restore re-arms the latch.
+      const recoveryOwnership=_captureMessageRecoveryOwnership();
       _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+      if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
       _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
       requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
       if(typeof _initMediaPlaybackObserver==='function') _initMediaPlaybackObserver();
@@ -19934,7 +20399,18 @@ function renderMessages(options){
       const _hasLiveAssistantProjection=Array.isArray(S.messages)&&S.messages.some(m=>
         m&&m.role==='assistant'&&(m._live||m._activityBurstId!==undefined||m._liveSegmentSeq!==undefined)
       );
-      if(S.activeStreamId || _hasLiveAssistantProjection){
+      // #7676: TERMINAL SETTLEMENT OWNS THE TURN. The live-projection branch
+      // above exists for the reconnect case — the pane is still working
+      // (S.busy) when the SSE transport drops and the journal snapshot carries
+      // live markers. It must NOT apply once the pane has settled: after
+      // `done`/`cancel` the projection is the authority, and re-attaching the
+      // parser-owned node over it can re-pin the pre-settle live DOM — which
+      // in Transparent Stream carries the final prose hidden
+      // (`assistant-segment-worklog-source` + aria-hidden + hidden) with its
+      // scene rows already removed, i.e. the reported blank (#7676). A settled
+      // pane (idle, no live stream ownership) therefore never preserves.
+      const _paneSettled=S.busy===false && !S.activeStreamId;
+      if(S.activeStreamId || (_hasLiveAssistantProjection && !_paneSettled)){
         _preservedLiveTurn=_lt;
       }
     }
@@ -21398,83 +21874,6 @@ function renderMessages(options){
       }
     }
   }
-  // Fail-safe invariant (#3875): a settled assistant turn must never render with
-  // ZERO visible content. The Worklog redesign (#3401) folds intermediate
-  // assistant segments into a collapsed Worklog card and hides the source segment
-  // (`assistant-segment-worklog-source` → display:none). That is correct WHEN the
-  // turn also has a visible final answer. But when a turn's ONLY content is folded
-  // into a collapsed Worklog (e.g. an autonomous/interrupted run whose final
-  // assistant message is empty, or a reload where S.toolCalls didn't hydrate so the
-  // worklog card built with no expandable tool steps), every segment is hidden and
-  // the turn paints as nothing — leaving the transcript a bare stack of date
-  // separators (#3875 brick). Reveal such turns so their content is never silently
-  // swallowed: expand the turn's Worklog group(s) when the turn has no other
-  // visible content. This NEVER touches a turn that has any visible segment, so the
-  // intended collapsed-Worklog UX is preserved whenever a visible answer exists.
-  // The live turn is excluded by its `liveAssistantTurn` id (it drives its own
-  // state during a stream), so this sweep is safe to run even while busy — a
-  // historical blank turn must not re-paint blank during a follow-up stream
-  // (Opus advisor, stage-342).
-  {
-    const _turnHasVisibleContent=(turn)=>{
-      if(typeof _assistantTurnHasVisibleRenderedSegment==='function'){
-        return _assistantTurnHasVisibleRenderedSegment(turn)===true;
-      }
-      // Keep the extracted renderMessages test harness self-contained.
-      if(!turn||typeof turn.querySelectorAll!=='function') return false;
-      for(const seg of turn.querySelectorAll('.assistant-segment')){
-        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
-        if(seg.classList.contains('assistant-segment-anchor')) continue;
-        if((seg.textContent||'').trim()) return true;
-      }
-      return false;
-    };
-    for(const turn of inner.querySelectorAll('.assistant-turn')){
-      if(turn.id==='liveAssistantTurn') continue; // live turn drives its own state
-      if(_turnHasVisibleContent(turn)) continue;
-      // No visible content — surface the folded Worklog so the turn isn't blank.
-      const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
-      let revealed=false;
-      for(const group of groups){
-        // A settled Worklog whose rows are still deferred (#5839) has an empty
-        // textContent but is not empty in substance. Judging it empty here drops
-        // through to the last-resort un-hide below, and the deferred rows then
-        // materialize the same prose beside the segments it just un-hid.
-        // Materialize first, then judge.
-        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
-           &&typeof _materializeDeferredWorklogRows==='function'){
-          _materializeDeferredWorklogRows(group);
-        }
-        if(!(group.textContent||'').trim()) continue; // empty group can't help
-        if(group.classList.contains('tool-call-group-collapsed')){
-          group.classList.remove('tool-call-group-collapsed');
-          group.classList.add('open');
-          const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
-          if(summary) summary.setAttribute('aria-expanded','true');
-          // #5839: this turn is otherwise blank, so materialize any deferred
-          // settled rows now that we're force-expanding the worklog to fill it.
-          if(typeof _materializeDeferredWorklogRows==='function') _materializeDeferredWorklogRows(group);
-        }
-        // `revealed` means "this turn has a non-empty Worklog group that the user
-        // can see" — NOT "we just expanded something". An already-open non-empty
-        // group is itself visible (it slips past _turnHasVisibleContent only
-        // because that check inspects .assistant-segment nodes, not group bodies),
-        // so the turn isn't truly blank and the last-resort un-hide below is
-        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
-        revealed=true;
-      }
-      // Last resort: no usable worklog group either, but hidden worklog-source
-      // segments carry the real text — un-hide them so nothing is lost.
-      if(!revealed){
-        for(const seg of turn.querySelectorAll('.assistant-segment-worklog-source')){
-          if(!(seg.textContent||'').trim()) continue;
-          seg.classList.remove('assistant-segment-worklog-source');
-          seg.removeAttribute('aria-hidden');
-          seg.hidden=false;
-        }
-      }
-    }
-  }
   // Re-attach the preserved live turn (#3877). The rebuild above recreated a
   // live turn from S.messages, but the live assistant message's content lags the
   // stream (it is only persisted to S.messages on a throttled write-back) — so the
@@ -21503,6 +21902,14 @@ function renderMessages(options){
   // no live segment to swap into. No-op for a settled turn or when nothing was
   // streaming.
   if(_preservedLiveTurn){
+    // #7676: the transferred node may hold the final answer in a segment that
+    // the transparent live scene hides (`assistant-segment-worklog-source` +
+    // aria-hidden + hidden) while its scene rows rendered the activity. If this
+    // node is about to become the pane's only copy of the reply (rows already
+    // removed by the settle render), the reply would go blank — so normalize the
+    // retained prose FIRST (it un-hides only when no visible scene row owns it),
+    // before any branch re-attaches the node.
+    _normalizeTransferredLiveProse(_preservedLiveTurn);
     const _rebuilt=document.getElementById('liveAssistantTurn');
     // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
     // post-tool activity boundaries a live turn can carry MULTIPLE
@@ -21580,6 +21987,90 @@ function renderMessages(options){
       }
     }
   }
+  // Fail-safe invariant (#3875): a settled assistant turn must never render with
+  // ZERO visible content. The Worklog redesign (#3401) folds intermediate
+  // assistant segments into a collapsed Worklog card and hides the source segment
+  // (`assistant-segment-worklog-source` → display:none). That is correct WHEN the
+  // turn also has a visible final answer. But when a turn's ONLY content is folded
+  // into a collapsed Worklog (e.g. an autonomous/interrupted run whose final
+  // assistant message is empty, or a reload where S.toolCalls didn't hydrate so the
+  // worklog card built with no expandable tool steps), every segment is hidden and
+  // the turn paints as nothing — leaving the transcript a bare stack of date
+  // separators (#3875 brick). Reveal such turns so their content is never silently
+  // swallowed: expand the turn's Worklog group(s) when the turn has no other
+  // visible content. This NEVER touches a turn that has any visible segment, so the
+  // intended collapsed-Worklog UX is preserved whenever a visible answer exists.
+  // The live turn is excluded by its `liveAssistantTurn` id while a stream
+  // still owns it (it drives its own state during a stream), so this sweep is
+  // safe to run even while busy — a historical blank turn must not re-paint
+  // blank during a follow-up stream (Opus advisor, stage-342). A SETTLED live
+  // turn is covered (#7676): the invariant runs after every preservation and
+  // swap decision above, so a transferred blank live node is revealed rather
+  // than pinned as the pane's zero-visible-content reply.
+  {
+    const _turnHasVisibleContent=(turn)=>{
+      if(typeof _assistantTurnHasVisibleRenderedSegment==='function'){
+        return _assistantTurnHasVisibleRenderedSegment(turn)===true;
+      }
+      // Keep the extracted renderMessages test harness self-contained.
+      if(!turn||typeof turn.querySelectorAll!=='function') return false;
+      for(const seg of turn.querySelectorAll('.assistant-segment')){
+        if(seg.classList.contains('assistant-segment-worklog-source')) continue;
+        if(seg.classList.contains('assistant-segment-anchor')) continue;
+        if((seg.textContent||'').trim()) return true;
+      }
+      return false;
+    };
+    const _liveTurnSettled=(S.busy===false && !S.activeStreamId); // #7676
+    for(const turn of inner.querySelectorAll('.assistant-turn')){
+      // #7676: the invariant must hold for a SETTLED live turn too — the
+      // transparent settle can transfer a node whose only copy of the reply is
+      // hidden. An ACTIVE stream still owns its node and drives its own state.
+      if(turn.id==='liveAssistantTurn'&&!_liveTurnSettled) continue;
+      if(_turnHasVisibleContent(turn)) continue;
+      // No visible content — surface the folded Worklog so the turn isn't blank.
+      const groups=turn.querySelectorAll('.tool-worklog-group,.tool-call-group');
+      let revealed=false;
+      for(const group of groups){
+        // A settled Worklog whose rows are still deferred (#5839) has an empty
+        // textContent but is not empty in substance. Judging it empty here drops
+        // through to the last-resort un-hide below, and the deferred rows then
+        // materialize the same prose beside the segments it just un-hid.
+        // Materialize first, then judge.
+        if(group.getAttribute&&group.getAttribute('data-worklog-rows-deferred')==='1'
+           &&typeof _materializeDeferredWorklogRows==='function'){
+          _materializeDeferredWorklogRows(group);
+        }
+        if(!(group.textContent||'').trim()) continue; // empty group can't help
+        if(group.classList.contains('tool-call-group-collapsed')){
+          group.classList.remove('tool-call-group-collapsed');
+          group.classList.add('open');
+          const summary=group.querySelector('.tool-call-group-summary,.activity-summary');
+          if(summary) summary.setAttribute('aria-expanded','true');
+          // #5839: this turn is otherwise blank, so materialize any deferred
+          // settled rows now that we're force-expanding the worklog to fill it.
+          if(typeof _materializeDeferredWorklogRows==='function') _materializeDeferredWorklogRows(group);
+        }
+        // `revealed` means "this turn has a non-empty Worklog group that the user
+        // can see" — NOT "we just expanded something". An already-open non-empty
+        // group is itself visible (it slips past _turnHasVisibleContent only
+        // because that check inspects .assistant-segment nodes, not group bodies),
+        // so the turn isn't truly blank and the last-resort un-hide below is
+        // unnecessary. Keep this assignment OUTSIDE the if(collapsed) branch.
+        revealed=true;
+      }
+      // Last resort: no usable worklog group either, but hidden worklog-source
+      // segments carry the real text — un-hide them so nothing is lost.
+      if(!revealed){
+        for(const seg of turn.querySelectorAll('.assistant-segment-worklog-source')){
+          if(!(seg.textContent||'').trim()) continue;
+          seg.classList.remove('assistant-segment-worklog-source');
+          seg.removeAttribute('aria-hidden');
+          seg.hidden=false;
+        }
+      }
+    }
+  }
   // Only force-scroll when not actively streaming — mid-stream re-renders
   // (tool completion, session switch) must not override the user's scroll position.
   // scrollIfPinned() respects _scrollPinned, so it's a no-op if user scrolled up.
@@ -21599,8 +22090,12 @@ function renderMessages(options){
   if(typeof addCopyButtons==='function') addCopyButtons(inner);
   if(typeof initTreeViews==='function') initTreeViews(inner);
   }catch(_){ /* fail-safe: a bad block (e.g. _buildTreeDOM overflow) must not abort scroll restore, cache or the caller; the deferred pass keeps the old contained failure */ }
+  // #7591: capture viewport ownership BEFORE the restore (see the sibling
+  // cache-branch call site) so recovery can tell an independent in-flight
+  // programmatic write from this render's own.
+  const recoveryOwnership=_captureMessageRecoveryOwnership();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
-  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow)) return;
+  if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
