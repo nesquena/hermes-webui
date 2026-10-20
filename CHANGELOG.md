@@ -82,6 +82,8 @@
 
 ### Fixed
 
+- **Test suite: no real DNS lookups.** The shared test network guard now blocks DNS as well as connections (IP literals and `localhost` still resolve). A real lookup in the custom-provider address check could take longer than the 4-second model-list limit on a slow CI resolver, which made `test_seeded_config_survives_a_stale_loaded_config_path` fail on unrelated PRs. (#8396)
+
 - **The finished reply stays on screen in Transparent Stream.** When a long Transparent Stream turn settles, the reply is finalized in place instead of re-rendering the whole transcript, so it no longer blanks for a moment at the end of a turn; disclosure choices, detail scroll and table sort/filter controls survive. (#7833, closes #7676, thanks @MuhammadUsamaMX)
 
 - **Steer goes to the live Gateway run.** With the Gateway backend, Steer now forwards your message to the running turn instead of queueing it as the next one. If the connection to the Gateway drops and the run finishes before it reads the steer text, the text is replayed instead of lost. (#7919, thanks @carlotestor)
