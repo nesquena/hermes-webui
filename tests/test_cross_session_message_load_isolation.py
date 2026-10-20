@@ -144,6 +144,9 @@ COMPOSER_DRAFT_HELPERS_SRC = "\n".join(
         "_composerDraftFileSignature",
         "_composerDraftPayloadSignature",
         "_composerDraftPayloadSignatureForSid",
+        "_composerDraftRevision",
+        "_noteComposerDraftPayload",
+        "_bumpComposerDraftRevision",
         "_clearComposerDraftRestoreSuppression",
         "_isComposerDraftRestoreSuppressed",
         "_suppressComposerDraftRestoreAfterSubmit",
@@ -422,6 +425,11 @@ let toastCalls = [];
 
 // Source under test
 let _draftSaveTimer = null;
+let _draftSaveTimerSid = null;
+let _draftSaveTimerPayload = null;
+let _draftSaveTimerRev = 0;
+const _composerDraftRevBySid = new Map();
+const _composerDraftLastPayloadBySid = new Map();
 const _DRAFT_SAVE_DELAY_MS = 400;
 const NEW_CHAT_DRAFT_SESSION_KEY = 'hermes-new-chat-draft-session';
 const _COMPOSER_DRAFT_RESTORE_SUPPRESS_MS = 30000;
