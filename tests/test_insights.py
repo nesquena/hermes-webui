@@ -1871,26 +1871,27 @@ def test_insights_does_not_double_count_webui_state_db_rows(monkeypatch, tmp_pat
 
 
 # ── #3911 / salvage of #3912: prompt-cache hit rate on Insights ────────────
-# Maintainer-flagged correctness fix: the hit rate must use the FULL prompt
-# total as the denominator — cache_read / (input_tokens + cache_read) — so it
-# is bounded 0-100% and means "% of the prompt served from cache". The naive
-# cache_read / input_tokens formula EXCEEDS 100% on cache-heavy sessions.
+# The hit rate is cache_read over the FULL prompt total, bounded 0-100%.
+# WebUI sessions store that full total (uncached + cache reads + cache writes)
+# in input_tokens, the same value Agent reports as session_prompt_tokens, so
+# the denominator is input_tokens itself (#8345). Adding the reads again
+# capped every WebUI row at 50%.
 
 
 def test_insights_cache_hit_rate_uses_bounded_denominator(monkeypatch, tmp_path):
-    """Per-model + aggregate hit rate = cache_read / (input + cache_read)."""
+    """Per-model + aggregate hit rate = cache_read / full prompt (input_tokens)."""
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [
-        # 100 fresh input + 300 cached reads -> 300 / (100 + 300) = 75%
+        # Full prompt of 400 = 100 uncached + 300 cache reads -> 300 / 400 = 75%
         {"updated_at": now, "message_count": 1, "model": "cached",
-         "input_tokens": 100, "output_tokens": 40, "cache_read_tokens": 300,
+         "input_tokens": 400, "output_tokens": 40, "cache_read_tokens": 300,
          "estimated_cost": 0.05},
     ]
     data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
     model = data["models"][0]
     assert model["model"] == "cached"
     assert model["cache_read_tokens"] == 300
-    # cache_read / (input + cache_read) = 300 / 400 = 75 (NOT 300/100 = 300%)
+    # 300 / 400 = 75 (NOT 300 / (400 + 300) = 43, NOT 300 / 100 = 300%)
     assert model["cache_hit_percent"] == 75
     # Aggregate uses the same bounded denominator.
     assert data["total_cache_read_tokens"] == 300
@@ -1898,46 +1899,38 @@ def test_insights_cache_hit_rate_uses_bounded_denominator(monkeypatch, tmp_path)
 
 
 def test_insights_cache_hit_rate_never_exceeds_100_percent(monkeypatch, tmp_path):
-    """Non-vacuous boundary test: an extremely cache-heavy session where the OLD
-    formula (cache_read / input_tokens) would report >100%. The bounded
-    denominator must clamp the displayed rate to <=100%.
+    """Cache-heavy rows read close to, but never above, 100%.
 
-    Here cache_read (9900) vastly exceeds fresh input (100):
-      OLD (buggy): 9900 / 100         = 9900%   ← would be displayed, absurd
-      NEW (fixed): 9900 / (100+9900)  = 99%     ← bounded, meaningful
-    The assertion below would FAIL under the old formula, so it is non-vacuous.
+    "cache-heavy" is a 10,000-token prompt with 9,900 served from cache (99%).
+    "inconsistent" reports more cache reads than prompt tokens, which only bad
+    data can do; the shared helper clamps it to 100 instead of showing 9900%.
     """
     now = time.mktime((2026, 5, 4, 12, 0, 0, 0, 0, -1))
     entries = [
         {"updated_at": now, "message_count": 1, "model": "cache-heavy",
-         "input_tokens": 100, "output_tokens": 20, "cache_read_tokens": 9900,
+         "input_tokens": 10000, "output_tokens": 20, "cache_read_tokens": 9900,
          "estimated_cost": 0.10},
-        # A second model with cache_read == input (would be exactly 100% under
-        # the old formula; 50% under the bounded one) — still <= 100% either way,
-        # included to exercise the equality edge of the bound.
         {"updated_at": now, "message_count": 1, "model": "balanced",
-         "input_tokens": 500, "output_tokens": 100, "cache_read_tokens": 500,
+         "input_tokens": 1000, "output_tokens": 100, "cache_read_tokens": 500,
          "estimated_cost": 0.02},
+        {"updated_at": now, "message_count": 1, "model": "inconsistent",
+         "input_tokens": 100, "output_tokens": 10, "cache_read_tokens": 9900,
+         "estimated_cost": 0.01},
     ]
     data = _call_insights(monkeypatch, tmp_path, entries, days="7", now=now)
 
-    # Prove non-vacuity: the OLD reads-over-misses formula WOULD exceed 100%.
-    heavy = next(m for m in data["models"] if m["model"] == "cache-heavy")
-    old_formula = round((heavy["cache_read_tokens"] / heavy["input_tokens"]) * 100)
-    assert old_formula > 100, "test must exercise a case the old formula mishandles"
-
-    # Every per-model displayed rate is bounded to 0..100.
     for m in data["models"]:
         pct = m["cache_hit_percent"]
         if pct is not None:
             assert 0 <= pct <= 100, f"{m['model']} hit rate {pct} out of bounds"
 
-    # The fixed bounded denominator: 9900 / (100 + 9900) = 99%.
+    heavy = next(m for m in data["models"] if m["model"] == "cache-heavy")
     assert heavy["cache_hit_percent"] == 99
     balanced = next(m for m in data["models"] if m["model"] == "balanced")
     assert balanced["cache_hit_percent"] == 50
+    inconsistent = next(m for m in data["models"] if m["model"] == "inconsistent")
+    assert inconsistent["cache_hit_percent"] == 100
 
-    # Aggregate is bounded too, and < 100 even though cache_read dominates input.
     assert data["total_cache_hit_percent"] is not None
     assert 0 <= data["total_cache_hit_percent"] <= 100
 
