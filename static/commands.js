@@ -33,6 +33,7 @@ const COMMANDS=[
   {name:'btw',       desc:t('cmd_btw'),      fn:cmdBtw,       arg:'question', noEcho:true},
   {name:'background',desc:t('cmd_background'),fn:cmdBackground,arg:'prompt',  noEcho:true},
   {name:'status',    desc:t('cmd_status'),   fn:cmdStatus},
+  {name:'idea',     desc:t('cmd_idea'),     fn:cmdIdea,     arg:'on|off|status', noEcho:true},
   {name:'voice',     desc:t('cmd_voice'),    fn:cmdVoice,     noEcho:true},
   {name:'reasoning', desc:t('cmd_reasoning'), fn:cmdReasoning, arg:'show|hide|none|minimal|low|medium|high|xhigh|max', subArgs:['show','hide','none','minimal','low','medium','high','xhigh','max'], noEcho:true},
   {name:'yolo', desc:t('cmd_yolo'), fn:cmdYolo, noEcho:true},
@@ -2309,6 +2310,45 @@ function cmdVoice(){
   );
   if(micVisible){try{mic.click();return;}catch(_){}}
   showToast(t('cmd_voice_use_mic'));
+}
+
+// ── Idea mode (spec t_14ad8e89 §3) ──
+// /idea on|off|status — server-side session flag. While ON, send() intercepts
+// every non-slash input and POSTs it to /api/idea/capture instead of starting
+// an agent turn: read-back suppression is structural (no agent reply exists).
+async function cmdIdea(args){
+  const arg=String(args||'').trim().toLowerCase()||'status';
+  if(!['on','off','status'].includes(arg)){
+    showToast(t('idea_usage'));
+    return;
+  }
+  const sid=S.session&&S.session.session_id;
+  if(!sid){showToast(t('yolo_no_session'));return;}
+  if(arg==='status'){
+    let st=null;
+    try{st=await api('/api/idea/status?session_id='+encodeURIComponent(sid));}
+    catch(e){showToast((e&&e.message)||t('idea_toggle_failed'));return;}
+    window._ideaModeOn=!!(st&&st.idea_mode);
+    window._ideaModeSid=sid;
+    _pushIdeaLine(st&&st.idea_mode
+      ?t('idea_status_on',String((st.stats&&st.stats.filed)||0),String((st.stats&&st.stats.dupes)||0))
+      :t('idea_status_off'));
+    return;
+  }
+  try{
+    const res=await api('/api/idea/mode',{method:'POST',body:JSON.stringify({session_id:sid,on:arg==='on'})});
+    window._ideaModeOn=!!(res&&res.idea_mode);
+    window._ideaModeSid=sid;
+    if(res&&res.text)_pushIdeaLine(res.text);
+    if(arg==='on')showToast(t('idea_mode_on_toast'),2500);
+  }catch(e){
+    showToast((e&&e.message)||t('idea_toggle_failed'));
+  }
+}
+function _pushIdeaLine(text){
+  if(!text)return;
+  S.messages.push({role:'assistant',content:String(text),_ts:Date.now()/1000,_idea:true});
+  renderMessages();
 }
 
 // ── YOLO mode toggle ──
