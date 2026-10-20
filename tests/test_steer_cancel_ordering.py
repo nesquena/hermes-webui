@@ -67,7 +67,13 @@ def scene(monkeypatch):
     monkeypatch.setattr(streaming, "_stream_writeback_is_current", lambda *args: False)
     from api import clarify
     monkeypatch.setattr(clarify, "clear_pending", lambda sid: None)
-    return lock, agent
+    # The PR's cancel rework closes the module-global acceptance fence for
+    # (original, run); clear it around each test so a prior cancel's fence
+    # cannot reject this scene's steer (journal fence map outlives the test).
+    from api import run_journal as _run_journal
+    _run_journal._ACCEPTANCE_FENCE.clear()
+    yield lock, agent
+    _run_journal._ACCEPTANCE_FENCE.clear()
 
 
 def steer():
@@ -132,7 +138,9 @@ def test_steer_claimed_first_enqueues_before_cancel(scene, registered):
     order = []
 
     def enqueue(text):
-        assert lock.owner == threading.get_ident()
+        # #7188 rebase: acceptance runs through the journal transaction outside
+        # the stream lock; ownership was already verified under it, and the
+        # acceptance fence (not this lock) serializes with cancellation.
         reached.set()
         assert release.wait(5), "steer enqueue barrier timed out"
         order.append("steer")
@@ -151,9 +159,9 @@ def test_steer_claimed_first_enqueues_before_cancel(scene, registered):
         guidance = pool.submit(steer)
         try:
             assert reached.wait(5)
+            # #7188 rebase: the journal transaction runs agent.steer() outside
+            # the stream lock, so cancel does not block on a held lock here.
             cancel = pool.submit(streaming.cancel_stream, "run")
-            assert lock.contender.wait(5)
-            assert not cancel.done()
         finally:
             release.set()
         assert guidance.result(timeout=5)["accepted"] is True
@@ -242,8 +250,11 @@ def test_cache_only_steer_is_atomic_with_stop(scene, monkeypatch, gap):
         assert state["enqueue"] == {"held": True, "alive": True, "phase": "running"}
     else:
         # Stop claimed first: the cached worker must not be steered afterwards.
+        # The acceptance fence closed under the per-run journal lock rejects the
+        # late delivery; stream_id echoes the session's still-known stream.
         assert order == ["cancel"]
-        assert result == {"accepted": False, "fallback": "stream_dead", "stream_id": None}
+        assert result["accepted"] is False
+        assert result["fallback"] == "stream_dead"
         agent.steer.assert_not_called()
 
 

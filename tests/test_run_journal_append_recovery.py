@@ -107,7 +107,9 @@ def test_failed_append_preserves_answer_through_real_repair(
     stream = sid + "-run"
     session = _persist_recovery_boundary_turn(sid, stream, lifecycle)
     writer = RunJournalWriter(sid, stream)
-    writer.append_sse_event("token", {"text": "PREFIX"})
+    # #7188: a stop lifecycle journals a durable terminal cancel row first
+    # (seq 1), so anchor later seq assertions on the PREFIX row itself.
+    prefix = writer.append_sse_event("token", {"text": "PREFIX"})
     path = run_journal._run_path(sid, stream)
     before = path.read_bytes()
     # Terminal-mode flush failures are meaningful only for fsynced events.
@@ -133,7 +135,7 @@ def test_failed_append_preserves_answer_through_real_repair(
     )
     assert failure is not None
     assert after_failure == before
-    assert continuation["seq"] == 2
+    assert continuation["seq"] == prefix["seq"] + 1
 
 
 @pytest.mark.parametrize("lifecycle", ["crash", "stop"])
@@ -145,12 +147,16 @@ def test_lone_surrogate_roundtrips_journal_and_real_cold_repair(lifecycle, compl
     session = _persist_recovery_boundary_turn(sid, stream, lifecycle)
     writer = RunJournalWriter(sid, stream)
     writer.append_sse_event("token", {"text": "PREFIX"})
-    writer.append_sse_event("token", {"text": "\ud83d"})
+    surrogate = writer.append_sse_event("token", {"text": "\ud83d"})
     path = run_journal._run_path(sid, stream)
-    assert json.loads(path.read_bytes().splitlines()[1])["payload"]["text"] == "\ud83d"
+    # #7188: a stop lifecycle's durable cancel terminal row precedes these
+    # token rows, so anchor the journaled-line position on the surrogate's
+    # own seq instead of a fixed index.
+    rows = [json.loads(line) for line in path.read_bytes().splitlines()]
+    assert rows[surrogate["seq"] - 1]["payload"]["text"] == "\ud83d"
     if fresh_writer:
         _forget_writer(path)
-    assert writer.append_sse_event("token", {"text": "AFTER"})["seq"] == 3
+    assert writer.append_sse_event("token", {"text": "AFTER"})["seq"] == surrogate["seq"] + 1
     if completed:
         writer.append_sse_event("done", {"session": public_session_projection(session.__dict__)})
     _assert_boundary_output_recovered(
@@ -169,15 +175,18 @@ def test_fresh_append_repairs_tail_then_real_repair_recovers(lifecycle, complete
     writer = RunJournalWriter(sid, stream)
     writer.append_sse_event("token", {"text": "PREFIX"})
     path = run_journal._run_path(sid, stream)
+    # #7188: a stop lifecycle's durable terminal cancel row is seq 1 and
+    # shifts every later seq by one.
+    stop_shift = 1 if lifecycle == "stop" else 0
     if tail in {"valid-token", "valid-done"}:
         writer.append_sse_event("done" if tail == "valid-done" else "token", {"text": "MIDDLE"})
         path.write_bytes(path.read_bytes().rstrip(b"\n"))
-        expected_seq = 3
+        expected_seq = 3 + stop_shift
         answer = "PREFIXMIDDLEAFTER" if tail == "valid-token" else "PREFIX"
     else:
         with path.open("ab") as fh:
             fh.write(b'{"seq":' if tail == "json" else b'{"payload":{"text":"\xe2\x82')
-        expected_seq, answer = 2, "PREFIXAFTER"
+        expected_seq, answer = 2 + stop_shift, "PREFIXAFTER"
     _forget_writer(path)
     # A terminal prefix may receive stream_end after reattach. Do not invent
     # another token segment after done and demand that recovery merge it.
@@ -351,10 +360,19 @@ def test_cancel_repair_cannot_observe_terminal_before_failed_fsync_rolls_back(mo
         with pytest.raises(OSError, match="terminal fsync failure"):
             writing.result(timeout=5)
         recovered = reading.result(timeout=5)
-    assert _stream_output(recovered, stream) == []
-    assert _pending_stream_hook(recovered, stream) is not None
-    assert models._run_journal_terminal_state(recovered, stream) is None
-    assert writer.append_sse_event("done", {})["seq"] == 2
+    # #7188: the stop boundary's durable cancel terminal row legitimately
+    # closes the same-process ambiguity, so the post-cancel PREFIX row replays
+    # as recovered output, the journal retry hook is disarmed, and the
+    # authoritative terminal state is the journaled cancel row — not the
+    # rolled-back done append.
+    recovered_output = _stream_output(recovered, stream)
+    assert [row["content"] for row in recovered_output] == ["PREFIX"]
+    assert _pending_stream_hook(recovered, stream) is None
+    assert models._run_journal_terminal_state(recovered, stream) == "interrupted-by-user"
+    # #7188: the stop boundary's durable cancel row is seq 1 and PREFIX is
+    # seq 2, so the repaired terminal append is seq 3. The failed fsync must
+    # not have burned a seq in between.
+    assert writer.append_sse_event("done", {})["seq"] == 3
     _assert_boundary_output_recovered(sid, stream, "PREFIX", completed=True, lifecycle="stop")
 
 
