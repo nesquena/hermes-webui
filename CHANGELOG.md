@@ -82,6 +82,8 @@
 
 ### Fixed
 
+- **Steer goes to the live Gateway run.** With the Gateway backend, Steer now forwards your message to the running turn instead of queueing it as the next one. If the connection to the Gateway drops and the run finishes before it reads the steer text, the text is replayed instead of lost. (#7919, thanks @carlotestor)
+
 - **Long chats stop jumping while you scroll.** In long virtualized transcripts, rows measured during a scroll no longer pull the view back and forth or teleport it mid-gesture, the scrollbar thumb lands where you drop it, and jump-to-question lands on the answer. Older-row loading and streaming tail-follow keep their place. (#8122, closes #7591, thanks @MuhammadUsamaMX)
 
 - **Archiving a session from another profile works.** With All profiles on, archiving or restoring a CLI or imported session that belongs to another profile no longer fails with "Session not found", keeps the session's CLI source details, and never writes a copy into the wrong profile. A request that names the wrong owner gets a clear profile-mismatch error. (#7731, closes #7549, thanks @MuhammadUsamaMX)
