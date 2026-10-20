@@ -5,6 +5,20 @@
 
 ### Added
 
+- **Insights: pick an exact date range.** The period menu has a Custom range… option with Start and End date pickers (labelled, translated in all 15 languages), so usage, cost and model numbers can cover any window, not just the presets. Today is always selectable, and typing a date no longer clears the field. Thanks @silent-reader-cn. (#6970)
+
+- **Kanban Scheduled column.** Scheduled tasks get their own board column, and the task editor, task detail and bulk
+  status menu can set and show the Scheduled status (the sidebar count used to show the raw key). Thanks @webtecnica.
+  (#7906, fixes #7900)
+
+- **Take a photo straight from the composer on phones and tablets.** On touch devices the Attach button now offers
+  **Take photo** (opens the camera) or **Choose files**. Desktop is unchanged. Thanks @rodboev. (#7069, fixes #6942)
+
+- **Task list in the chat (optional).** Settings > Appearance > **Show task list in chat** shows the session's to-do
+  list as a collapsible strip above the conversation. Collapsed it's a single band; expanded it's capped so the
+  conversation keeps most of the height, with a fade marking more items. While it's on, the workspace Todos tab is
+  disabled with a note. Off by default. Thanks @silent-reader-cn. (#6978)
+
 - **Project bindings: pin workspaces and a model to a sidebar project.** Right-click a project chip and choose
   **Project settings…** to bind one or more workspaces (one marked default) and a model, so the project's quick-create
   (+) button opens a new session already set up for that project. Thanks @silent-reader-cn.
@@ -15,6 +29,12 @@
   @judah-hermes-agent. (#8210)
 
 ### Performance
+
+- **Draft autosave no longer rewrites the whole session.** Typing in a long conversation could stall, because every
+  changed composer draft was saved by rewriting the full session JSON file. Drafts now go to a small per-session draft
+  file that is overlaid when the session loads, with first-write durability, compression ownership, explicit clears,
+  deletion and session cleanup all preserved. A draft save that fails while switching sessions keeps navigation working
+  without losing the unsaved text. Thanks @starship-s. (#6524)
 
 - **Opening a session reuses a recent model catalog for up to an hour.** The session-visit freshness window for the
   disk-backed models catalog is 1 h instead of 5 min, so installs with many or slow providers stop rebuilding the full
@@ -61,6 +81,129 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **A message you send while a /goal continuation is pending runs as your own turn.** The pending continuation no longer claims the next message for the goal: each continuation carries its own ID, and only that continuation is treated as goal-related. A continuation restored into the composer after a reload, or saved while a clarify question is open, keeps its ID while the text is unchanged. A regenerate no longer uses up the pending continuation, and deleting a session clears it. (#7855, part of #6885, thanks @happy5318)
+
+- **Insights cache hit rate is no longer stuck at or below 50%.** Cache reads are already counted inside input tokens, so the rate now divides cache reads by the full prompt total, in the daily chart and the per-model and overall figures. Thanks @balabommablock-cpu. (#8372, fixes #8345)
+
+- **Today's messaging DM stays in Today.** After a Telegram/Discord `session_reset`, the new session is shown as its own top-level conversation (keeping its lineage link) instead of being nested under the old chat, so it no longer drops out of "Today". Branches, subagents, CLI and compression children are grouped as before. (#8298, thanks @solarmaster961)
+
+- **Test suite: no real DNS lookups.** The shared test network guard now blocks DNS as well as connections (IP literals and `localhost` still resolve). A real lookup in the custom-provider address check could take longer than the 4-second model-list limit on a slow CI resolver, which made `test_seeded_config_survives_a_stale_loaded_config_path` fail on unrelated PRs. (#8396)
+
+- **The finished reply stays on screen in Transparent Stream.** When a long Transparent Stream turn settles, the reply is finalized in place instead of re-rendering the whole transcript, so it no longer blanks for a moment at the end of a turn; disclosure choices, detail scroll and table sort/filter controls survive. (#7833, closes #7676, thanks @MuhammadUsamaMX)
+
+- **Steer goes to the live Gateway run.** With the Gateway backend, Steer now forwards your message to the running turn instead of queueing it as the next one. If the connection to the Gateway drops and the run finishes before it reads the steer text, the text is replayed instead of lost. (#7919, thanks @carlotestor)
+
+- **Long chats stop jumping while you scroll.** In long virtualized transcripts, rows measured during a scroll no longer pull the view back and forth or teleport it mid-gesture, the scrollbar thumb lands where you drop it, and jump-to-question lands on the answer. Older-row loading and streaming tail-follow keep their place. (#8122, closes #7591, thanks @MuhammadUsamaMX)
+
+- **Archiving a session from another profile works.** With All profiles on, archiving or restoring a CLI or imported session that belongs to another profile no longer fails with "Session not found", keeps the session's CLI source details, and never writes a copy into the wrong profile. A request that names the wrong owner gets a clear profile-mismatch error. (#7731, closes #7549, thanks @MuhammadUsamaMX)
+
+- **Long messages no longer show another message's text.** The render cache identified messages over 500 characters by their length plus their first and last 20 characters, so two equal-length messages from the same template (status reports, cron summaries, regenerated answers) shared an entry and the second displayed the first one's body. Long messages are now keyed on a hash of the whole text. Saved data was never affected. (#8387)
+
+- **Tool calls without a result no longer break a conversation.** An assistant tool call whose result never arrived (an interrupted run, a crash between call and result) is now repaired the same way the Agent repairs it, so the next reply stays in the saved model context instead of being dropped, including when an older tool call had empty or broken arguments. (#7237, thanks @happy5318)
+
+- **Subagent runs stay with their parent conversation in the sidebar.** With All profiles on and a project filter such as Unassigned, delegated subagent sessions whose parent was filed in another project, or belonged to another profile, or was itself a subagent, showed up as contextless top-level "Subagent Session" rows (18 on one real install). They now follow their parent: nested when the parent is visible, hidden with it when it is filtered out, and still listed as an openable orphan when the parent is missing, compressed, or a CLI conversation. (#7771, thanks @carlotestor)
+
+- **Windows file links open the right file.** A `file:///C:/...` link or image in a reply now reaches the media route with its drive letter intact, so it previews or downloads on a Windows server (on a POSIX server a `/C:/...` path stays absolute and can never alias a workspace file). Streaming and finished replies convert links the same way, a network-share `file://server/...` link is left as a plain link, and a `#` or `?` in a file name is kept. (#8243, closes #8033, thanks @happy5318)
+
+- **The quota chip follows the open conversation's provider.** The chip by the model picker (and the Quota pill in the phone composer) used to show the server default's numbers: a DeepSeek chat showed Codex's 5-hour window. It now shows the conversation's own provider in its units (percent windows for plans, a balance for prepaid accounts), refreshes on a conversation, provider or profile switch, and clears at once so another account's numbers never show. Thanks @sheldon-im. (#6506)
+
+- **Test suite: the mobile camera-choice test no longer fails in full runs.** `test_issue6942_mobile_camera_choice_render` started its own server with the shared test server's config path, so after earlier tests configured a provider there it auto-completed and saved onboarding, and later browser contexts skipped the request the test waited for. The test's server now uses its own config and workspace. Test-only. (PR #8382)
+
+- **Composer menus stay open when the on-screen keyboard opens on tablets.** On tablets and foldables, typing in the model picker's search box no longer snaps the model, reasoning or workspace menu shut. They close only on a real switch between phone and desktop layouts, or when the composer collapses into its compact menu. Thanks @jatinbharadia. (#7472)
+
+- **Deleting a conversation now also clears its Gateway runtime records.** Deleting a session removed its messages but left the Gateway's runtime ledger (admissions, worker receipts, routing, spillover and mutation receipts) behind, so a deleted conversation could keep blocking or confusing later Gateway work. Deletes now run the Agent's own retirement step inside the same transaction. A conversation that is still running or finishing background work is refused with a clear message instead of being half-deleted, and in a batch delete only those sessions stay selected while the rest are removed. On an Agent too old to provide the step, or an install missing the Agent's dependencies, sessions with no runtime records still delete normally. (#8300, PR #8323, thanks @Overview3833)
+
+- **Agent update: a slow fetch is reported as a timeout, not a network outage.** When the in-app Agent update's fetch ran past its 15-second budget, the error said the remote couldn't be reached and suggested checking your connection. It now says the fetch was cancelled at the deadline and names the command. Real network failures keep their connectivity guidance. Thanks @pcsokonay. (#8375, fixes #8337)
+
+- **Terminal keeps your keystrokes in order.** Keys typed into the composer terminal are now sent one request at a time per shell, with anything typed meanwhile queued and sent next, so fast typing or a paste followed by Enter can no longer reach the shell out of order. Long pastes are split under the server's size limit, and unsent keys are dropped when the terminal is closed or restarted. Thanks @grzezlo. (#8341)
+
+- **Windows: starting the WebUI again reports "already running".** When our own WebUI already listens on the port, Windows can refuse the second bind with a permission error (WSAEACCES) instead of "address in use"; the launcher now recognises its own server behind that error. Thanks @Thanatos9404. (#8301, #8137)
+
+- **Faster session switching on code-heavy chats.** The copy-button pass marks code blocks it has already handled, so re-rendering a cached transcript no longer re-walks every code block to add nothing. Thanks @MuhammadUsamaMX. (#8309, #2168)
+
+- **Dashboard link setting rejects double-slash paths.** A browser dashboard URL whose path contains `//` (for example `https://host//dashboard`) is now refused when you save it, closing the last authority-like path shape the earlier #7844 hardening missed. Thanks @MuhammadUsamaMX. (#8354)
+
+- **Skills panel works again with current Hermes Agent builds.** The Agent renamed its skills-ordering helper on 2026-10-18 without keeping the old name, so the Skills list and skill usage stats returned a server error after the WebUI restarted. The WebUI now accepts both the old and new name (and falls back to the same ordering if neither exists), so it works with older and newer Agents alike. Thanks @sh4rknado. (#8367)
+
+- **Less CPU while chats are open.** Finding a run's journal file walked every session directory on each lookup, and those lookups sit on per-poll paths (stream reconnect probes, ownership checks). With hundreds of sessions that walk took a large share of the process and slowed even `/health`. Run paths are now cached (bounded, revalidated on use), hundreds of times faster per warm lookup. Thanks @silent-reader-cn. (#8322)
+
+- **Chats on a named custom provider keep their model.** A session pinned to `@custom:<name>:<model>` could silently switch to the catalog default on another provider when the catalog was cold (the provider lives in `custom_providers`, often in a profile config). Valid models are now kept, including server-side wakeup turns, and a model that was really removed from the provider's list moves to the provider's current default, with `${VAR}` defaults expanded in the session's own profile environment. Thanks @MoBluey. (#8256)
+
+- **Scheduled Tasks mark the job that just ran.** When a job finishes in the background, the Tasks list now refreshes on its own and marks the job with a dot, and an open job's Last Output card is marked too, without collapsing output you have open. The marker uses the app's unread colour and sits in the row's gutter so titles don't shift. Thanks @martindell. (#6767)
+
+- **Failed file previews say why.** When an inline CSV, diff, PDF, HTML or Excalidraw preview can't load, the card now explains it: session expired (reload the page), no access (move the file into the workspace or check permissions), or file gone. The download link is dropped for those three cases, since it would fail too. Translated in all 15 languages. Thanks @pxxD1998. (#7254)
+
+- **Keyboard and screen-reader users can open chats from the sidebar.** Tab now reaches each conversation title, Enter or a screen reader's click opens it, and the focused row shows a focus ring. Mouse and touch behave as before: a press doesn't leave focus on the title, drags and swipes don't open a chat, and clicking elsewhere during a rename saves it. Thanks @grzezlo. (#8214)
+
+- **Error toasts stay on screen.** Twenty-one error messages (Kanban unavailable, task dependency, workspace worktree and
+  reorder failures, the MCP server toggle, checkpoint restore, copy failure) passed their type where the duration
+  goes, so the toast vanished the moment it appeared; the Kanban dispatcher result and eight worktree errors had the
+  same problem in two other shapes. `showToast` now reads a type name in that position as the type and treats 0 as the
+  default duration. (#8315)
+
+- **Session menu and Move-to-project picker stay with their row.** On tablets the sidebar menu and project picker
+  opened in the top-left corner over the header; they now open at the pressed row and stay inside the screen, keep
+  "+ New project" visible with long project lists on phones, and move with their row when the sidebar scrolls. Thanks
+  @pxxD1998. (#6713)
+
+- **Two recurring CI failures fixed.** The `[SLOW]` diagnostics on draft saves and session loads no longer raise on a
+  request handler without the WebUI print helper (they read it the same guarded way as every other diagnostics site),
+  and the legacy-Agent worker test keeps the rows it tracks by identity alive so CPython cannot reuse their ids. Both
+  showed up as unrelated failures on contributor PRs and release stages. (#8312)
+
+- **Model picker keeps its search box and highlighted row visible, and sorts custom provider lists.** Once the picker is
+  scrolled, the note at the top no longer lets rows show through, the search box stays visible, and the row you move
+  to with the arrow keys is never hidden under the header. Custom and aggregator providers (for example a New-API
+  gateway with 50+ models) are listed in natural alphabetical order (model-2 before model-10); built-in providers keep
+  their curated newest-first order, and models revealed by "Show more" or fetched live are sorted after them. Thanks
+  @happy5318. (#7528)
+
+- **Composer stays above the keyboard on Android Chrome and Edge.** The page now asks Chromium browsers on Android to
+  resize the layout when the on-screen keyboard opens, the same setting Gemini, Open WebUI and LibreChat use. iPhone,
+  iPad and desktop are unchanged. Thanks @qxxaa. (#6475)
+
+- **Update status line wraps and names the latest release.** The Settings > System update line no longer runs off the
+  screen on phones and tablets (it was cut mid-word and could push **Check now** out of view); it wraps, and adds
+  "Latest tag: …" when the line doesn't already name that tag. Docker/pip installs get the same tag. Thanks
+  @lucas-albers-lz4. (#6859)
+
+- **Local providers with a saved address show as configured.** Ollama, LM Studio and other keyless self-hosted
+  providers that have an endpoint now read "N models · host:port" with a green **Configured** pill on Settings >
+  Providers, instead of "Not configured". Long LAN/Tailscale hosts wrap, and the card's status strings are translated in
+  Spanish, German and Korean. Thanks @rodboev. (#7246)
+
+- **Provider usage tiles name the right window.** On Settings > Providers, a ChatGPT account whose usage probe reports a
+  24-hour and a 5-hour window showed two tiles both called "5-hour limit", and a weekly-only window was also called
+  "5-hour limit". Tiles are now labelled by their real duration ("Usage limit" + "5-hour limit", "Weekly limit"); normal
+  accounts look the same. Thanks @mvanhorn. (#6893, fixes #6825)
+
+- **A delegated task's result is retried again after a stuck delivery.** With a current Agent, a finished delegated
+  task whose delivery was claimed by a process that then died stayed pending until WebUI restarted: WebUI scheduled the
+  retry but never handed the completion back to the Agent, which now offers each restored result only once per process.
+  WebUI now hands it back before the retry, and older Agents are unaffected. (#8278)
+
+- **A rename or archive is no longer silently undone by a concurrent session load.** When a session was loaded from
+  disk at the same moment another request saved it, the cache could keep the copy read before the save. A metadata-only
+  change (a new title, the archive flag, a model pick) then went unnoticed, and the next save of the session wrote the
+  old value back. Saves now bump a per-session write counter, and a cold load re-reads instead of caching a copy that
+  overlapped a save. Thanks @TowardInfinity. (#8269, fixes #8267)
+
+- **A second attachment with the same filename is kept.** Adding two different files with the same name (for example
+  two phone photos both called `image.jpg`) silently dropped the second one from the composer. Pending files are now
+  identified by more than their name, so both are kept and sent, and re-adding the same file still doesn't create a
+  duplicate chip. Thanks @lucastraba. (#8204)
+
+- **Login keeps your destination behind a subpath mount.** Behind a prefix such as `/hermes/`, the reverse proxy strips
+  the prefix from `next=`, so signing in sent you to the site root instead of the page you asked for. The login page now
+  remaps a prefix-stripped `next=` onto the app root, and validates the remapped result so a protocol-relative target
+  can never leave the app's origin. Thanks @robslove. (#8212)
+
+- **Gateway turns use the session's own profile endpoint and key.** A fresh or restarted Gateway turn resolved the
+  Gateway URL and key from whichever profile the process had active, so a profile with its own Gateway was routed to the
+  shared one with the launcher key, and with a root `.env` alias a cloned profile sent a copied key while a sparse
+  profile sent none. Each turn now resolves both from the session's profile; the launcher's exported key still wins on
+  the shared URL. Thanks @conradmicallef. (#7983)
 
 - **Per-turn token usage survives a reload.** The usage badge on an assistant reply ("1.2k in · 800 out") was
   computed client-side at the end of a stream and lost on reload; it's now persisted on the settled assistant
@@ -431,6 +574,16 @@
 
 ### Changed
 
+- **Test suite: the run-journal echo-scan scaling check no longer flakes on a busy runner,** while still failing on a genuinely quadratic rebuild. Thanks @MuhammadUsamaMX. (#8328)
+
+- **Russian: the last English strings translated.** The Profiles explainer and the Transparent Stream timestamp setting now read in Russian. Thanks @RajPabnani03. (#8001)
+
+- **German: Scheduled Tasks strings translated.** The cron editor's weekdays, time fields and hints were still English in German. Thanks @solarmaster961. (#8289)
+
+- **Open thinking cards follow the reasoning as it streams.** A reasoning card that is open while the model thinks now
+  keeps the newest text in view instead of sitting at the top. Scroll up inside the card to hold your place; scroll back
+  to the bottom to resume following. Thanks @esc247. (#7988)
+
 - **The WAL snapshot refusal test now exercises a real temporary database.** Thanks @tobenot. (#8233)
 
 - **An order-dependent CI test failure is fixed.** `test_custom_provider_detected_by_get_available_models` (and four
@@ -451,6 +604,10 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **Test suite keeps the Agent on `sys.path`.** The per-test `sys.path` guard restored a snapshot taken before
+  `api.config` added the Agent directory, so after the first test any newly added Agent module could not be imported
+  and 14 `hermes_state` tests skipped or failed on machines with a real Agent. CI was unaffected. (#8277)
 
 - **Hardened `test_tls_support::test_tls_startup_failure_fallback_to_http` against stdout-preamble noise.** The test asserted the server prints "TLS setup failed" by reading only the first 2000 bytes of its stdout. When the test interpreter lacks optional deps (`requests`/`websockets`), startup emits a burst of plugin/tool import warnings plus the startup-config banner *before* the TLS line, pushing the marker past that fixed window → spurious failure (distinct from the agent-package-isolation cause fixed separately below). It now drains all currently-available stdout (bounded by a 5s deadline, short-circuiting once the marker is seen) instead of a single fixed-size read. Verified failing→passing in a fresh venv without the optional deps. Test-only.
 

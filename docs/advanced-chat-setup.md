@@ -319,6 +319,15 @@ exposing the key value. That `gateway_chat` field is an operator diagnostic
 payload only; it is not currently rendered as a user-facing health banner in the
 browser UI.
 
+### Several profiles behind one Gateway
+
+A turn uses the gateway URL and key of the **session's own profile**, not those of whichever profile the WebUI process loaded.
+
+- **A profile that sets nothing of its own** (no `HERMES_WEBUI_GATEWAY_BASE_URL`, `HERMES_WEBUI_GATEWAY_API_KEY` or `API_SERVER_KEY` in its own `.env`, no `webui_gateway_base_url` in its `config.yaml`) uses the shared endpoint the WebUI process was given, URL and key together. That includes values exported by the launcher and values the default profile's `~/.hermes/.env` put into the process environment. This is what a single-profile setup sends, so named profiles on a shared Gateway keep working unchanged.
+- **A profile can override the URL and the key independently.** The half it does not set comes from the shared pair above. A profile's own URL is `HERMES_WEBUI_GATEWAY_BASE_URL` in its `.env`, or `webui_gateway_base_url` in its `config.yaml` (an exported `HERMES_WEBUI_GATEWAY_BASE_URL` takes precedence over `config.yaml`); a profile with no URL of its own keeps the shared URL. A profile's own key is `HERMES_WEBUI_GATEWAY_API_KEY` or `API_SERVER_KEY` in its `.env`.
+- **The shared key is only ever sent to the shared Gateway.** On a URL that is not the shared one, a profile sends its own key or none, never the launcher's or the shared key. On the shared URL the order is: the profile's own `HERMES_WEBUI_GATEWAY_API_KEY`, then the shared `HERMES_WEBUI_GATEWAY_API_KEY` (exported by the launcher, or set in the root profile's `~/.hermes/.env`), then the profile's `API_SERVER_KEY` (the key of its own Gateway), then the shared key. A global `HERMES_WEBUI_GATEWAY_API_KEY` combined with per-profile `HERMES_WEBUI_GATEWAY_API_KEY` values therefore works: each profile with its own alias sends that alias.
+- A `${VAR}` in a profile's `webui_gateway_base_url` is expanded from that profile's `.env`, read fresh from the file on every turn, plus any launcher export that did not come from another profile's `.env`. If the variable is not set anywhere, the turn ends with an error naming the unresolved variable and no request is sent.
+
 The bridge is best used by operators who already run Hermes Gateway/API Server
 locally and want browser-originated chat to use the same runtime/tool path as
 messaging surfaces. Attachments, cancellation, approvals, and clarify prompts

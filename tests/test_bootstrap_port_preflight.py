@@ -419,12 +419,19 @@ def _stdlib_ssl_context_class() -> type:
 
 @contextlib.contextmanager
 def _serve(
-    body: bytes, status: int = 200, cert: str | None = None, key: str | None = None
+    body: bytes,
+    status: int = 200,
+    cert: str | None = None,
+    key: str | None = None,
+    host: str = "127.0.0.1",
+    server_class: type = http.server.HTTPServer,
 ) -> Iterator[int]:
     """A /health listener that answers ``status`` with exactly ``body``.
 
     Yields the port; the server runs on a background thread. ``cert``/``key``
-    wrap the socket in TLS, making it an HTTPS-only listener.
+    wrap the socket in TLS, making it an HTTPS-only listener. ``host`` and
+    ``server_class`` choose the bind (``server.QuietHTTPServer`` binds like
+    the WebUI itself).
     """
 
     class _Handler(http.server.BaseHTTPRequestHandler):
@@ -437,7 +444,7 @@ def _serve(
         def log_message(self, *args: object) -> None:
             return None
 
-    with http.server.HTTPServer(("127.0.0.1", 0), _Handler) as httpd:
+    with server_class((host, 0), _Handler) as httpd:
         if cert and key:
             ctx = _stdlib_ssl_context_class()(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(cert, key)
@@ -656,3 +663,156 @@ def test_https_only_webui_is_recognised(
     monkeypatch.delenv("HERMES_WEBUI_TLS_KEY", raising=False)
     with _serve(_WEBUI_HEALTH_BODY, cert=cert, key=key) as port:
         assert bootstrap._already_serving_scheme("127.0.0.1", port) == "https"
+
+
+# ---------- #8137: Windows WSAEACCES from an exclusive wildcard listener -----
+
+
+def _wsaeacces() -> OSError:
+    """The bind error native Windows raises for WSAEACCES.
+
+    CPython maps winerror 10013 to errno EACCES and keeps ``winerror``; it is
+    set by hand so the error has the same shape on every platform.
+    """
+    exc = OSError(
+        errno.EACCES,
+        "An attempt was made to access a socket in a way forbidden by its "
+        "access permissions",
+    )
+    exc.winerror = 10013
+    return exc
+
+
+class _AccessDeniedSocket(_StubSocket):
+    """bind() fails like Windows under an exclusive wildcard listener."""
+
+    def bind(self, address: tuple) -> None:
+        self.bind_calls.append(address)
+        raise _wsaeacces()
+
+
+class _PosixAccessDeniedSocket(_StubSocket):
+    """bind() fails like a privileged port for an unprivileged POSIX user."""
+
+    def bind(self, address: tuple) -> None:
+        self.bind_calls.append(address)
+        raise OSError(errno.EACCES, "Permission denied")
+
+
+def _stub_windows_access_denied(
+    monkeypatch: pytest.MonkeyPatch, argv: list, scheme: str
+) -> list:
+    """main() on Windows with a WSAEACCES bind; returns the probe calls."""
+    _stub_main_up_to_preflight(monkeypatch, argv)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(bootstrap.socket, "socket", _AccessDeniedSocket)
+    probed: list = []
+
+    def fake_probe(host: str, port: int) -> str:
+        probed.append((host, port))
+        return scheme
+
+    monkeypatch.setattr(bootstrap, "_already_serving_scheme", fake_probe)
+    return probed
+
+
+def test_windows_access_denied_by_our_webui_reports_ready(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A WebUI started with ``--host 0.0.0.0`` holds the port exclusively.
+
+    Re-running bootstrap with the default host binds 127.0.0.1, which Windows
+    refuses with WSAEACCES (10013) rather than WSAEADDRINUSE. When our WebUI
+    answers the probe, that is the already-running path, not a permission
+    error (#8137).
+    """
+    probed = _stub_windows_access_denied(
+        monkeypatch, ["--no-browser", "--host", "127.0.0.1"], "http"
+    )
+
+    assert bootstrap.main() == 0
+    assert probed == [("127.0.0.1", bootstrap.DEFAULT_PORT)]
+    assert (
+        f"already running: http://localhost:{bootstrap.DEFAULT_PORT}"
+        in capsys.readouterr().out
+    )
+
+
+def test_windows_access_denied_by_our_webui_in_foreground_names_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The foreground/supervisor refusal names our instance here too."""
+    _stub_windows_access_denied(
+        monkeypatch, ["--foreground", "--host", "127.0.0.1"], "http"
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bootstrap.main()
+    message = str(excinfo.value)
+    assert (
+        f"Hermes WebUI is already running at http://localhost:{bootstrap.DEFAULT_PORT}"
+        in message
+    )
+    assert "Stop that instance first" in message
+
+
+def test_windows_access_denied_without_our_webui_keeps_the_permission_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A port in an excluded port range also fails with WSAEACCES.
+
+    Nothing of ours answers there, so the original bind failure stays visible
+    instead of turning into "already running" or a port-conflict suggestion.
+    """
+    probed = _stub_windows_access_denied(
+        monkeypatch, ["--no-browser", "--host", "127.0.0.1"], ""
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        bootstrap.main()
+    message = str(excinfo.value)
+    assert probed == [("127.0.0.1", bootstrap.DEFAULT_PORT)]
+    assert f"Cannot bind 127.0.0.1:{bootstrap.DEFAULT_PORT}" in message
+    assert "forbidden by its access permissions" in message
+    assert "already in use" not in message
+    assert not isinstance(excinfo.value, bootstrap.PortInUseError)
+
+
+def test_access_denied_off_windows_is_not_probed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """EACCES off Windows (a privileged port) stays a plain bind error."""
+    _stub_main_up_to_preflight(monkeypatch, ["--no-browser", "--host", "127.0.0.1"])
+    monkeypatch.setattr(sys, "platform", "linux")
+    monkeypatch.setattr(bootstrap.socket, "socket", _PosixAccessDeniedSocket)
+    probed: list = []
+    monkeypatch.setattr(
+        bootstrap,
+        "_already_serving_scheme",
+        lambda host, port: probed.append((host, port)) or "http",
+    )
+
+    with pytest.raises(RuntimeError, match="Cannot bind"):
+        bootstrap.main()
+    assert probed == []
+
+
+@pytest.mark.skipif(
+    sys.platform != "win32", reason="needs native Windows SO_EXCLUSIVEADDRUSE"
+)
+def test_real_windows_exclusive_wildcard_webui_reports_ready(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Real sockets, no stubbed errno: the listener binds 0.0.0.0 through
+    server.QuietHTTPServer (SO_EXCLUSIVEADDRUSE) and bootstrap runs with
+    ``--host 127.0.0.1``, whose preflight bind gets WSAEACCES (#8137)."""
+    import server
+
+    with _serve(
+        _WEBUI_HEALTH_BODY, host="0.0.0.0", server_class=server.QuietHTTPServer
+    ) as port:
+        _stub_main_up_to_preflight(
+            monkeypatch, ["--no-browser", "--host", "127.0.0.1", str(port)]
+        )
+        assert bootstrap.main() == 0
+    assert f"already running: http://localhost:{port}" in capsys.readouterr().out
