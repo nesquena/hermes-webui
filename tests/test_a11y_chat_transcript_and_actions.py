@@ -158,7 +158,7 @@ def test_message_actions_and_footers_reveal_on_focus_within():
 def test_copy_msg_announces_copied_and_updates_aria_label():
     funcs = "\n".join(
         _function_body(UI_JS, name)
-        for name in ("_announceA11yPolite", "copyMsg")
+        for name in ("_announceA11yPolite", "_applyButtonCopiedFeedback", "copyMsg")
     )
     script = f"""
     let _a11yPoliteClearTimer = null;
@@ -403,6 +403,382 @@ def test_a11y_spoken_response_on_done_short_code_and_long():
     assert out["longReply"].startswith("Hermes: First sentence is clear and concise.")
     assert out["longReply"].endswith("Full response ready in transcript.")
     assert len(out["longReply"]) < 200
+
+
+def test_a11y_navigation_and_recovery_lifecycle_retires_busy_and_start_state():
+    a11y_js = (ROOT / "static" / "a11y.js").read_text(encoding="utf-8")
+    script = f"""
+    const elements = {{
+      a11yAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      a11yAlertAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      messages: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k]; }},
+      }},
+      liveAssistantTurn: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+      }},
+    }};
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      getElementById(id) {{ return elements[id] || null; }},
+      activeElement: null,
+      body: {{}},
+    }};
+    globalThis.S = {{ session: {{ session_id: 'sessionA' }} }};
+    globalThis.assistantDisplayName = () => 'Hermes';
+    globalThis.t = (k) => ({{
+      thinking: 'Thinking',
+      a11y_response_complete: 'Response complete',
+    }})[k] || k;
+    let rAFCallbacks = [];
+    globalThis.requestAnimationFrame = (fn) => {{ rAFCallbacks.push(fn); return rAFCallbacks.length; }};
+    globalThis.cancelAnimationFrame = (id) => {{ rAFCallbacks[id - 1] = null; }};
+    let timerId = 0;
+    const timers = new Map();
+    globalThis.setTimeout = (fn, ms) => {{
+      const id = ++timerId;
+      timers.set(id, fn);
+      return id;
+    }};
+    globalThis.clearTimeout = (id) => {{ timers.delete(id); }};
+
+    {a11y_js}
+
+    const log = [];
+
+    // 1. Live stream A starts: sets aria-busy="true" on messages and announces Thinking
+    a11yOnStreamStart('sessionA', {{ streamId: 'stream1' }});
+    rAFCallbacks.forEach(fn => fn && fn());
+    rAFCallbacks = [];
+    log.push({{
+      step: 'start_A',
+      busy: elements.messages.attrs['aria-busy'],
+      announcement: elements.a11yAnnouncer.textContent,
+    }});
+
+    // 2. Composed navigation: switch from live A to existing idle B
+    // S.session becomes B, stream A is closed and resets stream state, and idle B loads
+    globalThis.S.session = {{ session_id: 'sessionB' }};
+    a11yResetStreamState('sessionA');
+    log.push({{
+      step: 'switched_to_idle_B',
+      busy: elements.messages.attrs['aria-busy'],
+    }});
+
+    // 3. Same-turn silent reconnect control:
+    // Switch back to session A, reconnecting the SAME stream1 does not re-announce thinking
+    globalThis.S.session = {{ session_id: 'sessionA' }};
+    elements.a11yAnnouncer.textContent = '';
+    a11yOnStreamStart('sessionA', {{ streamId: 'stream1', reconnecting: true }});
+    rAFCallbacks.forEach(fn => fn && fn());
+    rAFCallbacks = [];
+    log.push({{
+      step: 'reconnect_same_turn',
+      busy: elements.messages.attrs['aria-busy'],
+      announcement: elements.a11yAnnouncer.textContent,
+    }});
+
+    // 4. stream_end recovery finishes through fallback / restoreSettledSession without done
+    // Simulates _setActivePaneIdleIfOwner: resets stream state
+    a11yResetStreamState('sessionA', {{ streamId: 'stream1' }});
+    log.push({{
+      step: 'stream_end_recovery',
+      busy: elements.messages.attrs['aria-busy'],
+    }});
+
+    // 5. Fresh turn on the SAME session (sessionA) with new streamId2:
+    // Must announce Thinking and set aria-busy="true"
+    elements.a11yAnnouncer.textContent = '';
+    a11yOnStreamStart('sessionA', {{ streamId: 'stream2' }});
+    rAFCallbacks.forEach(fn => fn && fn());
+    rAFCallbacks = [];
+    log.push({{
+      step: 'fresh_same_sid_turn',
+      busy: elements.messages.attrs['aria-busy'],
+      announcement: elements.a11yAnnouncer.textContent,
+    }});
+
+    // 6. Retirement cancels/fences pending announcement:
+    // Schedule a pending announcement with rAF while sessionA is active,
+    // then switch to sessionC before rAF runs.
+    elements.a11yAnnouncer.textContent = 'Existing session text';
+    announceA11yPolite('Stale thinking for A', 2500, {{ sessionId: 'sessionA' }});
+    globalThis.S.session = {{ session_id: 'sessionC' }};
+    a11yResetStreamState('sessionA');
+    rAFCallbacks.forEach(fn => fn && fn());
+    rAFCallbacks = [];
+    log.push({{
+      step: 'fenced_announcement',
+      announcement: elements.a11yAnnouncer.textContent,
+    }});
+
+    console.log(JSON.stringify(log));
+    """
+    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    assert out == [
+        {"step": "start_A", "busy": "true", "announcement": "Hermes: Thinking…"},
+        {"step": "switched_to_idle_B", "busy": "false"},
+        {"step": "reconnect_same_turn", "busy": "true", "announcement": ""},
+        {"step": "stream_end_recovery", "busy": "false"},
+        {"step": "fresh_same_sid_turn", "busy": "true", "announcement": "Hermes: Thinking…"},
+        {"step": "fenced_announcement", "announcement": ""},
+    ]
+
+
+def test_a11y_compression_rotation_admits_continuation_and_rejects_unrelated():
+    a11y_js = (ROOT / "static" / "a11y.js").read_text(encoding="utf-8")
+    script = f"""
+    const elements = {{
+      a11yAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      messages: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k]; }},
+      }},
+      liveAssistantTurn: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+      }},
+    }};
+    globalThis.window = globalThis;
+    globalThis.document = {{
+      getElementById(id) {{ return elements[id] || null; }},
+      activeElement: null,
+      body: {{}},
+    }};
+    globalThis.S = {{ session: {{ session_id: 'sid_parent' }} }};
+    globalThis.assistantDisplayName = () => 'Hermes';
+    globalThis.t = (k) => ({{
+      thinking: 'Thinking',
+      a11y_response_complete: 'Response complete',
+    }})[k] || k;
+    globalThis.requestAnimationFrame = (fn) => fn();
+    globalThis.setTimeout = () => 1;
+    globalThis.clearTimeout = () => {{}};
+
+    {a11y_js}
+
+    const log = [];
+
+    // 1. Live stream starts on parent session sid_parent
+    a11yOnStreamStart('sid_parent', {{ streamId: 'stream_compress' }});
+    log.push({{
+      step: 'started_parent',
+      busy: elements.messages.attrs['aria-busy'],
+    }});
+
+    // 2. Context compression rotates session: frontend done listener admits transport
+    // SID 'sid_parent', assigns S.session = sid_continuation, then calls a11yOnStreamDone
+    globalThis.S.session = {{ session_id: 'sid_continuation' }};
+    a11yOnStreamDone('sid_parent', {{
+      completedSid: 'sid_continuation',
+      streamId: 'stream_compress',
+      message: {{ role: 'assistant', content: 'Here is the continuation response after compression.' }},
+    }});
+    log.push({{
+      step: 'completed_continuation',
+      busy: elements.messages.attrs['aria-busy'],
+      announcement: elements.a11yAnnouncer.textContent,
+    }});
+
+    // 3. Negative control: unrelated background session completion
+    // User is currently viewing sid_continuation. Background session sid_other finishes.
+    elements.a11yAnnouncer.textContent = 'Still continuation announcement';
+    elements.messages.attrs['aria-busy'] = 'false';
+    a11yOnStreamDone('sid_other', {{
+      completedSid: 'sid_other',
+      streamId: 'stream_other',
+      message: {{ role: 'assistant', content: 'Background answer that must not appear.' }},
+    }});
+    log.push({{
+      step: 'unrelated_background_rejected',
+      announcement: elements.a11yAnnouncer.textContent,
+      busy: elements.messages.attrs['aria-busy'],
+    }});
+
+    console.log(JSON.stringify(log));
+    """
+    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    assert out == [
+        {"step": "started_parent", "busy": "true"},
+        {
+            "step": "completed_continuation",
+            "busy": "false",
+            "announcement": "Hermes: Here is the continuation response after compression.",
+        },
+        {
+            "step": "unrelated_background_rejected",
+            "announcement": "Still continuation announcement",
+            "busy": "false",
+        },
+    ]
+
+
+def test_repeated_copy_handlers_preserve_canonical_aria_label_and_drain():
+    funcs = "\n".join(
+        _function_body(UI_JS, name)
+        for name in (
+            "_announceA11yPolite",
+            "_applyButtonCopiedFeedback",
+            "copyMsg",
+            "copyStatusSessionId",
+            "_copyThinkingText",
+        )
+    )
+    script = f"""
+    let _a11yPoliteClearTimer = null;
+    const announcer = {{ textContent: '' }};
+    function $(id) {{ return id === 'a11yAnnouncer' ? announcer : null; }}
+    function _copyText() {{ return Promise.resolve(); }}
+    function li(name) {{ return `<svg data-icon="${{name}}"></svg>`; }}
+    function t(k) {{ return k === 'copied' ? 'Copied!' : k === 'copy' ? 'Copy' : k; }}
+    let toastMsg = null;
+    function showToast(msg) {{ toastMsg = msg; }}
+    function requestAnimationFrame(fn) {{ fn(); }}
+
+    let scheduledTimers = new Map();
+    let timerCounter = 0;
+    function setTimeout(fn, ms) {{
+      const id = ++timerCounter;
+      scheduledTimers.set(id, fn);
+      return id;
+    }}
+    function clearTimeout(id) {{
+      scheduledTimers.delete(id);
+    }}
+
+    function createMockBtn(initialLabel) {{
+      const attrs = {{ 'aria-label': initialLabel }};
+      const classList = new Set();
+      return {{
+        innerHTML: '<svg data-icon="copy"></svg>',
+        style: {{ color: '' }},
+        classList: {{
+          add(c) {{ classList.add(c); }},
+          remove(c) {{ classList.delete(c); }},
+          contains(c) {{ return classList.has(c); }},
+        }},
+        isConnected: true,
+        getAttribute(k) {{ return attrs[k]; }},
+        setAttribute(k, v) {{ attrs[k] = String(v); }},
+      }};
+    }}
+
+    {funcs}
+
+    const results = [];
+
+    // --- Case 1: copyMsg repeated click before expiry ---
+    const msgBtn = createMockBtn('Copy');
+    const msgRow = {{ dataset: {{ rawText: 'Hello test message' }} }};
+    msgBtn.closest = () => msgRow;
+
+    copyMsg(msgBtn);
+    setImmediate(() => {{
+      const firstClickLabel = msgBtn.getAttribute('aria-label');
+      // Second click before 1500ms timer fires
+      copyMsg(msgBtn);
+      setImmediate(() => {{
+        const secondClickLabel = msgBtn.getAttribute('aria-label');
+        // Drain all timers (simulating timeout expiry)
+        for (const [id, fn] of [...scheduledTimers.entries()]) {{
+          scheduledTimers.delete(id);
+          fn();
+        }}
+        const restoredLabel = msgBtn.getAttribute('aria-label');
+        results.push({{
+          handler: 'copyMsg',
+          firstClickLabel,
+          secondClickLabel,
+          restoredLabel,
+        }});
+
+        // --- Case 2: copyStatusSessionId repeated click before expiry ---
+        const statusBtn = createMockBtn('Copy session ID');
+        statusBtn.getAttribute = (k) => k === 'data-copy-status-session' ? 'session_12345' : statusBtn.attrs ? statusBtn.attrs[k] : 'Copy session ID';
+        statusBtn.attrs = {{ 'aria-label': 'Copy session ID' }};
+        statusBtn.setAttribute = (k, v) => {{ statusBtn.attrs[k] = String(v); }};
+
+        copyStatusSessionId(statusBtn);
+        setImmediate(() => {{
+          copyStatusSessionId(statusBtn);
+          setImmediate(() => {{
+            for (const [id, fn] of [...scheduledTimers.entries()]) {{
+              scheduledTimers.delete(id);
+              fn();
+            }}
+            results.push({{
+              handler: 'copyStatusSessionId',
+              restoredLabel: statusBtn.attrs['aria-label'],
+            }});
+
+            // --- Case 3: _copyThinkingText repeated click before expiry ---
+            const thinkBtn = createMockBtn('Copy thinking');
+            const preEl = {{ textContent: 'Thinking process...' }};
+            const cardEl = {{ querySelector: () => preEl }};
+            thinkBtn.closest = () => cardEl;
+
+            _copyThinkingText(thinkBtn);
+            setImmediate(() => {{
+              _copyThinkingText(thinkBtn);
+              setImmediate(() => {{
+                for (const [id, fn] of [...scheduledTimers.entries()]) {{
+                  scheduledTimers.delete(id);
+                  fn();
+                }}
+                results.push({{
+                  handler: '_copyThinkingText',
+                  restoredLabel: thinkBtn.getAttribute('aria-label'),
+                }});
+
+                // --- Case 4: Disconnected control before timer expiry ---
+                const disBtn = createMockBtn('Copy');
+                disBtn.closest = () => msgRow;
+                copyMsg(disBtn);
+                setImmediate(() => {{
+                  disBtn.isConnected = false;
+                  for (const [id, fn] of [...scheduledTimers.entries()]) {{
+                    scheduledTimers.delete(id);
+                    fn();
+                  }}
+                  results.push({{
+                    handler: 'disconnected',
+                    hadError: false,
+                  }});
+
+                  console.log(JSON.stringify(results));
+                }});
+              }});
+            }});
+          }});
+        }});
+      }});
+    }});
+    """
+    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    assert out == [
+        {
+            "handler": "copyMsg",
+            "firstClickLabel": "Copied!",
+            "secondClickLabel": "Copied!",
+            "restoredLabel": "Copy",
+        },
+        {
+            "handler": "copyStatusSessionId",
+            "restoredLabel": "Copy session ID",
+        },
+        {
+            "handler": "_copyThinkingText",
+            "restoredLabel": "Copy thinking",
+        },
+        {
+            "handler": "disconnected",
+            "hadError": False,
+        },
+    ]
 
 
 

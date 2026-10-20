@@ -4,9 +4,15 @@
 // chat streaming, tool calls, and transient feedback.
 
 let _a11yPoliteTimer = null;
+let _a11yPoliteTimerOwner = null;
 let _a11yAssertiveTimer = null;
+let _a11yAssertiveTimerOwner = null;
+let _a11yPendingPoliteRaf = null;
+let _a11yPendingAssertiveRaf = null;
+let _a11yAnnounceGeneration = 0;
 let _a11yLastToolAnnounceAt = 0;
 let _a11yActiveStreamSid = null;
+let _a11yActiveStreamId = null;
 let _a11yActiveStreamAnnouncedStart = false;
 
 const A11Y_TOOL_THROTTLE_MS = 3000;
@@ -28,12 +34,34 @@ function _a11yAssistantName() {
   return 'Hermes';
 }
 
-function _a11yIsActiveSession(sessionId) {
-  if (!sessionId) return true;
+function _a11yIsActiveSession(sessionId, completedSid) {
+  if (!sessionId && !completedSid) return true;
   if (typeof S !== 'undefined' && S && S.session && S.session.session_id) {
-    return S.session.session_id === sessionId;
+    const cur = S.session.session_id;
+    return cur === sessionId || (!!completedSid && cur === completedSid);
   }
   return true;
+}
+
+function _a11yCancelPendingAnnouncements(retiredSid) {
+  if (_a11yPendingPoliteRaf) {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(_a11yPendingPoliteRaf);
+    _a11yPendingPoliteRaf = null;
+  }
+  if (_a11yPendingAssertiveRaf) {
+    if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(_a11yPendingAssertiveRaf);
+    _a11yPendingAssertiveRaf = null;
+  }
+  if (_a11yPoliteTimer && (!retiredSid || _a11yPoliteTimerOwner === retiredSid)) {
+    clearTimeout(_a11yPoliteTimer);
+    _a11yPoliteTimer = null;
+    _a11yPoliteTimerOwner = null;
+  }
+  if (_a11yAssertiveTimer && (!retiredSid || _a11yAssertiveTimerOwner === retiredSid)) {
+    clearTimeout(_a11yAssertiveTimer);
+    _a11yAssertiveTimer = null;
+    _a11yAssertiveTimerOwner = null;
+  }
 }
 
 function _ensureA11yLiveRegion(id, role, ariaLive) {
@@ -51,55 +79,87 @@ function _ensureA11yLiveRegion(id, role, ariaLive) {
   return el;
 }
 
-function announceA11yPolite(message, durationMs = 2500) {
+function announceA11yPolite(message, durationMs = 2500, opts = {}) {
   const text = String(message || '').trim();
   if (!text) return;
+  const ownerSid = (opts && (opts.sessionId || opts.ownerSid)) || _a11yActiveStreamSid || null;
+  const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || null;
+  if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
   const el = _ensureA11yLiveRegion('a11yAnnouncer', 'status', 'polite');
   if (!el) return;
   if (_a11yPoliteTimer) {
     clearTimeout(_a11yPoliteTimer);
     _a11yPoliteTimer = null;
+    _a11yPoliteTimerOwner = null;
   }
+  if (_a11yPendingPoliteRaf && typeof cancelAnimationFrame === 'function') {
+    cancelAnimationFrame(_a11yPendingPoliteRaf);
+    _a11yPendingPoliteRaf = null;
+  }
+  const generation = ++_a11yAnnounceGeneration;
   // Clear first so identical consecutive announcements (e.g. repeated Copy)
   // still trigger a DOM mutation event for screen readers.
   el.textContent = '';
   const applyText = () => {
+    _a11yPendingPoliteRaf = null;
+    if (generation !== _a11yAnnounceGeneration) return;
+    if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
     el.textContent = text;
     if (durationMs > 0) {
+      _a11yPoliteTimerOwner = ownerSid;
       _a11yPoliteTimer = setTimeout(() => {
-        if (el.textContent === text) el.textContent = '';
+        if (generation === _a11yAnnounceGeneration && el.textContent === text) {
+          el.textContent = '';
+        }
         _a11yPoliteTimer = null;
+        _a11yPoliteTimerOwner = null;
       }, durationMs);
     }
   };
   if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(applyText);
+    _a11yPendingPoliteRaf = requestAnimationFrame(applyText);
   } else {
     applyText();
   }
 }
 
-function announceA11yAssertive(message, durationMs = 4000) {
+function announceA11yAssertive(message, durationMs = 4000, opts = {}) {
   const text = String(message || '').trim();
   if (!text) return;
+  const ownerSid = (opts && (opts.sessionId || opts.ownerSid)) || _a11yActiveStreamSid || null;
+  const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || null;
+  if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
   const el = _ensureA11yLiveRegion('a11yAlertAnnouncer', 'alert', 'assertive');
   if (!el) return;
   if (_a11yAssertiveTimer) {
     clearTimeout(_a11yAssertiveTimer);
     _a11yAssertiveTimer = null;
+    _a11yAssertiveTimerOwner = null;
   }
+  if (_a11yPendingAssertiveRaf && typeof cancelAnimationFrame === 'function') {
+    cancelAnimationFrame(_a11yPendingAssertiveRaf);
+    _a11yPendingAssertiveRaf = null;
+  }
+  const generation = ++_a11yAnnounceGeneration;
   el.textContent = '';
   const applyText = () => {
+    _a11yPendingAssertiveRaf = null;
+    if (generation !== _a11yAnnounceGeneration) return;
+    if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
     el.textContent = text;
     if (durationMs > 0) {
+      _a11yAssertiveTimerOwner = ownerSid;
       _a11yAssertiveTimer = setTimeout(() => {
-        if (el.textContent === text) el.textContent = '';
+        if (generation === _a11yAnnounceGeneration && el.textContent === text) {
+          el.textContent = '';
+        }
         _a11yAssertiveTimer = null;
+        _a11yAssertiveTimerOwner = null;
       }, durationMs);
     }
   };
   if (typeof requestAnimationFrame === 'function') {
-    requestAnimationFrame(applyText);
+    _a11yPendingAssertiveRaf = requestAnimationFrame(applyText);
   } else {
     applyText();
   }
@@ -133,8 +193,15 @@ function a11yPreserveFocusAcross(fn) {
   }
 }
 
-function a11ySetStreamBusy(busy, sessionId) {
-  if (!_a11yIsActiveSession(sessionId)) return;
+function a11ySetStreamBusy(busy, sessionId, opts = {}) {
+  const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || null;
+  if (busy) {
+    if (sessionId && !_a11yIsActiveSession(sessionId, completedSid)) return;
+  } else if (sessionId) {
+    const isOwnerStream = !!(_a11yActiveStreamSid && (_a11yActiveStreamSid === sessionId || _a11yActiveStreamSid === completedSid));
+    const isActive = _a11yIsActiveSession(sessionId, completedSid);
+    if (!isOwnerStream && !isActive) return;
+  }
   if (typeof document === 'undefined' || !document.getElementById) return;
   const val = busy ? 'true' : 'false';
   const messagesEl = document.getElementById('messages');
@@ -147,26 +214,37 @@ function a11ySetStreamBusy(busy, sessionId) {
   }
 }
 
-function a11yResetStreamState(sessionId) {
-  if (sessionId && _a11yActiveStreamSid && _a11yActiveStreamSid !== sessionId) return;
+function a11yResetStreamState(sessionId, opts = {}) {
+  const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || null;
+  const streamId = (opts && opts.streamId) || null;
+  if (streamId && _a11yActiveStreamId && _a11yActiveStreamId !== streamId) return;
+  if (sessionId && _a11yActiveStreamSid && _a11yActiveStreamSid !== sessionId && (!completedSid || _a11yActiveStreamSid !== completedSid)) {
+    return;
+  }
+  a11ySetStreamBusy(false, sessionId, opts);
   _a11yActiveStreamSid = null;
+  _a11yActiveStreamId = null;
   _a11yActiveStreamAnnouncedStart = false;
   _a11yLastToolAnnounceAt = 0;
-  a11ySetStreamBusy(false, sessionId);
+  _a11yCancelPendingAnnouncements(sessionId || completedSid);
 }
 
 function a11yOnStreamStart(sessionId, opts = {}) {
   if (!_a11yIsActiveSession(sessionId)) return;
   const reconnecting = !!(opts && opts.reconnecting);
-  const isSameStreamSid = _a11yActiveStreamSid === sessionId && _a11yActiveStreamAnnouncedStart;
+  const streamId = (opts && opts.streamId) || null;
+  const isSameStream = streamId
+    ? (_a11yActiveStreamSid === sessionId && _a11yActiveStreamId === streamId && _a11yActiveStreamAnnouncedStart)
+    : (_a11yActiveStreamSid === sessionId && _a11yActiveStreamAnnouncedStart);
   _a11yActiveStreamSid = sessionId || null;
+  _a11yActiveStreamId = streamId;
   a11ySetStreamBusy(true, sessionId);
-  if (reconnecting || isSameStreamSid) return;
+  if (reconnecting || isSameStream) return;
   _a11yActiveStreamAnnouncedStart = true;
   _a11yLastToolAnnounceAt = 0;
   const name = _a11yAssistantName();
   const thinkingLabel = _a11yTranslate('thinking', 'Thinking');
-  announceA11yPolite(`${name}: ${thinkingLabel}…`, 3000);
+  announceA11yPolite(`${name}: ${thinkingLabel}…`, 3000, { sessionId, streamId });
 }
 
 function _a11yFormatToolLabel(toolCall) {
@@ -308,31 +386,34 @@ function a11yFormatAssistantReplyAnnouncement(rawText, opts = {}) {
 }
 
 function a11yOnStreamDone(sessionId, opts = {}) {
-  const isActive = _a11yIsActiveSession(sessionId);
-  a11yResetStreamState(sessionId);
+  const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || sessionId;
+  const isActive = _a11yIsActiveSession(sessionId, completedSid);
+  a11yResetStreamState(sessionId, opts);
   if (!isActive) return;
-  const rawText = _a11yExtractResponseText(opts, sessionId);
+  const rawText = _a11yExtractResponseText(opts, completedSid);
   const announcement = a11yFormatAssistantReplyAnnouncement(rawText, opts);
   // Pass durationMs = 0 so longer spoken responses are never cleared mid-speech
   // by a timer; the live region will be cleared on the next announcement.
-  announceA11yPolite(announcement, 0);
+  announceA11yPolite(announcement, 0, { sessionId: completedSid });
 }
 
-function a11yOnStreamCancel(sessionId) {
-  const isActive = _a11yIsActiveSession(sessionId);
-  a11yResetStreamState(sessionId);
+function a11yOnStreamCancel(sessionId, opts = {}) {
+  const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || sessionId;
+  const isActive = _a11yIsActiveSession(sessionId, completedSid);
+  a11yResetStreamState(sessionId, opts);
   if (!isActive) return;
   const cancelLabel = _a11yTranslate('a11y_response_cancelled', 'Response cancelled');
-  announceA11yPolite(cancelLabel, 3000);
+  announceA11yPolite(cancelLabel, 3000, { sessionId: completedSid });
 }
 
-function a11yOnStreamError(sessionId, errorMessage) {
-  const isActive = _a11yIsActiveSession(sessionId);
-  a11yResetStreamState(sessionId);
+function a11yOnStreamError(sessionId, errorMessage, opts = {}) {
+  const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || sessionId;
+  const isActive = _a11yIsActiveSession(sessionId, completedSid);
+  a11yResetStreamState(sessionId, opts);
   if (!isActive) return;
   const detail = String(errorMessage || '').trim();
   const fallback = _a11yTranslate('a11y_response_error', 'Response interrupted by an error');
-  announceA11yAssertive(detail ? `${fallback}: ${detail}` : fallback, 4500);
+  announceA11yAssertive(detail ? `${fallback}: ${detail}` : fallback, 4500, { sessionId: completedSid });
 }
 
 if (typeof window !== 'undefined') {

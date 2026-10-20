@@ -11120,6 +11120,7 @@ function setBusy(v){
   S.busy=v;
   updateSendBtn();
   if(!v){
+    if(typeof a11ySetStreamBusy==='function') a11ySetStreamBusy(false);
     if(typeof _clearActivityElapsedTimer==='function') _clearActivityElapsedTimer();
     setStatus('');
     setComposerStatus('');
@@ -11736,42 +11737,65 @@ function _fallbackCopy(text){
     }
   });
 }
+function _applyButtonCopiedFeedback(btn, applyFn, restoreFn){
+  if(!btn) return;
+  let state=btn._copyFeedbackState;
+  const copiedText=(typeof t==='function'&&t('copied'))||'Copied!';
+  if(!state){
+    const origHtml=btn.innerHTML;
+    const rawLabel=typeof btn.getAttribute==='function'?btn.getAttribute('aria-label'):null;
+    const origLabel=(rawLabel&&rawLabel!==copiedText)
+      ? rawLabel
+      : ((typeof t==='function'&&t('copy'))||'Copy');
+    state={
+      timer:null,
+      generation:0,
+      origHtml,
+      origLabel,
+    };
+    btn._copyFeedbackState=state;
+  }else if(state.timer){
+    clearTimeout(state.timer);
+    state.timer=null;
+  }
+  state.generation+=1;
+  const generation=state.generation;
+  if(typeof btn.setAttribute==='function') btn.setAttribute('aria-label',copiedText);
+  if(typeof applyFn==='function') applyFn(copiedText, state);
+  _announceA11yPolite(copiedText);
+  state.timer=setTimeout(()=>{
+    if(btn._copyFeedbackState!==state||state.generation!==generation) return;
+    state.timer=null;
+    delete btn._copyFeedbackState;
+    if(btn.isConnected===false) return;
+    if(typeof restoreFn==='function') restoreFn(state);
+    if(state.origHtml!==undefined) btn.innerHTML=state.origHtml;
+    if(typeof btn.setAttribute==='function') btn.setAttribute('aria-label',state.origLabel);
+  },1500);
+}
 function copyStatusSessionId(btn){
   const text=btn&&btn.getAttribute('data-copy-status-session');
   if(!text)return;
   _copyText(text).then(()=>{
-    const orig=btn.innerHTML;
-    const origLabel=typeof btn.getAttribute==='function'?btn.getAttribute('aria-label'):null;
-    const copiedText=(typeof t==='function'&&t('copied'))||'Copied!';
-    btn.innerHTML=(typeof li==='function')?li('check',13):copiedText;
-    if(typeof btn.setAttribute==='function') btn.setAttribute('aria-label',copiedText);
-    btn.classList.add('copied');
-    _announceA11yPolite(copiedText);
-    setTimeout(()=>{
-      btn.innerHTML=orig;
+    _applyButtonCopiedFeedback(btn, (copiedText)=>{
+      btn.innerHTML=(typeof li==='function')?li('check',13):copiedText;
+      btn.classList.add('copied');
+    }, ()=>{
       btn.classList.remove('copied');
-      if(typeof btn.setAttribute==='function'){
-        if(origLabel) btn.setAttribute('aria-label',origLabel);
-        else btn.setAttribute('aria-label',(typeof t==='function'&&t('copy'))||'Copy');
-      }
-    },1500);
+    });
   }).catch(()=>showToast(t('copy_failed')));
 }
 function copyMsg(btn){
-  const row=btn.closest('[data-raw-text]');
+  const row=btn&&btn.closest?btn.closest('[data-raw-text]'):null;
   const text=row?row.dataset.rawText:'';
   if(!text)return;
   _copyText(text).then(()=>{
-    const orig=btn.innerHTML;
-    const origLabel=typeof btn.getAttribute==='function'?btn.getAttribute('aria-label'):null;
-    const copiedText=(typeof t==='function'&&t('copied'))||'Copied!';
-    btn.innerHTML=li('check',13);btn.style.color='var(--blue)';
-    if(typeof btn.setAttribute==='function') btn.setAttribute('aria-label',copiedText);
-    _announceA11yPolite(copiedText);
-    setTimeout(()=>{
-      btn.innerHTML=orig;btn.style.color='';
-      if(typeof btn.setAttribute==='function') btn.setAttribute('aria-label',origLabel||((typeof t==='function'&&t('copy'))||'Copy'));
-    },1500);
+    _applyButtonCopiedFeedback(btn, ()=>{
+      btn.innerHTML=(typeof li==='function')?li('check',13):'Copied!';
+      btn.style.color='var(--blue)';
+    }, ()=>{
+      btn.style.color='';
+    });
   }).catch(()=>showToast(t('copy_failed')));
 }
 function _copyThinkingText(btn){
@@ -11781,17 +11805,12 @@ function _copyThinkingText(btn){
   const text=pre?pre.textContent:'';
   if(!text)return;
   _copyText(text).then(()=>{
-    const orig=btn.innerHTML;
-    const origLabel=typeof btn.getAttribute==='function'?btn.getAttribute('aria-label'):null;
-    const copiedText=(typeof t==='function'&&t('copied'))||'Copied!';
-    btn.innerHTML=li('check',12);
-    btn.style.color='var(--accent)';
-    if(typeof btn.setAttribute==='function') btn.setAttribute('aria-label',copiedText);
-    _announceA11yPolite(copiedText);
-    setTimeout(()=>{
-      btn.innerHTML=orig;btn.style.color='';
-      if(typeof btn.setAttribute==='function') btn.setAttribute('aria-label',origLabel||((typeof t==='function'&&t('copy'))||'Copy'));
-    },1500);
+    _applyButtonCopiedFeedback(btn, ()=>{
+      btn.innerHTML=(typeof li==='function')?li('check',12):'Copied!';
+      btn.style.color='var(--accent)';
+    }, ()=>{
+      btn.style.color='';
+    });
   }).catch(()=>showToast(t('copy_failed')));
 }
 
