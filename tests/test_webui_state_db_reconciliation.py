@@ -1109,6 +1109,97 @@ def test_msg_limit_compression_child_fast_path_filters_tool_calls_in_child_coord
     ]
 
 
+def test_parent_and_straddling_pages_do_not_leak_child_local_hydration_coordinates(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "parent_hydration_coordinate_window"
+    child_sid = "child_hydration_coordinate_window"
+    parent_messages = [
+        {"role": "assistant", "content": f"parent {idx}", "timestamp": float(idx)}
+        for idx in range(4)
+    ]
+    child_messages = [
+        {"role": "assistant", "content": f"child {idx}", "timestamp": 10.0 + idx}
+        for idx in range(4)
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 5.0
+    parent.save(touch_updated_at=False)
+    child = models.Session(
+        session_id=child_sid,
+        title="Reconcile",
+        workspace=str(tmp_path),
+        model="test-model",
+        messages=child_messages,
+        tool_calls=[
+            {"name": "child-zero", "assistant_msg_idx": 0},
+            {"name": "child-two", "assistant_msg_idx": 2},
+        ],
+        # This stale record is still child-local. Even though its scene text can
+        # match a parent row, a parent-only page must never consult child index 0.
+        anchor_activity_scenes={
+            "stale-child-zero": {
+                "version": "anchor_activity_scene_record_v1",
+                "message_index": 0,
+                "message_ref": "stale-child-zero",
+                "stream_id": "stale-child-stream",
+                "scene": {
+                    "version": "activity_scene_v1",
+                    "mode": "compact_worklog",
+                    "activity_rows": [],
+                    "final_answer": "parent 2",
+                },
+                "updated_at": 20.0,
+            }
+        },
+        parent_session_id=parent_sid,
+        created_at=10.0,
+        updated_at=20.0,
+    )
+    child.save(touch_updated_at=False)
+    _make_state_db(tmp_path / "state.db", child_sid, child_messages)
+
+    parent_only = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0"
+        "&msg_limit=2&msg_before=4"
+    )
+    routes.handle_get(parent_only, urlparse(parent_only.path))
+
+    assert parent_only.status == 200
+    parent_payload = parent_only.response_json["session"]
+    assert parent_payload["_messages_offset"] == 2
+    assert [msg["content"] for msg in parent_payload["messages"]] == [
+        "parent 2",
+        "parent 3",
+    ]
+    assert parent_payload["tool_calls"] == []
+    assert all("_anchor_activity_scene" not in msg for msg in parent_payload["messages"])
+
+    straddling = _GetHandler(
+        f"/api/session?session_id={child_sid}&messages=1&resolve_model=0"
+        "&msg_limit=4&msg_before=6"
+    )
+    routes.handle_get(straddling, urlparse(straddling.path))
+
+    assert straddling.status == 200
+    straddling_payload = straddling.response_json["session"]
+    assert straddling_payload["_messages_offset"] == 2
+    assert [msg["content"] for msg in straddling_payload["messages"]] == [
+        "parent 2",
+        "parent 3",
+        "child 0",
+        "child 1",
+    ]
+    assert straddling_payload["tool_calls"] == [
+        {"name": "child-zero", "assistant_msg_idx": 2}
+    ]
+
+
 def test_msg_limit_partial_parent_suffix_replay_falls_back_with_contiguous_pagination(
     monkeypatch,
     tmp_path,
@@ -1202,7 +1293,7 @@ def test_msg_limit_partial_parent_suffix_replay_falls_back_with_contiguous_pagin
 
 @pytest.mark.parametrize(
     "mutation",
-    ["content", "api_content", "tool_calls", "timestamp"],
+    ["content", "api_content", "tool_calls", "timestamp", "hidden_source"],
 )
 def test_msg_limit_same_id_child_rewrite_invalidates_disjoint_boundary(
     monkeypatch,
@@ -1261,8 +1352,10 @@ def test_msg_limit_same_id_child_rewrite_invalidates_disjoint_boundary(
                 "function": {"name": "rewritten_tool", "arguments": "{}"},
             }
         ]
-    else:
+    elif mutation == "timestamp":
         mutated_child_messages[0]["timestamp"] = 300.25
+    else:
+        mutated_child_messages[0]["_source"] = "delegation_wakeup"
     child.messages = mutated_child_messages
     child.save(touch_updated_at=False)
 
@@ -1278,6 +1371,99 @@ def test_msg_limit_same_id_child_rewrite_invalidates_disjoint_boundary(
     assert base_offset == 0
     assert selected_sidecar == full_lineage
     assert full_lineage == parent_messages + mutated_child_messages
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        pytest.param("last_message_at", 9.5, id="stale-parent-last-message"),
+        pytest.param("message_count", True, id="boolean-parent-count"),
+        pytest.param("message_count", 1.25, id="fractional-parent-count"),
+        pytest.param("visible_message_count", True, id="boolean-visible-count"),
+        pytest.param("child_message_count", True, id="boolean-child-count"),
+    ],
+)
+def test_disjoint_boundary_rejects_unproven_timestamp_and_non_integer_counts(
+    monkeypatch,
+    tmp_path,
+    field,
+    invalid_value,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = f"strict_boundary_parent_{field}_{str(invalid_value).replace('.', '_')}"
+    child_sid = f"strict_boundary_child_{field}_{str(invalid_value).replace('.', '_')}"
+    parent_messages = [
+        {"role": "user", "content": "parent", "timestamp": 10.0},
+    ]
+    child_messages = [
+        {"role": "assistant", "content": "child", "timestamp": 20.0},
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 15.0
+    parent.save(touch_updated_at=False)
+    boundary = _disjoint_parent_boundary(parent, child_messages)
+    boundary[field] = invalid_value
+    child = models.Session(
+        session_id=child_sid,
+        workspace=str(tmp_path),
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=boundary,
+        created_at=20.0,
+        updated_at=21.0,
+    )
+
+    assert routes._validated_omitted_compression_parent_metadata(
+        child,
+        child_messages,
+    ) is None
+
+
+def test_disjoint_boundary_requires_persisted_parent_last_message_metadata(
+    monkeypatch,
+    tmp_path,
+):
+    import api.models as models
+    import api.routes as routes
+
+    parent_sid = "legacy_boundary_parent_without_last_message"
+    child_sid = "legacy_boundary_child_without_last_message"
+    parent_messages = [
+        {"role": "user", "content": "parent", "timestamp": 10.0},
+    ]
+    child_messages = [
+        {"role": "assistant", "content": "child", "timestamp": 20.0},
+    ]
+    parent = _install_test_session(monkeypatch, tmp_path, parent_sid, parent_messages)
+    parent.pre_compression_snapshot = True
+    parent.updated_at = 15.0
+    parent.save(touch_updated_at=False)
+    parent_payload = json.loads(parent.path.read_text(encoding="utf-8"))
+    parent_payload.pop("last_message_at", None)
+    parent.path.write_text(
+        json.dumps(parent_payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    child = models.Session(
+        session_id=child_sid,
+        workspace=str(tmp_path),
+        messages=child_messages,
+        parent_session_id=parent_sid,
+        compression_disjoint_parent_boundary=_disjoint_parent_boundary(
+            parent,
+            child_messages,
+        ),
+        created_at=20.0,
+        updated_at=21.0,
+    )
+
+    assert routes._validated_omitted_compression_parent_metadata(
+        child,
+        child_messages,
+    ) is None
 
 
 def test_msg_limit_canonicalized_parent_falls_back_with_contiguous_pagination(

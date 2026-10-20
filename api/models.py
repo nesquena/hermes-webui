@@ -1882,6 +1882,11 @@ class Session:
         self.todo_state = raw_todo_state if isinstance(raw_todo_state, dict) else None
         self._todo_state_metadata_available = 'todo_state' in kwargs
         raw_message_count = kwargs.get('message_count')
+        self._metadata_message_count_exact = (
+            raw_message_count
+            if type(raw_message_count) is int and raw_message_count >= 0
+            else None
+        )
         parsed_message_count = None
         if raw_message_count is not None:
             try:
@@ -1893,6 +1898,11 @@ class Session:
         # (written by save()); None on legacy sidecars → compact() walks
         # messages instead.
         _raw_visible_count = kwargs.get('visible_message_count')
+        self._metadata_visible_message_count_exact = (
+            _raw_visible_count
+            if type(_raw_visible_count) is int and _raw_visible_count >= 0
+            else None
+        )
         _parsed_visible_count = None
         if _raw_visible_count is not None:
             try:
@@ -1902,6 +1912,14 @@ class Session:
         self._metadata_visible_message_count = (
             _parsed_visible_count
             if _parsed_visible_count is not None and _parsed_visible_count >= 0
+            else None
+        )
+        _raw_last_message_at = kwargs.get('last_message_at')
+        self._metadata_last_message_at = (
+            float(_raw_last_message_at)
+            if type(_raw_last_message_at) in (int, float)
+            and math.isfinite(float(_raw_last_message_at))
+            and float(_raw_last_message_at) >= 0
             else None
         )
 
@@ -2006,6 +2024,13 @@ class Session:
             1 for m in (guarded_messages or [])
             if not is_hidden_transcript_row(m)
         )
+        # The disjoint-compression boundary validator must prove the archived
+        # parent's freshness without parsing its messages array. Persist the
+        # same timestamp compact() publishes in the bounded metadata prefix;
+        # legacy files without it fail closed to the full-lineage path.
+        meta['last_message_at'] = (
+            _last_message_timestamp(guarded_messages) or self.updated_at
+        )
         # _mc_v marks this file as written by the current writer contract,
         # where `message_count` equals len(the persisted guarded messages) by
         # construction and both keys land in the same atomic write. save()'s
@@ -2028,7 +2053,16 @@ class Session:
         meta['anchor_activity_scenes'] = self.anchor_activity_scenes if isinstance(self.anchor_activity_scenes, dict) else {}
         # Fields not in METADATA_FIELDS (e.g. last_usage) go at the end. Exclude
         # the keys we placed explicitly above so they aren't emitted twice.
-        _placed = {'message_count', '_mc_v', 'anchor_scene_index', 'messages', 'tool_calls', 'anchor_activity_scenes'}
+        _placed = {
+            'message_count',
+            'visible_message_count',
+            'last_message_at',
+            '_mc_v',
+            'anchor_scene_index',
+            'messages',
+            'tool_calls',
+            'anchor_activity_scenes',
+        }
         extra = {k: v for k, v in self.__dict__.items()
                  if k not in METADATA_FIELDS and k not in _placed
                  and not k.startswith('_')}
@@ -12464,9 +12498,13 @@ def _compression_child_message_semantic_key(msg):
         "role": msg.get("role"),
         "content": msg.get("content"),
         "api_content": msg.get("api_content"),
+        # Visibility is semantic: changing a persisted row into (or out of) an
+        # internal delegation wakeup changes display counts and coordinates.
+        "_source": msg.get("_source"),
         # Keep the exact persisted timestamp. The display merge can reorder a
         # same-id row after even a sub-second rewrite.
         "timestamp": msg.get("timestamp"),
+        "_ts": msg.get("_ts"),
         "tool_call_id": msg.get("tool_call_id"),
         "tool_name": msg.get("tool_name"),
         "name": msg.get("name"),
