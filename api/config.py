@@ -52,6 +52,189 @@ HOST = os.getenv("HERMES_WEBUI_HOST", "127.0.0.1")
 PORT = int(os.getenv("HERMES_WEBUI_PORT", "8787"))
 
 
+def _natural_model_id_key(_m, _provider_id: str = ""):
+    r"""Locale-independent natural sort key for model ids (#7528 round-4).
+
+    Contract shared with the frontend ``_compareModelPickerEntries`` in
+    ``static/ui.js``: no localeCompare, no browser collation — both sides run
+    the identical token algorithm so ordering is deterministic across Python
+    and JS boundaries:
+
+    1. lowercase the id;
+    2. strip ONE provider-routing ``@<provider>:`` segment when the exact
+       provider id is known — a named custom provider such as
+       ``custom:abc`` must strip the FULL ``@custom:abc:`` prefix so the
+       underlying model id is compared (``@custom:abc:z-model`` →
+       ``z-model``), matching the frontend's provider-aware branch. Without
+       the provider id we fall back to a single leading ``@...:`` strip so
+       bare routing prefixes still collapse to the model id;
+    3. split into ASCII digit runs and text runs (``[0-9]+|[^0-9]+`` — ASCII
+       on purpose so JS ``/\d+/`` and Python agree on what counts as a digit;
+       Arabic-Indic ٢ etc. stay in the text run);
+    4. digit run vs digit run: compare numeric value (strip leading zeros,
+       compare core length then core text), tie-break by raw run text so
+       ``007`` vs ``7`` is deterministic;
+    5. text run vs text run: compare Unicode code points;
+    6. digit run sorts before text run at the same position;
+    7. shorter run list sorts first when prefix-identical.
+
+    ``model-2`` sorts before ``model-10`` while plain lexical sort would emit
+    ``model-10`` first. The returned key is a comparable wrapper, so callers
+    keep using ``sort(key=_natural_model_id_key)`` unchanged.
+
+    The key is ONLY the routing-stripped id. A bare id and its routed twin
+    (``a-model`` vs ``@custom:abc:a-model``) strip to the same value and
+    therefore compare EQUAL here, so Python's stable sort preserves input
+    order. That is deliberate: the picker's provider-aware tie-break sorts
+    routed-first, and matching it here WOULD flip the API order — the two
+    boundaries disagree only for this pair, which the final picker dedups
+    away, so there is no visible row either way. See
+    ``test_provider_aware_tie_is_left_equal_by_design``.
+    """
+    return _NaturalModelKey(
+        _natural_model_routing_stripped(str((_m or {}).get("id") or ""), _provider_id)
+    )
+
+
+def _natural_model_routing_stripped(value, _provider_id: str = "") -> str:
+    """Strip one leading ``@<provider>:`` routing segment.
+
+    When ``_provider_id`` is supplied AND the value carries that exact
+    routing prefix (case-insensitive), the FULL ``@<provider>:`` segment is
+    removed. This mirrors the frontend ``_modelPickerSortableId`` provider-
+    aware branch: a named custom provider id like ``custom:abc`` must strip
+    ``@custom:abc:`` (not just the first colon) so the underlying model id
+    is what gets compared, with the api and the picker agreeing on order
+    for mixed bare / @custom:<name>:routed entries (review blocker 2,
+    2026-09-19). When the prefix doesn't match (e.g. a legacy alias) or no
+    provider is given, drop a single leading ``@...:`` segment so the common
+    routing shapes still collapse cleanly.
+    """
+    _s = str(value or "")
+    if _s.startswith("@"):
+        _pid = str(_provider_id or "").strip()
+        if _pid:
+            _prefix = "@" + _pid + ":"
+            if _s[: len(_prefix)].lower() == _prefix.lower():
+                return _s[len(_prefix):]
+        colon = _s.find(":")
+        if colon >= 0:
+            return _s[colon + 1:]
+    return _s
+
+
+def _natural_model_key_runs(text: str) -> list:
+    # ASCII-only digit definition; see _natural_model_id_key docstring. Using
+    # an explicit [0-9] class guarantees the Python side agrees with the JS
+    # /\d+/ (ASCII) so the two runtime comparators tokenize identically for
+    # every input — including non-ASCII decimal digits such as Arabic-Indic
+    # U+0662, which must fall into the text run on both sides (review
+    # blocker 3, 2026-09-19).
+    return re.findall(r"[0-9]+|[^0-9]+", str(text or "").lower())
+
+
+class _NaturalModelKey:
+    """Hash-free, comparison-only sort key implementing the shared contract."""
+
+    __slots__ = ("_runs",)
+
+    def __init__(self, value):
+        self._runs = _natural_model_key_runs(value)
+
+    @staticmethod
+    def _is_digit_run(run: str) -> bool:
+        """True when the run is ASCII digits ONLY.
+
+        ``str.isdigit()`` is Unicode-aware and returns True for non-ASCII
+        decimal digits (Arabic-Indic U+0662, Devanagari, fullwidth), which is
+        exactly where the shared contract says text. The JS side classifies
+        with ``/^\\d+$/`` (ASCII), so a run of ``٢`` was numeric here but text
+        there — and two distinct ids like ``model-1٢`` / ``model-1a`` came out
+        in OPPOSITE order in the picker and the api (#7528 re-gate).
+
+        The tokenizer already emits ASCII-only digit runs
+        (``_natural_model_key_runs`` uses ``[0-9]+|[^0-9]+``), so this is
+        belt-and-braces: any digit-looking run reaching here is ASCII by
+        construction, and the classification no longer depends on a Unicode
+        predicate that the JS side cannot replicate.
+        """
+        return bool(run) and all("0" <= ch <= "9" for ch in run)
+
+    @staticmethod
+    def _cmp_runs(a: str, b: str) -> int:
+        a_digit = _NaturalModelKey._is_digit_run(a)
+        b_digit = _NaturalModelKey._is_digit_run(b)
+        if a_digit and b_digit:
+            a_core = a.lstrip("0") or "0"
+            b_core = b.lstrip("0") or "0"
+            if len(a_core) != len(b_core):
+                return -1 if len(a_core) < len(b_core) else 1
+            if a_core != b_core:
+                return -1 if a_core < b_core else 1
+            if a != b:
+                return -1 if a < b else 1
+            return 0
+        if not a_digit and not b_digit:
+            for ca, cb in zip(a, b, strict=False):
+                if ord(ca) != ord(cb):
+                    return -1 if ord(ca) < ord(cb) else 1
+            if len(a) != len(b):
+                return -1 if len(a) < len(b) else 1
+            return 0
+        return -1 if a_digit else 1
+
+    def _cmp(self, other) -> int:
+        common = min(len(self._runs), len(other._runs))
+        for i in range(common):
+            c = self._cmp_runs(self._runs[i], other._runs[i])
+            if c:
+                return c
+        if len(self._runs) != len(other._runs):
+            return -1 if len(self._runs) < len(other._runs) else 1
+        return 0
+
+    def __lt__(self, other):
+        return self._cmp(other) < 0
+
+    def __le__(self, other):
+        return self._cmp(other) <= 0
+
+    def __gt__(self, other):
+        return self._cmp(other) > 0
+
+    def __ge__(self, other):
+        return self._cmp(other) >= 0
+
+    def __eq__(self, other):
+        return isinstance(other, _NaturalModelKey) and self._cmp(other) == 0
+
+
+def _sort_picker_group_models(group: dict) -> None:
+    """Apply the natural model sort WHERE it belongs (#7528 owner option B).
+
+    Custom / aggregator groups (``custom``, ``custom:<name>``) arrive in
+    machine insertion order (New-API style gateways with 50+ ids), so their
+    ``models`` are natural-sorted whole. Built-in providers keep their
+    curated catalog order in ``models`` (newest-first lists such as OpenAI's
+    stay newest-first). Every group's ``extra_models`` overflow tail is
+    machine-provided and natural-sorted, so the API order matches the
+    picker's Show-more order. Mirrors the frontend policy in ``static/ui.js``
+    (``_sortModelPickerOptions`` and ``renderModelDropdown``'s
+    ``_orderGroupRows``: custom groups whole, built-in groups only their
+    ``extra`` rows after the curated ones).
+    """
+    provider_id = str(group.get("provider_id") or "")
+    lowered = provider_id.strip().lower()
+    is_custom = lowered == "custom" or lowered.startswith("custom:")
+    for bucket in ("models", "extra_models") if is_custom else ("extra_models",):
+        rows = group.get(bucket)
+        if isinstance(rows, list) and len(rows) > 1:
+            try:
+                rows.sort(key=lambda _m, _pid=provider_id: _natural_model_id_key(_m, _pid))
+            except Exception:
+                pass
+
+
 def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
     """Read a positive int from the environment, falling back on bad input.
 
@@ -6714,7 +6897,7 @@ _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
-_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 300.0
+_SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
 _cache_build_in_progress = False  # True while a cold path is actively building
@@ -7653,6 +7836,17 @@ def _static_models_catalog_without_live_probes() -> dict:
             return (3, provider_id)
 
         groups.sort(key=_group_sort_key)
+
+        # Natural, case-insensitive model order (#7528) — applied ONLY where
+        # the owner's option B allows it: custom/aggregator groups are sorted
+        # whole (a newapi-style gateway otherwise shows jd-* / sn-* / sub-*
+        # intermixed in insertion order, user request 2026-09-05); built-in
+        # providers keep their curated catalog order. The exact provider_id is
+        # threaded so a named custom provider such as `custom:abc` strips the
+        # FULL `@custom:abc:` prefix when sorting (review blocker 2,
+        # 2026-09-19). See `_sort_picker_group_models`.
+        for _group in groups:
+            _sort_picker_group_models(_group)
 
         model_aliases = _model_aliases_from_config()
 
@@ -11127,6 +11321,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             return (3, pid)
         groups.sort(key=_group_sort_key)
 
+        # Natural model order (#7528 owner option B): custom/aggregator groups
+        # sorted whole, built-in providers keep their curated catalog order,
+        # and every group's `extra_models` overflow tail is sorted so the API
+        # order matches the picker's Show-more order. Mirrors the static
+        # catalog path (user request 2026-09-05; review blocker 2, 2026-09-19).
+        for _group in groups:
+            _sort_picker_group_models(_group)
+
         # 12. Include model aliases so the WebUI frontend can resolve them.
         model_aliases = _model_aliases_from_config()
 
@@ -12310,6 +12512,27 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+# #6885 admission correction (round 2, maintainer review): marker and prompt
+# are ONE record so the two collections cannot drift apart. Value shape:
+#   {"prompt": str, "continuation_id": str}
+# #7855: the routes.py consumer admits the turn by "continuation_id" — the
+# token the server issues here and carries on the goal_continue SSE event,
+# which the browser keeps on the queued entry through inline edits and
+# combines. A genuine user/queued turn carries no ID, so it keeps user
+# priority and the record stays for the real continuation dispatch.
+# Written atomically next to the set add in streaming/gateway goal_continue
+# paths; consumed together with the marker by
+# _consume_pending_goal_continuation.
+# There is deliberately no wall-clock expiry: the browser keeps a queued
+# continuation across refreshes and restores it into the composer for a
+# later send, so a TTL retired perfectly usable records (#7855 blocker 1).
+# A record lives until it is consumed or explicitly retired (goal clear /
+# session retirement, plus an orphan sweep for broken halves). Pause does
+# NOT retire it: a paused goal is resumed with the same pending
+# continuation, so clearing it on pause broke the resume retry
+# (test_7855_regate_behaviour CORE 2).
+PENDING_GOAL_CONTINUATION_PROMPTS: dict = {}
+PENDING_GOAL_CONTINUATION_LOCK = threading.Lock()
 
 # ── THE list of per-stream registries (#7302 re-gate) ───────────────────────
 # Every registry a stream owns. Both the local worker teardown (api/streaming.py)

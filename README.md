@@ -214,6 +214,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Syntax highlighting via Prism.js (Python, JS, bash, JSON, SQL, and more)
 - Safe HTML rendering in AI responses (bold, italic, code converted to markdown)
 - Bare HTTP(S) URLs are auto-linked without absorbing adjacent CJK prose; Unicode IDN host separators and raw-CJK IRI paths remain linkable
+- Local file links: a `file:///` URI in a reply renders through the media route (inline preview for images/audio/video, download otherwise). Windows drive-letter URIs (`file:///C:/...`) resolve to the drive path on a Windows server; on a POSIX server the leading separator is preserved so a `/C:/...` request stays absolute and can never alias a workspace-relative file. Only local authorities are served — a `file://<host>/...` UNC reference is rejected (never silently rewired to a local path), and the file must live under an allowed root (`HERMES_HOME`, `/tmp`, the active workspace, or `MEDIA_ALLOWED_ROOTS`)
 - rAF-throttled token streaming for smoother rendering during long responses
 - Context usage indicator in composer footer -- token count, cost, and fill bar (model-aware)
 
@@ -224,6 +225,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Pinned-conversation limits apply separately to each session's owning profile; root/default aliases share a limit. Unpin an empty session before switching its profile through chat or `/goal`.
 - Archive sessions (hide without deleting, toggle to show)
 - Session projects -- named groups with colors for organizing sessions; delegated subagent sessions have no project of their own and follow their nearest ancestor's project in the project filter and the Unassigned chip; forks and other child sessions keep their own project, so a fork moved to "No project" stays Unassigned
+- Delegated subagent sessions nest under their parent row. When that parent is filtered out of the current view (project, source tab, hidden), the subagent is hidden with it rather than shown as a stray top-level "Subagent Session"; a subagent without the cross-surface flag (for example in the all-profiles view) stays a top-level row when its parent is in the other (CLI/TUI) tab, was never imported, or is itself shown as a top-level subagent row, and a subagent that matches an active sidebar search is always listed
 - Project bindings -- right-click a project chip and pick **Project settings…** to pin a default workspace (or several workspaces, with one marked default) and a model. The chip's **+** (and New Chat while the project filter is active) then opens a session already in that workspace/model. The reasoning-effort binding stays in the API (`POST /api/projects/bind`) but is dormant: the dialog no longer offers the row, and nothing applies a stored value to a new session any more — the only mechanism would be the **profile-wide** reasoning-effort preference (the same `agent.reasoning_effort` setting the `/reasoning` command writes), so a row inside a per-project dialog read as per-project while silently moving the whole profile's effort; it comes back with per-session effort (#7881)
 - Session tags -- add #tag to titles for colored chips and click-to-filter
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
@@ -298,6 +300,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Send-key on touch devices: plain Enter inserts a newline on phones (iPhone/iPod, Android phones) and on tablets / iPadOS / touch-capable Macs that only expose a coarse pointer (no attached hardware keyboard), matching the software keyboard's return key. Devices that report a fine pointer (for example, a tablet with a hardware keyboard) keep the configured physical-keyboard send-key behavior. The configured shortcut and the Send button remain available for sending.
 - Show/hide CLI sessions toggle (enabled by default)
 - Token usage display toggle (off by default, also via `/usage` command)
+- Task list in chat toggle (off by default) -- a collapsible task strip pinned at the top of the chat area, summarising the current session's todos. While it is on, the sidebar **Todos** panel is hidden and the workspace-panel Todos toggle is disabled with an explanation, so the same list is never shown twice; switch it back off in Settings -> Appearance to restore the sidebar panel and re-enable the workspace toggle.
 - Control Center always opens on the Conversation tab; resets on close
 - Unsaved changes guard -- discard/save prompt when closing with unpersisted changes
 - Cron completion alerts -- toast notifications and unread badges scoped to the active profile on the Tasks tab and session sidebar
@@ -378,7 +381,8 @@ before the session's named-profile Gateway ownership is known.
 - **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
-- **Todos** -- live task list from the current session
+- **Todos** -- live task list from the current session; hidden while the in-chat task list toggle is on, which also disables the workspace-panel Todos tab
+- **Insights** -- token, cost, and skill-usage analytics; period presets (7/30/90/365 days) plus a **Custom range** with start/end date pickers
 - **Spaces** -- add, rename, remove workspaces; quick-switch from topbar
 
 ### Mobile responsive
@@ -763,6 +767,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 **Using & customizing**
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide
 - [`docs/workspace-git.md`](docs/workspace-git.md) — the workspace Git controls
+- [`docs/kanban.md`](docs/kanban.md) — the Kanban board's status flow: who may set which column, how tasks enter and leave Scheduled, and the parent re-gating on Scheduled/Blocked → Ready
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
 **Deploying & operating**

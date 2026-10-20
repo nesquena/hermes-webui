@@ -41,4 +41,4 @@ def test_goal_does_not_await_a_list_render_after_creating_a_session():
 def test_new_session_still_owns_a_forced_sidebar_refresh():
     start = SESSIONS_JS.index("async function newSession(")
     body = SESSIONS_JS[start : SESSIONS_JS.index("\n}\n", start)]
-    assert "refreshSessionList('new-session',{force:true})" in body
+    assert "refreshSessionList('new-session',{force:true,keepProjectPicker:true})" in body

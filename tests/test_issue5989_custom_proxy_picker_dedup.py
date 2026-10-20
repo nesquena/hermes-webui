@@ -38,6 +38,7 @@ def _run_harness():
 class Node {{
   constructor(tag) {{ this.tagName=tag.toUpperCase(); this.children=[]; this.dataset={{}}; this.parentElement=null; }}
   appendChild(child) {{ child.parentElement=this; this.children.push(child); return child; }}
+  insertBefore(child, ref) {{ child.parentElement=this; const at=this.children.indexOf(ref); if(at>=0) this.children.splice(at,0,child); else this.children.push(child); return child; }}
   removeChild(child) {{ this.children=this.children.filter(item=>item!==child); child.parentElement=null; }}
   querySelectorAll(selector) {{
     if(selector==='optgroup') return this.children.filter(child=>child.tagName==='OPTGROUP');
@@ -98,7 +99,18 @@ _addLiveModelsToSelect('custom:b',[{{id:'@custom:b:gpt-4o',label:'GPT-4o B'}}],c
 const unnamespaced=makeSelect();
 addCatalog(unnamespaced,'gpt-4o');
 _addLiveModelsToSelect('custom:llm-proxy',[{{id:'@custom:llm-proxy:gpt-4o',label:'GPT-4o'}}],unnamespaced);
+// #7528 option B: a built-in provider's routed live twins replace its catalog rows IN PLACE and stay curated
+// (not extras), so the curated newest-first order survives the live refresh.
+window._activeProvider='openai';
+const builtinRoutedTwins=new Node('select');
+const openaiGroup=new Node('optgroup'); openaiGroup.dataset.provider='openai'; builtinRoutedTwins.appendChild(openaiGroup);
+for(const value of ['gpt-5.1','gpt-5','gpt-5-nano']){{ const option=new Node('option'); option.value=value; option.textContent=value; openaiGroup.appendChild(option); }}
+builtinRoutedTwins.value='gpt-5.1';
+_addLiveModelsToSelect('openai',[{{id:'gpt-5-nano'}},{{id:'gpt-5.1'}},{{id:'gpt-5'}},{{id:'gpt-6-preview'}}],builtinRoutedTwins);
+_deduplicateModelPickerOptions(builtinRoutedTwins,builtinRoutedTwins.value);
+const builtinRows=openaiGroup.children.map(option=>[option.value,!!option.dataset.extra]);
 console.log(JSON.stringify({{
+  builtinRoutedTwins:builtinRows,
   liveFirst:snapshot(liveFirst),
   catalogFirst:snapshot(catalogFirst),
   selectedBare:snapshot(selectedBare),
@@ -164,3 +176,17 @@ def test_unnamespaced_custom_proxy_value_deduplicates_with_catalog():
         "groups": [["@custom:llm-proxy:gpt-4o"]],
         "selected": "@custom:llm-proxy:gpt-4o",
     }
+
+
+def test_builtin_routed_live_twins_keep_curated_order_and_status():
+    """#7528 owner option B (Codex b1): with OpenAI active, live routed twins
+    replace the catalog rows in their places and stay curated; only the new
+    live model is an extra, so sorting cannot push GPT-5.1 below GPT-5 Nano."""
+    # The selected bare row survives dedup (existing rule: the selected value wins); the other twins are replaced
+    # in their curated slots. Before the fix they were appended as extras in arrival order (nano before gpt-5).
+    assert _run_harness()["builtinRoutedTwins"] == [
+        ["gpt-5.1", False],
+        ["@openai:gpt-5", False],
+        ["@openai:gpt-5-nano", False],
+        ["@openai:gpt-6-preview", True],
+    ]
