@@ -1066,16 +1066,21 @@ def build_share_snapshot(session) -> dict:
     }
 
 
-def create_or_refresh_share(session) -> dict:
-    snapshot = build_share_snapshot(session)
+def write_share_snapshot(snapshot: dict, *, token: str = "", source_session_id: str = "") -> dict:
+    """Persist a prebuilt share snapshot under ``token`` (or a fresh one).
+
+    Split out of :func:`create_or_refresh_share` so the caller can build the
+    snapshot outside a lock (redaction and media embedding can take seconds on a
+    large session) and take the lock only around token resolution, this write and
+    the token persist (#8255 review).
+    """
     with _SHARE_LOCK:
         _ensure_share_dir()
-        existing_token = str(getattr(session, "share_token", "") or "").strip()
-        token = existing_token or secrets.token_urlsafe(18)
+        token = str(token or "").strip() or secrets.token_urlsafe(18)
         now = time.time()
         payload = {
             "token": token,
-            "source_session_id": str(getattr(session, "session_id", "") or ""),
+            "source_session_id": str(source_session_id or ""),
             "title": snapshot["title"],
             "messages": snapshot["messages"],
             "message_count": snapshot["message_count"],
@@ -1099,6 +1104,15 @@ def create_or_refresh_share(session) -> dict:
         "share_created_at": payload["created_at"],
         "share_updated_at": payload["updated_at"],
     }
+
+
+def create_or_refresh_share(session) -> dict:
+    snapshot = build_share_snapshot(session)
+    return write_share_snapshot(
+        snapshot,
+        token=str(getattr(session, "share_token", "") or ""),
+        source_session_id=str(getattr(session, "session_id", "") or ""),
+    )
 
 
 def load_share(token: str) -> dict | None:
