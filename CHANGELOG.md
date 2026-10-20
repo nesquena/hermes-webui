@@ -68,6 +68,16 @@
 
 ### Security
 
+- **The request log no longer records a spoofable client IP.** The structured `[webui] {...}` log recorded
+  `X-Forwarded-For[0]` — the left-most hop, which the client itself writes — in a `forwarded_for` field. Since these logs
+  are advertised as usable by "downstream security tooling like fail2ban", a jail keyed on that field let anyone get an
+  arbitrary third-party IP banned at the edge (a denial-of-service and self-lockout vector). Each record now carries a
+  `client_ip` resolved by the existing trusted-proxy machinery: it is the real client IP only when the un-spoofable raw
+  socket peer is a trusted proxy (loopback, or `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`) **and** `HERMES_WEBUI_TRUST_FORWARDED_FOR=1`,
+  walked right-to-left across the full chain; otherwise it is the raw socket peer. Malformed chains fail closed to the raw
+  peer rather than to attacker input. The untrusted `forwarded_for` field is **removed** — point ban keys at `client_ip`.
+  (#7863)
+
 - **Pressing Enter on the approval card's Deny button denies.** While a tool approval was pending, Enter on any focused
   control outside a text field ran "Allow once": Enter on **Deny**, **Allow session** or **Always allow** approved the
   command once, and Enter on the ⋮ menu, a menu row, the project picker or a control that closes itself on Enter approved

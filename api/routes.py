@@ -7322,6 +7322,47 @@ def _forwarded_client_ip_from_trusted_proxy(handler):
     return _request_client_ip(handler)
 
 
+def request_log_client_ip(handler) -> str:
+    """Trustworthy client IP for the structured request log (#7863).
+
+    ``log_request`` used to record ``X-Forwarded-For[0]`` — the left-most hop,
+    which the CLIENT writes — under a ``forwarded_for`` field that reads as
+    authenticated. Since the CHANGELOG advertises these records to "downstream
+    security tooling like fail2ban", a jail keyed on that field let anyone get
+    an arbitrary third-party IP banned.
+
+    The value returned here is one of:
+      * the real client IP, resolved through the existing trusted-proxy
+        machinery — and only when the raw socket peer is a trusted proxy AND
+        the operator opted in with ``HERMES_WEBUI_TRUST_FORWARDED_FOR``;
+      * otherwise the raw socket peer, which no header can forge.
+
+    It never returns a value taken from an untrusted peer, and on a malformed
+    chain it fails closed to the raw peer rather than to attacker input.
+    """
+    raw_peer = _request_client_ip(handler)
+    if not raw_peer:
+        return "-"
+    try:
+        if _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR") and _raw_peer_is_trusted_proxy(handler):
+            resolved = _forwarded_client_ip_from_trusted_proxy(handler)
+            # The resolver's X-Real-IP branch is not IP-validated upstream, so
+            # re-check: only a parseable address may become the logged client.
+            if resolved:
+                import ipaddress
+
+                try:
+                    ipaddress.ip_address(resolved.strip())
+                except ValueError:
+                    resolved = None
+            if resolved:
+                return resolved
+    except Exception:
+        # Logging must never depend on header parsing succeeding.
+        pass
+    return raw_peer
+
+
 def _onboarding_request_is_local(handler) -> bool:
     """Return True when an unauthenticated onboarding request is local/private.
 
