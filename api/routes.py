@@ -987,10 +987,20 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     # Import routes create/claim sessions before normal ownership exists, and
     # chat/start has inline placeholder-retag rules that must run before the
     # generic request-session guard.
+    # #7731: /api/session/archive is exempt for the same reason, but for a
+    # different one. Archiving a session that lives in another profile publishes
+    # a sidecar owned by that profile, so the NEXT request (the restore) would
+    # hit the generic guard and be answered 409 session_profile_mismatch before
+    # the archive handler ever ran -- archiving a session would permanently
+    # brick its own restore. The archive handler therefore owns its profile
+    # boundary (see the /api/session/archive branch in handle_post): it accepts
+    # an explicitly supplied owning profile and keeps unqualified requests
+    # pinned to the active profile.
     return path in {
         "/api/session/import",
         "/api/session/import_cli",
         "/api/chat/start",
+        "/api/session/archive",
     }
 
 
@@ -1295,6 +1305,27 @@ def _normalize_disabled_set(values) -> set:
     return {str(v).strip() for v in values if str(v).strip()}
 
 
+def _skill_listing_order_key(skill: dict) -> tuple:
+    return (skill.get("category") or "", skill["name"])
+
+
+def _resolve_agent_sort_skills(skills_tool_module):
+    """Return the Agent's skill-listing order helper under whichever name it exports.
+
+    Agent commit 93fafc4d6ff (2026-10-18) renamed ``_sort_skills`` to
+    ``sort_skills`` with no underscore alias, while older Agents only export the
+    private name. WebUI runs against both, so resolve the helper by attribute
+    instead of importing one spelling (an ImportError here took down
+    ``/api/skills`` and ``/api/skills/usage`` on newer Agents). If neither name
+    exists, fall back to the same ``(category, name)`` order the helper uses.
+    """
+    for attr in ("sort_skills", "_sort_skills"):
+        candidate = getattr(skills_tool_module, attr, None)
+        if callable(candidate):
+            return candidate
+    return lambda skills: sorted(skills, key=_skill_listing_order_key)
+
+
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
     """List skills using an explicit local skills directory.
 
@@ -1302,14 +1333,17 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     scan root explicit so per-client WebUI profile switches do not race on or
     leak through the skills tool's module-global ``SKILLS_DIR``.
     """
+    import importlib
+
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import (
         MAX_DESCRIPTION_LENGTH,
         _EXCLUDED_SKILL_DIRS,
         _parse_frontmatter,
-        _sort_skills,
         skill_matches_platform,
     )
+
+    sort_skills = _resolve_agent_sort_skills(importlib.import_module("tools.skills_tool"))
 
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
@@ -1367,7 +1401,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 
     if category:
         all_skills = [s for s in all_skills if s.get("category") == category]
-    all_skills = _sort_skills(all_skills)
+    all_skills = sort_skills(all_skills)
     categories = sorted(set(s.get("category") for s in all_skills if s.get("category")))
     result = {
         "success": True,
@@ -2918,6 +2952,15 @@ def _build_session_list_cache_payload(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
         reverse=True,
     )
+    # Each sidebar tab is loaded on its own, so a child can arrive without its parent's row.
+    # Stamp the parent's tab (the same classifier _filter_sidebar_source uses) on the child.
+    # Only within one profile: a parent in another profile is filtered out of this child's
+    # view, so its tab says nothing about where the child belongs — leave the hint unset.
+    _merged_by_id = {s.get("session_id"): s for s in merged if s.get("session_id")}
+    for s in merged:
+        _parent = _merged_by_id.get(s.get("parent_session_id"))
+        if _parent is not None and _profiles_match(_parent.get("profile"), s.get("profile")):
+            s["parent_is_cli_session"] = _is_cli_session_for_settings(_parent)
     # ── Profile scoping (#1611) ────────────────────────────────────────
     # Default: filter to the active profile. ?all_profiles=1 opts into
     # the aggregate view used by the "All profiles" sidebar toggle.
@@ -6270,8 +6313,13 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     except KeyError:
         pass
 
-    # Fallback: try to materialize from CLI/agent session metadata
-    cli_meta = _lookup_cli_session_metadata(sid)
+    # Fallback: try to materialize from CLI/agent session metadata.
+    # Active-profile-only: this helper is the shared chokepoint for rename,
+    # regenerate, update, move, prompts, chat-start and anchor scenes.
+    # Opening all-profiles here would let profile A materialize and mutate
+    # profile B's sessions.  The archive handler has its own request-scoped
+    # all-profiles path (#7549, #7731).
+    cli_meta = _resolve_cli_import_metadata(sid)
 
     # Delegated subagent children (#5307) are view-only: their transcript lives
     # in state.db and ownership belongs to the delegate runner, not WebUI. They
@@ -6315,7 +6363,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         # Messaging sessions: lightweight Session with no messages (state.db is source of truth)
         s = Session(
             session_id=sid,
-            title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+            title=cli_meta.get("title") or title_from(get_cli_session_messages(sid, profile=cli_meta.get("profile")), "CLI Session"),
             workspace=get_last_workspace(),
             model=cli_meta.get("model") or "unknown",
             created_at=cli_meta.get("created_at"),
@@ -6325,7 +6373,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         s.save(touch_updated_at=False)
     else:
         # Regular CLI/agent sessions: import full message history
-        msgs = get_cli_session_messages(sid)
+        msgs = get_cli_session_messages(sid, profile=cli_meta.get("profile"))
         if not msgs:
             raise KeyError(sid)
         s = import_cli_session(
@@ -8449,6 +8497,108 @@ def _ordered_custom_provider_model_ids(entry: dict) -> list[str]:
     return ordered
 
 
+def _custom_provider_allowlist_ids(_cp: dict) -> list[str]:
+    """Plural ``models`` list only — the explicit allowlist signal.
+
+    The singular ``model`` field is sticky/default metadata, NOT an
+    allowlist: it must not gate live-catalog filtering, otherwise a
+    provider configured with only ``model: assistant`` (no ``models``
+    list) would be collapsed to a single model.  Only an explicit
+    ``models`` allowlist expresses "show exactly these models".
+
+    An auto-discovered catalog is NOT an allowlist: when Hermes
+    persisted discovery results back into config (``models: {...}``
+    plus ``models_discovered: true``), that mapping is a snapshot
+    of what the gateway exposed at discovery time.  Gating on it
+    would permanently pin the live catalog to the first-discovery
+    set, silently dropping any model the user pulls in later
+    (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
+    is the shared predicate the ``/api/models`` path already uses;
+    when it says "discovered", return no allowlist and let the
+    live probe win.  An explicit ``discover_models: false`` opt-out
+    re-pins the catalog (the predicate accounts for it), so a
+    hand-pinned discovered catalog still filters.
+
+    A dict-shaped ``models`` mapping that is NOT marked discovered is
+    *per-model metadata* written by the Hermes Agent setup flow
+    (``hermes_cli/model_switch.py::_save_custom_provider`` and the
+    setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
+    not a catalog narrow: treating its keys as an allowlist would
+    collapse the live picker to the single saved default (keyless
+    Ollama) while the CLI live-probe shows the full catalog.  Only an
+    explicit ``discover_models: false`` opts into treating the dict
+    keys as a pinned allowlist.  List/JSON-array-string/Python-literal
+    shapes remain plain allowlists.
+
+    The plural value is decoded through ``_parse_config_string_list()``
+    because ``hermes config set`` / JSON-mode editor saves persist
+    lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
+    Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
+    made a serialized allowlist fall through to ``[]``, which the
+    caller reads as "no allowlist configured" and floods the picker
+    with the full upstream catalog — the same class of bug as the
+    ``skills.disabled`` regression (#7120 / #7134).
+    """
+    from api.config import (
+        _provider_discover_allowed,
+        _provider_models_are_discovered_catalog,
+    )
+
+    if _provider_models_are_discovered_catalog(_cp):
+        return []
+    _ids = []
+    _models = _cp.get("models")
+    # Serialized shapes only: ``hermes config set`` / JSON-mode
+    # editor saves persist lists as quoted JSON-array strings
+    # (``'["chat-a","chat-b"]'``) or Python literals
+    # (``"['chat-a']"``).  Decode the array itself (JSON first, then a
+    # Python literal) and walk it below, so mapping members keep their
+    # id|model|name metadata; the shared decoder str()-ifies members
+    # (``"{'id': 'a'}"``).  Anything else goes through
+    # ``_parse_config_string_list()`` as before.
+    if isinstance(_models, str):
+        import ast
+
+        _decoded = None
+        _stripped = _models.strip()
+        if _stripped.startswith("["):
+            try:
+                _decoded = json.loads(_stripped)
+            except ValueError:
+                try:
+                    _decoded = ast.literal_eval(_stripped)
+                except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                    _decoded = None
+        if isinstance(_decoded, list):
+            _models = _decoded
+        else:
+            _models = _parse_config_string_list(_models)
+    if isinstance(_models, dict):
+        # A dict-shaped ``models`` is per-model metadata written by
+        # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
+        # ``discover_models: false`` opt-out treats the dict keys as a
+        # pinned allowlist; otherwise return the empty allowlist so the
+        # live probe returns the full catalog.
+        if _provider_discover_allowed(_cp):
+            return []
+        for _mid in _models:
+            # Pre-fix Hermes wrote these sentinels inside the mapping;
+            # skip them like the Agent's ``_declared_model_ids``.
+            if _mid in ("__explicit_model_allowlist__", "__discovered_model_catalog__"):
+                continue
+            if isinstance(_mid, str) and _mid.strip():
+                _ids.append(_mid.strip())
+    elif isinstance(_models, (list, tuple)):
+        for _item in _models:
+            if isinstance(_item, str) and _item.strip():
+                _ids.append(_item.strip())
+            elif isinstance(_item, dict):
+                _mid = _item.get("id") or _item.get("model") or _item.get("name")
+                if _mid and str(_mid).strip():
+                    _ids.append(str(_mid).strip())
+    return _ids
+
+
 def _repair_bare_custom_provider_model(
     bare_model: str,
     provider: str | None,
@@ -8511,6 +8661,91 @@ def _repair_bare_custom_provider_model(
         return None
 
 
+def _repair_removed_qualified_custom_provider_model(
+    model: str,
+    provider: str | None,
+    *,
+    config_obj: dict | None,
+    profile: str | None = None,
+) -> str | None:
+    """Move a removed named-custom model to that provider's pinned list.
+
+    The target is the configured default when it's in the pinned list,
+    otherwise the first pinned model. A session on the configured default
+    (``${VAR}`` expanded with ``profile``'s env) is kept even outside the
+    list, since the picker still offers it. Only a pinned allowlist (``_custom_provider_allowlist_ids``) can prove a
+    model was removed: a discovered catalog snapshot or dict-shaped metadata
+    may omit models the live probe still serves. Needs the session's own
+    profile config; ``None`` is ambiguous (no profile, unreadable profile, or
+    a caller that doesn't pass one) and the shared ``cfg`` may belong to
+    another profile, so it never repairs from it. Colliding slugs fail closed.
+    """
+    prov = _clean_session_model_provider(provider)
+    bare_model, qualified_provider = _split_provider_qualified_model(model)
+    if (
+        not isinstance(config_obj, dict)
+        or not prov
+        or not prov.startswith("custom:")
+        or qualified_provider != prov
+    ):
+        return None
+
+    from api.config import (
+        AmbiguousCustomProviderError,
+        _custom_provider_slug_key,
+        _unique_custom_provider_entry,
+    )
+
+    try:
+        entry = _unique_custom_provider_entry(
+            config_obj.get("custom_providers"),
+            _custom_provider_slug_key(prov),
+        )
+    except AmbiguousCustomProviderError:
+        return None
+    if not entry:
+        return None
+    pinned = _custom_provider_allowlist_ids(entry)
+    raw_models = entry.get("models")
+    if (
+        isinstance(raw_models, str)
+        and raw_models.strip().startswith("[")
+        and pinned == [raw_models.strip()]
+    ):
+        # Serialized list that failed to decode: not proof of anything.
+        # A plain single-model string is still a valid one-model allowlist.
+        return None
+    if any("${" in item for item in pinned):
+        # Unresolved env reference: the raw profile YAML isn't the real ID.
+        return None
+
+    def _own_bare(item: str) -> str:
+        # Unwrap only this provider's own wrapper; ``@safe:x`` is a real ID.
+        bare, item_provider = _split_provider_qualified_model(item)
+        return bare if item_provider == prov else item
+
+    pinned_bare = [_own_bare(item) for item in pinned]
+    if not pinned or bare_model in pinned_bare:
+        return None
+    default_raw = str(entry.get("model") or "").strip()
+    if "${" in default_raw:
+        # Expand with the session profile's env, root included (read-only,
+        # fail-closed); left unresolved, it falls back to the pinned list.
+        from api.config import _expand_env_vars
+        from api.profiles import profile_env_for_thread_readonly
+
+        with profile_env_for_thread_readonly(
+            profile or "", "custom provider default", include_root=True,
+        ):
+            default_raw = _expand_env_vars(default_raw).strip()
+    default_bare = _own_bare(default_raw)
+    # The singular default stays a picker entry even outside ``models``.
+    if bare_model == default_bare:
+        return None
+    replacement = default_bare if default_bare in pinned_bare else pinned_bare[0]
+    return f"@{prov}:{replacement}"
+
+
 def _moa_fast_path_model_state(model: str) -> tuple[str, str, bool]:
     """Strip an optional ``@moa:``/``moa/`` prefix from an MoA-routed model.
 
@@ -8537,6 +8772,7 @@ def _resolve_compatible_session_model_state(
     profile_config: dict | None = None,
     explicit_model_pick: bool = False,
     prefer_cached_catalog: bool = False,
+    profile: str | None = None,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -8574,6 +8810,25 @@ def _resolve_compatible_session_model_state(
     if model and requested_provider == "moa":
         return _moa_fast_path_model_state(model)
     if model and requested_provider and model.startswith(f"@{requested_provider}:"):
+        # A fresh explicit pick is never second-guessed as stale.
+        repaired_model = None if explicit_model_pick else _repair_removed_qualified_custom_provider_model(
+            model,
+            requested_provider,
+            config_obj=profile_config,
+            profile=profile,
+        )
+        if repaired_model:
+            return repaired_model, requested_provider, True
+        if (
+            requested_provider.startswith("custom:")
+            and _split_provider_qualified_model(model)[1] == requested_provider
+        ):
+            # Keeping a pick rewrites nothing, so a session without a profile
+            # config may check the active config (repair above may not).
+            from api.config import _named_custom_provider_slug_for_provider
+
+            if _named_custom_provider_slug_for_provider(requested_provider, profile_config):
+                return model, requested_provider, False
         try:
             from api.config import cfg as _active_cfg
 
@@ -8989,6 +9244,7 @@ def _resolve_effective_session_model_for_display(session) -> str:
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(session, "profile", None),
         # GET /api/session is a hot, side-effect-free per-tab/per-poll path.
         # It must never pay the cold live provider-catalog rebuild (a
         # botocore IMDS probe that cannot resolve on a non-AWS / WSL / corp
@@ -9013,6 +9269,7 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(session, "profile", None),
         # See _resolve_effective_session_model_for_display: same hot
         # side-effect-free GET /api/session path; must not trigger the cold
         # live rebuild. prefer_cached_catalog resolves from warm/disk cache
@@ -9403,6 +9660,62 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     session (#5307).
     """
     return _state_db_session_source(sid) == "subagent"
+
+
+def _project_session_draft_write(write: dict, current_draft: dict) -> dict:
+    """Apply a ``/api/session/draft`` write to the stored draft.
+
+    #7855 CORE (round 6): the goal-continuation token is PART of the draft, so
+    it is written and cleared by exactly the same rules as the text:
+
+    - a non-empty ``goal_continuation_id`` is stored alongside the text it
+      belongs to;
+    - an explicitly EMPTY string clears it (the draft was edited, abandoned or
+      submitted);
+    - an absent field (``None``) leaves the stored token alone, so a plain
+      keystroke auto-save does not drop it.
+
+    Persisting the text without this is what made a reload between a failed
+    continuation start and its retry restore the words and lose the token — the
+    retry then posted ``goal_continuation_id: None`` and start admission scored
+    it ``goal_related=false``.
+    """
+    next_draft = dict(current_draft or {})
+    text = write.get("text")
+    files = write.get("files")
+    token = write.get("goal_continuation_id")
+    if text is not None:
+        next_draft["text"] = text
+    if files is not None:
+        next_draft["files"] = files
+    if token is not None:
+        if token:
+            next_draft["goal_continuation_id"] = token
+        else:
+            next_draft.pop("goal_continuation_id", None)
+    else:
+        # #7855 CORE (round 7, MUST-FIX 1): a keystroke changes the text the
+        # token is bound to, so "the user has not touched the token" is not a
+        # reason to keep it. The keystroke autosave (static/boot.js -> static/
+        # sessions.js) and the session-switch save never send the field, and
+        # the old absent-field rule then stored the user's edited text next to
+        # the stale token. Restoring that pair on reload and sending it posted
+        # the edited text WITH the continuation id, so a genuine turn consumed
+        # the real continuation record (the #6885 bug this PR exists to fix).
+        #
+        # When the stored draft's text changed, the token no longer describes
+        # it: drop it. An unchanged text (a plain re-save of the same draft)
+        # keeps it, which is the case the absent-field rule was written for.
+        # Pending records have no TTL (api/goals.py), so nothing else expires
+        # the stale binding.
+        _stored_text = (current_draft or {}).get("text")
+        if (
+            "goal_continuation_id" in next_draft
+            and text is not None
+            and text != _stored_text
+        ):
+            next_draft.pop("goal_continuation_id", None)
+    return next_draft
 
 
 def _session_is_subagent_view_only(sid: str) -> bool:
@@ -12461,6 +12774,7 @@ from api.streaming import (
     _sse_set_write_deadline,
     _run_agent_streaming,
     _provider_routing_kwargs_for_agent,
+    _producer_committed_compression,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
@@ -14057,36 +14371,41 @@ def _handle_insights(handler, parsed) -> bool:
             with closing(open_state_db_readonly(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                # cache_read_tokens may not exist on older agent state DBs;
-                # fall back to a query without it if the column is missing.
-                try:
-                    cur.execute(f"""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                               started_at, ended_at,
-                               COALESCE(ended_at, started_at, 0) AS usage_ts
-                        FROM sessions
-                        WHERE COALESCE(ended_at, started_at, 0) >= ?
-                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, end_cutoff))
-                except sqlite3.OperationalError:
-                    cur.execute(f"""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               0 AS cache_read_tokens,
-                               started_at, ended_at,
-                               COALESCE(ended_at, started_at, 0) AS usage_ts
-                        FROM sessions
-                        WHERE COALESCE(ended_at, started_at, 0) >= ?
-                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, end_cutoff))
+                # Older agent state DBs may lack either cache column, so pick
+                # each one on its own: a DB with reads but no writes still has
+                # useful reads.
+                _session_cols = {
+                    r[1] for r in cur.execute("PRAGMA table_info(sessions)").fetchall()
+                }
+
+                def _optional_token_col(name: str) -> str:
+                    if name in _session_cols:
+                        return f"COALESCE({name}, 0) AS {name}"
+                    return f"0 AS {name}"
+
+                cur.execute(f"""
+                    SELECT id, model, message_count, input_tokens, output_tokens,
+                           estimated_cost_usd,
+                           {_optional_token_col("cache_read_tokens")},
+                           {_optional_token_col("cache_write_tokens")},
+                           started_at, ended_at,
+                           COALESCE(ended_at, started_at, 0) AS usage_ts
+                    FROM sessions
+                    WHERE COALESCE(ended_at, started_at, 0) >= ?
+                      AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
+                      AND COALESCE(source, '') != 'webui'
+                """, (cutoff, end_cutoff))
                 for row in cur.fetchall():
-                    _input = _safe_usage_int(row["input_tokens"])
-                    _output = _safe_usage_int(row["output_tokens"])
                     _cache_read = _safe_usage_int(row["cache_read_tokens"])
+                    # state.db input_tokens is uncached input only, while WebUI
+                    # sessions store the full prompt. Add the cache tokens so
+                    # both sources mean the same thing before they are summed.
+                    _input = (
+                        _safe_usage_int(row["input_tokens"])
+                        + _cache_read
+                        + _safe_usage_int(row["cache_write_tokens"])
+                    )
+                    _output = _safe_usage_int(row["output_tokens"])
                     _cost = _safe_cost_float(row["estimated_cost_usd"])
                     _msgs = _safe_usage_int(row["message_count"])
                     total_sessions += 1
@@ -14138,13 +14457,13 @@ def _handle_insights(handler, parsed) -> bool:
         row_total_tokens = stats["input_tokens"] + stats["output_tokens"]
         row_cost = round(stats["cost"], 6)
         row_cache_read = stats["cache_read_tokens"]
-        # Bounded prompt-cache hit rate: cached reads over the FULL prompt total
-        # (ordinary input + cache reads), so it can never exceed 100%. Computing
-        # cache_read / input_tokens alone would overshoot 100% on cache-heavy
-        # sessions. prompt_cache_hit_percent clamps to [0,100] and returns None
-        # when there is nothing meaningful to display.
+        # Prompt-cache hit rate: cached reads over the full prompt total.
+        # input_tokens already includes cache reads and writes for both
+        # sources, so adding the reads again would cap the rate at 50%.
+        # prompt_cache_hit_percent clamps to [0,100] and returns None when
+        # there is nothing meaningful to display.
         row_cache_hit_percent = prompt_cache_hit_percent(
-            row_cache_read, stats["input_tokens"] + row_cache_read
+            row_cache_read, stats["input_tokens"]
         )
         models_breakdown.append({
             "model": model,
@@ -14208,9 +14527,9 @@ def _handle_insights(handler, parsed) -> bool:
         "total_output_tokens": total_output_tokens,
         "total_cache_read_tokens": total_cache_read_tokens,
         # Aggregate prompt-cache hit rate, bounded 0-100% via the shared helper
-        # (cache_read over input + cache_read).
+        # (cache_read over the full prompt total in input_tokens).
         "total_cache_hit_percent": prompt_cache_hit_percent(
-            total_cache_read_tokens, total_input_tokens + total_cache_read_tokens
+            total_cache_read_tokens, total_input_tokens
         ),
         "total_tokens": total_tokens,
         "total_cost": round(total_cost, 6),
@@ -18439,6 +18758,31 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
+        # #7855 CORE (round 6): the goal-continuation token travels with the draft
+        # it belongs to. Persisting the text alone meant a reload between a failed
+        # continuation start and its retry restored the words and dropped the
+        # token, so the retry posted goal_continuation_id: None and start
+        # admission scored it goal_related=false.
+        goal_continuation_id = body.get("goal_continuation_id")
+        if goal_continuation_id is not None and not isinstance(goal_continuation_id, str):
+            goal_continuation_id = ""
+        if isinstance(goal_continuation_id, str):
+            goal_continuation_id = goal_continuation_id.strip()
+        # #7855 P1 (Greptile, round 7): unlike draft text, this field had no
+        # size or shape limit before it was persisted into the session JSON.
+        # An authenticated client could submit a value approaching the
+        # request-body limit on every keystroke, consuming storage and
+        # slowing session operations. The producer mints uuid4().hex
+        # (api/goals.py) and admission itself requires exactly 32 lowercase
+        # hex characters, so anything else can never match a pending record
+        # anyway — drop it here rather than store it.
+        if isinstance(goal_continuation_id, str) and goal_continuation_id:
+            _looks_like_cont_id = (
+                len(goal_continuation_id) == 32
+                and all(c in "0123456789abcdef" for c in goal_continuation_id.lower())
+            )
+            if not _looks_like_cont_id:
+                goal_continuation_id = ""
         # Stage-326 hardening (per Opus advisor): size + type validation on
         # the draft inputs. Without this, a misbehaving or malicious client
         # can persist multi-MB strings into the session JSON on every keystroke
@@ -18458,6 +18802,10 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
+        # Optional compare-and-clear: only write when the stored draft still equals
+        # if_text (and if_files when given), so a stale retire keeps newer drafts.
+        if_text = body.get("if_text")
+        if_files = body.get("if_files")
         unchanged = False
         request_sid = sid
         request_session = s
@@ -18551,12 +18899,24 @@ def handle_post(handler, parsed) -> bool:
                         status=409,
                     )
 
+                # #7855 CORE (round 6): the goal-continuation token is part of
+                # the draft. Apply the write through the shared projection so
+                # the token follows exactly the same rules as the text: stored
+                # with the exact text it belongs to, dropped when the text is
+                # edited, cleared by an explicit empty string, and left alone
+                # by an absent field on an unchanged re-save. Master's inline
+                # text/files mutation (merged 2026-10-17) would preserve the
+                # stored token next to edited text and re-bind them on restore.
                 current_draft = dict(getattr(request_session, "composer_draft", {}) or {})
-                next_draft = dict(current_draft)
-                if text is not None:
-                    next_draft["text"] = text
-                if files is not None:
-                    next_draft["files"] = files
+                if isinstance(if_text, str) and (
+                    str(current_draft.get("text") or "") != if_text
+                    or (isinstance(if_files, list) and list(current_draft.get("files") or []) != if_files)
+                ):
+                    return j(handler, {"ok": True, "draft": current_draft, "unchanged": True, "mismatch": True})
+                next_draft = _project_session_draft_write(
+                    {"text": text, "files": files, "goal_continuation_id": goal_continuation_id},
+                    current_draft,
+                )
                 if next_draft == current_draft:
                     unchanged = True
                     saved_draft = current_draft
@@ -18744,6 +19104,17 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
+        try:
+            p = (SESSION_DIR / f"{sid}.json").resolve()
+            p.relative_to(SESSION_DIR.resolve())
+        except Exception:
+            return bad(handler, "Invalid session_id", 400)
+        # Evict outside the mutation lock: the lifecycle commit performs provider
+        # I/O (it can wait on another commit) and must not hold a per-session
+        # lock. It runs before the DB delete because that commit writes state.db
+        # and would otherwise recreate the session being deleted.
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
@@ -18751,11 +19122,79 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Session busy, try again", 503)
         draft_delete_failed = False
         try:
+            # Delete state.db rows BEFORE any user-visible file. A refusal (live
+            # gateway work, unfenceable ledger) or a failed commit must leave the
+            # whole session intact instead of stranding an unrecoverable
+            # half-delete: the sidecar, index entry, backups and tombstone are
+            # not restored by the DB rollback.
+            state_db_cleanup_failed = False
+            delete_raised = False
+            if not is_messaging_session:
+                try:
+                    from api.models import SessionDeleteRefused, delete_cli_session
+
+                    state_db_cleanup_failed = not delete_cli_session(sid)
+                except SessionDeleteRefused as exc:
+                    return j(
+                        handler,
+                        {"ok": False, "error": exc.code, "action": "session_delete"},
+                        status=409,
+                    )
+                except Exception:
+                    state_db_cleanup_failed = True
+                    delete_raised = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
+                if state_db_cleanup_failed:
+                    # A False return covers an aborted transaction and a commit
+                    # whose artifact cleanup is still pending (its manifest
+                    # retries it). Only a surviving row proves nothing was
+                    # committed; then user files must stay. Otherwise the
+                    # conversation is already gone and the remaining cleanup
+                    # must still run, or the sidecar, index entry and tombstone
+                    # would strand a deleted session. An exception proves
+                    # nothing either way, so it keeps failing closed.
+                    from api.models import state_db_session_presence
+
+                    if delete_raised or state_db_session_presence(sid) is not False:
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "error": "state_db_cleanup_failed",
+                                "action": "session_delete",
+                            },
+                            status=500,
+                        )
+                    logger.warning(
+                        "Session %s committed; transcript cleanup is still pending",
+                        sid,
+                    )
+            # Runtime cleanup only after the delete is durable: closing the
+            # terminal of a refused delete would kill the very work that made
+            # the Agent refuse it.
+            # Prune the completion-dedup entry too. The reaper sweeps it once the
+            # completion is delivered (drained from PENDING); a session deleted
+            # while a completion is still pending would otherwise keep its entry.
             try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
+                from api.background_process import forget_bg_task_completion_dedup
+
+                forget_bg_task_completion_dedup(sid)
             except Exception:
-                return bad(handler, "Invalid session_id", 400)
+                logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
+            # #6885 round 2 lifecycle: session retirement is a terminal path — a
+            # deleted session's pending continuation record (marker + prompt +
+            # expiry) must not survive the session itself.
+            try:
+                from api.goals import clear_pending_goal_continuation
+
+                clear_pending_goal_continuation(sid)
+            except Exception:
+                logger.debug("Failed to clear pending goal continuation for deleted session %s", sid, exc_info=True)
+            try:
+                from api.terminal import close_terminal
+                close_terminal(sid)
+            except Exception:
+                logger.debug("Failed to close workspace terminal for deleted session %s", sid)
             sidecar_deleted = False
             with LOCK:
                 SESSIONS.pop(sid, None)
@@ -18785,10 +19224,6 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
-        # Evict outside the mutation lock: lifecycle commit may perform provider
-        # I/O and must not hold a per-session Session lock.
-        from api.config import _evict_session_agent
-        _evict_session_agent(sid)
         try:
             from api.upload import _session_attachment_dir
 
@@ -18814,31 +19249,6 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
-        # Prune the completion-dedup entry too. The reaper sweeps it once the
-        # completion is delivered (drained from PENDING); a session deleted
-        # while a completion is still pending would otherwise keep its entry.
-        try:
-            from api.background_process import forget_bg_task_completion_dedup
-
-            forget_bg_task_completion_dedup(sid)
-        except Exception:
-            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
-        try:
-            from api.terminal import close_terminal
-            close_terminal(sid)
-        except Exception:
-            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
         response = {
             "state_db_cleanup_failed": state_db_cleanup_failed,
@@ -19903,6 +20313,77 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        # ── Request-scoped profile boundary (#7731) ──
+        # This route is exempt from _guard_request_session_visibility (see
+        # _request_session_visibility_exempt) so an archived foreign session can
+        # be restored; that makes THIS handler the owner of the boundary, for
+        # both the resident-session path and the CLI materialize fallback.
+        #
+        # Normalize the caller's claim BEFORE anything reads it. ``None`` means
+        # absent and ``''`` means present-but-malformed; neither may stand in for
+        # an owner. Mirrors the invariant _handle_session_import_cli already
+        # enforces for cross-profile import, so ``all_profiles: true`` can never
+        # widen the search without a claimed, validated owner.
+        _arch_allow_all = _request_wants_all_profiles_import(body)
+        _arch_profile = _normalize_import_profile_value((body or {}).get("profile"))
+        if _arch_profile == "":
+            return bad(handler, "invalid profile", 400)
+        if _arch_allow_all and not _arch_profile:
+            return bad(handler, "profile is required for all_profiles archive", 400)
+        if _arch_allow_all and _is_isolated_profile_mode():
+            # Isolated mode exposes exactly one profile, so a cross-profile
+            # lookup is meaningless there. The browser can still restore a saved
+            # all-profiles toggle (#7731 greptile), so rather than stranding the
+            # pinned profile's OWN sessions behind a 403, confirm the claim names
+            # that pinned profile and degrade to an ordinary active-profile
+            # archive. A claim naming any other profile is refused outright.
+            if not _profiles_match(_arch_profile, _get_active_profile_name()):
+                return bad(handler, "all_profiles archive is not allowed in isolated profile mode", 403)
+            _arch_allow_all = False
+        # #7731: apply the profile boundary for a session that ALREADY has a
+        # WebUI sidecar, BEFORE get_session() runs. get_session() repairs legacy
+        # sidecar layouts in place (#8094), so a request that is about to be
+        # refused must not touch the bytes — the generic guard this route is
+        # exempt from used to guarantee exactly that. The probe is the same
+        # read-only ownership read the guard used, so it neither repairs nor
+        # publishes a cache entry.
+        #
+        # A scoped request that explicitly names the owning profile may reach
+        # the session (that is what makes an archived foreign session
+        # restorable); an unqualified request stays pinned to the active
+        # profile, keeping the #7710 contract: a known other profile is a 409 so
+        # the frontend can offer a profile switch, and only an unknown/legacy
+        # None-profile sidecar 404s, so its stale-URL self-heal keeps firing.
+        if is_safe_session_id(sid):
+            _arch_owner_profile = None
+            _arch_owner_known = False
+            try:
+                _arch_owner_profile = get_session_profile_readonly(sid)
+                _arch_owner_known = True
+            except KeyError:
+                # No sidecar yet — the CLI materialize fallback below decides.
+                _arch_owner_known = False
+            except (OSError, ValueError, TypeError):
+                return bad(handler, "Session not found", 404)
+            if _arch_owner_known:
+                _arch_mismatch = (
+                    not _profiles_match(_arch_owner_profile, _arch_profile)
+                    if _arch_allow_all
+                    else not _profiles_match(_arch_owner_profile, _get_active_profile_name())
+                )
+                if _arch_mismatch:
+                    if _arch_owner_profile:
+                        return j(handler, {
+                            "error": "Session belongs to another profile",
+                            "code": "session_profile_mismatch",
+                            "session_id": sid,
+                            "profile": _arch_owner_profile,
+                        }, 409)
+                    return bad(handler, "Session not found", 404)
+        # Runs AFTER the profile boundary above, not before: the check calls
+        # get_session(), which repairs legacy sidecar layouts in place (#8094),
+        # so a request already destined for a 409/404 must not reach it. The
+        # generic guard this route is exempt from used to refuse first.
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
         # #7776 Finding 2: capture the CLI source identity BEFORE the lock so
@@ -19910,6 +20391,9 @@ def handle_post(handler, parsed) -> bool:
         # new WebUI session without the pre-lock CLI metadata) cannot drop it
         # on the way back to disk. The materialize path below also uses it.
         _archive_cli_meta = _lookup_cli_session_metadata(sid) or {}
+        # Set by the materialize fallback below; empty on the resident path,
+        # where _archive_cli_meta already holds the active-profile identity.
+        _archive_resolved_meta = {}
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -19923,9 +20407,51 @@ def handle_post(handler, parsed) -> bool:
                 with LOCK:
                     SESSIONS[sid] = s
         except KeyError:
-            cli_meta = _archive_cli_meta
+            # #7776: reuse the CLI identity captured before the lock — the
+            # lock-held reload can drop it. #7549/#7731: cross-profile archive
+            # is only allowed when the request explicitly carried
+            # all_profiles=true AND a validated profile, both normalized and
+            # validated above, so the shared materializer chokepoint cannot
+            # leak profile isolation.
+            cli_meta = _archive_cli_meta or _resolve_cli_import_metadata(
+                sid,
+                requested_profile=_arch_profile,
+                allow_all_profiles=_arch_allow_all,
+            )
             if not cli_meta:
+                # #7731: an empty result is ambiguous on its own. When the
+                # request scoped itself to a profile, re-probe WITHOUT that
+                # filter to tell a profile conflict apart from a missing
+                # session: the resolver above prefilters a mismatched owner to
+                # ``{}``, so without this probe the caller cannot tell
+                # "wrong profile" from "no such session" and both answered 404.
+                # Only an all-profiles request may probe other profiles: a request that carries ``profile`` without
+                # ``all_profiles`` is an active-profile archive and keeps master's 404 for a foreign session.
+                if _arch_allow_all and _arch_profile:
+                    _owner_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
+                    _owner_profile = (_owner_meta or {}).get("profile")
+                    if _owner_profile and not _profiles_match(_owner_profile, _arch_profile):
+                        return j(handler, {
+                            "error": "Session belongs to another profile",
+                            "code": "session_profile_mismatch",
+                            "session_id": sid,
+                            "profile": _owner_profile,
+                        }, 409)
                 return bad(handler, "Session not found", 404)
+            # When the request carries an explicit profile but the resolved
+            # session belongs to a different one, return the #7710 contract
+            # (409 session_profile_mismatch) so the frontend can surface the
+            # conflict rather than silently mutating a foreign session.
+            if _arch_allow_all and _arch_profile:
+                _resolved_profile = cli_meta.get("profile")
+                if _resolved_profile and not _profiles_match(_resolved_profile, _arch_profile):
+                    return j(handler, {"error": "Session belongs to another profile", "code": "session_profile_mismatch"}, 409)
+            # #7731: remember the resolved identity for the re-stamp after the
+            # lock-held reload below. ``_archive_cli_meta`` is captured from the
+            # ACTIVE profile only, so on the cross-profile path it is empty and
+            # the reload would persist a WebUI-native copy (is_cli_session=False
+            # plus null source fields) of a CLI-origin session.
+            _archive_resolved_meta = cli_meta
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the
@@ -19939,7 +20465,7 @@ def handle_post(handler, parsed) -> bool:
                 _arch_profile = cli_meta.get("profile") or None
                 s = Session(
                     session_id=sid,
-                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid, profile=cli_meta.get("profile")), "CLI Session"),
                     workspace=get_last_workspace(profile=_arch_profile),
                     messages=[],
                     model=cli_meta.get("model") or "unknown",
@@ -19960,7 +20486,7 @@ def handle_post(handler, parsed) -> bool:
                 s.platform = cli_meta.get("platform")
                 s.save(touch_updated_at=False)
             else:
-                msgs = get_cli_session_messages(sid)
+                msgs = get_cli_session_messages(sid, profile=cli_meta.get("profile"))
                 if not msgs:
                     return bad(handler, "Session not found", 404)
                 s = import_cli_session(
@@ -20003,15 +20529,20 @@ def handle_post(handler, parsed) -> bool:
                 if latest is None:
                     return bad(handler, "Session not found", 404)
             s = _ensure_full_session_before_mutation(sid, latest)
-            # #7776 Finding 2: re-stamp CLI source identity on the freshly
-            # loaded session before mutating it. ``_archive_cli_meta`` was
-            # captured above (before the lock); for the regular CLI/agent
-            # materialize path the on-disk sidecar that Session.load(sid)
-            # just read is the import_cli_session save WITHOUT source meta,
-            # so without this re-stamp the save() below would persist a
-            # WebUI-native copy with is_cli_session=False + null source.
-            if _archive_cli_meta:
-                _apply_cli_source_meta_to_session(s, _archive_cli_meta)
+            # #7776 Finding 2 / #7731: re-stamp CLI source identity on the
+            # freshly loaded session before mutating it. ``_archive_cli_meta``
+            # was captured above (before the lock) from the ACTIVE profile;
+            # for the regular CLI/agent materialize path the on-disk sidecar
+            # that Session.load(sid) just read is the import_cli_session save
+            # WITHOUT source meta, so without this re-stamp the save() below
+            # would persist a WebUI-native copy with is_cli_session=False +
+            # null source. On the cross-profile path _archive_cli_meta is empty
+            # (the session is not in the active profile), so prefer the
+            # identity the fallback actually resolved — otherwise the archived
+            # foreign session is recorded as WebUI-native.
+            _archive_source_meta = _archive_cli_meta or _archive_resolved_meta
+            if _archive_source_meta:
+                _apply_cli_source_meta_to_session(s, _archive_source_meta)
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
             with LOCK:
@@ -23919,6 +24450,43 @@ def _media_deny_reason(target: Path) -> str | None:
     return None
 
 
+# #8033: Windows drive-letter file:/// URIs arrive here as '/C:/Users/me/x' —
+# URL.pathname keeps the file-URI grammar's leading separator before the drive
+# letter, and Path('/C:/x') is root-relative on Windows (resolves to the wrong
+# location). Strip exactly that ONE URI-style separator when it sits
+# immediately before a drive letter — and ONLY on a Windows server. On a POSIX
+# server the conversion must never run: stripping '/C:/report.png' there turns
+# an absolute path into a cwd-relative 'C:/report.png' that can alias a file
+# inside an allowed workspace. Never a generic leading-slash removal: POSIX
+# ('/home/me/x') and UNC ('\\server\share\...') semantics differ and must stay
+# untouched.
+_WINDOWS_DRIVE_URI_LEAD_RE = re.compile(r"^[\\/]([A-Za-z]:[\\/])")
+
+
+def _is_windows_server() -> bool:
+    """True when this server resolves paths with Windows drive semantics."""
+    return os.name == "nt"
+
+
+def _normalize_media_request_path(raw_path: str) -> str:
+    """Return ``raw_path`` with the file-URI leading separator before a drive
+    letter removed (Windows drive-letter file:/// URIs), otherwise unchanged.
+
+    The drive-letter conversion is gated on the server being Windows
+    (``_is_windows_server``). On POSIX the leading separator is preserved so
+    ``/C:/report.png`` stays an absolute path and can never alias a
+    cwd-relative ``C:/report.png`` inside an allowed root.
+
+    Only a leading ``[\\/]`` immediately followed by ``[A-Za-z]:[\\/]``
+    matches; every other path (POSIX absolute, UNC, drive-relative ``C:foo``,
+    already-clean ``C:/x``) passes through untouched. Shape-only: no
+    percent-decoding, no existence checks.
+    """
+    if _is_windows_server() and _WINDOWS_DRIVE_URI_LEAD_RE.match(raw_path):
+        return raw_path[1:]
+    return raw_path
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -23955,7 +24523,13 @@ def _handle_media(handler, parsed):
 
     # Resolve the path and check it is within an allowed root
     try:
-        target = Path(raw_path).resolve()
+        # #8033: Windows drive-letter file:/// URIs carry a URI-style leading
+        # separator ('/C:/Users/...'); the normalizer strips exactly that one
+        # separator, and ONLY on a Windows server. On POSIX it must not strip —
+        # '/C:/...' has to stay absolute so it can never alias a cwd-relative
+        # drive-shaped path inside an allowed workspace. POSIX and UNC paths
+        # are returned unchanged by the normalizer.
+        target = Path(_normalize_media_request_path(raw_path)).resolve()
     except Exception:
         return bad(handler, "Invalid path", 400)
 
@@ -24925,99 +25499,6 @@ def _handle_live_models(handler, parsed):
                         return _key
                 _env = str(_cp.get("key_env") or "").strip()
                 return os.getenv(_env, "").strip() if _env else ""
-
-            def _custom_provider_models_discover_is_false(_cp):
-                """True when ``discover_models`` is an explicit ``false`` opt-out.
-
-                Mirrors ``api.config._provider_discover_allowed`` / Hermes
-                Agent ``model_switch_providers._discover_flag``: ``discover_models``
-                defaults to True, and the string forms ``"false"``/``"no"``/``"0"``
-                (case-insensitive) mean False.  Used to decide whether a
-                dict-shaped ``models`` mapping is a hand-pinned allowlist (only
-                when discovery is off) rather than per-model metadata.
-                """
-                _discover = _cp.get("discover_models", True) if isinstance(_cp, dict) else True
-                if isinstance(_discover, str):
-                    return _discover.strip().lower() in {"false", "no", "0"}
-                return not bool(_discover)
-
-            def _custom_provider_allowlist_ids(_cp):
-                """Plural ``models`` list only — the explicit allowlist signal.
-
-                The singular ``model`` field is sticky/default metadata, NOT an
-                allowlist: it must not gate live-catalog filtering, otherwise a
-                provider configured with only ``model: assistant`` (no ``models``
-                list) would be collapsed to a single model.  Only an explicit
-                ``models`` allowlist expresses "show exactly these models".
-
-                An auto-discovered catalog is NOT an allowlist: when Hermes
-                persisted discovery results back into config (``models: {...}``
-                plus ``models_discovered: true``), that mapping is a snapshot
-                of what the gateway exposed at discovery time.  Gating on it
-                would permanently pin the live catalog to the first-discovery
-                set, silently dropping any model the user pulls in later
-                (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
-                is the shared predicate the ``/api/models`` path already uses;
-                when it says "discovered", return no allowlist and let the
-                live probe win.  An explicit ``discover_models: false`` opt-out
-                re-pins the catalog (the predicate accounts for it), so a
-                hand-pinned discovered catalog still filters.
-
-                A dict-shaped ``models`` mapping that is NOT marked discovered is
-                *per-model metadata* written by the Hermes Agent setup flow
-                (``hermes_cli/model_switch.py::_save_custom_provider`` and the
-                setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
-                not a catalog narrow: treating its keys as an allowlist would
-                collapse the live picker to the single saved default (keyless
-                Ollama) while the CLI live-probe shows the full catalog.  Only an
-                explicit ``discover_models: false`` opts into treating the dict
-                keys as a pinned allowlist.  List/JSON-array-string/Python-literal
-                shapes remain plain allowlists.
-
-                The plural value is decoded through ``_parse_config_string_list()``
-                because ``hermes config set`` / JSON-mode editor saves persist
-                lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
-                Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
-                made a serialized allowlist fall through to ``[]``, which the
-                caller reads as "no allowlist configured" and floods the picker
-                with the full upstream catalog — the same class of bug as the
-                ``skills.disabled`` regression (#7120 / #7134).
-                """
-                from api.config import _provider_models_are_discovered_catalog
-
-                if _provider_models_are_discovered_catalog(_cp):
-                    return []
-                _ids = []
-                _models = _cp.get("models")
-                # Serialized shapes only: ``hermes config set`` / JSON-mode
-                # editor saves persist lists as quoted JSON-array strings
-                # (``'["chat-a","chat-b"]'``) or Python literals
-                # (``"['chat-a']"``).  Decode those through the shared helper so
-                # they are honored; native dict/list values are walked below so
-                # dict *entries* keep their id|model|name metadata (the decoder
-                # str()-ifies list members, which would mangle them).
-                if isinstance(_models, str):
-                    _models = _parse_config_string_list(_models)
-                if isinstance(_models, dict):
-                    # A dict-shaped ``models`` is per-model metadata written by
-                    # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
-                    # ``discover_models: false`` opt-out treats the dict keys as a
-                    # pinned allowlist; otherwise return the empty allowlist so the
-                    # live probe returns the full catalog.
-                    if not _custom_provider_models_discover_is_false(_cp):
-                        return []
-                    for _mid in _models:
-                        if isinstance(_mid, str) and _mid.strip():
-                            _ids.append(_mid.strip())
-                elif isinstance(_models, (list, tuple)):
-                    for _item in _models:
-                        if isinstance(_item, str) and _item.strip():
-                            _ids.append(_item.strip())
-                        elif isinstance(_item, dict):
-                            _mid = _item.get("id") or _item.get("model") or _item.get("name")
-                            if _mid and str(_mid).strip():
-                                _ids.append(str(_mid).strip())
-                return _ids
 
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
@@ -27231,6 +27712,75 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _normalize_goal_continuation_id(raw) -> str:
+    """Coerce a client-supplied continuation ID to a safe token (#7855).
+
+    Rejects anything that is not a compact hex string so a malformed or
+    hostile value can never reach the matcher: returns "" (the "no ID"
+    signal, which keeps the turn a genuine user turn) for None, non-strings,
+    empty/whitespace, wrong length or non-hex characters.
+    """
+    if raw is None:
+        return ""
+    token = str(raw).strip().lower()
+    if not token:
+        return ""
+    if len(token) != 32 or any(c not in "0123456789abcdef" for c in token):
+        return ""
+    return token
+
+
+def _resolve_chat_start_goal_continuation_id(body: dict, session_id: str) -> str:
+    """Resolve the continuation ID for a /api/chat/start body (#7855).
+
+    Current clients always send the key: ``send()`` posts
+    ``goal_continuation_id: _goalContinuationId || ''``, so a genuine turn
+    carries the key with an EMPTY value and a continuation carries its ID. A
+    PRE-UPGRADE tab posts ``_goalContinuationId || undefined`` and
+    ``JSON.stringify`` drops the undefined key entirely, so its body has no
+    ``goal_continuation_id`` key at all. Those tabs must still get master's
+    marker admission: resolve the session's pending ID server-side and feed
+    it through the same ID admission (receipt/rollback intact). An explicit
+    empty string from a current client must NOT peek — that is the #6885
+    genuine-turn signal, and a key-presence legacy path would otherwise admit
+    every genuine turn again.
+    """
+    if "goal_continuation_id" not in body and body.get("regenerate") is not True:
+        from api.goals import peek_pending_goal_continuation_id
+
+        return _normalize_goal_continuation_id(peek_pending_goal_continuation_id(session_id))
+    return _normalize_goal_continuation_id(body.get("goal_continuation_id"))
+
+
+def _consume_pending_goal_continuation(session_id: str, msg: str) -> str | dict | bool | None:
+    """#7855 admission: consume the goal-continuation record only when the
+    incoming turn carries the matching continuation ID.
+
+    The marker is session-scoped (#1932) and set when goal_continue fires;
+    the ID is issued at the same moment and travels with the browser's queued
+    continuation. Without the ID match, a genuine user/queued turn arriving
+    before the browser's auto-dispatch would be misclassified as goal-related
+    and would inherit goal-continuation semantics. When the ID differs (or is
+    absent), the user turn keeps priority and the record is left in place for
+    the browser's actual continuation dispatch.
+
+    Admission is by ID, not text (#7855): the queue UI lets the user edit or
+    combine a queued entry, and there is no wall-clock expiry, so a late or
+    edited continuation is still admitted. Marker, prompt and ID are one
+    record in api.goals; the admission check delegates there so check + drop
+    stay atomic.
+
+    On a match the return value is the **rollback receipt**: the popped
+    record itself (marker + prompt + ID together). A rejected chat start must
+    restore both halves (#7249 rolls back rejected starts), so callers keep
+    the receipt rather than re-deriving what was consumed — restoring the
+    marker alone left the retry unmatchable (maintainer's #7862 repro).
+    """
+    from api.goals import consume_pending_goal_continuation
+
+    return consume_pending_goal_continuation(session_id, msg)
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -27244,6 +27794,7 @@ def _start_chat_stream_for_session(
     normalized_model: bool = False,
     diag=None,
     goal_related: bool = False,
+    goal_continuation_id: str = "",
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
@@ -27295,20 +27846,43 @@ def _start_chat_stream_for_session(
 
     consumed_goal_continuation = False
     consumed_bg_task_completion = False
+    # #1932: this session may have a pending goal continuation. The streaming
+    # hook sets PENDING_GOAL_CONTINUATION when goal_continue fires, so the next
+    # chat/start for this session is automatically treated as goal-related.
+    # #6885 + #7855: the marker is consumed ONLY when the request carries the
+    # continuation ID the server issued at goal_continue time — a genuine
+    # user/queued turn (no ID) keeps priority and leaves the marker for the
+    # browser's auto-dispatch, while an edited / combined / late-sent
+    # continuation still carries its ID and keeps the goal.
+    #
+    # #7855 rebase compat (#7249): the admission runs INSIDE the session lock
+    # via consume_continuation_markers(), not up front. Admission pops BOTH
+    # halves (marker + prompt record, api/goals.py), so a rejected start must
+    # restore both; rolling back the marker alone left the retry unmatchable
+    # (maintainer's #7862 repro: consume -> rollback -> retry consume False).
+    # The popped record therefore travels as a rollback receipt and
+    # restore_consumed_continuation_markers() re-arms the pair — unless a
+    # newer continuation was armed for this session meanwhile.
+    consumed_goal_continuation_receipt = None
 
     def consume_continuation_markers() -> None:
         nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
-        if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-            goal_related = True
-            PENDING_GOAL_CONTINUATION.discard(s.session_id)
-            consumed_goal_continuation = True
+        nonlocal consumed_goal_continuation_receipt
+        if not goal_related and goal_continuation_id:
+            receipt = _consume_pending_goal_continuation(s.session_id, goal_continuation_id)
+            if receipt:
+                goal_related = True
+                consumed_goal_continuation = True
+                consumed_goal_continuation_receipt = receipt
         if s.session_id in PENDING_BG_TASK_COMPLETIONS:
             PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
             consumed_bg_task_completion = True
 
     def restore_consumed_continuation_markers() -> None:
         if consumed_goal_continuation:
-            PENDING_GOAL_CONTINUATION.add(s.session_id)
+            from api.goals import restore_pending_goal_continuation
+
+            restore_pending_goal_continuation(s.session_id, consumed_goal_continuation_receipt)
         if consumed_bg_task_completion:
             PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
 
@@ -27711,6 +28285,7 @@ def _start_run(
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
     goal_related: bool = False,
+    goal_continuation_id: str = "",
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
@@ -27798,6 +28373,7 @@ def _start_run(
                 goal_related=goal_related,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                goal_continuation_id=goal_continuation_id,
                 process_id=process_id,
                 retry_attempt=retry_attempt,
                 rearm_deferred_wakeup=rearm_deferred_wakeup,
@@ -27849,6 +28425,7 @@ def _start_run(
         goal_related=goal_related,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        goal_continuation_id=goal_continuation_id,
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
@@ -27987,6 +28564,7 @@ def start_session_turn(
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(s, "profile", None),
         prefer_cached_catalog=True,
     )
     _paused_wakeup_response = None
@@ -28421,6 +28999,7 @@ def _handle_goal_command(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
             explicit_model_pick=explicit_model_pick,
         )
         alias_refusal = _external_model_alias_lane_response(
@@ -28505,6 +29084,40 @@ def _handle_goal_command(handler, body):
             status = 409 if payload.get("error") == "agent_running" else 400
         return j(handler, payload, status=status)
 
+    # #6885 round 2 lifecycle: the /goal command is the natural traffic hook
+    # for record upkeep. A cleared/paused goal has no continuation coming, so
+    # any pending record for this session must not outlive it (an abandoned
+    # browser dispatch would otherwise keep the pair resident until expiry);
+    # sweeping expired/orphaned records here bounds the rest without a
+    # background timer.
+    # #7855 rebase compat (#7249): this hook must not fire for runner-owned
+    # goals. The runner does not drive the browser's queued continuation, so
+    # there is no record to clear, and the sweep below runs on the runner's
+    # traffic for goals it owns locally.
+    # #7855 re-gate CORE: only a CLEARED goal has no continuation coming. PAUSE
+    # keeps the goal (and its pending continuation) alive: pausing then resuming a
+    # deferred continuation used to delete the admission record here, and the
+    # resume path restored the active goal WITHOUT replacing the token — so the
+    # retry launched with `goal_related=false` and the goal loop silently stopped.
+    # Verified through real HTTP with the installed native GoalManager: master
+    # launches the retry with `goal_related=true`, this branch with `false`.
+    if not runner_goal_owned:
+        if goal_adapter_action == "clear":
+            from api.goals import clear_pending_goal_continuation
+
+            try:
+                clear_pending_goal_continuation(s.session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to clear pending goal continuation for %s", s.session_id, exc_info=True
+                )
+        from api.goals import sweep_expired_goal_continuations
+
+        try:
+            sweep_expired_goal_continuations()
+        except Exception:
+            logger.debug("Failed to sweep expired goal continuations", exc_info=True)
+
     def _rollback_goal_after_failed_kickoff() -> None:
         restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
 
@@ -28532,6 +29145,7 @@ def _handle_goal_command(handler, body):
                 profile_provider=_pp_provider,
                 profile_default_model=_pp_default,
                 profile_config=_pp_cfg,
+                profile=getattr(s, "profile", None),
                 explicit_model_pick=explicit_model_pick,
             )
             # #6703 parity: same explicit-pick signature stamping on the
@@ -28835,6 +29449,7 @@ def _handle_chat_start(handler, body, diag=None):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
             explicit_model_pick=explicit_model_pick,
         )
         from api.runtime_adapter import runtime_adapter_runner_enabled
@@ -28927,6 +29542,20 @@ def _handle_chat_start(handler, body, diag=None):
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
             "regeneration": regeneration,
+            # #7855: the server-issued continuation ID travels with the browser's
+            # queued continuation through inline edits and combines; admission
+            # is by ID, never by text, so an edited/late/combined continuation
+            # keeps its goal semantics and a genuine user message (no ID) does
+            # not. Rejected as malformed here rather than by the matcher. A
+            # pre-upgrade tab omits the key entirely (its send() posts
+            # `_goalContinuationId || undefined` and JSON.stringify drops the
+            # undefined key), so the resolver peeks the session's pending ID
+            # for that wire shape — master's marker admission, receipt/rollback
+            # intact — while a current client's explicit empty string stays a
+            # genuine turn (#6885).
+            "goal_continuation_id": _resolve_chat_start_goal_continuation_id(
+                body, getattr(s, "session_id", "") or ""
+            ),
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -29106,6 +29735,7 @@ def _handle_chat_sync(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
         )[:2]
         s.model = model
         s.model_provider = model_provider
@@ -29222,6 +29852,13 @@ def _handle_chat_sync(handler, body):
                 s, "sync provider routing", logger_override=logger,
             ):
                 _routing_kwargs = _sync_routing_kwargs(_pp_cfg, _sync_routing_params)
+            # #7237 review round-N+2 finding 2 (nesquena-hermes 2026-10-05):
+            # the sync path must derive wholesale-replacement authority from
+            # the PRODUCER, exactly like the streaming path. Capture the
+            # session id this turn opened with so a post-run compression
+            # rotation (agent.session_id advancing to a fresh continuation) is
+            # visible to the settle below.
+            _sync_session_id = s.session_id
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
@@ -29241,6 +29878,7 @@ def _handle_chat_sync(handler, body):
                 _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
+                _deduplicate_context_messages,
                 _find_active_turn_checkpoint_index,
                 _merge_display_messages_after_agent_result,
                 _resolve_active_turn_authority,
@@ -29248,6 +29886,7 @@ def _handle_chat_sync(handler, body):
                 _restore_reasoning_metadata_before_boundary,
                 _settle_current_turn_boundary,
                 _sanitize_messages_for_agent,
+                _agent_replay_settle_projection,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
                 _workspace_context_prefix,
@@ -29274,17 +29913,64 @@ def _handle_chat_sync(handler, body):
 
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
+            # The EXACT projection handed to the Agent, threaded to the settle's
+            # replay dedupe. ``result["messages"]`` is the full conversation
+            # (this projection + the current turn), so without it the dedupe
+            # cannot prove which rows the current turn owns and could append
+            # sanitizer-rewritten historical rows beside the raw history
+            # (#7237 review data-regression finding, nesquena-hermes
+            # 2026-09-23).
+            # #7237 review round 3 finding 2 (nesquena-hermes 2026-10-06): the
+            # projection used to be passed BY REFERENCE and then reused for the
+            # prefix proof. The real Agent shallow-copies the list and performs
+            # its consecutive-user repair on the tail dict, so the same object
+            # the settle compares against had already been mutated. An
+            # unanswered-tail follow-up therefore lost its current user row.
+            #
+            # Take an INDEPENDENT deep snapshot here: the value handed to the
+            # Agent and the value compared at settle time must be two objects,
+            # or "what we sent" is a moving target.
+            #
+            # The sent projection keeps out-of-clock-order splice pairs
+            # separate (the boundary matrix pins the row-level prefix), so the
+            # settle proof compares the UNCONDITIONAL merge of the sent rows —
+            # the form the installed Agent actually returns.
+            _agent_replay_projection = _sanitize_messages_for_agent(
+                _previous_context_messages,
+                cfg=get_config(),
+                effective_model=_model,
+                effective_provider=_provider,
+                effective_base_url=_base_url,
+                # #7237 review round 3 finding 5 (nesquena-hermes
+                # 2026-10-06): same Agent-replay adjacency normalization the
+                # streaming path applies, so the sync settle models the
+                # Agent's merge of bare assistant rows instead of rejecting
+                # the changed prefix and dropping the exchange.
+                normalize_bare_assistant_adjacency=True,
+            )
+            _run_conversation_projected_history = _agent_replay_settle_projection(
+                _agent_replay_projection
+            )
 
             result = agent.run_conversation(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_agent(
-                    _previous_context_messages,
-                    cfg=get_config(),
-                    effective_model=_model,
-                    effective_provider=_provider,
-                    effective_base_url=_base_url,
-                ),
+                # Threaded to the settle's replay dedupe so only rows the
+                # current turn owns are appended when the replayed prefix
+                # diverges from the raw context (#7237 review
+                # data-regression finding).
+                # #7237 review blocker 1 (nesquena-hermes 2026-10-09): the
+                # proof snapshot above must stay an IMMUTABLE copy. The
+                # installed Agent shallow-copies the list it receives and
+                # performs its consecutive-user repair on the tail dict, so
+                # handing it the same object the settle compares against
+                # makes the prefix proof a moving target — the repair
+                # mutates the dict in place and the settle then rejects the
+                # changed prefix, dropping the follow-up's prompt and reply.
+                # A second deep copy here isolates the Agent's mutation. The
+                # Agent receives the SENT projection (splice pairs separate);
+                # only the settle proof uses the unconditional merge.
+                conversation_history=copy.deepcopy(_agent_replay_projection),
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
@@ -29312,6 +29998,23 @@ def _handle_chat_sync(handler, body):
                 os.environ.pop("HERMES_SESSION_KEY", None)
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
+    # #7237 review round-N+2 finding 2 (nesquena-hermes 2026-10-05): the sync
+    # path previously never passed ``compression_authorized`` to
+    # ``_dedupe_replayed_context_messages``, so every genuine compression was
+    # refused there and the persisted context kept only the old history. The
+    # producer signal is the same as the streaming path: the Agent rotating
+    # its own session_id inside this call proves the context layer really ran
+    # a compression turn.
+    # #7237 review round 3 (nesquena-hermes 2026-10-06): the installed Agent
+    # compresses IN PLACE by default — it keeps its session id and commits
+    # ``_last_compaction_in_place``. The previous proxy
+    # (``agent.session_id != _sync_session_id``) could only see a rotation, so
+    # the default case was treated as "no compression", the settle refused the
+    # compacted result, and the route kept the 24 old context rows without the
+    # current answer. Derive the authority from actual producer commitment via
+    # the shared predicate the streaming settle uses, so the two paths cannot
+    # drift apart again.
+    _compression_authorized = _producer_committed_compression(agent, _sync_session_id)
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         # Active-turn boundary is fixed BEFORE any restoration (same as streaming),
@@ -29361,11 +30064,42 @@ def _handle_chat_sync(handler, body):
         _assign_stable_message_ids(
             _result_messages, _previous_messages, _previous_context_messages
         )
-        _next_context_messages = _dedupe_replayed_context_messages(
-            _previous_context_messages,
-            _next_context_messages,
-            msg,
-        )
+        if result.get("messages"):
+            # Call-scoped protection (#7237 review blocker 1,
+            # nesquena-hermes 2026-09-28): the dedupe RETURNS the protected
+            # rows it proved; the sync route consumes them in THIS call by
+            # passing them into the identity dedupe — the old module global
+            # was never read here, so a settle that proved current-turn rows
+            # could have them collapsed as duplicates on the sync path.
+            _next_context_messages, _proven_rows = _dedupe_replayed_context_messages(
+                _previous_context_messages,
+                _next_context_messages,
+                msg,
+                projected_history=_run_conversation_projected_history,
+                # #7237 review round-N+2 finding 2 (nesquena-hermes
+                # 2026-10-05): the sync path must grant wholesale-replacement
+                # authority when the producer actually rotated the session
+                # id, exactly like the streaming path — a genuine compression
+                # must persist the compacted list, not the old history.
+                compression_authorized=_compression_authorized,
+            )
+            s.context_messages = _deduplicate_context_messages(
+                _next_context_messages,
+                protected_rows=_proven_rows,
+            )
+        else:
+            # The Agent produced NO rows for this turn. The previous fallback
+            # (``result.get("messages") or _previous_context_messages``) left
+            # the raw pre-turn context substituted as the settle input; with
+            # the exact sent projection ``[]`` that whole substituted raw
+            # history was then treated as the current-turn output and the
+            # settle returned ``previous_context + previous_context``
+            # (#7237 review residual 2, nesquena-hermes 2026-09-27). Settle
+            # an empty Agent result as a no-op for model context — the same
+            # contract the streaming ``_settle_result_messages`` applies —
+            # keeping exactly one raw-history copy with no loss or
+            # duplication.
+            _next_context_messages = list(_previous_context_messages)
         if _active_turn_identity.get("token"):
             _next_context_messages = _settle_current_turn_boundary(
                 _previous_context_messages,
