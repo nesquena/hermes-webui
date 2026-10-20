@@ -10379,7 +10379,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     if not (entry.get("name") or "").strip():
                         continue
                     configured_models = entry.get("models")
-                    if isinstance(configured_models, (dict, list)) and len(configured_models) > 0:
+                    if (
+                        isinstance(configured_models, (dict, list))
+                        and len(configured_models) > 0
+                        and not _provider_models_are_discovered_catalog(entry)
+                    ):
                         continue
                     count += 1
             # The LM Studio provider-group branch re-probes the same
