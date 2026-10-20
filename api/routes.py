@@ -987,10 +987,20 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     # Import routes create/claim sessions before normal ownership exists, and
     # chat/start has inline placeholder-retag rules that must run before the
     # generic request-session guard.
+    # #7731: /api/session/archive is exempt for the same reason, but for a
+    # different one. Archiving a session that lives in another profile publishes
+    # a sidecar owned by that profile, so the NEXT request (the restore) would
+    # hit the generic guard and be answered 409 session_profile_mismatch before
+    # the archive handler ever ran -- archiving a session would permanently
+    # brick its own restore. The archive handler therefore owns its profile
+    # boundary (see the /api/session/archive branch in handle_post): it accepts
+    # an explicitly supplied owning profile and keeps unqualified requests
+    # pinned to the active profile.
     return path in {
         "/api/session/import",
         "/api/session/import_cli",
         "/api/chat/start",
+        "/api/session/archive",
     }
 
 
@@ -6303,8 +6313,13 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     except KeyError:
         pass
 
-    # Fallback: try to materialize from CLI/agent session metadata
-    cli_meta = _lookup_cli_session_metadata(sid)
+    # Fallback: try to materialize from CLI/agent session metadata.
+    # Active-profile-only: this helper is the shared chokepoint for rename,
+    # regenerate, update, move, prompts, chat-start and anchor scenes.
+    # Opening all-profiles here would let profile A materialize and mutate
+    # profile B's sessions.  The archive handler has its own request-scoped
+    # all-profiles path (#7549, #7731).
+    cli_meta = _resolve_cli_import_metadata(sid)
 
     # Delegated subagent children (#5307) are view-only: their transcript lives
     # in state.db and ownership belongs to the delegate runner, not WebUI. They
@@ -6348,7 +6363,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         # Messaging sessions: lightweight Session with no messages (state.db is source of truth)
         s = Session(
             session_id=sid,
-            title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+            title=cli_meta.get("title") or title_from(get_cli_session_messages(sid, profile=cli_meta.get("profile")), "CLI Session"),
             workspace=get_last_workspace(),
             model=cli_meta.get("model") or "unknown",
             created_at=cli_meta.get("created_at"),
@@ -6358,7 +6373,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         s.save(touch_updated_at=False)
     else:
         # Regular CLI/agent sessions: import full message history
-        msgs = get_cli_session_messages(sid)
+        msgs = get_cli_session_messages(sid, profile=cli_meta.get("profile"))
         if not msgs:
             raise KeyError(sid)
         s = import_cli_session(
@@ -19901,6 +19916,77 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        # ── Request-scoped profile boundary (#7731) ──
+        # This route is exempt from _guard_request_session_visibility (see
+        # _request_session_visibility_exempt) so an archived foreign session can
+        # be restored; that makes THIS handler the owner of the boundary, for
+        # both the resident-session path and the CLI materialize fallback.
+        #
+        # Normalize the caller's claim BEFORE anything reads it. ``None`` means
+        # absent and ``''`` means present-but-malformed; neither may stand in for
+        # an owner. Mirrors the invariant _handle_session_import_cli already
+        # enforces for cross-profile import, so ``all_profiles: true`` can never
+        # widen the search without a claimed, validated owner.
+        _arch_allow_all = _request_wants_all_profiles_import(body)
+        _arch_profile = _normalize_import_profile_value((body or {}).get("profile"))
+        if _arch_profile == "":
+            return bad(handler, "invalid profile", 400)
+        if _arch_allow_all and not _arch_profile:
+            return bad(handler, "profile is required for all_profiles archive", 400)
+        if _arch_allow_all and _is_isolated_profile_mode():
+            # Isolated mode exposes exactly one profile, so a cross-profile
+            # lookup is meaningless there. The browser can still restore a saved
+            # all-profiles toggle (#7731 greptile), so rather than stranding the
+            # pinned profile's OWN sessions behind a 403, confirm the claim names
+            # that pinned profile and degrade to an ordinary active-profile
+            # archive. A claim naming any other profile is refused outright.
+            if not _profiles_match(_arch_profile, _get_active_profile_name()):
+                return bad(handler, "all_profiles archive is not allowed in isolated profile mode", 403)
+            _arch_allow_all = False
+        # #7731: apply the profile boundary for a session that ALREADY has a
+        # WebUI sidecar, BEFORE get_session() runs. get_session() repairs legacy
+        # sidecar layouts in place (#8094), so a request that is about to be
+        # refused must not touch the bytes — the generic guard this route is
+        # exempt from used to guarantee exactly that. The probe is the same
+        # read-only ownership read the guard used, so it neither repairs nor
+        # publishes a cache entry.
+        #
+        # A scoped request that explicitly names the owning profile may reach
+        # the session (that is what makes an archived foreign session
+        # restorable); an unqualified request stays pinned to the active
+        # profile, keeping the #7710 contract: a known other profile is a 409 so
+        # the frontend can offer a profile switch, and only an unknown/legacy
+        # None-profile sidecar 404s, so its stale-URL self-heal keeps firing.
+        if is_safe_session_id(sid):
+            _arch_owner_profile = None
+            _arch_owner_known = False
+            try:
+                _arch_owner_profile = get_session_profile_readonly(sid)
+                _arch_owner_known = True
+            except KeyError:
+                # No sidecar yet — the CLI materialize fallback below decides.
+                _arch_owner_known = False
+            except (OSError, ValueError, TypeError):
+                return bad(handler, "Session not found", 404)
+            if _arch_owner_known:
+                _arch_mismatch = (
+                    not _profiles_match(_arch_owner_profile, _arch_profile)
+                    if _arch_allow_all
+                    else not _profiles_match(_arch_owner_profile, _get_active_profile_name())
+                )
+                if _arch_mismatch:
+                    if _arch_owner_profile:
+                        return j(handler, {
+                            "error": "Session belongs to another profile",
+                            "code": "session_profile_mismatch",
+                            "session_id": sid,
+                            "profile": _arch_owner_profile,
+                        }, 409)
+                    return bad(handler, "Session not found", 404)
+        # Runs AFTER the profile boundary above, not before: the check calls
+        # get_session(), which repairs legacy sidecar layouts in place (#8094),
+        # so a request already destined for a 409/404 must not reach it. The
+        # generic guard this route is exempt from used to refuse first.
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
         # #7776 Finding 2: capture the CLI source identity BEFORE the lock so
@@ -19908,6 +19994,9 @@ def handle_post(handler, parsed) -> bool:
         # new WebUI session without the pre-lock CLI metadata) cannot drop it
         # on the way back to disk. The materialize path below also uses it.
         _archive_cli_meta = _lookup_cli_session_metadata(sid) or {}
+        # Set by the materialize fallback below; empty on the resident path,
+        # where _archive_cli_meta already holds the active-profile identity.
+        _archive_resolved_meta = {}
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -19921,9 +20010,51 @@ def handle_post(handler, parsed) -> bool:
                 with LOCK:
                     SESSIONS[sid] = s
         except KeyError:
-            cli_meta = _archive_cli_meta
+            # #7776: reuse the CLI identity captured before the lock — the
+            # lock-held reload can drop it. #7549/#7731: cross-profile archive
+            # is only allowed when the request explicitly carried
+            # all_profiles=true AND a validated profile, both normalized and
+            # validated above, so the shared materializer chokepoint cannot
+            # leak profile isolation.
+            cli_meta = _archive_cli_meta or _resolve_cli_import_metadata(
+                sid,
+                requested_profile=_arch_profile,
+                allow_all_profiles=_arch_allow_all,
+            )
             if not cli_meta:
+                # #7731: an empty result is ambiguous on its own. When the
+                # request scoped itself to a profile, re-probe WITHOUT that
+                # filter to tell a profile conflict apart from a missing
+                # session: the resolver above prefilters a mismatched owner to
+                # ``{}``, so without this probe the caller cannot tell
+                # "wrong profile" from "no such session" and both answered 404.
+                # Only an all-profiles request may probe other profiles: a request that carries ``profile`` without
+                # ``all_profiles`` is an active-profile archive and keeps master's 404 for a foreign session.
+                if _arch_allow_all and _arch_profile:
+                    _owner_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
+                    _owner_profile = (_owner_meta or {}).get("profile")
+                    if _owner_profile and not _profiles_match(_owner_profile, _arch_profile):
+                        return j(handler, {
+                            "error": "Session belongs to another profile",
+                            "code": "session_profile_mismatch",
+                            "session_id": sid,
+                            "profile": _owner_profile,
+                        }, 409)
                 return bad(handler, "Session not found", 404)
+            # When the request carries an explicit profile but the resolved
+            # session belongs to a different one, return the #7710 contract
+            # (409 session_profile_mismatch) so the frontend can surface the
+            # conflict rather than silently mutating a foreign session.
+            if _arch_allow_all and _arch_profile:
+                _resolved_profile = cli_meta.get("profile")
+                if _resolved_profile and not _profiles_match(_resolved_profile, _arch_profile):
+                    return j(handler, {"error": "Session belongs to another profile", "code": "session_profile_mismatch"}, 409)
+            # #7731: remember the resolved identity for the re-stamp after the
+            # lock-held reload below. ``_archive_cli_meta`` is captured from the
+            # ACTIVE profile only, so on the cross-profile path it is empty and
+            # the reload would persist a WebUI-native copy (is_cli_session=False
+            # plus null source fields) of a CLI-origin session.
+            _archive_resolved_meta = cli_meta
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the
@@ -19937,7 +20068,7 @@ def handle_post(handler, parsed) -> bool:
                 _arch_profile = cli_meta.get("profile") or None
                 s = Session(
                     session_id=sid,
-                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid, profile=cli_meta.get("profile")), "CLI Session"),
                     workspace=get_last_workspace(profile=_arch_profile),
                     messages=[],
                     model=cli_meta.get("model") or "unknown",
@@ -19958,7 +20089,7 @@ def handle_post(handler, parsed) -> bool:
                 s.platform = cli_meta.get("platform")
                 s.save(touch_updated_at=False)
             else:
-                msgs = get_cli_session_messages(sid)
+                msgs = get_cli_session_messages(sid, profile=cli_meta.get("profile"))
                 if not msgs:
                     return bad(handler, "Session not found", 404)
                 s = import_cli_session(
@@ -20001,15 +20132,20 @@ def handle_post(handler, parsed) -> bool:
                 if latest is None:
                     return bad(handler, "Session not found", 404)
             s = _ensure_full_session_before_mutation(sid, latest)
-            # #7776 Finding 2: re-stamp CLI source identity on the freshly
-            # loaded session before mutating it. ``_archive_cli_meta`` was
-            # captured above (before the lock); for the regular CLI/agent
-            # materialize path the on-disk sidecar that Session.load(sid)
-            # just read is the import_cli_session save WITHOUT source meta,
-            # so without this re-stamp the save() below would persist a
-            # WebUI-native copy with is_cli_session=False + null source.
-            if _archive_cli_meta:
-                _apply_cli_source_meta_to_session(s, _archive_cli_meta)
+            # #7776 Finding 2 / #7731: re-stamp CLI source identity on the
+            # freshly loaded session before mutating it. ``_archive_cli_meta``
+            # was captured above (before the lock) from the ACTIVE profile;
+            # for the regular CLI/agent materialize path the on-disk sidecar
+            # that Session.load(sid) just read is the import_cli_session save
+            # WITHOUT source meta, so without this re-stamp the save() below
+            # would persist a WebUI-native copy with is_cli_session=False +
+            # null source. On the cross-profile path _archive_cli_meta is empty
+            # (the session is not in the active profile), so prefer the
+            # identity the fallback actually resolved — otherwise the archived
+            # foreign session is recorded as WebUI-native.
+            _archive_source_meta = _archive_cli_meta or _archive_resolved_meta
+            if _archive_source_meta:
+                _apply_cli_source_meta_to_session(s, _archive_source_meta)
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
             with LOCK:
