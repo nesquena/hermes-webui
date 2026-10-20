@@ -2358,7 +2358,7 @@ async function newSession(flash, options={}){
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     updateQueueBadge();
     S.toolCalls=[];
-    // #7358 r10 (f4): drop the per-session error map so a new chat cannot inherit the previous session's reused-id verdicts.
+    // #7358 r10 (f4): a new chat must not inherit the previous session's verdict map.
     S._settledToolIsErrorByTid=null;
     _messagesTruncated=false;
     _oldestIdx=0;
