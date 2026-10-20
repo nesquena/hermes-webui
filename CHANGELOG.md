@@ -82,6 +82,8 @@
 
 ### Fixed
 
+- **Insights cache hit rate is no longer stuck at or below 50%.** Cache reads are already counted inside input tokens, so the rate now divides cache reads by the full prompt total, in the daily chart and the per-model and overall figures. Thanks @balabommablock-cpu. (#8372, fixes #8345)
+
 - **Today's messaging DM stays in Today.** After a Telegram/Discord `session_reset`, the new session is shown as its own top-level conversation (keeping its lineage link) instead of being nested under the old chat, so it no longer drops out of "Today". Branches, subagents, CLI and compression children are grouped as before. (#8298, thanks @solarmaster961)
 
 - **Test suite: no real DNS lookups.** The shared test network guard now blocks DNS as well as connections (IP literals and `localhost` still resolve). A real lookup in the custom-provider address check could take longer than the 4-second model-list limit on a slow CI resolver, which made `test_seeded_config_survives_a_stale_loaded_config_path` fail on unrelated PRs. (#8396)

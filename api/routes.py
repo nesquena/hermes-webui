@@ -14069,36 +14069,41 @@ def _handle_insights(handler, parsed) -> bool:
             with closing(open_state_db_readonly(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                # cache_read_tokens may not exist on older agent state DBs;
-                # fall back to a query without it if the column is missing.
-                try:
-                    cur.execute(f"""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                               started_at, ended_at,
-                               COALESCE(ended_at, started_at, 0) AS usage_ts
-                        FROM sessions
-                        WHERE COALESCE(ended_at, started_at, 0) >= ?
-                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, end_cutoff))
-                except sqlite3.OperationalError:
-                    cur.execute(f"""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               0 AS cache_read_tokens,
-                               started_at, ended_at,
-                               COALESCE(ended_at, started_at, 0) AS usage_ts
-                        FROM sessions
-                        WHERE COALESCE(ended_at, started_at, 0) >= ?
-                          AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, end_cutoff))
+                # Older agent state DBs may lack either cache column, so pick
+                # each one on its own: a DB with reads but no writes still has
+                # useful reads.
+                _session_cols = {
+                    r[1] for r in cur.execute("PRAGMA table_info(sessions)").fetchall()
+                }
+
+                def _optional_token_col(name: str) -> str:
+                    if name in _session_cols:
+                        return f"COALESCE({name}, 0) AS {name}"
+                    return f"0 AS {name}"
+
+                cur.execute(f"""
+                    SELECT id, model, message_count, input_tokens, output_tokens,
+                           estimated_cost_usd,
+                           {_optional_token_col("cache_read_tokens")},
+                           {_optional_token_col("cache_write_tokens")},
+                           started_at, ended_at,
+                           COALESCE(ended_at, started_at, 0) AS usage_ts
+                    FROM sessions
+                    WHERE COALESCE(ended_at, started_at, 0) >= ?
+                      AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
+                      AND COALESCE(source, '') != 'webui'
+                """, (cutoff, end_cutoff))
                 for row in cur.fetchall():
-                    _input = _safe_usage_int(row["input_tokens"])
-                    _output = _safe_usage_int(row["output_tokens"])
                     _cache_read = _safe_usage_int(row["cache_read_tokens"])
+                    # state.db input_tokens is uncached input only, while WebUI
+                    # sessions store the full prompt. Add the cache tokens so
+                    # both sources mean the same thing before they are summed.
+                    _input = (
+                        _safe_usage_int(row["input_tokens"])
+                        + _cache_read
+                        + _safe_usage_int(row["cache_write_tokens"])
+                    )
+                    _output = _safe_usage_int(row["output_tokens"])
                     _cost = _safe_cost_float(row["estimated_cost_usd"])
                     _msgs = _safe_usage_int(row["message_count"])
                     total_sessions += 1
@@ -14150,13 +14155,13 @@ def _handle_insights(handler, parsed) -> bool:
         row_total_tokens = stats["input_tokens"] + stats["output_tokens"]
         row_cost = round(stats["cost"], 6)
         row_cache_read = stats["cache_read_tokens"]
-        # Bounded prompt-cache hit rate: cached reads over the FULL prompt total
-        # (ordinary input + cache reads), so it can never exceed 100%. Computing
-        # cache_read / input_tokens alone would overshoot 100% on cache-heavy
-        # sessions. prompt_cache_hit_percent clamps to [0,100] and returns None
-        # when there is nothing meaningful to display.
+        # Prompt-cache hit rate: cached reads over the full prompt total.
+        # input_tokens already includes cache reads and writes for both
+        # sources, so adding the reads again would cap the rate at 50%.
+        # prompt_cache_hit_percent clamps to [0,100] and returns None when
+        # there is nothing meaningful to display.
         row_cache_hit_percent = prompt_cache_hit_percent(
-            row_cache_read, stats["input_tokens"] + row_cache_read
+            row_cache_read, stats["input_tokens"]
         )
         models_breakdown.append({
             "model": model,
@@ -14220,9 +14225,9 @@ def _handle_insights(handler, parsed) -> bool:
         "total_output_tokens": total_output_tokens,
         "total_cache_read_tokens": total_cache_read_tokens,
         # Aggregate prompt-cache hit rate, bounded 0-100% via the shared helper
-        # (cache_read over input + cache_read).
+        # (cache_read over the full prompt total in input_tokens).
         "total_cache_hit_percent": prompt_cache_hit_percent(
-            total_cache_read_tokens, total_input_tokens + total_cache_read_tokens
+            total_cache_read_tokens, total_input_tokens
         ),
         "total_tokens": total_tokens,
         "total_cost": round(total_cost, 6),
