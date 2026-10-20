@@ -506,6 +506,16 @@ def test_regression_fails_without_guard(monkeypatch, no_copilot_in_providers_cfg
     persisted pair. Then we restore the patched function and assert the
     real implementation still passes — together this proves the guard
     is the load-bearing piece, not the test fixture.
+
+    The double is deliberately signature-adaptive: current master's real
+    display wrappers pass ``profile=getattr(session, "profile", None)``
+    unconditionally, while the source-head merge predates that keyword
+    (it carries ``wait_for_inflight_rebuild`` instead). The double must
+    bind to BOTH call shapes and forward exactly the keywords the real
+    implementation accepts — the same signature probe the resolver
+    itself uses on ``get_available_models`` — so the profile-aware
+    custom-provider repair keeps running on current master without
+    breaking the source-head run (re-gate #7568, 2026-10-19).
     """
     from api.routes import _resolve_compatible_session_model_state as real_impl
 
@@ -519,6 +529,8 @@ def test_regression_fails_without_guard(monkeypatch, no_copilot_in_providers_cfg
         explicit_model_pick=False,
         prefer_cached_catalog=False,
         wait_for_inflight_rebuild=True,
+        profile=None,
+        **kwargs,
     ):
         # Strip the marker so the slow path runs as it did before round 6.
         with patch(
@@ -529,16 +541,24 @@ def test_regression_fails_without_guard(monkeypatch, no_copilot_in_providers_cfg
                 if not k.startswith("_non_authoritative")
             },
         ):
-            return real_impl(
-                model_id,
-                model_provider,
+            import inspect as _inspect
+
+            try:
+                _real_params = _inspect.signature(real_impl).parameters
+            except (TypeError, ValueError):
+                _real_params = {}
+            _forward = dict(
                 profile_provider=profile_provider,
                 profile_default_model=profile_default_model,
                 profile_config=profile_config,
                 explicit_model_pick=explicit_model_pick,
                 prefer_cached_catalog=prefer_cached_catalog,
-                wait_for_inflight_rebuild=wait_for_inflight_rebuild,
             )
+            if "wait_for_inflight_rebuild" in _real_params:
+                _forward["wait_for_inflight_rebuild"] = wait_for_inflight_rebuild
+            if "profile" in _real_params:
+                _forward["profile"] = profile
+            return real_impl(model_id, model_provider, **_forward)
 
     session = _FakeSession("@copilot:gpt-5.5", "copilot")
     monkeypatch.setattr(
@@ -562,6 +582,156 @@ def test_regression_fails_without_guard(monkeypatch, no_copilot_in_providers_cfg
     assert provider == "openai-codex", (
         "reverse-verification: without the guard, the display provider "
         "should switch to openai-codex (proves the regression is real)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 5b. Producer→consumer: a REAL warm catalog (lacking Copilot) consumed
+#     through the REAL display resolver while a forced rebuild is in flight
+#     (re-gate #7568, 2026-10-19). The marker-only producer test plus a
+#     separately mocked resolver test cannot catch a broken
+#     producer→consumer connection, so this drives the actual production
+#     path end to end: warm module cache → real get_available_models
+#     (marks it non-authoritative) → real display resolvers (preserve the
+#     persisted pair).
+# ---------------------------------------------------------------------------
+
+
+def test_display_resolver_preserves_pair_with_real_warm_catalog_during_inflight_rebuild(
+    monkeypatch, no_copilot_in_providers_cfg
+):
+    """A real warm catalog lacking Copilot, served while a forced catalog
+    rebuild is in flight, must flow through the REAL display resolver
+    unchanged for a session persisted as ``@copilot:gpt-5.5`` / ``copilot``.
+
+    This is the producer→consumer composition the marker-only
+    ``test_warm_cache_overlapping_rebuild_is_non_authoritative`` cannot
+    cover: that test stops at ``get_available_models`` returning the marked
+    snapshot, and the display tests substitute an already-marked catalog via
+    ``patch(api.routes.get_available_models)`` — neither would catch a
+    resolver that stops honoring the marker. Here NOTHING is patched on the
+    routes side: the warm snapshot lives in the real module cache, the real
+    ``get_available_models(prefer_cache=True, wait_for_inflight_rebuild=False)``
+    marks it ``no_wait_warm_cache_during_rebuild`` because the forced
+    rebuild flag is set, and the real display wrappers consume that result.
+
+    Without the round-6 guard, the display resolver would rewrite the pair
+    to ``gpt-5.5`` / ``openai-codex`` (the warm catalog's active provider),
+    the browser would echo it into ``S.session.model`` / ``model_provider``,
+    and the next ``/api/chat/start`` would silently reroute to a backend the
+    user never picked.
+    """
+    import time
+
+    from api import config as cfg_mod
+
+    # --- Producer side: a REAL warm module cache lacking Copilot ----------
+    # Full /api/models shape so the warm-cache read is accepted as fresh
+    # (mirrors _warm_catalog in test_prefer_cache_no_wait.py).
+    warm_catalog = {
+        "active_provider": "openai-codex",
+        "default_model": "gpt-5.5",
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "OpenAI Codex",
+                "provider_id": "openai-codex",
+                "models": [{"id": "gpt-5.5", "label": "GPT-5.5"}],
+            },
+        ],
+        "aliases": {},
+    }
+    monkeypatch.setattr(
+        cfg_mod, "_available_models_cache", warm_catalog, raising=False
+    )
+    monkeypatch.setattr(
+        cfg_mod, "_available_models_cache_ts", time.monotonic(), raising=False
+    )
+    monkeypatch.setattr(
+        cfg_mod,
+        "_available_models_cache_source_fingerprint",
+        cfg_mod._models_cache_source_fingerprint(),
+        raising=False,
+    )
+    # No disk participation: the warm branch must be the one served, not a
+    # disk/stale/minimal fallback.
+    monkeypatch.setattr(cfg_mod, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(
+        cfg_mod, "_load_stale_models_cache_from_disk", lambda: None
+    )
+    monkeypatch.setattr(
+        cfg_mod, "_save_models_cache_to_disk", lambda *_a, **_k: None
+    )
+    try:
+        monkeypatch.setattr(
+            cfg_mod,
+            "_cfg_mtime",
+            cfg_mod._get_config_path().stat().st_mtime,
+            raising=False,
+        )
+    except Exception:
+        pass
+
+    # --- Forced rebuild IN FLIGHT, synchronized ---------------------------
+    # The cold path publishes the single-flight flag under the condition
+    # variable; mirror that so the overlap is deterministic. The flag stays
+    # set for the whole consumer read and is cleared afterwards — a real
+    # forced rebuild would hold it across the display resolution.
+    with cfg_mod._cache_build_cv:
+        monkeypatch.setattr(
+            cfg_mod, "_cache_build_in_progress", True, raising=False
+        )
+
+    try:
+        # Producer: the REAL catalog lookup the display path performs. It
+        # must return the warm snapshot marked non-authoritative — proving
+        # the marker comes from production code, not from a test fixture.
+        produced = cfg_mod.get_available_models(
+            prefer_cache=True, wait_for_inflight_rebuild=False
+        )
+        assert produced.get("_non_authoritative") is True, (
+            "producer: the real get_available_models must mark the warm "
+            "catalog non-authoritative while a rebuild is in flight "
+            "(no_wait_warm_cache_during_rebuild)"
+        )
+        assert (
+            produced.get("_non_authoritative_reason")
+            == "no_wait_warm_cache_during_rebuild"
+        )
+        assert [g["provider_id"] for g in produced.get("groups", [])] == [
+            "openai-codex"
+        ], "premise: the warm catalog must lack Copilot"
+
+        # Consumer: the REAL display resolvers, with NO routes-side patch —
+        # they call the same real get_available_models internally.
+        session = _FakeSession("@copilot:gpt-5.5", "copilot")
+        display_model = routes._resolve_effective_session_model_for_display(
+            session
+        )
+        display_provider = (
+            routes._resolve_effective_session_model_provider_for_display(
+                session
+            )
+        )
+    finally:
+        # Restore the single-flight flag under the condition variable so the
+        # module state is clean for the next test (monkeypatch would restore
+        # the attribute anyway, but clear the flag explicitly the way the
+        # production code does, via the cv).
+        with cfg_mod._cache_build_cv:
+            cfg_mod._cache_build_in_progress = False
+            cfg_mod._cache_build_cv.notify_all()
+
+    assert display_model == "@copilot:gpt-5.5", (
+        "real warm catalog + in-flight rebuild: the display resolver "
+        f"rewrote the persisted model to {display_model!r} — the browser "
+        "would echo that into S.session.model and silently reroute the "
+        "next turn (producer→consumer regression)"
+    )
+    assert display_provider == "copilot", (
+        "real warm catalog + in-flight rebuild: the display resolver "
+        f"rewrote the persisted provider to {display_provider!r} "
+        "(producer→consumer regression)"
     )
 
 

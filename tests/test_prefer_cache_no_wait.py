@@ -322,3 +322,97 @@ def test_marking_does_not_mutate_the_shared_cache_entry(monkeypatch):
         "the module-level cache entry was marked in place; an authoritative "
         "reader would now inherit the non-authoritative flag (#7568)"
     )
+
+
+# ── #7568 CORE re-review: a REAL builder owns the lock across its wait ───────
+# The previous lock-contention test parked a bare thread on the RLock, which
+# proved only that the reader does not queue on the lock. The maintainer's
+# 2026-10-19 re-review asked for the shape that actually reproduces the
+# reported stall: a builder that owns ``_available_models_cache_lock`` AND
+# blocks inside it on its own condition for the full rebuild budget, with the
+# ``prefer_cache`` reader required to return BEFORE that builder finishes.
+# The reader must not merely be fast in absolute terms — it must win the race
+# against a rebuild that is still holding the lock.
+
+
+class _FakeRebuildBudget:
+    """Own the catalog lock and hold it across a condition wait.
+
+    Mirrors the real bounded rebuild in ``get_available_models``: it takes
+    ``_available_models_cache_lock`` and then blocks on ``build_done.wait()``
+    for the rebuild budget. A reader that queues on that RLock pays the whole
+    budget no matter how the condvar wait is gated (CORE #7568).
+    """
+
+    def __init__(self, cfg, budget):
+        self._cfg = cfg
+        self._budget = budget
+        self.finished = threading.Event()
+        self.hold_started = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self):
+        lock = self._cfg._available_models_cache_lock
+        cond = getattr(self._cfg, "_available_models_build_done", None)
+        lock.acquire()
+        try:
+            self.hold_started.set()
+            if cond is not None:
+                with cond:
+                    cond.wait(timeout=self._budget)
+            else:
+                time.sleep(self._budget)
+        finally:
+            lock.release()
+            self.finished.set()
+
+    def join(self, timeout):
+        self._thread.join(timeout=timeout)
+        return self.finished.is_set()
+
+
+def test_display_prefer_cache_beats_a_real_builder_holding_the_lock(monkeypatch):
+    """CORE: the display reader must return while the rebuild still owns the lock.
+
+    This is the shape the 2026-10-19 re-review asked for: a real builder
+    holding ``_available_models_cache_lock`` across its own budget wait, and
+    the ``prefer_cache`` reader required to finish BEFORE that builder
+    releases. Asserting only "the reader is fast" is not enough — a reader
+    that returns in 50ms but only after the builder finished would still
+    stall every session-open model resolution behind a real rebuild.
+    """
+    _cold_caches(monkeypatch)
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+
+    budget = 0.9
+    builder = _FakeRebuildBudget(cfg, budget)
+    try:
+        assert builder.hold_started.wait(timeout=2.0), "builder never took the lock"
+        # The builder owns the RLock right now and is blocked inside it.
+        assert not builder.finished.is_set(), "builder already released the lock"
+
+        started = time.monotonic()
+        result = cfg.get_available_models(
+            prefer_cache=True, wait_for_inflight_rebuild=False
+        )
+        elapsed = time.monotonic() - started
+
+        # The load-bearing assertion: the reader returned while the builder
+        # still holds the lock. If the reader queued on the RLock it could
+        # not possibly be here yet.
+        assert not builder.finished.is_set(), (
+            "the display reader only returned AFTER the rebuild finished — it "
+            "queued on _available_models_cache_lock for the whole budget (#7568)"
+        )
+    finally:
+        builder.join(timeout=budget + 2.0)
+
+    assert isinstance(result, dict)
+    assert elapsed < budget, (
+        f"display prefer_cache took {elapsed:.2f}s against a {budget:.2f}s rebuild"
+    )
+    assert result.get("_non_authoritative") is True, (
+        "a resolution that overlapped a real rebuild must be marked "
+        "non-authoritative so no caller routes on it"
+    )
