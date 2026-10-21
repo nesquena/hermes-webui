@@ -6608,11 +6608,17 @@ def _reload_session_for_share(sid: str):
 
 
 def _mirror_share_fields_to_cached_session(sid: str, source) -> None:
-    """Copy share fields onto the resident cached session after a share mutation.
+    """Copy share fields onto the resident cached session before it is persisted.
 
     The cache's freshness check compares message/scene state and not share fields,
     so a cached copy left untouched after the share lock was released keeps serving
     the previous token to the next reader (#8255 review).
+
+    This runs BEFORE the durable save, not after it (#8255 review, second round).
+    A streaming checkpoint serializes the live session; if the token only reached
+    the live copy after the save, a checkpoint landing in that window would write
+    ``share_token: None`` back over the sidecar and the published link would stay
+    live with nothing left for revoke to find.
     """
     try:
         with LOCK:
@@ -18109,14 +18115,12 @@ def handle_post(handler, parsed) -> bool:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        # #8255 review: build the snapshot outside the share lock — redaction and
-        # media embedding take seconds on a large session, and the streaming worker
-        # must not wait behind that. The lock covers token resolution, the snapshot
-        # write and the token persist only.
-        try:
-            snapshot = build_share_snapshot(snapshot_session)
-        except ValueError as exc:
-            return bad(handler, str(exc), 400)
+        # #8255 review (second round): build the snapshot from the session as it
+        # is INSIDE the lock. A writer that saves while the snapshot is being
+        # built used to be reverted, because the snapshot was taken before the
+        # lock and the persist saved that older state back. The lock now covers
+        # the build as well, so the published snapshot and the persisted state
+        # are the same state.
         share_lock = _get_session_share_lock(sid)
         if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
             return bad(handler, "Session busy, try again", 503)
@@ -18131,6 +18135,33 @@ def handle_post(handler, parsed) -> bool:
                     snapshot_session,
                     cli_meta=cli_meta,
                 )
+            try:
+                # The transcript still comes from the resolved snapshot session: a
+                # raw messaging session has no WebUI sidecar to read messages
+                # from, and building the snapshot from the sidecar instead would
+                # lose that transcript (#8255 review, second round). What changed
+                # is WHERE the snapshot is built: inside the lock, and from the
+                # newest state, so a writer that saves during the snapshot I/O is
+                # not reverted by the persist.
+                current = _reload_session_for_share(sid)
+                if current is not None:
+                    snapshot_source = copy.copy(current)
+                    snapshot_source.messages = _share_snapshot_messages_for_session(
+                        current,
+                        cli_meta=cli_meta,
+                    )
+                else:
+                    snapshot_source = snapshot_session
+                snapshot = build_share_snapshot(snapshot_source)
+            except ValueError as exc:
+                return bad(handler, str(exc), 400)
+            # A writer may have saved while the snapshot was being built. Re-read
+            # once more so the state we persist is the newest one, not the copy
+            # that was current when the snapshot started (#8255 review, second
+            # round: a writer that saves during the snapshot I/O was reverted).
+            refreshed = _reload_session_for_share(sid)
+            if refreshed is not None:
+                persisted_session = refreshed
             # Create side of #8255: reuse the token the durable sidecar already
             # records instead of minting a new one, otherwise the previous snapshot
             # stays live and unreachable by revoke.
@@ -18141,8 +18172,13 @@ def handle_post(handler, parsed) -> bool:
             )
             persisted_session.share_token = share_meta["share_token"]
             persisted_session.share_created_at = share_meta["share_created_at"]
-            persisted_session.save(touch_updated_at=False)
+            # Update the live cached copy BEFORE the durable save (#8255 review,
+            # second round): a streaming checkpoint that serializes the live
+            # session between the save and the mirror would write
+            # ``share_token: None`` back over the sidecar, leaving a published
+            # link that revoke can no longer reach.
             _mirror_share_fields_to_cached_session(sid, persisted_session)
+            persisted_session.save(touch_updated_at=False)
         finally:
             share_lock.release()
         _publish_session_list_changed(
@@ -18218,10 +18254,20 @@ def handle_post(handler, parsed) -> bool:
                 revoke_share(target_session)
                 if load_share(token) is not None:
                     return bad(handler, "Share link could not be revoked", 500)
+            # A writer may have saved while the revoke was reading the snapshot
+            # store. Re-read so the state we persist is the newest one, not the
+            # copy that was current when the token was resolved (#8255 review,
+            # second round).
+            refreshed = _reload_session_for_share(sid)
+            if refreshed is not None:
+                target_session = refreshed
             target_session.share_token = None
             target_session.share_created_at = None
-            target_session.save(touch_updated_at=False)
+            # Mirror before the durable save (#8255 review, second round): a
+            # streaming checkpoint in the save/mirror window would otherwise write
+            # the live session's stale share fields back over the sidecar.
             _mirror_share_fields_to_cached_session(sid, target_session)
+            target_session.save(touch_updated_at=False)
         finally:
             share_lock.release()
         _publish_session_list_changed(
