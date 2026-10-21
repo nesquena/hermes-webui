@@ -96,11 +96,12 @@ class TestMappedTranslation:
         with pytest.raises(ValueError):
             workspace.resolve_webui_workspace("/workspace/ghost/dir", profile="alice")
 
-    def test_unmapped_path_fails_closed(self, mapped_world):
-        # An agent path with no map entry is NOT passed through: it does not
-        # exist locally and is not in the saved list -> ValueError.
-        with pytest.raises(ValueError):
-            workspace.resolve_webui_workspace("/workspace", profile="bravo")
+    def test_unmapped_profile_passes_through_unchanged(self, mapped_world):
+        # Single-container profile (no map declared): the translation tier is
+        # inert and the pre-existing direct-path contract is preserved — even
+        # for a path that does not exist locally.
+        got = workspace.resolve_webui_workspace("/workspace", profile="bravo")
+        assert got == Path("/workspace")
 
     def test_sibling_root_named_directly_is_rejected(self, mapped_world):
         # The core Dragonk invariant: a caller naming ANOTHER profile's
@@ -133,8 +134,9 @@ class TestMappedTranslation:
         )
         monkeypatch.setattr(workspace, "load_workspaces", lambda profile=None: [])
         assert workspace._workspace_path_map("alice") is None
-        with pytest.raises(ValueError):
-            workspace.resolve_webui_workspace("/workspace", profile="alice")
+        # The bad entry is dropped, so the tier is inert and behaviour matches
+        # an unmapped profile — never a half-applied translation.
+        assert workspace.resolve_webui_workspace("/workspace", profile="alice") == Path("/workspace")
 
 
 class TestRemoteBypass:

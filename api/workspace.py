@@ -1257,9 +1257,11 @@ def resolve_webui_workspace(
       4. a declared per-profile map translates the agent root (exact or
          sub-path) onto its WebUI-local root, which is THEN re-validated by
          :func:`resolve_trusted_workspace` — a map entry can never widen trust
-         beyond what the profile already allows;
-      5. anything unmapped falls through to the untouched
-         :func:`resolve_trusted_workspace` contract.
+         beyond what the profile already allows; a mapped profile naming an
+         unmapped path (e.g. a sibling mount) fails closed rather than
+         passing through just because this process can see it;
+      5. a profile with NO declared map keeps the pre-existing direct-path
+         contract byte-for-byte (single-container behaviour unchanged);
 
     ``session.workspace`` itself is NEVER rewritten: the return value is the
     local root (plus, with *rel*, the safe-resolved target), and every failure
@@ -1286,15 +1288,22 @@ def resolve_webui_workspace(
 
     # (4) Declared map: translate, then RE-VALIDATE under the profile's trust.
     maps = _workspace_path_map(profile)
-    if maps:
-        translated = _translate_agent_workspace(workspace, maps)
-        if translated is not None:
-            if _is_blocked_workspace_path(translated, str(translated)):
-                raise ValueError(f"Path points to a system directory: {translated}")
-            root = resolve_trusted_workspace(translated, profile)
-            return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
+    if maps is None:
+        # Single-container profile: no map declared, so the translation tier is
+        # inert and the pre-existing direct-path contract is preserved
+        # byte-for-byte (maintainer scope: single-container behaviour unchanged).
+        root = _resolve_path(workspace, profile) if profile is not None else _resolve_path(workspace)
+        return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
+    translated = _translate_agent_workspace(workspace, maps)
+    if translated is not None:
+        if _is_blocked_workspace_path(translated, str(translated)):
+            raise ValueError(f"Path points to a system directory: {translated}")
+        root = resolve_trusted_workspace(translated, profile)
+        return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
 
-    # (5) Unmapped: the pre-existing contract, unchanged.
+    # (5) Mapped profile, unmapped path: fail closed on untrusted paths — a
+    #     sibling mount named directly must not pass just because this process
+    #     can see it (the reviewer's load-bearing invariant).
     root = resolve_trusted_workspace(workspace, profile)
     return (root, safe_resolve_ws(root, str(rel))) if rel not in (None, "") else root
 
