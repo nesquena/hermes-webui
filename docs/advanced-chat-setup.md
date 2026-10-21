@@ -328,6 +328,17 @@ A turn uses the gateway URL and key of the **session's own profile**, not those 
 - **The shared key is only ever sent to the shared Gateway.** On a URL that is not the shared one, a profile sends its own key or none, never the launcher's or the shared key. On the shared URL the order is: the profile's own `HERMES_WEBUI_GATEWAY_API_KEY`, then the shared `HERMES_WEBUI_GATEWAY_API_KEY` (exported by the launcher, or set in the root profile's `~/.hermes/.env`), then the profile's `API_SERVER_KEY` (the key of its own Gateway), then the shared key. A global `HERMES_WEBUI_GATEWAY_API_KEY` combined with per-profile `HERMES_WEBUI_GATEWAY_API_KEY` values therefore works: each profile with its own alias sends that alias.
 - A `${VAR}` in a profile's `webui_gateway_base_url` is expanded from that profile's `.env`, read fresh from the file on every turn, plus any launcher export that did not come from another profile's `.env`. If the variable is not set anywhere, the turn ends with an error naming the unresolved variable and no request is sent.
 
+The rest of a Gateway-routed chat's settings come from the session's own
+profile too: its reasoning effort, runs-API switch, prefill and prompt
+settings. A relative `prefill_messages_file` is looked up in that profile's
+home (for the profile the WebUI process itself runs as, beside its
+`config.yaml`, as before). A `${VAR}` in a profile's `config.yaml` is filled
+from that profile's own environment, and so are settings a profile's `.env`
+provides, such as `HERMES_PREFILL_MESSAGES_FILE`; a prefill script a profile
+names runs with that profile's environment. A profile does not inherit another
+profile's `config.yaml` or `.env`, nor the values another profile's running
+chat or background task holds in the process environment.
+
 The bridge is best used by operators who already run Hermes Gateway/API Server
 locally and want browser-originated chat to use the same runtime/tool path as
 messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
