@@ -5016,8 +5016,23 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
         or re.search(
+            # Re-gate 2026-10-21 (db59f307) finding 1: a bare pronoun or
+            # "user" after a heading silently renames ordinary persisted
+            # titles ("Analysis: User Retention", "Thinking: You and Your
+            # Research"). Require an explicit reasoning clause after the
+            # heading instead — the clause families the line-start rules
+            # above already use.
             r'^\s*(?:[*_`~]+\s*)?(?:analysis|thinking|reasoning|thought)\s*:'
-            r'\s*(?:(?:the\s+)?user|we|i(?:\'m)?|let me|they|you|okay|ok)\b',
+            r'\s*(?:'
+            r"(?:the\s+)?user\s+(?:wan(?:t|ts|ted)\b|need(?:s|ed)?\b|ask(?:ed|s)?\b|did\b|mentioned?\b|said\b)"
+            r'|we\s+(?:need(?:\s+to)?\b|should\b|will\b|can\b|could\b|wan(?:t|ts|ted)\b|decided\b|moved\b|have\s+to\b)'
+            r'|i\s+(?:should\b|need(?:\s+to)?\b|must\b|will\b|am\s+going\b|can\b|could\b|want(?:ed)?\b|think\b)'
+            r"|i'm\b"
+            r'|let\s+me\b'
+            r'|they\s+(?:wan(?:t|ts|ted)\b|need(?:s|ed)?\b|ask(?:ed|s)?\b|did\b|mentioned?\b|said\b)'
+            r'|you\s+(?:need(?:s|ed)?\b|want(?:ed)?\b|should\b|ask(?:ed|s)?\b|did\b|mentioned?\b|said\b)'
+            r'|ok(?:ay)?,?\s+so\b'
+            r')',
             s,
             flags=re.IGNORECASE,
         )
@@ -6395,31 +6410,42 @@ def _title_retry_completion_budget(provider: str = '', model: str = '', base_url
     return max(1024, _title_completion_budget(provider, model, base_url) * 2)
 
 
-# Re-gate finding (low): only these markers in a schema-attempt failure prove
-# the route itself rejected the JSON-schema request shape (a 4xx naming
-# `response_format`/`json_schema`). A 401/429/timeout must not be re-labeled
-# "schema unavailable" — that silently re-sends the identical request in
-# compatibility mode and pays a second failing provider call.
-_SCHEMA_REJECTION_TEXT_RE = re.compile(
-    r'\b(?:response_format|response format|json_schema|json schema)\b',
-    flags=re.IGNORECASE,
-)
-
-
+# Schema-attempt failures permit a compatibility resend only when they prove
+# the route itself rejected the JSON-schema request shape. A 401/429/timeout
+# must not be re-labeled "schema unavailable" — that silently re-sends the
+# identical request in compatibility mode and pays a second failing provider
+# call. Classification lives in `_schema_rejection_error` (docstring carries
+# the re-gate 2026-10-21 semantics).
 def _schema_rejection_error(error) -> bool:
-    """Only an unsupported-schema error permits a compatibility resend."""
+    """Only an unsupported-schema rejection permits a compatibility resend.
+
+    Re-gate 2026-10-21 (#7539): when the failure carries an HTTP status, that
+    status is the whole verdict — ``response_format`` is the only difference
+    from the compatibility request, so any 400/422 proves the route rejected
+    the schema shape; 401/403/408/429 and 5xx stay transport failures.
+    Message-only errors fall back to text sniffing: non-retry signals
+    (auth, throttling, timeouts, connection) are excluded first — numeric
+    codes anchored to ``error code`` / ``status`` / ``http`` context, bare
+    otherwise — and schema-shape positive evidence
+    (``response_format`` / ``json_schema`` / ``structured output``)
+    qualifies. The former field-name + English-keyword requirement missed
+    "unavailable now", ``must be one of`` and non-English 400 bodies, and a
+    bare ``5\\d\\d`` exclusion misfired on ``max_tokens 512``.
+    """
     message = str(error or '')
     status = getattr(error, 'status_code', None)
     if status is None:
         status = getattr(getattr(error, 'response', None), 'status_code', None)
-    if status is not None and status not in (400, 422):
+    if status is not None:
+        return status in (400, 422)
+    if re.search(
+        r'(?:error code|status|http)\s*:?\s*(?:401|403|408|429|5\d\d)\b'
+        r'|unauthorized|forbidden|timed? ?out|rate.limit|too many requests|connection',
+        message,
+        flags=re.IGNORECASE,
+    ):
         return False
-    if re.search(r'\b(?:401|403|408|429|5\d\d|unauthorized|forbidden|timeout|timed out|rate.limit|too many requests|connection)\b', message, re.IGNORECASE):
-        return False
-    return bool(
-        _SCHEMA_REJECTION_TEXT_RE.search(message)
-        and re.search(r'unsupported|not supported|not support|not permitted|not allowed|unknown|unrecognized|invalid|reject', message, re.IGNORECASE)
-    )
+    return bool(re.search(r'response.?format|json.?schema|structured output', message, flags=re.IGNORECASE))
 
 
 def _title_retry_status(status: str) -> bool:
@@ -6526,16 +6552,28 @@ def _extract_title_text(content: str, *, mode: str = 'compatibility') -> str:
     try:
         parsed = json.loads(raw)
     except (TypeError, ValueError):
-        if schema_mode or raw.startswith(('{', '[')):
+        # Only a leading '{' (or a '[' that opens a real JSON value) counts as
+        # malformed-JSON evidence; prose like "[Bug] Login Fails On Submit" is
+        # a legitimate title (re-gate 2026-10-21 should-fix 3).
+        if schema_mode or raw.startswith('{') or re.match(r'^\[\s*(?:[\{\]"\-\d]|true\b|false\b|null\b)', raw):
             return ''
         parsed = None
     else:
-        if isinstance(parsed, dict) and isinstance(parsed.get('title'), str):
+        # Re-gate 2026-10-21 finding 2b: the schema declares
+        # additionalProperties: false, so a parsed object is accepted only
+        # when its keys are exactly {"title"} — in both fail-closed modes.
+        if isinstance(parsed, dict) and set(parsed.keys()) == {'title'} and isinstance(parsed['title'], str):
             return _usable_title_string(parsed['title'])
         if schema_mode:
             return ''
         if isinstance(parsed, str):
             return _usable_title_string(parsed)
+        return ''
+    # Re-gate 2026-10-21 finding 2a: validate the FULL raw text before the
+    # embedded-title regex can pull a candidate out of a reasoning sentence
+    # ("I should not use {"title": ...} ...") — reject so the caller falls
+    # through to the compatibility request.
+    if _looks_invalid_generated_title(raw):
         return ''
     match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
     if match:
@@ -6543,6 +6581,12 @@ def _extract_title_text(content: str, *, mode: str = 'compatibility') -> str:
             return _usable_title_string(json.loads(f'"{match.group(1)}"'))
         except ValueError:
             return _usable_title_string(match.group(1))
+    # Re-gate 2026-10-21 should-fix 2: a short preamble in front of malformed
+    # JSON ("Sure! {"foo": "bar", "Here is the JSON: {"title": "Login Flow")
+    # must not be returned as raw prose; fail closed so the caller re-sends
+    # the compatibility request.
+    if re.search(r'\{"|"title"', raw):
+        return ''
     return raw
 
 
@@ -6558,6 +6602,14 @@ def _extract_title_response(resp, *, aux: bool = False, mode: str = 'compatibili
             title_text = _extract_title_text(content, mode=mode)
             if title_text:
                 return title_text, ''
+            # Re-gate 2026-10-21 finding 2: non-empty content whose FULL text
+            # is a reasoning trace is invalid model output (not an empty
+            # response) — surface a distinct invalid status so the worker
+            # keeps the provisional title and retries like the sanitize-layer
+            # llm_invalid family, while the schema attempt still falls through
+            # to the compatibility request.
+            if _looks_invalid_generated_title(content):
+                return '', f'llm_invalid_trace{suffix}'
         finish_reason = _safe_text_value(_safe_obj_value(choice, 'finish_reason')).lower()
         reasoning = (
             _safe_text_value(_safe_obj_value(message, 'reasoning'))
@@ -6685,7 +6737,9 @@ def generate_title_raw_via_aux(
                         if raw:
                             return raw, ('llm_aux' if attempted == 1 else 'llm_aux_retry')
                         last_status = empty_status or 'llm_empty_aux'
-                        if mode == 'schema' and last_status in {'llm_empty_aux', 'llm_empty_reasoning_aux'}:
+                        if mode == 'schema' and last_status in {
+                            'llm_empty_aux', 'llm_empty_reasoning_aux', 'llm_invalid_trace_aux',
+                        }:
                             schema_unavailable = True
                             continue
                         break
@@ -6829,7 +6883,9 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                                     empty_status = ''
                                 elif prose_status:
                                     empty_status = prose_status
-                            if mode == 'schema' and empty_status in {'llm_empty', 'llm_empty_reasoning'}:
+                            if mode == 'schema' and empty_status in {
+                                'llm_empty', 'llm_empty_reasoning', 'llm_invalid_trace',
+                            }:
                                 schema_unavailable = True
                                 continue
                             break
@@ -7060,6 +7116,8 @@ _TITLE_FAILURE_HUMAN_REASONS = {
     'llm_language_mismatch_aux': 'the generated title did not match the conversation language',
     'llm_invalid': 'the title model returned an unusable title',
     'llm_invalid_aux': 'the title model returned an unusable title',
+    'llm_invalid_trace': 'the title model returned reasoning text instead of a title',
+    'llm_invalid_trace_aux': 'the title model returned reasoning text instead of a title',
     'llm_empty': 'the title model returned an empty title',
     'llm_empty_aux': 'the title model returned an empty title',
     'llm_error': 'the title model could not be reached',
@@ -7152,16 +7210,16 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             rejected_model_output = False
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
-                if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch', 'llm_invalid_trace')
+                if not next_title and llm_status in ('llm_error', 'llm_invalid', 'llm_invalid_trace'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
-                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux', 'llm_invalid_trace_aux')
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
-                rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
-                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux', 'llm_invalid_trace_aux')
+                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux', 'llm_invalid_trace_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch')
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch', 'llm_invalid_trace')
             source = llm_status
             # An invalid response is different from an unavailable title model:
             # choosing a local fallback here would mark a warm-up opener as
@@ -7170,6 +7228,8 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             invalid_model_output = rejected_model_output or llm_status in {
                 'llm_invalid',
                 'llm_invalid_aux',
+                'llm_invalid_trace',
+                'llm_invalid_trace_aux',
                 'llm_language_mismatch',
                 'llm_language_mismatch_aux',
             }

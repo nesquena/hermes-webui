@@ -425,6 +425,11 @@ LEGITIMATE_PERSISTED_TITLES = (
     "Thought: Experiments in Ethics",
     "Options: Stocks, Bonds, ETFs",
     "Title Should Reflect Content",
+    # Re-gate 2026-10-21 (db59f307) finding 1: heading prefixes followed by a
+    # bare pronoun/"user" must survive as ordinary persisted subject matter.
+    "Analysis: User Retention",
+    "Analysis: User Authentication",
+    "Thinking: You and Your Research",
 )
 
 SCREENSHOT_PERSISTED_TRACES = (
@@ -471,6 +476,9 @@ def test_persisted_title_check_accepts_ordinary_subject_matter(candidate):
         "Thought: Experiments in Ethics",
         "Options: Stocks, Bonds, ETFs",
         "Title Should Reflect Content",
+        "Analysis: User Retention",
+        "Analysis: User Authentication",
+        "Thinking: You and Your Research",
     ),
 )
 def test_persisted_subject_matter_survives_normal_send(candidate, monkeypatch):
@@ -802,6 +810,9 @@ def test_minimax_aux_schema_request_keeps_reasoning_split():
     "Options: Stocks, Bonds, ETFs",
     "Title Should Reflect Content",
     "The title should be concise",
+    "Analysis: User Retention",
+    "Analysis: User Authentication",
+    "Thinking: You and Your Research",
 ))
 def test_ambiguous_headings_are_candidate_only(candidate):
     assert not streaming._looks_invalid_generated_title(candidate)
@@ -813,6 +824,10 @@ def test_ambiguous_headings_are_candidate_only(candidate):
     "Thinking: Let me reconsider the scope",
     "Reasoning: They asked for a summary",
     "Thought: I should double-check the parser",
+    "Analysis: the user wants a breakdown of costs",
+    "Reasoning: okay, so the parser needs a fix",
+    "Analysis: I think we should file by quarter",
+    "Thinking: You asked for a weekly summary",
     "The title should be 3-8 words, as a topic label",
     "Title should be a concise topic label",
     "Title should: Something Else Entirely",
@@ -1021,3 +1036,240 @@ def test_malformed_schema_worker_saves_and_publishes_recovered_title(route, tmp_
     assert saved["title"] == "Valid Recovery Title"
     assert saved["llm_title_generated"] is True
     assert [data["title"] for name, data in events if name == "title"] == ["Valid Recovery Title"]
+
+
+# ── Re-gate 2026-10-21 at db59f307 (must-fix 2/3, should-fix 1-3) ────────────
+
+TRACE_SENTENCE = 'I should not use {"title": "Rejected Candidate"} for this conversation.'
+EXTRA_KEY_PAYLOAD = '{"title": "Unexpected Title", "extra": "forbidden"}'
+
+
+def _fixture_agent(respond):
+    agent = MagicMock()
+    agent.api_mode = "openai"
+    agent.provider = "custom"
+    agent.model = "fixture"
+    agent.base_url = "https://example.invalid/v1"
+    agent.reasoning_config = None
+    agent._build_api_kwargs.return_value = {}
+    agent._ensure_primary_openai_client.return_value = types.SimpleNamespace(
+        chat=types.SimpleNamespace(completions=types.SimpleNamespace(create=respond)))
+    return agent
+
+
+@pytest.mark.parametrize("route", ("aux", "agent"))
+def test_reasoning_embedded_title_falls_through_to_compatibility(route):
+    """Re-gate finding 2: the schema attempt on the rejected-candidate
+    sentence fails closed; the same-response compatibility reuse must not pull
+    the embedded candidate out of the reasoning sentence; the caller falls
+    through to the real compatibility request, whose canned answer wins."""
+    calls = []
+
+    def respond(**kwargs):
+        calls.append(kwargs)
+        return _response(TRACE_SENTENCE if len(calls) == 1 else "Valid Recovery Title")
+
+    if route == "aux":
+        with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+            with patch("agent.auxiliary_client.call_llm", side_effect=respond, create=True):
+                result, status = streaming.generate_title_raw_via_aux("Fix login.", "Inspect login.")
+        assert status == "llm_aux_retry"
+    else:
+        result, status = streaming.generate_title_raw_via_agent(
+            _fixture_agent(respond), "Fix login.", "Inspect login.")
+        assert status == "llm_retry"
+    assert result == "Valid Recovery Title"
+    assert "Rejected Candidate" not in result
+    # schema attempt + real compatibility request — no second schema pass
+    assert len(calls) == 2
+    assert "response_format" not in (calls[1].get("extra_body") or {})
+
+
+@pytest.mark.parametrize("route", ("aux", "agent"))
+def test_persistent_reasoning_trace_ends_as_invalid_model_output(route):
+    """Re-gate finding 2 (end state): a transport that keeps answering with
+    the reasoning sentence yields an invalid-model-output status (the
+    llm_invalid_trace family), which suppresses the local fallback."""
+    calls = []
+
+    def respond(**kwargs):
+        calls.append(kwargs)
+        return _response(TRACE_SENTENCE)
+
+    if route == "aux":
+        with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+            with patch("agent.auxiliary_client.call_llm", side_effect=respond, create=True):
+                result, status = streaming.generate_title_raw_via_aux("Fix login.", "Inspect login.")
+        assert (result, status) == (None, "llm_invalid_trace_aux")
+    else:
+        result, status = streaming.generate_title_raw_via_agent(
+            _fixture_agent(respond), "Fix login.", "Inspect login.")
+        assert (result, status) == (None, "llm_invalid_trace")
+    # prompt 1: schema + compatibility resend; prompt 2: compatibility only
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("route", ("aux", "agent"))
+def test_extra_key_title_object_is_not_accepted(route):
+    """Re-gate finding 2b: a parsed object whose keys are not exactly
+    {"title"} fails closed in both modes even with a string title field."""
+    calls = []
+
+    def respond(**kwargs):
+        calls.append(kwargs)
+        return _response(EXTRA_KEY_PAYLOAD)
+
+    if route == "aux":
+        with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+            with patch("agent.auxiliary_client.call_llm", side_effect=respond, create=True):
+                result, status = streaming.generate_title_raw_via_aux("Fix login.", "Inspect login.")
+        assert (result, status) == (None, "llm_empty_aux")
+    else:
+        result, status = streaming.generate_title_raw_via_agent(
+            _fixture_agent(respond), "Fix login.", "Inspect login.")
+        assert (result, status) == (None, "llm_empty")
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("content", (
+    TRACE_SENTENCE,
+    'Here is my thinking: {"title": "Wrong One"}',
+    "Sure! {\"foo\": \"bar",
+    'Here is the JSON: {"title": "Login Flow',
+    EXTRA_KEY_PAYLOAD,
+    '{"extra": "first", "title": "Unexpected Title"}',
+))
+def test_compatibility_extract_fails_closed_on_reasoning_and_broken_json(content):
+    """Full-text reasoning guards run before embedded extraction; malformed
+    JSON behind a short preamble never returns as raw prose; objects that
+    violate additionalProperties fail closed."""
+    assert streaming._extract_title_text(content, mode="compatibility") == ""
+
+
+def test_compatibility_extract_keeps_bracket_prose_and_preamble_valid_json():
+    """Should-fix 3 (bracket prose) and the retained recovery semantics."""
+    assert streaming._extract_title_text("[Bug] Login Fails On Submit", mode="compatibility") == (
+        "[Bug] Login Fails On Submit"
+    )
+    assert streaming._extract_title_text('Sure. {"title": "Login Flow"}', mode="compatibility") == (
+        "Login Flow"
+    )
+    assert streaming._extract_title_text(EXTRA_KEY_PAYLOAD, mode="schema") == ""
+
+
+@pytest.mark.parametrize("message", (
+    "This response_format type is unavailable now",
+    "response_format must be one of text, json_object",
+    "response_format 参数非法。",
+    "'response_format' of type 'json_schema' is not supported for this model (max_tokens 512)",
+    "Structured outputs are not supported for this model",
+))
+def test_schema_rejection_text_evidence_permits_fallback(message):
+    """Must-fix 3 + should-fix 1: real schema-unavailable rejections permit the
+    compatibility resend — "unavailable now", ``must be one of``, non-English
+    bodies and ``max_tokens 512`` are no longer misclassified."""
+    assert streaming._schema_rejection_error(RuntimeError(message)) is True
+
+
+def test_schema_rejection_http_status_is_authoritative():
+    """Should-fix 1: when the failure carries an HTTP status, that status is
+    the verdict; message text cannot re-label a throttling 429."""
+    available = RuntimeError("This response_format type is unavailable now")
+    available.status_code = 400
+    assert streaming._schema_rejection_error(available) is True
+    throttled = RuntimeError("This response_format type is unavailable now")
+    throttled.status_code = 429
+    assert streaming._schema_rejection_error(throttled) is False
+
+
+@pytest.mark.parametrize("route", ("aux", "agent"))
+def test_worker_reasoning_trace_recovery_saves_canned_recovery(route, tmp_path, monkeypatch):
+    """Worker-level (must-fix 2): the embedded candidate of the reasoning
+    sentence is never saved or published; the compatibility recovery decides
+    the persisted title."""
+    import json
+    import api.models as models
+    from api.models import Session
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    session = Session(session_id="trace-worker-recovery", title="Untitled", messages=[
+        {"role": "user", "content": "Fix login."},
+        {"role": "assistant", "content": "Inspect login."},
+    ], llm_title_generated=False, manual_title=False)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(streaming, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(streaming, "LOCK", threading.Lock())
+    monkeypatch.setattr(streaming, "_aux_title_generation_enabled", lambda: True)
+    monkeypatch.setattr(streaming, "_aux_title_configured", lambda: route == "aux")
+    monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *a, **k: nullcontext())
+    monkeypatch.setattr("api.state_sync.sync_session_title", lambda *a, **k: None)
+    calls = []
+
+    def respond(**kwargs):
+        calls.append(kwargs)
+        return _response(TRACE_SENTENCE if len(calls) == 1 else "Valid Recovery Title")
+
+    agent = _fixture_agent(respond) if route == "agent" else None
+    events = []
+    with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+        with patch("agent.auxiliary_client.call_llm", side_effect=respond, create=True):
+            streaming._run_background_title_update(
+                session_id=session.session_id, user_text="Fix login.", assistant_text="Inspect login.",
+                placeholder_title="Untitled", put_event=lambda name, data: events.append((name, data)),
+                agent=agent)
+    saved = json.loads((session_dir / (session.session_id + ".json")).read_text(encoding="utf-8"))
+    assert saved["title"] == "Valid Recovery Title"
+    assert saved["llm_title_generated"] is True
+    assert [data["title"] for name, data in events if name == "title"] == ["Valid Recovery Title"]
+    assert "Rejected Candidate" not in repr(events)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("route", ("aux", "agent"))
+def test_worker_persistent_reasoning_trace_keeps_provisional_title(route, tmp_path, monkeypatch):
+    """Worker-level (must-fix 2, end state): when every call answers with the
+    reasoning sentence, the session keeps its provisional title — invalid
+    model output must not mint a fallback and must not publish any title."""
+    import api.models as models
+    from api.models import Session
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    session = Session(session_id="trace-worker-keeps", title="Untitled", messages=[
+        {"role": "user", "content": "Fix login."},
+        {"role": "assistant", "content": "Inspect login."},
+    ], llm_title_generated=False, manual_title=False)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(streaming, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(streaming, "LOCK", threading.Lock())
+    monkeypatch.setattr(streaming, "_aux_title_generation_enabled", lambda: True)
+    monkeypatch.setattr(streaming, "_aux_title_configured", lambda: route == "aux")
+    monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *a, **k: nullcontext())
+    monkeypatch.setattr("api.state_sync.sync_session_title", lambda *a, **k: None)
+    calls = []
+
+    def respond(**kwargs):
+        calls.append(kwargs)
+        return _response(TRACE_SENTENCE)
+
+    agent = _fixture_agent(respond) if route == "agent" else None
+    events = []
+    with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+        with patch("agent.auxiliary_client.call_llm", side_effect=respond, create=True):
+            streaming._run_background_title_update(
+                session_id=session.session_id, user_text="Fix login.", assistant_text="Inspect login.",
+                placeholder_title="Untitled", put_event=lambda name, data: events.append((name, data)),
+                agent=agent)
+    assert session.title == "Untitled"
+    assert session.llm_title_generated is False
+    assert [name for name, _data in events if name == "title"] == []
+    assert "Rejected Candidate" not in repr(events)
+    reasons = [data.get("reason") for name, data in events if name == "title_status"]
+    assert any(r in ("llm_invalid_trace_aux", "llm_invalid_trace") for r in reasons if r)
+    # route loops: prompt 1 (schema + compatibility resend) and prompt 2
+    # (compatibility only); the agent-routed worker additionally retries the
+    # aux route end-to-end before declaring invalid output.
+    assert len(calls) == (6 if route == "agent" else 3)
