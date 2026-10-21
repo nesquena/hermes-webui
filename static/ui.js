@@ -10747,7 +10747,11 @@ function renderMd(raw){
     }
     return lead+'\x00P'+(_preBlock_stash.length-1)+'\x00';
   });
-  s=s.replace(/`([^`\n]+)`/g,(_,c)=>{fence_stash.push('<code>'+esc(c)+'</code>');return '\x00F'+(fence_stash.length-1)+'\x00';});
+  // #8303 gate: a code span may wrap onto the next line (the image regexes
+  // accept one line break between ] and ( ), so a two-line example must be
+  // protected from them as well. The span may contain ONE line break, and
+  // never a blank line — a blank line is a paragraph break.
+  s=s.replace(/`([^`\n]+(?:\n(?!\n)[^`\n]+)?)`/g,(_,c)=>{fence_stash.push('<code>'+esc(c)+'</code>');return '\x00F'+(fence_stash.length-1)+'\x00';});
   // Math stash: protect $$..$$ and $..$ from markdown processing
   // Runs AFTER fence_stash so backtick code spans protect their dollar-sign contents
   const math_stash=[];
@@ -10954,19 +10958,45 @@ function renderMd(raw){
   // mangle it. Path and alt text stay escaped at construction time inside
   // _inlineMediaHtmlForRef(); only the generated wrapper is protected.
   const _imgfrag_stash=[];
-  const _stashImageFrag=html=>{
+  // #8303 gate: only stash HTML the media helpers BUILT. A refused local path
+  // returns the ORIGINAL markdown source unchanged, and that source is
+  // model-controlled — its alt text may carry raw HTML. The stash is
+  // restored AFTER the tag sanitizer, so a stashed source would smuggle the
+  // raw HTML straight into innerHTML. `src` is the matched markdown source;
+  // when the helper handed it back verbatim, leave it in the stream so the
+  // sanitizer sees it like any other text (as on master).
+  const _stashImageFrag=(html,src)=>{
     if(typeof html!=='string') return String(html==null?'':html);
+    if(src!=null && html===src) return html;
     if(!/<(?:span|svg)\b/i.test(html)) return html;
     _imgfrag_stash.push(html);
     return '\x00I'+(_imgfrag_stash.length-1)+'\x00';
   };
+  // #8303 gate: an image's alt text can contain the renderer's OWN stash
+  // tokens — a math span (\x00M), a MEDIA: token (\x00D) or a code fragment
+  // (\x00S / \x00C). The math and MEDIA restores run AFTER both image passes,
+  // so a token left inside the alt text would reach the rendered alt
+  // attribute (and the download name) as a raw control byte. Resolve them
+  // BEFORE the card is built. An unknown index resolves to empty text: NUL
+  // bytes in the input can forge a token, and a forged index must not throw.
+  function _mdAltText(alt,codeStash,inlineCodeStash){
+    let a=String(alt==null?'':alt);
+    if(codeStash)a=a.replace(/\x00S(\d+)\x00/g,(_,i)=>codeStash[+i]!=null?String(codeStash[+i]):'');
+    if(inlineCodeStash)a=a.replace(/\x00C(\d+)\x00/g,(_,i)=>inlineCodeStash[+i]!=null?String(inlineCodeStash[+i]):'');
+    a=a.replace(/\x00M(\d+)\x00/g,(_,i)=>math_stash[+i]!=null?String(math_stash[+i].src):'');
+    a=a.replace(/\x00D(\d+)\x00/g,(_,i)=>media_stash[+i]!=null?'MEDIA:'+String(media_stash[+i]):'');
+    return a;
+  }
   // inlineMd: process bold/italic/code/links within a single line of text.
   // Used inside list items and blockquotes where the text may already contain
   // HTML from the pre-pass → bold pipeline, so we cannot call esc() directly.
   function inlineMd(t){
     // Stash backtick code spans first so bold/italic never esc() their content
+    // #8303 gate: accept one line break inside the span, like the outer stash —
+    // the image regexes accept one line break between ] and ( ), so a two-line
+    // example must be protected from them too. Never a blank line.
     const _code_stash=[];
-    t=t.replace(/`([^`\n]+)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
+    t=t.replace(/`([^`\n]+(?:\n(?!\n)[^`\n]+)?)`/g,(_,x)=>{_code_stash.push(`<code>${esc(x)}</code>`);return `\x00C${_code_stash.length-1}\x00`;});
     t=t.replace(/\*\*\*(.+?)\*\*\*/g,(_,x)=>`<strong><em>${esc(x)}</em></strong>`);
     t=t.replace(/\*\*(.+?)\*\*/g,(_,x)=>`<strong>${esc(x)}</strong>`);
     t=t.replace(/\*([^\s*](?:[^*\n]*?[^\s*])?)\*/g,(_,x)=>`<em>${esc(x)}</em>`);
@@ -10988,7 +11018,13 @@ function renderMd(raw){
     // <code> fragments around the substitution and restore them right after.
     const _ic_stash=[];
     t=t.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_ic_stash.push(m);return `\x00S${_ic_stash.length-1}\x00`;});
-    t=t.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+)[ \t]*\)/g,(src,alt,url)=>(typeof _mdImageHtml==='function')?_stashImageFrag(_mdImageHtml(alt,url,src)):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+    // #8303 gate: the trailing whitespace is matched ONLY inside the bare-path
+    // alternative. The scheme branch's [^\)]+ already consumes trailing spaces,
+    // so an outer [ \t]* overlapped it and an unterminated target (e.g.
+    // "![a](https://…" followed by spaces) backtracked quadratically and stalled
+    // the renderer. Resolve the alt's stash tokens BEFORE the card is built, so
+    // a math/MEDIA/code token never reaches the alt attribute or download name.
+    t=t.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+[ \t]*)\)/g,(src,alt,url)=>{alt=_mdAltText(alt,_ic_stash,_code_stash);return (typeof _mdImageHtml==='function')?_stashImageFrag(_mdImageHtml(alt,url,src),src):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;});
     t=t.replace(/\x00S(\d+)\x00/g,(_,i)=>_ic_stash[+i]);
     // Stash rendered <img> tags so autolink never matches URLs inside src=
     const _img_stash=[];
@@ -11182,13 +11218,16 @@ function renderMd(raw){
   // image pass above. The bare-path branch matches any root-relative target and
   // hands it to _mdImageHtml(), which is the single place that decides whether it
   // is an acceptable local artifact.
-  // #8303: same two protections as the inline pass — complete <code> fragments
-  // are stashed so an inline-code example cannot become a live image, and a
-  // whole artifact-card fragment is stashed so the tag sanitizer below cannot
-  // rewrite its <span> or delete its download <svg>.
+  // #8303 gate: same two protections as the inline pass — complete <code>
+  // fragments are stashed so an inline-code example cannot become a live
+  // image, and a whole artifact-card fragment is stashed so the tag sanitizer
+  // below cannot rewrite its <span> or delete its download <svg>.
+  // The trailing whitespace is matched ONLY inside the bare-path alternative
+  // (quadratic backtracking on an unterminated target — see the inline pass)
+  // and the alt's stash tokens are resolved before the card is built.
   const _oc_stash=[];
   s=s.replace(/(<code\b[^>]*>[\s\S]*?<\/code>)/g,m=>{_oc_stash.push(m);return `\x00S${_oc_stash.length-1}\x00`;});
-  s=s.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+)[ \t]*\)/g,(src,alt,url)=>(typeof _mdImageHtml==='function')?_stashImageFrag(_mdImageHtml(alt,url,src)):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`);
+  s=s.replace(/!\[([^\]]*)\][ \t]*(?:\r?\n[ \t]*)?\([ \t]*((?:https?:\/\/|file:\/\/|data:image\/)[^\)]+|\/(?!\/)[^\s\)]+[ \t]*)\)/g,(src,alt,url)=>{alt=_mdAltText(alt,_oc_stash,null);return (typeof _mdImageHtml==='function')?_stashImageFrag(_mdImageHtml(alt,url,src),src):`<img src="${url.replace(/"/g,'%22')}" alt="${esc(alt)}" class="msg-media-img" loading="lazy">`;});
   s=s.replace(/\x00S(\d+)\x00/g,(_,i)=>_oc_stash[+i]);
   // Outer link pass for labeled links in plain paragraphs (outside table cells).
   // Runs AFTER the table pass so table cells are processed by inlineMd() only.

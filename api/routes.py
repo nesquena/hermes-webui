@@ -25331,6 +25331,14 @@ def _normalize_media_request_path(raw_path: str) -> str:
 # session-token semantics.
 _GENERATED_IMAGE_MODES = {"1", "true", "yes", "on"}
 
+# The image extensions the generated-image mode may serve. Mirrors the
+# client-side _IMAGE_EXTS in static/ui.js: the renderer only ever asks for
+# generated=1 on a bare local path with one of these extensions, so the
+# server enforces the same set instead of trusting the request.
+_GENERATED_IMAGE_EXTS = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".ico", ".avif"}
+)
+
 
 def _generated_image_cache_roots() -> list[Path]:
     """Image-cache roots the generated-image mode may serve from.
@@ -25515,9 +25523,14 @@ def _handle_media(handler, parsed):
     # Requested by the markdown renderer for model-emitted bare local image
     # paths. This is the SERVER-side gate the gate review asked for: the
     # resolved target must be canonically inside an owning profile's own
-    # image-cache root. Deliberately independent of `within_allowed` (whose
-    # roots include the OS temp dir and the workspace) and of
-    # `session_media_allowed` (a transcript token must not widen this mode).
+    # image-cache root.
+    #
+    # Generated mode is PLAIN MODE PLUS the cache-root containment below — it
+    # is never a way around the ordinary authorization. The allowlist roots
+    # include the OS temp dir and the active workspace, and the cache root is
+    # resolved through symlinks, so a cache/images directory symlinked
+    # elsewhere would otherwise be served by generated mode while plain mode
+    # refuses the very same file.
     generated_image_mode = (
         qs.get("generated", [""])[0].strip().lower() in _GENERATED_IMAGE_MODES
     )
@@ -25527,9 +25540,16 @@ def _handle_media(handler, parsed):
         if generated_image_root is None:
             return bad(handler, "Path not in allowed location", 403)
 
-    if not generated_image_mode:
-        if not within_allowed and not session_media_allowed:
-            return bad(handler, "Path not in allowed location", 403)
+    # The ordinary authorization applies in BOTH modes.
+    if not within_allowed and not session_media_allowed:
+        return bad(handler, "Path not in allowed location", 403)
+
+    # Generated mode serves generated IMAGES only: the client-side image
+    # extension check is advisory, so the server enforces it too. Without
+    # this, any file inside the image cache (notes.txt, a stray archive) was
+    # served under this mode.
+    if generated_image_mode and target.suffix.lower() not in _GENERATED_IMAGE_EXTS:
+        return bad(handler, "Path not in allowed location", 403)
 
     # Determine MIME type from the requested path's extension. Computed BEFORE
     # the existence check because the requested file may have been overwritten
