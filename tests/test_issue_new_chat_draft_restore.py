@@ -94,7 +94,7 @@ def test_restore_helper_validates_candidate_with_session_metadata():
 def test_session_switch_awaits_immediate_draft_flush_before_loading_target():
     save_start = SESSIONS_JS.index("function _saveComposerDraftNow(")
     save_end = SESSIONS_JS.index("// Restore composer draft", save_start)
-    assert "return _postComposerDraftPayload(sid, normalizedDraft, intent);" in SESSIONS_JS[save_start:save_end], (
+    assert "return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId);" in SESSIONS_JS[save_start:save_end], (
         "_saveComposerDraftNow should return the shared POST promise so switch-away can await it"
     )
     assert "await _saveComposerDraftNow(currentSid" in SESSIONS_JS, (
