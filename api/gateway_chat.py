@@ -1919,6 +1919,23 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     return url, (own_alias or shared_alias or own_key or shared_key)
 
 
+def _gateway_config_for_profile(profile_name) -> dict | None:
+    """Config of a named non-root profile; None means the process default applies."""
+    from api import profiles as _profiles
+    from api.config import get_config_for_profile_home
+
+    name = str(profile_name or "").strip()
+    if not name or _profiles._is_root_profile(name):
+        return None
+    return get_config_for_profile_home(_profiles.get_hermes_home_for_profile(name))
+
+
+def _settle_delegation_reservation(session_id, stream_id, accepted: bool) -> None:
+    from api.gateway_delegation_wakeup import settle_reservation
+
+    settle_reservation(session_id, stream_id, accepted)
+
+
 def _resume_gateway_run_for_session(session) -> bool:
     from api.config import create_stream_channel, register_session_writeback_owner, register_stream_owner
 
@@ -2710,7 +2727,8 @@ def _run_gateway_chat_streaming(
         s = get_session(session_id)
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
-        cfg = get_config()
+        # Profile-bound like the endpoint below: the worker thread has no request profile TLS.
+        cfg = _gateway_config_for_profile(getattr(s, "profile", None)) or get_config()
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
@@ -2782,10 +2800,13 @@ def _run_gateway_chat_streaming(
                 body_extras["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
-            record_run = lambda run_id, request=None: _record_gateway_run(
-                session_id, stream_id, run_id, request=request,
-                regeneration=bool(regeneration), goal_related=bool(goal_related),
-            )
+            def record_run(run_id, request=None):
+                _record_gateway_run(
+                    session_id, stream_id, run_id, request=request,
+                    regeneration=bool(regeneration), goal_related=bool(goal_related),
+                )
+                if run_id:  # the Gateway accepted the run: its delegation lease is delivered
+                    _settle_delegation_reservation(session_id, stream_id, accepted=True)
             try:
                 if reattach_run:
                     run_id = str(reattach_run.get("run_id") or "").strip()
@@ -2796,6 +2817,7 @@ def _run_gateway_chat_streaming(
                             reattach_run["request"], stream_id,
                         )
                         record_run(run_id)
+                    _settle_delegation_reservation(session_id, stream_id, accepted=True)
                     final_text, usage = _await_gateway_run_result(
                         session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event,
@@ -2892,6 +2914,7 @@ def _run_gateway_chat_streaming(
             last_payload = {}
             sse_event = "message"
             with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
+                _settle_delegation_reservation(session_id, stream_id, accepted=True)
                 for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
                         put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -3301,6 +3324,7 @@ def _run_gateway_chat_streaming(
         # so both teardowns stay one implementation. ``runs_api_pending_marked``
         # keeps this call site's original finish-pending semantics.
         release_gateway_stream_state(stream_id, finish_pending=runs_api_pending_marked)
+        _settle_delegation_reservation(session_id, stream_id, accepted=False)  # no-op once committed
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
         # Release the writeback-owner entry the route layer registered for this

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+import time
 import copy
 import hashlib
 import math
@@ -1087,6 +1088,8 @@ def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
         )
     session.truncation_watermark = _truncation_watermark_for(session.messages)
     session.truncation_boundary = session.truncation_watermark
+    # Gateway delegation results delivered before this point are cleared away with the transcript.
+    session.delegation_cutoff_ts = time.time()
     return old_msg_count, old_ctx_count
 
 
