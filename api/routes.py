@@ -29086,15 +29086,20 @@ def _handle_chat_start(handler, body, diag=None):
                 "idempotency_key": idem_validated_key,
             }, status=503)
         try:
-            # Mint the turn identity HERE and persist it with the claim
-            # (#7782 finding 1). A crash between the claim and the moment
-            # ``_start_run`` returns its real stream_id used to leave a
-            # pending record with NO identity on disk; a restarted process
+            # Mint a PROVISIONAL turn identity HERE and persist it with the
+            # claim (#7782 finding 1). A crash between the claim and the
+            # moment ``_start_run`` returns its real stream_id used to leave
+            # a pending record with NO identity on disk; a restarted process
             # then answered every retry for that key with
             # ``409 idempotency_in_flight`` + ``retry_after_seconds: 1``
-            # for the remaining TTL. Carrying the minted identity means a
-            # restarted process finds a pending record WITH a stream_id,
-            # which ``claim`` replays as the original turn.
+            # for the remaining TTL. The minted identity is provisional —
+            # it is NEVER passed to ``_start_run`` (which mints the real
+            # stream id itself) and only ``complete()`` / ``reconcile()``
+            # bind a proven admission onto the record, so a restarted
+            # process finds a pending record whose ``stream_id`` is STILL
+            # empty and ``claim`` fails closed with
+            # ``409 idempotency_outcome_unknown`` (no retry hint) instead of
+            # replaying a fabricated stream that 404s.
             _idem_provisional_stream = f"stream-{uuid.uuid4().hex}"
             idem_claim_record = store.claim_with_identity(
                 idem_validated_key,

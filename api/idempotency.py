@@ -39,16 +39,17 @@ is documented and accepted — when the tombstone bound is exceeded the oldest
 tombstone is dropped and that one key becomes re-admittable, versus evicting
 tombstones by record pressure which would stall every fresh key with 503.
 
-Crash-window hardening (contract call 1): a claim is persisted together with
-the turn identity minted by the route (``claim_with_identity``), so a crash
-between the claim and the turn being admitted leaves a pending record that
-still carries a stream_id — a restarted process replays it as the original
-turn instead of answering retries with ``in_flight`` + ``retry_after=1`` for
-the remaining TTL. A pending record recovered from disk with NO identity
-(the older builds' window) is stamped by ``sweep_pending_claims`` at startup
-and fails closed with ``IdempotencyOutcomeUnknown`` → 409 WITHOUT a retry
-hint, so an operator is never told to poll for a day on a turn whose outcome
-is unknowable.
+Crash-window hardening (contract call 1): the route mints a PROVISIONAL
+turn identity and persists it with the claim (``claim_with_identity`` →
+``pending_stream_id``), so a crash between the claim and the turn being
+admitted leaves a pending record that still carries the provisional id — but
+that id is never accepted by a turn, so it is NOT replayable. A pending
+record recovered from disk with NO proven admitted stream (``stream_id``
+empty) is marked outcome-unknown at LOAD time (``_load_locked``; the startup
+``sweep_pending_claims`` remains as belt-and-braces) and fails closed with
+``IdempotencyOutcomeUnknown`` → 409 WITHOUT a retry hint, so an operator is
+never told to poll for a day on a turn whose outcome is unknowable — and the
+provisional id is never promoted into a fabricated replay.
 
 This module is deliberately small and dependency-free. The full chat-start
 flow is still owned by ``api.routes._handle_chat_start``; this module
@@ -63,9 +64,11 @@ import os
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable
+
+from api.paths import _fsync_directory
 
 # Module-level logger placeholder; real logger injected lazily so importing
 # this module never pulls the heavy routes module (avoid circular import).
@@ -185,10 +188,11 @@ class IdempotencyRecord:
     # admitted. Deliberately NOT read by the route's replay predicate, which
     # inspects ``stream_id`` only — a pending claim with a provisional
     # identity must still flow to ``_start_run`` instead of short-circuiting
-    # as a replay of an identity no turn has accepted yet. It exists so that
-    # a crash in the claim→admit window leaves a durable identity to replay,
-    # and so ``sweep_pending_claims`` can tell "identity was minted" from
-    # "identity was never bound".
+    # as a replay of an identity no turn has accepted yet. The provisional
+    # id is NOT replayable: it was never accepted by a turn, so a pending
+    # record recovered from disk with no proven admitted stream is
+    # outcome-unknown regardless of what ``pending_stream_id`` holds (see
+    # ``_load_locked`` / ``sweep_pending_claims``).
     pending_stream_id: str = ""
     pending_turn_id: str = ""
     # #7782 finding 1: the pid that claimed this record. An in-flight guard
@@ -205,11 +209,13 @@ class IdempotencyRecord:
     response_payload: dict[str, Any] = field(default_factory=dict)
     claimed_at: float = 0.0
     completed_at: float = 0.0
-    # #7782 finding 1: set by ``sweep_pending_claims`` when a pending record
-    # was loaded from disk with no bound stream identity — the durable store
+    # #7782 finding 1: set at LOAD time (``_load_locked``, with
+    # ``sweep_pending_claims`` as belt-and-braces) when a pending record was
+    # recovered from disk with no bound stream identity — the durable store
     # cannot say whether the turn ever ran. Such a record must NOT keep
     # answering ``idempotency_in_flight`` with a 1-second retry hint for the
-    # rest of its TTL.
+    # rest of its TTL, and must never promote its provisional id into a
+    # fabricated replay.
     outcome_unknown: bool = False
 
     def to_json(self) -> dict[str, Any]:
@@ -602,6 +608,18 @@ class IdempotencyStore:
                     "that disagrees with its namespaced key"
                 )
             self._records[rec.key] = rec
+            if rec.status == STATUS_PENDING and not rec.stream_id:
+                # #7782 finding 1: a pending record loaded from disk with no
+                # proven admitted stream — the crash window between the claim
+                # and the turn being admitted, regardless of whether a
+                # provisional identity was minted at claim time. The durable
+                # store cannot say whether the turn ran, so the record must
+                # fail closed as outcome-unknown: NOT replay the provisional
+                # id (no turn ever accepted it), NOT answer in-flight +
+                # retry_after=1 for the rest of the TTL. Marking at LOAD
+                # makes it independent of pid and provisional data; newly
+                # claimed records are never marked.
+                rec.outcome_unknown = True
         # #7782 call 5: restore tombstones. A v1 file has none; that is fine,
         # those keys simply have no memory of completion.
         tombstones = data.get("expired_keys") if isinstance(data, dict) else None
@@ -764,19 +782,20 @@ class IdempotencyStore:
             raise IdempotencyStoreUnavailable(
                 f"failed to persist store to {path}: {exc}"
             ) from exc
-        # Try to fsync the directory so the rename is durable across
-        # power loss on filesystems that support it. A failure here
-        # is not fatal: the data is on disk, the rename succeeded;
-        # the only thing at risk is the directory entry's mtime /
-        # atime, which is irrelevant for our reader.
+        # Make the rename durable: fsync the parent directory so the
+        # directory entry (and the new inode it points to) is on disk
+        # before we answer 200. Repo convention (``api.paths._fsync_directory``):
+        # only the two \"this filesystem cannot fsync\" errors (EINVAL /
+        # ENOTSUP) are tolerable — a REAL I/O error (EIO and friends) means
+        # the rename may never survive a power loss, so the durable path
+        # cannot be trusted and the store fails closed (503) rather than
+        # answering 200 for a claim that could vanish (#7782 finding 3).
         try:
-            dir_fd = os.open(path.parent, getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
-        except OSError:
-            pass
+            _fsync_directory(path.parent)
+        except OSError as exc:
+            raise IdempotencyStoreUnavailable(
+                f"could not fsync store directory {path.parent}: {exc}"
+            ) from exc
 
     # -- public api ----------------------------------------------------------
 
@@ -916,6 +935,25 @@ class IdempotencyStore:
                     # an in-flight duplicate: the route returns the original
                     # identity and no second turn is admitted.
                     return existing
+                if existing.outcome_unknown:
+                    # Recovered from a crash between the claim and the
+                    # identity binding. The turn MAY have run; refusing with
+                    # a retry hint for the remaining TTL would have the
+                    # operator polling for a day (#7782 finding 1). Raise the
+                    # distinct "do not blind-retry" outcome instead. This
+                    # check runs BEFORE the pid comparison on purpose: the
+                    # mark is load-time (see ``_load_locked``) and must win
+                    # whether the recorded owner_pid equals ours (the common
+                    # same-PID restart) or belongs to a dead process. There
+                    # is deliberately NO provisional-id promotion here: the
+                    # minted ``pending_stream_id`` was never accepted by a
+                    # turn, so replaying it would hand the caller a
+                    # fabricated stream that 404s.
+                    raise IdempotencyOutcomeUnknown(
+                        f"idempotency key {key!r} has a pending claim with no "
+                        "recorded outcome; the previous attempt may have run "
+                        "— check the session before retrying, or use a new key"
+                    )
                 # Same process still owns an un-admitted claim: a sibling
                 # request is mid-start, so this is an in-flight duplicate
                 # (409 + retry hint), NOT a replay. Without this check the
@@ -927,31 +965,6 @@ class IdempotencyStore:
                 ):
                     raise IdempotencyInFlight(
                         f"idempotency key {key!r} is currently in flight"
-                    )
-                if existing.pending_stream_id:
-                    # Identity was minted and persisted WITH the claim
-                    # (``claim_with_identity``) but no turn has accepted it
-                    # yet: the process almost certainly died between the
-                    # claim and the admission (#7782 finding 1). Replaying
-                    # the minted identity is the honest answer — the caller
-                    # gets a usable stream identity back — and it avoids
-                    # parking the key in `in_flight` + retry_after=1 for the
-                    # remaining TTL.
-                    return replace(
-                        existing,
-                        stream_id=existing.pending_stream_id,
-                        turn_id=existing.pending_turn_id,
-                    )
-                if existing.outcome_unknown:
-                    # Recovered from a crash between the claim and the
-                    # identity binding. The turn MAY have run; refusing with
-                    # a retry hint for the remaining TTL would have the
-                    # operator polling for a day (#7782 finding 1). Raise the
-                    # distinct "do not blind-retry" outcome instead.
-                    raise IdempotencyOutcomeUnknown(
-                        f"idempotency key {key!r} has a pending claim with no "
-                        "recorded outcome; the previous attempt may have run "
-                        "— check the session before retrying, or use a new key"
                     )
                 raise IdempotencyInFlight(
                     f"idempotency key {key!r} is currently in flight"
@@ -980,10 +993,13 @@ class IdempotencyStore:
         cannot tell "ran" from "never ran" (#7782 finding 1, the feature's
         main use case).
 
-        Minting the identity in the route and persisting it WITH the claim
-        closes the window: after a restart a retry finds a pending record
-        that carries a minted identity, which ``claim`` replays as the
-        original turn instead of a day-long in-flight error.
+        The route mints a PROVISIONAL identity and persists it WITH the
+        claim. That id is NOT replayable: no turn ever accepted it (``_start_run``
+        mints the real stream id and only ``complete`` / ``reconcile`` bind a
+        proven admission), so a pending record recovered from disk with no
+        proven admitted stream fails closed as ``IdempotencyOutcomeUnknown``
+        (409 without a retry hint) instead of a day-long in-flight error or a
+        fabricated replay of a stream that 404s.
 
         The minted identity is stored in ``pending_stream_id`` /
         ``pending_turn_id``, NOT ``stream_id`` / ``turn_id``. That split is
@@ -1023,7 +1039,10 @@ class IdempotencyStore:
         ``IdempotencyOutcomeUnknown`` (mapped to 409 without
         ``retry_after_seconds``), which tells the caller "a previous attempt
         may have run; check the session / pick a new key" instead of "retry in
-        one second". Returns the number of records swept.
+        one second". The identity-less mark is applied at LOAD time in
+        ``_load_locked``; this sweep is belt-and-braces for records that
+        reach memory unmarked (e.g. a store loaded before the load-time
+        marking shipped). Returns the number of records swept.
         """
         self._ensure_loaded()
         swept = 0
@@ -1031,9 +1050,13 @@ class IdempotencyStore:
             for record in self._records.values():
                 if record.status != STATUS_PENDING:
                     continue
-                if record.stream_id or record.pending_stream_id:
-                    # Already carries an identity (admitted, or minted at
-                    # claim time) — ``claim`` replays it, no sweep needed.
+                if record.stream_id:
+                    # A proven admitted stream was reconciled onto this
+                    # pending claim — ``claim`` replays it, no sweep needed.
+                    # ``pending_stream_id`` (provisional, minted at claim
+                    # time, never accepted by a turn) does NOT exempt a
+                    # record: without a proven admission the outcome is
+                    # unknowable and must fail closed (#7782 finding 1).
                     continue
                 if record.outcome_unknown:
                     continue

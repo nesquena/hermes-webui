@@ -34,6 +34,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import stat
 import threading
 import time
 from types import SimpleNamespace
@@ -169,6 +171,9 @@ def idem_env(tmp_path, monkeypatch):
     Returns a namespace with the relevant test handles:
       * ``store`` — fresh ``IdempotencyStore`` pointed at tmp_path
       * ``recorder`` — counts every ``_start_run`` call
+      * ``real_start_run`` — the SHIPPING ``routes._start_run`` captured
+        before the recorder shadows it (the restart-path test drives it
+        end to end)
       * ``routes`` — imported ``api.routes`` module (already mutated
         with monkeypatched dependencies)
       * ``run_handler`` — convenience: builds a fake handler and calls
@@ -237,6 +242,13 @@ def idem_env(tmp_path, monkeypatch):
     except ImportError:
         pass
 
+    # Capture the SHIPPING ``_start_run`` before the recorder below shadows
+    # it. The restart-path test drives the real start pipeline end to end
+    # (real mint, real pending save, real turn journal, real SSE
+    # registration, real worker thread) with only the Agent worker replaced;
+    # every other test keeps the recorder. ``real_start_run`` must be the
+    # actual shipping function object — never an implementation copy.
+    real_start_run = routes._start_run
     recorder = _RunRecorder()
     monkeypatch.setattr(routes, "_start_run", recorder)
 
@@ -278,6 +290,7 @@ def idem_env(tmp_path, monkeypatch):
     return SimpleNamespace(
         store=store,
         recorder=recorder,
+        real_start_run=real_start_run,
         routes=routes,
         run_handler=run_handler,
         session=session,
@@ -1538,73 +1551,93 @@ def test_profile_drift_within_request_stays_bound_to_original_namespace(idem_env
 # ─── #7782 review follow-ups: crash-window, persistence, namespace, tombstone ───
 
 
-def test_crash_between_claim_and_start_leaves_replayable_identity(idem_env, monkeypatch):
+def test_crash_between_claim_and_start_is_outcome_unknown(idem_env):
     """#7782 finding 1: a crash after the claim but before the turn is admitted
-    must not turn the key into a day-long in-flight error.
+    must NOT leave a replayable identity and must NOT turn the key into a
+    day-long in-flight error.
 
-    The route now mints the turn identity and persists it WITH the claim
-    (``claim_with_identity``). Simulate the crash window by claiming directly
-    the way the route does, then dropping the in-memory store (restart) and
-    re-claiming: the recovered pending record carries a stream_id, so
-    ``claim`` replays the original identity instead of raising in-flight.
+    The route mints a PROVISIONAL identity and persists it with the claim
+    (``claim_with_identity`` → ``pending_stream_id``), but that identity is
+    never accepted by a turn — ``_start_run`` mints the real stream id and
+    only ``complete()``/``reconcile()`` bind a proven admission onto the
+    record. A pending record recovered from disk WITHOUT a proven admitted
+    stream (``stream_id`` empty) can therefore not be replayed as the
+    original turn: the durable store cannot say whether a turn ran. Both
+    restart shapes — the record carrying the CURRENT process's pid (the
+    common same-PID restart, e.g. Docker ``python server.py`` where the
+    recorded ``owner_pid`` equals the restarted pid) and a dead process's
+    pid — must fail closed with the distinct, non-retryable
+    ``IdempotencyOutcomeUnknown``.
     """
     from api.idempotency import (
         STATUS_PENDING,
+        IdempotencyOutcomeUnknown,
         build_storage_key,
         compute_request_fingerprint,
     )
 
     env = idem_env
-    body = {"session_id": env.session.session_id, "messages": []}
+    body = {"session_id": env.session.session_id, "message": "hello"}
     fingerprint = compute_request_fingerprint(body, "default")
     storage_key = build_storage_key("crash-window", "default")  # "default|crash-window"
 
-    # Route minted identity → persisted with the claim.
-    minted_stream = "stream-minted-at-claim"
-    record = env.store.claim_with_identity(
-        "crash-window",
-        fingerprint,
-        profile="default",
-        session_id=env.session.session_id,
-        stream_id=minted_stream,
-        turn_id="turn-minted-at-claim",
-    )
-    assert record.status == STATUS_PENDING
-    # The minted identity lives in the pending_* fields on purpose: the
-    # route's replay predicate reads stream_id only, so this record still
-    # flows to _start_run instead of short-circuiting as its own replay.
-    assert record.stream_id == ""
-    assert record.pending_stream_id == minted_stream
-    # Simulate the claim->admit crash: the owner process dies, so whatever
-    # a "restart" loads carries a foreign pid.
-    with env.store._lock:
-        env.store._records[storage_key].owner_pid = 999999
-    env.store._persist_locked()
+    for owner_pid in (os.getpid(), 999999):
+        # Fresh durable file for each restart shape.
+        env.store.reset()
+        # Route minted identity → persisted with the claim.
+        record = env.store.claim_with_identity(
+            "crash-window",
+            fingerprint,
+            profile="default",
+            session_id=env.session.session_id,
+            stream_id="stream-minted-at-claim",
+            turn_id="turn-minted-at-claim",
+        )
+        assert record.status == STATUS_PENDING
+        # The minted identity lives in the pending_* fields on purpose: the
+        # route's replay predicate reads stream_id only, so this record still
+        # flows to _start_run instead of short-circuiting as its own replay.
+        assert record.stream_id == ""
+        assert record.pending_stream_id == "stream-minted-at-claim"
+        # Simulate the claim->admit crash: whatever a restart loads carries
+        # this pid (same process for the common same-PID restart, foreign
+        # otherwise).
+        with env.store._lock:
+            env.store._records[storage_key].owner_pid = owner_pid
+        env.store._persist_locked()
 
-    # Restart: fresh instance over the same durable file.
-    restarted = type(env.store)(path=env.store._path)
-    # claim() loads the durable file lazily; the recovered pending record
-    # must carry the minted identity.
-    replay = restarted.claim("crash-window", fingerprint, profile="default")
-    assert replay.stream_id == minted_stream, "identity must survive the crash"
-
-    # Crucially NOT an in-flight / retry_after=1 answer for the whole TTL.
-    assert replay.turn_id == "turn-minted-at-claim"
-    assert len(env.recorder.calls) == 0, "no turn admitted by the retry"
+        # Restart: fresh instance over the same durable file.
+        restarted = type(env.store)(path=env.store._path)
+        # claim() loads the durable file lazily. The recovered pending
+        # record has NO proven admitted stream — provisional data and pid
+        # must NOT make it replayable — so claim refuses with the distinct
+        # outcome instead of replaying a fabricated identity (foreign pid)
+        # or answering in-flight + retry_after=1 (same pid).
+        with pytest.raises(IdempotencyOutcomeUnknown):
+            restarted.claim("crash-window", fingerprint, profile="default")
+        assert len(env.recorder.calls) == 0, "no turn admitted by the retry"
 
 
 def test_pending_claim_with_no_identity_is_swept_to_outcome_unknown(idem_env):
     """#7782 finding 1 (legacy window): a pending record recovered from disk
     with no stream identity must fail closed with the distinct non-retryable
     outcome, not `in_flight` + retry_after=1.
+
+    The identity-less mark is applied at LOAD time (``_load_locked``), so it
+    is independent of pid and provisional data; the startup sweep then finds
+    nothing left to do and is a no-op on already-marked records. If an
+    unmarked identity-less pending record reaches memory (a store loaded
+    before this marking shipped), the sweep still stamps it — pinned below
+    by unsetting the load-time mark and re-running the sweep.
     """
     from api.idempotency import (
         IdempotencyOutcomeUnknown,
+        build_storage_key,
+        compute_request_fingerprint,
     )
 
     env = idem_env
-    body = {"session_id": env.session.session_id, "messages": []}
-    from api.idempotency import build_storage_key, compute_request_fingerprint
+    body = {"session_id": env.session.session_id, "message": "hello"}
 
     fingerprint = compute_request_fingerprint(body, "default")
     storage_key = build_storage_key("no-identity", "default")  # "default|no-identity"
@@ -1626,11 +1659,413 @@ def test_pending_claim_with_no_identity_is_swept_to_outcome_unknown(idem_env):
     loaded = restarted._records[storage_key]
     assert loaded.owner_pid == 999999, "durable file must carry the dead pid"
     assert loaded.pending_stream_id == ""
-    assert restarted.sweep_pending_claims() == 1
+    # Marked at LOAD, not by the sweep: the sweep below finds nothing to do.
+    assert loaded.outcome_unknown is True
+    assert restarted.sweep_pending_claims() == 0
 
     with pytest.raises(IdempotencyOutcomeUnknown) as excinfo:
         restarted.claim("no-identity", fingerprint, profile="default")
     assert "may have run" in str(excinfo.value).lower()
+
+    # The sweep still stamps an identity-less pending record that reaches
+    # memory unmarked (belt-and-braces for stores loaded before this marking
+    # shipped): unset the load-time mark and re-run it.
+    with restarted._lock:
+        restarted._records[storage_key].outcome_unknown = False
+    assert restarted.sweep_pending_claims() == 1
+    with restarted._lock:
+        assert restarted._records[storage_key].outcome_unknown is True
+
+
+def test_pending_claim_with_only_provisional_identity_is_outcome_unknown(idem_env):
+    """#7782 finding 1: a pending record whose ONLY identity is the
+    provisional minted-at-claim id (``pending_stream_id``) — no admitted
+    stream — is still identity-less for replay purposes. Recovered from disk
+    it must be outcome_unknown: the startup sweep must NOT skip it just
+    because ``pending_stream_id`` is set, and ``claim`` must never promote
+    the provisional id into a replayable ``stream_id``.
+    """
+    from api.idempotency import (
+        STATUS_PENDING,
+        IdempotencyOutcomeUnknown,
+        build_storage_key,
+        compute_request_fingerprint,
+    )
+
+    env = idem_env
+    body = {"session_id": env.session.session_id, "message": "hello"}
+    fingerprint = compute_request_fingerprint(body, "default")
+    storage_key = build_storage_key("provisional-only", "default")
+
+    # A claim_with_identity record — provisional identity persisted WITH the
+    # claim, exactly as the route mints it — whose turn never accepted the
+    # provisional id (stream_id stays empty).
+    env.store.claim_with_identity(
+        "provisional-only",
+        fingerprint,
+        profile="default",
+        session_id=env.session.session_id,
+        stream_id="stream-minted-at-claim",
+        turn_id="turn-minted-at-claim",
+    )
+    with env.store._lock:
+        rec = env.store._records[storage_key]
+        assert rec.status == STATUS_PENDING
+        assert rec.stream_id == ""
+        assert rec.pending_stream_id == "stream-minted-at-claim"
+        rec.owner_pid = 999999
+    env.store._persist_locked()
+
+    restarted = type(env.store)(path=env.store._path)
+    restarted._ensure_loaded()
+    loaded = restarted._records[storage_key]
+    # Provisional data does NOT make the record replayable.
+    assert loaded.pending_stream_id == "stream-minted-at-claim"
+    assert loaded.stream_id == ""
+    # Marked at load, provisional or not — and the sweep does not skip it
+    # either way (its skip condition is stream_id-only, not pending_stream_id).
+    assert loaded.outcome_unknown is True
+    assert restarted.sweep_pending_claims() == 0
+
+    # An unmarked provisional-only record is still swept (the sweep's skip
+    # condition must not exempt pending_stream_id-carrying records).
+    with restarted._lock:
+        restarted._records[storage_key].outcome_unknown = False
+    assert restarted.sweep_pending_claims() == 1
+
+    with pytest.raises(IdempotencyOutcomeUnknown):
+        restarted.claim("provisional-only", fingerprint, profile="default")
+
+
+def test_recovered_pending_claim_is_outcome_unknown_across_restart(idem_env, monkeypatch, tmp_path):
+    """Maintainer repro for #7782 finding 1, handler level, over the REAL
+    start pipeline: drive the REAL ``_handle_chat_start`` with the REAL store
+    and the REAL ``_start_run`` → REAL ``_start_chat_stream_for_session`` —
+    real stream mint (``uuid.uuid4().hex``), real pending session save
+    (eager user row), real turn-journal identity, real SSE registration and
+    launch-phase claim, real ``threading.Thread`` worker — with ONLY the
+    Agent worker replaced by a recorder that counts the admission and exits
+    immediately (no model run). Copy ``store.json`` at entry (right after the
+    claim persists, before ``_start_run``) and again just after the real
+    ``_start_run`` returns (before the completion write); then restart the
+    singleton store against each copy (startup sweep included) and retry the
+    same key+body.
+
+    Every recovered shape — entry or after-start, same-PID or foreign-PID,
+    +0 / +60s / +23h — must answer ``409 idempotency_outcome_unknown``
+    WITHOUT ``retry_after_seconds`` and must NOT start a new turn. At +24h
+    the key is past its TTL and answers the unchanged ``410
+    idempotency_key_expired``. The provisional identity minted at claim time
+    differs from the identity the turn was admitted with (the real mint, a
+    random uuid that reaches the response AND the real worker thread), and
+    is never replayed (the retry returns no stream identity at all).
+
+    Completed control: a snapshot taken AFTER the completion write replays
+    the REAL admitted identity — fresh singleton, no extra worker, no extra
+    eager user row.
+    """
+    import re
+    import shutil
+    from pathlib import Path
+
+    import api.config as config_mod
+    import api.models as models_mod
+    import api.runtime_adapter as runtime_adapter_mod
+    from api.idempotency import get_idempotency_store, set_idempotency_store
+    from api.models import Session
+    from api.turn_journal import read_turn_journal
+
+    env = idem_env
+    body = {"session_id": "idem-session", "message": "hello"}
+    key = "restart-outcome-key"
+    store_path = env.store.path
+    snapshots: dict[str, Path] = {}
+
+    # ── Registry isolation: the real launch mutates process-global stream /
+    # session registries. Snapshot-and-restore them around the whole test so
+    # no entry leaks into sibling tests (the 16 retry probes and the
+    # completed control all return at the idempotency claim/replay and never
+    # touch these, but the crash request registers a stream + owner + launch
+    # claim + session writeback owner).
+    _registry_names = [
+        "STREAMS", "ACTIVE_RUNS", "CANCEL_FLAGS", "STREAM_GOAL_RELATED",
+        "PRE_ADMISSION_CLAIMS", "STREAM_SESSION_OWNERS",
+        "SESSION_WRITEBACK_OWNERS", "PENDING_BG_TASK_COMPLETIONS",
+    ]
+    _registry_before: dict[str, dict | set] = {}
+    for _name in _registry_names:
+        _obj = getattr(config_mod, _name)
+        _registry_before[_name] = dict(_obj) if isinstance(_obj, dict) else set(_obj)
+        _obj.clear()
+    with config_mod.SESSION_AGENT_LOCKS_LOCK:
+        _agent_locks_before = dict(config_mod.SESSION_AGENT_LOCKS.items())
+        config_mod.SESSION_AGENT_LOCKS.clear()
+
+    try:
+        # ── Real Session in a disposable SESSION_DIR ───────────────────
+        # A real api.models.Session with a real save(): the sidecar, the
+        # session index and the turn journal all land under tmp_path, never
+        # under the production HERMES_HOME.
+        session_dir = Path(tmp_path) / "sessions"
+        monkeypatch.setattr(models_mod, "SESSION_DIR", session_dir)
+        monkeypatch.setattr(models_mod, "SESSION_INDEX_FILE", session_dir / "_index.json")
+        monkeypatch.setattr(config_mod, "SESSION_DIR", session_dir, raising=False)
+        # Production creates SESSION_DIR at server startup; the real
+        # Session.save() needs it to exist before the first atomic write.
+        session_dir.mkdir(parents=True, exist_ok=True)
+
+        workspace = str(Path(tmp_path) / "workspace")
+        session = Session(
+            session_id="idem-session",
+            title="Untitled",
+            workspace=workspace,
+            model="test-model",
+            model_provider="test-provider",
+            profile=None,
+            messages=[],
+        )
+        monkeypatch.setattr(
+            env.routes, "_get_or_materialize_session", lambda *_a, **_k: session
+        )
+        monkeypatch.setattr(
+            env.routes, "_resolve_chat_workspace_with_recovery",
+            lambda *_a, **_k: workspace,
+        )
+        # Eager session-save mode: the real _prepare… writes exactly one
+        # user row, so a replay cannot silently add a second one.
+        monkeypatch.setattr(env.routes, "get_webui_session_save_mode", lambda: "eager")
+        # set_last_workspace persistence is not the contract under test.
+        monkeypatch.setattr(env.routes, "set_last_workspace", lambda *a, **k: None)
+        # Pin the local in-process shipping path: no runtime adapter, no
+        # runner, no gateway, no model-alias lane.
+        monkeypatch.setattr(
+            runtime_adapter_mod, "runtime_adapter_enabled", lambda *a, **k: False
+        )
+        monkeypatch.setattr(
+            runtime_adapter_mod, "runtime_adapter_runner_enabled", lambda *a, **k: False
+        )
+        monkeypatch.setattr(
+            env.routes.api_config, "resolve_model_alias_runtime", lambda *a, **k: None
+        )
+
+        # ── The ONLY stub in the start pipeline: the Agent worker ───────
+        # _start_chat_stream_for_session spawns a REAL threading.Thread whose
+        # target is _run_agent_streaming; that target is replaced by a
+        # recorder that counts the admission and exits immediately (no model,
+        # no session-lock interaction, so the real thread is safe). The event
+        # gives the test a bounded wait for the real thread.
+        worker_calls: list[dict] = []
+        worker_started = threading.Event()
+
+        def _counting_worker(
+            worker_session_id, msg_text, model, worker_workspace, stream_id,
+            attachments=None, **kwargs,
+        ):
+            worker_calls.append({
+                "session_id": worker_session_id,
+                "msg": msg_text,
+                "model": model,
+                "workspace": worker_workspace,
+                "stream_id": stream_id,
+                "attachments": attachments,
+                "kwargs": dict(kwargs),
+            })
+            worker_started.set()
+
+        monkeypatch.setattr(env.routes, "_run_agent_streaming", _counting_worker)
+
+        def _copy_snapshot(name: str) -> Path:
+            dest = store_path.parent / f"{name}.json"
+            shutil.copy2(store_path, dest)
+            return dest
+
+        # Hook 1 — entry snapshot: copy the durable file right after the
+        # claim (with its provisional identity) persists and BEFORE the real
+        # _start_run runs.
+        real_claim = env.store.claim_with_identity
+
+        def _claim_and_snapshot(*args, **kwargs):
+            rec = real_claim(*args, **kwargs)
+            snapshots["entry"] = _copy_snapshot("snapshot_entry")
+            return rec
+
+        env.store.claim_with_identity = _claim_and_snapshot
+
+        # Hook 2 — after-start snapshot: the SHIPPING _start_run (captured by
+        # the fixture before any recorder shadowed it) is wrapped so the
+        # durable file is copied right after it returns its admitted identity
+        # and BEFORE the route's completion write. The durable record is
+        # still pending + provisional: the true admitted stream id only
+        # exists in the response (and the worker thread), not on disk.
+        start_run_calls: list[dict] = []
+
+        def _wrapped_start_run(s, **kwargs):
+            result = env.real_start_run(s, **kwargs)
+            start_run_calls.append({
+                "session_id": getattr(s, "session_id", None),
+                "status": result.get("_status", 200) if isinstance(result, dict) else 200,
+                "stream_id": result.get("stream_id") if isinstance(result, dict) else None,
+            })
+            snapshots["after"] = _copy_snapshot("snapshot_after")
+            return result
+
+        monkeypatch.setattr(env.routes, "_start_run", _wrapped_start_run)
+
+        # The "crash" request: claims, drives the REAL start pipeline
+        # (real mint, real pending save, real journal, real SSE
+        # registration, real worker thread), completes.
+        s1, p1 = env.run_handler(body, key_header=key)
+        assert s1 == 200, p1
+        assert len(start_run_calls) == 1
+        # The real worker thread ran with the minted identity.
+        assert worker_started.wait(5.0), "the real worker thread never ran"
+        assert len(worker_calls) == 1
+        assert "entry" in snapshots and "after" in snapshots
+        true_stream = p1["stream_id"]
+        true_turn = p1["turn_id"]
+        # The response carries a REAL minted uuid (32 lowercase hex), never
+        # the route's provisional "stream-…" placeholder.
+        assert re.fullmatch(r"[0-9a-f]{32}", true_stream), (
+            f"stream_id must be a real minted uuid, got {true_stream!r}"
+        )
+        assert worker_calls[0]["stream_id"] == true_stream, (
+            "the real worker thread did not receive the minted stream id"
+        )
+        assert worker_calls[0]["kwargs"].get("model_provider") == "test-provider"
+        # Real turn-journal identity: the submitted event written by the real
+        # append_turn_journal_event carries the same stream/turn the response
+        # exposed.
+        journal = read_turn_journal("idem-session", session_dir=session_dir)
+        submitted = [e for e in journal["events"] if e.get("event") == "submitted"]
+        assert submitted, "no submitted turn-journal event was written"
+        assert submitted[0]["stream_id"] == true_stream
+        assert submitted[0]["turn_id"] == true_turn
+        # Eager session-save pinned exactly one user row.
+        assert len(session.messages) == 1
+
+        # Both snapshots carry a pending record with ONLY a provisional
+        # identity, and the provisional id differs from the identity the turn
+        # was actually admitted with (the route mints it before _start_run;
+        # the REAL _start_run mints its own random uuid and never accepts the
+        # provisional one).
+        for name in ("entry", "after"):
+            raw = json.loads(Path(snapshots[name]).read_text(encoding="utf-8"))
+            records = raw.get("records", [])
+            assert len(records) == 1, f"{name} snapshot must hold one claim"
+            rec = records[0]
+            assert rec["status"] == "pending", (
+                f"{name} snapshot: completion write must not have run yet"
+            )
+            assert rec["stream_id"] == "", (
+                f"{name} snapshot: no proven admitted stream at snapshot time"
+            )
+            provisional = rec["pending_stream_id"]
+            assert provisional, f"{name} snapshot: claim carries a provisional id"
+            assert provisional != true_stream, (
+                "the provisional id must differ from the truly admitted stream id"
+            )
+            assert rec["pending_turn_id"] != true_turn
+
+        HOUR = 3600
+        timings = [
+            (0, 409, "idempotency_outcome_unknown"),
+            (60, 409, "idempotency_outcome_unknown"),
+            (23 * HOUR, 409, "idempotency_outcome_unknown"),
+            (24 * HOUR + 1, 410, "idempotency_key_expired"),
+        ]
+
+        def _shape_snapshot(src: Path, *, foreign_pid: bool, elapsed: float) -> Path:
+            data = json.loads(src.read_text(encoding="utf-8"))
+            for rec in data.get("records", []):
+                if foreign_pid:
+                    rec["owner_pid"] = 999999
+                rec["claimed_at"] = float(rec.get("claimed_at") or 0.0) - elapsed
+            dest_dir = src.parent / f"restart_{src.stem}_fp{int(foreign_pid)}_{int(elapsed)}"
+            dest = dest_dir / "idempotency" / "store.json"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(json.dumps(data), encoding="utf-8")
+            return dest_dir
+
+        probes = 0
+        for name in ("entry", "after"):
+            for foreign in (False, True):
+                for elapsed, exp_status, exp_code in timings:
+                    shaped_dir = _shape_snapshot(
+                        Path(snapshots[name]), foreign_pid=foreign, elapsed=elapsed
+                    )
+                    # Restart: clear the singleton and let
+                    # get_idempotency_store() construct a fresh store at the
+                    # copied path (startup sweep included), exactly like a
+                    # process restart.
+                    monkeypatch.setattr(
+                        "api.config.STATE_DIR", shaped_dir, raising=False
+                    )
+                    set_idempotency_store(None)
+                    restarted = get_idempotency_store()
+                    assert restarted.path == shaped_dir / "idempotency" / "store.json"
+                    calls_before = len(start_run_calls)
+                    status, payload = env.run_handler(body, key_header=key)
+                    assert status == exp_status, (
+                        f"snapshot={name} foreign={foreign} elapsed={elapsed}: "
+                        f"expected status {exp_status}, got {status} "
+                        f"payload={payload}"
+                    )
+                    assert payload.get("code") == exp_code, (
+                        f"snapshot={name} foreign={foreign} elapsed={elapsed}: "
+                        f"expected code {exp_code}, got {payload.get('code')}"
+                    )
+                    if exp_status == 409:
+                        assert "retry_after_seconds" not in payload, (
+                            "outcome_unknown is not retryable: no retry hint"
+                        )
+                        assert payload.get("stream_id") is None, (
+                            "must never replay a fabricated identity"
+                        )
+                    assert len(start_run_calls) == calls_before, (
+                        f"snapshot={name} foreign={foreign} elapsed={elapsed}: "
+                        "retry must not start a turn"
+                    )
+                    assert len(worker_calls) == 1, (
+                        f"snapshot={name} foreign={foreign} elapsed={elapsed}: "
+                        "retry must not schedule a worker"
+                    )
+                    probes += 1
+        assert probes == 2 * 2 * len(timings)
+
+        # ── Completed control ───────────────────────────────────────────
+        # A snapshot taken AFTER the completion write (the durable record now
+        # carries the REAL admitted stream) must REPLAY that real identity
+        # from a fresh singleton: no provisional replay, no new worker, no
+        # new eager user row.
+        completed = _copy_snapshot("snapshot_completed")
+        completed_dir = _shape_snapshot(completed, foreign_pid=False, elapsed=0)
+        monkeypatch.setattr("api.config.STATE_DIR", completed_dir, raising=False)
+        set_idempotency_store(None)
+        restarted_completed = get_idempotency_store()
+        rec_completed = restarted_completed.lookup(key)
+        assert rec_completed is not None and rec_completed.stream_id == true_stream
+        calls_before = len(start_run_calls)
+        s_c, p_c = env.run_handler(body, key_header=key)
+        assert s_c == 200, p_c
+        assert p_c["stream_id"] == true_stream, (
+            "the completed control must replay the REAL admitted stream, "
+            f"got {p_c.get('stream_id')!r}"
+        )
+        assert p_c["turn_id"] == true_turn
+        assert p_c.get("replayed_from_idempotency_key") is True
+        assert len(start_run_calls) == calls_before
+        assert len(worker_calls) == 1, "the completed control scheduled a worker"
+        assert len(session.messages) == 1, "the replay added a second user row"
+    finally:
+        # Restore the process-global registries exactly as found.
+        for _name, _before in _registry_before.items():
+            _obj = getattr(config_mod, _name)
+            _obj.clear()
+            _obj.update(_before)
+        with config_mod.SESSION_AGENT_LOCKS_LOCK:
+            config_mod.SESSION_AGENT_LOCKS.clear()
+            for _k, _v in _agent_locks_before.items():
+                config_mod.SESSION_AGENT_LOCKS[_k] = _v
 
 
 def test_persist_io_failure_during_fsync_is_not_swallowed(idem_env, monkeypatch):
@@ -1699,6 +2134,113 @@ def test_fsync_einval_and_enotsup_still_pass(idem_env, monkeypatch):
         )
         record = store.claim(f"fsync-ok-{err}", "fp", profile="default")
         assert record.status == "pending"
+
+
+def test_directory_fsync_eio_fails_closed_with_zero_turns(idem_env, monkeypatch):
+    """#7782 finding 3, handler level: a REAL I/O error (EIO) on the DIRECTORY
+    fsync — the write that makes the rename durable — must fail closed with
+    503 ``idempotency_store_unavailable`` and ZERO admitted turns.
+
+    Before the fix the directory-fsync block swallowed every ``OSError``
+    (``except OSError: pass``), so the claim looked durable, the route
+    answered 200 and admitted the turn even though the durable guard could
+    not be proven to survive a power loss. The control is
+    ``test_regular_file_fsync_eio_fails_closed_at_handler``: EIO on the
+    regular-file fsync already propagates.
+    """
+    import errno
+
+    import api.idempotency as idem_mod
+
+    env = idem_env
+    real_fsync = os.fsync
+
+    def _fsync_selector(fd):
+        # Only DIRECTORY fds fail — the exact fault the old ``except
+        # OSError: pass`` hid. Regular-file fsyncs (the tmp-store write)
+        # pass through untouched so the control stays clean.
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "directory fsync: disk on fire")
+        real_fsync(fd)
+
+    monkeypatch.setattr(idem_mod.os, "fsync", _fsync_selector)
+
+    status, payload = env.run_handler(
+        {"session_id": "idem-session", "message": "hello"},
+        key_header="dir-eio-key",
+    )
+    assert status == 503, (
+        f"directory-fsync EIO must fail closed, got status {status}"
+    )
+    assert payload.get("code") == "idempotency_store_unavailable"
+    assert len(env.recorder.calls) == 0, (
+        "EIO on the directory fsync must not admit a turn"
+    )
+
+
+def test_regular_file_fsync_eio_fails_closed_at_handler(idem_env, monkeypatch):
+    """Control for ``test_directory_fsync_eio_fails_closed_with_zero_turns``:
+    EIO on the REGULAR-FILE fsync (the tmp-store write) already fails closed
+    (503, zero turns) — the narrowed file-fsync path from the earlier
+    finding-3 fix must keep propagating, so the directory-fd-only test above
+    isolates the block that used to swallow.
+    """
+    import errno
+
+    import api.idempotency as idem_mod
+
+    env = idem_env
+    real_fsync = os.fsync
+
+    def _fsync_selector(fd):
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(errno.EIO, "file fsync: disk on fire")
+        real_fsync(fd)
+
+    monkeypatch.setattr(idem_mod.os, "fsync", _fsync_selector)
+
+    status, payload = env.run_handler(
+        {"session_id": "idem-session", "message": "hello"},
+        key_header="file-eio-key",
+    )
+    assert status == 503
+    assert payload.get("code") == "idempotency_store_unavailable"
+    assert len(env.recorder.calls) == 0
+
+
+def test_directory_fsync_einval_enotsup_still_passes_at_handler(idem_env, monkeypatch):
+    """Handler-level exemption coverage: filesystems that refuse directory
+    fsync with EINVAL/ENOTSUP (tmpfs/overlayfs) must keep the happy path —
+    the claim persists, exactly one turn is admitted, 200 is returned.
+    """
+    import errno
+
+    import api.idempotency as idem_mod
+
+    env = idem_env
+    real_fsync = os.fsync
+
+    for err in (errno.EINVAL, errno.ENOTSUP):
+        env.recorder.calls.clear()
+
+        def _fsync_selector(fd, _e=err):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError(_e, "fsync unsupported")
+            real_fsync(fd)
+
+        monkeypatch.setattr(idem_mod.os, "fsync", _fsync_selector)
+        status, payload = env.run_handler(
+            {"session_id": "idem-session", "message": "hello"},
+            key_header=f"dir-exempt-{err}",
+        )
+        assert status == 200, (
+            f"EINVAL/ENOTSUP on directory fsync must stay tolerable, "
+            f"got status {status}"
+        )
+        assert len(env.recorder.calls) == 1, (
+            f"exempt directory fsync must admit exactly one turn, "
+            f"got {len(env.recorder.calls)}"
+        )
 
 
 def test_expired_completed_key_is_not_re_admitted(idem_env, monkeypatch):
