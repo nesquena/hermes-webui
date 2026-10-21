@@ -100,7 +100,14 @@ def _post(path, body):
 
 
 class _WaitingLock:
-    """Lock stand-in: the concurrent writer finishes while the handler waits."""
+    """Lock stand-in: the concurrent writer finishes while the handler waits.
+
+    ``__enter__`` / ``__exit__`` delegate to ``acquire`` / ``release`` so the
+    stand-in also works with a ``with lock:`` handler. Without them the two
+    lock-scope tests fail on the previous head with a TypeError about the
+    context manager protocol instead of the behavioural difference, which would
+    make the red-before run prove nothing (#8255 review).
+    """
 
     def __init__(self, on_acquire):
         self._on_acquire = on_acquire
@@ -113,6 +120,14 @@ class _WaitingLock:
 
     def release(self):
         pass
+
+    def __enter__(self):
+        self.acquire()
+        return self
+
+    def __exit__(self, *_):
+        self.release()
+        return False
 
 
 def _wait_with(monkeypatch, on_acquire):
