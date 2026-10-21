@@ -47,6 +47,22 @@
 
 - **Push-to-talk hold gesture for dictation.** Hold the mic button (or its keyboard activation) to dictate and release to stop, in addition to the existing click-to-toggle mode — a more reliable way to capture a quick voice note. The browser-reserved `Ctrl+Shift+D` chord that an earlier draft proposed was dropped (it collides with browser bookmark shortcuts); only the page-safe hold gesture ships, and the restart/teardown paths are race-hardened so there's no stuck or zombie microphone. Thanks @rodboev. (#5310, #3700)
 
+### Security
+
+- **Update timeout messages never echo credentials.** When an in-app update's fetch times out, the message names the cancelled operation; that operation text now goes through the same credential scrub as every other update diagnostic, so a remote URL with embedded userinfo or a token would be shown redacted. The message is unchanged for the fetches the updater runs today. Thanks @pcsokonay. (#8415)
+
+- **Pressing Enter on the approval card's Deny button denies.** While a tool approval was pending, Enter on any focused
+  control outside a text field ran "Allow once": Enter on **Deny**, **Allow session** or **Always allow** approved the
+  command once, and Enter on the ⋮ menu, a menu row, the project picker or a control that closes itself on Enter approved
+  the pending action instead of doing its own job. Enter now approves only when it isn't pressed on a control, so each
+  button does what it says. Enter with nothing focused still means Allow once. (#8131, #8130)
+
+- **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
+  crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
+  CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
+  response now gets a clean 400/401 with nothing stored and no session issued, and valid passkeys register and sign in
+  exactly as before. Thanks @ybai08. (#8138, fixes #8126)
+
 ### Fixed
 
 - **Run journals no longer grow without bound.** Each run's journal used to stay on disk forever, so a long-lived session's journal directory kept growing. An hourly maintenance sweep now compresses settled runs into `sessions/_run_journal_archive/` once they pass a size, count or age limit (defaults: 256 MiB of live journal per session, 40 live runs per session, 14 days). The compressed copy is verified byte-for-byte before the live file is removed, runs that have not provably finished are never touched, and every read path (run status, session reload, replay after a reconnect) falls back to the archive transparently. Archives are kept forever by default; the optional archive TTL never deletes an archive a session still needs to recover an interrupted answer. On platforms without `dir_fd` support (Windows) the sweep turns itself off. Thanks @aleesposito85. (#7642, fixes #7613)
@@ -420,6 +436,8 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **Running the tests can no longer delete the checkout.** An exported-but-empty `HERMES_WEBUI_TEST_STATE_DIR=` used to resolve the test state directory to the current directory, and the session fixture's cleanup then deleted the whole repository, `.git` included. An empty or whitespace-only value now falls back to the temp-dir default, and the suite refuses to start when the state directory is the checkout, one of its parents, or a directory inside it (such as `tests` or `static`). Test-only; no runtime change. Thanks @Overview3833. (#8414, fixes #8413)
 
 - **Test suite keeps the Agent on `sys.path`.** The per-test `sys.path` guard restored a snapshot taken before
   `api.config` added the Agent directory, so after the first test any newly added Agent module could not be imported
