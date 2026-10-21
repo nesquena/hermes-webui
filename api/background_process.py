@@ -929,6 +929,25 @@ def _reaper_loop() -> None:
                     if s not in _cfg.PENDING_BG_TASK_COMPLETIONS
                 ]:
                     _cfg.BG_TASK_COMPLETE_EVENTS_SEEN.pop(sid, None)
+
+            # SESSIONS cache-cap pass (#6351 Q3): cap enforcement used to run
+            # only where a session-touching request ran it, so a cache that was
+            # over its cap — an insertion path that never evicts, or entries
+            # pinned active/unsaved during a burst that turn clean afterwards —
+            # stayed over cap until the next such request. On an idle install
+            # none ever arrives and the resident working set keeps the shape of
+            # the busiest moment of the process's life (the growth curve in the
+            # issue). This loop is the one thing still running without traffic,
+            # so re-check the cap here once a tick. The sweep resolves the cap
+            # itself and takes LOCK; we hold no lock at this point in the
+            # iteration, and the call is best-effort — a failure here must not
+            # take down the rest of the reaper pass.
+            try:
+                from api.models import sweep_sessions_cache_over_cap
+
+                sweep_sessions_cache_over_cap()
+            except Exception:
+                logger.debug("sessions-cache sweep failed", exc_info=True)
         except Exception:
             logger.warning("SessionChannel reaper iteration failed", exc_info=True)
         # Wait but wake up promptly on stop.

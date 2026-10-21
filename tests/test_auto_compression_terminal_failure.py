@@ -190,8 +190,18 @@ def test_compression_rotation_publication_is_fail_closed(tmp_path, monkeypatch, 
         def __setitem__(self, key, value):
             if key == new_sid:
                 observed["lock_at_publish"] = streaming.SESSION_AGENT_LOCKS.get(new_sid)
-                observed["old_owner_at_publish"] = self.get(old_sid)
             super().__setitem__(key, value)
+
+        def pop(self, key, *args):
+            # #8240: the publisher now retires the old alias BEFORE publishing
+            # the continuation (so the temporary third key cannot manufacture
+            # cap pressure, and eviction never runs under SESSION_AGENT_LOCKS_LOCK).
+            # Object identity across the rotation is therefore observed here at
+            # retirement, which holds under either ordering, instead of being
+            # pinned to the old publish-then-retire sequence.
+            if key in self:
+                observed["owner_at_retire"] = self[key]
+            return super().pop(key, *args)
 
     sessions = ObservedSessions({old_sid: session})
     models.SESSIONS.clear()
@@ -258,7 +268,11 @@ def test_compression_rotation_publication_is_fail_closed(tmp_path, monkeypatch, 
             assert sessions.get(new_sid) is session
             assert observed["lock_at_publish"] is not None
             assert observed["lock_at_publish"] is streaming.SESSION_AGENT_LOCKS.get(new_sid)
-            assert observed["old_owner_at_publish"] is session
+            # The rotation must move the SAME session object across the id change.
+            # Observed at retirement, so this holds whether the old alias is
+            # retired before or after the continuation is published (#8240).
+            assert observed["owner_at_retire"] is session
+            assert old_sid not in sessions
         else:
             assert sessions.get(new_sid) is None
             assert session.session_id == old_sid
