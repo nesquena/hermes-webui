@@ -13242,6 +13242,8 @@ def _build_run_conversation_kwargs(
     ``persist_user_timestamp`` is signature-gated (#6935): an older
     hermes-agent whose ``run_conversation()`` predates the kwarg must not
     receive it, or the call trips a TypeError before the turn starts.
+    The title-only override is gated the same way and uses the submitted
+    prompt, not the workspace/notification-enriched model input.
     """
     _preserve_legacy_agent_row_identity(callable_obj, legacy_row_identity_owner)
     kwargs = {
@@ -13262,6 +13264,12 @@ def _build_run_conversation_kwargs(
         kwargs,
         "conversation_history_revision",
         conversation_history_revision,
+    )
+    _add_supported_run_conversation_kwarg(
+        callable_obj,
+        kwargs,
+        "title_user_message",
+        persist_user_message,
     )
     return kwargs
 

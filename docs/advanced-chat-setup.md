@@ -72,6 +72,19 @@ manually titled. Image-only or metadata-only content does not provide title
 text. Existing manual-title protection and the title-generation setting still
 apply; this cleanup does not rewrite the transcript or native image parts.
 
+The Agent's separate `state.db` auto-title receives the exact submitted prompt
+through its `title_user_message` argument, when the installed Agent supports it.
+Workspace prefixes, injected process notifications, and native image parts
+remain in the model-facing input but do not become the Agent's title source.
+Text the browser itself puts into the prompt (an `[Attached files: ...]` suffix,
+or "I've uploaded N file(s): ..." for a file-only send) is part of the submitted
+prompt, so it can still reach the title. The shared invocation builder applies
+this to the initial call and self-heal retries, and the synchronous
+`POST /api/chat` route passes the same argument.
+An empty submitted prompt explicitly supplies an empty title input rather than
+falling back to workspace metadata. Older Agents without the argument remain
+callable, but need an Agent upgrade to use this title-source separation.
+
 Automatic title-generation LLM calls honor the active Hermes profile's
 `auxiliary.title_generation.enabled` setting (default: `true`):
 

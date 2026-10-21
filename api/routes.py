@@ -29604,6 +29604,7 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
+                _add_supported_run_conversation_kwarg,
                 _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
@@ -29681,7 +29682,7 @@ def _handle_chat_sync(handler, body):
                 _agent_replay_projection
             )
 
-            result = agent.run_conversation(
+            _sync_run_kwargs = dict(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
                 # Threaded to the settle's replay dedupe so only rows the
@@ -29703,6 +29704,13 @@ def _handle_chat_sync(handler, body):
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
+            # #8436 maintainer fold: the sync route calls run_conversation directly (not through
+            # _build_run_conversation_kwargs), so give it the same signature-gated title-only input:
+            # the Agent titles state.db from the submitted prompt, not the [Workspace::v1: ...] prefix.
+            _add_supported_run_conversation_kwarg(
+                agent.run_conversation, _sync_run_kwargs, "title_user_message", msg,
+            )
+            result = agent.run_conversation(**_sync_run_kwargs)
     finally:
         # Same as the streaming worker's teardown: mirror the workspace into the
         # Agent-created state.db row on every exit, including a raised turn.
