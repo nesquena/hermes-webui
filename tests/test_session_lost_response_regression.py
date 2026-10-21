@@ -818,6 +818,169 @@ def test_get_session_syncs_sidecar_from_newer_state_db_even_when_stream_not_term
     assert reloaded.messages[-1]["content"] == "latest live progress"
 
 
+def test_get_session_sync_keeps_pending_image_prompt_when_agent_row_is_proven(monkeypatch, hermes_home):
+    sid = "state_newer_pending_image_sid"
+    stream_id = "dead_pending_image_stream"
+    timestamp = time.time() - models._REPAIR_STALE_PENDING_GRACE_SECONDS - 5
+    prompt = "Describe the attached image"
+    attachment = {"name": "sample.png", "mime": "image/png", "is_image": True}
+    agent_only_note = "Agent-only recall note"
+    agent_user_content = [
+        {"type": "text", "text": prompt},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}},
+        {"type": "text", "text": agent_only_note},
+    ]
+    previous_messages = [
+        {"role": "user", "content": "old question", "timestamp": timestamp - 2},
+        {"role": "assistant", "content": "old answer", "timestamp": timestamp - 1},
+    ]
+    state_messages = [
+        *previous_messages,
+        {"role": "user", "content": agent_user_content, "timestamp": timestamp},
+        {"role": "assistant", "content": "recovered assistant tail", "timestamp": timestamp + 1},
+    ]
+    s = Session(
+        session_id=sid,
+        title="Pending image recovery",
+        messages=previous_messages,
+        context_messages=previous_messages,
+        active_stream_id=stream_id,
+        pending_user_message=prompt,
+        pending_attachments=[attachment],
+        pending_started_at=timestamp,
+        pending_user_source="webui",
+        _webui_pending_user_timestamp_identity=(stream_id, timestamp),
+    )
+    s.save()
+    models.SESSIONS.pop(sid, None)
+
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {
+            "message_count": len(state_messages),
+            "last_message_at": timestamp + 1,
+        },
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+
+    models.get_session(sid)
+    reloaded = Session.load(sid)
+
+    submitted_rows = [
+        message for message in reloaded.messages
+        if message.get("role") == "user" and message.get("content") == prompt
+    ]
+    assert len(submitted_rows) == 1
+    assert submitted_rows[0]["timestamp"] == timestamp
+    assert submitted_rows[0]["attachments"] == [attachment]
+    assert reloaded.messages[-1] == state_messages[-1]
+    assert agent_only_note not in str(reloaded.messages)
+
+    context_rows = models.reconciled_state_db_messages_for_session(
+        reloaded,
+        prefer_context=True,
+        state_messages=state_messages,
+    )
+    enriched_rows = [
+        message for message in context_rows
+        if message.get("role") == "user" and message.get("timestamp") == timestamp
+    ]
+    assert len(enriched_rows) == 1
+    assert enriched_rows[0]["content"] == agent_user_content
+    assert agent_only_note in str(enriched_rows[0]["content"])
+
+
+def test_state_db_pending_image_row_alone_does_not_skip_stale_journal_recovery(
+    monkeypatch, hermes_home,
+):
+    sid = "state_pending_image_without_output_sid"
+    stream_id = "dead_pending_image_without_output_stream"
+    timestamp = time.time() - models._REPAIR_STALE_PENDING_GRACE_SECONDS - 5
+    prompt = "Describe the attached image"
+    attachment = {"name": "sample.png", "mime": "image/png", "is_image": True}
+    old_messages = [
+        {"role": "user", "content": "old question", "timestamp": timestamp - 2},
+        {"role": "assistant", "content": "old answer", "timestamp": timestamp - 1},
+    ]
+    state_messages = [
+        *old_messages,
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,YWJj"}},
+            ],
+            "timestamp": timestamp,
+        },
+    ]
+    session = Session(
+        session_id=sid,
+        title="Pending image without output",
+        messages=old_messages,
+        context_messages=old_messages,
+        active_stream_id=stream_id,
+        pending_user_message=prompt,
+        pending_attachments=[attachment],
+        pending_started_at=timestamp,
+        pending_user_source="webui",
+        _webui_pending_user_timestamp_identity=(stream_id, timestamp),
+    )
+    session.save()
+    models.SESSIONS[sid] = session
+
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_summary",
+        lambda sid_arg, profile=None: {
+            "message_count": len(state_messages),
+            "last_message_at": timestamp,
+        },
+    )
+    monkeypatch.setattr(
+        models,
+        "get_state_db_session_messages",
+        lambda sid_arg, **kwargs: list(state_messages),
+    )
+    append_run_event(sid, stream_id, "token", {"text": "Recovered partial text."})
+
+    # Cached get_session runs state.db self-heal, then the real stale-stream
+    # cleanup must still get the pending turn so it can replay the run journal.
+    loaded = models.get_session(sid)
+    assert loaded is session
+    assert loaded.active_stream_id == stream_id
+    assert loaded.pending_user_message == prompt
+    assert loaded.pending_attachments == [attachment]
+
+    import api.routes as routes
+
+    assert routes._clear_stale_stream_state(loaded) is True
+
+    reloaded = Session.load(sid)
+    submitted_rows = [
+        message for message in reloaded.messages
+        if message.get("role") == "user" and message.get("content") == prompt
+    ]
+    assert len(submitted_rows) == 1
+    assert submitted_rows[0]["attachments"] == [attachment]
+    assert any(
+        message.get("_recovered_from_run_journal")
+        and "Recovered partial text." in message.get("content", "")
+        for message in reloaded.messages
+    )
+    markers = [
+        message for message in reloaded.messages
+        if message.get("_error") and message.get("type") == "interrupted"
+    ]
+    assert len(markers) == 1
+    assert "**Response interrupted.**" in markers[0]["content"]
+    assert "partial output above was recovered" in markers[0]["content"]
+
+
 def test_get_session_does_not_sync_while_stream_is_still_live(monkeypatch):
     """A still-running worker owns its own writeback; do not race it.
 
@@ -884,6 +1047,7 @@ def test_sync_save_failure_does_not_mutate_session(monkeypatch):
     """
     sid = "state_sync_save_fail_sid"
     stream_id = "stream_save_fail_no_done"
+    attachment = {"name": "sample.png", "mime": "image/png", "is_image": True}
     s = Session(
         session_id=sid,
         title="Save failure",
@@ -893,7 +1057,10 @@ def test_sync_save_failure_does_not_mutate_session(monkeypatch):
         ],
         active_stream_id=stream_id,
         pending_user_message="new request",
+        pending_attachments=[attachment],
         pending_started_at=102.0,
+        pending_user_source="webui",
+        _webui_pending_user_timestamp_identity=(stream_id, 102.0),
     )
     s.save()
 
@@ -926,7 +1093,13 @@ def test_sync_save_failure_does_not_mutate_session(monkeypatch):
     assert result is False
     assert s.active_stream_id == stream_id
     assert s.pending_user_message == "new request"
+    assert s.pending_attachments == [attachment]
     assert [m["content"] for m in s.messages] == ["old question", "old answer"]
+    reloaded = Session.load(sid)
+    assert reloaded.active_stream_id == stream_id
+    assert reloaded.pending_user_message == "new request"
+    assert reloaded.pending_attachments == s.pending_attachments
+    assert [m["content"] for m in reloaded.messages] == ["old question", "old answer"]
 
 
 def test_sync_persists_recovered_state_db_tail_when_stream_dead(monkeypatch):

@@ -470,6 +470,19 @@ Expected behavior:
 
 - A session row's running indicator should reflect a real active run or a
   clearly restorable state, not stale persisted metadata alone.
+- An idle sidebar response does not prove that the browser has consumed the
+  terminal chat frame. While the current pane still owns its exact OPEN chat
+  transport, list reconciliation and cache purging must preserve that handoff.
+  Missing, connecting, closed, or mismatched transports keep the normal stale
+  state recovery path; a cached stream ID or busy flag is insufficient.
+  OPEN is not proof that a terminal frame will arrive: an idle hint must also
+  schedule bounded recovery without erasing the live scene. Before reading a
+  settled session snapshot, that recovery must check the exact stream's runtime
+  status. A runtime-active stream retains ownership even when persisted
+  `active_stream_id` and pending fields are already clear; only explicit
+  runtime inactivity permits canonical snapshot settlement. Probe failure is a
+  degraded/interrupted state, not evidence of successful completion. A newer
+  turn, replacement source, or received terminal event invalidates the request.
 - Background completion, cancellation, or failure should be represented without
   stealing the visible pane from the user.
 - Session switching should not erase pending live context, in-flight snapshots,

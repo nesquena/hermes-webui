@@ -36,6 +36,9 @@ _RESTART_REQUIRED_MESSAGE = (
 _AGENT_UPDATE_MARKER = ".hermes-update-in-progress"
 _AGENT_RECOVERY_MARKERS = (".update-incomplete", ".lazy-refresh-incomplete")
 _AGENT_UPDATE_MAX_AGE_SECONDS = 20 * 60
+# Slow local Git reads must not look like source drift after just two seconds.
+# Share one total budget across all reads; unreadable revisions fail closed.
+_GIT_REVISION_TIMEOUT_SECONDS = 10
 # The update marker holds a PID and a start timestamp (two short numeric lines).
 # Anything larger is not a legitimate marker; cap the read so a huge or growing
 # regular file can never exhaust memory on the stale-runtime request path.
@@ -63,7 +66,15 @@ def _read_agent_revision(
     *,
     module_path: Path | None = None,
 ) -> str | None:
-    """Return the loaded Agent checkout HEAD, or ``None`` if it is not tracked."""
+    """Return the tracked Agent HEAD within one total Git-read budget."""
+    deadline = time.monotonic() + _GIT_REVISION_TIMEOUT_SECONDS
+
+    def remaining_timeout() -> float:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise subprocess.TimeoutExpired("git", _GIT_REVISION_TIMEOUT_SECONDS)
+        return remaining
+
     if agent_dir is None:
         return None
 
@@ -83,7 +94,7 @@ def _read_agent_revision(
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=remaining_timeout(),
             creationflags=windows_hide_flags(),
         )
         if worktree_result.returncode != 0:
@@ -104,7 +115,7 @@ def _read_agent_revision(
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=remaining_timeout(),
             creationflags=windows_hide_flags(),
         )
         if tracked_result.returncode != 0:
@@ -114,12 +125,15 @@ def _read_agent_revision(
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=remaining_timeout(),
             creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.TimeoutExpired, RuntimeError, ValueError):
         return None
 
+    # Scheduling/process-creation overhead can exceed a subprocess timeout.
+    if time.monotonic() >= deadline:
+        return None
     revision = revision_result.stdout.strip()
     return revision if revision_result.returncode == 0 and revision else None
 
@@ -397,18 +411,29 @@ def ensure_agent_runtime_current() -> None:
     """Reject a known Git checkout change instead of mixing Python modules."""
     if _AGENT_REVISION is None:
         return
-    if (
-        _read_agent_revision(_AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH)
-        != _AGENT_REVISION
-    ):
-        # Automatic restart needs an Agent-owned success receipt bound to this
-        # transaction, final revision and healthy environment, plus an atomic
-        # handoff excluding mutations across replacement. Marker polling and a
-        # final revision read supply neither contract. Keep this path manual.
-        raise AgentRuntimeChangedError(
-            _RESTART_REQUIRED_MESSAGE,
-            agent_update_state=_agent_update_transaction_state(),
+    fresh_revision = None
+    try:
+        fresh_revision = _read_agent_revision(
+            _AGENT_SOURCE_DIR, module_path=_AGENT_MODULE_PATH
         )
+    except Exception:
+        # An unreadable revision is indistinguishable from a changed one, so a
+        # failed read must fail CLOSED like every other identity-loss shape
+        # (deleted, permission-denied, empty, corrupt, removed directory).
+        # Letting the raw exception escape would surface as an HTTP 500 instead
+        # of the typed stale-runtime response the barrier is meant to produce.
+        fresh_revision = None
+    if fresh_revision == _AGENT_REVISION:
+        return
+
+    # Automatic restart needs an Agent-owned success receipt bound to this
+    # transaction, final revision and healthy environment, plus an atomic
+    # handoff excluding mutations across replacement. Marker polling and a
+    # final revision read supply neither contract. Keep this path manual.
+    raise AgentRuntimeChangedError(
+        _RESTART_REQUIRED_MESSAGE,
+        agent_update_state=_agent_update_transaction_state(),
+    )
 
 
 def require_ai_agent_class():

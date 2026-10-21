@@ -9,6 +9,12 @@ Supported operations:
 - Task dependency links (create, delete)
 - SSE live event stream for real-time updates
 - Comments and worker dispatch integration
+
+Status transitions are routed through the Agent's own verbs (``complete_task``,
+``block_task``, ``archive_task``, ``schedule_task``, ``unblock_task``). The
+full column/status flow — including how tasks enter and leave ``scheduled``
+and the parent re-gating on the way back to ``ready`` — is documented in
+``docs/kanban.md``.
 """
 
 from __future__ import annotations
@@ -19,10 +25,11 @@ import time
 from dataclasses import asdict, is_dataclass
 from urllib.parse import parse_qs, unquote
 
+from api.agent_compat import agent_attr
 from api.helpers import bad, j
 from api.workspace import resolve_trusted_workspace
 
-BOARD_COLUMNS = ["triage", "todo", "ready", "running", "blocked", "done"]
+BOARD_COLUMNS = ["triage", "todo", "scheduled", "ready", "running", "blocked", "done"]
 _TASK_PREFIX = "/api/kanban/tasks/"
 
 
@@ -31,6 +38,11 @@ def _kb():
     from hermes_cli import kanban_db as kb
 
     return kb
+
+
+def _kb_connect(kb, board=None):
+    """Raw ``kb.connect`` (moved to ``hermes_cli.kanban_db_connect`` by the Agent split)."""
+    return agent_attr(kb, "connect", "hermes_cli.kanban_db_connect")(board=board)
 
 
 def _resolve_board(parsed):
@@ -93,13 +105,13 @@ def _conn(board=None):
     """
     kb = _kb()
     kb.init_db(board=board)
-    closing = getattr(kb, "connect_closing", None)
+    closing = agent_attr(kb, "connect_closing", "hermes_cli.kanban_db_connect", None)
     if closing is not None:
         return closing(board=board)
     # Older kanban_db builds (and lightweight test doubles) without
     # connect_closing: fall back to the raw connection; sqlite3's own
     # context manager at least scopes the transaction.
-    return kb.connect(board=board)
+    return _kb_connect(kb, board=board)
 
 
 def _obj_dict(value):
@@ -581,20 +593,29 @@ def _patch_task(conn, task_id: str, body: dict):
         if not kb.archive_task(conn, task_id):
             raise LookupError("task not found")
     elif status == "ready":
-        # If the task is currently 'blocked', use the structured unblock
-        # verb so the unblocked event fires. Otherwise it's a legitimate
+        # If the task is currently 'blocked' or 'scheduled', use the structured unblock
+        # verb so parent re-gating and events fire correctly. Otherwise it's a legitimate
         # drag-drop or click move (e.g. todo → ready, running → ready when
         # the user yanks a stuck worker back to the queue) and we use the
         # claim-aware direct status write.
         current = kb.get_task(conn, task_id)
         if not current:
             raise LookupError("task not found")
-        if current.status == "blocked":
+        if current.status in ("blocked", "scheduled"):
             if not kb.unblock_task(conn, task_id):
                 raise LookupError("task not found")
         else:
             if not _set_status_direct(conn, task_id, "ready"):
                 raise LookupError("task not found")
+    elif status == "scheduled":
+        current = kb.get_task(conn, task_id)
+        if not current:
+            raise LookupError("task not found")
+        if not hasattr(kb, "schedule_task"):
+            raise RuntimeError("scheduling requires a newer Hermes Agent")
+        reason = body.get("reason") or None
+        if not kb.schedule_task(conn, task_id, reason=reason):
+            raise ValueError(f"cannot schedule task from status: {current.status}")
     elif status in ("triage", "todo"):
         # Direct status write for drag-drop moves between non-running,
         # non-terminal columns. Uses the claim-aware helper that nulls out
@@ -872,10 +893,11 @@ def _dispatch_payload(parsed):
     kb = _kb()
     dry_run = _bool_query(parsed, "dry_run", False)
     max_spawn = _int_query(parsed, "max", 8, minimum=1, maximum=100)
-    if not hasattr(kb, "dispatch_once"):
+    dispatch_once = agent_attr(kb, "dispatch_once", "hermes_cli.kanban_db_dispatch", None)
+    if dispatch_once is None:
         raise ValueError("dispatcher is unavailable")
     with _conn(board=board) as conn:
-        result = kb.dispatch_once(conn, dry_run=dry_run, max_spawn=max_spawn)
+        result = dispatch_once(conn, dry_run=dry_run, max_spawn=max_spawn)
     if isinstance(result, dict):
         return result
     try:
@@ -939,7 +961,7 @@ def _board_counts_for_slug(slug):
     if not kb.board_exists(slug):
         return {}
     try:
-        conn = kb.connect(board=slug)
+        conn = _kb_connect(kb, board=slug)
     except Exception:
         return {}
     try:
@@ -1173,7 +1195,7 @@ def _kanban_sse_fetch_new(board, cursor):
         if board != default_slug and not kb.board_exists(board):
             return cursor, []
     try:
-        conn = kb.connect(board=board)
+        conn = _kb_connect(kb, board=board)
     except Exception:
         return cursor, []
     try:
@@ -1325,6 +1347,7 @@ def handle_kanban_get(handler, parsed) -> bool | None:
     to distinguish unmatched paths from already-responded paths (#1843).
     """
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         # Multi-board management endpoints — these do NOT take a board arg
         # because they operate on the on-disk board collection itself, not
@@ -1344,7 +1367,7 @@ def handle_kanban_get(handler, parsed) -> bool | None:
         if path == "/api/kanban/events/stream":
             return _handle_events_sse_stream(handler, parsed)
         if path.startswith(_TASK_PREFIX) and path.endswith("/log"):
-            task_id = unquote(path[len(_TASK_PREFIX):-len("/log")]).strip("/")
+            task_id = unquote(raw_path[len(_TASK_PREFIX):-len("/log")]).strip("/")
             if not task_id or "/" in task_id:
                 return False
             payload = _task_log_payload(parsed, task_id)
@@ -1352,7 +1375,7 @@ def handle_kanban_get(handler, parsed) -> bool | None:
                 return bad(handler, "task not found", status=404)
             return j(handler, payload) or True
         if path.startswith(_TASK_PREFIX):
-            task_id = unquote(path[len(_TASK_PREFIX):]).strip("/")
+            task_id = unquote(raw_path[len(_TASK_PREFIX):]).strip("/")
             if not task_id or "/" in task_id:
                 return False
             payload = _task_detail_payload(task_id, board=_resolve_board(parsed))
@@ -1377,6 +1400,7 @@ def handle_kanban_post(handler, parsed, body) -> bool | None:
     """Dispatch a Kanban POST. See ``handle_kanban_get`` for the
     three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         # Multi-board management endpoints — `_create_board_payload` and
         # `_switch_board_payload` operate on the on-disk board collection,
@@ -1386,7 +1410,7 @@ def handle_kanban_post(handler, parsed, body) -> bool | None:
         # POST /api/kanban/boards/<slug>/switch — set active board
         _BOARDS_PREFIX = "/api/kanban/boards/"
         if path.startswith(_BOARDS_PREFIX) and path.endswith("/switch"):
-            slug = unquote(path[len(_BOARDS_PREFIX):-len("/switch")]).strip("/")
+            slug = unquote(raw_path[len(_BOARDS_PREFIX):-len("/switch")]).strip("/")
             if not slug or "/" in slug:
                 return False
             return j(handler, _switch_board_payload(slug)) or True
@@ -1406,14 +1430,14 @@ def handle_kanban_post(handler, parsed, body) -> bool | None:
         if path == "/api/kanban/links/delete":
             return j(handler, _link_tasks_payload(body, unlink=True, board=board)) or True
         if path.startswith(_TASK_PREFIX) and path.endswith("/comments"):
-            task_id = path[len(_TASK_PREFIX):-len("/comments")].strip("/")
+            task_id = raw_path[len(_TASK_PREFIX):-len("/comments")].strip("/")
             return j(handler, _comment_payload(task_id, body, board=board)) or True
         for suffix, action in (("/block", "block"), ("/unblock", "unblock")):
             if path.startswith(_TASK_PREFIX) and path.endswith(suffix):
-                task_id = path[len(_TASK_PREFIX):-len(suffix)].strip("/")
+                task_id = raw_path[len(_TASK_PREFIX):-len(suffix)].strip("/")
                 return j(handler, _task_action_payload(task_id, body, action, board=board)) or True
         if path.startswith(_TASK_PREFIX) and path.endswith("/patch"):
-            task_id = path[len(_TASK_PREFIX):-len("/patch")].strip("/")
+            task_id = raw_path[len(_TASK_PREFIX):-len("/patch")].strip("/")
             return j(handler, _patch_task_payload(task_id, body, board=board)) or True
     except ImportError as exc:
         return bad(handler, f"kanban unavailable: {exc}", status=503)
@@ -1430,6 +1454,7 @@ def handle_kanban_patch(handler, parsed, body) -> bool | None:
     """Dispatch a Kanban PATCH. See ``handle_kanban_get`` for the
     three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         if path == "/api/kanban/config":
             return j(handler, _update_config_payload(body)) or True
@@ -1441,7 +1466,7 @@ def handle_kanban_patch(handler, parsed, body) -> bool | None:
         # by Opus advisor.)
         _BOARDS_PREFIX = "/api/kanban/boards/"
         if path.startswith(_BOARDS_PREFIX):
-            slug = unquote(path[len(_BOARDS_PREFIX):]).strip("/")
+            slug = unquote(raw_path[len(_BOARDS_PREFIX):]).strip("/")
             if not slug or "/" in slug:
                 return False
             return j(handler, _update_board_payload(slug, body)) or True
@@ -1451,7 +1476,7 @@ def handle_kanban_patch(handler, parsed, body) -> bool | None:
         board_b = _resolve_board_from_body(body)
         board = board_q if board_q is not None else board_b
         if path.startswith(_TASK_PREFIX):
-            task_id = unquote(path[len(_TASK_PREFIX):]).strip("/")
+            task_id = unquote(raw_path[len(_TASK_PREFIX):]).strip("/")
             if not task_id or "/" in task_id:
                 return False
             return j(handler, _patch_task_payload(task_id, body, board=board)) or True
@@ -1470,12 +1495,13 @@ def handle_kanban_delete(handler, parsed, body) -> bool | None:
     """Dispatch a Kanban DELETE. See ``handle_kanban_get`` for the
     three-valued ``True | None | False`` contract (#1843)."""
     path = parsed.path
+    raw_path = getattr(handler, "_raw_api_path", None) or parsed.path
     try:
         # Same routing reorder as PATCH: /boards/<slug> path-routed first,
         # so a stray ?board=ghost can't 404 a legitimate board archive.
         _BOARDS_PREFIX = "/api/kanban/boards/"
         if path.startswith(_BOARDS_PREFIX):
-            slug = unquote(path[len(_BOARDS_PREFIX):]).strip("/")
+            slug = unquote(raw_path[len(_BOARDS_PREFIX):]).strip("/")
             if not slug or "/" in slug:
                 return False
             return j(handler, _delete_board_payload(slug, parsed)) or True

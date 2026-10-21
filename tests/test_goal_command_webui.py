@@ -397,7 +397,7 @@ def test_goal_endpoint_sets_goal_and_starts_kickoff_stream(
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(
         routes,
         "webui_gateway_chat_enabled",
@@ -519,7 +519,7 @@ def test_goal_endpoint_adapter_keeps_full_set_text_and_legacy_payload_status(mon
     monkeypatch.setenv("HERMES_WEBUI_RUNTIME_ADAPTER", "legacy-journal")
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(
         routes,
         "_resolve_compatible_session_model_state",
@@ -671,7 +671,14 @@ def test_frontend_has_goal_slash_command_and_status_event_handler():
     assert "goal'" in MESSAGES_JS
     assert "source.addEventListener('goal'" in MESSAGES_JS
     assert "source.addEventListener('goal_continue'" in MESSAGES_JS
-    assert "['steer','interrupt','queue','terminal','goal','yolo'].includes(_pc.name)" in MESSAGES_JS
+    # #6962 added 'stop' to this busy-command passthrough list so a busy /stop
+    # cancels immediately. Assert /goal's membership rather than the exact list
+    # literal, so adding another passthrough command does not fail this test.
+    _passthrough = re.search(
+        r"if\(_pc&&\[([^\]]*)\]\.includes\(_pc\.name\)\)", MESSAGES_JS
+    )
+    assert _passthrough, "busy-command passthrough list not found in messages.js"
+    assert "'goal'" in _passthrough.group(1)
     assert "queueSessionMessage" in MESSAGES_JS
 
 
@@ -732,7 +739,7 @@ def test_goal_kickoff_forwards_explicit_model_pick_to_resolver(monkeypatch, tmp_
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
     monkeypatch.setattr(routes, "get_config", lambda: {})
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
@@ -809,7 +816,7 @@ def test_goal_kickoff_defaults_explicit_model_pick_false(monkeypatch, tmp_path):
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
     monkeypatch.setattr(routes, "get_config", lambda: {})
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
@@ -901,7 +908,7 @@ def test_goal_kickoff_stamps_explicit_pick_signature(monkeypatch, tmp_path):
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
     monkeypatch.setattr(routes, "get_session", lambda sid: FakeSession())
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
     monkeypatch.setattr(routes, "get_config", lambda: {})
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)
@@ -973,7 +980,7 @@ def test_goal_kickoff_does_not_stamp_signature_without_explicit_pick(monkeypatch
         return model, provider, False
 
     monkeypatch.setattr(webui_goals, "GoalManager", FakeGoalManager)
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda workspace, **_kw: tmp_path)
     monkeypatch.setattr(routes, "webui_gateway_chat_enabled", lambda _cfg: False)
     monkeypatch.setattr(routes, "get_config", lambda: {})
     monkeypatch.setattr(routes, "_resolve_compatible_session_model_state", fake_resolve)

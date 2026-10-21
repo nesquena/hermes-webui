@@ -47,8 +47,13 @@ def test_available_models_exposes_primary_and_fallback_badges():
     assert badges.get("@openai-codex:gpt-5.4", {}).get("label") == "Primary"
     assert badges.get("@copilot:gpt-4.1", {}).get("role") == "fallback"
     assert badges.get("@copilot:gpt-4.1", {}).get("label") == "Fallback 1"
-    assert badges.get("anthropic/claude-haiku-4.5", {}).get("role") == "fallback"
-    assert badges.get("anthropic/claude-haiku-4.5", {}).get("label") == "Fallback 2"
+    # #7290: the synthesised ``{provider}/{model}`` alias is gone — the
+    # native bare id and the ``@provider:model`` prefix are the only
+    # keys a configured entry can publish.
+    assert badges.get("claude-haiku-4.5", {}).get("role") == "fallback"
+    assert badges.get("@anthropic:claude-haiku-4.5", {}).get("role") == "fallback"
+    assert "anthropic/claude-haiku-4.5" not in badges
+    assert badges.get("@anthropic:claude-haiku-4.5", {}).get("label") == "Fallback 2"
 
 
 def test_duplicate_slash_id_primary_badge_sticks_to_matching_provider_only():

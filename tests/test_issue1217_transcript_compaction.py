@@ -336,7 +336,7 @@ def test_near_duplicate_session_arc_summary_is_not_replayed_in_context():
         {"role": "user", "content": "next question"},
     ]
 
-    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+    next_context, _protected = _dedupe_replayed_context_messages(previous_context, result_messages)
 
     assert [m["content"] for m in next_context] == [
         summary_a["content"],
@@ -363,7 +363,7 @@ def test_non_adjacent_replayed_context_block_is_not_appended_again():
         {"role": "user", "content": "next question"},
     ]
 
-    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+    next_context, _protected = _dedupe_replayed_context_messages(previous_context, result_messages)
 
     assert [m["content"] for m in next_context] == [
         "older setup",
@@ -703,7 +703,7 @@ def test_non_streaming_chat_writeback_dedupes_full_context_replay():
         {"role": "assistant", "content": "short answer"},
     ]
 
-    next_context = _dedupe_replayed_context_messages(previous_context, result_messages)
+    next_context, _protected = _dedupe_replayed_context_messages(previous_context, result_messages)
 
     assert next_context == previous_context + [
         {"role": "user", "content": "simple follow-up"},
@@ -748,7 +748,7 @@ def test_handle_chat_sync_writeback_dedupes_full_context_replay(tmp_path, monkey
     monkeypatch.setattr(routes, "title_from", models.title_from)
     monkeypatch.setattr(config, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
     monkeypatch.setattr(routes, "get_config", lambda: {"model": "test-model", "provider": "test-provider"})
-    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value: tmp_path)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda value, **_kw: tmp_path)
     monkeypatch.setattr(routes, "load_settings", lambda: {})
     monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
 

@@ -816,20 +816,26 @@ def test_stream_end_restore_attaches_projected_anchor_scene_before_render():
     filter_idx = restore.index("S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);")
     attach_idx = restore.index("_attachProjectedAnchorSceneToLastAssistant(S.messages);")
     render_idx = restore.index("syncTopbar();renderMessages({preserveScroll:true})")
-    assert carry_idx < filter_idx < attach_idx < render_idx
+    offset_idx = restore.index("_oldestIdx=session._messages_offset||0")
+    assert offset_idx < carry_idx < filter_idx < attach_idx < render_idx
+    assert "_stagedMatchesCurrentSuffix" in restore
 
 
 def test_cancel_settlement_attaches_projected_anchor_scene_before_render():
     cancel = _event_listener_body(MESSAGES_JS, "cancel")
 
     fetch_idx = cancel.index("const _nextMsgs3018=(sessionPayload.messages||[]).filter(m=>m&&m.role);")
+    offset_idx = cancel.index("_oldestIdx=sessionPayload._messages_offset||0")
     attach_idx = cancel.index("_attachProjectedAnchorSceneToLastAssistant(_nextMsgs3018);")
     carry_idx = cancel.index("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], _nextMsgs3018);")
     render_idx = cancel.index("renderMessages({preserveScroll:true});")
-    assert fetch_idx < attach_idx < carry_idx < render_idx
+    assert fetch_idx < offset_idx < attach_idx < carry_idx < render_idx
 
     embedded_idx = cancel.index("if(_applyCancelSessionPayload(_cancelSessionPayload)) return;")
-    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}`);")
+    # #7310/#7625: the HTTP fallback is a bounded tail now (full-transcript
+    # reloads were stacking on every cancel recovery); ordering contract below
+    # is unchanged.
+    fallback_get_idx = cancel.index("const data=await api(`/api/session?session_id=${encodeURIComponent(activeSid)}&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1`);")
     fallback_apply_idx = cancel.index("if(data&&data.session) _applyCancelSessionPayload(data.session);")
     assert embedded_idx < fallback_get_idx < fallback_apply_idx
 
@@ -1091,16 +1097,13 @@ def test_settled_anchor_scene_preserves_live_projected_order_before_backfill():
     overlap = _function_body(MESSAGES_JS, "_anchorSceneRowTextOverlapsExisting")
 
     projected_idx = complete.index("const projectedRows=Array.isArray(base.activity_rows)?base.activity_rows:[];")
-    ordered_idx = complete.index("const orderedRows=[];", projected_idx)
-    projected_push_idx = complete.index("orderedRows.push(row);", ordered_idx)
-    backfill_idx = complete.index("for(let idx=turnStart+1;idx<=lastAsstIndex;idx+=1)", projected_push_idx)
-    terminal_idx = complete.index("if(row&&row.role==='terminal') orderedRows.push(row);", backfill_idx)
-    replay_idx = complete.index("orderedRows.forEach((row)=>pushRow(row));", terminal_idx)
-    assert projected_idx < ordered_idx < projected_push_idx < backfill_idx < terminal_idx < replay_idx
+    phase1_idx = complete.index("// Phase 1: projected non-terminal rows")
+    phase2_idx = complete.index("// Phase 2: settled/backfill rows")
+    phase3_idx = complete.index("// Phase 3: projected terminal rows")
+    assert projected_idx < phase1_idx < phase2_idx < phase3_idx
 
     assert "const seenTextKeys=[];" in complete
     assert "_anchorSceneRowTextOverlapsExisting(textKey,seenTextKeys)" in complete
-    assert "if(isTextual&&textKey) seenTextKeys.push(textKey);" in complete
     assert "rowTextKey.includes(existing)||existing.includes(rowTextKey)" in overlap
 
 
@@ -1112,10 +1115,10 @@ def test_settled_anchor_scene_does_not_persist_running_live_activity_rows():
     assert "const hasSettledThinking=_anchorSceneMessageRowsHaveThinking(messageRows);" in complete
     assert "row=_anchorSceneSettleLiveRunningRow(row,hasSettledThinking);" in complete
     assert "String(value||'').startsWith('live-')" in live_identity
+    assert "const group=row.group&&typeof row.group==='object'?row.group:{};" in live_identity
     assert "const hasStreamOwner=!!(row.stream_id||row.run_id||identity.stream_id||identity.run_id);" in live_identity
     assert "const hasAssistantMessageIndex=group.assistant_msg_idx!==undefined&&group.assistant_msg_idx!==null;" in live_identity
     assert "return hasStreamOwner&&!hasAssistantMessageIndex;" in live_identity
-    assert "String(row.status||'').toLowerCase()!=='running'" in settle_live
     assert "if(row.role==='thinking'&&hasSettledThinking) return null;" in settle_live
     assert "const sealed={...row,status:'completed'};" in settle_live
     assert "sealed.payload={...row.payload,status:'completed'};" in settle_live

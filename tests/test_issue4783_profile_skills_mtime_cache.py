@@ -162,7 +162,7 @@ class TestAfterTTLSafetyRecompute:
         fixed_mtime_ns = 1_700_000_000_000_000_000
         past_expiry = time.time() - 1.0
         resolved = Path(profile_dir).resolve()
-        mod._SKILLS_STATS_CACHE[resolved] = (3, 5, fixed_mtime_ns, past_expiry)
+        mod._SKILLS_STATS_CACHE[resolved] = (3, 5, fixed_mtime_ns, past_expiry, None)
 
         with (
             patch.object(mod, "_compute_profile_skills_stats", return_value=(4, 6)) as mock_compute,
@@ -191,7 +191,7 @@ class TestAfterTTLChangedFilesFullRecompute:
         new_mtime_ns = 2_000_000_000_000_000_000
         past_expiry = time.time() - 1.0
         resolved = Path(profile_dir).resolve()
-        mod._SKILLS_STATS_CACHE[resolved] = (1, 2, old_mtime_ns, past_expiry)
+        mod._SKILLS_STATS_CACHE[resolved] = (1, 2, old_mtime_ns, past_expiry, None)
 
         with (
             patch.object(mod, "_compute_profile_skills_stats", return_value=(7, 9)) as mock_compute,
@@ -219,7 +219,7 @@ class TestWithinTTLChangedFilesRecompute:
         changed_mtime_ns = 2_000_000_000_000_000_000
         future_expiry = time.time() + 9999.0  # firmly WITHIN the TTL
         resolved = Path(profile_dir).resolve()
-        mod._SKILLS_STATS_CACHE[resolved] = (1, 2, old_mtime_ns, future_expiry)
+        mod._SKILLS_STATS_CACHE[resolved] = (1, 2, old_mtime_ns, future_expiry, None)
 
         with (
             patch.object(mod, "_compute_profile_skills_stats", return_value=(7, 9)) as mock_compute,
@@ -245,7 +245,7 @@ class TestConfigYamlMtimeDetected:
         old_mtime_ns = config_path.stat().st_mtime_ns
         past_expiry = time.time() - 1.0
         resolved = Path(profile_dir).resolve()
-        mod._SKILLS_STATS_CACHE[resolved] = (2, 4, old_mtime_ns, past_expiry)
+        mod._SKILLS_STATS_CACHE[resolved] = (2, 4, old_mtime_ns, past_expiry, None)
 
         # Bump config.yaml mtime
         new_mtime_ns = old_mtime_ns + 1_000_000_000  # +1 second in ns
@@ -268,7 +268,7 @@ class TestClearForcesRecompute:
         # Populate cache with a fresh (non-expired) entry
         resolved = Path(profile_dir).resolve()
         future_expiry = time.time() + 9999.0
-        mod._SKILLS_STATS_CACHE[resolved] = (3, 3, 0, future_expiry)
+        mod._SKILLS_STATS_CACHE[resolved] = (3, 3, 0, future_expiry, None)
 
         mod._SKILLS_STATS_CACHE.clear()
 
@@ -295,8 +295,8 @@ class TestNestedDeletionDetected:
         assert mod._get_profile_skills_stats(profile_dir) == (2, 2)
 
         resolved = Path(profile_dir).resolve()
-        enabled, compat, cached_mtime_ns, _ = mod._SKILLS_STATS_CACHE[resolved]
-        mod._SKILLS_STATS_CACHE[resolved] = (enabled, compat, cached_mtime_ns, time.time() - 1.0)
+        enabled, compat, cached_mtime_ns, _, cached_org = mod._SKILLS_STATS_CACHE[resolved]
+        mod._SKILLS_STATS_CACHE[resolved] = (enabled, compat, cached_mtime_ns, time.time() - 1.0, cached_org)
 
         time.sleep(0.02)
         shutil.rmtree(deleted_skill_dir)

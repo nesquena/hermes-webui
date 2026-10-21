@@ -35,3 +35,9 @@ def test_canonical_session_resolution_contract_names_entrypoints_and_outputs():
 
     missing = [term for term in required_terms if term not in text]
     assert missing == []
+
+
+def test_404_recovery_preserves_unrelated_saved_restore_target():
+    text = " ".join(RFC.read_text(encoding="utf-8").split())
+    assert "Clear route and localStorage independently" in text
+    assert "a route-only 404 must preserve a different saved ID" in text

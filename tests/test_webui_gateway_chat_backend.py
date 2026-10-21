@@ -4,8 +4,11 @@ from email.message import Message
 import json
 from pathlib import Path
 import re
+import threading
 import time
 import urllib.error
+
+import pytest
 
 import api.gateway_chat as gateway_chat
 import api.models as models
@@ -24,6 +27,7 @@ from api.gateway_chat import (
     webui_chat_backend_mode,
     webui_gateway_chat_enabled,
 )
+from api.turn_journal import derive_turn_journal_states, read_turn_journal
 
 
 def test_gateway_chat_backend_is_default_off_for_truthy_values():
@@ -329,13 +333,31 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     subscriber = channel.subscribe()
     STREAMS[stream_id] = channel
 
-    gateway_chat._run_gateway_chat_streaming(
-        s.session_id,
-        "Say hello",
-        "test-model",
-        str(tmp_path),
-        stream_id,
-        [],
+    from api import routes
+
+    monkeypatch.setattr(routes.api_config, "resolve_model_alias_runtime", lambda *_a, **_k: {
+        "alias": "sol", "model": "alias-target-model", "provider": "openai-codex",
+        "api_key": "ambient-provider-key", "base_url": "https://provider.example.test/v1",
+        "base_url_explicit": False, "credential_explicit": False,
+    })
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_enabled", lambda: False)
+    monkeypatch.setattr("api.runtime_adapter.runtime_adapter_runner_enabled", lambda: False)
+
+    def start_gateway(session, **kw):
+        gateway_chat._run_gateway_chat_streaming(
+            session.session_id, kw["msg"], kw["model"], kw["workspace"], stream_id,
+            kw["attachments"], model_provider=kw["model_provider"],
+            persisted_model=kw["persisted_model"],
+            persisted_model_provider=kw["persisted_model_provider"],
+        )
+        return {"stream_id": stream_id}
+
+    monkeypatch.setattr(routes, "_start_chat_stream_for_session", start_gateway)
+    routes._start_run(
+        s, msg="Say hello", model="alias-target-model",
+        model_provider="model-alias-profile-bound-lane", workspace=str(tmp_path),
+        attachments=[], normalized_model=False, source="webui", route="/api/chat/start",
+        gateway_chat_enabled=True,
     )
 
     saved = models.get_session(s.session_id)
@@ -345,6 +367,8 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert isinstance(saved.messages[1]["timestamp"], float)
     assert saved.messages[0]["timestamp"] < saved.messages[1]["timestamp"]
     assert saved.active_stream_id is None
+    assert saved.model == "alias-target-model"
+    assert saved.model_provider == "model-alias-profile-bound-lane"
     assert stream_id not in STREAMS
     assert captured["url"] == "http://gateway.local/v1/chat/completions"
     assert captured["headers"]["Authorization"] == "Bearer secret-token"
@@ -353,6 +377,9 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
     assert '"stream": true' in captured["body"]
     payload = json.loads(captured["body"])
     assert payload["reasoning_effort"] == "high"
+    assert payload["model"] == "alias-target-model"
+    assert payload["provider"] == "openai-codex"
+    assert "ambient-provider-key" not in captured["body"]
     # #3324: the gateway path's first system message is now the full WebUI
     # ephemeral system prompt (progress prompt + session/delivery context),
     # NOT the bare _WEBUI_PROGRESS_PROMPT — otherwise the delivery/session
@@ -394,6 +421,140 @@ def test_gateway_chat_worker_translates_sse_and_persists_session(tmp_path, monke
         "tid": "call-1",
     }) in event_pairs
     assert all(len(item) == 3 and item[2] for item in events)
+
+
+def test_gateway_chat_worker_records_turn_journal_completion(tmp_path, monkeypatch):
+    """#6366 re-gate: a successful Gateway run must record durable
+    same-stream completion evidence in the crash-safe turn journal.
+
+    The stale-cancel recovery predicate derives its completion evidence
+    from the turn journal, so a Gateway run that persisted its final
+    answer but lost the run journal's terminal write would otherwise
+    have no completion evidence at all — and recovery would re-append a
+    duplicate recovered row after the valid final answer.
+    """
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "secret-token")
+    monkeypatch.setattr(
+        gateway_chat.urllib.request,
+        "urlopen",
+        lambda req, timeout=0: FakeResponse(),
+    )
+
+    s = new_session()
+    stream_id = "stream-gateway-turn-journal-completed"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hello"
+    s.pending_attachments = []
+    s.pending_started_at = 456
+    s.save()
+    channel = create_stream_channel()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(
+        s.session_id,
+        "Say hello",
+        "test-model",
+        str(tmp_path),
+        stream_id,
+        [],
+    )
+
+    journal = read_turn_journal(s.session_id, session_dir=session_dir)
+    states, _ = derive_turn_journal_states(journal.get("events") or [])
+    stream_events = [
+        event
+        for event in states.values()
+        if str(event.get("stream_id") or "") == stream_id
+    ]
+    assert stream_events, "expected turn journal events for the gateway stream"
+    assert any(
+        event.get("event") == "completed" for event in stream_events
+    ), "the gateway success writeback must record a completed turn journal event"
+
+
+def test_gateway_chat_worker_uses_session_profile_endpoint_not_process_profile(tmp_path, monkeypatch):
+    """A fresh gateway turn must target the session's profile gateway endpoint.
+
+    With one WebUI serving several profiles against a multiplexing gateway, each
+    profile's turns belong on its own ``/p/<profile>`` route with its own key. The
+    process-wide URL/key describe whichever profile the process loaded, so using
+    them sends every profile's turns to that one profile.
+    """
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    # Process-active profile's endpoint: must NOT be used for a 'coder' session.
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", "process-profile-key")
+    resolved_for = []
+
+    def fake_endpoint_for_profile(profile_name):
+        resolved_for.append(profile_name)
+        return "http://gateway.local/p/coder", "coder-key"
+
+    monkeypatch.setattr(gateway_chat, "_gateway_endpoint_for_profile", fake_endpoint_for_profile)
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+
+    requests = []
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    def fake_urlopen(req, timeout=0):
+        requests.append(req)
+        return FakeResponse()
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    channel = MagicMock()
+    channel.put_nowait = lambda item: None
+    s = new_session()
+    s.profile = "coder"
+    stream_id = "stream-gateway-session-profile-endpoint-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hi"
+    s.pending_started_at = 333
+    s.save()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(s.session_id, "Say hi", "m", str(tmp_path), stream_id, [])
+
+    assert resolved_for == ["coder"]
+    assert requests, "the worker made no gateway request"
+    assert requests[0].full_url.startswith("http://gateway.local/p/coder/v1/")
+    assert requests[0].get_header("Authorization") == "Bearer coder-key"
 
 
 def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp_path, monkeypatch):
@@ -454,10 +615,12 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     gateway_chat._run_gateway_chat_streaming(
         s.session_id,
         "Say hello",
-        "test-model",
+        "east",
         str(tmp_path),
         stream_id,
         [],
+        persisted_model="shared-model",
+        persisted_model_provider="model-alias-profile-bound-lane",
     )
 
     apperrors = [item[1] for item in events if item[0] == "apperror"]
@@ -474,6 +637,8 @@ def test_gateway_chat_worker_classifies_terminal_provider_error_without_text(tmp
     assert context_users[-1]["timestamp"] == 222
     assert context_users[-1]["attachments"] == [{"name": "current.png"}]
     assert saved.messages[-1].get("_error") is True
+    assert saved.model == "shared-model"
+    assert saved.model_provider == "model-alias-profile-bound-lane"
 
     response_error[0] = ""
     empty_stream_id = "stream-gateway-empty-response-test"
@@ -856,6 +1021,104 @@ def test_gateway_chat_worker_emits_goal_continue_for_goal_related_turn(tmp_path,
     assert goal_continue_event[1]["message_key"] == "goal_continuing"
     assert saved.messages[-1]["role"] == "assistant"
     assert saved.messages[-1]["content"] == "goal reply"
+
+
+def test_gateway_goal_eval_keeps_runtime_active_after_success_writeback_before_done(
+    tmp_path, monkeypatch
+):
+    """Persisted idle flags can precede terminal emission while STREAMS is still active."""
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    class FakeResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def __iter__(self):
+            yield b'data: {"choices":[{"delta":{"content":"goal reply"}}]}\n\n'
+            yield b"data: [DONE]\n\n"
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gateway.local")
+    monkeypatch.setattr(
+        gateway_chat.urllib.request, "urlopen", lambda req, timeout=0: FakeResponse()
+    )
+
+    from api import goals as webui_goals
+
+    goal_entered = threading.Event()
+    release_goal = threading.Event()
+    observed = {}
+
+    monkeypatch.setattr(webui_goals, "has_active_goal", lambda *args, **kwargs: True)
+
+    def blocked_goal_eval(*args, **kwargs):
+        saved = models.get_session(s.session_id)
+        observed["active_stream_id"] = saved.active_stream_id
+        observed["pending_user_message"] = saved.pending_user_message
+        observed["stream_registered"] = stream_id in STREAMS
+        goal_entered.set()
+        assert release_goal.wait(timeout=10)
+        return {"should_continue": False, "message": "Goal checked"}
+
+    monkeypatch.setattr(webui_goals, "evaluate_goal_after_turn", blocked_goal_eval)
+
+    s = new_session()
+    stream_id = "stream-gateway-goal-runtime-window"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "finish it"
+    s.pending_attachments = []
+    s.pending_started_at = 123
+    s.save()
+    channel = create_stream_channel()
+    subscriber = channel.subscribe()
+    STREAMS[stream_id] = channel
+
+    worker = threading.Thread(
+        target=gateway_chat._run_gateway_chat_streaming,
+        args=(
+            s.session_id,
+            "finish it",
+            "test-model",
+            str(tmp_path),
+            stream_id,
+            [],
+        ),
+        kwargs={"goal_related": True},
+        daemon=True,
+    )
+    worker.start()
+    assert goal_entered.wait(timeout=10), "worker did not reach post-writeback goal evaluation"
+
+    # This is the exact authority split the browser recovery must respect:
+    # persisted session metadata already looks idle, while the runtime stream
+    # (and therefore /api/chat/stream/status) is still active and can emit
+    # goal / goal_continue / done / stream_end.
+    assert observed == {
+        "active_stream_id": None,
+        "pending_user_message": None,
+        "stream_registered": True,
+    }
+    assert stream_id in STREAMS
+    assert worker.is_alive()
+    assert not any(item[0] == "done" for item in list(subscriber.queue))
+
+    release_goal.set()
+    worker.join(timeout=10)
+    assert not worker.is_alive()
+    events = []
+    while not subscriber.empty():
+        events.append(subscriber.get_nowait())
+    names = [item[0] for item in events]
+    assert "goal" in names
+    assert "done" in names
+    assert "stream_end" in names
+    assert names.index("goal") < names.index("done") < names.index("stream_end")
 
 
 def test_gateway_chat_worker_skips_goal_judge_for_non_goal_turn(tmp_path, monkeypatch):
@@ -1596,3 +1859,280 @@ def test_gateway_worker_skips_runs_api_when_opt_in_absent():
     finally:
         with STREAMS_LOCK:
             STREAMS.pop(stream_id, None)
+
+
+def test_gateway_chat_401_hint_reports_the_session_profile_key_not_the_process_key(tmp_path, monkeypatch):
+    """A 401 on a profile's request must be explained by the key that request carried.
+
+    The worker now resolves the endpoint (URL and key) from the session's profile. The
+    HTTP error path used to ask the process environment whether a key was configured,
+    so a profile with its own key was told "set HERMES_WEBUI_GATEWAY_API_KEY" (and the
+    inverse case claimed a mismatch when the profile sent no key at all).
+    """
+    import io
+    from unittest.mock import MagicMock
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(models, "SESSIONS", OrderedDict())
+
+    # The process-wide environment has NO key; the 'coder' profile has one.
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("API_SERVER_KEY", raising=False)
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)     # the suite may set one; tests that need it set it themselves
+    monkeypatch.setattr(
+        gateway_chat, "_gateway_endpoint_for_profile",
+        lambda profile_name: ("http://gateway.local/p/coder", "coder-key"),
+    )
+    monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
+    monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
+
+    def fake_urlopen(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 401, "Unauthorized", Message(), io.BytesIO(b"{}"))
+
+    monkeypatch.setattr(gateway_chat.urllib.request, "urlopen", fake_urlopen)
+
+    events = []
+    channel = MagicMock()
+    channel.put_nowait = events.append
+    s = new_session()
+    s.profile = "coder"
+    stream_id = "stream-gateway-401-profile-key-hint-test"
+    s.active_stream_id = stream_id
+    s.pending_user_message = "Say hi"
+    s.pending_started_at = 444
+    s.save()
+    STREAMS[stream_id] = channel
+
+    gateway_chat._run_gateway_chat_streaming(s.session_id, "Say hi", "m", str(tmp_path), stream_id, [])
+
+    blob = repr(events)
+    assert "gateway_auth_error" in blob, "the 401 was not classified as an auth error"
+    # The profile DID send a key, so the hint is the "check it matches" one, never "Set ...".
+    assert "Check that HERMES_WEBUI_GATEWAY_API_KEY matches" in blob
+    assert "Set HERMES_WEBUI_GATEWAY_API_KEY to the same value" not in blob
+
+
+def _profile_homes(tmp_path, monkeypatch, envs, config_url="${GW_ROUTE}"):
+    """Throwaway profile homes whose config.yaml names the gateway URL by variable; the real resolver runs."""
+    import api.profiles as profiles
+
+    homes = {}
+    for name in envs:
+        home = tmp_path / name
+        home.mkdir()
+        (home / "config.yaml").write_text(
+            ('webui_gateway_base_url: "%s"\n' % config_url) if config_url else "{}\n", encoding="utf-8")
+        homes[name] = home
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda n: homes[str(n)])
+    monkeypatch.setattr(profiles, "get_profile_runtime_env", lambda home: dict(envs[Path(home).name]))
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_BASE_URL", raising=False)
+    monkeypatch.delenv("HERMES_WEBUI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.delenv("API_SERVER_KEY", raising=False)
+    # GW_ROUTE reaches the process env only by way of the active profile's .env, which is what this set records.
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", set(getattr(profiles, "_loaded_profile_env_keys", ())) | {"GW_ROUTE"})
+    return homes
+
+
+def test_gateway_endpoint_expands_url_variable_from_the_session_profile_env(tmp_path, monkeypatch):
+    envs = {
+        "alpha": {"GW_ROUTE": "http://gw.local/p/alpha", "API_SERVER_KEY": "alpha-key"},
+        "beta": {"GW_ROUTE": "http://gw.local/p/beta", "API_SERVER_KEY": "beta-key"},
+    }
+    _profile_homes(tmp_path, monkeypatch, envs)
+    monkeypatch.setenv("GW_ROUTE", "http://gw.local/p/PROCESS")        # the process-active profile's value
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/p/beta", "beta-key")
+    assert gateway_chat._gateway_endpoint_for_profile("alpha") == ("http://gw.local/p/alpha", "alpha-key")
+
+
+def test_gateway_endpoint_never_uses_the_process_env_for_the_url_variable(tmp_path, monkeypatch):
+    envs = {"beta": {"API_SERVER_KEY": "beta-key"}}                    # beta defines no GW_ROUTE
+    _profile_homes(tmp_path, monkeypatch, envs)
+    monkeypatch.setenv("GW_ROUTE", "http://gw.local/p/PROCESS")
+
+    with pytest.raises(RuntimeError, match="unresolved variable"):
+        gateway_chat._gateway_endpoint_for_profile("beta")
+
+
+def test_gateway_endpoint_restores_the_thread_env_state(tmp_path, monkeypatch):
+    from api.config import _thread_ctx
+
+    envs = {"beta": {"GW_ROUTE": "http://gw.local/p/beta", "API_SERVER_KEY": "k"}}
+    _profile_homes(tmp_path, monkeypatch, envs)
+    before_env = getattr(_thread_ctx, "env", {})
+    before_block = getattr(_thread_ctx, "block_process_env_fallback", False)
+    gateway_chat._gateway_endpoint_for_profile("beta")
+    assert getattr(_thread_ctx, "env", {}) == before_env
+    assert getattr(_thread_ctx, "block_process_env_fallback", False) == before_block
+
+
+def test_gateway_endpoint_keeps_the_shared_pair_for_a_profile_with_no_transport_overrides(tmp_path, monkeypatch):
+    """A globally exported URL plus API_SERVER_KEY only in the default profile's .env (so the loader recorded and
+    would strip it) must still authenticate a named profile that sets nothing of its own: the pair master sends."""
+    import api.profiles as profiles
+
+    _profile_homes(tmp_path, monkeypatch, {"beta": {"TERMINAL_CWD": "/work"}}, config_url=None)
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gw.local:8642")
+    monkeypatch.setenv("API_SERVER_KEY", "shared-root-key")
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY"})
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "shared-root-key")
+
+
+def test_gateway_endpoint_reads_the_active_profiles_env_fresh_not_the_cached_config(tmp_path, monkeypatch):
+    """Changing the active profile's .env from route A to route B must change the URL with the key, even though
+    the ambient config cache was expanded earlier."""
+    import api.profiles as profiles
+
+    envs = {"alpha": {"GW_ROUTE": "http://gw.local/p/A", "API_SERVER_KEY": "key-A"}}
+    homes = _profile_homes(tmp_path, monkeypatch, envs)
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: homes["alpha"])   # alpha is the ambient profile
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(homes["alpha"] / "config.yaml"))     # the suite pins its own; point it at alpha's
+
+    assert gateway_chat._gateway_endpoint_for_profile("alpha") == ("http://gw.local/p/A", "key-A")
+    envs["alpha"] = {"GW_ROUTE": "http://gw.local/p/B", "API_SERVER_KEY": "key-B"}
+    assert gateway_chat._gateway_endpoint_for_profile("alpha") == ("http://gw.local/p/B", "key-B")
+
+
+def _authoritative_config(path, url="http://gw.local/authoritative"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('webui_gateway_base_url: "%s"\n' % url, encoding="utf-8")
+    return path
+
+
+def test_gateway_endpoint_honours_an_external_directory_hermes_config_path_for_the_active_profile(tmp_path, monkeypatch):
+    import api.profiles as profiles
+
+    envs = {"alpha": {"API_SERVER_KEY": "alpha-key"}}
+    homes = _profile_homes(tmp_path, monkeypatch, envs, config_url="http://gw.local/WRONG")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: homes["alpha"])
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(_authoritative_config(tmp_path / "elsewhere" / "custom.yaml")))
+
+    assert gateway_chat._gateway_endpoint_for_profile("alpha") == ("http://gw.local/authoritative", "alpha-key")
+
+
+def test_gateway_endpoint_honours_a_same_home_custom_config_filename(tmp_path, monkeypatch):
+    import api.profiles as profiles
+
+    envs = {"alpha": {"API_SERVER_KEY": "alpha-key"}}
+    homes = _profile_homes(tmp_path, monkeypatch, envs, config_url="http://gw.local/WRONG")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: homes["alpha"])
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(_authoritative_config(homes["alpha"] / "custom.yaml")))
+
+    assert gateway_chat._gateway_endpoint_for_profile("alpha") == ("http://gw.local/authoritative", "alpha-key")
+
+
+def test_gateway_endpoint_does_not_let_a_divergent_profile_inherit_the_active_custom_config(tmp_path, monkeypatch):
+    import api.profiles as profiles
+
+    envs = {"alpha": {"API_SERVER_KEY": "alpha-key"}, "beta": {"API_SERVER_KEY": "beta-key"}}
+    homes = _profile_homes(tmp_path, monkeypatch, envs, config_url="http://gw.local/own")
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: homes["alpha"])
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(_authoritative_config(tmp_path / "elsewhere" / "custom.yaml")))
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/own", "beta-key")
+    assert gateway_chat._gateway_endpoint_for_profile("alpha") == ("http://gw.local/authoritative", "alpha-key")
+
+
+def _shared_gateway(monkeypatch, url="http://gw.local:8642", key="shared-root-key", launcher_key=None):
+    """The process pair: the URL from the launcher, the key from the default profile's .env (so the loader recorded it)."""
+    import api.profiles as profiles
+
+    monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", url)
+    monkeypatch.setenv("API_SERVER_KEY", key)
+    if launcher_key:
+        monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", launcher_key)
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY", "GW_ROUTE"})
+
+
+def test_gateway_endpoint_a_profile_with_the_same_url_and_no_key_keeps_the_shared_key(tmp_path, monkeypatch):
+    _profile_homes(tmp_path, monkeypatch, {"beta": {"HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw.local:8642"}}, config_url=None)
+    _shared_gateway(monkeypatch)
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "shared-root-key")
+
+
+def test_gateway_endpoint_a_key_only_profile_keeps_the_shared_url(tmp_path, monkeypatch):
+    import api.profiles as profiles
+
+    _profile_homes(tmp_path, monkeypatch, {"beta": {"API_SERVER_KEY": "beta-key"}}, config_url=None)
+    _shared_gateway(monkeypatch)
+    # the shared URL comes from the default profile's .env too, so the loader recorded it and a profile copy strips it
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY", "GW_ROUTE", "HERMES_WEBUI_GATEWAY_BASE_URL"})
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "beta-key")
+
+
+def test_gateway_endpoint_the_launcher_alias_never_outranks_the_profiles_own_key(tmp_path, monkeypatch):
+    envs = {"beta": {"HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw.local/p/beta", "API_SERVER_KEY": "beta-key"}}
+    _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
+    _shared_gateway(monkeypatch, launcher_key="launcher-key")
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/p/beta", "beta-key")
+
+
+def test_gateway_endpoint_the_shared_key_is_never_sent_to_a_different_gateway(tmp_path, monkeypatch):
+    _profile_homes(tmp_path, monkeypatch, {"beta": {"HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw.local/p/beta"}}, config_url=None)
+    _shared_gateway(monkeypatch, launcher_key="launcher-key")
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/p/beta", "")
+
+
+def test_gateway_endpoint_the_launcher_alias_still_outranks_a_profiles_api_server_key_on_the_shared_url(tmp_path, monkeypatch):
+    """On the SHARED URL the launcher's explicit alias is the key for that Gateway (docs: HERMES_WEBUI_GATEWAY_API_KEY
+    first, API_SERVER_KEY as the fallback); a profile's own API_SERVER_KEY is the key of ITS OWN Gateway and must
+    not replace it there. This includes the default profile, i.e. the single-profile deployment."""
+    envs = {"beta": {"API_SERVER_KEY": "beta-local-key"}, "default": {"API_SERVER_KEY": "local-key"}}
+    _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
+    _shared_gateway(monkeypatch, launcher_key="launcher-key")
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "launcher-key")
+    assert gateway_chat._gateway_endpoint_for_profile("default") == ("http://gw.local:8642", "launcher-key")
+
+
+def _root_is_the_process_profile(monkeypatch, homes, process="default"):
+    import api.profiles as profiles
+
+    named = {**homes, "": homes["default"]}
+    monkeypatch.setattr(profiles, "get_hermes_home_for_profile", lambda n: named[str(n)])
+    monkeypatch.setattr(profiles, "get_process_profile_home", lambda: homes[process])
+
+
+def test_gateway_endpoint_an_alias_from_the_root_env_is_the_shared_alias_for_a_named_profile(tmp_path, monkeypatch):
+    """The process profile is the root one, so HERMES_WEBUI_GATEWAY_API_KEY in os.environ came from ~/.hermes/.env
+    (the loader recorded it) and is the shared alias; a named profile carrying a cloned API_SERVER_KEY must not
+    replace it on the shared URL."""
+    import api.profiles as profiles
+
+    envs = {"beta": {"API_SERVER_KEY": "local-key"}, "default": {"API_SERVER_KEY": "local-key"}}
+    homes = _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
+    _shared_gateway(monkeypatch, launcher_key="root-alias")
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY", "HERMES_WEBUI_GATEWAY_API_KEY"})
+    _root_is_the_process_profile(monkeypatch, homes)
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "root-alias")
+    assert gateway_chat._gateway_endpoint_for_profile("default") == ("http://gw.local:8642", "root-alias")
+
+
+def test_gateway_endpoint_an_alias_mirrored_from_a_named_active_profile_is_not_shared(tmp_path, monkeypatch):
+    import api.profiles as profiles
+
+    envs = {"beta": {"API_SERVER_KEY": "beta-local-key"}, "alpha": {"HERMES_WEBUI_GATEWAY_API_KEY": "alpha-alias"},
+            "default": {}}
+    homes = _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
+    _shared_gateway(monkeypatch, launcher_key="alpha-alias")
+    monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY", "HERMES_WEBUI_GATEWAY_API_KEY"})
+    _root_is_the_process_profile(monkeypatch, homes, process="alpha")
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "beta-local-key")
+
+
+def test_gateway_endpoint_a_profiles_own_alias_still_wins_on_the_shared_url(tmp_path, monkeypatch):
+    envs = {"beta": {"HERMES_WEBUI_GATEWAY_API_KEY": "beta-alias", "API_SERVER_KEY": "beta-local-key"}}
+    _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
+    _shared_gateway(monkeypatch, launcher_key="launcher-key")
+
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "beta-alias")

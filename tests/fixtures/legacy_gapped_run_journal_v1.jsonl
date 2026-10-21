@@ -1,0 +1,3 @@
+{"version":1,"event_id":"legacy-master-run:1","seq":1,"run_id":"legacy-master-run","session_id":"legacy-master-session","event":"token","type":"token","created_at":1000.0,"terminal":false,"terminal_state":null,"payload":{"text":"Legacy durable prefix"}}
+{"version":1,"event_id":"legacy-master-run:3","seq":3,"run_id":"legacy-master-run","session_id":"legacy-master-session","event":"token","type":"token","created_at":1000.0,"terminal":false,"terminal_state":null,"payload":{"text":" and continuation"}}
+{"version":1,"event_id":"legacy-master-run:4","seq":4,"run_id":"legacy-master-run","session_id":"legacy-master-session","event":"done","type":"done","created_at":1000.0,"terminal":true,"terminal_state":"completed","payload":{}}

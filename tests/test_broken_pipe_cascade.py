@@ -227,14 +227,14 @@ class TestServerDisconnectHandling(unittest.TestCase):
         # Patch handle_get to raise BrokenPipeError
         import server as _server_mod
         orig_handle_get = _server_mod.handle_get
-        orig_check_auth = _server_mod.check_auth
+        orig_check_auth = _server_mod.check_auth_or_close
         _server_mod.handle_get = _fake_handle_get
-        _server_mod.check_auth = lambda h, p: True
+        _server_mod.check_auth_or_close = lambda h, p: True
         try:
             Handler.do_GET(handler)
         finally:
             _server_mod.handle_get = orig_handle_get
-            _server_mod.check_auth = orig_check_auth
+            _server_mod.check_auth_or_close = orig_check_auth
 
         # send_response should NEVER be called for the 500 — client is gone
         handler.send_response.assert_not_called()
@@ -248,12 +248,12 @@ class TestServerDisconnectHandling(unittest.TestCase):
             raise self._route_raises
 
         import server as _server_mod
-        orig_check_auth = _server_mod.check_auth
-        _server_mod.check_auth = lambda h, p: True
+        orig_check_auth = _server_mod.check_auth_or_close
+        _server_mod.check_auth_or_close = lambda h, p: True
         try:
             Handler._handle_write(handler, _fake_route)
         finally:
-            _server_mod.check_auth = orig_check_auth
+            _server_mod.check_auth_or_close = orig_check_auth
 
         handler.send_response.assert_not_called()
 
@@ -286,9 +286,9 @@ class TestServerDisconnectHandling(unittest.TestCase):
 
         import server as _server_mod
         orig_handle_get = _server_mod.handle_get
-        orig_check_auth = _server_mod.check_auth
+        orig_check_auth = _server_mod.check_auth_or_close
         _server_mod.handle_get = _fake_handle_get
-        _server_mod.check_auth = lambda h, p: True
+        _server_mod.check_auth_or_close = lambda h, p: True
 
         closed_stdout = io.StringIO()
         closed_stdout.close()
@@ -299,7 +299,7 @@ class TestServerDisconnectHandling(unittest.TestCase):
         finally:
             sys.stdout = original_stdout
             _server_mod.handle_get = orig_handle_get
-            _server_mod.check_auth = orig_check_auth
+            _server_mod.check_auth_or_close = orig_check_auth
 
         handler.send_response.assert_called_once_with(500)
 
@@ -312,14 +312,14 @@ class TestServerDisconnectHandling(unittest.TestCase):
 
         import server as _server_mod
         orig_handle_get = _server_mod.handle_get
-        orig_check_auth = _server_mod.check_auth
+        orig_check_auth = _server_mod.check_auth_or_close
         _server_mod.handle_get = _fake_handle_get
-        _server_mod.check_auth = lambda h, p: True
+        _server_mod.check_auth_or_close = lambda h, p: True
         try:
             Handler.do_GET(handler)
         finally:
             _server_mod.handle_get = orig_handle_get
-            _server_mod.check_auth = orig_check_auth
+            _server_mod.check_auth_or_close = orig_check_auth
 
         # Should send 500 for real errors
         handler.send_response.assert_called_once_with(500)
@@ -334,14 +334,14 @@ class TestServerDisconnectHandling(unittest.TestCase):
 
         import server as _server_mod
         orig_handle_get = _server_mod.handle_get
-        orig_check_auth = _server_mod.check_auth
+        orig_check_auth = _server_mod.check_auth_or_close
         _server_mod.handle_get = _fake_handle_get
-        _server_mod.check_auth = lambda h, p: True
+        _server_mod.check_auth_or_close = lambda h, p: True
         try:
             Handler.do_GET(handler)
         finally:
             _server_mod.handle_get = orig_handle_get
-            _server_mod.check_auth = orig_check_auth
+            _server_mod.check_auth_or_close = orig_check_auth
 
         handler.send_response.assert_not_called()
 
@@ -355,14 +355,14 @@ class TestServerDisconnectHandling(unittest.TestCase):
 
         import server as _server_mod
         orig_handle_get = _server_mod.handle_get
-        orig_check_auth = _server_mod.check_auth
+        orig_check_auth = _server_mod.check_auth_or_close
         _server_mod.handle_get = _fake_handle_get
-        _server_mod.check_auth = lambda h, p: True
+        _server_mod.check_auth_or_close = lambda h, p: True
         try:
             Handler.do_GET(handler)
         finally:
             _server_mod.handle_get = orig_handle_get
-            _server_mod.check_auth = orig_check_auth
+            _server_mod.check_auth_or_close = orig_check_auth
 
         handler.send_response.assert_not_called()
 
@@ -406,14 +406,14 @@ class TestServer500ResponseSafety(unittest.TestCase):
 
         import server as _server_mod
         orig_handle_get = _server_mod.handle_get
-        orig_check_auth = _server_mod.check_auth
+        orig_check_auth = _server_mod.check_auth_or_close
         _server_mod.handle_get = _fake_handle_get
-        _server_mod.check_auth = lambda h, p: True
+        _server_mod.check_auth_or_close = lambda h, p: True
         try:
             Handler.do_GET(handler)
         finally:
             _server_mod.handle_get = orig_handle_get
-            _server_mod.check_auth = orig_check_auth
+            _server_mod.check_auth_or_close = orig_check_auth
 
         # send_response WAS called (we tried to send 500), but write failed
         handler.send_response.assert_called_once_with(500)
@@ -431,14 +431,14 @@ class TestServer500ResponseSafety(unittest.TestCase):
 
         import server as _server_mod
         orig_handle_get = _server_mod.handle_get
-        orig_check_auth = _server_mod.check_auth
+        orig_check_auth = _server_mod.check_auth_or_close
         _server_mod.handle_get = _fake_handle_get
-        _server_mod.check_auth = lambda h, p: True
+        _server_mod.check_auth_or_close = lambda h, p: True
         try:
             Handler.do_GET(handler)
         finally:
             _server_mod.handle_get = orig_handle_get
-            _server_mod.check_auth = orig_check_auth
+            _server_mod.check_auth_or_close = orig_check_auth
 
         # send_response WAS called (we tried to send 500), but write failed
         handler.send_response.assert_called_once_with(500)
