@@ -660,6 +660,7 @@ def main() -> None:
         from api.background_process import start_drain_thread
         if start_drain_thread():
             print('[ok] bg_task_complete drain thread started', flush=True)
+        from api.gateway_delegation_wakeup import start_gateway_delegation_poller; start_gateway_delegation_poller()
     except Exception as e:
         print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
 
@@ -745,8 +746,8 @@ def main() -> None:
         except Exception:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
         try:
-            from api.background_process import stop_drain_thread
-            stop_drain_thread()
+            from api.gateway_delegation_wakeup import stop_gateway_delegation_poller; stop_gateway_delegation_poller()
+            from api.background_process import stop_drain_thread; stop_drain_thread()
         except Exception:
             logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
         try:

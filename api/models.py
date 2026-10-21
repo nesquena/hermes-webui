@@ -1722,6 +1722,8 @@ class Session:
                  share_token=None,
                  share_created_at=None,
                  gateway_run=None,
+                 delegation_reservation=None,
+                 delegation_cutoff_ts=None,
                  **kwargs):
         self.session_id = session_id or uuid.uuid4().hex[:12]
         self.title = title
@@ -1845,6 +1847,10 @@ class Session:
         self.share_token = str(share_token).strip() if share_token else None
         self.share_created_at = share_created_at
         self.gateway_run = gateway_run if isinstance(gateway_run, dict) else None
+        # Gateway delegation rows leased for this session's next accepted turn (api.gateway_delegation_wakeup).
+        self.delegation_reservation = delegation_reservation if isinstance(delegation_reservation, dict) else None
+        # Last clear/truncation: Gateway delegation rows written before it are never woken into context.
+        self.delegation_cutoff_ts = delegation_cutoff_ts if isinstance(delegation_cutoff_ts, (int, float)) else None
         # #5854: a compact fingerprint of anchor_activity_scenes ({scene_key:
         # updated_at}) persisted BEFORE the messages array so the sidebar-poll
         # freshness check can compare scene freshness without parsing the full
@@ -1946,7 +1952,7 @@ class Session:
             'enabled_toolsets', 'composer_draft',
             'process_wakeup_pause',
             'share_token', 'share_created_at',
-            'gateway_run',
+            'gateway_run', 'delegation_reservation', 'delegation_cutoff_ts',
         ]
         guarded_messages, exact_replay_rows_removed = _deduplicate_exact_stable_messages(self.messages)
         if exact_replay_rows_removed:
