@@ -335,7 +335,135 @@ def _gateway_deployment_owner_base_url(
     return _gateway_base_url(owner_config, environ=deployment)
 
 
-def _gateway_request_environ(profile_environ: dict[str, str] | None, config_data=None):
+def _process_profile_is_root() -> bool:
+    """Whether the stable process owner is the root/default profile."""
+    from api import profiles as _profiles
+    from api.workspace import _safe_resolve
+
+    try:
+        return _safe_resolve(Path(_profiles.get_process_profile_home()).expanduser()) == _safe_resolve(
+            Path(_profiles.get_hermes_home_for_profile("")).expanduser()
+        )
+    except Exception:
+        return False
+
+
+def _same_profile_home(a, b) -> bool:
+    from api.workspace import _safe_resolve
+
+    return _safe_resolve(Path(a).expanduser()) == _safe_resolve(Path(b).expanduser())
+
+
+def _env_value_is_profile_sourced(profiles_mod, key, value) -> bool:
+    """Whether a deployment-snapshot value came from a profile dotenv (#8432)."""
+    value = str(value or "").strip()
+    if not value:
+        return False
+    if key in (getattr(profiles_mod, "_loaded_profile_env_keys", ()) or ()):
+        return True
+    launch_env = getattr(profiles_mod, "_INITIAL_HERMES_HOME_DOTENV", None) or {}
+    if str(launch_env.get(key) or "").strip() != value:
+        return False
+    launch_home = str(getattr(profiles_mod, "_INITIAL_HERMES_HOME", "") or "").strip()
+    try:
+        return not _same_profile_home(launch_home, profiles_mod.get_hermes_home_for_profile(""))
+    except Exception:
+        return True
+
+
+def _config_url_may_belong_to_a_profile(
+    profiles_mod,
+    process_home,
+    *,
+    owner_environ=None,
+) -> bool:
+    """Fail closed unless the owner URL is from an operator config outside every profile."""
+    import re as _re
+
+    from api.config import _load_yaml_config_file_raw
+    from api.workspace import _safe_resolve
+
+    owner_environ = (
+        profiles_mod.get_process_owner_environ()
+        if owner_environ is None
+        else owner_environ
+    )
+    override = str(owner_environ.get("HERMES_CONFIG_PATH") or "").strip()
+    if not override or _env_value_is_profile_sourced(profiles_mod, "HERMES_CONFIG_PATH", override):
+        return True
+    cfg_dir = _safe_resolve(Path(override).expanduser()).parent
+    try:
+        own_home = _safe_resolve(Path(process_home).expanduser())
+        if cfg_dir == own_home or own_home in cfg_dir.parents:
+            return True
+    except Exception:
+        return True
+    try:
+        roots = [_safe_resolve(Path(profiles_mod.get_hermes_home_for_profile("")).expanduser() / "profiles")]
+        canonical = getattr(profiles_mod, "_profiles_root", None)
+        if callable(canonical):
+            roots.append(_safe_resolve(Path(canonical())))
+    except Exception:
+        return True
+    if any(root in cfg_dir.parents for root in roots):
+        return True
+    raw = _load_yaml_config_file_raw(Path(override).expanduser(), _copy=False)
+    raw_url = str(raw.get("webui_gateway_base_url") or "") if isinstance(raw, dict) else ""
+    for ref in _re.findall(r"\$\{([^}]+)\}", raw_url):
+        name = ref.split(":-", 1)[0].strip()
+        value = owner_environ.get(name)
+        if value is not None and _env_value_is_profile_sourced(profiles_mod, name, value):
+            return True
+    return False
+
+
+def _shared_url_may_belong_to_process_profile(
+    session_home,
+    *,
+    deployment=None,
+    owner_config=None,
+    owner_environ=None,
+) -> bool:
+    """Whether the stable deployment URL may actually be the named owner's URL (#8432)."""
+    from api import profiles as _profiles
+
+    if _process_profile_is_root():
+        return False
+    try:
+        process_home = _profiles.get_process_profile_home()
+        if _same_profile_home(session_home, process_home):
+            return False
+    except Exception:
+        process_home = None
+    deployment = _GATEWAY_DEPLOYMENT_ENV if deployment is None else deployment
+    raw_env_url = str(deployment.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    try:
+        if raw_env_url:
+            return _env_value_is_profile_sourced(_profiles, _WEBUI_GATEWAY_BASE_URL_ENV, raw_env_url)
+        owner_config = (
+            _gateway_deployment_owner_config()
+            if owner_config is None
+            else owner_config
+        )
+        if not str(owner_config.get("webui_gateway_base_url") or "").strip():
+            return False
+        if process_home is None:
+            return True
+        return _config_url_may_belong_to_a_profile(
+            _profiles,
+            process_home,
+            owner_environ=owner_environ,
+        )
+    except Exception:
+        return True
+
+
+def _gateway_request_environ(
+    profile_environ: dict[str, str] | None,
+    config_data=None,
+    *,
+    profile_home=None,
+):
     """Return deployment Gateway settings overlaid by one named profile."""
     if profile_environ is None:
         return None
@@ -398,7 +526,19 @@ def _gateway_request_environ(profile_environ: dict[str, str] | None, config_data
         _gateway_endpoint_identity(selected_url)
         != _gateway_endpoint_identity(effective_deployment_url)
     )
-    if dedicated_url:
+    key_only_profile_on_named_owner_url = bool(
+        profile_home is not None
+        and not str(profile_environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+        and not str(session_config.get("webui_gateway_base_url") or "").strip()
+        and (profile_canonical or profile_alias)
+        and _shared_url_may_belong_to_process_profile(profile_home)
+    )
+    if key_only_profile_on_named_owner_url:
+        # The deployment snapshot is one stable URL/key pair. Never combine a
+        # different profile's key with a URL that may belong to the named
+        # process owner (#8432).
+        resolved_key = _gateway_api_key(deployment)
+    elif dedicated_url:
         # A profile-selected endpoint must never inherit the deployment
         # receiver's secret. It gets a profile-owned key or no Authorization
         # header at all.
@@ -641,7 +781,7 @@ def _gateway_request_settings_for_session(
     """Resolve Agent-facing request settings in the session's profile scope."""
     from api.config import _main_model_request_overrides, get_config_snapshot
 
-    def _resolve(environ):
+    def _resolve(environ, profile_home):
         # get_config_snapshot() copies under the cache lock. get_config()
         # returns the one process-global mutable _cfg_cache, which a
         # concurrent cross-profile read clears and refills in place — a bare
@@ -650,7 +790,9 @@ def _gateway_request_settings_for_session(
         # size during iteration").
         cfg = get_config_snapshot()
         environ, resolved_base_url, resolved_api_key = _gateway_profile_endpoint(
-            environ, config_data=cfg
+            environ,
+            config_data=cfg,
+            profile_home=profile_home,
         )
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
@@ -682,14 +824,16 @@ def _gateway_request_settings_for_session(
     # profile-owned env yielded here, never a mirror another request thread
     # pushed into os.environ (see profile_scope_for_request_read).
     from api.profiles import profile_scope_for_request_read
+    from api.profiles import get_hermes_home_for_profile
 
     profile_name = str(getattr(session, "profile", "") or "").strip()
+    profile_home = get_hermes_home_for_profile(profile_name)
     with profile_scope_for_request_read(
         profile_name,
         "gateway chat request settings",
         logger_override=logger,
     ) as environ:
-        return _resolve(environ)
+        return _resolve(environ, profile_home)
 
 
 def _gateway_session_yolo_enabled(session_id: str) -> bool:
@@ -2248,7 +2392,7 @@ def _profile_config_path(home):
     return Path(home) / "config.yaml"
 
 
-def _gateway_profile_endpoint(profile_environ, *, config_data=None):
+def _gateway_profile_endpoint(profile_environ, *, config_data=None, profile_home=None):
     """Resolve one profile's effective request environment, URL and key.
 
     New turns and restart recovery must cross the same endpoint-identity and
@@ -2256,7 +2400,11 @@ def _gateway_profile_endpoint(profile_environ, *, config_data=None):
     falling back to the former raw URL-string comparison.
     """
     config_data = config_data if isinstance(config_data, dict) else {}
-    environ = _gateway_request_environ(profile_environ, config_data=config_data)
+    environ = _gateway_request_environ(
+        profile_environ,
+        config_data=config_data,
+        profile_home=profile_home,
+    )
     return (
         environ,
         _gateway_base_url(config_data, environ=environ),
@@ -2265,16 +2413,30 @@ def _gateway_profile_endpoint(profile_environ, *, config_data=None):
 
 
 def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
-    """Resolve a persisted run's profile through the live-request resolver."""
+    """Resolve the persisted run's profile with the released provenance guard."""
     from api import profiles as _profiles
-    from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx
+    from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx, get_config
+
+    shared_config = get_config()
+    shared_url = _gateway_base_url(shared_config, os.environ)
+    shared_key = _gateway_api_key(os.environ)
 
     home = Path(_profiles.get_hermes_home_for_profile(str(profile_name or "").strip()))
     own_env = _profiles.filter_runtime_env_for_gateway_parity(_profiles.get_profile_runtime_env(home))
     raw_cfg = _load_yaml_config_file_raw(_profile_config_path(home), _copy=False)
-    raw_cfg = dict(raw_cfg) if isinstance(raw_cfg, dict) else {}
     own_url_cfg = raw_cfg.get("webui_gateway_base_url") if isinstance(raw_cfg, dict) else None
-    if own_url_cfg:
+    own_url_env = str(own_env.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    own_alias = str(own_env.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    own_key = own_alias or str(own_env.get("API_SERVER_KEY") or "").strip()
+    shared_alias = str(os.environ.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+    if _WEBUI_GATEWAY_API_KEY_ENV in _profiles._loaded_profile_env_keys and not _process_profile_is_root():
+        shared_alias = ""
+
+    if not (own_url_env or own_url_cfg or own_key):
+        return shared_url, shared_key
+
+    url = shared_url
+    if own_url_env or own_url_cfg:
         environ = {k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys}
         environ.update(own_env)
         previous_env = getattr(_thread_ctx, "env", {})
@@ -2286,20 +2448,31 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
         finally:
             _thread_ctx.env = previous_env
             _thread_ctx.block_process_env_fallback = previous_block
-        raw_cfg["webui_gateway_base_url"] = expanded_url
-
-    _, base_url, api_key = _gateway_profile_endpoint(own_env, config_data=raw_cfg)
-    # The check runs on the URL this profile would actually dial, after the
-    # environment overlay: an unresolved config placeholder that the profile's
-    # own explicit environment URL overrides is unused and must not fail
-    # recovery (Greptile P1, 2026-10-16). Only a final URL that is still
-    # unresolved is an error.
-    if "${" in str(base_url or ""):
-        raise RuntimeError(
-            f"gateway URL for profile {profile_name or 'default'!r} still contains an unresolved variable "
-            f"({base_url}); set it in that profile's .env"
+        url_env = own_url_env or str(environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+        url = _gateway_base_url(
+            {"webui_gateway_base_url": expanded_url} if expanded_url else {},
+            {_WEBUI_GATEWAY_BASE_URL_ENV: url_env} if url_env else {},
         )
-    return base_url, api_key
+        if "${" in url:
+            raise RuntimeError(
+                f"gateway URL for profile {profile_name or 'default'!r} still contains an unresolved variable "
+                f"({url}); set it in that profile's .env"
+            )
+    if _gateway_endpoint_identity(url) != _gateway_endpoint_identity(shared_url):
+        return url, own_key
+    if (
+        not own_url_env
+        and not own_url_cfg
+        and own_key
+        and _shared_url_may_belong_to_process_profile(
+            home,
+            deployment=os.environ,
+            owner_config=shared_config,
+            owner_environ=os.environ,
+        )
+    ):
+        return shared_url, shared_key
+    return url, (own_alias or shared_alias or own_key or shared_key)
 
 
 def _gateway_config_for_profile(profile_name) -> dict | None:

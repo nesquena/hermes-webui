@@ -49,6 +49,8 @@
 
 ### Security
 
+- **Gateway chat no longer sends one profile's Gateway key to another profile's Gateway.** When the WebUI runs on a named profile whose `.env` sets its own Gateway URL, a session on a different profile that sets only a Gateway key (no URL of its own) sent that key to the first profile's Gateway, so the request failed with 401 or exposed the key to the wrong server. Such a profile now uses the WebUI's own Gateway URL and key together, which is what v0.52.492 and earlier sent. Profiles that set their own `HERMES_WEBUI_GATEWAY_BASE_URL`, shared operator configuration and launcher-exported URLs behave as before. To give a profile its own Gateway, set its own `HERMES_WEBUI_GATEWAY_BASE_URL`. (#8435, fixes #8432)
+
 - **Update timeout messages never echo credentials.** When an in-app update's fetch times out, the message names the cancelled operation; that operation text now goes through the same credential scrub as every other update diagnostic, so a remote URL with embedded userinfo or a token would be shown redacted. The message is unchanged for the fetches the updater runs today. Thanks @pcsokonay. (#8415)
 
 - **Pressing Enter on the approval card's Deny button denies.** While a tool approval was pending, Enter on any focused
@@ -64,6 +66,10 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **Agent oneshot runs no longer push your conversations out of the sidebar.** `hermes -z` one-off runs are small and numerous; an agent delegating through them filled the 20-row interactive sidebar window and hid real Desktop sessions. Oneshot runs are now treated like the other background sources (kept out of that window, still listed with the oneshot source filter), while an opened oneshot session stays fully usable: it is looked up by id rather than from the newest 20, the Files pane lists its workspace under the profile that owns it (with that profile's workspace trust checks), and an older oneshot filed under a project keeps resolving as before. (#8349, fixes #8265, thanks @balabommablock-cpu)
+
+- **Agent session titles come from what you typed, not the workspace prefix.** With a workspace attached, the Agent's own auto-title (the one stored in `state.db`) was generated from the model input, so sessions could be titled `[Workspace::v1: /home/user/project]`. WebUI now passes the submitted prompt as the Agent's title input on the first send, on both credential self-heal retries and on the synchronous `POST /api/chat` route; the model still receives the workspace context. Older Agents without the setting are called exactly as before. Thanks @mickek. (#8436)
 
 - **Gateway chat: finished background delegations can wake the agent.** With the Gateway chat backend (`HERMES_WEBUI_CHAT_BACKEND=gateway`), an `[ASYNC DELEGATION COMPLETE]` result landed in history but nothing happened until you typed again. The WebUI now picks those completion rows up and starts the wakeup turn itself, reserving each row through the Agent's own delivery API so a result is folded exactly once (by the wakeup or by your next turn, never both); results from turns you cleared or rewound are retired instead of replayed. This turns on only when the installed Hermes Agent provides the delivery reserve/commit API; on older Agent builds it stays off and logs that it is inactive. Thanks @carlotestor. (#7901)
 

@@ -72,6 +72,19 @@ manually titled. Image-only or metadata-only content does not provide title
 text. Existing manual-title protection and the title-generation setting still
 apply; this cleanup does not rewrite the transcript or native image parts.
 
+The Agent's separate `state.db` auto-title receives the exact submitted prompt
+through its `title_user_message` argument, when the installed Agent supports it.
+Workspace prefixes, injected process notifications, and native image parts
+remain in the model-facing input but do not become the Agent's title source.
+Text the browser itself puts into the prompt (an `[Attached files: ...]` suffix,
+or "I've uploaded N file(s): ..." for a file-only send) is part of the submitted
+prompt, so it can still reach the title. The shared invocation builder applies
+this to the initial call and self-heal retries, and the synchronous
+`POST /api/chat` route passes the same argument.
+An empty submitted prompt explicitly supplies an empty title input rather than
+falling back to workspace metadata. Older Agents without the argument remain
+callable, but need an Agent upgrade to use this title-source separation.
+
 Automatic title-generation LLM calls honor the active Hermes profile's
 `auxiliary.title_generation.enabled` setting (default: `true`):
 
@@ -329,6 +342,7 @@ A turn uses the gateway URL and key of the **session's own profile**, not those 
 - **A profile can override the URL and the key independently.** The half it does not set comes from the shared pair above. A profile's own URL is `HERMES_WEBUI_GATEWAY_BASE_URL` in its `.env`, or `webui_gateway_base_url` in its `config.yaml` (an exported `HERMES_WEBUI_GATEWAY_BASE_URL` takes precedence over `config.yaml`); a profile with no URL of its own keeps the shared URL. A profile's own key is `HERMES_WEBUI_GATEWAY_API_KEY` or `API_SERVER_KEY` in its `.env`.
 - **The shared key is only ever sent to the shared Gateway.** On a URL that is not the shared one, a profile sends its own key or none, never the launcher's or the shared key. On the shared URL the order is: the profile's own `HERMES_WEBUI_GATEWAY_API_KEY`, then the shared `HERMES_WEBUI_GATEWAY_API_KEY` (exported by the launcher, or set in the root profile's `~/.hermes/.env`), then the profile's `API_SERVER_KEY` (the key of its own Gateway), then the shared key. A global `HERMES_WEBUI_GATEWAY_API_KEY` combined with per-profile `HERMES_WEBUI_GATEWAY_API_KEY` values therefore works: each profile with its own alias sends that alias.
 - A `${VAR}` in a profile's `webui_gateway_base_url` is expanded from that profile's `.env`, read fresh from the file on every turn, plus any launcher export that did not come from another profile's `.env`. If the variable is not set anywhere, the turn ends with an error naming the unresolved variable and no request is sent.
+- **When the WebUI process itself runs on a named profile** (the profile it starts on, from the sticky `active_profile` or an isolated profile, is not the default one), the process environment and ambient config carry that profile's own `.env` and `config.yaml`, so the "shared" URL may really be that profile's Gateway. A profile that sets a key but no URL is then never paired with that URL: it uses the process profile's own URL and key together, exactly as earlier releases sent every turn. The documented shared-URL behaviour above applies only when the URL is provably the launcher's: an exported `HERMES_WEBUI_GATEWAY_BASE_URL` that no profile `.env` supplied (not mirrored from the active profile, and not the value a launcher such as `ctl.sh` sourced from a named `HERMES_HOME`), or an operator `HERMES_CONFIG_PATH` file outside every profile home whose URL does not take a `${VAR}` from a profile's `.env`. To give such a profile its own Gateway, set its own `HERMES_WEBUI_GATEWAY_BASE_URL` (#8432).
 
 The bridge is best used by operators who already run Hermes Gateway/API Server
 locally and want browser-originated chat to use the same runtime/tool path as
