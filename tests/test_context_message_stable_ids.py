@@ -90,7 +90,7 @@ def test_both_arrays_share_id_for_same_logical_row():
 
     # --- context path (mirrors streaming.py commit site) ---
     next_ctx = _restore_reasoning_metadata(prev_context, result_messages)
-    next_ctx = _dedupe_replayed_context_messages(prev_context, next_ctx, "hello")
+    next_ctx, _protected = _dedupe_replayed_context_messages(prev_context, next_ctx, "hello")
     _assign_stable_message_ids(result_messages, prev_display, prev_context)
     context_out = _deduplicate_context_messages(next_ctx)
 

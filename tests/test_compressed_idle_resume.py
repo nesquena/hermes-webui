@@ -189,13 +189,14 @@ const calls=[];
 const stopApprovalPolling=()=>{},stopClarifyPolling=()=>{},removeThinking=()=>{},setBusy=()=>{},setComposerStatus=()=>{},showToast=()=>{};
 const loadSession=async sid=>{calls.push(['load',sid]);S.session={session_id:sid}};
 const _restoreComposerDraftAfterFailedSend=(...args)=>calls.push(['restore',...args]);
+const _normalizeGoalContinuationId=id=>String(id||'').trim();
 const api=()=>{throw Error('must not repost')};
 (async()=>{
 const err={status:409,body:JSON.stringify({code:'session_rotated',continuation_session_id:'new'})};
 const files=[{name:'drawing.png'}], promise=Promise.resolve();
 assert.equal(await _recoverCompressedSend(err,'old','conclusion?',files,promise),true);
 assert.deepEqual(calls[0],['load','new']);
-assert.deepEqual(calls[1],['restore','conclusion?',files,'new',promise]);
+assert.deepEqual(calls[1],['restore','conclusion?',files,'new',promise,'']);
 assert.equal(INFLIGHT.old,undefined);
 assert.equal(await _recoverCompressedSend({status:500},'new','x',[],promise),false);
 assert.equal(await _recoverCompressedSend(err,'old','x',[],promise),false);
@@ -214,6 +215,9 @@ const S={session:{session_id:'unrelated'},pendingFiles:[]};
 const $=()=>{throw Error('unrelated visible composer must not be touched')};
 const calls=[];
 const _saveComposerDraftNow=(...args)=>calls.push(args);
+const _normalizeGoalContinuationId=id=>String(id||'').trim();
+const _setRestoredGoalContinuationDraft=()=>{throw Error('unrelated visible composer must not touch a draft marker')};
+const _clearRestoredGoalContinuationDraft=()=>{};
 (async()=>{
 const files=[{name:'drawing.png',path:'/uploads/drawing.png'}];
 _restoreComposerDraftAfterFailedSend('retained',files,'continuation',Promise.resolve());
