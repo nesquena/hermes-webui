@@ -46,7 +46,7 @@
     constructor(opts){
       opts = opts || {};
       this.modelBase = opts.modelBase || (VENDOR + 'openwakeword/');
-      this.wakeModelFile = opts.wakeModelFile || 'hey_jarvis_v0.1.onnx';
+      this.wakeModelFile = opts.wakeModelFile || 'hey_hermes_v0.1.onnx';
       this.threshold = opts.threshold != null ? opts.threshold : 0.5;
       this.consecutive = opts.consecutive || 3;
       this.refractoryMs = opts.refractoryMs != null ? opts.refractoryMs : 2000;

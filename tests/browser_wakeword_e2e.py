@@ -45,7 +45,7 @@ REPO = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
 
 FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures" / "wakeword"
-POS_FILE = FIXTURES / "positive_hey_jarvis.wav"
+POS_FILE = FIXTURES / "positive_hey_hermes.wav"
 NEG_FILE = FIXTURES / "negative_speech_60s.wav"
 
 

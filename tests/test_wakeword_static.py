@@ -25,7 +25,7 @@ def test_vendored_assets_exist():
         "static/vendor/onnxruntime-web/ort-wasm-simd-threaded.mjs",
         "static/vendor/openwakeword/melspectrogram.onnx",
         "static/vendor/openwakeword/embedding_model.onnx",
-        "static/vendor/openwakeword/hey_jarvis_v0.1.onnx",
+        "static/vendor/openwakeword/hey_hermes_v0.1.onnx",
         "static/wakeword.js",
     ):
         assert (REPO / p).is_file() and (REPO / p).stat().st_size > 1000, p
@@ -101,7 +101,7 @@ def test_wakeword_e2e_is_hermetic():
     assert "settle()" in e2e
     # console errors must be part of the pass condition
     assert "not hard_errors" in e2e
-    for name in ("positive_hey_jarvis.wav", "negative_speech_60s.wav"):
+    for name in ("positive_hey_hermes.wav", "negative_speech_60s.wav"):
         p = REPO / "tests" / "fixtures" / "wakeword" / name
         assert p.is_file() and p.stat().st_size > 10000, name
 

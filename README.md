@@ -264,7 +264,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - **Wake word (opt-in)** -- Settings -> Voice: "Wake word" enables hands-free
   dictation start. A fully local openWakeWord model (ONNX, vendored, runs in
   the page via WebAssembly) listens continuously and starts dictation when it
-  hears "Hey Jarvis". Saying the word is equivalent to tapping the mic button.
+  hears "Hey Hermes". Saying the word is equivalent to tapping the mic button.
   Detection is 100% on-device; no audio leaves the browser. The detector
   releases the microphone and its models when the setting is turned off or the
   tab closes. Slightly higher battery/CPU use while enabled. Threshold can be

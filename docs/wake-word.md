@@ -1,6 +1,6 @@
 # Wake word — hands-free dictation start
 
-Opt-in feature: say "Hey Jarvis" and dictation starts, hands-free. This
+Opt-in feature: say "Hey Hermes" and dictation starts, hands-free. This
 document covers usage, tuning, privacy, and the evaluation behind the
 shipped defaults. Feature issue: kanban t_c70e5bf1; implementation: PR #8339.
 
@@ -22,7 +22,7 @@ shipped defaults. Feature issue: kanban t_c70e5bf1; implementation: PR #8339.
 
 ```
 mic → AudioWorklet tap (16 kHz mono) → melspectrogram.onnx
-     → embedding_model.onnx → hey_jarvis_v0.1.onnx → score
+     → embedding_model.onnx → hey_hermes_v0.1.onnx → score
      → 3 consecutive frames ≥ threshold + 2 s refractory → trigger
      → start dictation (same path as tapping the mic button)
 ```
@@ -67,15 +67,16 @@ report artifact of the kanban card.
 
 - Corpus: 1 h of real other-content speech negatives (two Piper TTS voices,
   news-style sentences + babble/music/TV-mix/fan/keyboard classes) and 72
-  positives ("hey jarvis" at SNR −3…20 dB, babble & fan, 3 positions).
+  positives ("hey hermes" at SNR −3…20 dB, babble & fan, 3 positions).
 - Trigger rule (same as shipped): ≥3 consecutive 80 ms frames over
   threshold + 2 s refractory.
-- Results (hey_jarvis model): 71/72 detections, **0 FP/hour at every
-  threshold 0.3–0.8**; control models (alexa, hey_mycroft, hey_rhasspy)
-  0/72 — corpus honesty check.
+- Results (hey_hermes model, 2026-10-21 sweep): 71/72 detections, **0 FP
+  per hour at thresholds 0.5–0.8** (0.4: 1/h, 0.3: 15/h); old "hey jarvis"
+  positives never trigger under the full rule (max score 0.54, single
+  frame).
 - CPU: RTF 0.022 server-side / ≈0.05 in-browser (wasm, 1 thread).
-- The one miss is a −3 dB SNR clip in fan noise — below usable SNR for the
-  phrase.
+- The one miss is a −3 dB SNR clip in babble noise — below usable SNR for
+  the phrase.
 
 ## Testing
 
