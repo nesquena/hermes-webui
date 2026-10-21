@@ -371,6 +371,87 @@ def _gateway_api_key(environ: dict[str, str] | None = None) -> str:
     ).strip()
 
 
+def _gateway_shared_pair() -> tuple[str, str]:
+    """The deployment-level Gateway pair (launcher env, root profile's ``.env``, ambient config).
+
+    This is exactly the pair a single-profile deployment sends, and what the
+    worker-time ``_gateway_base_url()`` / ``_gateway_api_key()`` reads on
+    ``os.environ``. Both dispatch-side capture helpers strip
+    ``_profiles._loaded_profile_env_keys`` so a mirrored value can never leak
+    into another profile's request; that strip also removes the ROOT profile's
+    mirrored pair, so a session profile that configures no Gateway settings of
+    its own must inherit it explicitly instead of sending the default
+    ``http://127.0.0.1:8642`` with no key (greptile 2026-10-17 P1, "Shared
+    Gateway settings disappear").
+
+    When the process-active profile is NOT the root profile, the mirrored keys
+    belong to that NAMED profile and must never be promoted to "shared": an
+    unconfigured session profile would otherwise borrow a sibling's credential.
+    The strip therefore only runs in that case, so an anonymous session keeps
+    sending no Authorization header.
+    """
+    from api import profiles as _profiles
+    from api.config import get_config
+
+    if _process_profile_is_root():
+        environ: dict[str, str] = dict(os.environ)
+    else:
+        loaded = getattr(_profiles, "_loaded_profile_env_keys", set())
+        environ = {k: v for k, v in os.environ.items() if k not in loaded}
+    return _gateway_base_url(get_config(), environ), _gateway_api_key(environ)
+
+
+def _gateway_session_own_env(home) -> dict[str, str] | None:
+    """Environ for the session-owning profile, with mirrored profile keys stripped.
+
+    ``os.environ`` minus ``_profiles._loaded_profile_env_keys`` (the
+    process-active profile's mirrored ``.env``), overlaid with this profile's
+    filtered runtime env. ``None`` on failure preserves the historical
+    ``_gateway_api_key()``/``_gateway_base_url()`` ambient fallback.
+    """
+    from api import profiles as _profiles
+
+    try:
+        environ = {
+            k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys
+        }
+        environ.update(
+            _profiles.filter_runtime_env_for_gateway_parity(
+                _profiles.get_profile_runtime_env(home)
+            )
+        )
+        return environ
+    except Exception:
+        return None
+
+
+def _gateway_session_has_own_endpoint(home, environ: dict[str, str] | None) -> bool:
+    """True when the session profile configures any half of the Gateway endpoint itself.
+
+    A profile that sets its own URL and/or key owns the endpoint decision: its
+    own key wins, the launcher key is kept when only the URL is overridden (the
+    round-2 BRICK contract), and an explicitly empty key stays empty for an
+    anonymous profile. A profile with NEITHER half inherits the deployment-level
+    shared pair instead (round-9 P1).
+    """
+    from api.config import _load_yaml_config_file_raw
+
+    source = environ if isinstance(environ, dict) else {}
+    if (
+        str(source.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+        or str(source.get(_WEBUI_GATEWAY_API_KEY_ENV) or "").strip()
+        or str(source.get("API_SERVER_KEY") or "").strip()
+    ):
+        return True
+    try:
+        raw_cfg = _load_yaml_config_file_raw(_profile_config_path(home), _copy=False)
+    except Exception:
+        return False
+    return bool(
+        isinstance(raw_cfg, dict) and str(raw_cfg.get("webui_gateway_base_url") or "").strip()
+    )
+
+
 def _gateway_session_owner_cfg(session) -> dict:
     """Resolve an IMMUTABLE config snapshot for the profile owning ``session``.
 
@@ -440,35 +521,38 @@ def _gateway_session_api_key(session) -> str:
     profile runtime env, captured ``""`` for the launcher key and sent an
     anonymous request the keyed Gateway rejected with 401).
 
-    Returns the empty string when neither the process env nor the session
-    profile's env configure a key (matches the historical contract of
-    ``_gateway_api_key``, which also returns ``""`` on absence). The worker
-    is the only consumer; it treats an empty string identically to a missing
-    key (no ``Authorization`` header is sent — issue #7074 keeps the
-    anonymous path for unauthenticated local gateways working).
+    Returns the empty string when the session profile configures an endpoint
+    but no key (matches the historical contract of ``_gateway_api_key``, which
+    also returns ``""`` on absence). The worker is the only consumer; it treats
+    an empty string identically to a missing key (no ``Authorization`` header
+    is sent — issue #7074 keeps the anonymous path for unauthenticated local
+    gateways working).
+
+    A session profile that configures NEITHER half of the Gateway endpoint
+    inherits the deployment-level shared pair (launcher environment, the root
+    profile's ``.env``, ambient config) instead of resolving to ``""``: the
+    loaded-profile strip deliberately removes that pair from the profile
+    environ, and dropping it would send the documented docker-compose
+    deployments to the default URL with no key (greptile 2026-10-17 P1).
     """
     try:
-        from api import profiles as _profiles
         from api.models import _get_profile_home
         home = _get_profile_home(getattr(session, "profile", None))
     except Exception:
         return ""
     if not home:
         return ""
-    try:
-        # Never let the loaded profile env keys (process-active profile)
-        # override the session-owning profile's key; the launcher/operator
-        # process-env key that no profile .env claims survives the strip.
-        environ = {
-            k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys
-        }
-        environ.update(
-            _profiles.filter_runtime_env_for_gateway_parity(
-                _profiles.get_profile_runtime_env(home)
-            )
-        )
-    except Exception:
-        environ = None
+    environ = _gateway_session_own_env(home)
+    if not _gateway_session_has_own_endpoint(home, environ):
+        # No Gateway settings of its own → inherit the deployment-level shared
+        # pair (launcher env / root profile's .env). The stripped loaded-profile
+        # keys ARE that shared pair when the process-active profile is root, so
+        # falling through here would send the documented docker-compose
+        # deployments to the default URL with no key (greptile 2026-10-17 P1).
+        try:
+            return _gateway_shared_pair()[1]
+        except Exception:
+            return ""
     try:
         return _gateway_api_key(environ)
     except Exception:
@@ -495,15 +579,12 @@ def _gateway_session_base_url(session) -> str:
 
     Returns the resolved URL (the default ``http://127.0.0.1:8642`` counts
     as resolved) or ``""`` only when the helper could not determine the
-    session profile's home at all. The worker treats that defensive ``""``
-    as a FAILED URL capture: the key and URL are one atomic pair, so the
-    URL falls back inside the session config snapshot (ambient
-    ``os.environ`` excluded) rather than pairing the session's key with
-    the ambient profile's gateway (round-7+1 P1, "Gateway key crosses
-    endpoints").
+    session profile's home at all. A profile that configures neither the URL
+    nor a key inherits the deployment-level shared URL rather than the built-in
+    default, mirroring ``_gateway_session_api_key``'s shared-pair inheritance
+    (greptile 2026-10-17 P1) and keeping the captured pair atomic.
     """
     try:
-        from api import profiles as _profiles
         from api.config import get_config_for_profile_home
         from api.models import _get_profile_home
         home = _get_profile_home(getattr(session, "profile", None))
@@ -511,19 +592,16 @@ def _gateway_session_base_url(session) -> str:
         return ""
     if not home:
         return ""
-    try:
-        # Never let the loaded profile env keys (process-active profile)
-        # override the session-owning profile's URL.
-        environ = {
-            k: v for k, v in os.environ.items() if k not in _profiles._loaded_profile_env_keys
-        }
-        environ.update(
-            _profiles.filter_runtime_env_for_gateway_parity(
-                _profiles.get_profile_runtime_env(home)
-            )
-        )
-    except Exception:
-        environ = None
+    environ = _gateway_session_own_env(home)
+    if not _gateway_session_has_own_endpoint(home, environ):
+        # No Gateway settings of its own → the shared deployment URL, never the
+        # built-in default (greptile 2026-10-17 P1). The key half resolves the
+        # same way in ``_gateway_session_api_key``, so the captured pair stays
+        # atomic.
+        try:
+            return _gateway_shared_pair()[0]
+        except Exception:
+            return ""
     try:
         cfg_data = get_config_for_profile_home(home)
     except Exception:
