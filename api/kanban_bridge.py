@@ -402,51 +402,103 @@ def _create_task_payload(body: dict, *, board=None):
         return {"task": _task_dict(kb.get_task(conn, task_id)), "read_only": False}
 
 
-def _patch_task(conn, task_id: str, body: dict):
-    """Apply a partial update to a task, routing status transitions through structured verbs (complete, block, archive)."""
-    kb = _kb()
-    task = kb.get_task(conn, task_id)
-    if not task:
-        raise LookupError("task not found")
+def _vet_routing_change(task, task_id: str, routing, expected) -> bool:
+    """Decide whether a PATCH changes the task's model/provider pair, refusing
+    the change when it is stale or the task is archived.
 
-    # Model / provider override. Edit mode sends the fields explicitly (even
-    # empty) so users can clear an override back to the profile default;
-    # _normalise_model_override collapses empty model → (None, None), which
-    # set_model_override treats as "clear both". A provider without a model is
-    # rejected (mirrors the worker spawn contract).
-    #
-    # Resolve and VET it before any write below: kanban_db.set_model_override
-    # refuses archived tasks by raising, and this PATCH is a plain sequence of
-    # independent writes with no enclosing transaction — so a rejection landing
-    # after the title/priority UPDATE left the task half-edited behind an HTTP
-    # 500 (#6765). Checking first makes the archived case all-or-nothing.
-    model_changed = False
-    new_model = new_provider = None
-    if "model_override" in body or "provider_override" in body:
-        new_model, new_provider = _normalise_model_override(
-            body.get("model_override"), body.get("provider_override")
+    ``task`` must be the row the write will be applied against (read under the
+    same write lock). ``routing`` is the normalised requested
+    pair, or None when the PATCH did not touch the picker; ``expected`` is the
+    normalised pair the edit modal opened with, or None when not sent.
+    """
+    if routing is None:
+        return False
+    current = _normalise_model_override(
+        getattr(task, "model_override", None), getattr(task, "provider_override", None)
+    )
+    if routing == current:
+        # Re-saving the pair the task already has is not a change: no write,
+        # no event, and no archived refusal for an edit that never touched it.
+        return False
+    # Compare-and-set: the edit modal is never refreshed while open, so a
+    # deliberate pick also sends the pair it opened with. If the task's routing
+    # changed underneath (and this save would change it again), refuse rather
+    # than silently overwrite the external change (#6765).
+    if expected is not None and expected != current:
+        raise RuntimeError(
+            f"model override on task {task_id} changed since it was opened; "
+            "reload the task and pick the model again"
         )
-        curr_model, curr_provider = _normalise_model_override(
-            getattr(task, "model_override", None), getattr(task, "provider_override", None)
+    if getattr(task, "status", None) == "archived":
+        # Same refusal (and message) as kanban_db.set_model_override.
+        raise RuntimeError(f"cannot set model override on archived task {task_id}")
+    return True
+
+
+def _write_task_fields(conn, kb, task_id: str, updates: dict) -> None:
+    """Direct title/body/tenant/priority UPDATE plus its ``updated`` event."""
+    if not updates:
+        return
+    assignments = ", ".join(f"{field} = ?" for field in updates)
+    conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", [*updates.values(), task_id])
+    kb._append_event(conn, task_id, "updated", {"fields": list(updates), "source": "webui"})
+
+
+def _assign_in_txn(conn, kb, task, task_id: str, profile) -> None:
+    """Body of ``kanban_db.assign_task`` for the caller's open write transaction.
+
+    The native verb opens its own ``write_txn``, which refuses to nest, so the
+    atomic PATCH mirrors it here (same refusal, SQL and ``assigned`` payload).
+    ``task`` is the row read inside that transaction; ``profile`` is already
+    canonical and differs from the current assignee (the caller skips no-ops).
+    """
+    if getattr(task, "claim_lock", None) is not None and getattr(task, "status", None) == "running":
+        raise RuntimeError(
+            f"cannot reassign {task_id}: currently running (claimed). "
+            "Wait for completion or reclaim the stale lock first."
         )
-        model_changed = (new_model != curr_model) or (new_provider != curr_provider)
-        # Compare-and-set: the edit modal is never refreshed while open, so a
-        # deliberate pick also sends the pair it opened with. If the task's
-        # routing changed underneath (and this save would change it again),
-        # refuse rather than silently overwrite the external change (#6765).
-        if model_changed and (
-            "expected_model_override" in body or "expected_provider_override" in body
-        ):
-            expected = _normalise_model_override(
-                body.get("expected_model_override"), body.get("expected_provider_override")
+    # The failure streak is per task/profile; a new profile starts fresh.
+    conn.execute(
+        "UPDATE tasks SET assignee = ?, consecutive_failures = 0, "
+        "last_failure_error = NULL WHERE id = ?", (profile, task_id),
+    )
+    # ``from`` lets the respawn guard tell a real handoff from a no-op re-assign.
+    kb._append_event(
+        conn, task_id, "assigned", {"assignee": profile, "from": getattr(task, "assignee", None)}
+    )
+
+
+def _patch_task(conn, task_id: str, body: dict):
+    """Apply a partial update to a task, routing status transitions through structured verbs (complete, block, archive).
+
+    Field edits (title/body/tenant/priority, assignee, model/provider override)
+    commit all-or-nothing: they run in ONE ``kb.write_txn`` (BEGIN IMMEDIATE)
+    that also reads the row the routing compare-and-set and the archived check
+    decide on, so no other writer can change or archive the task between those
+    checks and the writes, and any rejection rolls back every field and event
+    (#6765). A status change then runs through its native verb, which owns its
+    own transaction and post-commit side effects and therefore cannot nest
+    inside this one.
+    """
+    kb = _kb()
+
+    # Validate every input before the first write, so a bad value can never
+    # land after part of the edit has committed.
+    status = None
+    if body.get("status") not in (None, ""):
+        status = _validate_status(body.get("status"))
+        if status == "running":
+            # The 'running' state is owned by the kanban dispatcher / claim
+            # protocol — entering it via raw UPDATE bypasses claim_lock,
+            # claim_expires, started_at, and worker_pid, which leaves the task
+            # in a state the dispatcher treats as "phantom claimed" and may
+            # reclaim or hide. Match the agent dashboard plugin's contract
+            # (plugins/kanban/dashboard/plugin_api.py update_task) by rejecting
+            # this transition with HTTP 400. Workers enter 'running' via
+            # kb.claim_task(); UI users should use the dispatcher nudge.
+            raise ValueError(
+                "Cannot set status to 'running' directly; use the dispatcher/claim path"
             )
-            if expected != (curr_model, curr_provider):
-                raise RuntimeError(
-                    f"model override on task {task_id} changed since it was opened; "
-                    "reload the task and pick the model again"
-                )
-        if model_changed and getattr(task, "status", None) == "archived":
-            raise RuntimeError(f"cannot set model override on archived task {task_id}")
 
     updates = {}
     if "title" in body:
@@ -464,34 +516,61 @@ def _patch_task(conn, task_id: str, body: dict):
         except (TypeError, ValueError):
             raise ValueError("priority must be an integer")
 
-    for field, value in updates.items():
-        if hasattr(task, field):
-            try:
-                setattr(task, field, value)
-            except Exception:
-                pass
-    if updates:
-        assignments = ", ".join(f"{field} = ?" for field in updates)
-        conn.execute(f"UPDATE tasks SET {assignments} WHERE id = ?", [*updates.values(), task_id])
-        if hasattr(kb, "_append_event"):
-            kb._append_event(conn, task_id, "updated", {"fields": list(updates), "source": "webui"})
+    # The edit modal always sends the assignee. Canonicalise it up front (as
+    # kanban_db.assign_task does) so an unchanged one is recognised as a no-op
+    # below: it must neither emit an ``assigned`` event nor make the native
+    # running-task refusal reject an edit that never touched it.
+    assign = "assignee" in body
+    assignee = body.get("assignee") or None
+    canonical_assignee = getattr(kb, "_canonical_assignee", None)
+    if assign and canonical_assignee is not None:
+        assignee = canonical_assignee(assignee)
 
-    if "assignee" in body:
-        if not kb.assign_task(conn, task_id, body.get("assignee") or None):
+    # Model / provider override. The edit modal sends the pair only when the
+    # picker was touched (empty = clear back to the profile default); a
+    # provider without a model is rejected (mirrors the worker spawn contract).
+    routing = expected = None
+    if "model_override" in body or "provider_override" in body:
+        routing = _normalise_model_override(body.get("model_override"), body.get("provider_override"))
+        if "expected_model_override" in body or "expected_provider_override" in body:
+            expected = _normalise_model_override(
+                body.get("expected_model_override"), body.get("expected_provider_override")
+            )
+
+    # Same boundary _set_status_direct uses. There is deliberately no fallback
+    # for a kanban_db without write_txn: applying these writes as a plain
+    # sequence is exactly the half-committed edit this boundary exists to stop.
+    changed_fields = []
+    with kb.write_txn(conn):
+        # Read under the write lock: this is the row every check below decides
+        # on AND the row the writes land on. A rejection raises out of
+        # write_txn, which rolls back every field and event written so far.
+        task = kb.get_task(conn, task_id)
+        if not task:
             raise LookupError("task not found")
+        model_changed = _vet_routing_change(task, task_id, routing, expected)
+        _write_task_fields(conn, kb, task_id, updates)
+        if assign and getattr(task, "assignee", None) != assignee:
+            _assign_in_txn(conn, kb, task, task_id, assignee)
+            changed_fields.append("assignee")
+        if model_changed:
+            # Body of kanban_db.set_model_override (which cannot nest either);
+            # the archived refusal ran in _vet_routing_change.
+            new_model, new_provider = routing
+            conn.execute(
+                "UPDATE tasks SET model_override = ?, provider_override = ? WHERE id = ?",
+                (new_model, new_provider, task_id),
+            )
+            kb._append_event(
+                conn, task_id, "model_override_set", {"model": new_model, "provider": new_provider}
+            )
+            changed_fields += ["model_override", "provider_override"]
+    # Observers fire AFTER commit, as the native setters do.
+    if changed_fields and hasattr(kb, "notify_task_updated"):
+        kb.notify_task_updated(conn, task_id, changed_fields)
 
-    # Apply the override vetted above. An unchanged pair skips the write
-    # entirely: the modal always re-sends both fields, so calling through on
-    # every save would make set_model_override reject an archived task for an
-    # edit that never touched its model (and would spam model_override_set
-    # events on every unrelated save).
-    if model_changed:
-        if not kb.set_model_override(conn, task_id, new_model, provider=new_provider):
-            raise LookupError("task not found")
-
-    if "status" not in body or body.get("status") in (None, ""):
+    if status is None:
         return
-    status = _validate_status(body.get("status"))
     if status == "done":
         if not kb.complete_task(conn, task_id, result=body.get("result"), summary=body.get("summary")):
             raise LookupError("task not found")
@@ -501,18 +580,6 @@ def _patch_task(conn, task_id: str, body: dict):
     elif status == "archived":
         if not kb.archive_task(conn, task_id):
             raise LookupError("task not found")
-    elif status == "running":
-        # The 'running' state is owned by the kanban dispatcher / claim
-        # protocol — entering it via raw UPDATE bypasses claim_lock,
-        # claim_expires, started_at, and worker_pid, which leaves the task
-        # in a state the dispatcher treats as "phantom claimed" and may
-        # reclaim or hide. Match the agent dashboard plugin's contract
-        # (plugins/kanban/dashboard/plugin_api.py update_task) by rejecting
-        # this transition with HTTP 400. Workers enter 'running' via
-        # kb.claim_task(); UI users should use the dispatcher nudge.
-        raise ValueError(
-            "Cannot set status to 'running' directly; use the dispatcher/claim path"
-        )
     elif status == "ready":
         # If the task is currently 'blocked', use the structured unblock
         # verb so the unblocked event fires. Otherwise it's a legitimate

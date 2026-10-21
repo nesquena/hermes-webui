@@ -11,6 +11,7 @@ requiring the external package.
 
 from __future__ import annotations
 
+import contextlib
 import importlib
 import sys
 import time
@@ -117,6 +118,7 @@ class FakeKanbanDB:
         self.links = []
         self.next_id = 3
         self.next_event_id = 8
+        self.in_txn = False
 
     def init_db(self, *, board=None):
         # board param accepted but ignored — the fake stores everything
@@ -162,6 +164,36 @@ class FakeKanbanDB:
         self.events.append(FakeEvent(self.next_event_id, task_id, None, kind, payload or {}, 456))
         self.next_event_id += 1
 
+    def _append_event(self, conn, task_id, kind, payload=None, *, run_id=None):
+        self._event(task_id, kind, payload)
+
+    @contextlib.contextmanager
+    def write_txn(self, conn, *, allow_nested=False):
+        # Mirrors kanban_db.write_txn: refuses to nest, and an exception rolls
+        # back every task field and event written inside it.
+        self._refuse_nested()
+        saved_tasks = [dict(vars(task)) for task in self.tasks]
+        saved_events = list(self.events)
+        saved_next_event_id = self.next_event_id
+        self.in_txn = True
+        try:
+            yield conn
+        except Exception:
+            del self.tasks[len(saved_tasks):]
+            for task, saved in zip(self.tasks, saved_tasks):
+                vars(task).update(saved)
+            self.events[:] = saved_events
+            self.next_event_id = saved_next_event_id
+            raise
+        finally:
+            self.in_txn = False
+
+    def _refuse_nested(self):
+        # The native verbs open their own write_txn, which raises when called
+        # inside an open transaction.
+        if self.in_txn:
+            raise RuntimeError("write_txn: already inside a transaction")
+
     def create_task(self, conn, **kwargs):
         task_id = f"t_{self.next_id}"
         self.next_id += 1
@@ -182,6 +214,7 @@ class FakeKanbanDB:
         return task_id
 
     def set_model_override(self, conn, task_id, model, provider=None):
+        self._refuse_nested()
         task = self.get_task(conn, task_id)
         if not task:
             return False
@@ -199,6 +232,7 @@ class FakeKanbanDB:
         return True
 
     def assign_task(self, conn, task_id, assignee):
+        self._refuse_nested()
         task = self.get_task(conn, task_id)
         if not task:
             return False
@@ -207,6 +241,7 @@ class FakeKanbanDB:
         return True
 
     def complete_task(self, conn, task_id, result=None, summary=None):
+        self._refuse_nested()
         task = self.get_task(conn, task_id)
         if not task:
             return False
@@ -215,6 +250,7 @@ class FakeKanbanDB:
         return True
 
     def block_task(self, conn, task_id, reason=None):
+        self._refuse_nested()
         task = self.get_task(conn, task_id)
         if not task:
             return False
@@ -223,6 +259,7 @@ class FakeKanbanDB:
         return True
 
     def archive_task(self, conn, task_id):
+        self._refuse_nested()
         task = self.get_task(conn, task_id)
         if not task:
             return False
@@ -231,6 +268,7 @@ class FakeKanbanDB:
         return True
 
     def unblock_task(self, conn, task_id):
+        self._refuse_nested()
         task = self.get_task(conn, task_id)
         if not task:
             return False
@@ -602,10 +640,32 @@ def test_kanban_patch_persists_the_bare_model_id_not_the_picker_prefix(monkeypat
 # ── #6765 P1: an archived-task rejection must not leave a half-applied edit ──
 #
 # kanban_db.set_model_override() REFUSES archived tasks by raising RuntimeError,
-# and _patch_task applies its writes as an unguarded sequence (title/priority
+# and _patch_task used to apply its writes as an unguarded sequence (title/priority
 # UPDATE, assign, model override, status verb). Calling set_model_override last
 # meant a PATCH of an archived task committed the title first and then blew up
-# with a 500: the user saw an error, and the title changed anyway.
+# with a 500: the user saw an error, and the title changed anyway. The field
+# writes now share one kb.write_txn; test_kanban_bridge_native_atomicity.py
+# covers that boundary against the real DB with a second connection.
+
+
+def test_patch_rejection_inside_the_write_txn_rolls_back_earlier_writes(monkeypatch):
+    """A refusal raised after the title UPDATE has run must take it (and its
+    event) back out: the field writes share one write_txn, not a sequence."""
+    bridge = _load_bridge(monkeypatch)
+    fake_kanban = sys.modules["hermes_cli.kanban_db"]
+
+    task_id = bridge._create_task_payload({"title": "Claimed target", "assignee": "worker"})["task"]["id"]
+    task = next(task for task in fake_kanban.tasks if task.id == task_id)
+    task.status = "running"
+    task.claim_lock = "host:1"
+    events_before = len(fake_kanban.events)
+
+    import pytest as _pytest
+    with _pytest.raises(RuntimeError, match="currently running"):
+        bridge._patch_task_payload(task_id, {"title": "Should not be applied", "priority": 4, "assignee": "other"})
+
+    assert (task.title, task.priority, task.assignee) == ("Claimed target", 0, "worker")
+    assert len(fake_kanban.events) == events_before, "a rejected PATCH still emitted events"
 
 
 def test_patch_archived_task_edits_other_fields_when_model_is_unchanged(monkeypatch):
