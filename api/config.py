@@ -2844,6 +2844,37 @@ def _filter_picker_excludes(
     ]
 
 
+def _unfiltered_catalog_for_cache(payload: dict) -> dict:
+    """Return *payload* as the catalog that may be published to the models cache.
+
+    #7777 re-gate finding 3: the picker projection filters excluded ids out of
+    ``groups``, but the catalog stored in ``_available_models_cache`` (and on
+    disk) is the routing-authoritative universe — it feeds
+    ``_endpoint_advertised_model_ids()`` on the per-turn send hot path. If the
+    picker policy leaked into it, excluding a model would change which backend
+    an existing session's turn is routed to.
+
+    So the builder ships its unfiltered groups under a private key; this helper
+    swaps them into ``groups`` and drops the private key. A payload without the
+    key (static/minimal catalogs, older callers) is returned as a shallow copy
+    with the key removed.
+    """
+    cache_payload = dict(payload)
+    cache_payload.pop("_unfiltered_groups", None)
+    unfiltered = payload.get("_unfiltered_groups")
+    if unfiltered is not None:
+        cache_payload["groups"] = unfiltered
+    return cache_payload
+
+
+def _strip_internal_catalog_keys(payload: dict) -> dict:
+    """Return *payload* without the private keys used only between the builder
+    and the cache-publication path (never part of the API/picker contract)."""
+    if not isinstance(payload, dict):
+        return payload
+    return {k: v for k, v in payload.items() if not k.startswith("_unfiltered_")}
+
+
 def _apply_provider_prefix(
     raw_models: list[dict],
     provider_id: str,
@@ -11087,6 +11118,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         except Exception:
             logger.debug("Failed to inspect MoA presets for model picker", exc_info=True)
 
+        # #7777 re-gate finding 3: the UNFILTERED counterpart of the picker
+        # groups. ``_append_picker_group`` fills both — the filtered projection
+        # for the picker response, and this one for the catalog that gets
+        # published to ``_available_models_cache`` (routing provenance must
+        # never see the picker policy). Declared before the branch so the
+        # payload below can read it unconditionally.
+        _unfiltered_groups: list[dict] = []
+
         # 5. Build model groups
         if detected_providers:
             _picker_selected_model_id = (
@@ -11094,7 +11133,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 or default_model
                 or None
             )
-
             def _append_picker_group(
                 provider_label: str,
                 provider_id: str,
@@ -11105,6 +11143,24 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 decorate_overflow_label: bool = False,
                 allow_empty: bool = False,
             ) -> None:
+                # #7777 re-gate finding 3: routing must use UNFILTERED
+                # identities. The picker projection filters; the catalog that
+                # gets published to ``_available_models_cache`` (and therefore
+                # to the provenance snapshot ``_endpoint_advertised_model_ids``
+                # reads on the per-turn send hot path) must NOT. So record the
+                # unfiltered group first, then build the filtered projection.
+                _unfiltered_models = copy.deepcopy(raw_models or [])
+                if apply_prefix:
+                    _unfiltered_models = _apply_provider_prefix(
+                        _unfiltered_models, provider_id, active_provider
+                    )
+                _unfiltered_groups.append(
+                    {
+                        "provider": provider_label,
+                        "provider_id": provider_id,
+                        "models": _unfiltered_models,
+                    }
+                )
                 picker_models = copy.deepcopy(raw_models or [])
                 # #7507: subtract per-provider picker excludes BEFORE the
                 # fast-tier annotation, BEFORE ``_apply_provider_prefix``,
@@ -11811,6 +11867,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # (boot default, previous pick, synthesized fallback rows)
             # server-side filtering never sees.
             "picker_excludes": _picker_excludes_payload(),
+            # #7777 re-gate finding 3: the unfiltered counterpart of ``groups``.
+            # Consumed by the cache-publication path below (routing provenance
+            # must not see the picker policy) and stripped before the payload
+            # is handed to a picker/API caller.
+            "_unfiltered_groups": _unfiltered_groups if detected_providers else groups,
         }
         # #7777 round-3 SHOULD-FIX 2: only the minimal/static builder used to
         # set ``no_eligible_models``. With one configured model fully
@@ -12105,7 +12166,11 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 )
                 if not _superseded and _identity_current:
                     published_at = time.monotonic()
-                    _available_models_cache = result
+                    # #7777 re-gate finding 3: publish the UNFILTERED groups so
+                    # the routing-provenance snapshot (and every disk/memory
+                    # reader) sees the real universe. The picker response the
+                    # caller gets keeps the filtered projection.
+                    _available_models_cache = _unfiltered_catalog_for_cache(result)
                     _available_models_cache_ts = published_at
                     _available_models_live_rebuild_ts = published_at
                     _available_models_cache_source_fingerprint = rebuild_source_fingerprint
@@ -12119,7 +12184,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     rebuild_seq,
                     _models_rebuild_seq,
                 )
-                return copy.deepcopy(result)
+                return copy.deepcopy(_strip_internal_catalog_keys(result))
             if not _identity_current:
                 # The config/auth/catalog this build read changed while it ran, so
                 # it describes sources that no longer exist. Publishing it would
@@ -12131,7 +12196,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     rebuild_seq,
                 )
                 _clear_build_in_progress(rebuild_seq)
-                return copy.deepcopy(result)
+                return copy.deepcopy(_strip_internal_catalog_keys(result))
             # Foreground durable commit, queued rather than performed here: the
             # caller still holds the catalog lock, and taking the commit mutex in
             # that state is the lock-order cycle the #7481 review reproduced. The
@@ -12139,8 +12204,18 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # _commit_models_cache_to_disk_after_lock), so ownership still spans
             # it.
             deferred_disk_commits.append(
-                (result, rebuild_seq, rebuild_source_fingerprint, rebuild_profile)
+                (
+                    _unfiltered_catalog_for_cache(result),
+                    rebuild_seq,
+                    rebuild_source_fingerprint,
+                    rebuild_profile,
+                )
             )
+            # The picker/API caller gets the FILTERED projection (the policy is
+            # still honoured) PLUS the unfiltered identities under a private
+            # key, which the browser uses to resolve an explicit `/model`
+            # against the real universe (#7777 re-gate finding 5). The key is
+            # never part of the picker rendering.
             return copy.deepcopy(result)
 
         # ── Bounded rebuild (defense-in-depth) ───────────────────────────────
@@ -12248,7 +12323,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     return True
                 try:
                     _save_models_cache_to_disk(
-                        result,
+                        _unfiltered_catalog_for_cache(result),
                         rebuild_seq=rebuild_seq,
                         build_fingerprint=build_fingerprint,
                         build_profile=build_profile,

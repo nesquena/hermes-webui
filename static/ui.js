@@ -4961,27 +4961,33 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   // silently snap to the first <option>. _ensureModelOptionInDropdown already
   // tries _applyModelToDropdown first, so delegate to it (single scan) and keep
   // the plain-apply fallback for the unlikely case it is unavailable.
-  // #7507: every path here is a NON-session selection — the fresh-boot
-  // profile default, or the persisted previous pick from a tab the user
-  // has since left. Neither is the running session's model, so the
-  // per-provider picker exclude policy applies in full and an excluded
-  // id must never be (re-)injected here. The active-session exception
-  // lives in syncTopbar() (which passes allowExcludedForActiveSession).
-  const _applyOrEnsure = function(modelId, providerId) {
+  // #7507: a NON-session selection — the fresh-boot profile default, or the
+  // persisted previous pick from a tab the user has since left — must honour
+  // the per-provider picker exclude policy in full, so an excluded id is never
+  // (re-)injected for those.
+  // #7777 re-gate finding 4: the RUNNING session's own model is the documented
+  // exception. A catalog refresh used to drop it here while
+  // ``_chatPayloadModelState()`` kept sending it, so the picker disagreed with
+  // what the next turn actually used — and clicking the shown row did nothing
+  // because the picker already believed it was selected. The active-session
+  // branch therefore passes ``allowExcludedForActiveSession`` (the same
+  // exception syncTopbar() uses).
+  const _applyOrEnsure = function(modelId, providerId, allowActiveSession) {
     if (typeof _ensureModelOptionInDropdown === 'function') {
-      return _ensureModelOptionInDropdown(modelId, sel, providerId);
+      return _ensureModelOptionInDropdown(modelId, sel, providerId,
+        allowActiveSession ? {allowExcludedForActiveSession:true} : undefined);
     }
     return _applyModelToDropdown(modelId, sel, providerId);
   };
 
   if(shouldApplyBootDefault && data&&data.default_model && !(activeSession&&activeSession.model)){
-    return _applyOrEnsure(data.default_model, data.active_provider||null);
+    return _applyOrEnsure(data.default_model, data.active_provider||null, false);
   }
   if(activeSession&&activeSession.model){
-    return _applyOrEnsure(activeSession.model, activeSession.model_provider||null);
+    return _applyOrEnsure(activeSession.model, activeSession.model_provider||null, true);
   }
   if(previousState&&previousState.model){
-    return _applyOrEnsure(previousState.model, previousState.model_provider||null);
+    return _applyOrEnsure(previousState.model, previousState.model_provider||null, false);
   }
   return null;
 }
@@ -5675,6 +5681,13 @@ async function populateModelDropdown(opts={}){
     }else{
       window._pickerExcludes={};
     }
+    // #7777 re-gate finding 5: the server ships the UNFILTERED identities
+    // alongside the filtered picker groups. An explicit `/model <name>` is a
+    // user instruction, so it resolves against these — a model the user hid
+    // from the picker is absent from the rendered groups and would otherwise
+    // report "No model matching" even though the backend still resolves it.
+    window._unfilteredModelGroups=Array.isArray(data&&data._unfiltered_groups)
+      ?data._unfiltered_groups:[];
     window._modelEndpointErrors={};
     const _sortModelEntries=(items,providerId)=>{
       const values=Array.from(items||[]);

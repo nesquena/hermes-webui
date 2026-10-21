@@ -176,3 +176,119 @@ def test_exclusions_are_case_preserving(_settings_store):
     assert not config._is_model_id_excluded("MODEL-A", excludes), (
         "a lowercase exclusion suppressed the distinct catalog id 'MODEL-A'"
     )
+
+
+# ── re-gate 2026-10-12 finding 3: the display filter must not change send routing ──
+#
+# `_filter_picker_excludes` used to run INSIDE `_build_available_models_uncached`
+# (the catalog builder), so the published `_available_models_cache` — and the
+# provenance snapshot `_endpoint_advertised_model_ids()` reads on the per-turn
+# send hot path — carried the FILTERED universe. Excluding `openai/gpt-4.1`
+# therefore removed it from the provenance set, and an existing session whose
+# wire model was `openai/gpt-4.1` silently re-resolved to the bare `gpt-4.1` in
+# a sibling group.
+#
+# Invariant (reviewer's): routing always uses UNFILTERED identities; exclusion
+# is applied only where a list is rendered for picking. The picker projections
+# (/api/models and /api/models/live) still filter.
+
+
+def _drive_real_builder(monkeypatch, tmp_path):
+    """Drive the REAL catalog builder with one custom provider and two ids.
+
+    Mirrors the established pattern in test_issue7404_models_discovered_not_allowlist:
+    a synthetic config with a live-probed provider, then a real
+    ``get_available_models(force_refresh=True)`` — so the published
+    ``_available_models_cache`` (and its provenance snapshot) is produced by
+    production code, not by a fixture.
+    """
+    cfg = {
+        "model": {"default": "openai/gpt-4.1", "provider": "custom-llm"},
+        "providers": {
+            "custom-llm": {
+                "name": "Custom LLM",
+                "api": "https://llm.example.com",
+                "transport": "chat_completions",
+                "models_discovered": True,
+                "models": {"openai/gpt-4.1": {}, "gpt-4.1": {}},
+            }
+        },
+    }
+    monkeypatch.setattr(config, "cfg", cfg, raising=False)
+    monkeypatch.setattr(config, "_get_config_path", lambda: tmp_path / "config.yaml")
+    monkeypatch.setattr(config, "_get_auth_store_path", lambda: tmp_path / "auth.json")
+    monkeypatch.setattr(
+        config, "_get_models_cache_path", lambda: tmp_path / "models_cache.json"
+    )
+    monkeypatch.setattr(config, "_models_cache_source_fingerprint", lambda: {"test": 1})
+    monkeypatch.setattr(config, "reload_config_if_stale", lambda: None)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "_cfg_mtime", 0.0, raising=False)
+    monkeypatch.setattr(config, "_LIVE_REBUILD_BUDGET_SECONDS", 0.0, raising=False)
+    monkeypatch.setattr(
+        config,
+        "_read_live_provider_model_ids",
+        lambda pid: ["openai/gpt-4.1", "gpt-4.1"] if pid == "custom-llm" else [],
+    )
+    config.invalidate_models_cache()
+    return config.get_available_models(force_refresh=True)
+
+
+def test_excluding_a_model_does_not_remove_it_from_routing_provenance(
+    _settings_store, monkeypatch, tmp_path
+):
+    """Finding 3: an excluded id must still be visible to send-side routing.
+
+    The picker exclusion used to run INSIDE ``_build_available_models_uncached``,
+    so the published catalog — and the provenance snapshot
+    ``_endpoint_advertised_model_ids()`` reads on the per-turn send hot path —
+    carried the FILTERED universe. Excluding ``openai/gpt-4.1`` therefore
+    removed it from the provenance set, and an existing session whose wire
+    model was ``openai/gpt-4.1`` silently re-resolved to the sibling
+    ``gpt-4.1`` and was sent to a backend the user never picked.
+
+    Invariant (reviewer's): routing always uses UNFILTERED identities;
+    exclusion is applied only where a list is rendered for picking.
+    """
+    _settings_store({"picker_excludes": {"custom-llm": ["openai/gpt-4.1"]}})
+    payload = _drive_real_builder(monkeypatch, tmp_path)
+
+    advertised = config._endpoint_advertised_model_ids("custom-llm")
+
+    assert advertised is not None, "provenance signal vanished entirely"
+    assert "openai/gpt-4.1" in advertised, (
+        "excluding a model from the picker removed it from the ROUTING "
+        "provenance set — an existing session persisted as "
+        "'openai/gpt-4.1' would silently re-resolve to the sibling "
+        "'gpt-4.1' and be sent to a backend the user never picked "
+        "(#7777 re-gate finding 3)"
+    )
+    # The picker projection must still hide it (the exclusion is not lost).
+    group = next(
+        g for g in payload["groups"] if g.get("provider_id") == "custom-llm"
+    )
+    visible = [str(m.get("id")) for m in group.get("models", [])]
+    assert "openai/gpt-4.1" not in visible, (
+        "the picker projection no longer honours the exclusion — the fix "
+        "must remove the model from the PICKER while keeping it in the "
+        "published catalog, not drop the policy entirely"
+    )
+
+
+def test_the_published_catalog_keeps_unfiltered_provider_provenance(
+    _settings_store, monkeypatch, tmp_path
+):
+    """Finding 3, the source side: the catalog PUBLISHED to memory is the
+    unfiltered universe, so memory/disk caches stay routing-authoritative."""
+    _settings_store({"picker_excludes": {"custom-llm": ["openai/gpt-4.1"]}})
+    _drive_real_builder(monkeypatch, tmp_path)
+
+    published_ids = {
+        str(m.get("id"))
+        for group in config._available_models_cache.get("groups", [])
+        for m in group.get("models", [])
+    }
+    assert "openai/gpt-4.1" in published_ids, (
+        "the published catalog itself is filtered — the picker policy leaked "
+        "into the routing-authoritative snapshot (#7777 re-gate finding 3)"
+    )

@@ -684,6 +684,24 @@ function _buildModelCandidates(sel,groups){
       for(const m of (Array.isArray(g.extra_models)?g.extra_models:[])) push(m);
     }
   }
+  // #7777 re-gate finding 5: fold in the UNFILTERED identities the server
+  // ships alongside the filtered picker groups, so an explicit `/model <name>`
+  // can resolve a model the picker policy hid. Only used for command
+  // resolution — never for rendering, so the picker still honours the policy.
+  const unfiltered=(typeof window!=='undefined'&&window&&Array.isArray(window._unfilteredModelGroups))
+    ?window._unfilteredModelGroups:[];
+  for(const g of unfiltered){
+    const pid=(g&&g.provider_id)||'';
+    const push=m=>{
+      if(!m||!m.id) return;
+      if(!options.some(o=>o.value===m.id)){
+        options.push({value:m.id,textContent:m.label||m.id});
+        if(pid&&!(m.id in providerMap)) providerMap[m.id]=pid;
+      }
+    };
+    for(const m of (Array.isArray(g.models)?g.models:[])) push(m);
+    for(const m of (Array.isArray(g.extra_models)?g.extra_models:[])) push(m);
+  }
   if(!options.length&&sel){
     for(const o of Array.from(sel.options||[])) options.push({value:o.value,textContent:o.textContent});
   }
