@@ -49,6 +49,8 @@
 
 ### Security
 
+- **Gateway chat no longer sends one profile's Gateway key to another profile's Gateway.** When the WebUI runs on a named profile whose `.env` sets its own Gateway URL, a session on a different profile that sets only a Gateway key (no URL of its own) sent that key to the first profile's Gateway, so the request failed with 401 or exposed the key to the wrong server. Such a profile now uses the WebUI's own Gateway URL and key together, which is what v0.52.492 and earlier sent. Profiles that set their own `HERMES_WEBUI_GATEWAY_BASE_URL`, shared operator configuration and launcher-exported URLs behave as before. To give a profile its own Gateway, set its own `HERMES_WEBUI_GATEWAY_BASE_URL`. (#8435, fixes #8432)
+
 - **Update timeout messages never echo credentials.** When an in-app update's fetch times out, the message names the cancelled operation; that operation text now goes through the same credential scrub as every other update diagnostic, so a remote URL with embedded userinfo or a token would be shown redacted. The message is unchanged for the fetches the updater runs today. Thanks @pcsokonay. (#8415)
 
 - **Pressing Enter on the approval card's Deny button denies.** While a tool approval was pending, Enter on any focused
