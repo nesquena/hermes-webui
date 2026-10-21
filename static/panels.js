@@ -3767,9 +3767,26 @@ function _kanbanRefreshOpenModelDropdown(){
   // first thing renderModelDropdown() appends after the scope note, so the
   // first <input> in document order is the search box.
   const _search = () => (typeof dd.querySelector === 'function') ? dd.querySelector('input') : null;
+  // The picker has a SECOND text input: the custom model-ID field. The search
+  // box is the first <input> in document order and the custom-ID field is the
+  // last one, so the custom draft is addressed by POSITION (never by ui.js's
+  // internal class name) — the same class-agnostic rule as the search box.
+  const _custom = () => {
+    if (typeof dd.querySelectorAll !== 'function') return null;
+    const all = dd.querySelectorAll('input');
+    return all.length > 1 ? all[all.length - 1] : null;
+  };
   const prevInput = _search();
   const prevQuery = prevInput ? String(prevInput.value || '') : '';
   const prevHadFocus = !!prevInput && document.activeElement === prevInput;
+  // A custom model-ID the user is still typing must survive the refresh: the
+  // catalog landing REPLACED the popup's children, which erased the draft and
+  // dropped focus to the document body — pressing Enter then fell through to
+  // the modal's own key handler and submitted the task with Profile default
+  // instead of the model the user had typed (#6765).
+  const prevCustom = _custom();
+  const prevCustomValue = prevCustom ? String(prevCustom.value || '') : '';
+  const prevCustomHadFocus = !!prevCustom && document.activeElement === prevCustom;
   renderModelDropdown({
     dropdownId: 'kanbanTaskModalModelDropdown',
     selectId: 'kanbanTaskModalModel',
@@ -3781,6 +3798,16 @@ function _kanbanRefreshOpenModelDropdown(){
     // it, so don't yank it back on a background refresh.
     autoFocusSearch: false,
   });
+  const nextCustom = _custom();
+  if (nextCustom && prevCustomValue) {
+    // Restore the draft and put the caret back where the user left it.
+    nextCustom.value = prevCustomValue;
+    try {
+      if (typeof nextCustom.setSelectionRange === 'function' && typeof prevCustom.selectionStart === 'number') {
+        nextCustom.setSelectionRange(prevCustom.selectionStart, prevCustom.selectionEnd);
+      }
+    } catch (_e) { /* selection ranges are best-effort */ }
+  }
   const nextInput = _search();
   if (!nextInput) return;
   if (prevQuery) {
@@ -3794,6 +3821,9 @@ function _kanbanRefreshOpenModelDropdown(){
   // Only give focus back if the user had it — an open-but-unfocused picker must
   // not steal the caret out of the field the user is actually typing in.
   if (prevHadFocus && typeof nextInput.focus === 'function') nextInput.focus();
+  // Same rule for the custom model-ID field: hand the caret back to the
+  // replacement only when the user had it there.
+  else if (prevCustomHadFocus && nextCustom && typeof nextCustom.focus === 'function') nextCustom.focus();
 }
 
 function _kanbanMountModelChip(){

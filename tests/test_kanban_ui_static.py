@@ -3388,6 +3388,32 @@ async function run() {
   assert.strictEqual(kept.value, "sol");
   assert.deepStrictEqual(rowNames(), ["gpt-5.6-sol"]);
   assert.strictEqual(document.activeElement, elsewhere, "focus not stolen");
+
+  // ── (7) a custom model-ID draft survives the refresh ──
+  // The catalog landing REPLACED the popup's children, which erased a
+  // half-typed custom model ID and dropped focus to the document body — so
+  // pressing Enter then fell through to the modal's own key handler and
+  // submitted the task with Profile default instead of the typed model.
+  elements.kanbanTaskModalModel = new Elem("select");
+  _kanbanCloseModelDropdown();
+  _catalog = deferred();
+  const sixth = _kanbanPopulateModelSelect("", "");
+  _kanbanOpenModelDropdown();
+  const customBefore = dd.querySelectorAll("input").slice(-1)[0];
+  assert(customBefore, "precondition: the render owns a custom model-ID input");
+  customBefore.value = "vendor/my-new-model";
+  customBefore.focus();
+  assert.strictEqual(document.activeElement, customBefore);
+
+  _catalog.resolve();
+  await sixth;
+
+  const customAfter = dd.querySelectorAll("input").slice(-1)[0];
+  assert(customAfter !== customBefore, "refresh replaced the custom model-ID input");
+  assert.strictEqual(customAfter.value, "vendor/my-new-model",
+    "the custom model-ID draft was erased by the catalog refresh");
+  assert.strictEqual(document.activeElement, customAfter,
+    "focus was not handed back to the custom model-ID input");
 }
 
 run().then(() => console.log(JSON.stringify({success: true})))
