@@ -4834,8 +4834,13 @@ def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
             _rm['reasoning'] = _existing_reasoning
 
 
-def _strip_thinking_markup(text: str) -> str:
-    """Remove common reasoning/thinking wrappers from model text."""
+def _strip_thinking_markup(text: str, *, collapse_whitespace: bool = True) -> str:
+    """Remove common reasoning/thinking wrappers from model text.
+
+    ``collapse_whitespace=False`` keeps line breaks, so a caller that still has
+    to validate the text (the title extractor's option-menu detector splits
+    candidates on newlines) sees the same boundaries the model sent.
+    """
     if not text:
         return ''
     s = str(text)
@@ -4855,8 +4860,9 @@ def _strip_thinking_markup(text: str) -> str:
         r"|(?:okay|alright|sure|of course),?\s+let me\b[^\n]*\n?)",
         ' ', s, flags=re.IGNORECASE
     )
-    s = re.sub(r'\s+', ' ', s).strip()
-    return s
+    if collapse_whitespace:
+        s = re.sub(r'\s+', ' ', s)
+    return s.strip()
 
 
 def _strip_xml_tool_calls(text: str) -> str:
@@ -6643,8 +6649,13 @@ def _extract_title_text(content: str, *, mode: str = 'compatibility') -> str:
     except (TypeError, ValueError):
         # Only a leading '{' (or a '[' that opens a real JSON value) counts as
         # malformed-JSON evidence; prose like "[Bug] Login Fails On Submit" is
-        # a legitimate title (re-gate 2026-10-21 should-fix 3).
-        if schema_mode or raw.startswith('{') or re.match(r'^\[\s*(?:[\{\]"\-\d]|true\b|false\b|null\b)', raw):
+        # a legitimate title (re-gate 2026-10-21 should-fix 3). A closed
+        # bracket label followed by prose ("[2026] Login Repair", "[3D] ...")
+        # is a title too, even when the label starts with a digit.
+        _bracket_label_prose = re.match(r'^\[[\w.-]+\]\s+\S', raw)
+        if schema_mode or raw.startswith('{') or (
+            re.match(r'^\[\s*(?:[\{\]"\-\d]|true\b|false\b|null\b)', raw) and not _bracket_label_prose
+        ):
             return ''
         parsed = None
     else:
@@ -6664,7 +6675,9 @@ def _extract_title_text(content: str, *, mode: str = 'compatibility') -> str:
     # through to the compatibility request.
     # Completed wrappers and supported thinking preambles are metadata; validate
     # the remaining visible text before looking for an embedded JSON title.
-    raw = _strip_thinking_markup(raw) if mode == 'compatibility' else raw
+    # Keep line breaks: collapsing them here would hide a newline-separated
+    # title menu ("Title options:\nA\nB") from the option-menu check below.
+    raw = _strip_thinking_markup(raw, collapse_whitespace=False) if mode == 'compatibility' else raw
     if _looks_invalid_generated_title(raw):
         return ''
     match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)

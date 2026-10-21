@@ -87,3 +87,82 @@ def test_refresh_invalid_trace_uses_alternate_route(scene, monkeypatch, primary)
     assert calls == [primary] * 3 + ["agent" if primary == "aux" else "aux"]
     assert [data["title"] for name, data in events if name == "title"] == ["Recovered Refresh Title"]
     assert any(data.get("status") == "refreshed" for name, data in events if name == "title_status")
+
+
+# ── Maintainer fold on 35ec7c5f (release re-gate 2026-10-21) ─────────────────
+
+@pytest.mark.parametrize("route", ("aux", "agent"))
+@pytest.mark.parametrize("content", (
+    "Title options:\nMobile Login Repair\nLogin Button Fix",
+    "Here are some title suggestions:\nMobile Login Repair\nLogin Flow Fix",
+))
+def test_worker_never_saves_a_newline_title_menu(scene, monkeypatch, route, content):
+    session, path = scene
+    monkeypatch.setattr(streaming, "_aux_title_configured", lambda: route == "aux")
+
+    def respond(**kwargs):
+        return _response(content)
+
+    agent = _fixture_agent(respond) if route == "agent" else None
+    events = []
+    with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+        with patch("agent.auxiliary_client.call_llm", side_effect=respond, create=True):
+            streaming._run_background_title_update(
+                session.session_id, "Fix login.", "Inspect login.", "Untitled",
+                lambda name, data: events.append((name, data)), agent=agent)
+    titles = [data["title"] for name, data in events if name == "title"]
+    assert not any("options" in t.lower() or "suggestions" in t.lower() for t in titles)
+    assert "options:" not in session.title.lower() and "suggestions:" not in session.title.lower()
+    if path.exists():
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert "options:" not in saved["title"].lower() and "suggestions:" not in saved["title"].lower()
+
+
+@pytest.mark.parametrize("primary", ("aux", "agent"))
+def test_refresh_never_overwrites_a_title_with_a_newline_menu(scene, monkeypatch, primary):
+    session, path = scene
+    session.title = "Existing Title"
+    session.llm_title_generated = True
+    session.save()
+    monkeypatch.setattr(streaming, "_aux_title_configured", lambda: primary == "aux")
+
+    def respond(route, **kwargs):
+        if route == primary:
+            return _response("Title options:\nMobile Login Repair\nLogin Button Fix")
+        return _response("Recovered Refresh Title")
+
+    agent = _fixture_agent(lambda **kw: respond("agent", **kw))
+    events = []
+    with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+        with patch("agent.auxiliary_client.call_llm", side_effect=lambda **kw: respond("aux", **kw), create=True):
+            streaming._run_background_title_refresh(
+                session.session_id, "Fix login.", "Inspect login.", "Existing Title",
+                lambda name, data: events.append((name, data)), agent=agent)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["title"] in ("Existing Title", "Recovered Refresh Title")
+    assert not any("options" in data["title"].lower() for name, data in events if name == "title")
+
+
+@pytest.mark.parametrize("route", ("aux", "agent"))
+@pytest.mark.parametrize("content", ("[2026] Login Repair", "[3D] Printer Extruder Repair"))
+def test_worker_saves_digit_bracket_label_titles_in_one_call(scene, monkeypatch, route, content):
+    session, path = scene
+    monkeypatch.setattr(streaming, "_aux_title_configured", lambda: route == "aux")
+    calls = []
+
+    def respond(**kwargs):
+        calls.append(kwargs)
+        return _response(content)
+
+    agent = _fixture_agent(respond) if route == "agent" else None
+    events = []
+    with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+        with patch("agent.auxiliary_client.call_llm", side_effect=respond, create=True):
+            streaming._run_background_title_update(
+                session.session_id, "Fix login.", "Inspect login.", "Untitled",
+                lambda name, data: events.append((name, data)), agent=agent)
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["title"] == content
+    assert saved["llm_title_generated"] is True
+    assert len(calls) == 1
+    assert [data["title"] for name, data in events if name == "title"] == [content]

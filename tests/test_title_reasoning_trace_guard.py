@@ -640,7 +640,6 @@ def test_legitimate_existing_title_is_not_self_healed_on_background_update(monke
 
 @pytest.mark.parametrize("title", ("Analysis: User Needs Assessment", "Analysis: I Think Therefore I Am", "Thinking: User Needs Assessment", "Analysis: We Can Do It Poster", "Analysis: I Will Survive Lyrics", "Analysis: You Should Know Podcast", "Thinking: I Think Therefore I Am", "Analysis: They Said Yes Wedding", "Thought: Let Me In Review"))
 def test_persisted_title_worker_leaves_subjects_unchanged(title, tmp_path, monkeypatch):
-    import json
     import api.models as models
     from api.models import Session
     directory = tmp_path / "sessions"
@@ -1328,3 +1327,37 @@ def test_worker_persistent_reasoning_trace_keeps_provisional_title(route, tmp_pa
     # (compatibility only); the agent-routed worker additionally retries the
     # aux route end-to-end before declaring invalid output.
     assert len(calls) == (6 if route == "agent" else 3)
+
+
+# ── Maintainer fold on 35ec7c5f (release re-gate 2026-10-21) ─────────────────
+
+NEWLINE_TITLE_MENUS = (
+    "Title options:\nMobile Login Repair\nLogin Button Fix",
+    "Here are some title suggestions:\nMobile Login Repair\nLogin Flow Fix",
+)
+
+
+@pytest.mark.parametrize("content", NEWLINE_TITLE_MENUS)
+def test_compatibility_extract_rejects_newline_title_menus(content):
+    """The thinking-markup cleanup must keep line breaks, or a newline menu is
+    flattened into one long "title" the option-menu check cannot see."""
+    assert streaming._extract_title_text(content, mode="compatibility") == ""
+
+
+@pytest.mark.parametrize("content", (
+    "[2026] Login Repair",
+    "[3D] Printer Extruder Repair",
+    "[v2.1] Release Notes Cleanup",
+))
+def test_compatibility_extract_keeps_digit_bracket_label_prose(content):
+    assert streaming._extract_title_text(content, mode="compatibility") == content
+
+
+@pytest.mark.parametrize("content", ('[1, 2', '[-1, "x"', '["Login Flow"', "[{\"title\": \"x\""))
+def test_compatibility_extract_still_fails_closed_on_broken_json_arrays(content):
+    assert streaming._extract_title_text(content, mode="compatibility") == ""
+
+
+def test_strip_thinking_markup_collapses_whitespace_by_default():
+    assert streaming._strip_thinking_markup("<think>x</think>\nA\n\nB") == "A B"
+    assert streaming._strip_thinking_markup("<think>x</think>\nA\nB", collapse_whitespace=False) == "A\nB"
