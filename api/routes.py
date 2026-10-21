@@ -21952,6 +21952,27 @@ def _read_json_request_body(handler, *, max_bytes: int = 4096) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def _file_ops_ws_root(s) -> Path:
+    """WebUI-LOCAL workspace root for file-manager handlers (#7217).
+
+    File-manager handlers receive a session view from
+    ``get_session_for_file_ops``, which attaches the profile-scoped resolver's
+    translated ``local_workspace`` (the session's agent-visible workspace may
+    differ from the WebUI-container path in multi-container deployments).
+    Operations must be rooted there. The session object itself is never
+    rewritten.
+
+    A session WITH a profile whose translation was rejected never reaches
+    this helper — ``get_session_for_file_ops`` raises
+    :class:`SessionWorkspaceUnavailable` (KeyError) first, which the
+    handlers already answer with 404. Reaching this helper with no attached
+    translation therefore means a legacy/profile-less session, which keeps
+    the unchanged ``workspace`` field (explicitly deferred in the #7217 PR).
+    """
+    local = getattr(s, "local_workspace", None)
+    return Path(local) if local is not None else Path(s.workspace)
+
+
 def _handle_escape_authorize(handler, parsed, body: dict | None = None):
     if handler.command != "POST":
         return bad(handler, "method not allowed", 405)
@@ -21979,7 +22000,7 @@ def _handle_escape_authorize(handler, parsed, body: dict | None = None):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        payload = authorize_escape_target(Path(s.workspace), sid, rel)
+        payload = authorize_escape_target(_file_ops_ws_root(s), sid, rel)
     except ValueError as exc:
         return bad(handler, _sanitize_error(exc), 404)
     return j(handler, payload)
@@ -21999,7 +22020,7 @@ def _handle_escape_list_dir(handler, parsed):
         return bad(handler, "Session not found", 404)
     rel_path = qs.get("path", ["."])[0]
     try:
-        payload = list_authorized_escape_dir(Path(s.workspace), sid, token, rel_path)
+        payload = list_authorized_escape_dir(_file_ops_ws_root(s), sid, token, rel_path)
         payload["entries"] = serialize_workspace_entries_for_browser(payload.get("entries"))
         return j(handler, payload)
     except FileNotFoundError as exc:
@@ -22024,7 +22045,7 @@ def _handle_escape_file_read(handler, parsed):
         return bad(handler, "Session not found", 404)
     rel = qs.get("path", [""])[0]
     try:
-        return j(handler, read_authorized_escape_file_content(Path(s.workspace), sid, token, rel))
+        return j(handler, read_authorized_escape_file_content(_file_ops_ws_root(s), sid, token, rel))
     except FileNotFoundError as exc:
         return bad(handler, _sanitize_error(exc), 404)
     except EscapeAuthorizationExpiredError as exc:
@@ -22052,7 +22073,7 @@ def _handle_escape_file_raw(handler, parsed):
     rel = qs.get("path", [""])[0]
     force_download = qs.get("download", [""])[0] == "1"
     try:
-        anchor_root, target = raw_authorized_escape_target(Path(s.workspace), sid, token, rel)
+        anchor_root, target = raw_authorized_escape_target(_file_ops_ws_root(s), sid, token, rel)
     except FileNotFoundError:
         return j(handler, {"error": "not found"}, status=404)
     except EscapeAuthorizationExpiredError as exc:
@@ -24728,7 +24749,7 @@ def _handle_media(handler, parsed):
 
 def _file_raw_target(session, sid: str, rel: str) -> tuple[Path, Path] | None:
     """Resolve /api/file/raw paths from the workspace or this session's uploads."""
-    workspace_root = Path(session.workspace)
+    workspace_root = _file_ops_ws_root(session)
     try:
         target = safe_resolve(workspace_root, rel)
     except ValueError:
@@ -24840,7 +24861,7 @@ def _handle_folder_download(handler, parsed):
 
     rel = qs.get("path", [""])[0]
     try:
-        target = safe_resolve(Path(s.workspace), rel)
+        target = safe_resolve(_file_ops_ws_root(s), rel)
     except ValueError:
         return bad(handler, "invalid path", 400)
     if not target.exists():
@@ -24848,7 +24869,7 @@ def _handle_folder_download(handler, parsed):
     if not target.is_dir():
         return bad(handler, "path must be a directory; use /api/file/raw for single files", 400)
 
-    workspace_root = Path(s.workspace).resolve()
+    workspace_root = _file_ops_ws_root(s).resolve()
     max_bytes = _folder_zip_max_bytes()
     max_files = _folder_zip_max_files()
 
@@ -24967,7 +24988,7 @@ def _handle_file_read(handler, parsed):
     if not rel:
         return bad(handler, "path is required")
     try:
-        return j(handler, read_file_content(Path(s.workspace), rel))
+        return j(handler, read_file_content(_file_ops_ws_root(s), rel))
     except ImportError as e:
         return bad(handler, str(e), 503)
     except (FileNotFoundError, ValueError) as e:
@@ -30954,7 +30975,7 @@ def _handle_file_delete(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         # Reject a symlinked entry BEFORE the follow-based exists() check: a
         # dangling symlink resolves to a missing target, so an exists()-first
@@ -30986,7 +31007,7 @@ def _handle_file_save(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         if (ws_root / body["path"]).is_symlink():
             return bad(handler, "Cannot save to a symlinked entry")
@@ -31017,7 +31038,7 @@ def _handle_office_file_save(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         if (ws_root / body["path"]).is_symlink():
             return bad(handler, "Cannot save to a symlinked entry")
@@ -31052,7 +31073,7 @@ def _handle_file_create(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         if target.exists():
             return bad(handler, "File already exists")
@@ -31079,7 +31100,7 @@ def _handle_file_rename(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         ws_root_resolved = ws_root.resolve()
         source = safe_resolve(ws_root, body["path"])
         # Reject a symlinked entry BEFORE the follow-based exists() check (see
@@ -31114,7 +31135,7 @@ def _handle_file_move(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         # safe_resolve() returns paths under the RESOLVED root, so compute
         # returned relative paths against the resolved root too — otherwise a
         # symlinked workspace root (e.g. macOS /tmp -> /private/tmp) makes
@@ -31212,7 +31233,7 @@ def _handle_create_dir(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        ws_root = Path(s.workspace)
+        ws_root = _file_ops_ws_root(s)
         target = safe_resolve(ws_root, body["path"])
         if target.exists():
             return bad(handler, "Path already exists")
@@ -31234,7 +31255,7 @@ def _handle_file_reveal(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        target = safe_resolve(_file_ops_ws_root(s), body["path"])
         if not target.exists():
             # Include the resolved server-side path in the error message so
             # the frontend toast can show *which* file the system expected.
@@ -31295,7 +31316,7 @@ def _handle_file_path(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        target = safe_resolve(_file_ops_ws_root(s), body["path"])
         return j(handler, {"ok": True, "path": str(target)})
     except (ValueError, PermissionError, OSError) as e:
         return bad(handler, _sanitize_error(e))
@@ -31325,7 +31346,7 @@ def _handle_file_open_vscode(handler, body):
     except KeyError:
         return bad(handler, "Session not found", 404)
     try:
-        target = safe_resolve(Path(s.workspace), body["path"])
+        target = safe_resolve(_file_ops_ws_root(s), body["path"])
         if not target.exists():
             return bad(handler, f"File not found: {target}", 404)
 
