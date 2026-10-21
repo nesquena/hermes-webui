@@ -553,7 +553,7 @@ def test_persisted_title_check_self_heals_screenshot_traces(candidate):
 
 @pytest.mark.parametrize("candidate", ADVERSARIAL_TRACE_TITLES)
 def test_sanitizer_rejects_whitespace_and_provider_trace_wrappers(candidate):
-    assert streaming._looks_invalid_generated_title(candidate) is True
+    assert streaming._is_bad_new_title(candidate) is True
     assert streaming._sanitize_generated_title(candidate) == ""
 
 
@@ -636,6 +636,35 @@ def test_legitimate_existing_title_is_not_self_healed_on_background_update(monke
     status = [data for name, data in events if name == "title_status"]
     assert status[-1]["status"] == "skipped"
     assert status[-1]["reason"] == "already_generated"
+
+
+@pytest.mark.parametrize("title", ("Analysis: User Needs Assessment", "Analysis: I Think Therefore I Am", "Thinking: User Needs Assessment", "Analysis: We Can Do It Poster", "Analysis: I Will Survive Lyrics", "Analysis: You Should Know Podcast", "Thinking: I Think Therefore I Am", "Analysis: They Said Yes Wedding", "Thought: Let Me In Review"))
+def test_persisted_title_worker_leaves_subjects_unchanged(title, tmp_path, monkeypatch):
+    import json
+    import api.models as models
+    from api.models import Session
+    directory = tmp_path / "sessions"
+    directory.mkdir()
+    monkeypatch.setattr(models, "SESSION_DIR", directory)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", directory / "_index.json")
+    session = Session(session_id="persisted-title", title=title, messages=[{"role": "user", "content": "A topic."}, {"role": "assistant", "content": "Details."}], llm_title_generated=True, manual_title=False)
+    monkeypatch.setattr(streaming, "get_session", lambda _sid: session)
+    monkeypatch.setattr(streaming, "SESSIONS", {session.session_id: session})
+    monkeypatch.setattr(streaming, "LOCK", threading.Lock())
+    monkeypatch.setattr(streaming, "_aux_title_generation_enabled", lambda: True)
+    monkeypatch.setattr(streaming, "_aux_title_configured", lambda: True)
+    monkeypatch.setattr("api.profiles.profile_env_for_background_worker", lambda *a, **k: nullcontext())
+    session.save()
+    path = directory / "persisted-title.json"
+    original = path.read_bytes()
+    calls, events = [], []
+    with auxiliary_client_modules(), patch_tg_config({"provider": "custom", "model": "fixture"}):
+        with patch("agent.auxiliary_client.call_llm", side_effect=lambda **kw: calls.append(kw), create=True):
+            streaming._run_background_title_update(session_id=session.session_id, user_text="A topic.", assistant_text="Details.", placeholder_title="Untitled", put_event=lambda n, d: events.append((n, d)), agent=None)
+    assert path.read_bytes() == original
+    assert calls == []
+    assert not [1 for name, _ in events if name == "title"]
+    assert [d["reason"] for n, d in events if n == "title_status"][-1] == "already_generated"
 
 
 def test_legitimate_existing_title_survives_normal_turn(tmp_path, monkeypatch):
@@ -828,15 +857,10 @@ def test_ambiguous_headings_are_candidate_only(candidate):
     "Reasoning: okay, so the parser needs a fix",
     "Analysis: I think we should file by quarter",
     "Thinking: You asked for a weekly summary",
-    "The title should be 3-8 words, as a topic label",
-    "Title should be a concise topic label",
-    "Title should: Something Else Entirely",
-    "Title options: Stocks; Bonds; ETFs",
 ))
-def test_unambiguous_traces_still_self_heal_after_persisted_split(trace):
-    """Re-gate finding 1: narrowing the persisted predicate to unambiguous
-    traces must not stop self-healing the shapes that actually leak."""
-    assert streaming._looks_invalid_generated_title(trace) is True
+def test_heading_trace_shapes_are_candidate_only(trace):
+    """Heading clauses are rejected for new candidates, never used to rename persisted titles."""
+    assert streaming._looks_invalid_generated_title(trace) is False
     assert streaming._is_bad_new_title(trace)
 
 
@@ -1131,6 +1155,17 @@ def test_extra_key_title_object_is_not_accepted(route):
     assert len(calls) == 3
 
 
+@pytest.mark.parametrize("trace", (
+    "The title should be 3-8 words, as a topic label",
+    "Title should be a concise topic label",
+    "Title should: Something Else Entirely",
+    "Title options: Stocks; Bonds; ETFs",
+))
+def test_unambiguous_prompt_echoes_still_self_heal(trace):
+    assert streaming._looks_invalid_generated_title(trace) is True
+    assert streaming._is_bad_new_title(trace) is True
+
+
 @pytest.mark.parametrize("content", (
     TRACE_SENTENCE,
     'Here is my thinking: {"title": "Wrong One"}',
@@ -1143,6 +1178,26 @@ def test_compatibility_extract_fails_closed_on_reasoning_and_broken_json(content
     """Full-text reasoning guards run before embedded extraction; malformed
     JSON behind a short preamble never returns as raw prose; objects that
     violate additionalProperties fail closed."""
+    assert streaming._extract_title_text(content, mode="compatibility") == ""
+
+
+@pytest.mark.parametrize("content", (
+    "<think>I should choose a title.</think>\nMobile Login Repair",
+    "Let me think through this.\nMobile Login Repair",
+    "Here's my thinking process: short.\nMobile Login Repair",
+    "The user is asking about login.\nMobile Login Repair",
+))
+def test_compatibility_extract_reuses_visible_title_after_thinking(content):
+    assert streaming._extract_title_text(content, mode="compatibility") == "Mobile Login Repair"
+
+
+def test_completed_think_wrapper_embedded_candidate_does_not_block_visible_title():
+    content = '<think>I should not use {"title": "Rejected Candidate"}.</think>\nMobile Login Repair'
+    assert streaming._extract_title_text(content, mode="compatibility") == "Mobile Login Repair"
+
+
+def test_unwrapped_reasoning_with_embedded_json_candidate_fails_closed():
+    content = 'I should not use {"title": "Rejected Candidate"}.\nMobile Login Repair'
     assert streaming._extract_title_text(content, mode="compatibility") == ""
 
 

@@ -5015,27 +5015,6 @@ def _looks_invalid_generated_title(text: str) -> bool:
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
-        or re.search(
-            # Re-gate 2026-10-21 (db59f307) finding 1: a bare pronoun or
-            # "user" after a heading silently renames ordinary persisted
-            # titles ("Analysis: User Retention", "Thinking: You and Your
-            # Research"). Require an explicit reasoning clause after the
-            # heading instead — the clause families the line-start rules
-            # above already use.
-            r'^\s*(?:[*_`~]+\s*)?(?:analysis|thinking|reasoning|thought)\s*:'
-            r'\s*(?:'
-            r"(?:the\s+)?user\s+(?:wan(?:t|ts|ted)\b|need(?:s|ed)?\b|ask(?:ed|s)?\b|did\b|mentioned?\b|said\b)"
-            r'|we\s+(?:need(?:\s+to)?\b|should\b|will\b|can\b|could\b|wan(?:t|ts|ted)\b|decided\b|moved\b|have\s+to\b)'
-            r'|i\s+(?:should\b|need(?:\s+to)?\b|must\b|will\b|am\s+going\b|can\b|could\b|want(?:ed)?\b|think\b)'
-            r"|i'm\b"
-            r'|let\s+me\b'
-            r'|they\s+(?:wan(?:t|ts|ted)\b|need(?:s|ed)?\b|ask(?:ed|s)?\b|did\b|mentioned?\b|said\b)'
-            r'|you\s+(?:need(?:s|ed)?\b|want(?:ed)?\b|should\b|ask(?:ed|s)?\b|did\b|mentioned?\b|said\b)'
-            r'|ok(?:ay)?,?\s+so\b'
-            r')',
-            s,
-            flags=re.IGNORECASE,
-        )
     )
 
 
@@ -6573,6 +6552,9 @@ def _extract_title_text(content: str, *, mode: str = 'compatibility') -> str:
     # embedded-title regex can pull a candidate out of a reasoning sentence
     # ("I should not use {"title": ...} ...") — reject so the caller falls
     # through to the compatibility request.
+    # Completed wrappers and supported thinking preambles are metadata; validate
+    # the remaining visible text before looking for an embedded JSON title.
+    raw = _strip_thinking_markup(raw) if mode == 'compatibility' else raw
     if _looks_invalid_generated_title(raw):
         return ''
     match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
@@ -7353,11 +7335,11 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                if not next_title and llm_status in ('llm_error', 'llm_invalid', 'llm_invalid_trace'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
-                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux', 'llm_invalid_trace_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         if not next_title:
             _put_title_status(put_event, session_id, 'refresh_skipped', llm_status or 'empty', effective, raw_preview)

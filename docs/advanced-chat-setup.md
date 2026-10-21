@@ -72,11 +72,18 @@ and comma-separated noun lists are preserved unless there is actual
 multiple-option/list evidence (numbered/bulleted markers, quoted alternatives,
 or explicit list separators). A persisted title is regenerated only for
 unambiguous traces — thinking/analysis wrappers, `Title should:`/prompt-echo
-sentences ("3-8 words", "topic label"), structural option menus, or
-meta-commentary continuations after an `Analysis:`/`Thinking:`/`Reasoning:`/
-`Thought:` heading. Manual titles remain protected. Invalid output retains the
-provisional title until a later exchange or the existing bounded recovery cap;
-this does not change retry ownership.
+sentences ("3-8 words", "topic label") or structural option menus. Saved
+`Analysis:`/`Thinking:`/`Reasoning:`/`Thought:` headings are not self-heal
+signals, even when their subject matter resembles a reasoning clause; newly
+generated candidates with those headings are still rejected. Manual titles
+remain protected. Compatibility extraction removes completed thinking wrappers
+and supported thinking preambles before validating the remaining visible title,
+so a usable title can be reused without another provider call. Unwrapped
+reasoning that embeds a candidate is still rejected. Adaptive refresh tries the
+alternate route for invalid-trace output just as it does for other invalid
+model output. Invalid output retains the provisional title until a later
+exchange or the existing bounded recovery cap; this does not change retry
+ownership.
 
 Hermes WebUI derives a provisional session title from the first user message
 and, after the first response, may call an LLM to generate a better title
