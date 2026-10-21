@@ -180,7 +180,9 @@ class FakeKanbanDB:
             yield conn
         except Exception:
             del self.tasks[len(saved_tasks):]
-            for task, saved in zip(self.tasks, saved_tasks):
+            # strict=True: the delete above truncated self.tasks back to the
+            # saved length, so the two sequences must line up exactly.
+            for task, saved in zip(self.tasks, saved_tasks, strict=True):
                 vars(task).update(saved)
             self.events[:] = saved_events
             self.next_event_id = saved_next_event_id
