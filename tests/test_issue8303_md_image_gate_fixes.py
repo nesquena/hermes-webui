@@ -127,6 +127,12 @@ process.stdin.on('end', () => { process.stdout.write(renderMd(buf)); });
 
 @pytest.fixture(scope="module")
 def driver_path(tmp_path_factory):
+    # Every test that uses this fixture drives the REAL renderMd() through
+    # node. Without node the fixture would hand out a path and _render() would
+    # pass None as the executable — a TypeError, not a skip. Skip here so the
+    # whole node-dependent group degrades cleanly.
+    if NODE is None:
+        pytest.skip("node not on PATH")
     path = tmp_path_factory.mktemp("md_image_gate_8303") / "driver.js"
     path.write_text(_DRIVER_SRC, encoding="utf-8")
     return str(path)

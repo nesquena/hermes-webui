@@ -201,16 +201,25 @@ def test_tab_between_brackets_renders(driver_path):
 
 
 def test_image_in_table_cell_split_across_lines_renders(driver_path):
-    """The inlineMd() call site (tables/lists) needs the same tolerance."""
+    """The inlineMd() call site (tables/lists) needs the same tolerance.
+
+    The image must be INSIDE a table cell. The previous version put it after
+    a blank line, which made it a sibling paragraph — the outer image pass
+    handled it and the inlineMd() path was never exercised.
+    """
     md = (
         "| image |\n"
         "| --- |\n"
         "| x |\n"
-        "| y |\n\n"
-        "![cat]\n(https://example.com/cat.png)"
+        "| ![cat](https://example.com/cat.png) |"
     )
     html = _render(driver_path, md)
     assert 'src="https://example.com/cat.png"' in html
+    # The image must be INSIDE a cell, not a paragraph after the table.
+    assert "<table>" in html, html
+    cell_html = html[html.index("<tbody>"):html.index("</tbody>")]
+    assert 'src="https://example.com/cat.png"' in cell_html, html
+    assert "<p>" not in html, html
 
 
 def test_image_in_list_item_split_across_lines_renders(driver_path):
@@ -324,11 +333,17 @@ def test_plain_bracket_paren_in_prose_not_an_image(driver_path):
 def test_compact_image_in_inline_code_span_still_not_promoted(driver_path):
     """A code span is still a code span: the ref must not become a media fetch.
 
-    Note the renderer only recognises single-line backtick spans (the stash
-    regex forbids newlines), so this pins the genuine code-span case.
+    The example is a COMPLETE ``![cat](path)`` — the previous version wrote
+    only ``![path]``, which cannot match the image regex even with code
+    protection disabled, so the test could not fail for the right reason.
     """
-    html = _render(driver_path, f"`see ![{CACHE_PNG}]`")
+    html = _render(driver_path, f"`see ![cat]({CACHE_PNG})`")
     assert "api/media?path=" not in html
+    assert "generated=1" not in html
+    assert "<img" not in html
+    # The example survives as literal code text.
+    assert "<code>" in html, html
+    assert CACHE_PNG in html, html
 
 
 def test_image_in_fenced_block_is_not_consumed(driver_path):
