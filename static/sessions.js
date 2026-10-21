@@ -5015,6 +5015,38 @@ function _assistantOnlySnapshotUserTurn(session, inflightMessages){
   return pending;
 }
 
+// #6649 re-gate (2026-10-19) — the recovery tail's user row can still carry
+// the CLIENT stamp (`_ts: 100`) while the server already persisted the SAME
+// turn's user row at `pending_started_at` (200) and saved an assistant answer
+// for it. The stamps then never precision-match, so the both-stamped branch
+// of `_hasInflightTailUserDuplicate` treats the pair as different turns and
+// the merge renders the prompt and the answer a second time (master shows one
+// copy). Adopt the server's start stamp onto the provisional row BEFORE the
+// prepare/merge machinery reads it. Ownership is proven by the local INFLIGHT
+// entry for this session pointing at the session's active stream plus the
+// normalized prompt text — never by answer text or pending truthiness alone.
+function _adoptServerStartStampForRecoveryUser(session,inflightMessages,firstLiveIdx){
+  if(!session||!session.session_id||!session.active_stream_id) return false;
+  const owner=(typeof INFLIGHT==='object'&&INFLIGHT)?INFLIGHT[session.session_id]:null;
+  if(!owner||String(owner.streamId||'')!==String(session.active_stream_id)) return false;
+  const started=Number(session.pending_started_at);
+  const pendingText=_normalizeUserTranscriptText(String(session.pending_user_message||''));
+  if(!(Number.isFinite(started)&&started>0)||!pendingText) return false;
+  const list=Array.isArray(inflightMessages)?inflightMessages:[];
+  for(let i=firstLiveIdx-1;i>=0;i--){
+    const row=list[i];
+    if(!row) continue;
+    if(String(row.role||'')==='tool') continue;
+    if(String(row.role||'')!=='user') return false;
+    if(row._pending!==true||row._active_turn_user===true||row.id||row._id) return false;
+    if(_normalizeUserTranscriptText(_messageComparableText(row))!==pendingText) return false;
+    row._ts=started;
+    if(row.timestamp!==undefined) row.timestamp=started;
+    return true;
+  }
+  return false;
+}
+
 function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
   const liveMessages=inflight.filter(m=>m&&m.role==='assistant'&&m._live);
@@ -5031,6 +5063,13 @@ function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
   // letting the merge text-dedupe it away would make the current response
   // disappear (#6649 greptile P1, "Current response can disappear").
   const firstLiveIdx=inflight.findIndex(m=>m&&m._live);
+  // #6649 re-gate (2026-10-19): adopt the server's `pending_started_at` onto
+  // the provisional recovery user BEFORE the ownership scan below, so the
+  // both-stamped dedup branch can precision-match the SAME turn even when the
+  // server already saved an assistant row for it. Guarded by session/stream
+  // ownership plus prompt equality; the completed-answer boundary in
+  // `_hasInflightTailUserDuplicate` is untouched for genuinely different turns.
+  _adoptServerStartStampForRecoveryUser(session,inflight,firstLiveIdx);
   let turnUser=null;
   for(let i=firstLiveIdx-1;i>=0;i--){
     const msg=inflight[i];

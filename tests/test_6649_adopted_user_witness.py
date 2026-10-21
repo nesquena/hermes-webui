@@ -131,6 +131,12 @@ if (typeof msgContent !== 'function') {
 # components (prepare -> conditional drop -> merge -> pending merge).
 _DRIVER = """
 function _driveCase(label, session, base, inflight) {
+  // The recovery path proves stream ownership through the live INFLIGHT entry
+  // for this session; without it the server-stamp adoption is (correctly)
+  // skipped, so the driver must publish the same ownership the browser holds.
+  if (session && session.session_id && session.active_stream_id) {
+    INFLIGHT[session.session_id] = { streamId: session.active_stream_id };
+  }
   var S = { session: session, messages: base };
   var prepared = _prepareRunningLiveTail(S.messages, inflight, S.session);
   if (prepared) S.messages = _dropCurrentTurnAssistantMessages(S.messages);
@@ -153,8 +159,10 @@ def _harness(body: str) -> str:
         _reattach_helper_src(),
         _FALLBACK_HELPERS,
         _pending_resolver_src(),
+        "var INFLIGHT = {};",
         _DRIVER,
         _function_decl(SESSIONS_JS, "_hasInflightTailUserDuplicate") or "",
+        _function_decl(SESSIONS_JS, "_adoptServerStartStampForRecoveryUser") or "",
         _function_decl(SESSIONS_JS, "_prepareRunningLiveTail") or "",
         _function_decl(SESSIONS_JS, "_mergeInflightTailMessages") or "",
         _function_decl(SESSIONS_JS, "_mergePendingSessionMessage") or "",
@@ -602,3 +610,133 @@ async function api() { return { stream_id: 's1', pending_started_at: 200 }; }
     )
     assert payload["_ts"] == 200, payload
     assert payload["pending"] is True, payload
+
+
+# =====================================================================
+# 2026-10-19 re-gate table — the persisted (non-`_live`) base assistant.
+#
+# `_handle_session_get` never returns a base row flagged `_live`, so the
+# round-4 fixtures that carried `_live: true` on the base assistant did not
+# exercise the shape that duplicated in production. Each case below is one
+# row of the review's table driven through the real
+# prepare -> conditional drop -> merge -> mergePending order.
+# =====================================================================
+
+def _drive_saved(label, session_js, base_js, inflight_js, expected, assistants):
+    body = f"""
+const result = _driveCase(
+  {label!r},
+  {session_js},
+  {base_js},
+  {inflight_js}
+);
+console.log(JSON.stringify(result));
+assert.deepStrictEqual(result.rows, {json.dumps(expected)},
+  'rows: ' + JSON.stringify(result.rows));
+assert.strictEqual(result.assistants, {assistants},
+  'assistants: ' + JSON.stringify(result.rows));
+"""
+    payload = _run_payload(body)
+    assert payload["rows"] == expected, payload["rows"]
+    assert payload["assistants"] == assistants, payload["rows"]
+
+
+_SESSION_SAVED = ("{ session_id: '%s', active_stream_id: 's1', "
+                  "pending_started_at: 200, pending_user_message: 'go', messages: [] }")
+
+
+# Table row 1 — the server already saved this turn's answer (marked user) and
+# the recovery tail still carries the stale client stamp on a provisional row.
+# Master renders one copy; before the 2026-10-19 reorder this head rendered
+# four rows.
+def test_saved_answer_marked_user_renders_one_pair():
+    _drive_saved(
+        "r12_saved_marked",
+        _SESSION_SAVED % "sid-r12a",
+        "[{ role:'user', content:'go', timestamp:200, _active_turn_user:true },"
+        " { role:'assistant', content:'new answer', timestamp:201 }]",
+        "[{ role:'user', content:'go', _ts:100, _pending:true },"
+        " { role:'assistant', content:'new answer', _live:true }]",
+        ["user:go", "assistant:new answer"],
+        1,
+    )
+
+
+# Table row 2 — the same shape without the server's active-turn marker.
+def test_saved_answer_unmarked_user_renders_one_pair():
+    _drive_saved(
+        "r12_saved_unmarked",
+        _SESSION_SAVED % "sid-r12b",
+        "[{ role:'user', content:'go', timestamp:200 },"
+        " { role:'assistant', content:'new answer', timestamp:201 }]",
+        "[{ role:'user', content:'go', _ts:100, _pending:true },"
+        " { role:'assistant', content:'new answer', _live:true }]",
+        ["user:go", "assistant:new answer"],
+        1,
+    )
+
+
+# Table row 3 — a previous same-text turn keeps its settled answer AND the
+# current turn keeps its own: four rows, never six.
+def test_saved_answer_with_previous_same_text_turn_renders_four_rows():
+    _drive_saved(
+        "r12_previous_same_text",
+        _SESSION_SAVED % "sid-r12c",
+        "[{ role:'user', content:'go', timestamp:50 },"
+        " { role:'assistant', content:'ok', timestamp:51 },"
+        " { role:'user', content:'go', timestamp:200, _active_turn_user:true },"
+        " { role:'assistant', content:'new answer', timestamp:201 }]",
+        "[{ role:'user', content:'go', _ts:100, _pending:true },"
+        " { role:'assistant', content:'new answer', _live:true }]",
+        ["user:go", "assistant:ok", "user:go", "assistant:new answer"],
+        2,
+    )
+
+
+# Table row 4 — a mid-turn tool-call row is a persisted non-live assistant.
+# The stale stamp must not stop the recovered prefix from being replaced by
+# the fuller live text: three rows, and never a second `go`.
+def test_saved_answer_with_tool_call_row_renders_three_rows():
+    _drive_saved(
+        "r12_tool_call_row",
+        _SESSION_SAVED % "sid-r12d",
+        "[{ role:'user', content:'go', timestamp:200, _active_turn_user:true },"
+        " { role:'assistant', content:'Preparing export', timestamp:201 },"
+        " { role:'tool', content:'ok' }]",
+        "[{ role:'user', content:'go', _ts:100, _pending:true },"
+        " { role:'assistant', content:'Preparing export\\n\\nExport is ready', _live:true }]",
+        ["user:go", "tool:ok", "assistant:Preparing export\n\nExport is ready"],
+        1,
+    )
+
+
+# Table row 5 — P5 control: the previous same-text turn has NO saved answer.
+# The marked current row pairs with its own turn, so the live reply survives
+# and both turns are visible (four rows).
+def test_previous_same_text_without_saved_answer_renders_four_rows():
+    _drive_saved(
+        "r12_p5_control",
+        _SESSION_SAVED % "sid-r12e",
+        "[{ role:'user', content:'go', timestamp:50 },"
+        " { role:'assistant', content:'ok', timestamp:51 },"
+        " { role:'user', content:'go', timestamp:200, _active_turn_user:true }]",
+        "[{ role:'user', content:'go', _ts:100, _pending:true },"
+        " { role:'assistant', content:'live reply', _live:true }]",
+        ["user:go", "assistant:ok", "user:go", "assistant:live reply"],
+        2,
+    )
+
+
+# Table row 6 — the tail user was already restamped to the server's
+# `pending_started_at`. Everything above must keep master's result here.
+def test_restamped_tail_user_matches_master():
+    _drive_saved(
+        "r12_restamped_tail",
+        _SESSION_SAVED % "sid-r12f",
+        "[{ role:'user', content:'go', timestamp:200 },"
+        " { role:'assistant', content:'new answer', timestamp:201 }]",
+        "[{ role:'user', content:'go', timestamp:200, _ts:200, _pending:true },"
+        " { role:'assistant', content:'new answer', _live:true }]",
+        ["user:go", "assistant:new answer"],
+        1,
+    )
