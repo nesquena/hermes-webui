@@ -51,6 +51,40 @@ never the prefill message bodies.
 
 ## Session title generation
 
+OpenAI-compatible title routes first request a strict JSON object with one
+`title` string. Unsupported schemas, empty schema results, and reasoning-only
+schema results retry the same prompt and budget with the existing compatibility
+request shape. Compatibility reasoning-only output still stops further attempts.
+When a transport silently strips the schema request and answers with a valid
+plain-text title, that same response is parsed with the compatibility
+extractor and accepted after validation — one provider call, no re-send.
+Malformed JSON-looking objects or arrays are rejected, not reused as prose;
+the compatibility request may still supply a valid recovery title.
+Only explicit unsupported-schema evidence permits a compatibility-mode re-send.
+Authentication, rate-limit, server and timeout failures remain transport errors
+even when their messages mention `response_format`/`json_schema`. The schema request carries
+the same route-gated reasoning disable as the compatibility request, so
+reasoning models do not spend the title budget on hidden thoughts first.
+
+Fresh candidates reject reasoning traces, option lists, and output over 12 words.
+Saved-title self-healing is narrower: ambiguous headings, single quoted terms,
+and comma-separated noun lists are preserved unless there is actual
+multiple-option/list evidence (numbered/bulleted markers, quoted alternatives,
+or explicit list separators). A persisted title is regenerated only for
+unambiguous traces — thinking/analysis wrappers, `Title should:`/prompt-echo
+sentences ("3-8 words", "topic label") or structural option menus. Saved
+`Analysis:`/`Thinking:`/`Reasoning:`/`Thought:` headings are not self-heal
+signals, even when their subject matter resembles a reasoning clause; newly
+generated candidates with those headings are still rejected. Manual titles
+remain protected. Compatibility extraction removes completed thinking wrappers
+and supported thinking preambles before validating the remaining visible title,
+so a usable title can be reused without another provider call. Unwrapped
+reasoning that embeds a candidate is still rejected. Adaptive refresh tries the
+alternate route for invalid-trace output just as it does for other invalid
+model output. Invalid output retains the provisional title until a later
+exchange or the existing bounded recovery cap; this does not change retry
+ownership.
+
 Hermes WebUI derives a provisional session title from the first user message
 and, after the first response, may call an LLM to generate a better title
 (and periodically refresh it for long sessions).

@@ -4914,10 +4914,12 @@ def _sanitize_generated_title(text: str) -> str:
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
     if _looks_like_title_option_menu(s):
         return ''
+    if _is_bad_new_title(s):
+        return ''
     s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
-    if _is_bad_new_title(s):
+    if _is_bad_new_title(s) or len(s.split()) > 12:
         return ''
     return s[:80]
 
@@ -4950,8 +4952,25 @@ _TITLE_MENU_COMMA_VERB_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# Re-gate 2026-10-19 finding 1: the persisted self-heal keeps only
+# unmistakable ``title should`` prompt echoes — an explicit ``Title should:``
+# clause or a sentence that echoes the title prompt's instruction tokens.
+# Ordinary subject matter such as "Title Should Reflect Content" stays;
+# freshly generated candidates with the bare shape are still rejected whole
+# by ``_is_bad_new_title``.
+_TITLE_SHOULD_ECHO_RE = re.compile(
+    r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should\b'
+    r'(?:'
+    r'\s*:'
+    r'|\s+[^.\n]{0,90}\b(?:3(?:\s*[-\u2013]\s*)?8\s*words?|three\s+to\s+eight\s*words?'
+    r'|topic\s+labels?|noun[-\s]phrase\s+titles?|short\s+session\s+titles?'
+    r'|full\s+sentences?|internal\s+reasoning|meta\s+commentary)\b'
+    r')',
+    flags=re.IGNORECASE,
+)
 
-def _looks_like_title_option_menu(text: str) -> bool:
+
+def _looks_like_title_option_menu(text: str, *, require_list_syntax: bool = False) -> bool:
     """Return True for a title-model menu rather than one selected title.
 
     The preamble alone is not enough: legitimate single titles like
@@ -4961,12 +4980,22 @@ def _looks_like_title_option_menu(text: str) -> bool:
     two or more list entries, or delimiter-separated standalone alternatives.
     Matching works on both raw stored text and the whitespace-collapsed sanitize
     form. A grammatical comma inside one title is not a candidate boundary.
+
+    ``require_list_syntax`` (persisted self-heal, re-gate 2026-10-19 finding 1)
+    trusts only structural menu evidence: quoted alternatives, list markers,
+    quoted items, newline/semicolon separators, or an explicit "or" choice.
+    Bare comma-separated noun fragments are ordinary saved-title subject
+    matter there ("Options: Stocks, Bonds, ETFs") and must survive.
     """
     s = str(text or '')
     s_m = _TITLE_OPTION_MENU_RE.match(s)
     if not s_m:
         return False
     rest = s[s_m.end():]
+    # A completed quoted option followed by another quoted choice is a menu,
+    # even if the stored output was truncated before the second closing quote.
+    if re.search(r'["“][^"”\n]+["”]\s+or\s+["“]\S', rest, re.IGNORECASE):
+        return True
     if len(_TITLE_MENU_LIST_RE.findall(rest)) >= 2:
         return True
     # Only separators outside quoted terms delimit candidates. Two quoted
@@ -5006,6 +5035,25 @@ def _looks_like_title_option_menu(text: str) -> bool:
         alternative = bool(re.match(r'^or\b', candidates[-1], re.IGNORECASE))
         if not (quoted or marked or alternative):
             return False
+    if require_list_syntax:
+        # Rewritten ambiguous preambles ("Options:", "Good title:",
+        # "Something like") must show structural menu evidence before a
+        # persisted title is renamed (re-gate 2026-10-19 finding 1): fully
+        # quoted items, a leading list marker, or an explicit "or" choice
+        # between exactly two fragments. Bare comma-separated noun fragments
+        # are ordinary saved-title subject matter there.
+        if any(
+            (item.startswith('"') and item.endswith('"'))
+            or (item.startswith('\u201c') and item.endswith('\u201d'))
+            for item in candidates
+            if item
+        ):
+            return True
+        if bool(re.match(r'^\s*(?:[-*\u2022\u2023]|\d{1,2}[).:])\s+', s)):
+            return True
+        if len(candidates) == 2 and alternative:
+            return True
+        return False
     # A comma can also join clauses in ONE title ("Compare REST, GraphQL and
     # gRPC"). Require short standalone alternatives: a leading action verb,
     # boundary-spanning preposition, or a connective joining the final segment
@@ -5031,22 +5079,52 @@ def _looks_like_title_option_menu(text: str) -> bool:
 def _looks_invalid_generated_title(text: str) -> bool:
     """True when an existing/persisted title is structurally invalid (CoT leak).
 
-    Intentionally does NOT reject short conversational words like "Done" or
-    "Cool" — those can be legitimate stored titles. Use ``_is_bad_new_title``
-    when validating a freshly generated candidate.
+    This is the persisted-title self-heal predicate. Keep it unambiguous:
+    leading thinking/analysis/reasoning wrappers, unmistakable prompt-echo
+    sentences (``Title should: …`` / "3-8 words" / "topic label" language),
+    structural candidate-list syntax, and meta-commentary continuations after
+    a heading prefix. Ordinary subject matter — "Analysis: Q3 Sales Trends",
+    "Options: Stocks, Bonds, ETFs", "Title Should Reflect Content",
+    "Maybe Monad Error Handling", "Something Like Summer Discussion",
+    "Parsing <analysis> Tags" — must survive (re-gate 2026-10-19 finding 1).
+    Use ``_is_bad_new_title`` for freshly generated candidates, which keeps
+    the aggressive bare-heading/menu/echo shapes candidate-only.
     """
     s = str(text or '')
     if not s.strip():
         return True
     return bool(
-        re.search(r'<think>|<\|channel\|>thought|<\|turn\|>thinking', s, flags=re.IGNORECASE)
+        re.search(
+            r'^\s*(?:[*_`~]+\s*)?<\s*(?:think|analysis|reasoning|thought)(?:\s[^>]*)?>',
+            s,
+            flags=re.IGNORECASE,
+        )
+        or re.search(
+            r'^\s*(?:[*_`~]+\s*)?<\|channel\|?>\s*(?:thought|analysis|reasoning|thinking)\b',
+            s,
+            flags=re.IGNORECASE,
+        )
+        or re.search(
+            r'^\s*(?:[*_`~]+\s*)?<\|turn\|?>\s*thinking',
+            s,
+            flags=re.IGNORECASE,
+        )
+        or _TITLE_SHOULD_ECHO_RE.search(s)
+        # Direct "title options:/suggestions:/ideas:" preambles already name a
+        # menu, so comma/semicolon fragments are real candidates there; only
+        # the rewritten bare-prefix forms (plain "Options:"/"Good title:"/
+        # "Something like") need structural list evidence (re-gate finding 1).
+        or _looks_like_title_option_menu(s)
+        or _looks_like_title_option_menu(re.sub(
+            r'^\s*(?:[*_`~]+\s*)?(?:(?:a\s+)?good title\s*:|options\s*:|something like\s+)',
+            'Title options:', s, flags=re.IGNORECASE,
+        ), require_list_syntax=True)
         or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
         or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
-        or _looks_like_title_option_menu(s)
     )
 
 
@@ -5055,16 +5133,69 @@ def _is_bad_new_title(text: str) -> bool:
 
     Includes structural CoT rejection plus trivial single-token echo replies
     (pong, yes, done, cool, …) that are useless as first-generation titles.
+    Anywhere-in-string wrappers, quoted alternatives, and bullet lists are
+    candidate-only so ordinary persisted titles are not silently renamed.
     """
     if _looks_invalid_generated_title(text):
         return True
     s = str(text or '').strip()
+    if re.search(
+        r'<\s*(?:think|analysis|reasoning|thought)(?:\s[^>]*)?>',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r'<\|channel\|?>\s*(?:thought|analysis|reasoning|thinking)\b',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(r'<\|turn\|?>\s*thinking', s, flags=re.IGNORECASE):
+        return True
+    if re.search(
+        r'["“][^"”\n]+["”]\s+or\s+["“][^"”\n]+["”]',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(r'^\s*[-*•]\s*["“][^"”\n]+["”]', s):
+        return True
+    if re.search(r'^\s*(?:[*_`~]+\s*)?something like\b', s, flags=re.IGNORECASE):
+        return True
+    if re.search(r'^\s*(?:[*_`~]+\s*)?(?:(?:a\s+)?good title\s*:|options\s*:)', s, re.IGNORECASE):
+        return True
     _token = re.sub(r'[\s.!?]+$', '', s, flags=re.IGNORECASE)
     if re.fullmatch(
         r'(?:pong|ping|yes|no|yep|nope|hi|hello|hey|thanks|thank you|sure|k|kk|cool|nice|lol|ok|okay|done)',
         _token,
         flags=re.IGNORECASE,
     ):
+        return True
+    # Candidate-only (re-gate 2026-10-19 finding 1): these shapes are fine for
+    # rejecting a fresh candidate (it costs one retry, not a silent rename),
+    # but ordinary persisted titles like "Analysis: Q3 Sales Trends",
+    # "Options: Stocks, Bonds, ETFs" and "Title Should Reflect Content" must
+    # survive `_looks_invalid_generated_title` untouched.
+    if re.search(
+        r'^\s*(?:[*_`~]+\s*)?(?:analysis|thinking|reasoning|thought)\s*:',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if _looks_like_title_option_menu(s):
+        return True
+    if re.search(
+        r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should\b',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    # Candidate-only: these phrases leak from title prompts, but they also
+    # appear in ordinary persisted subject matter ("Maybe Monad…").
+    if re.search(r'^\s*(?:[*_`~]+\s*)?maybe\s+', s, flags=re.IGNORECASE):
+        return True
+    if re.search(r'\b3-8 words\b|\btopic label\b', s, flags=re.IGNORECASE):
         return True
     return bool(
         re.search(
@@ -6368,6 +6499,44 @@ def _title_retry_completion_budget(provider: str = '', model: str = '', base_url
     return max(1024, _title_completion_budget(provider, model, base_url) * 2)
 
 
+# Schema-attempt failures permit a compatibility resend only when they prove
+# the route itself rejected the JSON-schema request shape. A 401/429/timeout
+# must not be re-labeled "schema unavailable" — that silently re-sends the
+# identical request in compatibility mode and pays a second failing provider
+# call. Classification lives in `_schema_rejection_error` (docstring carries
+# the re-gate 2026-10-21 semantics).
+def _schema_rejection_error(error) -> bool:
+    """Only an unsupported-schema rejection permits a compatibility resend.
+
+    Re-gate 2026-10-21 (#7539): when the failure carries an HTTP status, that
+    status is the whole verdict — ``response_format`` is the only difference
+    from the compatibility request, so any 400/422 proves the route rejected
+    the schema shape; 401/403/408/429 and 5xx stay transport failures.
+    Message-only errors fall back to text sniffing: non-retry signals
+    (auth, throttling, timeouts, connection) are excluded first — numeric
+    codes anchored to ``error code`` / ``status`` / ``http`` context, bare
+    otherwise — and schema-shape positive evidence
+    (``response_format`` / ``json_schema`` / ``structured output``)
+    qualifies. The former field-name + English-keyword requirement missed
+    "unavailable now", ``must be one of`` and non-English 400 bodies, and a
+    bare ``5\\d\\d`` exclusion misfired on ``max_tokens 512``.
+    """
+    message = str(error or '')
+    status = getattr(error, 'status_code', None)
+    if status is None:
+        status = getattr(getattr(error, 'response', None), 'status_code', None)
+    if status is not None:
+        return status in (400, 422)
+    if re.search(
+        r'(?:error code|status|http)\s*:?\s*(?:401|403|408|429|5\d\d)\b'
+        r'|unauthorized|forbidden|timed? ?out|rate.limit|too many requests|connection',
+        message,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    return bool(re.search(r'response.?format|json.?schema|structured output', message, flags=re.IGNORECASE))
+
+
 def _title_retry_status(status: str) -> bool:
     # Whether to grant a second budget attempt within the same prompt+model
     # combination.  ``llm_length`` indicates the model would have produced
@@ -6430,7 +6599,90 @@ def _safe_text_value(value) -> str:
     return str(value or '').strip()
 
 
-def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
+_TITLE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "session_title",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+_TITLE_SENTINELS = frozenset({'none', 'null', 'undefined'})
+
+
+def _usable_title_string(value: str) -> str:
+    title = str(value or '').strip()
+    if not title or title.lower() in _TITLE_SENTINELS:
+        return ''
+    return title
+
+
+def _extract_title_text(content: str, *, mode: str = 'compatibility') -> str:
+    """Extract a title from schema JSON or compatibility prose.
+
+    Schema mode accepts only a JSON object with a non-empty string ``title``.
+    Malformed JSON-looking output and sentinel strings fail closed. Compatibility
+    mode still unwraps common JSON containers and may return bare prose.
+    """
+    raw = str(content or '').strip()
+    if not raw:
+        return ''
+    fenced = re.match(r'^```(?:json)?\s*(.*?)\s*```$', raw, flags=re.IGNORECASE | re.DOTALL)
+    if fenced:
+        raw = fenced.group(1).strip()
+    schema_mode = mode == 'schema'
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        # Only a leading '{' (or a '[' that opens a real JSON value) counts as
+        # malformed-JSON evidence; prose like "[Bug] Login Fails On Submit" is
+        # a legitimate title (re-gate 2026-10-21 should-fix 3).
+        if schema_mode or raw.startswith('{') or re.match(r'^\[\s*(?:[\{\]"\-\d]|true\b|false\b|null\b)', raw):
+            return ''
+        parsed = None
+    else:
+        # Re-gate 2026-10-21 finding 2b: the schema declares
+        # additionalProperties: false, so a parsed object is accepted only
+        # when its keys are exactly {"title"} — in both fail-closed modes.
+        if isinstance(parsed, dict) and set(parsed.keys()) == {'title'} and isinstance(parsed['title'], str):
+            return _usable_title_string(parsed['title'])
+        if schema_mode:
+            return ''
+        if isinstance(parsed, str):
+            return _usable_title_string(parsed)
+        return ''
+    # Re-gate 2026-10-21 finding 2a: validate the FULL raw text before the
+    # embedded-title regex can pull a candidate out of a reasoning sentence
+    # ("I should not use {"title": ...} ...") — reject so the caller falls
+    # through to the compatibility request.
+    # Completed wrappers and supported thinking preambles are metadata; validate
+    # the remaining visible text before looking for an embedded JSON title.
+    raw = _strip_thinking_markup(raw) if mode == 'compatibility' else raw
+    if _looks_invalid_generated_title(raw):
+        return ''
+    match = re.search(r'"title"\s*:\s*"((?:[^"\\]|\\.)*)"', raw)
+    if match:
+        try:
+            return _usable_title_string(json.loads(f'"{match.group(1)}"'))
+        except ValueError:
+            return _usable_title_string(match.group(1))
+    # Re-gate 2026-10-21 should-fix 2: a short preamble in front of malformed
+    # JSON ("Sure! {"foo": "bar", "Here is the JSON: {"title": "Login Flow")
+    # must not be returned as raw prose; fail closed so the caller re-sends
+    # the compatibility request.
+    if re.search(r'\{"|"title"', raw):
+        return ''
+    return raw
+
+
+def _extract_title_response(resp, *, aux: bool = False, mode: str = 'compatibility') -> tuple[str, str]:
     """Return (content, empty_status) from an OpenAI-compatible response."""
     suffix = '_aux' if aux else ''
     try:
@@ -6439,7 +6691,17 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         message = _safe_obj_value(choice, 'message')
         content = _safe_text_value(_safe_obj_value(message, 'content'))
         if content:
-            return content, ''
+            title_text = _extract_title_text(content, mode=mode)
+            if title_text:
+                return title_text, ''
+            # Re-gate 2026-10-21 finding 2: non-empty content whose FULL text
+            # is a reasoning trace is invalid model output (not an empty
+            # response) — surface a distinct invalid status so the worker
+            # keeps the provisional title and retries like the sanitize-layer
+            # llm_invalid family, while the schema attempt still falls through
+            # to the compatibility request.
+            if _looks_invalid_generated_title(content):
+                return '', f'llm_invalid_trace{suffix}'
         finish_reason = _safe_text_value(_safe_obj_value(choice, 'finish_reason')).lower()
         reasoning = (
             _safe_text_value(_safe_obj_value(message, 'reasoning'))
@@ -6496,15 +6758,23 @@ def generate_title_raw_via_aux(
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
+    schema_extra = {"response_format": _TITLE_RESPONSE_FORMAT}
     reasoning_extra = {}
     if not _route_rejects_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
+        # Re-gate 2026-10-19 finding 3: the schema request carries the same
+        # route-gated reasoning disable, so reasoning models do not burn the
+        # 512-token title budget on hidden thoughts during the first call.
+        schema_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
+        schema_extra["reasoning_split"] = True
         reasoning_extra["reasoning_split"] = True
     try:
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
         last_status = 'llm_error_aux'
+        attempted = 0
+        schema_unavailable = False
         for idx, prompt in enumerate(prompts):
             messages = [
                 {"role": "system", "content": prompt},
@@ -6513,22 +6783,58 @@ def generate_title_raw_via_aux(
             budgets = [base_max_tokens]
             try:
                 for budget_idx, max_tokens in enumerate(budgets):
-                    resp = call_llm(
-                        task='title_generation',
-                        provider=provider or None,
-                        model=model or None,
-                        base_url=base_url or None,
-                        api_key=api_key or None,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.2,
-                        timeout=_timeout,
-                        extra_body=reasoning_extra or None,
-                    )
-                    raw, empty_status = _extract_title_response(resp, aux=True)
-                    if raw:
-                        return raw, ('llm_aux' if idx == 0 and budget_idx == 0 else 'llm_aux_retry')
-                    last_status = empty_status or 'llm_empty_aux'
+                    modes = ('compatibility',) if schema_unavailable else ('schema', 'compatibility')
+                    for mode in modes:
+                        try:
+                            attempted += 1
+                            resp = call_llm(
+                                task='title_generation',
+                                provider=provider or None,
+                                model=model or None,
+                                base_url=base_url or None,
+                                api_key=api_key or None,
+                                messages=messages,
+                                max_tokens=max_tokens,
+                                temperature=0.2,
+                                timeout=_timeout,
+                                extra_body=(schema_extra if mode == 'schema' else (reasoning_extra or None)),
+                            )
+                        except Exception as e:
+                            last_status = 'llm_error_aux'
+                            # Re-gate finding (low): only a schema-shaped
+                            # rejection proves the route cannot do JSON schema.
+                            # A 401/429/timeout is a transport failure —
+                            # re-sending the identical request in compatibility
+                            # mode would just pay a second failing provider call.
+                            if mode == 'schema' and _schema_rejection_error(e):
+                                schema_unavailable = True
+                                logger.debug("Aux title schema attempt %s failed: %s", idx + 1, e)
+                                continue
+                            raise
+                        raw, empty_status = _extract_title_response(resp, aux=True, mode=mode)
+                        if not raw and mode == 'schema':
+                            # Re-gate finding 2: a transport that silently
+                            # strips `response_format` still answers the schema
+                            # request with a valid plain-text title. Parse the
+                            # SAME response with the compatibility extractor
+                            # instead of re-sending the identical request;
+                            # empty/reasoning-only responses keep falling
+                            # through to the retry path below.
+                            prose_raw, prose_status = _extract_title_response(resp, aux=True, mode='compatibility')
+                            if prose_raw:
+                                raw = prose_raw
+                                empty_status = ''
+                            elif prose_status:
+                                empty_status = prose_status
+                        if raw:
+                            return raw, ('llm_aux' if attempted == 1 else 'llm_aux_retry')
+                        last_status = empty_status or 'llm_empty_aux'
+                        if mode == 'schema' and last_status in {
+                            'llm_empty_aux', 'llm_empty_reasoning_aux', 'llm_invalid_trace_aux',
+                        }:
+                            schema_unavailable = True
+                            continue
+                        break
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(provider, model, base_url))
             except Exception as e:
@@ -6566,6 +6872,8 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
     prev_reasoning = getattr(agent, 'reasoning_config', None)
     try:
         agent.reasoning_config = disabled_reasoning
+        attempted = 0
+        schema_unavailable = False
         for idx, prompt in enumerate(prompts):
             api_messages = [
                 {"role": "system", "content": prompt},
@@ -6578,6 +6886,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                     raw = ""
                     empty_status = ''
                     if getattr(agent, 'api_mode', '') == 'codex_responses':
+                        attempted += 1
                         codex_kwargs = agent._build_api_kwargs(api_messages)
                         codex_kwargs.pop('tools', None)
                         if 'max_output_tokens' in codex_kwargs:
@@ -6588,6 +6897,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                         if not raw:
                             empty_status = 'llm_empty'
                     elif getattr(agent, 'api_mode', '') == 'anthropic_messages':
+                        attempted += 1
                         from agent.anthropic_adapter import build_anthropic_kwargs
                         ant_kwargs = build_anthropic_kwargs(
                             model=agent.model,
@@ -6607,10 +6917,10 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                         if not raw:
                             empty_status = 'llm_empty'
                     else:
-                        api_kwargs = agent._build_api_kwargs(api_messages)
-                        api_kwargs.pop('tools', None)
-                        api_kwargs['temperature'] = 0.1
-                        api_kwargs['timeout'] = 15.0
+                        base_api_kwargs = agent._build_api_kwargs(api_messages)
+                        base_api_kwargs.pop('tools', None)
+                        base_api_kwargs['temperature'] = 0.1
+                        base_api_kwargs['timeout'] = 15.0
                         # Reasoning suppression for title gen is already handled
                         # route-correctly by `_build_api_kwargs()` from the
                         # `agent.reasoning_config = {"enabled": False}` set above —
@@ -6622,22 +6932,58 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                         # re-adds a 400-rejected param on top of the profile output
                         # (#4161). MiniMax still needs reasoning_split, which the
                         # profile path does not add.
-                        _tg_extra = dict(api_kwargs.get('extra_body') or {})
-                        if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
-                            _tg_extra['reasoning_split'] = True
-                        if _tg_extra:
-                            api_kwargs['extra_body'] = _tg_extra
-                        if 'max_completion_tokens' in api_kwargs:
-                            api_kwargs['max_completion_tokens'] = max_tokens
-                        else:
-                            api_kwargs['max_tokens'] = max_tokens
-                        resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
-                            **api_kwargs,
-                        )
-                        raw, empty_status = _extract_title_response(resp)
+                        modes = ('compatibility',) if schema_unavailable else ('schema', 'compatibility')
+                        for mode in modes:
+                            api_kwargs = dict(base_api_kwargs)
+                            _tg_extra = dict(base_api_kwargs.get('extra_body') or {})
+                            if mode == 'schema':
+                                _tg_extra['response_format'] = _TITLE_RESPONSE_FORMAT
+                            if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
+                                _tg_extra['reasoning_split'] = True
+                            if _tg_extra:
+                                api_kwargs['extra_body'] = _tg_extra
+                            if 'max_completion_tokens' in api_kwargs:
+                                api_kwargs['max_completion_tokens'] = max_tokens
+                            else:
+                                api_kwargs['max_tokens'] = max_tokens
+                            try:
+                                attempted += 1
+                                resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
+                                    **api_kwargs,
+                                )
+                            except Exception as e:
+                                # Same rule as the aux route: only a
+                                # schema-shaped rejection proves the route
+                                # cannot do JSON schema; 401/429/timeouts stay
+                                # transport failures instead of triggering a
+                                # compatibility-mode re-send (#7539 re-gate).
+                                if mode == 'schema' and _schema_rejection_error(e):
+                                    schema_unavailable = True
+                                    logger.debug("Agent title schema attempt %s failed: %s", idx + 1, e)
+                                    continue
+                                raise
+                            raw, empty_status = _extract_title_response(resp, mode=mode)
+                            if not raw and mode == 'schema':
+                                # Re-gate finding 2 (agent route): a transport
+                                # that stripped `response_format` answered with
+                                # valid prose — parse the SAME response with
+                                # the compatibility extractor rather than
+                                # re-sending the identical request.
+                                prose_raw, prose_status = _extract_title_response(resp, mode='compatibility')
+                                if prose_raw:
+                                    raw = prose_raw
+                                    empty_status = ''
+                                elif prose_status:
+                                    empty_status = prose_status
+                            if mode == 'schema' and empty_status in {
+                                'llm_empty', 'llm_empty_reasoning', 'llm_invalid_trace',
+                            }:
+                                schema_unavailable = True
+                                continue
+                            break
                     raw = str(raw or '').strip()
                     if raw:
-                        return raw, ('llm' if idx == 0 and budget_idx == 0 else 'llm_retry')
+                        return raw, ('llm' if attempted == 1 else 'llm_retry')
                     last_status = empty_status or 'llm_empty'
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(
@@ -6862,6 +7208,8 @@ _TITLE_FAILURE_HUMAN_REASONS = {
     'llm_language_mismatch_aux': 'the generated title did not match the conversation language',
     'llm_invalid': 'the title model returned an unusable title',
     'llm_invalid_aux': 'the title model returned an unusable title',
+    'llm_invalid_trace': 'the title model returned reasoning text instead of a title',
+    'llm_invalid_trace_aux': 'the title model returned reasoning text instead of a title',
     'llm_empty': 'the title model returned an empty title',
     'llm_empty_aux': 'the title model returned an empty title',
     'llm_error': 'the title model could not be reached',
@@ -6954,16 +7302,16 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             rejected_model_output = False
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
-                if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch', 'llm_invalid_trace')
+                if not next_title and llm_status in ('llm_error', 'llm_invalid', 'llm_invalid_trace'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
-                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux', 'llm_invalid_trace_aux')
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
-                rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
-                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux', 'llm_invalid_trace_aux')
+                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux', 'llm_invalid_trace_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch')
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch', 'llm_invalid_trace')
             source = llm_status
             # An invalid response is different from an unavailable title model:
             # choosing a local fallback here would mark a warm-up opener as
@@ -6972,6 +7320,8 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             invalid_model_output = rejected_model_output or llm_status in {
                 'llm_invalid',
                 'llm_invalid_aux',
+                'llm_invalid_trace',
+                'llm_invalid_trace_aux',
                 'llm_language_mismatch',
                 'llm_language_mismatch_aux',
             }
@@ -7095,11 +7445,11 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                if not next_title and llm_status in ('llm_error', 'llm_invalid', 'llm_invalid_trace'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
-                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux', 'llm_invalid_trace_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         if not next_title:
             _put_title_status(put_event, session_id, 'refresh_skipped', llm_status or 'empty', effective, raw_preview)
