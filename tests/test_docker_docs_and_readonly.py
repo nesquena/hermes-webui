@@ -266,6 +266,31 @@ def test_docker_init_excludes_egg_info_during_staging():
     )
 
 
+def test_docker_init_excludes_unreadable_install_lock_during_staging():
+    """An unreadable `tools/.install.lock` in the agent source must not be staged.
+
+    rsync exits 23 when it cannot read a file it was asked to copy, and the
+    staging step runs under `set -e`, so a single mode-000 file shipped by the
+    agent image kills container startup with
+    `Failed to stage hermes-agent source to writable build dir`. This is the
+    same class as `.playwright` above: an unreadable file in the source tree
+    that only the exclusion list keeps out of the copy.
+
+    Found while validating #8113 — the two/three-container smoke jobs could not
+    reach the interpreter fix because staging aborted first.
+    """
+    src = (REPO / "docker_init.bash").read_text(encoding="utf-8")
+
+    stage_idx = src.index("_stage_src=")
+    install_idx = src.index("uv pip install", stage_idx)
+    stage_block = src[stage_idx:install_idx]
+
+    assert "--exclude='.install.lock'" in stage_block, (
+        "rsync staging must --exclude='.install.lock'; the agent source ships it "
+        "unreadable, which makes rsync exit 23 and kills startup."
+    )
+
+
 def test_docker_init_makes_staged_dir_writable_after_ro_mount_copy():
     """Regression test for the docker-init "could not create hermes_agent.egg-info:
     Permission denied" failure on :ro multi-container mounts.

@@ -2413,7 +2413,28 @@ def _gateway_profile_endpoint(profile_environ, *, config_data=None, profile_home
 
 
 def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
-    """Resolve the persisted run's profile with the released provenance guard."""
+    """URL and key for a session's profile, never those of the process-active profile.
+
+    The shared pair is what the WebUI process was given (launcher environment, default profile's .env, ambient
+    config): exactly what a single-profile deployment sends. A profile may override each half on its own:
+
+    - URL: its own HERMES_WEBUI_GATEWAY_BASE_URL in its .env, or webui_gateway_base_url in its config.yaml
+      (${VAR} expanded from that profile's .env, read fresh from the file, never from the process environment or
+      the cached ambient config); without one it keeps the shared URL.
+    - Key, on a URL that is not the shared one: the profile's own HERMES_WEBUI_GATEWAY_API_KEY or API_SERVER_KEY,
+      or none; the launcher's and the shared key are never sent to another Gateway.
+    - Key, on the shared URL, for another profile: its own HERMES_WEBUI_GATEWAY_API_KEY, then the shared key
+      (what v0.52.492 sends), then its API_SERVER_KEY only when there is no shared key at all. A profile's
+      API_SERVER_KEY is the key of its OWN Gateway route: the Agent's API server picks the profile from the URL
+      and accepts only that profile's key, so on the shared URL it would be a 401.
+    - Key, on the shared URL, for the process profile's own sessions: its own HERMES_WEBUI_GATEWAY_API_KEY, then
+      the shared alias (the launcher's export, or the root profile's .env), then its API_SERVER_KEY (read fresh
+      from its .env), then the shared key.
+    - Exception (#8432): under a NAMED process profile, a profile with a key but no URL gets the process pair
+      (URL and key from one source, as v0.52.492 sends) unless the shared URL is provably the launcher's (an
+      export that no profile .env supplied, or an operator config file outside every profile home), because that
+      URL may be a profile's own Gateway and must never receive another profile's key.
+    """
     from api import profiles as _profiles
     from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx, get_config
 
@@ -2472,7 +2493,26 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
         )
     ):
         return shared_url, shared_key
-    return url, (own_alias or shared_alias or own_key or shared_key)
+    if _session_is_process_profile(home):
+        # The process profile's own sessions: the shared key IS this profile's key, read fresh from its .env.
+        return url, (own_alias or shared_alias or own_key or shared_key)
+    # Another profile on the shared URL. Its API_SERVER_KEY is the key of its OWN Gateway route (the Agent's API
+    # server picks the profile from the URL, its default listener or /p/<profile> under gateway.multiplex_profiles,
+    # and accepts only that profile's key), so it never replaces the shared key here: that was a 401 where
+    # v0.52.492 sends the shared key. Only an explicit WebUI alias set for this profile
+    # (HERMES_WEBUI_GATEWAY_API_KEY in its .env) outranks the shared key; its API_SERVER_KEY is used only when the
+    # WebUI was given no shared key at all. A profile that wants its own route sets its own URL.
+    return url, (own_alias or shared_key or own_key)
+
+
+def _session_is_process_profile(session_home) -> bool:
+    """True when the session's profile home is the profile the WebUI process runs on (fail: False)."""
+    from api import profiles as _profiles
+
+    try:
+        return _same_profile_home(session_home, _profiles.get_process_profile_home())
+    except Exception:
+        return False
 
 
 def _gateway_config_for_profile(profile_name) -> dict | None:
