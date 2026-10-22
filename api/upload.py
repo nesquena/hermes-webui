@@ -19,6 +19,7 @@ from api.profiles import _profiles_match, get_active_profile_name as _get_active
 from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
+    resolve_webui_workspace,
     open_anchored_create_fd,
     make_anchored_dir,
     rmtree_anchored,
@@ -718,11 +719,20 @@ def handle_workspace_upload(handler):
         if _reject_invisible_session(handler, session):
             return True
 
-        # Resolve workspace root using the session profile, not the ambient request profile.
+        # Resolve workspace root using the session profile, not the ambient
+        # request profile — through the #7217 translation tier, so the
+        # agent-visible path maps onto its WebUI-local root before trust
+        # validation (the same local-root contract as the file-manager
+        # handlers). Profile-less legacy sessions keep the pre-existing
+        # ambient trusted resolution.
+        session_profile = getattr(session, "profile", None)
         try:
-            workspace = resolve_trusted_workspace(
-                session.workspace, profile=getattr(session, "profile", None)
-            )
+            if session_profile:
+                workspace = resolve_webui_workspace(
+                    session.workspace, profile=session_profile
+                )
+            else:
+                workspace = resolve_trusted_workspace(session.workspace)
         except TypeError:
             workspace = resolve_trusted_workspace(session.workspace)
 

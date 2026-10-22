@@ -846,26 +846,32 @@ class TestLightweightHandlersTranslatedRoot:
 
 
 class TestUploadProfilePin:
-    def test_workspace_upload_forwards_session_profile_to_resolver(
+    def test_workspace_upload_translates_agent_path_to_webui_root(
         self, mapped_world, monkeypatch
     ):
-        """Pin the current upload contract: handle_workspace_upload resolves
-        through resolve_trusted_workspace with the SESSION's profile forwarded
-        (upload.py:723). A future refactor that drops the profile would break
-        the multi-profile scope and this test must catch it."""
+        """Upload must resolve through the #7217 translation tier FOR REAL.
+
+        Re-gate round-2 finding: a resolver spy that returns the desired
+        local path proves only profile forwarding, not translation. The
+        real :func:`resolve_webui_workspace` therefore stays under test
+        and is merely recorded: the agent-visible ``/workspace`` (absent on
+        this host) must map onto the session profile's WebUI-local root,
+        and the bytes must land THERE.
+        """
         import api.upload as upload
 
         webui_ws = mapped_world["webui_ws"]
         monkeypatch.setattr(upload, "_get_active_profile_name", lambda: "alice")
         monkeypatch.setattr(upload, "_profiles_match", lambda a, b: (a or "alice") == (b or "alice"))
 
+        real_resolve = upload.resolve_webui_workspace
         calls = []
 
-        def spy(workspace, profile=None):
-            calls.append((workspace, profile))
-            return webui_ws
+        def recording(workspace_path, *, profile=None, **kwargs):
+            calls.append((workspace_path, profile))
+            return real_resolve(workspace_path, profile=profile, **kwargs)
 
-        monkeypatch.setattr(upload, "resolve_trusted_workspace", spy)
+        monkeypatch.setattr(upload, "resolve_webui_workspace", recording)
         monkeypatch.setattr(
             upload, "_read_multipart_or_reject",
             lambda handler: ({"session_id": "s1", "path": ""}, {"hello.txt": ("hello.txt", b"hi")}),
@@ -878,8 +884,203 @@ class TestUploadProfilePin:
         handler = _FakeHandler()
         upload.handle_workspace_upload(handler)
 
-        # The profile attribute rides along on the resolver call — the exact
-        # contract the P1 translation tier relies on at the upload boundary.
+        # The session profile rides along on the translation-tier call — the
+        # exact contract the P1 translation tier relies on at the upload
+        # boundary — and the REAL translation (not a substituted path) put
+        # the bytes on the mapped WebUI root.
         assert calls == [("/workspace", "alice")]
         assert handler.status == 200
         assert (webui_ws / "hello.txt").read_text(encoding="utf-8") == "hi"
+
+
+# ── re-gate round 2: recovery order + create→list regression ─────────────────
+# Reviewer replay (2026-10-22): with a valid map and an existing fallback,
+# (1) create returned 200 but wrote the FALLBACK instead of the mapped local
+# root, replacing both cached and persisted session.workspace; (2) the same
+# session's listing then came back empty. Root cause: recovery's host-local
+# existence check ran BEFORE the translation tier, so the agent-side path —
+# absent on the WebUI host by design — was judged a deleted directory.
+#
+# These tests keep the REAL recovery tier and the REAL resolver under test
+# (only the session lookup and the fallback source are provided) and drive
+# the production handlers end to end.
+
+
+@pytest.fixture
+def regate_world(mapped_world, monkeypatch):
+    """mapped_world plus an EXISTING trusted fallback directory.
+
+    The fallback lives under the faked home, so it passes
+    resolve_trusted_workspace trust check (A) — the reviewer's "existing
+    fallback" condition, without which recovery cannot fire at all.
+    """
+    fallback = mapped_world["webui_ws"].parent / "home" / "fallback-ws"
+    fallback.mkdir(parents=True)
+    mapped_world["fallback"] = fallback
+    return mapped_world
+
+
+def _patch_real_recovery_plumbing(monkeypatch, session, fallback):
+    """Point get_session_for_file_ops at *session* with the REAL recovery.
+
+    Only the session lookup and the fallback source are substituted; the
+    recovery tier (resolve_implicit_workspace_with_recovery), the
+    translation tier (resolve_webui_workspace) and the persist helper all
+    stay real — a stub here is exactly what hid the regression before.
+    """
+    import api.models as models
+    import api.profiles as profiles
+    import api.routes as routes
+
+    session_profile = getattr(session, "profile", None) or "alice"
+    monkeypatch.setattr(models, "get_session", lambda sid, metadata_only=False: session)
+    monkeypatch.setattr(models, "state_db_has_session", lambda sid: False)
+    monkeypatch.setattr(models, "get_last_workspace", lambda profile=None: str(fallback))
+    # The active profile must be the session's own owner so the REAL
+    # _profiles_match (not a stub) authorizes it.
+    monkeypatch.setattr(profiles, "get_active_profile_name", lambda: session_profile)
+    monkeypatch.setattr(routes, "get_session", lambda sid, metadata_only=False: session)
+    monkeypatch.setattr(routes, "get_session_for_file_ops", models.get_session_for_file_ops)
+    return models, routes
+
+
+class TestRecoveryOrderRegression:
+    def test_mapped_missing_agent_path_keeps_binding_and_writes_mapped_root(
+        self, regate_world, monkeypatch
+    ):
+        """The reviewer's exact replay: mapped session, agent path absent on
+        the host, fallback exists → create must land on the MAPPED root and
+        the agent-visible binding must survive (no persist, no fallback)."""
+        models, routes = _patch_real_recovery_plumbing(
+            monkeypatch,
+            SimpleNamespace(session_id="regate-1", workspace="/workspace", profile="alice"),
+            regate_world["fallback"],
+        )
+        persist_calls = []
+
+        def spy_persist(session, workspace, *, expected_workspace=None):
+            # Mimic the real helper's binding rewrite so the OLD order
+            # reproduces the reviewer's symptom (200 into the fallback)
+            # instead of crashing on the None return.
+            persist_calls.append(str(workspace))
+            session.workspace = str(Path(workspace).expanduser().resolve())
+            return session
+
+        monkeypatch.setattr(models, "persist_recovered_workspace_binding", spy_persist)
+
+        handler = _FakeHandler()
+        routes._handle_file_create(
+            handler,
+            {"session_id": "regate-1", "path": "hello.txt", "content": "hi"},
+        )
+
+        assert handler.status == 200
+        # Bytes on the mapped WebUI-local root, NOT the fallback.
+        assert (regate_world["webui_ws"] / "hello.txt").read_text(encoding="utf-8") == "hi"
+        assert not (regate_world["fallback"] / "hello.txt").exists()
+        # Recovery never ran for the translated session: no persist, and the
+        # agent-visible binding is byte-identical.
+        assert persist_calls == []
+        assert models.get_session("regate-1").workspace == "/workspace"
+
+    def test_create_then_list_same_session_sees_created_file(
+        self, regate_world, monkeypatch
+    ):
+        """Native create→list through the same session (reviewer's table).
+
+        Both operations must resolve through the same WebUI-local root, so
+        a file created via the translated tier is visible to the listing.
+        """
+        models, routes = _patch_real_recovery_plumbing(
+            monkeypatch,
+            SimpleNamespace(session_id="regate-2", workspace="/workspace", profile="alice"),
+            regate_world["fallback"],
+        )
+
+        created = _FakeHandler()
+        routes._handle_file_create(
+            created,
+            {"session_id": "regate-2", "path": "visible.txt", "content": "x"},
+        )
+        assert created.status == 200
+
+        listed = _FakeHandler()
+        parsed = urlparse("/api/file/list?session_id=regate-2&path=.")
+        routes._handle_list_dir(listed, parsed)
+
+        assert listed.status == 200
+        payload = listed.json_body()
+        assert any(e.get("name") == "visible.txt" for e in payload["entries"])
+        # The listing root is the translated WebUI-local root.
+        assert payload["workspace"] == str(regate_world["webui_ws"])
+        assert payload["workspace_recovered"] is False
+
+    def test_translated_session_missing_local_root_fails_closed(
+        self, regate_world, monkeypatch
+    ):
+        """A mapped session whose WebUI-local root is genuinely gone fails
+        closed (404) — it must NOT silently jump to the fallback and must
+        NOT rewrite the agent-visible binding."""
+        import shutil
+
+        shutil.rmtree(regate_world["webui_ws"])
+        models, routes = _patch_real_recovery_plumbing(
+            monkeypatch,
+            SimpleNamespace(session_id="regate-3", workspace="/workspace", profile="alice"),
+            regate_world["fallback"],
+        )
+
+        handler = _FakeHandler()
+        routes._handle_file_create(
+            handler,
+            {"session_id": "regate-3", "path": "nope.txt", "content": "x"},
+        )
+
+        assert handler.status == 404
+        assert not (regate_world["fallback"] / "nope.txt").exists()
+
+    def test_unmapped_profile_recovery_still_fires_and_persists(
+        self, regate_world, monkeypatch
+    ):
+        """Unmapped (no declared map) sessions keep the pre-existing
+        recovery semantics byte-for-byte: a genuinely missing workspace
+        still recovers to the fallback and persists the new binding."""
+        import json as _json
+
+        import api.models as models
+
+        session_dir = regate_world["fallback"].parent / "sessions"
+        session_dir.mkdir()
+        sidecar = session_dir / "regate-4.json"
+        sidecar.write_text(
+            _json.dumps(
+                {
+                    "session_id": "regate-4",
+                    "workspace": "/gone",
+                    "messages": [{"role": "user", "content": "preserve me"}],
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+
+        models, routes = _patch_real_recovery_plumbing(
+            monkeypatch,
+            SimpleNamespace(session_id="regate-4", workspace="/gone", profile="bravo"),
+            regate_world["fallback"],
+        )
+
+        handler = _FakeHandler()
+        routes._handle_file_create(
+            handler,
+            {"session_id": "regate-4", "path": "recovered.txt", "content": "x"},
+        )
+
+        assert handler.status == 200
+        # The fallback is a real trusted directory (under the faked home).
+        assert (regate_world["fallback"] / "recovered.txt").exists()
+        # The binding was persisted to the recovered workspace — existing
+        # unmapped semantics, unchanged by the translation tier.
+        persisted = _json.loads(sidecar.read_text(encoding="utf-8"))
+        assert persisted["workspace"] == str(regate_world["fallback"].resolve())
+        assert persisted["messages"] == [{"role": "user", "content": "preserve me"}]

@@ -1233,6 +1233,31 @@ def _translate_agent_workspace(
     return None
 
 
+def workspace_translation_applies(
+    workspace: str | Path | None, profile: str | Path | None
+) -> bool:
+    """True when a declared per-profile map actually translates *workspace*.
+
+    Consumers that ask a host-local existence question about a session's
+    workspace must NOT stat a translated session's agent-visible name: in a
+    multi-container deployment that path is absent on the WebUI host by
+    design, and recovery tiers would mistake it for a deleted directory —
+    overwriting the agent-visible binding with a WebUI-local fallback. For
+    such sessions the WebUI-local view (resolved fail-closed by
+    :func:`resolve_webui_workspace`) answers the existence question instead.
+
+    Returns False for profile-less sessions, profiles with no declared map,
+    and agent paths outside every mapped prefix — those keep the pre-existing
+    direct-path semantics byte-for-byte.
+    """
+    if profile in (None, "") or workspace in (None, ""):
+        return False
+    maps = _workspace_path_map(profile)
+    if maps is None:
+        return False
+    return _translate_agent_workspace(workspace, maps) is not None
+
+
 def resolve_webui_workspace(
     workspace: str | Path | None = None,
     *,

@@ -12443,6 +12443,7 @@ from api.models import (
     get_session_for_scan,
     find_compression_recovery_session,
     get_session_for_file_ops,
+    attach_local_workspace_view,
     persist_recovered_workspace_binding,
     WorkspaceBindingPersistenceError,
     new_session,
@@ -12774,6 +12775,8 @@ from api.workspace import (
     safe_resolve_ws,
     raw_authorized_escape_target,
     resolve_trusted_workspace,
+    resolve_webui_workspace,
+    workspace_translation_applies,
     _resolve_path,
     resolve_implicit_workspace_with_recovery,
     open_anchored_fd,
@@ -21896,31 +21899,66 @@ def _handle_list_dir(handler, parsed):
         if webui_session is None and cli_owner_profile:
             _list_profile = cli_owner_profile
         if webui_session is None:
+            # CLI session: when the OWNER profile's map actually translates
+            # the agent-visible workspace, list through the WebUI-local root
+            # (the same local-root contract as the file-manager handlers,
+            # #7217); otherwise keep the pre-existing trusted resolution,
+            # which also keeps trust validation for map-less profiles.
             try:
-                workspace = resolve_trusted_workspace(workspace, profile=_list_profile)
+                if _list_profile and workspace_translation_applies(
+                    workspace, _list_profile
+                ):
+                    workspace = resolve_webui_workspace(
+                        workspace, profile=_list_profile
+                    )
+                else:
+                    workspace = resolve_trusted_workspace(
+                        workspace, profile=_list_profile
+                    )
             except TypeError:
                 workspace = resolve_trusted_workspace(workspace)
             recovered = False
         else:
             stored_workspace = workspace
+            # #7217 re-gate: resolve the WebUI-local operation view BEFORE
+            # recovery's host-local existence check. A mapped session's
+            # agent-side path is absent on this host by design — judging it
+            # a deleted directory overwrites the agent-visible binding with
+            # the fallback and hides files created through the translated
+            # root (the reviewer's replayed create→list regression).
             try:
-                workspace, recovered = resolve_implicit_workspace_with_recovery(
-                    stored_workspace,
-                    get_last_workspace,
-                    profile=_list_profile,
-                )
-            except TypeError:
-                workspace, recovered = resolve_implicit_workspace_with_recovery(
-                    stored_workspace,
-                    get_last_workspace,
-                )
-            if recovered:
-                persisted = persist_recovered_workspace_binding(
-                    webui_session,
-                    workspace,
-                    expected_workspace=stored_workspace,
-                )
-                workspace = Path(persisted.workspace)
+                s, translated = attach_local_workspace_view(webui_session)
+            except KeyError:
+                # Profile-scoped translation rejected: fail closed, exactly
+                # like the other file-manager handlers.
+                return bad(handler, "Session not found", 404)
+            if translated:
+                # Translated session: the WebUI-local root is the only
+                # stat-able answer and was validated fail-closed above;
+                # host-local recovery must never judge the agent-side name.
+                workspace = _file_ops_ws_root(s)
+                recovered = False
+            else:
+                # Unmapped/legacy session: pre-existing recovery semantics,
+                # byte-for-byte.
+                try:
+                    workspace, recovered = resolve_implicit_workspace_with_recovery(
+                        stored_workspace,
+                        get_last_workspace,
+                        profile=_list_profile,
+                    )
+                except TypeError:
+                    workspace, recovered = resolve_implicit_workspace_with_recovery(
+                        stored_workspace,
+                        get_last_workspace,
+                    )
+                if recovered:
+                    persisted = persist_recovered_workspace_binding(
+                        webui_session,
+                        workspace,
+                        expected_workspace=stored_workspace,
+                    )
+                    workspace = Path(persisted.workspace)
         rel_path = qs.get("path", ["."])[0]
         entries = list_dir(Path(workspace), rel_path)
         return j(
