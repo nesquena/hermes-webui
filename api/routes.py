@@ -9551,10 +9551,10 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
     return metadata if isinstance(metadata, dict) else {}
 
 
-# Sources kept out of the default projection with no bounded pass of their own.
-# A session the user explicitly opens from one of them is resolved by id, so it
-# stays reachable however many newer runs exist (#8265 review on #8349).
-_CLI_LOOKUP_FALLBACK_SOURCES = ("oneshot",)
+# Sources kept out of the default projection or aged-out beyond the recency
+# window. A session the user explicitly opens from one of them is resolved by id,
+# so it stays reachable however many newer runs exist (#8265, #8061).
+_CLI_LOOKUP_FALLBACK_SOURCES = ("oneshot", "desktop", "tui", "cli", "acp")
 
 
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
@@ -9568,13 +9568,10 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
             row = get_cli_session_by_id(session_id, source, all_profiles=all_profiles)
             if row:
                 return row
-        # Fallback for aged-out Desktop, CLI, TUI, or agent conversations outside the recency window (#8061)
-        row = get_cli_session_by_id(session_id, None, all_profiles=all_profiles)
-        if row:
-            return row
     except Exception:
         return {}
     return {}
+
 
 
 def _session_index_marks_was_webui(sid: str) -> bool:

@@ -10846,25 +10846,22 @@ def _load_cli_sessions_uncached(
 
 def get_cli_session_by_id(
     session_id: str,
-    source_filter: str | None = None,
+    source_filter: str,
     *,
     all_profiles: bool = False,
 ) -> dict:
-    """Resolve one session by id, outside any recency window.
+    """Resolve one ``source_filter`` session by id, outside any recency window.
 
     The sidebar views are bounded by recency, so a session the user explicitly
     opens can sit outside every one of them (an older one-shot run, #8265, or an
     aged-out Desktop/TUI/CLI session, #8061). This reads exactly that row from the
     active profile's state.db, or from every profile's when ``all_profiles`` is
     set, through the same projection the sidebar uses, so the row carries the
-    same profile, workspace and project fields. When ``source_filter`` is None,
-    matches any source. Returns {} when no profile owns it.
+    same profile, workspace and project fields. Returns {} when no profile owns it.
     """
     sid = str(session_id or '').strip()
-    if not sid:
-        return {}
     source = _normalize_cli_session_source_filter(source_filter)
-    if source_filter is not None and not source:
+    if not sid or not source:
         return {}
     if all_profiles:
         contexts, _cache_key = _all_profiles_cli_contexts()
