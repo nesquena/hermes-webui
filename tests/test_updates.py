@@ -379,6 +379,36 @@ def test_apply_fetch_failure_reports_cancelled_fetch_as_timeout(tmp_path):
         assert result == {'ok': False, 'message': expected_message}
 
 
+def test_apply_fetch_failure_redacts_a_credentialed_operation_in_the_timeout_message(tmp_path):
+    """The deadline message echoes the cancelled command; a credential-bearing
+    URL in that argv must be scrubbed like every other git diagnostic."""
+    (tmp_path / '.git').mkdir()
+    secret = 'ghp_' + 'B' * 36
+
+    def fake_git(args, cwd, timeout=10):
+        if args == ['fetch', 'origin', '--quiet', '--tags', '--force']:
+            return (
+                'git fetch https://ash:'
+                f'{secret}@github.com/nesquena/hermes-webui.git timed out after 15s'
+            ), False
+        raise AssertionError(f'unexpected git args: {args!r}')
+
+    expected_message = (
+        'The fetch was cancelled after 15s — '
+        'git fetch https://<redacted>@github.com/nesquena/hermes-webui.git '
+        'did not finish before the update deadline.'
+    )
+
+    for apply_fn in (updates.apply_force_update, updates.apply_update):
+        with patch.object(updates, '_run_git', side_effect=fake_git), \
+             patch.object(updates, 'REPO_ROOT', tmp_path), \
+             patch.object(updates, '_restart_blocker_snapshot', return_value={'restart_blocked': False, 'active_streams': 0, 'active_runs': 0}):
+            result = apply_fn('webui')
+
+        assert secret not in result['message']
+        assert result == {'ok': False, 'message': expected_message}
+
+
 def test_apply_fetch_failure_keeps_connectivity_guidance_for_remote_timeout(tmp_path):
     """libcurl's own stalled-transfer timeout ("Operation timed out after ...
     milliseconds") is a remote-side network symptom and keeps the connectivity
