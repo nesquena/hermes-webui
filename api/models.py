@@ -12208,6 +12208,32 @@ def _unwrap_state_db_steer_row(msg, display_kind=None):
     return True
 
 
+def _adopt_state_db_steer_split(local_messages, state_messages):
+    """#7600: sidecars saved before the state.db split keep the framed steer. Rewrite such a
+    row to the projected split only when exactly one typed state.db steer row proves it."""
+    proofs = {}
+    for row in state_messages or []:
+        if not (isinstance(row, dict) and row.get('role') == 'user' and row.get('display_kind') == 'steer'):
+            continue
+        raw = row.get('api_content')
+        if isinstance(raw, str) and raw:
+            ts = _compression_anchor_timestamp_as_float(row.get('timestamp'))
+            proofs.setdefault((raw, ts), []).append(row)
+    if not proofs:
+        return local_messages
+    out = list(local_messages or [])
+    for i, msg in enumerate(out):
+        if not isinstance(msg, dict) or msg.get('role') != 'user' or msg.get('api_content'):
+            continue
+        text = _state_db_steer_stored_text(msg)
+        ts = _compression_anchor_timestamp_as_float(msg.get('timestamp') or msg.get('_ts'))
+        hits = proofs.get((text, ts)) if text else None
+        if hits and len(hits) == 1:
+            out[i] = {**msg, 'content': copy.deepcopy(hits[0]['content']),
+                      'api_content': text, 'display_kind': 'steer'}
+    return out
+
+
 def _project_state_db_message(row, available, id_col, optional, *, include_row_identity=False):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
@@ -15217,7 +15243,10 @@ def _state_db_anchor_index(state_messages: list, anchor_key) -> int | None:
         # apply text comparison only when the anchor actually captured text.
         message_text = _normalized_compression_anchor_text(_message_content_text(message))
         if anchor_text and message_text != anchor_text:
-            continue
+            # #7600: anchors saved before the state.db steer split hold the framed text.
+            raw = message.get("api_content") if isinstance(message, dict) and message.get("display_kind") == "steer" else None
+            if not (isinstance(raw, str) and _normalized_compression_anchor_text(raw) == anchor_text):
+                continue
 
         message_ts = _compression_anchor_timestamp_as_float(
             message.get("timestamp") if isinstance(message, dict) else None
@@ -16500,9 +16529,12 @@ def reconciled_state_db_messages_for_session(
                         )
                     state_messages = list(state_messages or [])[anchor_index + 1 :]
                     cancelled_journal_prefix_start_verified = True
+        local_messages = _adopt_state_db_steer_split(local_messages, state_messages)
         if not (_sidecar_has_terminal_partial_error(getattr(session, 'messages', None) or [])
                 or _cancelled_journal_turn_owner(getattr(session, 'messages', None) or [], include_live_partial=True)):
             state_messages = state_db_delta_after_context(local_messages, state_messages)
+    if not prefer_context:
+        local_messages = _adopt_state_db_steer_split(local_messages, state_messages)
     reconciled_messages = merge_session_messages_append_only(
         local_messages,
         state_messages,
