@@ -15675,7 +15675,18 @@ def _handle_session_get(handler, parsed) -> bool:
                 # different slices of the same stitched conversation, merge
                 # them chronologically and dedupe exact repeats.
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
-            elif msg_limit is not None:
+            elif msg_limit is not None and _msg_after is None:
+                # The limited-display path is for bounded windows whose caller
+                # accepts a windowed document. An append-only fast-path request
+                # (#7925) carries msg_limit to bound the RETURNED window, but
+                # its anchor validation runs against the full display document:
+                # the limited path skips the lineage merge, so a continuation
+                # session's _all_msgs holds only the child's rows and every
+                # append anchor (an absolute index into the merged transcript)
+                # reads as out-of-range. The refusal then answers with the
+                # limited document instead of the authoritative full one and
+                # the client collapses to the child's rows. Route append
+                # requests down the full path; the window below stays bounded.
                 if _display_cache_hit is not None:
                     _all_msgs = _display_cache_hit
                 else:

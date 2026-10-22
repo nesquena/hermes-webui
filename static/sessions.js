@@ -4393,10 +4393,23 @@ async function _ensureMessagesLoaded(sid, opts) {
     Array.isArray(S.messages) && S.messages.length > 0 &&
     Number.isFinite(Number(S.session && S.session.transcript_generation));
   let appendParam = '';
+  // #7925 re-gate (2026-10-21, finding 2): rows can land locally while the
+  // append fetch is in flight (a streaming turn appending to S.messages, a
+  // delegation wakeup, a sibling loader). Concatenating the server's window
+  // onto a transcript that already grew duplicates those rows, and the anchor
+  // the request vouched for no longer describes what is held. Snapshot the
+  // shape the anchor described; any drift routes the response to the
+  // authoritative full fetch instead of the concat.
+  let _appendPreLength = -1;
+  let _appendPreAnchorRow = null;
+  let _appendPreOldestIdx = -1;
   if (_appendFastPath) {
     const lastRenderedIdx = _oldestIdx + S.messages.length - 1;
     const anchorFp = _appendAnchorRowFingerprint(S.messages[S.messages.length - 1]);
     if (anchorFp !== '') {
+      _appendPreLength = S.messages.length;
+      _appendPreAnchorRow = S.messages[S.messages.length - 1];
+      _appendPreOldestIdx = _oldestIdx;
       appendParam =
         `&msg_after=${lastRenderedIdx}` +
         `&anchor_fp=${encodeURIComponent(anchorFp)}` +
@@ -4433,34 +4446,64 @@ async function _ensureMessagesLoaded(sid, opts) {
     // only the rows the server returned after the anchor. The cursor is
     // unchanged (the retained rows still start at _oldestIdx) and the
     // ephemeral-field carry-forward does not apply (nothing was replaced).
-    const appended = (data.session.messages || []).filter(m => m && m.role);
-    if (appended.length) {
-      S.messages = [...S.messages, ...appended];
-      if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
-    }
+    //
+    // #7925 re-gate (2026-10-21, finding 2): if rows landed locally while the
+    // append fetch was in flight the anchor no longer describes the held
+    // transcript, and concatenating the window would duplicate them. Treat
+    // that drift exactly like an over-cap window: re-fetch the authoritative
+    // full transcript through the replace path below.
+    const _appendConcurrentChange =
+      _appendPreLength >= 0 &&
+      (S.messages.length !== _appendPreLength ||
+        S.messages[S.messages.length - 1] !== _appendPreAnchorRow ||
+        _oldestIdx !== _appendPreOldestIdx);
     // The append does not change whether OLDER rows exist beyond the window:
     // keep the previous truncation state and OR in the response's signal that
     // more NEWER rows exist beyond the capped append window. Only the newer
     // signal decides the fallback — a paged window that ends at the newest
     // row stays truncated (older rows unloaded) with no need for a full fetch.
-    const _appendHasMoreRows = !!data.session._messages_truncated;
+    const _appendHasMoreRows = !!data.session._messages_truncated || _appendConcurrentChange;
     _messagesTruncated = _messagesTruncated || _appendHasMoreRows;
-    if (_appendHasMoreRows) {
-      // The capped append window could not cover every new row (>msg_limit
-      // rows arrived since the last refresh — rare). Re-fetch the
-      // authoritative full transcript and fall through to the normal replace
-      // path below, which re-checks ownership and updates every session
-      // metadata field — exactly master's cost.
-      try {
-        data = await api(
-          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=all&expand_renderable=1`,
-          {timeoutMs:120000}
-        );
-      } finally {
-        if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
+    if (!_appendHasMoreRows) {
+      const appended = (data.session.messages || []).filter(m => m && m.role);
+      if (appended.length) {
+        S.messages = [...S.messages, ...appended];
+        if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
       }
-      if (!_ownsLoad() || !data || !data.session) return;
-    } else {
+      // #7925 re-gate (2026-10-21, finding 3): the append branch used to
+      // return before tool-card synchronization, so a session-level tool card
+      // that arrived with the append window never reached the client. Merge
+      // the response's cards by tid into the session-level list, rebasing the
+      // window-relative assistant_msg_idx (the server rebases full-transcript
+      // coordinates into the returned window) into the combined transcript's
+      // coordinate space, then run the existing sync over the combined
+      // transcript — the same contract the replace path below upholds.
+      if (S.session && S.session.session_id === sid && Array.isArray(data.session.tool_calls) && data.session.tool_calls.length) {
+        const _appendIdxShift = (Number(data.session._messages_offset) || 0) - _oldestIdx;
+        const _cards = Array.isArray(S.session.tool_calls) ? S.session.tool_calls : [];
+        const _byTid = new Map();
+        for (const tc of _cards) {
+          if (tc && typeof tc === 'object') _byTid.set(tc.tid !== undefined ? tc.tid : tc.id, tc);
+        }
+        for (const tc of data.session.tool_calls) {
+          if (!tc || typeof tc !== 'object') continue;
+          const _idx = Number(tc.assistant_msg_idx);
+          const _rebased = Number.isFinite(_idx)
+            ? Object.assign({}, tc, {assistant_msg_idx: _idx + _appendIdxShift})
+            : Object.assign({}, tc);
+          const _key = _rebased.tid !== undefined ? _rebased.tid : _rebased.id;
+          if (_key !== undefined && _byTid.has(_key)) {
+            const _at = _cards.indexOf(_byTid.get(_key));
+            if (_at >= 0) _cards[_at] = Object.assign({}, _byTid.get(_key), _rebased);
+          } else {
+            _cards.push(_rebased);
+          }
+        }
+        S.session.tool_calls = _cards;
+      }
+      if (!(typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[sid])) {
+        _syncToolCallsForLoadedMessages(S.messages, S.session && S.session.tool_calls);
+      }
       // Clean append: the new rows are all there is — refresh the session
       // metadata that every transcript landing must update, then finish. The
       // regeneration revision is re-adopted from this response (the
@@ -4496,6 +4539,21 @@ async function _ensureMessagesLoaded(sid, opts) {
       }
       return;
     }
+    // The capped append window could not cover every new row (>msg_limit rows
+    // arrived since the last refresh — rare), or rows landed locally during
+    // the fetch. Either way the held transcript is not the one the anchor
+    // described: re-fetch the authoritative full transcript and fall through
+    // to the normal replace path below, which re-checks ownership and updates
+    // every session metadata field — exactly master's cost.
+    try {
+      data = await api(
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=all&expand_renderable=1`,
+        {timeoutMs:120000}
+      );
+    } finally {
+      if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
+    }
+    if (!_ownsLoad() || !data || !data.session) return;
   }
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;

@@ -132,3 +132,120 @@ def test_msg_after_window_delivers_a_lone_tool_result_after_the_anchor():
     # The client can now advance its lastRenderedIdx to the tool row, so the
     # next reload's anchor check succeeds instead of failing into a full fetch.
     assert offset + len(window) == len(rows)
+
+
+# ── Handler-level: continuation collapse (2026-10-21 re-gate, finding 1) ──
+# A WebUI continuation session renders as ONE conversation: the parent's rows
+# followed by the child's. The client holds that merged transcript and, on a
+# refresh wider than the window ceiling, asks for only the rows after its last
+# rendered index. When the append is refused the response MUST be the
+# authoritative full transcript — for a continuation that is the merged
+# parent+child document — never the child's rows alone, or the client replaces
+# its 601 rendered parent rows with the child's single row.
+
+import types
+
+
+def _continuation_handler_harness(monkeypatch, tmp_path, parent_rows, child_rows):
+    import api.config
+    import api.models as models
+    import api.session_ops
+    from api import routes
+
+    session_dir = tmp_path / "sessions"
+    session_dir.mkdir(exist_ok=True)
+    db_path = tmp_path / "state.db"
+    monkeypatch.setattr(models, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", session_dir / "_index.json")
+    monkeypatch.setattr(routes, "SESSION_DIR", session_dir)
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db_path)
+
+    parent = models.Session(
+        session_id="cont-parent",
+        workspace="/fixture",
+        model="fixture-model",
+        context_length=128_000,
+        messages=[dict(r) for r in parent_rows],
+        source_tag="webui",
+        session_source="webui",
+    )
+    parent.save(skip_index=True)
+    child = models.Session(
+        session_id="cont-child",
+        workspace="/fixture",
+        model="fixture-model",
+        context_length=128_000,
+        messages=[dict(r) for r in child_rows],
+        parent_session_id="cont-parent",
+        source_tag="webui",
+        session_source="webui",
+    )
+    child.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS.pop("cont-parent", None)
+        models.SESSIONS.pop("cont-child", None)
+
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *a, **k: True)
+    monkeypatch.setattr(routes, "_active_stream_ids", lambda: set())
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", lambda *a, **k: {})
+    monkeypatch.setattr(routes, "find_run_summary", lambda *a, **k: None)
+    monkeypatch.setattr(api.config, "load_settings", lambda: {"api_redact_enabled": False})
+    monkeypatch.setattr(api.session_ops, "regeneration_state", lambda _s: ([], []))
+    monkeypatch.setattr(api.session_ops, "regeneration_authority", lambda *_a, **_k: None)
+    captured = {}
+    monkeypatch.setattr(
+        routes,
+        "j",
+        lambda _h, payload, status=200, **_k: (
+            captured.__setitem__("payload", payload),
+            captured.__setitem__("status", status),
+            payload,
+        )[-1],
+    )
+    return routes, captured
+
+
+def test_continuation_append_refusal_returns_the_merged_transcript(monkeypatch, tmp_path):
+    """2026-10-21 re-gate finding 1: a refused append on a continuation must
+    not collapse the client to the child's rows."""
+    from api.helpers import _public_message_projection
+    from api.routes import _append_anchor_fingerprint
+
+    parent_rows = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}", "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    child_rows = [{"role": "user", "content": "child question", "timestamp": 1700000601}]
+
+    routes, captured = _continuation_handler_harness(
+        monkeypatch, tmp_path, parent_rows, child_rows
+    )
+
+    # The client rendered all 601 parent rows; its anchor is the last one.
+    anchor_row = _public_message_projection(parent_rows[600], _enabled=False)
+    anchor_fp = _append_anchor_fingerprint(anchor_row)
+    query = (
+        "session_id=cont-child&messages=1&resolve_model=0"
+        "&msg_after=600"
+        f"&anchor_fp={anchor_fp}"
+        "&transcript_generation=0"
+        "&msg_limit=500&expand_renderable=1"
+    )
+    routes._handle_session_get(
+        None, types.SimpleNamespace(path="/api/session", query=query)
+    )
+
+    assert captured["status"] == 200
+    session = captured["payload"]["session"]
+    messages = session.get("messages") or []
+    append_only = session.get("_append_only")
+    # The full display document (lineage-merged parent+child) makes the anchor
+    # valid, so the fast path is ACCEPTED: exactly the child's new row travels,
+    # flagged _append_only, and the client appends it onto its 601 rows.
+    assert append_only is True, (
+        "the append was refused — with the merged document available the "
+        "anchor must validate; a refusal here means the response would be "
+        "answered from a lineage-less document again"
+    )
+    assert [m.get("content") for m in messages] == ["child question"], messages
+    assert session.get("_messages_offset") == 601, session.get("_messages_offset")
