@@ -73,6 +73,14 @@
 
 ### Fixed
 
+- **The model picker fallback reads colon-bearing custom models with the shared server grammar.** When a dropdown option
+  carries no provider metadata (before the catalog loads, or for a hand-typed custom model), the client fallback parsed
+  `@custom:<slug>:<model>` with its own colon heuristic, which could drop the port from endpoint-style slugs such as
+  `custom:localhost:11434` or split a colon-bearing model name into the provider ID. The fallback and the metadata-less
+  option path now mirror `api.config._parse_provider_qualified_model_id` — the single server grammar for
+  `@provider:model` values — so the browser and the server cannot disagree about where the provider ends and the model
+  begins. (#5907, fixes #1948, #2047)
+
 - **Docker first start survives files vanishing during the ownership walk.** A fresh container could fail its first
   start at random when files disappeared while the init script aligned ownership. The walk now tolerates only
   `chown`'s own ENOENT, migrates old-UID files in writable Agent checkouts and `.git` metadata after a UID change, and
