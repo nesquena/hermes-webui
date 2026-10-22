@@ -879,4 +879,849 @@ def test_repeated_copy_handlers_preserve_canonical_aria_label_and_drain():
     ]
 
 
+def _messages_stream_slice() -> str:
+    messages_js = (ROOT / "static" / "messages.js").read_text(encoding="utf-8")
+    start = messages_js.index("const LIVE_STREAMS={};")
+    end = messages_js.index("\nfunction transcript(){", start)
+    is_current = _function_body(messages_js, "_isSessionCurrentPane")
+    is_viewed = _function_body(messages_js, "_isSessionActivelyViewed")
+    return "\n".join([is_current, is_viewed, messages_js[start:end]])
+
+
+def test_attach_live_stream_and_reconnect_preserve_active_turn_and_retire_old_stream_before_successor():
+    a11y_js = (ROOT / "static" / "a11y.js").read_text(encoding="utf-8")
+    stream_js = _messages_stream_slice()
+    script = f"""
+    const elements = {{
+      a11yAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      a11yAlertAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      messages: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k]; }},
+      }},
+      liveAssistantTurn: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        querySelector() {{ return null; }},
+      }},
+    }};
+    globalThis.window = globalThis;
+    globalThis.location = {{ href: 'http://localhost:8789/' }};
+    globalThis.document = {{
+      baseURI: 'http://localhost:8789/',
+      hidden: false,
+      activeElement: null,
+      body: {{}},
+      getElementById(id) {{ return elements[id] || null; }},
+      addEventListener() {{}},
+    }};
+    globalThis.$ = (id) => elements[id] || null;
+    globalThis.S = {{
+      session: {{ session_id: 'sid-a', pending_started_at: 1 }},
+      messages: [{{ role: 'user', content: 'Hello' }}],
+      activeStreamId: 'stream-1',
+      toolCalls: [],
+      busy: true,
+    }};
+    globalThis.INFLIGHT = {{}};
+    globalThis._desktopBackgroundedForNotifications = false;
+    globalThis.assistantDisplayName = () => 'Hermes';
+    globalThis.t = (k) => ({{
+      thinking: 'Thinking',
+      a11y_response_complete: 'Response complete',
+      a11y_response_error: 'Response interrupted by an error',
+    }})[k] || k;
+
+    let rAFCallbacks = [];
+    globalThis.requestAnimationFrame = (fn) => {{ rAFCallbacks.push(fn); return rAFCallbacks.length; }};
+    globalThis.cancelAnimationFrame = (id) => {{ if (id > 0 && id <= rAFCallbacks.length) rAFCallbacks[id - 1] = null; }};
+    function flushRaf() {{
+      const pending = rAFCallbacks;
+      rAFCallbacks = [];
+      for (const fn of pending) {{ if (fn) fn(); }}
+    }}
+
+    let scheduledTimers = new Map();
+    let timerSeq = 0;
+    globalThis.setTimeout = (fn, ms) => {{
+      const id = ++timerSeq;
+      scheduledTimers.set(id, {{ fn, ms }});
+      return id;
+    }};
+    globalThis.clearTimeout = (id) => {{ scheduledTimers.delete(id); }};
+
+    for (const noopName of [
+      '_resumeSessionStreamAfterLiveChat',
+      '_suspendSessionStreamForLiveChat',
+      'resetTurnWorkspaceMutations',
+      '_resetStreamScrollFollow',
+      'ensureLiveWorklogShell',
+      'showLiveRunStatus',
+      '_clearLiveRunStatusTimer',
+      'hideLiveRunStatus',
+      'snapshotLiveTurnHtmlForSession',
+      'saveInflightState',
+      'clearInflightState',
+      'clearInflight',
+      'setComposerStatus',
+      'setStatus',
+      'renderSessionList',
+      'renderMessages',
+      'syncTopbar',
+      'loadDir',
+      'playNotificationSound',
+      'sendBrowserNotification',
+      '_markSessionViewed',
+      'finalizeThinkingCard',
+      'clearLiveToolCards',
+      'removeThinking',
+      '_clearApprovalPendingForSession',
+      '_clearClarifyPendingForSession',
+      'stopApprovalPolling',
+      'hideApprovalCard',
+      'stopClarifyPolling',
+      'hideClarifyCard',
+    ]) {{
+      globalThis[noopName] = () => {{}};
+    }}
+    globalThis.setBusy = (val) => {{
+      S.busy = Boolean(val);
+      if (!val && typeof a11ySetStreamBusy === 'function') a11ySetStreamBusy(false);
+    }};
+    globalThis._isDocumentVisibleAndFocused = () => true;
+    globalThis._deferStreamErrorIfOffline = () => false;
+    globalThis._deferStreamErrorIfPageHidden = () => false;
+    globalThis._approvalSessionId = null;
+    globalThis._clarifySessionId = null;
+    globalThis._pendingTitleUpdates = new Map();
+    globalThis._pendingTitleExpectedCurrent = new Map();
+    globalThis._queueDrainSid = null;
+    globalThis.localStorage = {{ setItem() {{}} }};
+    globalThis.api = async (url) => {{
+      if (String(url).includes('/api/chat/stream/status')) {{
+        return {{ active: true, replay_available: false }};
+      }}
+      return {{}};
+    }};
+
+    class MockEventSource {{
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 2;
+      static instances = [];
+      constructor(url) {{
+        this.url = String(url);
+        this.readyState = MockEventSource.OPEN;
+        this.listeners = new Map();
+        MockEventSource.instances.push(this);
+      }}
+      addEventListener(name, fn) {{
+        const list = this.listeners.get(name) || [];
+        list.push(fn);
+        this.listeners.set(name, list);
+      }}
+      async emit(name, payload = {{}}) {{
+        const ev = {{ type: name, data: JSON.stringify(payload), lastEventId: '' }};
+        for (const fn of this.listeners.get(name) || []) {{
+          await fn(ev);
+        }}
+      }}
+      close() {{ this.readyState = MockEventSource.CLOSED; }}
+    }}
+    globalThis.EventSource = MockEventSource;
+
+    {a11y_js}
+    {stream_js}
+
+    (async () => {{
+      const log = [];
+
+      // 1. Attach stream-1 on sid-a via real attachLiveStream
+      attachLiveStream('sid-a', 'stream-1', []);
+      await Promise.resolve();
+      flushRaf();
+      const firstSource = MockEventSource.instances.at(-1);
+      log.push({{
+        step: 'attached_stream1',
+        busy: elements.messages.attrs['aria-busy'],
+        announcement: elements.a11yAnnouncer.textContent,
+      }});
+
+      // 2. Recoverable SSE error fires on firstSource -> calls _closeSource (reconnecting=true)
+      elements.a11yAnnouncer.textContent = '';
+      await firstSource.emit('error', {{}});
+      const busyAfterCloseSource = elements.messages.attrs['aria-busy'];
+
+      // Run the scheduled 1500ms _probeReconnect timer, which probes status and calls _wireSSE
+      for (const [id, entry] of [...scheduledTimers.entries()]) {{
+        if (entry.ms === 1500) {{
+          scheduledTimers.delete(id);
+          await entry.fn();
+        }}
+      }}
+      flushRaf();
+      const reconnectedSource = MockEventSource.instances.at(-1);
+      log.push({{
+        step: 'after_reconnect_wireSSE',
+        reopenedNewSource: reconnectedSource !== firstSource,
+        busyAfterCloseSource,
+        busyAfterReconnect: elements.messages.attrs['aria-busy'],
+        announcement: elements.a11yAnnouncer.textContent,
+      }});
+
+      // 3. Same-SID successor attachment: attachLiveStream('sid-a', 'stream-2')
+      // Must retire stream-1 BEFORE publishing stream-2 so stream-2's state survives.
+      S.activeStreamId = 'stream-2';
+      elements.a11yAnnouncer.textContent = '';
+      attachLiveStream('sid-a', 'stream-2', []);
+      await Promise.resolve();
+      // Even if a stale reset for stream-1 runs now, stream-2 must remain untouched
+      a11yResetStreamState('sid-a', {{ streamId: 'stream-1' }});
+      flushRaf();
+      log.push({{
+        step: 'successor_stream2_attached',
+        busy: elements.messages.attrs['aria-busy'],
+        announcement: elements.a11yAnnouncer.textContent,
+      }});
+
+      console.log(JSON.stringify(log));
+    }})();
+    """
+    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    assert out == [
+        {
+            "step": "attached_stream1",
+            "busy": "true",
+            "announcement": "Hermes: Thinking…",
+        },
+        {
+            "step": "after_reconnect_wireSSE",
+            "reopenedNewSource": True,
+            "busyAfterCloseSource": "true",
+            "busyAfterReconnect": "true",
+            "announcement": "",
+        },
+        {
+            "step": "successor_stream2_attached",
+            "busy": "true",
+            "announcement": "Hermes: Thinking…\u00a0",
+        },
+    ]
+
+
+def test_done_listener_preserves_completion_across_stream_end_before_and_after_frame_and_fences_superseded():
+    a11y_js = (ROOT / "static" / "a11y.js").read_text(encoding="utf-8")
+    stream_js = _messages_stream_slice()
+    script = f"""
+    const elements = {{
+      a11yAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      a11yAlertAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      messages: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k]; }},
+      }},
+      liveAssistantTurn: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        querySelector() {{ return null; }},
+      }},
+    }};
+    globalThis.window = globalThis;
+    globalThis.location = {{ href: 'http://localhost:8789/' }};
+    globalThis.document = {{
+      baseURI: 'http://localhost:8789/',
+      hidden: false,
+      activeElement: null,
+      body: {{}},
+      getElementById(id) {{ return elements[id] || null; }},
+      addEventListener() {{}},
+    }};
+    globalThis.$ = (id) => elements[id] || null;
+    globalThis.S = {{
+      session: {{ session_id: 'sid-a', pending_started_at: 1 }},
+      messages: [{{ role: 'user', content: 'Hello' }}],
+      activeStreamId: 'stream-a1',
+      toolCalls: [],
+      busy: true,
+    }};
+    globalThis.INFLIGHT = {{}};
+    globalThis._desktopBackgroundedForNotifications = false;
+    globalThis.assistantDisplayName = () => 'Hermes';
+    globalThis.t = (k) => ({{
+      thinking: 'Thinking',
+      a11y_response_complete: 'Response complete',
+    }})[k] || k;
+
+    let rAFCallbacks = [];
+    globalThis.requestAnimationFrame = (fn) => {{ rAFCallbacks.push(fn); return rAFCallbacks.length; }};
+    globalThis.cancelAnimationFrame = (id) => {{ if (id > 0 && id <= rAFCallbacks.length) rAFCallbacks[id - 1] = null; }};
+    function flushRaf() {{
+      const pending = rAFCallbacks;
+      rAFCallbacks = [];
+      for (const fn of pending) {{ if (fn) fn(); }}
+    }}
+
+    globalThis.setTimeout = () => 1;
+    globalThis.clearTimeout = () => {{}};
+
+    for (const noopName of [
+      '_resumeSessionStreamAfterLiveChat',
+      '_suspendSessionStreamForLiveChat',
+      'resetTurnWorkspaceMutations',
+      '_resetStreamScrollFollow',
+      'ensureLiveWorklogShell',
+      'showLiveRunStatus',
+      '_clearLiveRunStatusTimer',
+      'hideLiveRunStatus',
+      'snapshotLiveTurnHtmlForSession',
+      'saveInflightState',
+      'clearInflightState',
+      'clearInflight',
+      'setComposerStatus',
+      'setStatus',
+      'renderSessionList',
+      'renderMessages',
+      'syncTopbar',
+      'loadDir',
+      'playNotificationSound',
+      'sendBrowserNotification',
+      '_markSessionViewed',
+      'finalizeThinkingCard',
+      'clearLiveToolCards',
+      'removeThinking',
+      '_clearApprovalPendingForSession',
+      '_clearClarifyPendingForSession',
+      'stopApprovalPolling',
+      'hideApprovalCard',
+      'stopClarifyPolling',
+      'hideClarifyCard',
+    ]) {{
+      globalThis[noopName] = () => {{}};
+    }}
+    globalThis.setBusy = (val) => {{
+      S.busy = Boolean(val);
+      if (!val && typeof a11ySetStreamBusy === 'function') a11ySetStreamBusy(false);
+    }};
+    globalThis._shouldUseLiveProseFade = () => false;
+    globalThis._shouldFollowMessagesOnDomReplace = () => false;
+    globalThis._isMessagePaneNearBottom = () => false;
+    globalThis._isDocumentVisibleAndFocused = () => true;
+    globalThis._deferStreamErrorIfOffline = () => false;
+    globalThis._deferStreamErrorIfPageHidden = () => false;
+    globalThis._completionNotificationPreviewText = () => '';
+    globalThis._extractInlineThinkingFromContent = (content, reasoning) => ({{
+      content: String(content || ''),
+      displayText: String(content || ''),
+      reasoning: String(reasoning || ''),
+    }});
+    globalThis._approvalSessionId = null;
+    globalThis._clarifySessionId = null;
+    globalThis._pendingTitleUpdates = new Map();
+    globalThis._pendingTitleExpectedCurrent = new Map();
+    globalThis._queueDrainSid = null;
+    globalThis.localStorage = {{ setItem() {{}} }};
+    globalThis.api = async () => ({{}});
+
+    class MockEventSource {{
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 2;
+      static instances = [];
+      constructor(url) {{
+        this.url = String(url);
+        this.readyState = MockEventSource.OPEN;
+        this.listeners = new Map();
+        MockEventSource.instances.push(this);
+      }}
+      addEventListener(name, fn) {{
+        const list = this.listeners.get(name) || [];
+        list.push(fn);
+        this.listeners.set(name, list);
+      }}
+      async emit(name, payload = {{}}) {{
+        const ev = {{ type: name, data: JSON.stringify(payload), lastEventId: '' }};
+        for (const fn of this.listeners.get(name) || []) {{
+          await fn(ev);
+        }}
+      }}
+      close() {{ this.readyState = MockEventSource.CLOSED; }}
+    }}
+    globalThis.EventSource = MockEventSource;
+
+    {a11y_js}
+    {stream_js}
+
+    (async () => {{
+      const log = [];
+
+      // Case 1: Ordinary A->A completion with stream_end BEFORE the completion RAF frame
+      attachLiveStream('sid-a', 'stream-a1', []);
+      await Promise.resolve();
+      flushRaf();
+      const srcA1 = MockEventSource.instances.at(-1);
+
+      await srcA1.emit('done', {{
+        status: 'completed',
+        stream_id: 'stream-a1',
+        session: {{
+          session_id: 'sid-a',
+          messages: [
+            {{ role: 'user', content: 'Hello' }},
+            {{ role: 'assistant', content: 'Settled A-to-A before frame.' }},
+          ],
+          tool_calls: [],
+        }},
+      }});
+      // Deliver trailing stream_end BEFORE flushRaf()
+      await srcA1.emit('stream_end', {{ session_id: 'sid-a' }});
+      flushRaf();
+      log.push({{
+        case: 'a_to_a_stream_end_before_frame',
+        busy: elements.messages.attrs['aria-busy'],
+        announcement: elements.a11yAnnouncer.textContent,
+      }});
+
+      // Case 2: Ordinary A->A completion with stream_end AFTER the completion RAF frame
+      S.activeStreamId = 'stream-a2';
+      S.busy = true;
+      attachLiveStream('sid-a', 'stream-a2', []);
+      await Promise.resolve();
+      flushRaf();
+      const srcA2 = MockEventSource.instances.at(-1);
+
+      await srcA2.emit('done', {{
+        status: 'completed',
+        stream_id: 'stream-a2',
+        session: {{
+          session_id: 'sid-a',
+          messages: [
+            {{ role: 'user', content: 'Second' }},
+            {{ role: 'assistant', content: 'Settled A-to-A after frame.' }},
+          ],
+          tool_calls: [],
+        }},
+      }});
+      flushRaf();
+      await srcA2.emit('stream_end', {{ session_id: 'sid-a' }});
+      log.push({{
+        case: 'a_to_a_stream_end_after_frame',
+        busy: elements.messages.attrs['aria-busy'],
+        announcement: elements.a11yAnnouncer.textContent,
+      }});
+
+      // Case 3: A->B compression rotation with stream_end BEFORE the completion RAF frame
+      // plus an unrelated background stream finishing before the frame runs
+      S.session = {{ session_id: 'sid-bg', pending_started_at: 1 }};
+      S.activeStreamId = 'stream-bg';
+      S.busy = true;
+      attachLiveStream('sid-bg', 'stream-bg', []);
+      await Promise.resolve();
+      const srcBg = MockEventSource.instances.at(-1);
+      // Keep srcBg alive in background while user views sid-parent
+      S.session = {{ session_id: 'sid-parent', pending_started_at: 2 }};
+      S.activeStreamId = 'stream-comp';
+      S.busy = true;
+      attachLiveStream('sid-parent', 'stream-comp', []);
+      await Promise.resolve();
+      flushRaf();
+      const srcComp = MockEventSource.instances.at(-1);
+
+      // Emit done on sid-parent rotating to sid-cont
+      await srcComp.emit('done', {{
+        status: 'completed',
+        stream_id: 'stream-comp',
+        session: {{
+          session_id: 'sid-cont',
+          messages: [
+            {{ role: 'user', content: 'Compress' }},
+            {{ role: 'assistant', content: 'Continuation reply after compression.' }},
+          ],
+          tool_calls: [],
+        }},
+      }});
+      // Emit trailing stream_end on sid-parent BEFORE completion RAF frame
+      await srcComp.emit('stream_end', {{ session_id: 'sid-parent' }});
+      // Also emit done + stream_end on unrelated background stream BEFORE completion RAF frame
+      await srcBg.emit('done', {{
+        status: 'completed',
+        stream_id: 'stream-bg',
+        session: {{
+          session_id: 'sid-bg',
+          messages: [{{ role: 'assistant', content: 'Unrelated background reply.' }}],
+          tool_calls: [],
+        }},
+      }});
+      await srcBg.emit('stream_end', {{ session_id: 'sid-bg' }});
+
+      flushRaf();
+      log.push({{
+        case: 'a_to_b_stream_end_and_bg_before_frame',
+        currentSid: S.session.session_id,
+        busy: elements.messages.attrs['aria-busy'],
+        announcement: elements.a11yAnnouncer.textContent,
+      }});
+
+      // Case 4: Superseded view owner fences pending terminal completion RAF
+      S.session = {{ session_id: 'sid-cont', pending_started_at: 3 }};
+      S.activeStreamId = 'stream-superseded';
+      S.busy = true;
+      attachLiveStream('sid-cont', 'stream-superseded', []);
+      await Promise.resolve();
+      flushRaf();
+      const srcSup = MockEventSource.instances.at(-1);
+      elements.a11yAnnouncer.textContent = '';
+
+      await srcSup.emit('done', {{
+        status: 'completed',
+        stream_id: 'stream-superseded',
+        session: {{
+          session_id: 'sid-cont',
+          messages: [{{ role: 'assistant', content: 'Should be fenced on switch.' }}],
+          tool_calls: [],
+        }},
+      }});
+      // User switches to idle sid-other before completion RAF runs
+      S.session = {{ session_id: 'sid-other' }};
+      a11yResetStreamState();
+      flushRaf();
+      log.push({{
+        case: 'superseded_view_fenced',
+        announcement: elements.a11yAnnouncer.textContent,
+      }});
+
+      // Case 5: Superseded turn owner (new stream on same session before completion RAF frame)
+      S.session = {{ session_id: 'sid-other', pending_started_at: 4 }};
+      S.activeStreamId = 'stream-turn-1';
+      S.busy = true;
+      attachLiveStream('sid-other', 'stream-turn-1', []);
+      await Promise.resolve();
+      flushRaf();
+      const srcTurn1 = MockEventSource.instances.at(-1);
+
+      await srcTurn1.emit('done', {{
+        status: 'completed',
+        stream_id: 'stream-turn-1',
+        session: {{
+          session_id: 'sid-other',
+          messages: [{{ role: 'assistant', content: 'Turn 1 answer superseded by turn 2.' }}],
+          tool_calls: [],
+        }},
+      }});
+      // Before Turn 1's completion RAF runs, Turn 2 starts on sid-other
+      S.activeStreamId = 'stream-turn-2';
+      S.busy = true;
+      attachLiveStream('sid-other', 'stream-turn-2', []);
+      await Promise.resolve();
+      await srcTurn1.emit('stream_end', {{ session_id: 'sid-other' }});
+      flushRaf();
+      log.push({{
+        case: 'superseded_turn_replaced_by_new_thinking',
+        busy: elements.messages.attrs['aria-busy'],
+        announcement: elements.a11yAnnouncer.textContent.trim(),
+      }});
+
+      console.log(JSON.stringify(log));
+    }})();
+    """
+    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    assert out == [
+        {
+            "case": "a_to_a_stream_end_before_frame",
+            "busy": "false",
+            "announcement": "Hermes: Settled A-to-A before frame.",
+        },
+        {
+            "case": "a_to_a_stream_end_after_frame",
+            "busy": "false",
+            "announcement": "Hermes: Settled A-to-A after frame.",
+        },
+        {
+            "case": "a_to_b_stream_end_and_bg_before_frame",
+            "currentSid": "sid-cont",
+            "busy": "false",
+            "announcement": "Hermes: Continuation reply after compression.",
+        },
+        {
+            "case": "superseded_view_fenced",
+            "announcement": "",
+        },
+        {
+            "case": "superseded_turn_replaced_by_new_thinking",
+            "busy": "true",
+            "announcement": "Hermes: Thinking…",
+        },
+    ]
+
+
+def test_polite_copy_does_not_invalidate_assertive_error_before_frame_or_before_expiry():
+    a11y_js = (ROOT / "static" / "a11y.js").read_text(encoding="utf-8")
+    stream_js = _messages_stream_slice()
+    copy_funcs = "\n".join(
+        _function_body(UI_JS, name)
+        for name in (
+            "_announceA11yPolite",
+            "_applyButtonCopiedFeedback",
+            "copyMsg",
+        )
+    )
+    script = f"""
+    const elements = {{
+      a11yAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      a11yAlertAnnouncer: {{ textContent: '', setAttribute() {{}} }},
+      messages: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        getAttribute(k) {{ return this.attrs[k]; }},
+      }},
+      liveAssistantTurn: {{
+        attrs: {{}},
+        setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+        querySelector() {{ return null; }},
+      }},
+    }};
+    globalThis.window = globalThis;
+    globalThis.location = {{ href: 'http://localhost:8789/' }};
+    globalThis.document = {{
+      baseURI: 'http://localhost:8789/',
+      hidden: false,
+      activeElement: null,
+      body: {{}},
+      getElementById(id) {{ return elements[id] || null; }},
+      addEventListener() {{}},
+    }};
+    globalThis.$ = (id) => elements[id] || null;
+    globalThis.S = {{
+      session: {{ session_id: 'sid-1', pending_started_at: 1 }},
+      messages: [{{ role: 'user', content: 'Prompt' }}],
+      activeStreamId: 'stream-err-1',
+      toolCalls: [],
+      busy: true,
+    }};
+    globalThis.INFLIGHT = {{}};
+    globalThis._desktopBackgroundedForNotifications = false;
+    globalThis.assistantDisplayName = () => 'Hermes';
+    globalThis.li = (name) => `<svg data-icon="${{name}}"></svg>`;
+    globalThis._copyText = () => Promise.resolve();
+    globalThis.showToast = () => {{}};
+    globalThis.t = (k) => ({{
+      thinking: 'Thinking',
+      copied: 'Copied!',
+      copy: 'Copy',
+      a11y_response_error: 'Response interrupted by an error',
+    }})[k] || k;
+
+    let rAFCallbacks = [];
+    globalThis.requestAnimationFrame = (fn) => {{ rAFCallbacks.push(fn); return rAFCallbacks.length; }};
+    globalThis.cancelAnimationFrame = (id) => {{ if (id > 0 && id <= rAFCallbacks.length) rAFCallbacks[id - 1] = null; }};
+    function flushRaf() {{
+      const pending = rAFCallbacks;
+      rAFCallbacks = [];
+      for (const fn of pending) {{ if (fn) fn(); }}
+    }}
+
+    let scheduledTimers = new Map();
+    let timerSeq = 0;
+    globalThis.setTimeout = (fn, ms) => {{
+      const id = ++timerSeq;
+      scheduledTimers.set(id, {{ fn, ms }});
+      return id;
+    }};
+    globalThis.clearTimeout = (id) => {{ scheduledTimers.delete(id); }};
+
+    for (const noopName of [
+      '_resumeSessionStreamAfterLiveChat',
+      '_suspendSessionStreamForLiveChat',
+      'resetTurnWorkspaceMutations',
+      '_resetStreamScrollFollow',
+      'ensureLiveWorklogShell',
+      'showLiveRunStatus',
+      '_clearLiveRunStatusTimer',
+      'hideLiveRunStatus',
+      'snapshotLiveTurnHtmlForSession',
+      'saveInflightState',
+      'clearInflightState',
+      'clearInflight',
+      'setComposerStatus',
+      'setStatus',
+      'renderSessionList',
+      'renderMessages',
+      'syncTopbar',
+      'loadDir',
+      'playNotificationSound',
+      'sendBrowserNotification',
+      '_markSessionViewed',
+      'finalizeThinkingCard',
+      'clearLiveToolCards',
+      'removeThinking',
+      '_clearApprovalPendingForSession',
+      '_clearClarifyPendingForSession',
+      'stopApprovalPolling',
+      'hideApprovalCard',
+      'stopClarifyPolling',
+      'hideClarifyCard',
+    ]) {{
+      globalThis[noopName] = () => {{}};
+    }}
+    globalThis.setBusy = (val) => {{
+      S.busy = Boolean(val);
+      if (!val && typeof a11ySetStreamBusy === 'function') a11ySetStreamBusy(false);
+    }};
+    globalThis._shouldUseLiveProseFade = () => false;
+    globalThis._shouldFollowMessagesOnDomReplace = () => false;
+    globalThis._isMessagePaneNearBottom = () => false;
+    globalThis._isDocumentVisibleAndFocused = () => true;
+    globalThis._deferStreamErrorIfOffline = () => false;
+    globalThis._deferStreamErrorIfPageHidden = () => false;
+    globalThis._approvalSessionId = null;
+    globalThis._clarifySessionId = null;
+    globalThis._pendingTitleUpdates = new Map();
+    globalThis._pendingTitleExpectedCurrent = new Map();
+    globalThis._queueDrainSid = null;
+    globalThis.localStorage = {{ setItem() {{}} }};
+    globalThis.api = async () => ({{}});
+
+    class MockEventSource {{
+      static CONNECTING = 0;
+      static OPEN = 1;
+      static CLOSED = 2;
+      static instances = [];
+      constructor(url) {{
+        this.url = String(url);
+        this.readyState = MockEventSource.OPEN;
+        this.listeners = new Map();
+        MockEventSource.instances.push(this);
+      }}
+      addEventListener(name, fn) {{
+        const list = this.listeners.get(name) || [];
+        list.push(fn);
+        this.listeners.set(name, list);
+      }}
+      async emit(name, payload = {{}}) {{
+        const ev = {{ type: name, data: JSON.stringify(payload), lastEventId: '' }};
+        for (const fn of this.listeners.get(name) || []) {{
+          await fn(ev);
+        }}
+      }}
+      close() {{ this.readyState = MockEventSource.CLOSED; }}
+    }}
+    globalThis.EventSource = MockEventSource;
+
+    let _a11yPoliteClearTimer = null;
+    {a11y_js}
+    {copy_funcs}
+    {stream_js}
+
+    const msgRow = {{ dataset: {{ rawText: 'Message to copy' }} }};
+    const copyBtn = {{
+      innerHTML: '<svg data-icon="copy"></svg>',
+      style: {{ color: '' }},
+      isConnected: true,
+      attrs: {{ 'aria-label': 'Copy' }},
+      getAttribute(k) {{ return this.attrs[k]; }},
+      setAttribute(k, v) {{ this.attrs[k] = String(v); }},
+      closest() {{ return msgRow; }},
+    }};
+
+    (async () => {{
+      const log = [];
+
+      // Case 1: Copy succeeds BEFORE the pending assertive error frame runs
+      attachLiveStream('sid-1', 'stream-err-1', []);
+      await Promise.resolve();
+      flushRaf();
+      const src1 = MockEventSource.instances.at(-1);
+
+      // Emit apperror -> schedules assertive error RAF (not yet flushed)
+      await src1.emit('apperror', {{
+        type: 'rate_limit',
+        status: 'rate_limit',
+        message: 'Rate limit reached',
+        session_id: 'sid-1',
+      }});
+      // Trigger copyMsg and let its microtask resolve BEFORE flushing RAF
+      copyMsg(copyBtn);
+      await Promise.resolve();
+
+      // Now flush RAF: both polite ("Copied!") and assertive error must publish
+      flushRaf();
+      log.push({{
+        case: 'copy_before_error_frame',
+        polite: elements.a11yAnnouncer.textContent,
+        assertive: elements.a11yAlertAnnouncer.textContent,
+      }});
+
+      // Case 2: Copy succeeds AFTER assertive error publication, BEFORE assertive expiry timer
+      // Trigger copyMsg again while the 4500ms assertive expiry timer is still pending
+      copyMsg(copyBtn);
+      await Promise.resolve();
+      flushRaf();
+      const assertiveBeforeExpiry = elements.a11yAlertAnnouncer.textContent;
+
+      // Fire the 4500ms assertive expiry timer
+      for (const [id, entry] of [...scheduledTimers.entries()]) {{
+        if (entry.ms === 4500) {{
+          scheduledTimers.delete(id);
+          entry.fn();
+        }}
+      }}
+      log.push({{
+        case: 'copy_between_publication_and_expiry',
+        assertiveBeforeExpiry: assertiveBeforeExpiry.trim(),
+        assertiveAfterExpiry: elements.a11yAlertAnnouncer.textContent,
+      }});
+
+      // Case 3: Owner-retirement fence cancels both pending channels on session switch
+      S.activeStreamId = 'stream-err-2';
+      S.busy = true;
+      attachLiveStream('sid-1', 'stream-err-2', []);
+      await Promise.resolve();
+      flushRaf();
+      const src2 = MockEventSource.instances.at(-1);
+      elements.a11yAnnouncer.textContent = '';
+      elements.a11yAlertAnnouncer.textContent = '';
+
+      await src2.emit('apperror', {{
+        type: 'rate_limit',
+        status: 'rate_limit',
+        message: 'Second error',
+        session_id: 'sid-1',
+      }});
+      copyMsg(copyBtn);
+      await Promise.resolve();
+      // Retire sid-1 by switching to sid-2 before RAFs run
+      S.session = {{ session_id: 'sid-2' }};
+      a11yResetStreamState('sid-1');
+      flushRaf();
+      log.push({{
+        case: 'owner_retirement_fences_both_channels',
+        polite: elements.a11yAnnouncer.textContent,
+        assertive: elements.a11yAlertAnnouncer.textContent,
+      }});
+
+      console.log(JSON.stringify(log));
+    }})();
+    """
+    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    assert out == [
+        {
+            "case": "copy_before_error_frame",
+            "polite": "Copied!",
+            "assertive": "Response interrupted by an error: Rate limit reached",
+        },
+        {
+            "case": "copy_between_publication_and_expiry",
+            "assertiveBeforeExpiry": "Response interrupted by an error: Rate limit reached",
+            "assertiveAfterExpiry": "",
+        },
+        {
+            "case": "owner_retirement_fences_both_channels",
+            "polite": "",
+            "assertive": "",
+        },
+    ]
+
+
+
 
