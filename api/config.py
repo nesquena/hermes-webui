@@ -1540,7 +1540,7 @@ def _custom_provider_slug_from_name(name: object, entry: dict | None = None) -> 
         name = entry.get("name")
 
     raw = str(name or "").strip().lower()
-    if not raw and not (isinstance(entry, dict) and (entry.get("provider_key") or entry.get("base_url"))):
+    if not raw and not (isinstance(entry, dict) and entry.get("provider_key")):
         return ""
     if raw.startswith("custom:"):
         return raw
@@ -1552,16 +1552,6 @@ def _custom_provider_slug_from_name(name: object, entry: dict | None = None) -> 
     slug = re.sub(r"-{2,}", "-", slug)
 
     if not slug:
-        # If entry wasn't passed, try looking up matching entry by name from config (#8017)
-        if entry is None and raw:
-            try:
-                for candidate in _custom_provider_entries():
-                    if str(candidate.get("name") or "").strip().lower() == raw:
-                        entry = candidate
-                        break
-            except Exception:
-                pass
-
         if isinstance(entry, dict):
             # 1. Fall back to provider_key if present
             pk = str(entry.get("provider_key") or "").strip().lower()
@@ -1571,24 +1561,7 @@ def _custom_provider_slug_from_name(name: object, entry: dict | None = None) -> 
                 if pk_slug:
                     slug = pk_slug
 
-            # 2. Fall back to endpoint-derived host-port if present
-            if not slug:
-                base_url = str(entry.get("base_url") or "").strip()
-                if base_url:
-                    try:
-                        from urllib.parse import urlparse
-                        parsed = urlparse(base_url)
-                        host = parsed.hostname or ""
-                        port = parsed.port
-                        if host:
-                            ep = f"{host}-{port}" if port else host
-                            ep_slug = re.sub(r"[^a-z0-9._-]+", "-", ep).strip("-")
-                            if ep_slug:
-                                slug = ep_slug
-                    except Exception:
-                        pass
-
-        # 3. Stable 8-char hex digest of UTF-8 name as last resort
+        # 2. Stable 8-char hex digest of UTF-8 name as last resort (#8017)
         if not slug and raw:
             import hashlib
             slug = "named-" + hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:8]
@@ -1596,6 +1569,7 @@ def _custom_provider_slug_from_name(name: object, entry: dict | None = None) -> 
     if not slug:
         return ""
     return "custom:" + slug
+
 
 
 def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
@@ -3020,8 +2994,11 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        if _custom_provider_slug_key(name) == slug_key or _custom_provider_slug_key(entry) == slug_key:
+        entry_slug = _custom_provider_slug_from_name(name, entry)
+        entry_key = entry_slug.removeprefix("custom:")
+        if entry_key == slug_key:
             matches.append(entry)
+
     if len(matches) >= 2:
         names = [str(e.get("name") or "").strip() for e in matches]
         raise AmbiguousCustomProviderError(
@@ -3241,7 +3218,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 entry_model_ids.add(entry_model)
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
-                provider_hint = _custom_provider_slug_from_name(entry_name)
+                provider_hint = _custom_provider_slug_from_name(entry_name, entry)
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
                 return _finalize(model_id, provider_hint, entry_base_url or None)
@@ -3395,7 +3372,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
-                        _slug = _custom_provider_slug_from_name(prefix)
+                        _slug = _custom_provider_slug_from_name(prefix, _entry)
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 
@@ -5989,7 +5966,7 @@ def _resolve_model_reasoning_efforts_impl(
     try:
         if provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
-                if _custom_provider_slug_from_name(_entry.get("name")) == provider:
+                if _custom_provider_slug_from_name(_entry.get("name"), _entry) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
@@ -7689,7 +7666,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         for entry in _custom_provider_entries(cfg):
             provider_name = str(entry.get("name") or "").strip()
-            provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
+            provider_slug = _custom_provider_slug_from_name(provider_name, entry) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
@@ -10202,7 +10179,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         continue
                     entry_name = str(entry.get("name") or "").strip()
                     if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
+                        return _custom_provider_slug_from_name(entry_name, entry)
                     return "custom"
 
             return ""
