@@ -1448,6 +1448,39 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+// #8297: successful per-File upload results, scoped to the session they were
+// uploaded for. A send aborted after a partial upload failure keeps the good
+// uploads on disk; the resend must reuse those results instead of uploading
+// the same File again and creating another disk copy (a.txt → a-1.txt → …).
+const _uploadedFileResults=new Map();
+function _cachedUploadResult(file, sessionId){
+  const entry=_uploadedFileResults.get(file);
+  return entry&&entry.sid===String(sessionId||'')?entry.result:null;
+}
+function _rememberUploadResult(file, sessionId, result){
+  if(!file||!result)return;
+  _uploadedFileResults.set(file,{sid:String(sessionId||''),result});
+}
+function _dropUploadResults(sessionId){
+  const sid=String(sessionId||'');
+  for(const [file,entry] of [..._uploadedFileResults]){
+    if(entry.sid===sid)_uploadedFileResults.delete(file);
+  }
+}
+function _pendingUploadsFor(files, sessionId){
+  // Split the submitted files into the ones that still need an upload and a
+  // File→result map pre-seeded with the reused ones, so the caller can rebuild
+  // the attachment list in submitted order.
+  const results=new Map();
+  const toUpload=[];
+  (Array.isArray(files)?files:[]).filter(Boolean).forEach((file)=>{
+    const cached=_cachedUploadResult(file, sessionId);
+    if(cached)results.set(file,cached);
+    else toUpload.push(file);
+  });
+  return {toUpload, results};
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -1755,8 +1788,13 @@ async function send(){
   if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
 
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
+  // #8297: only upload what is not already on disk from an earlier attempt of
+  // THIS send's files; the results of reused uploads are merged back in below
+  // so the attachment list keeps the submitted order and the partial-failure
+  // check counts reused + fresh results together.
+  const {toUpload:_filesToUpload, results:_uploadResultsByFile}=_pendingUploadsFor(_submittedFiles, activeSid);
   let uploaded=[];
-  try{uploaded=await uploadPendingFiles({files:_submittedFiles, sessionId:activeSid, clearPending:false});}
+  try{uploaded=await uploadPendingFiles({files:_filesToUpload, sessionId:activeSid, clearPending:false, onFileUploaded:(file,result)=>{_uploadResultsByFile.set(file,result);_rememberUploadResult(file,activeSid,result);}});}
   catch(e){
     // Total failure: never start the agent with no attachments. Restore the
     // draft + staged files so a one-key resend keeps them.
@@ -1764,6 +1802,7 @@ async function send(){
     setComposerStatus(`Upload error: ${e.message}`);
     return;
   }
+  uploaded=_submittedFiles.map((file)=>_uploadResultsByFile.get(file)).filter(Boolean);
   // Partial failure: uploadPendingFiles returns the files that DID upload and
   // only throws when every one failed. Starting the agent here would silently
   // send the message with a subset of the staged attachments, so abort and
@@ -2088,6 +2127,9 @@ async function send(){
     }
   });
 
+  // The send is with the agent now: its uploads belong to the message, so the
+  // per-File reuse cache for this session must not leak into a later send.
+  _dropUploadResults(activeSid);
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 
