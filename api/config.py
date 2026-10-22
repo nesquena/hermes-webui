@@ -11434,10 +11434,6 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         0.0,
                         _LIVE_REBUILD_BUDGET_SECONDS - (time.monotonic() - force_refresh_started_at),
                     )
-            elif not force_refresh and _LIVE_REBUILD_BUDGET_SECONDS > 0:
-                # A plain follower should not sit the full 60s either: the
-                # rebuild budget already bounds the live work it is waiting on.
-                wait_timeout = _LIVE_REBUILD_BUDGET_SECONDS
             _cache_build_cv.wait_for(
                 lambda: not _cache_build_in_progress,
                 timeout=wait_timeout
@@ -11458,8 +11454,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if stale_disk_groups is not None:
                     return copy.deepcopy(stale_disk_groups)
                 return copy.deepcopy(_static_models_catalog_without_live_probes())
-            # A plain follower that timed out on the rebuild budget serves the
-            # best catalog it can without waiting further, instead of falling
+            # A plain follower that timed out on its wait serves the best
+            # catalog it can without waiting further, instead of falling
             # through and re-entering the cold path.
             if (
                 not force_refresh

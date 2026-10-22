@@ -3,7 +3,14 @@
 The browser aborts ``api()`` at 30s. A 60s server-side follower wait makes
 ``POST /api/session/new`` look hung ("New conversation") even though the server
 would eventually return 200. ``prefer_cache`` callers must never wait, and a
-plain follower should wait at most the live-rebuild budget.
+follower whose wait runs out serves the best catalog it already knows instead of
+re-entering the cold path.
+
+A **plain** follower deliberately keeps the full wait for the slot owner:
+``tests/test_issue7481_custom_probe_budget_fairness.py`` pins that a third caller
+waits for the rebuild that owns the single-flight slot and is served *that*
+catalog. Shortening the plain-follower wait is a separate product decision and
+does not travel in this change.
 """
 from __future__ import annotations
 
@@ -70,7 +77,13 @@ def test_prefer_cache_does_not_wait_on_inflight_rebuild(tmp_path, monkeypatch):
     assert cfg._cache_build_in_progress is True
 
 
-def test_plain_follower_waits_at_most_rebuild_budget(tmp_path, monkeypatch):
+def test_plain_follower_still_waits_for_the_slot_owner(tmp_path, monkeypatch):
+    """A plain follower keeps waiting for the rebuild that owns the slot.
+
+    Deliberately *not* bounded by the live-rebuild budget: upstream pins the
+    waiting semantics in ``test_issue7481_custom_probe_budget_fairness.py``
+    (a third caller waits for B and is served B's catalog, not a cached one).
+    """
     import api.config as cfg
 
     catalog = _catalog("resident-model")
@@ -87,13 +100,45 @@ def test_plain_follower_waits_at_most_rebuild_budget(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cfg._cache_build_cv, "wait_for", _wait)
 
-    started = time.monotonic()
     result = cfg.get_available_models()
-    elapsed = time.monotonic() - started
 
-    assert timeouts == [0.05]
+    assert len(timeouts) == 1
+    assert timeouts[0] is not None and timeouts[0] >= 1.0, (
+        "a plain follower must wait for the slot owner; shortening that wait "
+        "is a product decision upstream pins against (test_issue7481)"
+    )
     assert result["default_model"] == "resident-model"
-    assert elapsed < 1.0
+    assert cfg._cache_build_in_progress is True
+
+
+def test_timed_out_follower_serves_the_resident_catalog_not_the_cold_path(
+    tmp_path, monkeypatch
+):
+    """When the follower wait runs out mid-rebuild, it serves what it knows.
+
+    It must not fall through into the cold path (live probes, a second build).
+    """
+    import api.config as cfg
+
+    catalog = _catalog("resident-model")
+    _pin_config(monkeypatch, cfg, tmp_path)
+    _seed_resident_cache(monkeypatch, cfg, catalog)
+    monkeypatch.setattr(cfg, "_LIVE_REBUILD_BUDGET_SECONDS", 0.05, raising=False)
+    monkeypatch.setattr(cfg, "_load_models_cache_from_disk", lambda: None)
+    monkeypatch.setattr(cfg, "_load_stale_models_cache_from_disk", lambda: None)
+
+    def _wait(_predicate, timeout=None):
+        return False
+
+    monkeypatch.setattr(cfg._cache_build_cv, "wait_for", _wait)
+
+    def _must_not_rebuild(*_args, **_kwargs):
+        raise AssertionError("a timed-out follower must not re-enter the cold path")
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _must_not_rebuild)
+
+    result = cfg.get_available_models()
+    assert result["default_model"] == "resident-model"
     assert cfg._cache_build_in_progress is True
 
 
