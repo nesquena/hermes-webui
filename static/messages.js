@@ -2327,6 +2327,7 @@ function closeLiveStream(sessionId, streamId, source, reconnecting=false){
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
+  const retiringStreamId=live.streamId||streamId||null;
   if(typeof live.dispose==='function') live.dispose(reconnecting);
   if(typeof live.cancelIdleRecovery==='function') live.cancelIdleRecovery();
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
@@ -2344,7 +2345,9 @@ function closeLiveStream(sessionId, streamId, source, reconnecting=false){
   if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
-  if(typeof a11yResetStreamState==='function') a11yResetStreamState(sessionId);
+  if(!reconnecting && typeof a11yResetStreamState==='function'){
+    a11yResetStreamState(sessionId,{streamId:retiringStreamId});
+  }
   _resumeSessionStreamAfterLiveChat(sessionId);
   // closeLiveStream() is called during session-switch teardown for any session
   // the user is no longer viewing. The stream is still active on the server,
@@ -2444,7 +2447,6 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   let assistantText='';
   let reasoningText='';
   if(S.session&&S.session.session_id===activeSid&&S.activeStreamId===streamId&&typeof ensureLiveWorklogShell==='function') ensureLiveWorklogShell();
-  if(typeof a11yOnStreamStart==='function') a11yOnStreamStart(activeSid,{reconnecting,streamId});
   const existingLive=LIVE_STREAMS[activeSid];
   if(
     existingLive&&existingLive.streamId===streamId&&existingLive.source&&
@@ -2455,6 +2457,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       existingLive.source.readyState===EventSource.OPEN||
       (!reconnecting&&existingLive.source.readyState===EventSource.CONNECTING))
   ){
+    if(typeof a11yOnStreamStart==='function') a11yOnStreamStart(activeSid,{reconnecting,streamId});
     // Phase D: restore bottom run status on reattach after the Worklog shell
     // exists. There is no stale transport teardown in this branch.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
@@ -2465,6 +2468,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
+  if(typeof a11yOnStreamStart==='function') a11yOnStreamStart(activeSid,{reconnecting,streamId});
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
   if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
   // Phase D: restore bottom run status after closeLiveStream(); that helper
@@ -6334,6 +6338,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelAnimationFramePendingStreamRender();
     }};
     _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
+    if(!_streamFinalized && !_terminalStateReached && typeof a11yOnStreamStart==='function'){
+      a11yOnStreamStart(activeSid,{reconnecting:true,streamId});
+    }
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
