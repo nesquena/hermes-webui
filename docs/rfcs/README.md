@@ -45,7 +45,8 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
 - [`webui-run-state-consistency-contract.md`](webui-run-state-consistency-contract.md)
   — #2361 consistency rules for keeping transcript, model context, live streams,
   replay, compression, and session metadata coherent during active and recovered
-  WebUI runs.
+  WebUI runs, including the per-layer authority matrix (authority, persistence
+  lifetime, allowed divergence, replay/recovery rules) and the review checklist.
 - [`live-to-final-assistant-replies.md`](live-to-final-assistant-replies.md)
   — #3400 accepted product model for long-running assistant replies, live
   process prose, tool activity, recovery, terminal outcomes, display
@@ -70,3 +71,6 @@ First-time contributor RFCs should be discussed in an issue before opening a PR.
 - [`session-sse-contract-v1.md`](session-sse-contract-v1.md) — #4812 Proposed
   contract vocabulary, replay identity, event taxonomy, cursor/resume semantics,
   and implementation gates for `GET /api/sessions/{session_id}/events`.
+- [`exact-persisted-message-replay-guard.md`](exact-persisted-message-replay-guard.md)
+  — proposed persistence-boundary invariant that removes only byte-equivalent
+  replay rows carrying stable event identity before a session save.

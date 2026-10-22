@@ -33,7 +33,7 @@ let _sessionStreamingById = new Map([['old', true], ['new', true]]);
 let _sessionListSnapshotById = new Map([['old', {{message_count: 10}}]]);
 let _sessionListSourceById = new Map([['old', 'webui'], ['new', 'webui']]);
 function _forgetObservedStreamingSession(_sid) {{}}
-function renderSessionListFromCache() {{}}
+function _repaintSidebarForBackgroundChurn() {{}}
 {fn_src}
 _markSessionCompletedInList({{
   session_id: 'new',

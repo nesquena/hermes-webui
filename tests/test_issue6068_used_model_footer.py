@@ -140,10 +140,11 @@ console.log(JSON.stringify({{
 
 def test_streaming_stamps_used_model_on_assistant_message_and_usage_payload():
     assert "_dm['_usedModel'] = _used_model" in STREAMING_PY
-    # The served model must be read from the agent AFTER the run — the agent
-    # mutates agent.model when a fallback fires, so the pre-run resolved_model
-    # would mis-attribute fallback turns.
-    assert "_used_model = getattr(agent, 'model', None) or resolved_model or model" in STREAMING_PY
+    # Read the served model from the agent after the run (including fallback),
+    # without treating a requested/configured selection as proof of service.
+    assert "_observed_model = getattr(agent, 'model', None)" in STREAMING_PY
+    assert "_used_model = _observed_model.strip() if isinstance(_observed_model, str) else None" in STREAMING_PY
+    assert "_used_model = getattr(agent, 'model', None) or resolved_model or model" not in STREAMING_PY
     assert "usage['used_model'] = _used_model" in STREAMING_PY
 
 

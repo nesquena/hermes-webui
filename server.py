@@ -97,18 +97,28 @@ except ImportError:  # pragma: no cover - resource is Unix-only
     resource = None
 from urllib.parse import urlparse
 
+# Agent's isolated interpreter relaunch uses runpy.run_path(), which does not
+# put this script's directory on sys.path. Restore it before local imports.
+_webui_root = os.path.dirname(os.path.abspath(__file__))
+if _webui_root not in sys.path:
+    sys.path.insert(0, _webui_root)
+from managed_agent_startup import activate_managed_agent
+activate_managed_agent()
+
 logger = logging.getLogger(__name__)
 
-from api.auth import check_auth, reset_trusted_auth_request_state
+from api.request_logging import emit_request_log
+from api.auth import check_auth_or_close, reset_trusted_auth_request_state
 from api.config import HOST, PORT, STATE_DIR, SESSION_DIR, DEFAULT_WORKSPACE
 from api.helpers import (
     j,
+    advertise_connection_close,
     get_profile_cookie,
     _build_csp_report_only_policy,
     _CLIENT_DISCONNECT_ERRORS,
 )
 from api.profiles import set_request_profile, clear_request_profile
-from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers
+from api.routes import handle_delete, handle_get, handle_patch, handle_post, handle_put, apply_cors_preflight_headers, fold_api_path
 from api.startup import auto_install_agent_deps, fix_credential_permissions
 from api.updates import WEBUI_VERSION
 from api.crash_visibility import install_crash_visibility
@@ -323,14 +333,16 @@ class Handler(BaseHTTPRequestHandler):
     _CSP_REPORT_TO = '{"group":"csp-endpoint","max_age":10886400,"endpoints":[{"url":"/api/csp-report"}]}'
 
     @classmethod
-    def csp_report_only_policy(cls, extra_connect_src=None, extra_frame_src=None) -> str:
-        return _build_csp_report_only_policy(extra_connect_src, extra_frame_src)
+    def csp_report_only_policy(cls, extra_connect_src=None, extra_frame_src=None, extra_img_src=None) -> str:
+        return _build_csp_report_only_policy(extra_connect_src, extra_frame_src, extra_img_src)
 
     def end_headers(self) -> None:
         extra_connect_src = getattr(self, "_csp_extra_connect_src", None)
         extra_frame_src = getattr(self, "_csp_extra_frame_src", None)
-        self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src))
+        extra_img_src = getattr(self, "_csp_extra_img_src", None)
+        self.send_header("Content-Security-Policy-Report-Only", self.csp_report_only_policy(extra_connect_src, extra_frame_src, extra_img_src))
         self.send_header("Report-To", self._CSP_REPORT_TO)
+        advertise_connection_close(self)  # tell the client when the socket dies
         super().end_headers()
 
     def log_message(self, fmt, *args): pass  # suppress default Apache-style log
@@ -338,10 +350,7 @@ class Handler(BaseHTTPRequestHandler):
     @staticmethod
     def _safe_webui_print(message: str) -> None:
         """Emit a request log line without letting logging break responses."""
-        try:
-            print(message, flush=True)
-        except Exception:
-            pass
+        emit_request_log(message)
 
     def log_request(self, code: str='-', size: str='-') -> None:
         """Structured JSON logs for each request."""
@@ -377,8 +386,9 @@ class Handler(BaseHTTPRequestHandler):
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
-            parsed = urlparse(self.path)
-            if not check_auth(self, parsed): return
+            parsed = fold_api_path(self, urlparse(self.path))  # case-insensitive /api/ routing (#3943)
+            # Body-pending-aware: a body-bearing GET failing auth would poison reuse (#7550).
+            if not check_auth_or_close(self, parsed): return
             result = handle_get(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -402,11 +412,9 @@ class Handler(BaseHTTPRequestHandler):
         if cookie_profile:
             set_request_profile(cookie_profile)
         try:
-            parsed = urlparse(self.path)
-            _is_csp_report_post = (
-                parsed.path == "/api/csp-report" and self.command == "POST"
-            )
-            if not _is_csp_report_post and not check_auth(self, parsed): return
+            parsed = fold_api_path(self, urlparse(self.path))  # case-insensitive /api/ routing (#3943)
+            _is_csp_report_post = parsed.path == "/api/csp-report" and self.command == "POST"
+            if not _is_csp_report_post and not check_auth_or_close(self, parsed): return
             result = route_func(self, parsed)
             if result is False:
                 return j(self, {'error': 'not found'}, status=404)
@@ -545,7 +553,7 @@ def _abort_if_already_serving(host: str, port: int) -> None:
 
 
 def main() -> None:
-    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND
+    from api.config import print_startup_config, verify_hermes_imports, _HERMES_FOUND, _AGENT_DIR
 
     _ignore_sigpipe()
 
@@ -617,7 +625,7 @@ def main() -> None:
         for mod, err in errors.items():
             print(f'     {mod}: {err}', flush=True)
         print('     Attempting to install missing dependencies from agent requirements.txt...', flush=True)
-        auto_install_agent_deps()
+        auto_install_agent_deps(expected_agent_dir=_AGENT_DIR)
         ok, missing, errors = verify_hermes_imports()
         if not ok:
             print(f'[!!] Still missing after install attempt: {missing}', flush=True)
@@ -652,6 +660,7 @@ def main() -> None:
         from api.background_process import start_drain_thread
         if start_drain_thread():
             print('[ok] bg_task_complete drain thread started', flush=True)
+        from api.gateway_delegation_wakeup import start_gateway_delegation_poller; start_gateway_delegation_poller()
     except Exception as e:
         print(f'[!!] WARNING: bg_task_complete drain failed to start: {e}', flush=True)
 
@@ -670,6 +679,7 @@ def main() -> None:
 
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
+    from api.gateway_chat import resume_gateway_runs_after_restart; resume_gateway_runs_after_restart()  # bound, not yet serving
 
     from api.config import TLS_ENABLED, TLS_CERT, TLS_KEY
     scheme = 'https' if TLS_ENABLED else 'http'
@@ -736,8 +746,8 @@ def main() -> None:
         except Exception:
             logger.debug("Failed to drain lifecycle on shutdown", exc_info=True)
         try:
-            from api.background_process import stop_drain_thread
-            stop_drain_thread()
+            from api.gateway_delegation_wakeup import stop_gateway_delegation_poller; stop_gateway_delegation_poller()
+            from api.background_process import stop_drain_thread; stop_drain_thread()
         except Exception:
             logger.debug("Failed to stop bg_task_complete drain thread during shutdown", exc_info=True)
         try:

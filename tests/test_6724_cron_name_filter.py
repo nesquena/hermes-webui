@@ -49,6 +49,12 @@ def test_cron_search_has_an_explicit_clear_control():
         ".sidebar-search input::-webkit-search-cancel-button"
     )
     assert 'onclick="clearCronSearch()"' in INDEX_HTML
+    assert 'data-i18n-title="clear_job_filter" data-i18n-aria-label="clear_job_filter"' in INDEX_HTML, (
+        "clear button tooltip/aria-label must go through the locale pass, not stay English"
+    )
+    assert I18N_JS.count("clear_job_filter:") == I18N_JS.count("filter_jobs:"), (
+        "every locale that ships filter_jobs must also ship clear_job_filter"
+    )
     assert '<div class="cron-search-field">' in INDEX_HTML
     assert ".cron-search-clear" in STYLE_CSS
 
@@ -172,12 +178,16 @@ let _cronMode = 'empty';
 let _showAllCronProfiles = false;
 let _cronOtherProfileCount = 0;
 const _cronNewJobIds = new Set();
-let _cronLoadToken = 0;
+let _cronLoadGeneration = 0;
+let _cronAcceptedLoadGeneration = 0;
+let _cronLatestLoadSettled = Promise.resolve();
+let _cronDetailRefreshKey = null;
+let _currentPanel = 'tasks';
 
 eval([
   '_cronStatusMeta', '_cronProfileName', '_cronProfileLabel', '_cronOwnerProfileName',
   '_cronJobKey', '_cronItemId', '_appendCronProfileToggle',
-  'syncCronSearchClear', 'filterCrons', 'clearCronSearch', 'loadCrons',
+  '_renderCronList', 'syncCronSearchClear', 'filterCrons', 'clearCronSearch', 'loadCrons',
 ].map(extractFunc).join('\n'));
 
 // ---- helpers for scenarios ----
