@@ -209,6 +209,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Approval card for dangerous shell commands (allow once / session / always / deny)
 - SSE auto-reconnect on network blips (SSH tunnel resilience)
 - File attachments persist across page reloads and are stored outside the active workspace by default (`~/.hermes/webui/attachments/<session_id>/`, or `HERMES_WEBUI_ATTACHMENT_DIR/<session_id>/` when configured)
+- A message with staged files is only sent when every file uploaded: a partial upload failure aborts the send, keeps the composer text and the staged files, and reports `n/total`. Resending reuses the uploads that already succeeded (same files, no new disk copies) and only retries the failed ones
 - Message timestamps (HH:MM next to each message, full date on hover)
 - Code block copy button with "Copied!" feedback
 - Syntax highlighting via Prism.js (Python, JS, bash, JSON, SQL, and more)
