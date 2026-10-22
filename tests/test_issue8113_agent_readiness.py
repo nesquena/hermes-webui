@@ -333,6 +333,81 @@ def test_auto_install_falls_back_to_the_mount_without_a_stage_dir(tmp_path):
         assert _agent_install_dir(mount) == mount
 
 
+def test_auto_install_never_returns_a_path_swapped_in_after_validation(tmp_path, ambient_umask):
+    """The path that was checked is the path that is returned.
+
+    Resolving the env value only after the trust and manifest checks let a
+    symlink swapped in between redirect the install to an unchecked,
+    world-writable directory.
+    """
+    import api.startup as startup
+
+    mount = _agent(tmp_path, "hermes-agent")
+    good = _staged_copy(tmp_path, mount)
+    evil = tmp_path / "evil"
+    evil.mkdir()
+    evil.chmod(0o777)
+    link = tmp_path / "stage-link"
+    link.symlink_to(good)
+    real_matches = startup._stage_matches_agent
+
+    def swap_after_validation(staged, agent_dir):
+        verdict = real_matches(staged, agent_dir)
+        link.unlink()
+        link.symlink_to(evil)  # the attacker's swap, deterministically mid-call
+        return verdict
+
+    with patch.dict("os.environ", {STAGE_ENV: str(link)}, clear=False), \
+            patch.object(startup, "_stage_matches_agent", swap_after_validation):
+        chosen = startup._agent_install_dir(mount.resolve())
+    assert chosen == good.resolve()
+    assert chosen != evil.resolve()
+
+
+@pytest.mark.parametrize("value", ["~hermes-no-such-user-8360", "~hermes-no-such-user-8360/stage"])
+def test_auto_install_survives_an_unexpandable_stage_value(tmp_path, value):
+    """`~unknown-user` raises in expanduser(); startup must fall back, not abort."""
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    with patch.dict("os.environ", {STAGE_ENV: value}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")
+def test_auto_install_rejects_a_stage_under_a_replaceable_parent(tmp_path, ambient_umask):
+    """A writable, non-sticky parent lets anyone swap the validated stage out."""
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    staged = _staged_copy(parent, mount)
+    parent.chmod(0o777)
+    try:
+        with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+            assert _agent_install_dir(mount.resolve()) == mount.resolve()
+    finally:
+        parent.chmod(0o755)
+
+
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")
+def test_auto_install_accepts_a_stage_under_a_sticky_parent(tmp_path, ambient_umask):
+    """The image's /app is 1777: sticky, so only the stage's owner can replace it."""
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    parent = tmp_path / "app"
+    parent.mkdir()
+    staged = _staged_copy(parent, mount)
+    parent.chmod(0o1777)
+    try:
+        with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+            assert _agent_install_dir(mount.resolve()) == staged.resolve()
+    finally:
+        parent.chmod(0o755)
+
+
 def test_auto_install_ignores_a_staged_path_that_does_not_exist(tmp_path):
     """A stale env var must not redirect the install into nowhere."""
     from api.startup import _agent_install_dir

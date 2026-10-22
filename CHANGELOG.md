@@ -67,6 +67,13 @@
 
 ### Fixed
 
+- **Docker first start survives files vanishing during the ownership walk.** A fresh container could fail its first
+  start at random when files disappeared while the init script aligned ownership. The walk now tolerates only
+  `chown`'s own ENOENT, migrates old-UID files in writable Agent checkouts and `.git` metadata after a UID change, and
+  still fails on real permission, read-only or disk-full errors. Thanks @gakugaku. (#8154, fixes #8106)
+
+- **Docker: the staged Agent copy that auto-install uses is checked and used as one path, and a bad stage setting no longer stops startup.** Since exp-v0.52.540 the WebUI installs Agent dependencies from a writable staged copy when the Agent source is mounted read-only. The staged path was resolved only after its trust checks, so a symlink swapped in between could point the install at a directory nothing had checked. A value like `~unknown-user` could also abort startup. The path is now resolved once and checked as resolved. Any unusable value falls back to the Agent directory, and a stage another user could replace through a parent folder is refused. (#8471)
+
 - **Non-English users are no longer told that a failed conversation delete succeeded.** When the WebUI cannot delete a conversation because the session store could not commit the delete, it keeps the conversation and its files and shows an error. Since exp-v0.52.519 the English text said so, but the 14 translations still said the conversation had been deleted. All 14 now say it could not be deleted, its files were kept, and to restart the agent and try again. (#8466)
 
 - **Run-journal archiving keeps the runs a session still needs to recover an answer.** The hourly retention sweep added in exp-v0.52.534 could archive the journal of an interrupted or cancelled run that its session had not recovered yet. Current releases read archives, but rolling back to a release that predates the archive format (such as v0.52.492) lost that recovered answer. The sweep now leaves a session's active run and any run named by an interrupted-turn marker live, and still archives everything else under the usual caps. (#8464)

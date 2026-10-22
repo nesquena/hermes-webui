@@ -361,12 +361,42 @@ def _agent_install_dir(agent_dir: Path) -> Path:
     """
     raw = os.environ.get('HERMES_WEBUI_AGENT_STAGE_DIR', '').strip()
     if raw:
-        staged = Path(raw).expanduser()
-        if staged.is_dir() and _trusted_agent_dir(staged):
+        # Resolve once, before any check, and check and return that same
+        # canonical path. Resolving after the checks let a symlink swapped in
+        # between redirect the install to a directory nothing had validated.
+        try:
+            staged = Path(raw).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            # Missing, unresolvable or `~unknown-user`: never fatal at startup.
+            return agent_dir
+        if staged.is_dir() and _trusted_agent_dir(staged) and _trusted_ancestry(staged):
             if _stage_matches_agent(staged, agent_dir):
-                return staged.resolve()
+                return staged
             print(f'[!!] Ignoring staged agent copy {staged}: it is not a current copy of {agent_dir}.', flush=True)
     return agent_dir
+
+
+def _trusted_ancestry(path: Path) -> bool:
+    """True when no other user can replace ``path`` through one of its parents.
+
+    Each parent must be owned by root or by the current user, and must not be
+    group- or world-writable unless it is sticky (like ``/tmp`` or the image's
+    ``/app``), where only an entry's owner may rename or remove it. POSIX only:
+    elsewhere ``_trusted_agent_dir`` skips the owner check too.
+    """
+    if not hasattr(os, 'getuid'):
+        return True
+    uid = os.getuid()
+    try:
+        for parent in path.parents:
+            st = parent.stat()
+            if st.st_uid not in (0, uid):
+                return False
+            if stat.S_IMODE(st.st_mode) & 0o022 and not st.st_mode & stat.S_ISVTX:
+                return False
+    except OSError:
+        return False
+    return True
 
 
 def auto_install_agent_deps(expected_agent_dir: Path | None = None) -> bool:
