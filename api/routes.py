@@ -9568,6 +9568,10 @@ def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False)
             row = get_cli_session_by_id(session_id, source, all_profiles=all_profiles)
             if row:
                 return row
+        # Fallback for aged-out Desktop, CLI, TUI, or agent conversations outside the recency window (#8061)
+        row = get_cli_session_by_id(session_id, None, all_profiles=all_profiles)
+        if row:
+            return row
     except Exception:
         return {}
     return {}

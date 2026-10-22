@@ -941,7 +941,7 @@ def read_importable_agent_session_rows(
                 placeholders = ", ".join("?" for _ in included)
                 where_clauses.append(f"s.source IN ({placeholders})")
                 params.extend(included)
-        if exclude_sources:
+        if exclude_sources and not wanted_session_ids:
             excluded = tuple(str(source) for source in exclude_sources if source)
             if excluded:
                 placeholders = ", ".join("?" for _ in excluded)
