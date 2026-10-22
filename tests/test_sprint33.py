@@ -118,6 +118,7 @@ AUTH_SAFETY_LOCALE_KEYS = (
     "current_password_incorrect",
     "disable_auth_typed_confirm",
     "auth_status_password",
+    "auth_status_oidc_only",
     "auth_status_passkey_only",
     "auth_status_unauthenticated",
     "auth_warning_badge",
