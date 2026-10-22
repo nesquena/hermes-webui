@@ -677,6 +677,12 @@ def main() -> None:
     except Exception as e:
         print(f'[!!] WARNING: Plugin loading failed: {e}', flush=True)
 
+    try:
+        from api.config import get_config, register_profile_hooks
+        register_profile_hooks(get_config())
+    except Exception as e:
+        print(f'[!!] WARNING: Hook registration failed: {e}', flush=True)
+
     _abort_if_already_serving(HOST, PORT)
     httpd = QuietHTTPServer((HOST, PORT), Handler)
     from api.gateway_chat import resume_gateway_runs_after_restart; resume_gateway_runs_after_restart()  # bound, not yet serving

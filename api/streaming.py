@@ -15372,6 +15372,11 @@ def _run_agent_streaming(
             except Exception:
                 from api.config import get_config as _get_config
                 _cfg = _get_config()
+            try:
+                from api.config import register_profile_hooks as _register_profile_hooks
+                _register_profile_hooks(_cfg, profile_home=_profile_home)
+            except Exception:
+                pass
             _prefill_context = _load_webui_prefill_context(_cfg)
             _prefill_messages = _prefill_messages_with_webui_context(_prefill_context, _cfg)
             _prefill_messages = _normalize_prefill_messages_before_user_turn(_prefill_messages)

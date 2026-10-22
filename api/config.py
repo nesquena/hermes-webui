@@ -14045,6 +14045,50 @@ def get_runtime_diagnostics_snapshot() -> dict[str, dict[str, object]]:
         pass
     return result
 
+
+def register_profile_hooks(cfg: Any, profile_home: Any = None) -> None:
+    """Register shell hooks and outbound webhooks from config.yaml (#8254).
+
+    Mirrors native CLI (cli.py), Desktop (tui_gateway/server.py), and messaging
+    gateway (gateway/run_startup.py) so config-declared shell hooks (hooks: in
+    config.yaml) and outbound webhooks are active during WebUI chat turns.
+    """
+    if not isinstance(cfg, dict):
+        return
+    home_token = None
+    old_home = os.environ.get("HERMES_HOME")
+    try:
+        if profile_home:
+            try:
+                from hermes_constants import set_hermes_home_override
+                home_token = set_hermes_home_override(profile_home)
+            except Exception:
+                pass
+            os.environ["HERMES_HOME"] = str(profile_home)
+        try:
+            from agent.shell_hooks import register_from_config as _register_shell_hooks
+            _register_shell_hooks(cfg, accept_hooks=False)
+        except Exception:
+            logger.debug("register_profile_hooks: shell hooks registration failed", exc_info=True)
+        try:
+            from agent.outbound_webhooks import register_from_config as _register_outbound_webhooks
+            _register_outbound_webhooks(cfg)
+        except Exception:
+            logger.debug("register_profile_hooks: outbound webhooks registration failed", exc_info=True)
+    finally:
+        if home_token is not None:
+            try:
+                from hermes_constants import reset_hermes_home_override
+                reset_hermes_home_override(home_token)
+            except Exception:
+                pass
+        if profile_home:
+            if old_home is None:
+                os.environ.pop("HERMES_HOME", None)
+            else:
+                os.environ["HERMES_HOME"] = old_home
+
+
 # ── Profile state initialisation ────────────────────────────────────────────
 # Must run after all imports are resolved to correctly patch module-level caches
 try:
