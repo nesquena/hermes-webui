@@ -11392,6 +11392,7 @@ def _limited_webui_messages_for_display_with_sidecar(
             owner_positions.clear()
             owner_positions.update(sidecar_owners)
         return sidecar_messages
+    sidecar_messages = _adopt_state_db_steer_split(sidecar_messages, state_db_messages)
 
     # NOTE: do not short-circuit to the sidecar when state.db has no strictly
     # newer rows. A state.db row whose timestamp is at-or-before the sidecar's
@@ -12153,6 +12154,7 @@ def _merged_session_messages_for_display(session, cli_messages=None) -> list:
     """
     cli_messages = list(cli_messages or [])
     sidecar_messages = _webui_sidecar_lineage_messages_for_display(session)
+    sidecar_messages = _adopt_state_db_steer_split(sidecar_messages, cli_messages)
     if cli_messages:
         if sidecar_messages and sidecar_messages != cli_messages:
             if len(sidecar_messages) >= len(cli_messages):
@@ -12896,6 +12898,7 @@ from api.models import (
     _reconcile_api_content_sidecars,
     _enrich_sidebar_lineage_metadata,
     _active_stream_ids,
+    _adopt_state_db_steer_split,
     _evict_sessions_over_cap,
     _merge_session_display_metadata,
     _session_message_merge_key,
@@ -16182,6 +16185,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     sidecar_messages,
                     parent_session=lineage_parent,
                 )
+                sidecar_messages = _adopt_state_db_steer_split(sidecar_messages, state_db_messages)
                 _all_msgs = merge_session_messages_append_only(
                     sidecar_messages,
                     state_db_messages,
