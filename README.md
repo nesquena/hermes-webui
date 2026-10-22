@@ -472,6 +472,7 @@ The run journal stores one `{run_id}.jsonl` per run under `sessions/_run_journal
 - eligible runs are compressed (gzip) into `sessions/_run_journal_archive/<session_id>/<run_id>.jsonl.gz` — measured at **5–18% of the original size** on real journals;
 - the compressed copy is verified to decompress to the exact original bytes **before** the live file is dropped;
 - runs that have not provably settled (no complete terminal row — including a journal truncated mid-write) are never touched;
+- a run the session still needs to recover an interrupted answer (its active stream, or the run an interrupted-turn marker names) stays live, so a release that predates the archive format can still recover it after a rollback;
 - every read path (run summaries, event reads, session replay, run lookup) transparently falls back to the archive, so a wrong classification costs one compressed copy, not the run;
 - deleting a session deletes its archives too.
 
