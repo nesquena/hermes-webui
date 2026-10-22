@@ -1534,17 +1534,65 @@ def _is_known_model_provider(provider_id: str) -> bool:
     return False
 
 
-def _custom_provider_slug_from_name(name: object) -> str:
+def _custom_provider_slug_from_name(name: object, entry: dict | None = None) -> str:
+    if isinstance(name, dict) and entry is None:
+        entry = name
+        name = entry.get("name")
+
     raw = str(name or "").strip().lower()
-    if not raw:
+    if not raw and not (isinstance(entry, dict) and (entry.get("provider_key") or entry.get("base_url"))):
         return ""
     if raw.startswith("custom:"):
         return raw
+
     # Keep name-derived custom provider slugs out of the @provider:model colon
     # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
     # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
     slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)
+
+    if not slug:
+        # If entry wasn't passed, try looking up matching entry by name from config (#8017)
+        if entry is None and raw:
+            try:
+                for candidate in _custom_provider_entries():
+                    if str(candidate.get("name") or "").strip().lower() == raw:
+                        entry = candidate
+                        break
+            except Exception:
+                pass
+
+        if isinstance(entry, dict):
+            # 1. Fall back to provider_key if present
+            pk = str(entry.get("provider_key") or "").strip().lower()
+            if pk:
+                pk_slug = re.sub(r"[^a-z0-9._-]+", "-", pk).strip("-")
+                pk_slug = re.sub(r"-{2,}", "-", pk_slug)
+                if pk_slug:
+                    slug = pk_slug
+
+            # 2. Fall back to endpoint-derived host-port if present
+            if not slug:
+                base_url = str(entry.get("base_url") or "").strip()
+                if base_url:
+                    try:
+                        from urllib.parse import urlparse
+                        parsed = urlparse(base_url)
+                        host = parsed.hostname or ""
+                        port = parsed.port
+                        if host:
+                            ep = f"{host}-{port}" if port else host
+                            ep_slug = re.sub(r"[^a-z0-9._-]+", "-", ep).strip("-")
+                            if ep_slug:
+                                slug = ep_slug
+                    except Exception:
+                        pass
+
+        # 3. Stable 8-char hex digest of UTF-8 name as last resort
+        if not slug and raw:
+            import hashlib
+            slug = "named-" + hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:8]
+
     if not slug:
         return ""
     return "custom:" + slug
@@ -1656,7 +1704,7 @@ def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
         for slug in (
-            _custom_provider_slug_from_name(entry.get("name"))
+            _custom_provider_slug_from_name(entry.get("name"), entry)
             for entry in _custom_provider_entries(config_obj)
         )
         if slug
@@ -1673,10 +1721,11 @@ def _named_custom_provider_slug_for_provider(
     raw_suffix = raw.removeprefix("custom:")
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
-        slug = _custom_provider_slug_from_name(entry_name)
+        slug = _custom_provider_slug_from_name(entry_name, entry)
         if not entry_name or not slug:
             continue
-        if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
+        pk = str(entry.get("provider_key") or "").strip().lower()
+        if raw in {entry_name, slug, pk} or raw_suffix in {slug.removeprefix("custom:"), pk}:
             return slug
     return ""
 
@@ -1862,7 +1911,7 @@ def _named_custom_provider_slug_for_base_url(
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        return _custom_provider_slug_from_name(entry.get("name"), entry) or "custom"
     return ""
 
 
@@ -2723,9 +2772,10 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
         for entry in _custom_provider_entries():
-            slug = _custom_provider_slug_from_name(entry.get("name"))
+            slug = _custom_provider_slug_from_name(entry.get("name"), entry)
             entry_name = str(entry.get("name") or "").strip().lower()
-            if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
+            pk = str(entry.get("provider_key") or "").strip().lower()
+            if not (prov in {entry_name, slug, pk} or (slug and raw_suffix in {slug.removeprefix("custom:"), pk})):
                 continue
             if str(entry.get("model") or "").strip() == model:
                 return True
@@ -2970,7 +3020,7 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        if _custom_provider_slug_key(name) == slug_key:
+        if _custom_provider_slug_key(name) == slug_key or _custom_provider_slug_key(entry) == slug_key:
             matches.append(entry)
     if len(matches) >= 2:
         names = [str(e.get("name") or "").strip() for e in matches]
@@ -10501,7 +10551,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if not isinstance(_cp, dict):
                     continue
                 _cp_name = (_cp.get("name") or "").strip()
-                _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
+                _slug = _custom_provider_slug_from_name(_cp_name, _cp) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
