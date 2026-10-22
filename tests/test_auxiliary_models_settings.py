@@ -1401,3 +1401,101 @@ class TestAuxiliaryModelsBackend:
         assert saved.get("provider") == "auto", (
             f"ambiguous aux save must not persist, got {saved!r}"
         )
+
+    def test_aux_slot_cjk_generated_slug_persists_row_name(self, monkeypatch, tmp_path):
+        """A CJK-named row selected by its generated endpoint slug must be
+        persisted under the row's name, which is the identity the Agent
+        resolves — the generated slug is a WebUI routing identity only and
+        the Agent would raise "Unknown provider" on it (#8017 follow-up).
+        The slot's base_url still comes from the selected row.
+        """
+        import hashlib
+
+        import yaml
+
+        from api import config
+
+        cjk_name = "晨光鑫遇专用"
+        digest = hashlib.sha256(cjk_name.encode("utf-8")).hexdigest()[:8]
+        slug = f"custom:127.0.0.1-8317-{digest}"
+        shared_cfg = {
+            "auxiliary": {"vision": {"provider": "auto", "model": ""}},
+            "custom_providers": [
+                {"name": cjk_name, "base_url": "http://127.0.0.1:8317/v1"},
+            ],
+        }
+        assert config._custom_provider_entry_slug(shared_cfg["custom_providers"][0]) == slug
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        result = config.set_auxiliary_model("vision", slug, "shared-llm")
+
+        assert result["provider"] == cjk_name
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved.get("provider") == cjk_name, (
+            f"aux slot must persist the row's name, not the generated slug; got {saved!r}"
+        )
+        assert saved.get("base_url") == "http://127.0.0.1:8317/v1"
+
+    def test_aux_slot_ascii_slug_persists_unchanged(self, monkeypatch, tmp_path):
+        """Control: a name-derived slug is a spelling of the row's Agent
+        identity, so an ASCII row's aux save stays byte-identical."""
+        import yaml
+
+        from api import config
+
+        shared_cfg = {
+            "auxiliary": {"vision": {"provider": "auto", "model": ""}},
+            "custom_providers": [
+                {"name": "Review ASCII", "base_url": "http://127.0.0.1:8317/v1"},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        result = config.set_auxiliary_model("vision", "custom:review-ascii", "shared-llm")
+
+        assert result["provider"] == "custom:review-ascii"
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved.get("provider") == "custom:review-ascii"
+        assert saved.get("base_url") == "http://127.0.0.1:8317/v1"
+
+    def test_aux_slot_ambiguous_generated_slug_refuses(self, monkeypatch, tmp_path):
+        """Two rows minting the generated slug being saved (a CJK row's
+        endpoint fallback and an ASCII name that slugifies to it) must fail
+        closed and write nothing, never a guessed Agent identity."""
+        import hashlib
+
+        import yaml
+
+        from api import config
+
+        cjk_name = "晨光鑫遇专用"
+        digest = hashlib.sha256(cjk_name.encode("utf-8")).hexdigest()[:8]
+        slug = f"custom:127.0.0.1-8317-{digest}"
+        shared_cfg = {
+            "auxiliary": {"vision": {"provider": "auto", "model": ""}},
+            "custom_providers": [
+                {"name": cjk_name, "base_url": "http://127.0.0.1:8317/v1"},
+                {"name": f"127.0.0.1-8317-{digest}", "base_url": "http://127.0.0.1:8318/v1"},
+            ],
+        }
+
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(yaml.safe_dump(shared_cfg), encoding="utf-8")
+        monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+        monkeypatch.setattr(config, "reload_config", lambda: None)
+
+        with pytest.raises(config.AmbiguousCustomProviderError):
+            config.set_auxiliary_model("vision", slug, "shared-llm")
+
+        saved = config._load_yaml_config_file(config_path)["auxiliary"]["vision"]
+        assert saved.get("provider") == "auto", (
+            f"ambiguous aux save must not persist, got {saved!r}"
+        )

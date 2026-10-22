@@ -518,6 +518,110 @@ class TestWarmCatalogIdentity:
         )
 
 
+# ── Persistence: generated slugs translate to the Agent identity ─────────────
+
+
+@contextlib.contextmanager
+def _persist_cfg(monkeypatch, tmp_path, config_data, resolved_provider, resolved_url=None):
+    """Point the setters at a tmp config.yaml holding *config_data*.
+
+    ``resolve_model_provider`` is stubbed to hand back the catalog-minted
+    slug, mirroring the Settings save flow; the file on disk is the oracle.
+    """
+    import yaml
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(yaml.safe_dump(config_data), encoding="utf-8")
+    monkeypatch.setattr(config, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(config, "reload_config", lambda: None)
+    monkeypatch.setattr(config, "invalidate_models_cache", lambda: None)
+    monkeypatch.setattr(
+        config,
+        "resolve_model_provider",
+        lambda model: (model, resolved_provider, resolved_url),
+    )
+    yield config_path
+
+
+class TestGeneratedSlugPersistence:
+    """config.yaml is read by the hermes-agent, which resolves providers
+    by the row's name / provider_key — a generated endpoint/name-hash slug
+    is a WebUI routing identity only and must never be persisted as the
+    provider (#8017 persistence follow-up)."""
+
+    def test_main_save_persists_row_name_not_generated_slug(
+        self, monkeypatch, tmp_path
+    ):
+        entry = _entry(CJK_NAME, URL_A)
+        slug = _slug(entry)
+        assert slug.startswith("custom:127.0.0.1-8317-")
+        config_data = {
+            "model": {"provider": "custom", "default": "old-model"},
+            "custom_providers": [entry],
+        }
+        with _persist_cfg(monkeypatch, tmp_path, config_data, slug, URL_A) as path:
+            result = config.set_hermes_default_model(SHARED, provider=slug)
+            saved = config._load_yaml_config_file(path)["model"]
+        assert result["provider"] == CJK_NAME
+        assert saved["provider"] == CJK_NAME
+        assert saved["provider"] != slug
+        assert saved["base_url"] == URL_A
+
+    def test_main_save_ambiguous_generated_slug_refuses(self, monkeypatch, tmp_path):
+        # An ASCII name that slugifies to the CJK row's generated endpoint
+        # slug: two rows mint the one identity being saved, so the save
+        # must fail closed instead of persisting a guessed Agent identity.
+        digest = hashlib.sha256(CJK_NAME.encode("utf-8")).hexdigest()[:8]
+        entries = [
+            _entry(CJK_NAME, URL_A),
+            _entry(f"127.0.0.1-8317-{digest}", URL_B),
+        ]
+        slug = _slug(entries[0])
+        assert _slug(entries[1]) == slug
+        config_data = {
+            "model": {"provider": "custom", "default": "old-model"},
+            "custom_providers": entries,
+        }
+        with _persist_cfg(monkeypatch, tmp_path, config_data, slug, URL_A) as path:
+            with pytest.raises(config.AmbiguousCustomProviderError):
+                config.set_hermes_default_model(SHARED, provider=slug)
+            saved = config._load_yaml_config_file(path)["model"]
+        assert saved["provider"] == "custom", "a refused save must write nothing"
+        assert saved["default"] == "old-model"
+
+    def test_main_save_ascii_slug_is_byte_identical(self, monkeypatch, tmp_path):
+        entry = _entry("Review ASCII", URL_A)
+        slug = _slug(entry)
+        assert slug == "custom:review-ascii"
+        config_data = {
+            "model": {"provider": "custom", "default": "old-model"},
+            "custom_providers": [entry],
+        }
+        with _persist_cfg(monkeypatch, tmp_path, config_data, slug, URL_A) as path:
+            result = config.set_hermes_default_model(SHARED, provider=slug)
+            saved = config._load_yaml_config_file(path)["model"]
+        assert result["provider"] == slug
+        assert saved["provider"] == slug
+
+    def test_main_save_provider_key_slug_is_byte_identical(
+        self, monkeypatch, tmp_path
+    ):
+        # The provider_key-derived slug IS a spelling of the row's Agent
+        # identity, so it persists exactly as before.
+        entry = _entry(CJK_NAME, URL_A, provider_key="cgxy-cpa")
+        slug = _slug(entry)
+        assert slug == "custom:cgxy-cpa"
+        config_data = {
+            "model": {"provider": "custom", "default": "old-model"},
+            "custom_providers": [entry],
+        }
+        with _persist_cfg(monkeypatch, tmp_path, config_data, slug, URL_A) as path:
+            result = config.set_hermes_default_model(SHARED, provider=slug)
+            saved = config._load_yaml_config_file(path)["model"]
+        assert result["provider"] == slug
+        assert saved["provider"] == slug
+
+
 # ── /api/models/live matches rows by canonical identity ──────────────────────
 
 

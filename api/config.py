@@ -1488,6 +1488,10 @@ def _custom_provider_entry_slug(entry: dict) -> str:
     The name-derived slug whenever the name provides one (unchanged
     behaviour for every ASCII name); otherwise the deterministic
     fallback from the entry's ``provider_key`` / ``base_url`` / name.
+    This slug is the WebUI routing identity only — the persisted Agent
+    identity is the row's name / ``provider_key``, and a generated
+    fallback slug is translated back to the name at persistence time
+    (see :func:`_agent_provider_identity_for_persistence`).
     """
     slug = _custom_provider_slug_from_name(entry.get("name"))
     if slug:
@@ -6546,6 +6550,59 @@ def _apply_advanced_model_options(model_cfg: dict, advanced: dict | None) -> Non
         model_cfg["api_key"] = api_key
 
 
+def _agent_provider_identity_for_persistence(provider: str, config_data: dict) -> str:
+    """Translate a generated WebUI routing slug to the Agent identity for config.yaml.
+
+    Identity scheme: a ``custom_providers`` row has two identities. The
+    catalog slug (``custom:<slug>``) is the WebUI routing identity; the
+    hermes-agent instead resolves a persisted provider by the row's own
+    name / ``provider_key``. Name- and provider_key-derived slugs are
+    spellings of that Agent identity, so they persist unchanged. A
+    GENERATED slug — the endpoint (``custom:<host>-<port>-<hash>``) or
+    name-hash fallback minted when a name slugifies to "" (e.g. a pure-CJK
+    name, #8017) — means nothing to the Agent, so at persistence time only
+    it is translated to the owning row's name. WebUI routing keeps using
+    the generated slug everywhere else.
+
+    Fails closed like every other slug boundary in this module: when more
+    than one row could own the generated slug, raises
+    ``AmbiguousCustomProviderError`` instead of persisting a guess.
+    Returns ``provider`` unchanged when it is not a generated slug or no
+    row owns it. Pure over the passed-in ``config_data`` snapshot, so it is
+    safe to call while holding ``_cfg_lock``.
+    """
+    if not provider.startswith("custom:"):
+        return provider
+    entries = config_data.get("custom_providers") if isinstance(config_data, dict) else None
+    if not isinstance(entries, list):
+        return provider
+    matches = [
+        entry
+        for entry in entries
+        if isinstance(entry, dict)
+        and str(entry.get("name") or "").strip()
+        and _custom_provider_entry_slug(entry) == provider
+    ]
+    generated = [
+        entry
+        for entry in matches
+        # The slug came from the fallback exactly when neither the name
+        # nor the provider_key slugifies to it.
+        if not _custom_provider_slug_from_name(entry.get("name"))
+        and _custom_provider_slug_from_name(entry.get("provider_key")) != provider
+    ]
+    if not generated:
+        return provider
+    if len(matches) > 1:
+        names = [str(entry.get("name") or "").strip() for entry in matches]
+        raise AmbiguousCustomProviderError(
+            f"Custom providers {names!r} all mint the same generated provider slug "
+            f"{provider!r}; the provider the Agent should persist cannot be "
+            f"chosen safely. Rename one so each custom provider has a unique slug."
+        )
+    return str(generated[0].get("name") or "").strip() or provider
+
+
 def set_hermes_default_model(model_id: str, provider: str | None = None, advanced: dict | None = None) -> dict:
     """Persist the Hermes default model in config.yaml and reload runtime config."""
     selected_model = str(model_id or "").strip()
@@ -6586,6 +6643,14 @@ def set_hermes_default_model(model_id: str, provider: str | None = None, advance
         # so the agent's auxiliary client uses the ``no-key-required`` path.
         if persisted_provider.lower() == "local":
             persisted_provider = "custom"
+
+        # A generated routing slug (the endpoint/name-hash fallback for a
+        # name that slugifies to "", e.g. pure CJK) is not an identity the
+        # Agent can resolve — persist the owning row's name instead, and
+        # fail closed if more than one row could own the slug.
+        persisted_provider = _agent_provider_identity_for_persistence(
+            persisted_provider, config_data
+        )
 
         model_cfg["default"] = persisted_model
         if persisted_provider:
@@ -6857,6 +6922,15 @@ def set_auxiliary_model(task: str, provider: str, model: str, advanced: dict | N
                 except ValueError as exc:
                     msg = str(exc).replace("advanced model options", "advanced auxiliary options")
                     raise ValueError(msg) from exc
+            # Persist the Agent identity, not a generated routing slug: an
+            # endpoint/name-hash fallback slug (minted when the row's name
+            # slugifies to "", e.g. pure CJK) is unknown to the Agent, so
+            # translate it to the selected row's name — derived from the
+            # same in-lock `config_data` snapshot the base_url lookup above
+            # used — and fail closed if more than one row could own it.
+            # The slug itself stays the routing identity everywhere else.
+            provider = _agent_provider_identity_for_persistence(provider, config_data)
+            slot_cfg["provider"] = provider
             aux_cfg[task] = slot_cfg
             config_data["auxiliary"] = aux_cfg
 
