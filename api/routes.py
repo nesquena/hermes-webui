@@ -21888,7 +21888,15 @@ def _handle_list_dir(handler, parsed):
             cli_meta = _lookup_cli_session_metadata(sid)
             if not cli_meta:
                 cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
-                cli_owner_profile = cli_meta.get("profile") if cli_meta else None
+            # Derive the owner profile from EVERY successful lookup, not just
+            # the all-profiles fallback. Re-gate round 3 (reviewer finding 2,
+            # 2026-10-22): the active-hit branch used to discard
+            # cli_meta["profile"], leaving _list_profile None, so the CLI
+            # translation arm below was skipped and a mapped CLI session
+            # listed through profile-less trusted resolution — 404 on its
+            # host-absent agent-visible path, for both the default and named
+            # profiles.
+            cli_owner_profile = cli_meta.get("profile") if cli_meta else None
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
             workspace = cli_meta.get("workspace", "")

@@ -1084,3 +1084,335 @@ class TestRecoveryOrderRegression:
         persisted = _json.loads(sidecar.read_text(encoding="utf-8"))
         assert persisted["workspace"] == str(regate_world["fallback"].resolve())
         assert persisted["messages"] == [{"role": "user", "content": "preserve me"}]
+
+
+# ── re-gate round 3 (2026-10-22): upload trust restoration + CLI owner profile ──
+# Reviewer findings on head 754350b8dd01453b2a2bb86c4341b71cdc71ffe1:
+#
+#  1. handle_workspace_upload routed EVERY profiled session through
+#     resolve_webui_workspace, whose no-map branch returns the direct path
+#     WITHOUT resolve_trusted_workspace validation — silently dropping the
+#     upload consumer's prior trust check. Replay: save a workspace outside
+#     the trusted home, persist a session there, remove it from the
+#     profile's saved list → production resolver rejects, but the upload
+#     handler still answered 200 and wrote the file (restoring the old
+#     trust-validation component gives 400 with no write).
+#
+#  2. _handle_list_dir assigned cli_owner_profile ONLY inside the
+#     all-profiles fallback. When the initial (active-profile) lookup
+#     succeeded, cli_meta["profile"] was discarded, _list_profile stayed
+#     None, and the CLI translation arm was skipped — the listing resolved
+#     through profile-less trusted resolution and answered 404 on the
+#     host-absent agent-visible path, for BOTH the default and a named
+#     profile. The all-profiles-fallback branches returned 200 and listed
+#     the mapped local file.
+#
+# Both suites keep the REAL resolvers, the REAL handlers and the REAL
+# profile configs under test — only the session lookup, the metadata
+# lookup and the multipart reader are provided.
+
+
+@pytest.fixture
+def trust_world(tmp_path, monkeypatch):
+    """Two profiles with EXPLICIT, disjoint trust sets.
+
+    alice: declares agent /workspace -> webui_ws (webui_ws sits under the
+           faked home); saved workspace list = {alice_only}
+    bravo: declares NO map; saved workspace list = {bravo_only}
+
+    alice_only/bravo_only live OUTSIDE the faked home and outside the boot
+    default, so ONLY the saved workspace list (trust rule B) can authorize
+    them — the reviewer's saved-workspace-revocation shape, and the
+    wrong-owner isolation probe (a path saved under one profile must never
+    resolve under another).
+    """
+    profiles_root = tmp_path / "profiles"
+    fake_home = tmp_path / "home"
+    webui_ws = fake_home / "webui-ws"
+    webui_ws.mkdir(parents=True)
+    alice_only = tmp_path / "alice-only"
+    alice_only.mkdir()
+    bravo_only = tmp_path / "bravo-only"
+    bravo_only.mkdir()
+
+    monkeypatch.setattr(workspace, "_home_path", lambda: fake_home)
+    _write_profile(
+        profiles_root / "alice",
+        "webui:\n"
+        "  workspace_path_maps:\n"
+        "    - agent: /workspace\n"
+        f"      webui: {webui_ws}\n",
+    )
+    _write_profile(profiles_root / "bravo", "terminal:\n  backend: local\n")
+    monkeypatch.setattr(
+        profiles, "get_hermes_home_for_profile",
+        lambda name: profiles_root / (name or "alice"),
+    )
+
+    state = {"alice": [str(alice_only)], "bravo": [str(bravo_only)]}
+
+    def fake_load_workspaces(profile: str | None = None) -> list:
+        return [{"path": p} for p in state.get(profile or "", [])]
+
+    monkeypatch.setattr(workspace, "load_workspaces", fake_load_workspaces)
+    return {
+        "profiles_root": profiles_root,
+        "fake_home": fake_home,
+        "webui_ws": webui_ws,
+        "alice_only": alice_only,
+        "bravo_only": bravo_only,
+        "saved_state": state,
+    }
+
+
+def _drive_workspace_upload(monkeypatch, session, active_profile):
+    """Drive the REAL handle_workspace_upload with *session*.
+
+    Only the multipart reader and the session lookup are substituted; the
+    profile-visibility check uses the REAL _profiles_match. Returns the
+    fake handler after the call.
+    """
+    import api.upload as upload
+
+    monkeypatch.setattr(upload, "_get_active_profile_name", lambda: active_profile)
+    monkeypatch.setattr(
+        upload, "_read_multipart_or_reject",
+        lambda handler: (
+            {"session_id": "up-1", "path": ""},
+            {"hello.txt": ("hello.txt", b"hi")},
+        ),
+    )
+    monkeypatch.setattr(upload, "get_session", lambda sid: session)
+    handler = _FakeHandler()
+    upload.handle_workspace_upload(handler)
+    return handler
+
+
+class TestUploadTrustValidationRestored:
+    """Reviewer finding 1 (2026-10-22): unmapped-profile uploads lost their
+    existing trust validation.
+
+    The translation tier's no-map branch returns the direct path without
+    resolve_trusted_workspace validation; routing every profiled session
+    through it dropped the upload trust check — a workspace removed from
+    its profile's saved list still answered 200 and wrote the file. The
+    fix gates the tier on workspace_translation_applies and restores the
+    consumer's original trusted resolution when translation does not apply.
+    """
+
+    def test_saved_workspace_revoked_upload_rejected_without_write(
+        self, trust_world, monkeypatch
+    ):
+        """The reviewer's exact replay: saved workspace revoked → 400, no write.
+
+        RED on the reviewed head: the no-map tier branch passed the revoked
+        path through and the handler answered 200 + write.
+        """
+        bravo_only = trust_world["bravo_only"]
+        trust_world["saved_state"]["bravo"].clear()  # the revocation
+        handler = _drive_workspace_upload(
+            monkeypatch,
+            SimpleNamespace(workspace=str(bravo_only), profile="bravo"),
+            "bravo",
+        )
+        assert handler.status == 400
+        assert not (bravo_only / "hello.txt").exists()
+
+    def test_mapped_profile_upload_still_translates_and_writes(
+        self, trust_world, monkeypatch
+    ):
+        """Control: a mapped profile keeps translating — the bytes land on
+        the WebUI-local root (the tier stays authoritative when a map
+        actually applies)."""
+        webui_ws = trust_world["webui_ws"]
+        handler = _drive_workspace_upload(
+            monkeypatch,
+            SimpleNamespace(workspace="/workspace", profile="alice"),
+            "alice",
+        )
+        assert handler.status == 200
+        assert (webui_ws / "hello.txt").read_text(encoding="utf-8") == "hi"
+        assert not (trust_world["alice_only"] / "hello.txt").exists()
+
+    def test_nomap_profile_saved_workspace_upload_still_allowed(
+        self, trust_world, monkeypatch
+    ):
+        """Control: a no-map profile whose workspace is still saved uploads
+        normally through the consumer's original trusted resolution."""
+        bravo_only = trust_world["bravo_only"]
+        handler = _drive_workspace_upload(
+            monkeypatch,
+            SimpleNamespace(workspace=str(bravo_only), profile="bravo"),
+            "bravo",
+        )
+        assert handler.status == 200
+        assert (bravo_only / "hello.txt").read_text(encoding="utf-8") == "hi"
+
+    def test_profileless_session_untrusted_workspace_rejected(
+        self, trust_world, monkeypatch
+    ):
+        """Control: profile-less legacy sessions keep the pre-existing
+        ambient trusted resolution — untrusted path, 400, no write."""
+        alice_only = trust_world["alice_only"]
+        handler = _drive_workspace_upload(
+            monkeypatch,
+            SimpleNamespace(workspace=str(alice_only), profile=None),
+            None,
+        )
+        assert handler.status == 400
+        assert not (alice_only / "hello.txt").exists()
+
+
+def _patch_cli_list_dir_plumbing(monkeypatch, *, active_hit, fallback_hit):
+    """Drive _handle_list_dir's CLI fallback with a scripted metadata lookup.
+
+    The WebUI session lookup always misses (a CLI session not loaded in
+    WebUI memory). *active_hit* / *fallback_hit* are the rows the first
+    (active-profile) and second (all-profiles) metadata lookups return;
+    None means "not found". Returns (routes_module, lookup_calls) where
+    lookup_calls records which lookups ran.
+    """
+    import api.routes as routes
+
+    lookup_calls = []
+
+    def fake_lookup(session_id, *, all_profiles=False):
+        lookup_calls.append(all_profiles)
+        row = fallback_hit if all_profiles else active_hit
+        return dict(row) if row else {}
+
+    def missing_session(sid, metadata_only=False):
+        raise KeyError(sid)
+
+    monkeypatch.setattr(routes, "get_session", missing_session)
+    monkeypatch.setattr(routes, "_lookup_cli_session_metadata", fake_lookup)
+    return routes, lookup_calls
+
+
+class TestListDirCliOwnerProfile:
+    """Reviewer finding 2 (2026-10-22): active-profile CLI lookup hits did
+    not use their profile map.
+
+    cli_owner_profile was assigned ONLY inside the all-profiles fallback,
+    so an active-hit row discarded cli_meta["profile"], _list_profile
+    stayed None, and the CLI translation arm was skipped — the listing
+    resolved through profile-less trusted resolution and answered 404 on
+    the host-absent agent-visible path, for the default and named
+    profiles alike. The owner profile is now derived from EVERY successful
+    metadata lookup.
+    """
+
+    def test_active_hit_mapped_profile_lists_translated_root(
+        self, trust_world, monkeypatch
+    ):
+        """Active hit + mapped owner profile → list the translated root.
+
+        RED on the reviewed head: the discarded owner profile sent the
+        listing through profile-less trusted resolution → 404 on
+        /workspace (absent on this host by design).
+        """
+        webui_ws = trust_world["webui_ws"]
+        (webui_ws / "mapped-file.txt").write_text("mapped", encoding="utf-8")
+        routes, lookup_calls = _patch_cli_list_dir_plumbing(
+            monkeypatch,
+            active_hit={
+                "session_id": "cli-1",
+                "workspace": "/workspace",
+                "profile": "alice",
+            },
+            fallback_hit=None,
+        )
+        handler = _FakeHandler()
+        routes._handle_list_dir(handler, urlparse("/api/list?session_id=cli-1&path=."))
+
+        assert handler.status == 200
+        payload = handler.json_body()
+        assert payload["workspace"] == str(webui_ws)
+        assert any(e.get("name") == "mapped-file.txt" for e in payload["entries"])
+        # The active hit alone answered — no all-profiles fallback needed.
+        assert lookup_calls == [False]
+
+    def test_active_hit_nomap_profile_lists_owner_trusted_root(
+        self, trust_world, monkeypatch
+    ):
+        """Active hit + no-map owner profile → list through the OWNER's
+        trusted resolution (saved-list authorization), not profile-less.
+
+        RED on the reviewed head: same discarded-profile path → 404.
+        """
+        bravo_only = trust_world["bravo_only"]
+        (bravo_only / "bravo-file.txt").write_text("bravo", encoding="utf-8")
+        routes, _ = _patch_cli_list_dir_plumbing(
+            monkeypatch,
+            active_hit={
+                "session_id": "cli-2",
+                "workspace": str(bravo_only),
+                "profile": "bravo",
+            },
+            fallback_hit=None,
+        )
+        handler = _FakeHandler()
+        routes._handle_list_dir(handler, urlparse("/api/list?session_id=cli-2&path=."))
+
+        assert handler.status == 200
+        payload = handler.json_body()
+        assert payload["workspace"] == str(bravo_only)
+        assert any(e.get("name") == "bravo-file.txt" for e in payload["entries"])
+
+    def test_fallback_hit_uses_owner_profile_trust(self, trust_world, monkeypatch):
+        """Control: the all-profiles fallback branch keeps deriving the
+        owner profile (pre-existing behavior, unchanged)."""
+        bravo_only = trust_world["bravo_only"]
+        routes, lookup_calls = _patch_cli_list_dir_plumbing(
+            monkeypatch,
+            active_hit=None,
+            fallback_hit={
+                "session_id": "cli-3",
+                "workspace": str(bravo_only),
+                "profile": "bravo",
+            },
+        )
+        handler = _FakeHandler()
+        routes._handle_list_dir(handler, urlparse("/api/list?session_id=cli-3&path=."))
+
+        assert handler.status == 200
+        payload = handler.json_body()
+        assert payload["workspace"] == str(bravo_only)
+        assert lookup_calls == [False, True]
+
+    def test_wrong_owner_workspace_not_widened(self, trust_world, monkeypatch):
+        """Wrong-owner isolation: alice_only is saved under ALICE only. A
+        bravo-owned session naming it must NOT list through alice's trust
+        — resolution stays scoped to the row's own owner profile."""
+        routes, _ = _patch_cli_list_dir_plumbing(
+            monkeypatch,
+            active_hit=None,
+            fallback_hit={
+                "session_id": "cli-4",
+                "workspace": str(trust_world["alice_only"]),
+                "profile": "bravo",
+            },
+        )
+        handler = _FakeHandler()
+        routes._handle_list_dir(handler, urlparse("/api/list?session_id=cli-4&path=."))
+
+        assert handler.status == 404
+
+    def test_nomap_owner_revoked_workspace_not_listed(self, trust_world, monkeypatch):
+        """No-map trust preservation: with the owner profile's saved entry
+        revoked, the listing fails closed (404) instead of silently
+        passing the untrusted path through."""
+        trust_world["saved_state"]["bravo"].clear()
+        routes, _ = _patch_cli_list_dir_plumbing(
+            monkeypatch,
+            active_hit={
+                "session_id": "cli-5",
+                "workspace": str(trust_world["bravo_only"]),
+                "profile": "bravo",
+            },
+            fallback_hit=None,
+        )
+        handler = _FakeHandler()
+        routes._handle_list_dir(handler, urlparse("/api/list?session_id=cli-5&path=."))
+
+        assert handler.status == 404

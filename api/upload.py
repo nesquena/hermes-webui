@@ -20,6 +20,7 @@ from api.workspace import (
     safe_resolve_ws,
     resolve_trusted_workspace,
     resolve_webui_workspace,
+    workspace_translation_applies,
     open_anchored_create_fd,
     make_anchored_dir,
     rmtree_anchored,
@@ -725,14 +726,35 @@ def handle_workspace_upload(handler):
         # validation (the same local-root contract as the file-manager
         # handlers). Profile-less legacy sessions keep the pre-existing
         # ambient trusted resolution.
+        #
+        # Re-gate round 3 (reviewer finding 1, 2026-10-22): the tier is only
+        # authoritative when a declared map ACTUALLY translates the path.
+        # Its no-map branch returns the direct path WITHOUT the
+        # resolve_trusted_workspace validation this consumer previously
+        # required, so routing every profiled session through it silently
+        # dropped the upload trust check (a workspace removed from the
+        # profile's saved list still returned 200 + write instead of 400).
+        # Gate on workspace_translation_applies — exactly the file-manager
+        # handlers' pattern — and keep the consumer's original trusted
+        # resolution when translation does not apply. The helper itself is
+        # deliberately NOT tightened: its other consumers have different
+        # contracts.
         session_profile = getattr(session, "profile", None)
         try:
-            if session_profile:
+            if session_profile and workspace_translation_applies(
+                session.workspace, session_profile
+            ):
                 workspace = resolve_webui_workspace(
                     session.workspace, profile=session_profile
                 )
             else:
-                workspace = resolve_trusted_workspace(session.workspace)
+                # Translation does not apply: preserve the consumer's
+                # ORIGINAL profile-scoped trusted resolution — the
+                # pre-#7217 call shape (profile-scoped, never the ambient
+                # request profile).
+                workspace = resolve_trusted_workspace(
+                    session.workspace, profile=session_profile
+                )
         except TypeError:
             workspace = resolve_trusted_workspace(session.workspace)
 
