@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Insights: pick an exact date range.** The period menu has a Custom range… option with Start and End date pickers (labelled, translated in all 15 languages), so usage, cost and model numbers can cover any window, not just the presets. Today is always selectable, and typing a date no longer clears the field. Thanks @silent-reader-cn. (#6970)
+
 - **Kanban Scheduled column.** Scheduled tasks get their own board column, and the task editor, task detail and bulk
   status menu can set and show the Scheduled status (the sidebar count used to show the raw key). Thanks @webtecnica.
   (#7906, fixes #7900)
@@ -79,6 +81,35 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **Scheduled Tasks mark the job that just ran.** When a job finishes in the background, the Tasks list now refreshes on its own and marks the job with a dot, and an open job's Last Output card is marked too, without collapsing output you have open. The marker uses the app's unread colour and sits in the row's gutter so titles don't shift. Thanks @martindell. (#6767)
+
+- **Failed file previews say why.** When an inline CSV, diff, PDF, HTML or Excalidraw preview can't load, the card now explains it: session expired (reload the page), no access (move the file into the workspace or check permissions), or file gone. The download link is dropped for those three cases, since it would fail too. Translated in all 15 languages. Thanks @pxxD1998. (#7254)
+
+- **Keyboard and screen-reader users can open chats from the sidebar.** Tab now reaches each conversation title, Enter or a screen reader's click opens it, and the focused row shows a focus ring. Mouse and touch behave as before: a press doesn't leave focus on the title, drags and swipes don't open a chat, and clicking elsewhere during a rename saves it. Thanks @grzezlo. (#8214)
+
+- **Error toasts stay on screen.** Twenty-one error messages (Kanban unavailable, task dependency, workspace worktree and
+  reorder failures, the MCP server toggle, checkpoint restore, copy failure) passed their type where the duration
+  goes, so the toast vanished the moment it appeared; the Kanban dispatcher result and eight worktree errors had the
+  same problem in two other shapes. `showToast` now reads a type name in that position as the type and treats 0 as the
+  default duration. (#8315)
+
+- **Session menu and Move-to-project picker stay with their row.** On tablets the sidebar menu and project picker
+  opened in the top-left corner over the header; they now open at the pressed row and stay inside the screen, keep
+  "+ New project" visible with long project lists on phones, and move with their row when the sidebar scrolls. Thanks
+  @pxxD1998. (#6713)
+
+- **Two recurring CI failures fixed.** The `[SLOW]` diagnostics on draft saves and session loads no longer raise on a
+  request handler without the WebUI print helper (they read it the same guarded way as every other diagnostics site),
+  and the legacy-Agent worker test keeps the rows it tracks by identity alive so CPython cannot reuse their ids. Both
+  showed up as unrelated failures on contributor PRs and release stages. (#8312)
+
+- **Model picker keeps its search box and highlighted row visible, and sorts custom provider lists.** Once the picker is
+  scrolled, the note at the top no longer lets rows show through, the search box stays visible, and the row you move
+  to with the arrow keys is never hidden under the header. Custom and aggregator providers (for example a New-API
+  gateway with 50+ models) are listed in natural alphabetical order (model-2 before model-10); built-in providers keep
+  their curated newest-first order, and models revealed by "Show more" or fetched live are sorted after them. Thanks
+  @happy5318. (#7528)
 
 - **Composer stays above the keyboard on Android Chrome and Edge.** The page now asks Chromium browsers on Android to
   resize the layout when the on-screen keyboard opens, the same setting Gemini, Open WebUI and LibreChat use. iPhone,
@@ -495,6 +526,10 @@
 
 ### Changed
 
+- **Russian: the last English strings translated.** The Profiles explainer and the Transparent Stream timestamp setting now read in Russian. Thanks @RajPabnani03. (#8001)
+
+- **German: Scheduled Tasks strings translated.** The cron editor's weekdays, time fields and hints were still English in German. Thanks @solarmaster961. (#8289)
+
 - **Open thinking cards follow the reasoning as it streams.** A reasoning card that is open while the model thinks now
   keeps the newest text in view instead of sitting at the top. Scroll up inside the card to hold your place; scroll back
   to the bottom to resume following. Thanks @esc247. (#7988)
@@ -519,6 +554,10 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **Test suite keeps the Agent on `sys.path`.** The per-test `sys.path` guard restored a snapshot taken before
+  `api.config` added the Agent directory, so after the first test any newly added Agent module could not be imported
+  and 14 `hermes_state` tests skipped or failed on machines with a real Agent. CI was unaffected. (#8277)
 
 - **Hardened `test_tls_support::test_tls_startup_failure_fallback_to_http` against stdout-preamble noise.** The test asserted the server prints "TLS setup failed" by reading only the first 2000 bytes of its stdout. When the test interpreter lacks optional deps (`requests`/`websockets`), startup emits a burst of plugin/tool import warnings plus the startup-config banner *before* the TLS line, pushing the marker past that fixed window → spurious failure (distinct from the agent-package-isolation cause fixed separately below). It now drains all currently-available stdout (bounded by a 5s deadline, short-circuiting once the marker is seen) instead of a single fixed-size read. Verified failing→passing in a fresh venv without the optional deps. Test-only.
 

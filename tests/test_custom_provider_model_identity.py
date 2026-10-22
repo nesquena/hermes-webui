@@ -27,6 +27,7 @@ function extract(name){
 class Node {
   constructor(tag){this.tagName=tag.toUpperCase();this.children=[];this.dataset={};this.parentElement=null;this._value='';this.textContent='';this.id='';}
   appendChild(child){child.parentElement=this;this.children.push(child);return child;}
+  insertBefore(child,ref){child.parentElement=this;const at=this.children.indexOf(ref);if(at>=0)this.children.splice(at,0,child);else this.children.push(child);return child;}
   removeChild(child){this.children=this.children.filter(x=>x!==child);child.parentElement=null;}
   querySelectorAll(selector){
     if(selector==='optgroup') return this.children.filter(x=>x.tagName==='OPTGROUP');

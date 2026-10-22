@@ -339,7 +339,8 @@ function _resyncChatSidebarAfterPanelSwitch() {
     // rebuilds rows, which is correct for normal list refreshes but hostile to
     // this one-shot panel-transition repair.
     if (typeof _sessionActionMenu !== 'undefined' && _sessionActionMenu) return;
-    renderSessionListFromCache();
+    if (typeof _repaintSidebarForBackgroundChurn === 'function') _repaintSidebarForBackgroundChurn();
+    else if (typeof renderSessionListFromCache === 'function') renderSessionListFromCache();
   };
   if (typeof requestAnimationFrame === 'function') requestAnimationFrame(run);
   else run();
@@ -1045,10 +1046,35 @@ async function loadCronGatewayNotice() {
   }
 }
 
-async function loadCrons(animate) {
+let _cronLoadGeneration = 0;  // monotonically bumped per loadCrons() entry; stale loads bail
+let _cronAcceptedLoadGeneration = 0;  // latest load that published _cronList
+let _cronLatestLoadSettled = Promise.resolve();  // lets save completion await a superseding reader
+let _cronDetailRefreshKey = null;  // explicit refresh intent survives a superseding poll
+
+async function loadCrons(animate, options) {
+  const background = !!(options && options.background);
+  const hasDetailRefreshKey = !!(options && Object.prototype.hasOwnProperty.call(options, 'detailRefreshKey'));
+  const requestedDetailRefreshKey = hasDetailRefreshKey ? options.detailRefreshKey : null;
   const box = $('cronList');
   const refreshBtn = $('cronRefreshBtn');
   loadCronGatewayNotice();
+  // #6767 stale-refresh guard: loadCrons() is async, and both the poller and
+  // switchPanel('tasks') can fire it. If a request started earlier resolves
+  // after a newer one (e.g. the poller fired, then the user reopened the panel
+  // and switchPanel started a fresh load), applying the older response would
+  // overwrite the newer list/detail with stale data. Bump a generation token
+  // at entry and bail once a superseded request realises it is no longer the
+  // latest, so only the newest render wins.
+  const _cronLoadSeq = ++_cronLoadGeneration;
+  let _resolveCronLoadSettled;
+  const _cronLoadSettled = new Promise(resolve => { _resolveCronLoadSettled = resolve; });
+  _cronLatestLoadSettled = _cronLoadSettled;
+  if (!background) {
+    _cronDetailRefreshKey = hasDetailRefreshKey
+      ? (requestedDetailRefreshKey || null)
+      : (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit'
+          ? _currentCronDetailKey : null);
+  }
   if (animate && refreshBtn) {
     refreshBtn.style.opacity = '0.5';
     refreshBtn.disabled = true;
@@ -1057,12 +1083,16 @@ async function loadCrons(animate) {
     await loadCronProfiles();
     const allProfilesQS = _showAllCronProfiles ? '?all_profiles=1' : '';
     const data = await api('/api/crons' + allProfilesQS);
+    if (_cronLoadSeq !== _cronLoadGeneration) return data;  // callers still need their fetched jobs
+    _cronAcceptedLoadGeneration = _cronLoadSeq;
     _cronList = data.jobs || [];
     _cronOtherProfileCount = Number(data.other_profile_count || 0);
     if (_showAllCronProfiles && !_cronList.some(job => job && job.read_only)) {
       _showAllCronProfiles = false;
       _cronOtherProfileCount = 0;
     }
+    // Capture after the await: the reader may have scrolled during the request.
+    const listScrollTop = background ? box.scrollTop : 0;
     box.innerHTML = '';
     // Partition active vs paused so paused jobs don't drown the list (#4026).
     // _cronList stays the single source of truth — only the render is split,
@@ -1108,7 +1138,8 @@ async function loadCrons(animate) {
       box.innerHTML = `<div style="padding:16px;color:var(--muted);font-size:12px">${esc(emptyText)}</div>`;
       _appendCronProfileToggle(box);
       if (_cronMode !== 'create' && _cronMode !== 'edit') _clearCronDetail();
-      return;
+      _cronDetailRefreshKey = null;
+      return data;
     }
     for (const entry of _activeJobs) _appendCronItem(box, entry);
     if (_pausedJobs.length) {
@@ -1133,14 +1164,36 @@ async function loadCrons(animate) {
       box.appendChild(details);
     }
     _appendCronProfileToggle(box);
-    // Re-render current detail with fresh data if we have one and we're not in a form
+    // Background polls update unread markers without discarding loaded output
+    // or collapsing a run the user is reading.
     if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
-      if (refreshed) _renderCronDetail(refreshed);
+      const differentDetailSelected = hasDetailRefreshKey && _currentCronDetailKey !== requestedDetailRefreshKey;
+      const selectedDetailRefreshPending = background && _cronDetailRefreshKey === _currentCronDetailKey;
+      if (refreshed && !selectedDetailRefreshPending &&
+          (differentDetailSelected || background)) {
+        const runs = $('cronDetailRuns');
+        if (runs) runs.classList.toggle('has-new-run', !!(refreshed && !refreshed.read_only && _cronNewJobIds.has(String(refreshed.id))));
+      }
+      else if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
-  } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
+    _cronDetailRefreshKey = null;
+    if (background) box.scrollTop = listScrollTop;
+    return data;
+  } catch(e) {
+    if (_cronLoadSeq !== _cronLoadGeneration) return;
+    // Retry one foreground read when a poll displaced an explicit refresh.
+    // Foreground failures do not recurse, and cancelled/hidden views do not retry.
+    if (background && _currentPanel === 'tasks' && _currentCronDetail &&
+        _cronDetailRefreshKey === _currentCronDetailKey &&
+        _cronMode !== 'create' && _cronMode !== 'edit') {
+      return await loadCrons(false);
+    }
+    box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`;
+  }
   finally {
+    _resolveCronLoadSettled();
     if (animate && refreshBtn) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
@@ -1237,6 +1290,10 @@ function _cronAgentPromptCardHtml(job){
 }
 
 function _renderCronDetail(job){
+  // A same-selection presentation redraw (e.g. Prompt expansion) is not
+  // authoritative fresh data and must not cancel a pending action refresh.
+  // loadCrons consumes that intent after applying the latest list response.
+  if (_currentCronDetailKey !== _cronJobKey(job)) _cronDetailRefreshKey = null;
   _currentCronDetail = job;
   _currentCronDetailKey = _cronJobKey(job);
   const title = $('taskDetailTitle');
@@ -1499,6 +1556,7 @@ async function _loadRunContent(jobId, filename, runId){
 function openCronDetail(jobOrId, el){
   const job = _findCronJob(jobOrId);
   if (!job) return;
+  const refreshPending = typeof _cronDetailRefreshKey !== 'undefined' && !!_cronDetailRefreshKey;
   const detailKey = _cronJobKey(job);
   document.querySelectorAll('.cron-item').forEach(e => e.classList.remove('active'));
   const target = el || $(_cronItemId(job));
@@ -1511,11 +1569,16 @@ function openCronDetail(jobOrId, el){
   _editingCronId = null;
   _stopCronWatch();
   _renderCronDetail(job);
+  // A pending action refresh belongs to the visible selection. Retarget it so
+  // the next authoritative load updates this detail without starting a request
+  // for every selection change.
+  if (refreshPending) _cronDetailRefreshKey = detailKey;
   if (!job.read_only) _checkCronWatchOnDetail(job.id, detailKey);
   _closeMobileSidebarAfterPanelSelection();
 }
 
 function _clearCronDetail(){
+  _cronDetailRefreshKey = null;
   _currentCronDetail = null;
   _currentCronDetailKey = '';
   _cronMode = 'empty';
@@ -1972,7 +2035,8 @@ function cancelCronForm(){
   if (_cronPreFormDetail) {
     const snap = _cronPreFormDetail;
     _cronPreFormDetail = null;
-    _renderCronDetail(snap);
+    const accepted = _cronList.find(job => _cronJobKey(job) === _cronJobKey(snap));
+    _renderCronDetail(accepted || snap);
     return;
   }
   _cronPreFormDetail = null;
@@ -2026,6 +2090,58 @@ async function saveCronForm(){
   errEl.style.display='none';
   if(!schedule){errEl.textContent=t('cron_schedule_required_example');errEl.style.display='';return;}
   if(!isNoAgent && !prompt){errEl.textContent=t('cron_prompt_required');errEl.style.display='';return;}
+  // Save completion owns only this form/view. Navigation or a replacement
+  // form must not be undone by either the write or its subsequent list read.
+  const formMode = _cronMode;
+  const formPanel = _currentPanel;
+  const formDetailKey = _currentCronDetailKey;
+  const formStillCurrent = () => $('cronFormError') === errEl &&
+    _currentPanel === formPanel && _cronMode === formMode && _currentCronDetailKey === formDetailKey;
+  const acceptedJobForCurrentForm = async (data, savedId) => {
+    if (!formStillCurrent()) return null;
+    const savedJob = () => {
+      if (!formStillCurrent()) return null;
+      return savedId
+        ? (_cronList.find(job => job.id === savedId) || null)
+        : (_cronList[_cronList.length - 1] || null);
+    };
+    if (data && data.jobs === _cronList) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // A completion poll can supersede this save's list request. If its accepted
+    // response has not landed yet, take one foreground read so the still-current
+    // form completes from the authoritative list rather than remaining saveable.
+    const recoveryGeneration = _cronLoadGeneration + 1;
+    data = await loadCrons(false, {detailRefreshKey: formDetailKey});
+    if (!formStillCurrent()) return null;
+    if (data && data.jobs === _cronList) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // The recovery read can itself be superseded. Await a bounded number of
+    // later readers instead of starting an unbounded chain of foreground reads.
+    // Each accepted reader publishes both its generation and _cronList.
+    let waitedFor = null;
+    for (let i = 0; i < 4 && formStillCurrent(); i++) {
+      if (_cronAcceptedLoadGeneration > recoveryGeneration) {
+        const job = savedJob();
+        if (job) return job;
+      }
+      const latestSettlement = _cronLatestLoadSettled;
+      if (!latestSettlement || latestSettlement === waitedFor) break;
+      waitedFor = latestSettlement;
+      await latestSettlement;
+    }
+    if (_cronAcceptedLoadGeneration > recoveryGeneration) {
+      const job = savedJob();
+      if (job) return job;
+    }
+    // The write already succeeded. Do not leave Create/Edit available for a
+    // duplicate submission when bounded list reconciliation could not settle it.
+    if (formStillCurrent()) _clearCronDetail();
+    return null;
+  };
   try{
     const modelEl = $('cronFormModel');
     const modelLoaded = !!(modelEl && modelEl.dataset.loaded === '1');
@@ -2051,14 +2167,24 @@ async function saveCronForm(){
         }
         // else: select not yet populated — omit model/provider to preserve saved value
       }
-      await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       const editedId = _editingCronId;
-      _editingCronId = null;
-      _cronPreFormDetail = null;
+      await api('/api/crons/update', {method:'POST', body: JSON.stringify(updates)});
       showToast(t('cron_job_updated'));
-      await loadCrons();
-      const job = _cronList && _cronList.find(j => j.id === editedId);
-      if (job) openCronDetail(job);
+      const saveViewCurrent = formStillCurrent();
+      if (!saveViewCurrent && _currentPanel !== 'tasks') return;
+      // Cancel returns an edit form to the same job's read view. That visible
+      // detail must receive the successful write; other navigation stays quiet.
+      const editedDetailShown = !saveViewCurrent && _cronMode === 'read' &&
+        !!_currentCronDetail && _currentCronDetailKey === formDetailKey;
+      const data = await loadCrons(false, {
+        background: !saveViewCurrent && !editedDetailShown,
+        detailRefreshKey: formDetailKey,
+      });
+      // A background refresh keeps a newer selection/output untouched. Only the
+      // still-current form may auto-open its saved job from the accepted list.
+      if (!saveViewCurrent) return;
+      const job = await acceptedJobForCurrentForm(data, editedId);
+      if (job && formStillCurrent()) openCronDetail(job);
       return;
     }
     const body={schedule,prompt,deliver,profile: profile, toast_notifications: toastNotifications, badge_notifications: badgeNotifications};
@@ -2078,13 +2204,20 @@ async function saveCronForm(){
       body.provider = _cronPreFormDetail.provider || null;
     }
     const res = await api('/api/crons/create',{method:'POST',body:JSON.stringify(body)});
-    _cronPreFormDetail = null;
-    _cronIsDuplicate = false;
     showToast(t('cron_job_created'));
-    await loadCrons();
     const newId = res && (res.id || (res.job && res.job.id));
-    if (newId) openCronDetail(newId);
-    else if (_cronList && _cronList.length) openCronDetail(_cronList[_cronList.length - 1]);
+    const saveViewCurrent = formStillCurrent();
+    if (!saveViewCurrent && _currentPanel !== 'tasks') return;
+    const data = await loadCrons(false, {
+      background: !saveViewCurrent,
+      detailRefreshKey: formDetailKey,
+    });
+    if (!saveViewCurrent) return;
+    const job = await acceptedJobForCurrentForm(data, newId);
+    if (job && formStillCurrent()) {
+      _cronIsDuplicate = false;
+      openCronDetail(job);
+    }
   }catch(e){
     errEl.textContent=t('error_prefix')+e.message;errEl.style.display='';
   }
@@ -4514,6 +4647,9 @@ async function copyLogsAll() {
 }
 
 // ── Insights panel ──
+// Latest-request generation counter: an older /api/insights response that
+// resolves after a newer request must not overwrite the newer render.
+let _insightsReqToken = 0;
 const STATIC_MODEL_HEALTH_ROWS = [
   {id:'openai/gpt-5.4-mini', provider:'OpenAI', inputCostPerM:0.25, outputCostPerM:2.00, replacement:'Default economical general-purpose model'},
   {id:'openai/gpt-5.4', provider:'OpenAI', inputCostPerM:2.00, outputCostPerM:10.00, replacement:'Use for complex synthesis; fall back to Mini for routine turns'},
@@ -4547,23 +4683,113 @@ async function loadInsights(animate) {
     refreshBtn.disabled = true;
   }
   const period = ($('insightsPeriod') || {}).value || '30';
+  // Re-cap the custom-range pickers on every refresh: a tab left open across
+  // midnight otherwise keeps yesterday as `max` and today stays unselectable
+  // (greptile P2, 2026-10-15T22:36:54Z, static/panels.js:4604).
+  _insightsSyncDateLimits();
+  const qs = new URLSearchParams();
+  if (period === 'custom') {
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    const startVal = startEl && startEl.value;
+    const endVal = endEl && endEl.value;
+    // Send RAW YYYY-MM-DD strings, not browser-local epoch seconds: the
+    // server interprets them in ITS OWN timezone, so a browser in another
+    // timezone can never shift the selected calendar day.
+    if (startVal) qs.set('start', startVal);
+    if (endVal) qs.set('end', endVal);
+  } else {
+    qs.set('days', period);
+  }
+  // Latest-request guard: date inputs fire one load per change; a slower
+  // earlier response must never overwrite a newer range.  Each call takes
+  // its own token; only the newest token may render.
+  const reqToken = ++_insightsReqToken;
   try {
     const [data, wikiStatus, skillUsage] = await Promise.all([
-      api(`/api/insights?days=${period}`),
+      api(`/api/insights?${qs.toString()}`),
       api('/api/wiki/status').catch(err => ({status:'error', error: err.message || String(err)})),
       api('/api/skills/usage').catch(() => ({usage:{}, skill_names:[], total_invocations:0, unique_skills_used:0})),
     ]);
+    if (reqToken !== _insightsReqToken) return;
     _renderInsights(data, box, wikiStatus, skillUsage);
     if (typeof _syncSystemHealthMonitorVisibility === 'function') _syncSystemHealthMonitorVisibility();
     if (typeof pollSystemHealth === 'function') void pollSystemHealth();
   } catch(e) {
+    if (reqToken !== _insightsReqToken) return;
     box.innerHTML = `<div style="color:var(--accent);font-size:12px">${esc(t('error_prefix') + e.message)}</div>`;
   } finally {
-    if (animate && refreshBtn) {
+    // Restore the refresh button when THIS request is the latest, regardless
+    // of whether it initiated the animation.  A superseding NON-animated
+    // request (e.g. a date change while an animated refresh is in flight)
+    // owns the shared control now; gating restoration on `animate` would
+    // leave the button permanently disabled after A(superseded)->B(latest).
+    if (refreshBtn && reqToken === _insightsReqToken) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
   }
+}
+
+// A future bound is not a servable window: cap both date controls at today so
+// the platform picker cannot offer dates the server will reject (#6970).
+// Lives in one helper because the cap must be recomputed whenever it could have
+// aged: entering Custom, every refresh, and whenever a picker is opened. Writing
+// it only from insightsPeriodChange left a panel that stayed open across
+// midnight with yesterday as the cap, so today was unselectable until the user
+// detoured through a preset (greptile P2, 2026-10-15T22:36:54Z,
+// static/panels.js:4604).
+//
+// Write `max` ONLY when the value actually changes.  Assigning it
+// unconditionally re-set the `<input type="date">` control on every segment
+// edit (the inputs run loadInsights() from onchange, which calls this helper),
+// and Chromium drops the in-progress segment editor when `max` is written -
+// even to the same string - so typing "09012026" into the month/day/year
+// segments ended with both fields empty and the request losing its range
+// (maintainer re-gate, 2026-10-16T01:48:06Z).
+function _insightsSyncDateLimits() {
+  const startEl = $('insightsStart');
+  const endEl = $('insightsEnd');
+  if (!startEl || !endEl) return;
+  const today = _toDateLocal(new Date());
+  if (startEl.max !== today) startEl.max = today;
+  if (endEl.max !== today) endEl.max = today;
+}
+
+function insightsPeriodChange() {
+  const sel = $('insightsPeriod');
+  const customWrap = $('insightsCustomRange');
+  if (!sel || !customWrap) return;
+  const isCustom = sel.value === 'custom';
+  customWrap.style.display = isCustom ? 'flex' : 'none';
+  if (isCustom) {
+    // Default the range to the last 30 calendar days only when the user
+    // hasn't already picked a custom range — so Custom(A/B) → preset →
+    // Custom still shows A/B instead of silently erasing it.
+    const startEl = $('insightsStart');
+    const endEl = $('insightsEnd');
+    _insightsSyncDateLimits();
+    if (startEl && endEl && !startEl.value && !endEl.value) {
+      const end = new Date();
+      const start = new Date();
+      start.setDate(start.getDate() - 29);  // inclusive: start..today = 30 days
+      endEl.value = _toDateLocal(end);
+      startEl.value = _toDateLocal(start);
+    }
+  }
+  loadInsights();
+}
+
+function insightsRangeInputs() {
+  // Each date change is its own request generation; the guard in
+  // loadInsights() drops any stale in-flight response.
+  _insightsReqToken++;
+  loadInsights();
+}
+
+function _toDateLocal(d) {
+  const pad = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 function _formatLlmWikiTimestamp(value) {
@@ -4740,7 +4966,8 @@ async function _openWikiBrowser() {
  *   31–90 days → 2-day buckets
  *   91–180 days → 3-day buckets
  *   181–365 days → 8-day buckets
- * Result is always <= ~52 bars.
+ *   >365 days → dynamic (ceil(len/52)) to keep chart bounded
+ * Result is always <= ~52 bars (tested up to 5 calendar years ≈1826 days).
  * Each bucket row has:
  *   - label: short label for axis (e.g. MM-DD or MM-DD–MM-DD)
  *   - title: full tooltip title (e.g. 2026-01-01 – 2026-01-05)
@@ -4752,7 +4979,7 @@ function _bucketDailyTokensForChart(rows) {
   const len = rows.length;
   if (len <= 30) return rows;  // per-day resolution for 7/30-day ranges
 
-  // Target <= 75 bars; derive bucket size
+  // Target <= 52 bars; derive bucket size
   let bucketSize;
   if (len <= 90) {
     bucketSize = 2;
@@ -4761,7 +4988,7 @@ function _bucketDailyTokensForChart(rows) {
   } else if (len <= 365) {
     bucketSize = 8;  // <=52 bars for 365 days (ceil(365/8)=46)
   } else {
-    bucketSize = 8;  // fallback for >365 (shouldn't occur in practice)
+    bucketSize = Math.ceil(len / 52);  // 5-year ≈1826 → 36 → 51 bars, preserves invariant
   }
 
   const result = [];
@@ -4926,23 +5153,57 @@ function _renderInsights(d, box, wikiStatus, skillUsage) {
       </div>
     </div>`;
 
-  box.innerHTML = `
-    ${_renderSystemHealthPanel()}
-    ${_renderLlmWikiStatus(wikiStatus)}
-    ${_renderSkillUsage(skillUsage)}
-    <div class="insights-grid">
-      ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
-    </div>
-    ${dailyHtml}
-    ${modelHealthHtml}
-    <div class="insights-row insights-usage-grid">
-      ${tokenCards}
-      ${modelsHtml}
-    </div>
-    ${dowHtml}
-    ${hodHtml}
-    <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(t('insights_footer').replace('{days}', d.period_days))}</div>
-  `;
+  const periodSel = $('insightsPeriod');
+  // The server tells us which window it ACTUALLY served: "custom" means a
+  // real absolute window was queried (after swap/clamp/DST/5yr-cap), while
+  // "trailing" means the request fell back to the trailing days-window (e.g.
+  // an all-future or fully-invalid custom range).  Never trust the raw
+  // selector/inputs for a range that the server rejected and replaced - that
+  // would render a future/invalid range while the cards/chart show the
+  // trailing query (Greptile P1: 'custom range normalizes to trailing').
+  // Selective fall-back disclosure (#6970 UX r1): the selector says "custom"
+  // but the server served a trailing window instead (an all-future or
+  // fully-invalid range).  Say so right next to the inputs - the footer that
+  // carries the served window sits below the fold.
+  const fellBack = !!(periodSel && periodSel.value === 'custom' && d.mode !== 'custom');
+  const rangeNoteEl = $('insightsRangeNote');
+  if (rangeNoteEl) {
+    rangeNoteEl.textContent = fellBack
+      ? t('insights_range_fallback').replace('{days}', d.period_days)
+      : '';
+    rangeNoteEl.classList.toggle('is-visible', fellBack);
+  }
+  for (const dateEl of [$('insightsStart'), $('insightsEnd')]) {
+    if (!dateEl) continue;
+    if (fellBack) dateEl.setAttribute('aria-invalid', 'true');
+    else dateEl.removeAttribute('aria-invalid');
+  }
+  const isCustomRange = periodSel && periodSel.value === 'custom' && d.mode === 'custom';
+  // The server reports the EFFECTIVE calendar window it actually queried
+  // (after swap, DST alignment, and the 5-year cap).  Use it verbatim; the
+  // trailing footer shows the literal day count instead.
+  const effStart = isCustomRange && d.effective_start;
+  const effEnd = isCustomRange && d.effective_end;
+  const rangeLabel = isCustomRange
+    ? (effStart && effEnd ? t('insights_footer_range').replace('{start}', effStart).replace('{end}', effEnd) : t('insights_footer').replace('{days}', d.period_days))
+    : t('insights_footer').replace('{days}', d.period_days);
+    box.innerHTML = `
+      ${_renderSystemHealthPanel()}
+      ${_renderLlmWikiStatus(wikiStatus)}
+      ${_renderSkillUsage(skillUsage)}
+      <div class="insights-grid">
+        ${overviewCards.map(c => `<div class="insights-stat"><div class="insights-stat-icon">${c.icon}</div><div class="insights-stat-info"><div class="insights-stat-value">${c.value}</div><div class="insights-stat-label">${esc(c.label)}</div></div></div>`).join('')}
+      </div>
+      ${dailyHtml}
+      ${modelHealthHtml}
+      <div class="insights-row insights-usage-grid">
+        ${tokenCards}
+        ${modelsHtml}
+      </div>
+      ${dowHtml}
+      ${hodHtml}
+      <div style="text-align:center;color:var(--muted);font-size:10px;margin-top:12px;opacity:.6">${esc(rangeLabel)}</div>
+    `;
 }
 
 async function clearConversation() {
@@ -13627,6 +13888,7 @@ async function _runCronPollTick(){
       }
       // _cronUnreadCount is derived from _cronNewJobIds.size in updateCronBadge.
       updateCronBadge();
+      if (_currentPanel === 'tasks' && $('cronList')) loadCrons(false, { background: true });
     }
   }catch(e){}
   finally{ _cronPollInFlight=false; }

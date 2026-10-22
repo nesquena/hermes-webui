@@ -157,10 +157,12 @@ const SESSION_VIRTUAL_ROW_HEIGHT = 52;
 function requestAnimationFrame(cb){ rafCount += 1; cb(); return rafCount; }
 function cancelAnimationFrame(_id){}
 function renderSessionListFromCache(){ renderCount += 1; }
+function _repaintSidebarForBackgroundChurn(){ renderSessionListFromCache(); }
 const makeHelper = new Function(
   'requestAnimationFrame',
   'cancelAnimationFrame',
   'renderSessionListFromCache',
+  '_repaintSidebarForBackgroundChurn',
   `let _sessionVirtualResyncRaf = 0;
    let _renamingSid = null;
    const SESSION_VIRTUAL_ROW_HEIGHT = 52;
@@ -170,7 +172,8 @@ const makeHelper = new Function(
 const _resyncSessionVirtualWindowAfterRender = makeHelper(
   requestAnimationFrame,
   cancelAnimationFrame,
-  renderSessionListFromCache
+  renderSessionListFromCache,
+  _repaintSidebarForBackgroundChurn
 );
 
 _resyncSessionVirtualWindowAfterRender(
