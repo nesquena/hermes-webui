@@ -1117,7 +1117,9 @@ async function loadCrons(animate, useCached = false) {
         try { collapsed = localStorage.getItem('cron-paused-collapsed') !== '0'; } catch (_e) {}
         const details = document.createElement('details');
         details.className = 'cron-paused-section';
-        if (!collapsed) details.open = true;
+        // An active query shows matching paused rows immediately; that forced
+        // open state is temporary and must not overwrite the saved preference.
+        if (!collapsed || query) details.open = true;
         const pausedLabel = t('cron_status_paused') || 'paused';
         const headerLabel = pausedLabel.charAt(0).toUpperCase() + pausedLabel.slice(1);
         const summary = document.createElement('summary');
@@ -1125,6 +1127,7 @@ async function loadCrons(animate, useCached = false) {
         summary.textContent = `${headerLabel} (${_pausedJobs.length})`;
         details.appendChild(summary);
         details.addEventListener('toggle', () => {
+          if (query) return;
           try { localStorage.setItem('cron-paused-collapsed', details.open ? '0' : '1'); } catch (_e) {}
         });
         const inner = document.createElement('div');
@@ -1135,15 +1138,19 @@ async function loadCrons(animate, useCached = false) {
       }
       _appendCronProfileToggle(box);
     }
-    // Re-render current detail with fresh data if we have one and we're not in a form
-    if (_currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
+    // Re-render current detail with fresh data if we have one and we're not in a form.
+    // Cached filter renders skip this: the job data is unchanged, and re-rendering
+    // would refetch run history and drop expanded run output on every keystroke.
+    if (!useCached && _currentCronDetail && _cronMode !== 'create' && _cronMode !== 'edit') {
       const refreshed = _cronList.find(j => _cronJobKey(j) === _currentCronDetailKey);
       if (refreshed) _renderCronDetail(refreshed);
       else _clearCronDetail();
     }
   } catch(e) { box.innerHTML = `<div style="padding:12px;color:var(--accent);font-size:12px">${esc(t('error_prefix'))}${esc(e.message)}</div>`; }
   finally {
-    if (animate && refreshBtn) {
+    // Only the current network-load owner restores the button, even if it began
+    // non-animated: a superseded refresh must not re-enable it mid-load.
+    if (!useCached && myToken === _cronLoadToken && refreshBtn) {
       refreshBtn.style.opacity = '';
       refreshBtn.disabled = false;
     }
@@ -1158,8 +1165,8 @@ function syncCronSearchClear() {
 }
 
 function filterCrons() {
-  if (!Array.isArray(_cronList)) return;
   syncCronSearchClear();
+  if (!Array.isArray(_cronList)) return;
   loadCrons(false, true);
 }
 

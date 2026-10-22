@@ -1595,6 +1595,7 @@
   .cron-search-clear svg{width:14px;height:14px;}
   .cron-search-clear:hover,.cron-search-clear:focus-visible{background:var(--hover);color:var(--text);opacity:1;}
   .cron-search-clear:focus-visible{outline:2px solid var(--accent);outline-offset:1px;}
+  @media (pointer:coarse){.cron-search input{padding-right:44px;}.cron-search .cron-search-clear{right:0;width:44px;height:44px;min-width:44px;min-height:44px;}}
 
   /* Inline session title edit */
   .session-title-input{flex:1;background:var(--surface);border:1px solid var(--accent);border-radius:6px;color:var(--text);padding:3px 8px;font-size:13px;outline:none;min-width:0;box-shadow:0 0 0 2px var(--accent-bg-strong);font-family:inherit;}
