@@ -16009,6 +16009,19 @@ def _handle_session_get(handler, parsed) -> bool:
         _truncated = load_messages and _window_limit is not None and _messages_offset > 0
         if _append_mode_anchor is not None:
             _truncated = load_messages and (_messages_offset + len(_truncated_msgs)) < len(_all_msgs)
+            # #7925 re-gate (2026-10-21, finding 5): the bounded-payload
+            # clipper trims over-long hidden tool-result rows inside the
+            # append window, so a large tool diff can arrive as a preview
+            # carrying ``_content_truncated``. Fold that into the truncation
+            # signal: the client answers it with the authoritative full
+            # fetch (``msg_limit=all`` skips the clipper), instead of keeping
+            # a permanently clipped diff with no marker that content is
+            # missing.
+            if not _truncated and any(
+                isinstance(m, dict) and m.get("_content_truncated")
+                for m in _truncated_msgs
+            ):
+                _truncated = True
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT

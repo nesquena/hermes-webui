@@ -249,3 +249,75 @@ def test_continuation_append_refusal_returns_the_merged_transcript(monkeypatch, 
     )
     assert [m.get("content") for m in messages] == ["child question"], messages
     assert session.get("_messages_offset") == 601, session.get("_messages_offset")
+
+
+def test_append_window_clipped_tool_diff_signals_truncation(monkeypatch, tmp_path):
+    """#7925 re-gate finding 5 (2026-10-21): a large tool diff inside the
+    append window is clipped to a preview by the bounded-payload limiter.
+    The row then arrives with ``_content_truncated`` but the append-mode
+    truncation flag stayed False, so the client kept the clipped diff with no
+    signal that content was missing. The flag now folds the clip in, which
+    sends the client to the authoritative full fetch (msg_limit=all skips the
+    clipper) — master's shape, with the complete diff."""
+    from api.routes import _append_anchor_fingerprint
+    from api.helpers import _public_message_projection
+
+    rows = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}", "timestamp": 1700000000 + i}
+        for i in range(600)
+    ]
+    anchor = {"role": "assistant", "content": "calling", "timestamp": 1700000600,
+              "tool_calls": [{"id": "t1"}]}
+    big_tool = {"role": "tool", "tool_call_id": "t1", "content": "x" * 5000,
+                "timestamp": 1700000601}
+    rows.append(anchor)
+    rows.append(big_tool)
+
+    routes, captured = _continuation_handler_harness(monkeypatch, tmp_path, rows, [])
+    # No continuation here: the child session IS the full transcript.
+    import api.models as models
+    with models.LOCK:
+        models.SESSIONS.pop("cont-child", None)
+    child = models.Session(
+        session_id="cont-child",
+        workspace="/fixture",
+        model="fixture-model",
+        context_length=128_000,
+        messages=[dict(r) for r in rows],
+        parent_session_id="",
+        source_tag="webui",
+        session_source="webui",
+    )
+    child.save(skip_index=True)
+    with models.LOCK:
+        models.SESSIONS.pop("cont-child", None)
+
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(anchor, _enabled=False)
+    )
+    query = (
+        "session_id=cont-child&messages=1&resolve_model=0"
+        "&msg_after=600"
+        f"&anchor_fp={anchor_fp}"
+        "&transcript_generation=0"
+        "&msg_limit=500&expand_renderable=1"
+    )
+    routes._handle_session_get(
+        None, types.SimpleNamespace(path="/api/session", query=query)
+    )
+
+    session = captured["payload"]["session"]
+    messages = session.get("messages") or []
+    assert session.get("_append_only") is True
+    assert messages, "the tool row should travel with the window"
+    tool_row = messages[-1]
+    assert tool_row.get("_content_truncated") is True, (
+        "the over-long tool diff was not clipped — fixture too small"
+    )
+    assert len(tool_row.get("content") or "") < 5000
+    # The clip must surface as truncation so the client re-fetches the full
+    # document instead of keeping the preview forever.
+    assert session.get("_messages_truncated") is True, (
+        "a clipped append-window tool diff left _messages_truncated False — "
+        "the client would keep the preview with no missing-content signal"
+    )
