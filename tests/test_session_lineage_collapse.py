@@ -2426,3 +2426,65 @@ def test_lineage_segments_inherit_row_owner_profile():
     assert by_sid["seg-ownerless"]["profile"] == "alpha"
     # An explicit owner on the segment is authoritative and left untouched.
     assert by_sid["seg-foreign"]["profile"] == "beta"
+
+
+def test_sealed_lineage_root_without_metadata_collapses_into_continuation():
+    """The sealed compression root must fold into the lineage that names it.
+
+    `read_session_lineage_metadata()` only labels CONTINUATION segments, so a
+    root row carries no `_lineage_root_id` of its own. When both the root and its
+    continuation land in the sidebar payload they used to render as two rows for
+    one conversation — and opening the root followed the backend
+    `continuation_session_id` hint to the continuation, so the row could not be
+    opened at all. The root is recognised from the child that names it.
+    """
+    js = SESSIONS_JS_PATH.read_text(encoding="utf-8")
+    source = f"""
+const src = {js!r};
+function extractFunc(name) {{
+  const re = new RegExp('function\\\\s+' + name + '\\\\s*\\\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {{
+    if (src[i] === '{{') depth++;
+    else if (src[i] === '}}') depth--;
+    i++;
+  }}
+  return src.slice(start, i);
+}}
+// Root row: no lineage metadata at all (that is the real server payload).
+// Continuation row: names the root and is the freshest tip.
+var _allSessions = [
+  {{session_id:'sealed-root', title:'Long conversation', message_count:217, updated_at:10, last_message_at:10}},
+  {{session_id:'live-tip', title:'Long conversation', parent_session_id:'sealed-root', message_count:603, updated_at:20, last_message_at:20, _lineage_root_id:'sealed-root', _lineage_tip_id:'live-tip', _compression_segment_count:2}},
+];
+eval(extractFunc('_sessionTimestampMs'));
+eval(extractFunc('_isChildSession'));
+eval(extractFunc('_sessionLineageKey'));
+eval(extractFunc('_sessionLineageContainsSession'));
+eval(extractFunc('_sidebarLineageKeyForRow'));
+eval(extractFunc('_collapseSessionLineageForSidebar'));
+eval(extractFunc('_resolveSessionIdFromSidebarLineage'));
+const collapsed = _collapseSessionLineageForSidebar(_allSessions);
+console.log(JSON.stringify({{
+  rows: collapsed.map(row => ({{
+    session_id: row.session_id,
+    lineage_key: row._lineage_key,
+    collapsed: row._lineage_collapsed_count,
+    segments: (row._lineage_segments || []).map(seg => seg.session_id),
+  }})),
+  resolved: {{
+    root: _resolveSessionIdFromSidebarLineage('sealed-root'),
+    tip: _resolveSessionIdFromSidebarLineage('live-tip'),
+  }},
+}}));
+"""
+    result = json.loads(_run_node(source))
+    assert [row["session_id"] for row in result["rows"]] == ["live-tip"]
+    assert result["rows"][0]["lineage_key"] == "sealed-root"
+    assert result["rows"][0]["collapsed"] == 2
+    assert result["rows"][0]["segments"] == ["live-tip", "sealed-root"]
+    # A stale /session/<root> URL still lands on the live continuation tip.
+    assert result["resolved"] == {"root": "live-tip", "tip": "live-tip"}
