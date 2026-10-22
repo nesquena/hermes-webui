@@ -1,5 +1,30 @@
 # Hermes Web UI: Browser Testing Plan
 
+## Project-picker deferred repaint handoff regression
+
+Expand a parent with fork-child menus, open a picker, defer a list repaint,
+then reopen the parent's action menu. Its own dots must receive active/ARIA
+state and Escape focus, never the child's. On touch layouts, long-press must
+retain the rebuilt row as its anchor through release. Repeat for a fork child
+and the connected topbar title.
+
+## Project-picker gesture deferral and context-point menus
+
+While the picker is open, a choice refresh that arrives between `pointerdown`
+and `pointerup` is deferred: the pressed row and the picker's place survive
+until the gesture settles, so the tap's click — dispatched in a later task than
+`pointerup` on touch — still selects the pressed project. The deferred refresh
+applies right after that click; a gesture that ends without one (pointercancel,
+a release outside the picker) applies it after a short grace period.
+
+A menu or picker anchored on a zero-sized trigger (the ⋮ trigger hidden on
+touch-primary layouts, a repainted trigger) borrows the visible row's geometry;
+when the interaction recorded a context point, it opens like an OS context
+menu — left edge at the pointer, shifted left only to stay inside the viewport.
+`tests/test_project_picker_viewport_position.py` pins both rules in the Node
+fixture; `tests/browser_project_picker_keyboard.py` covers the keyboard, mouse
+and touch flows in real Chromium.
+
 > This document is for manual browser testing by you or by a Claude browser agent.
 > It covers user-facing features of the UI across current releases.
 > Each section is written as a step-by-step test procedure with expected outcomes.
@@ -245,6 +270,44 @@ turned either way, or a window narrowed until the sidebar collapses or becomes
 a closed drawer (#8044). Run it locally with
 `python tests/browser_project_picker_keyboard.py`; add `--screenshots DIR` to
 write the open picker at 390x844, 820x1180, 844x390 and 1440x900.
+
+Last, it runs `tests/browser_session_row_activation.py`, which imports three
+conversations and opens them from the sidebar without a pointer press. Tab
+from the conversation filter must reach a conversation title, every row title
+must be a focusable link, with `aria-current="page"` on the open
+conversation's title. Mouse events without pointer events (how Firefox performs
+a screen reader's activate command, e.g. NVDA in browse mode), a bare
+`element.click()`, and Enter on the focused title must each open the
+conversation, and a sidebar repaint must never move focus to a title (a screen
+reader would pull its reading cursor back to the list). After Enter opens a
+conversation, focus must be on that row's rebuilt title, so the next Tab reaches
+its ⋮ trigger; Enter on one title and then another before the first has loaded
+must leave focus on the second (open) conversation's title, never the first; on
+a phone, focus must not stay inside the closed drawer. A mouse
+press on a title must not park focus there (a refresh deferred while the user
+interacts must apply once the mouse leaves), and double-click must still rename.
+Dragging from a title onto the row's ⋮ trigger must not open the conversation.
+A held (auto-repeated) Enter must not open it again, Enter on a title must not answer a visible tool
+approval card (the document-level "Enter = Allow once" shortcut), and a
+right-click on a row must not swallow the next keyboard activation. A real
+mouse click and a touch tap must still open it exactly once, and a mouse drag
+along a row must not open it. Mixed input, in Chromium touch contexts at
+1440x1000 and 390x844 with touches sent through the native input pipeline: after
+a short horizontal swipe (no compatibility click) the first Enter, or a screen
+reader's activate command, about 200 ms later must open another conversation,
+and so must Enter right after a tap or a mouse click. Enter on the row's
+⋮ trigger must open its menu, not the conversation; and in selection mode the
+title must not be a link. A click or tap on another title during a rename must
+commit and end the rename; with the name unchanged, the tap must not also open
+the other conversation (as on master). Clicking a title during a project rename
+must save the project name, and on the 1440x1000 touch run a tap on a title must
+move focus out of the focused search box. A long press must open the row's
+action menu with focus on its first item, and releasing the finger must leave
+focus there. The checks run in Chromium, and also in Firefox and
+WebKit when their Playwright builds are installed and launch
+(`python -m playwright install --with-deps firefox webkit`); a missing or
+unlaunchable engine is reported as skipped.
+Run it locally with `python tests/browser_session_row_activation.py`.
 
 ## Public conversation lifecycle gate
 
@@ -2080,7 +2143,25 @@ Each has automated API-level tests in `tests/test_sprint{N}.py`.
 ### Sprint 15: Session Projects
 - Click "+" in project bar to create a project. Type name, Enter.
 - Click a project chip to filter sessions.
-- Hover a session → click folder icon → assign to project via picker.
+- Session ⋮ menu → Move to project (long-press the row on touch) → assign via picker.
+- With a long project list, verify the picker stays within the visible viewport
+  at desktop and narrow widths; `+ New project` stays pinned at the bottom edge
+  while the list scrolls inside the picker.
+- Keep the picker open while resizing the window or changing the mobile visual
+  viewport (keyboard/browser chrome/zoom). Verify both horizontal edges and the
+  height cap follow the visible area, including nonzero viewport offsets.
+- Scroll the session list while the picker is open: it must follow its row,
+  then close when the trigger leaves the list's visible rectangle. Scrolling
+  inside the picker must keep it open and preserve access to the final item.
+- Re-render/remove the owning row without resizing or scrolling: the picker
+  must close immediately. Selection, outside click, and opening a replacement
+  must also release its listeners, observer, and queued animation frame.
+- Automated geometry/lifecycle regression:
+  `./scripts/test.sh tests/test_project_picker_viewport_position.py -q`.
+- While the picker is open, trigger a list refresh between press and release
+  (another conversation's pin or title update): the tap/click must still move
+  the session to the pressed project. A remote rename must also paint
+  immediately while the list is hovered or focused, with the picker kept.
 - Verify colored left border appears on assigned session.
 - Double-click project chip to rename. Right-click to delete.
 - Code blocks have a "Copy" button. Click → "Copied!" feedback.
@@ -2213,6 +2294,12 @@ Bridged CLI sessions:
 *Run: ./scripts/test.sh*
 *Source: <repo>/*
 
+### Media preview access errors (#7254)
+
+Verify CSV, PDF and HTML previews at desktop and 390px widths, including light
+theme. HTTP 401/403/404 must show the escaped filename and localized error in
+`diff-inline-error` without a download link. Network/format failures keep their
+format-specific fallback and download link. A 401 directs the user to reload.
 
 ### MEDIA boundary regression checks (#6923)
 

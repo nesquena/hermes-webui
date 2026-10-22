@@ -133,6 +133,7 @@ def _run_done_compaction_harness(
           removeItem(key){{ storage.delete(key); }},
         }};
         function renderSessionListFromCache(){{}}
+        function _repaintSidebarForBackgroundChurn(){{ renderSessionListFromCache(); }}
         function _forgetObservedStreamingSession(){{}}
         function _rememberSessionListSource(){{}}
         {helpers}

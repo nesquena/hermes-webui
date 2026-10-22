@@ -1656,6 +1656,8 @@
   .session-text{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden;}
   .session-title-row{display:flex;align-items:center;gap:6px;min-width:0;}
   .session-title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);user-select:none;}
+  .session-title:focus-visible{outline:none;}
+  .session-item:has(> .session-text > .session-title-row > .session-title:focus-visible){box-shadow:inset 0 0 0 2px var(--accent);}
   .session-search-hit{border-radius:4px;background:var(--accent-bg);color:var(--accent-text);box-decoration-break:clone;-webkit-box-decoration-break:clone;padding:0 .08em;}
   .session-search-preview{font-size:11px;line-height:1.35;color:var(--muted);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow-wrap:anywhere;opacity:.9;}
   .session-search-hit-preview{background:var(--accent-bg);color:var(--accent-text);}
@@ -2170,7 +2172,7 @@
   .cron-paused-section[open] > .cron-paused-summary::before{transform:rotate(90deg);}
   .cron-paused-summary:hover{color:var(--text);}
   .cron-paused-inner{margin-top:4px;}
-  .cron-header{display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;}
+  .cron-header{position:relative;display:flex;align-items:center;gap:8px;padding:10px 12px;cursor:pointer;}
   .cron-name{flex:1;font-size:13px;color:var(--text);font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   .cron-status{font-size:10px;font-weight:700;padding:2px 8px;border-radius:99px;flex-shrink:0;}
   .cron-profile-badge{font-size:10px;font-weight:650;padding:2px 7px;border-radius:99px;flex-shrink:0;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid var(--border);color:var(--muted);background:var(--surface-subtle);}
@@ -2533,7 +2535,7 @@
   .diff-block .diff-hunk{color:var(--muted);font-style:italic;background:rgba(99,102,241,.06);}
   .diff-inline-load{color:var(--muted);font-size:13px;padding:8px 12px;border:1px dashed var(--border);border-radius:8px;margin:6px 0;}
   .diff-inline{margin:6px 0;}
-  .diff-inline-error{color:#ef4444;font-size:13px;padding:8px 12px;border:1px solid rgba(239,68,68,.2);border-radius:8px;margin:6px 0;}
+  .diff-inline-error{color:var(--error,#ef4444);font-size:13px;padding:8px 12px;border:1px solid rgba(239,68,68,.2);border-radius:8px;margin:6px 0;}
   /* JSON/YAML tree viewer */
   .code-tree-wrap{position:relative;}
   .tree-view{padding:4px 0;font-family:var(--font-mono);font-size:13px;}
@@ -3520,7 +3522,17 @@
    lower stacking context. This single stacking rule closes the whole "drawer
    opened behind the floating picker" class without per-open-site guards. */
 .model-dropdown.model-dropdown--floating{position:fixed;left:0;bottom:auto;min-width:0;z-index:190;}
-.model-scope-note{position:sticky;top:0;z-index:2;padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text);font-size:11px;font-weight:650;line-height:1.4;background:color-mix(in srgb,var(--surface) 82%,var(--accent-bg));box-shadow:0 1px 0 rgba(0,0,0,.12);}
+.model-scope-note{position:sticky;top:0;z-index:2;padding:9px 14px;border-bottom:1px solid var(--border);color:var(--text);font-size:11px;font-weight:650;line-height:1.4;background:linear-gradient(color-mix(in srgb,var(--surface) 82%,var(--accent-bg)),color-mix(in srgb,var(--surface) 82%,var(--accent-bg))) var(--surface);box-shadow:0 1px 0 rgba(0,0,0,.12);}
+/* Composer picker: pin the search row directly under the sticky scope note.
+   Opening the picker now centres the selected row, so any deep selection
+   scrolls the list — without this rule the search box scrolls out of view.
+   The Settings picker pins its own row (.settings-model-dropdown
+   .model-search-row); this is the same idiom for the composer dropdown.
+   `top` is the scope note's own box height: 9px padding + 11px x 1.4 line
+   box + 9px padding + 1px border = 34.4px, rounded down so the row's
+   background covers the note's bottom border instead of leaving a sliver.
+   z-index stays below the note's 2 so the note always wins the overlap. */
+.model-dropdown .model-search-row{position:sticky;top:var(--model-scope-note-h,34px);background:var(--surface);z-index:1;}
 .model-group{padding:8px 14px 4px;font-size:10px;font-weight:700;letter-spacing:.04em;color:var(--muted);text-transform:uppercase;border-top:1px solid var(--border2);margin-top:2px;}.model-group.collapsible{cursor:pointer;user-select:none}.model-group.collapsible:before{content:'\25b6';display:inline-block;font-size:8px;margin-right:5px;transition:transform .15s ease}.model-group.collapsible.open:before{transform:rotate(90deg)}.model-group-body:empty{display:none}
 .model-group.sub{padding:4px 14px 2px 22px;font-size:9px;border-top:none;margin-top:0;letter-spacing:.03em;color:var(--muted);background:transparent;}.model-group.sub.collapsible:before{content:'\25b6';display:inline-block;font-size:7px;margin-right:4px;transition:transform .15s ease}.model-group.sub.collapsible.open:before{transform:rotate(90deg)}.model-group-body.sub{padding-left:8px;border-left:1px solid var(--border);}
 .model-opt{padding:10px 14px;cursor:pointer;transition:background .12s;display:flex;flex-direction:column;gap:3px;align-items:flex-start;}
@@ -5882,7 +5894,7 @@ main.main > #mainPlugin{display:none;}
 
 /* ── Cron alert badge ── */
 .cron-badge{position:absolute;top:2px;right:2px;background:#e53e3e;color:#fff;font-size:9px;font-weight:700;min-width:14px;height:14px;line-height:14px;text-align:center;border-radius:7px;padding:0 3px;}
-.cron-new-dot{width:7px;height:7px;border-radius:50%;background:var(--success,#22c55e);flex-shrink:0;animation:cron-dot-pulse 2s ease-in-out infinite;}
+.cron-new-dot{position:absolute;left:3px;top:50%;transform:translateY(-50%);width:7px;height:7px;border-radius:50%;background:var(--accent);animation:cron-dot-pulse 2s ease-in-out infinite;}
 .cron-agent-badge{flex-shrink:0;font-size:12px;line-height:1;}
 .cron-script-badge{flex-shrink:0;font-size:12px;line-height:1;opacity:.92;}
 .cron-script-job-banner{margin-bottom:12px;}
@@ -5893,7 +5905,8 @@ main.main > #mainPlugin{display:none;}
 .detail-badge.cron-mode-badge.script{background:rgba(148,163,184,.14);color:var(--text-secondary);}
 .detail-badge.cron-mode-badge.agent{background:rgba(99,179,237,.14);color:#90cdf4;}
 @keyframes cron-dot-pulse{0%,100%{opacity:1;}50%{opacity:.4;}}
-.has-new-run{border-color:var(--success,#22c55e)!important;box-shadow:0 0 0 1px var(--success,#22c55e);}
+.has-new-run{border-color:var(--accent)!important;box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 40%,transparent);}
+@media (prefers-reduced-motion:reduce){.cron-new-dot{animation:none;}}
 
 /* ── Background error banner ── */
 /* ── Archived sessions ── */
@@ -6031,8 +6044,11 @@ main.main > #mainPlugin{display:none;}
 .project-picker-item{padding:5px 10px;font-size:11px;border-radius:6px;cursor:pointer;color:var(--muted);transition:all .1s;display:flex;align-items:center;gap:6px;}
 .project-picker-item:hover{background:rgba(255,255,255,.08);color:var(--text);}
 .project-picker-item.active{color:var(--blue);}
-.project-picker-create{color:var(--blue);opacity:.7;border-top:1px solid var(--border2);margin-top:2px;padding-top:6px;}
-.project-picker-create:hover{opacity:1;background:var(--accent-bg);}
+/* Pinned to the bottom edge so "+ New project" stays reachable when a long project list scrolls inside
+   the capped picker. Opaque background (no element opacity) so rows don't show through while pinned;
+   the dimmed label is a color-mix instead of opacity:.7. Identical in the non-scrolling case. */
+.project-picker-create{color:color-mix(in srgb,var(--blue) 70%,var(--sidebar));border-top:1px solid var(--border2);margin-top:2px;padding-top:6px;position:sticky;bottom:-4px;background:var(--sidebar);}
+.project-picker-create:hover{color:var(--blue);background:linear-gradient(var(--accent-bg),var(--accent-bg)),var(--sidebar);}
 /* Lives as a flex sibling in .session-title-row (between title and time);
    the row's gap:6px handles spacing, no margin/vertical-align needed. */
 .session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;}
@@ -6042,7 +6058,7 @@ main.main > #mainPlugin{display:none;}
 .project-picker-item:focus-visible{background:rgba(255,255,255,.08);color:var(--text);outline:2px solid var(--focus-ring);outline-offset:-2px;}
 .project-picker-item.active:focus-visible{color:var(--blue);}
 @media (pointer:coarse){.project-picker-item{min-height:44px;padding-top:8px;padding-bottom:8px;font-size:13px;}}
-.project-picker:not(.batch-project-picker){max-height:calc(100dvh - 16px);overflow-y:auto;overscroll-behavior:contain;}
+.project-picker:not(.batch-project-picker){max-height:calc(100dvh - 16px);overflow-y:auto;overscroll-behavior:contain;scroll-padding-bottom:52px;}
 /* The batch picker renders inline in the selection bar, so on touch its 44px rows would push the
    checked conversations off screen while you choose a project: cap it at about five and a half rows. */
 @media (pointer:coarse){.batch-action-bar .batch-project-picker{max-height:250px;overflow-y:auto;}}
@@ -6903,6 +6919,21 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-stat-value{font-size:22px;font-weight:700;color:var(--text);}
 .insights-stat-label{font-size:11px;color:var(--muted);margin-top:4px;}
 .insights-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px;}
+/* Insights absolute-range bar (#6970): ALL layout/visual styles live here so the
+   controls carry NO inline styles.  An inline `background` on the period
+   <select> resets the shared select chevron background-image while
+   `appearance:none` remains, which left the control looking like static text. */
+.insights-range-bar{display:flex;flex-direction:column;gap:8px;padding:12px 12px 6px;}
+.insights-range-bar .insights-period-select{width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;}
+#insightsCustomRange{display:none;flex-direction:column;gap:6px;}
+#insightsCustomRange input[type="date"]{width:100%;min-width:0;background:var(--input-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;padding:5px 10px;font-size:12px;}
+#insightsCustomRange input[type="date"]:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-bg);}
+.insights-range-field{display:flex;flex-direction:column;gap:3px;min-width:0;}
+.insights-range-field-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);}
+/* Selective-fall-back disclosure (#6970 UX r1): shown only when the selector
+   is "custom" but the server served a trailing window instead. */
+.insights-range-note{display:none;font-size:11px;color:var(--muted);line-height:1.35;}
+.insights-range-note.is-visible{display:block;}
 /* Usage row (Token Breakdown + Models): 25/75 split so the Models table gets
    more of the row and long model IDs (e.g. "vendor/org/model:quant") are
    ellipsized less — allocation, not a full-name guarantee (very long IDs
