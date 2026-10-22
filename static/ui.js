@@ -3761,54 +3761,53 @@ function _getOptionProviderId(opt){
   }
   const value=String(opt.value||'');
   if(value.startsWith('@') && value.includes(':')){
-    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
-    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
-    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
-    if(value.startsWith('@custom:')){
-      const afterCustom=value.substring('@custom:'.length);
-      const parts=afterCustom.split(':');
-      if(parts.length>=3 && /^\d+$/.test(parts[1])){
-        const port=parseInt(parts[1], 10);
-        const host=parts[0];
-        const hl=host.toLowerCase();
-        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
-          return 'custom:'+host+':'+parts[1];
-        }
-      }
-      const firstColon=afterCustom.indexOf(':');
-      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
-      return 'custom:'+afterCustom;
-    }
-    // Other @provider:model — provider is up to first colon
-    return value.slice(1,value.indexOf(':'));
+    // No option metadata: derive the provider with the same shared right-to-
+    // left grammar as the server (_providerFromModelValue) so metadata-less
+    // options cannot drift from api.config._parse_provider_qualified_model_id
+    // (PR #5907 review; #1948/#2047/#6722 lineage).
+    return _providerFromModelValue(value);
   }
   return '';
 }
 function _providerFromModelValue(modelId){
+  // Right-to-left parse mirroring api.config._parse_provider_qualified_model_id
+  // — the shared server grammar for @provider:model values (#1776, #1948,
+  // #2047, #6722; PR #5907 review). Splitting at the LAST colon keeps
+  // colon-bearing model ids intact (e.g. @ollama:qwen3.8:27b-mtp-q8_0,
+  // @openrouter:vendor/model:free). For @custom:<slug>:<model> the provider
+  // segment may itself contain colons (host:port endpoint slugs such as
+  // custom:localhost:11434), so exactly one peel-back happens when the slug
+  // rest is NOT an endpoint-style host:port — matching the server parser.
+  // The known-provider set check of the server parser is not replicated:
+  // every non-custom provider id is colon-free, so the boundary up to the
+  // first colon and the boundary up to the last colon coincide whenever the
+  // hint would be a bare known provider id.
   const value=String(modelId||'').trim();
-  if(value.startsWith('@')&&value.includes(':')){
-    // Non-greedy parse for @custom:<slug>:<model> — provider is the slug only.
-    // Preserves endpoint-style host:port custom slugs (e.g. custom:localhost:11434)
-    // while keeping colon-bearing model ids (e.g. @custom:backup:model-a:free -> custom:backup).
-    if(value.startsWith('@custom:')){
-      const afterCustom=value.substring('@custom:'.length);
-      const parts=afterCustom.split(':');
-      if(parts.length>=3 && /^\d+$/.test(parts[1])){
-        const port=parseInt(parts[1], 10);
-        const host=parts[0];
-        const hl=host.toLowerCase();
-        if(port>=1 && port<=65535 && (hl==='localhost' || host.includes('.'))){
-          return 'custom:'+host+':'+parts[1];
-        }
-      }
-      const firstColon=afterCustom.indexOf(':');
-      if(firstColon>=0) return 'custom:'+afterCustom.substring(0,firstColon);
-      return 'custom:'+afterCustom;
+  if(!value.startsWith('@')||!value.includes(':')) return '';
+  const inner=value.slice(1);
+  const lastColon=inner.lastIndexOf(':');
+  let providerHint=inner.slice(0,lastColon);
+  if(providerHint.startsWith('custom:')&&(providerHint.split(':').length-1)>=2){
+    // Port of api.config._custom_slug_rest_looks_like_host_port: only an
+    // endpoint-style slug rest — host is localhost or dotted (every IPv4
+    // literal is dotted) with a numeric port in 1..65535 — keeps the provider
+    // hint intact. Anything else means the middle colon belongs to an eaten
+    // model segment and is peeled back into the model.
+    const slugRest=providerHint.slice('custom:'.length);
+    const restColon=slugRest.lastIndexOf(':');
+    const host=restColon>=0?slugRest.slice(0,restColon):'';
+    const portSegment=restColon>=0?slugRest.slice(restColon+1):'';
+    const port=parseInt(portSegment,10);
+    const looksLikeHostPort=restColon>=0&&!!host&&host.indexOf(':')<0
+      &&/^\d+$/.test(portSegment)&&port>=1&&port<=65535
+      &&(host.toLowerCase()==='localhost'||host.indexOf('.')>=0);
+    if(!looksLikeHostPort){
+      providerHint=providerHint.slice(0,providerHint.lastIndexOf(':'));
     }
-    // Other @provider:model — provider is up to first colon
-    return value.slice(1,value.indexOf(':'));
+  }else if(!providerHint.startsWith('custom:')){
+    providerHint=inner.slice(0,inner.indexOf(':'));
   }
-  return '';
+  return providerHint;
 }
 function _modelPickerOptionIdentity(modelId, providerId){
   let value=String(modelId||'');
