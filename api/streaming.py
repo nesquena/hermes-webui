@@ -3699,12 +3699,15 @@ def _capture_turn_served_model(s, agent) -> str | None:
     return _used_model
 
 
-def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
+def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str, profile_name: str = "") -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
     Profile runtime env may include TERMINAL_CWD from config.yaml. Passing it as
     **kwargs alongside an explicit TERMINAL_CWD raises TypeError before the
     agent starts, so merge into one dict first and let the active workspace win.
+
+    profile_name sets HERMES_SESSION_PROFILE so hermes-agent persistent Docker
+    and tools bind to the correct profile container/sandbox (#8452).
     """
     env = dict(profile_runtime_env or {})
     env.update({
@@ -3721,6 +3724,8 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
         'HERMES_SESSION_CHAT_ID': str(session_id),
         'HERMES_HOME': profile_home,
     })
+    if profile_name:
+        env['HERMES_SESSION_PROFILE'] = str(profile_name)
     return env
 
 
@@ -14275,6 +14280,15 @@ def _run_agent_streaming(
     _checkpoint_stop = None
     _ckpt_thread = None
     _agent_lock = None
+    old_profile_env = {}
+    old_cwd = None
+    old_exec_ask = None
+    old_session_key = None
+    old_session_id = None
+    old_session_platform = None
+    old_session_chat_id = None
+    old_hermes_home = None
+    old_session_profile = None
     try:
         # Register this stream with the global streaming meter and start the 1 Hz
         # metering ticker. Kept INSIDE the outer try so the outer `finally`'s
@@ -14424,6 +14438,7 @@ def _run_agent_streaming(
             str(s.workspace),
             session_id,
             _profile_home,
+            profile_name=_resolved_profile_name or "",
         )
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
         _set_thread_env(**_thread_env)
@@ -14484,6 +14499,7 @@ def _run_agent_streaming(
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
+            old_session_profile = os.environ.get('HERMES_SESSION_PROFILE')
             os.environ.update(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
@@ -14493,6 +14509,8 @@ def _run_agent_streaming(
             # process_complete wiring (ours-original, Option B): see
             # _build_agent_thread_env above.
             os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
+            if _resolved_profile_name:
+                os.environ['HERMES_SESSION_PROFILE'] = str(_resolved_profile_name)
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
                 # Prefer context-local Hermes-home overrides when available.
@@ -17807,6 +17825,8 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
+                if old_session_profile is None: os.environ.pop('HERMES_SESSION_PROFILE', None)
+                else: os.environ['HERMES_SESSION_PROFILE'] = old_session_profile
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
