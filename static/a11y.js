@@ -4,12 +4,13 @@
 // chat streaming, tool calls, and transient feedback.
 
 let _a11yPoliteTimer = null;
-let _a11yPoliteTimerOwner = null;
 let _a11yAssertiveTimer = null;
-let _a11yAssertiveTimerOwner = null;
 let _a11yPendingPoliteRaf = null;
 let _a11yPendingAssertiveRaf = null;
-let _a11yAnnounceGeneration = 0;
+let _a11yPoliteGeneration = 0;
+let _a11yAssertiveGeneration = 0;
+let _a11yPoliteMeta = null;
+let _a11yAssertiveMeta = null;
 let _a11yLastPoliteText = '';
 let _a11yLastAssertiveText = '';
 let _a11yLastToolAnnounceAt = 0;
@@ -36,33 +37,85 @@ function _a11yAssistantName() {
   return 'Hermes';
 }
 
+function _a11yCurrentSessionId() {
+  if (typeof S !== 'undefined' && S && S.session && S.session.session_id) {
+    return S.session.session_id;
+  }
+  return null;
+}
+
 function _a11yIsActiveSession(sessionId, completedSid) {
   if (!sessionId && !completedSid) return true;
-  if (typeof S !== 'undefined' && S && S.session && S.session.session_id) {
-    const cur = S.session.session_id;
+  const cur = _a11yCurrentSessionId();
+  if (cur) {
     return cur === sessionId || (!!completedSid && cur === completedSid);
   }
   return true;
 }
 
-function _a11yCancelPendingAnnouncements(retiredSid) {
+function _a11yCancelPoliteChannel() {
+  _a11yPoliteGeneration += 1;
   if (_a11yPendingPoliteRaf) {
     if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(_a11yPendingPoliteRaf);
     _a11yPendingPoliteRaf = null;
   }
+  if (_a11yPoliteTimer) {
+    clearTimeout(_a11yPoliteTimer);
+    _a11yPoliteTimer = null;
+  }
+  _a11yPoliteMeta = null;
+}
+
+function _a11yCancelAssertiveChannel() {
+  _a11yAssertiveGeneration += 1;
   if (_a11yPendingAssertiveRaf) {
     if (typeof cancelAnimationFrame === 'function') cancelAnimationFrame(_a11yPendingAssertiveRaf);
     _a11yPendingAssertiveRaf = null;
   }
-  if (_a11yPoliteTimer && (!retiredSid || _a11yPoliteTimerOwner === retiredSid)) {
-    clearTimeout(_a11yPoliteTimer);
-    _a11yPoliteTimer = null;
-    _a11yPoliteTimerOwner = null;
-  }
-  if (_a11yAssertiveTimer && (!retiredSid || _a11yAssertiveTimerOwner === retiredSid)) {
+  if (_a11yAssertiveTimer) {
     clearTimeout(_a11yAssertiveTimer);
     _a11yAssertiveTimer = null;
-    _a11yAssertiveTimerOwner = null;
+  }
+  _a11yAssertiveMeta = null;
+}
+
+function _a11yShouldCancelChannelMeta(meta, retiredSid, opts = {}) {
+  if (!meta) return false;
+  const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || null;
+  const streamId = (opts && opts.streamId) || null;
+  const retiringTurn = !!(opts && opts.retiringTurn);
+  if (!retiredSid && !completedSid && !streamId) {
+    return true;
+  }
+  const matchesStream = !!(streamId && meta.streamId && meta.streamId === streamId);
+  const matchesSid = !!(
+    (retiredSid && (meta.ownerSid === retiredSid || meta.completedSid === retiredSid)) ||
+    (completedSid && (meta.ownerSid === completedSid || meta.completedSid === completedSid))
+  );
+  if (!matchesStream && !matchesSid) {
+    if ((meta.ownerSid || meta.completedSid) && !_a11yIsActiveSession(meta.ownerSid, meta.completedSid)) {
+      return true;
+    }
+    return false;
+  }
+  if (meta.terminal && !retiringTurn) {
+    const hasViewOwner = !!(meta.ownerSid || meta.completedSid);
+    if (!hasViewOwner || _a11yIsActiveSession(meta.ownerSid, meta.completedSid)) {
+      return false;
+    }
+  }
+  if (streamId && meta.streamId && meta.streamId !== streamId) {
+    return false;
+  }
+  return true;
+}
+
+function _a11yCancelPendingAnnouncements(retiredSid, opts = {}) {
+  if (_a11yShouldCancelChannelMeta(_a11yPoliteMeta, retiredSid, opts)) {
+    _a11yCancelPoliteChannel();
+  }
+  if (_a11yShouldCancelChannelMeta(_a11yAssertiveMeta, retiredSid, opts)) {
+    _a11yCancelAssertiveChannel();
   }
 }
 
@@ -94,37 +147,36 @@ function _a11yAlternateIdentical(text, lastText) {
 function announceA11yPolite(message, durationMs = 2500, opts = {}) {
   const text = String(message || '').trim();
   if (!text) return;
-  const ownerSid = (opts && (opts.sessionId || opts.ownerSid)) || _a11yActiveStreamSid || null;
+  const ownerSid = (opts && (opts.sessionId || opts.ownerSid)) || _a11yActiveStreamSid || _a11yCurrentSessionId() || null;
   const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || null;
-  if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
+  const streamId = (opts && opts.streamId) || (!(opts && opts.terminal) ? _a11yActiveStreamId : null) || null;
+  const terminal = !!(opts && opts.terminal);
+  if ((ownerSid || completedSid) && !_a11yIsActiveSession(ownerSid, completedSid)) return;
   const el = _ensureA11yLiveRegion('a11yAnnouncer', 'status', 'polite');
   if (!el) return;
-  if (_a11yPoliteTimer) {
-    clearTimeout(_a11yPoliteTimer);
-    _a11yPoliteTimer = null;
-    _a11yPoliteTimerOwner = null;
-  }
-  if (_a11yPendingPoliteRaf && typeof cancelAnimationFrame === 'function') {
-    cancelAnimationFrame(_a11yPendingPoliteRaf);
-    _a11yPendingPoliteRaf = null;
-  }
-  const generation = ++_a11yAnnounceGeneration;
+  _a11yCancelPoliteChannel();
+  const generation = _a11yPoliteGeneration;
+  _a11yPoliteMeta = { ownerSid, completedSid, streamId, terminal };
   const finalText = _a11yAlternateIdentical(text, _a11yLastPoliteText);
   _a11yLastPoliteText = finalText;
   el.textContent = '';
   const applyText = () => {
     _a11yPendingPoliteRaf = null;
-    if (generation !== _a11yAnnounceGeneration) return;
-    if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
+    if (generation !== _a11yPoliteGeneration) return;
+    if ((ownerSid || completedSid) && !_a11yIsActiveSession(ownerSid, completedSid)) {
+      _a11yPoliteMeta = null;
+      return;
+    }
     el.textContent = finalText;
     if (durationMs > 0) {
-      _a11yPoliteTimerOwner = ownerSid;
       _a11yPoliteTimer = setTimeout(() => {
-        if (generation === _a11yAnnounceGeneration && el.textContent === finalText) {
+        if (generation === _a11yPoliteGeneration && el.textContent === finalText) {
           el.textContent = '';
         }
-        _a11yPoliteTimer = null;
-        _a11yPoliteTimerOwner = null;
+        if (generation === _a11yPoliteGeneration) {
+          _a11yPoliteTimer = null;
+          _a11yPoliteMeta = null;
+        }
       }, durationMs);
     }
   };
@@ -138,37 +190,36 @@ function announceA11yPolite(message, durationMs = 2500, opts = {}) {
 function announceA11yAssertive(message, durationMs = 4000, opts = {}) {
   const text = String(message || '').trim();
   if (!text) return;
-  const ownerSid = (opts && (opts.sessionId || opts.ownerSid)) || _a11yActiveStreamSid || null;
+  const ownerSid = (opts && (opts.sessionId || opts.ownerSid)) || _a11yActiveStreamSid || _a11yCurrentSessionId() || null;
   const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || null;
-  if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
+  const streamId = (opts && opts.streamId) || (!(opts && opts.terminal) ? _a11yActiveStreamId : null) || null;
+  const terminal = !!(opts && opts.terminal);
+  if ((ownerSid || completedSid) && !_a11yIsActiveSession(ownerSid, completedSid)) return;
   const el = _ensureA11yLiveRegion('a11yAlertAnnouncer', 'alert', 'assertive');
   if (!el) return;
-  if (_a11yAssertiveTimer) {
-    clearTimeout(_a11yAssertiveTimer);
-    _a11yAssertiveTimer = null;
-    _a11yAssertiveTimerOwner = null;
-  }
-  if (_a11yPendingAssertiveRaf && typeof cancelAnimationFrame === 'function') {
-    cancelAnimationFrame(_a11yPendingAssertiveRaf);
-    _a11yPendingAssertiveRaf = null;
-  }
-  const generation = ++_a11yAnnounceGeneration;
+  _a11yCancelAssertiveChannel();
+  const generation = _a11yAssertiveGeneration;
+  _a11yAssertiveMeta = { ownerSid, completedSid, streamId, terminal };
   const finalText = _a11yAlternateIdentical(text, _a11yLastAssertiveText);
   _a11yLastAssertiveText = finalText;
   el.textContent = '';
   const applyText = () => {
     _a11yPendingAssertiveRaf = null;
-    if (generation !== _a11yAnnounceGeneration) return;
-    if (ownerSid && !_a11yIsActiveSession(ownerSid, completedSid)) return;
+    if (generation !== _a11yAssertiveGeneration) return;
+    if ((ownerSid || completedSid) && !_a11yIsActiveSession(ownerSid, completedSid)) {
+      _a11yAssertiveMeta = null;
+      return;
+    }
     el.textContent = finalText;
     if (durationMs > 0) {
-      _a11yAssertiveTimerOwner = ownerSid;
       _a11yAssertiveTimer = setTimeout(() => {
-        if (generation === _a11yAnnounceGeneration && el.textContent === finalText) {
+        if (generation === _a11yAssertiveGeneration && el.textContent === finalText) {
           el.textContent = '';
         }
-        _a11yAssertiveTimer = null;
-        _a11yAssertiveTimerOwner = null;
+        if (generation === _a11yAssertiveGeneration) {
+          _a11yAssertiveTimer = null;
+          _a11yAssertiveMeta = null;
+        }
       }, durationMs);
     }
   };
@@ -231,16 +282,32 @@ function a11ySetStreamBusy(busy, sessionId, opts = {}) {
 function a11yResetStreamState(sessionId, opts = {}) {
   const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || null;
   const streamId = (opts && opts.streamId) || null;
-  if (streamId && _a11yActiveStreamId && _a11yActiveStreamId !== streamId) return;
-  if (sessionId && _a11yActiveStreamSid && _a11yActiveStreamSid !== sessionId && (!completedSid || _a11yActiveStreamSid !== completedSid)) {
+  const isOwnerStream = !!(
+    _a11yActiveStreamSid &&
+    (!sessionId || _a11yActiveStreamSid === sessionId || (!!completedSid && _a11yActiveStreamSid === completedSid)) &&
+    (!streamId || !_a11yActiveStreamId || _a11yActiveStreamId === streamId)
+  );
+  const isActiveView = _a11yIsActiveSession(sessionId, completedSid);
+
+  if (streamId && _a11yActiveStreamId && _a11yActiveStreamId !== streamId) {
+    _a11yCancelPendingAnnouncements(sessionId, opts);
     return;
   }
+  if (sessionId && _a11yActiveStreamSid && _a11yActiveStreamSid !== sessionId && (!completedSid || _a11yActiveStreamSid !== completedSid)) {
+    _a11yCancelPendingAnnouncements(sessionId, opts);
+    return;
+  }
+  if (sessionId && !isOwnerStream && !isActiveView) {
+    _a11yCancelPendingAnnouncements(sessionId, opts);
+    return;
+  }
+
   a11ySetStreamBusy(false, sessionId, opts);
   _a11yActiveStreamSid = null;
   _a11yActiveStreamId = null;
   _a11yActiveStreamAnnouncedStart = false;
   _a11yLastToolAnnounceAt = 0;
-  _a11yCancelPendingAnnouncements(sessionId || completedSid);
+  _a11yCancelPendingAnnouncements(sessionId, opts);
 }
 
 function a11yOnStreamStart(sessionId, opts = {}) {
@@ -253,7 +320,10 @@ function a11yOnStreamStart(sessionId, opts = {}) {
   _a11yActiveStreamSid = sessionId || null;
   _a11yActiveStreamId = streamId;
   a11ySetStreamBusy(true, sessionId);
-  if (reconnecting || isSameStream) return;
+  if (reconnecting || isSameStream) {
+    _a11yActiveStreamAnnouncedStart = true;
+    return;
+  }
   _a11yActiveStreamAnnouncedStart = true;
   _a11yLastToolAnnounceAt = 0;
   const name = _a11yAssistantName();
@@ -401,33 +471,54 @@ function a11yFormatAssistantReplyAnnouncement(rawText, opts = {}) {
 
 function a11yOnStreamDone(sessionId, opts = {}) {
   const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || sessionId;
+  const streamId = (opts && opts.streamId) || null;
   const isActive = _a11yIsActiveSession(sessionId, completedSid);
-  a11yResetStreamState(sessionId, opts);
+  a11yResetStreamState(sessionId, { ...opts, retiringTurn: true });
   if (!isActive) return;
   const rawText = _a11yExtractResponseText(opts, completedSid);
   const announcement = a11yFormatAssistantReplyAnnouncement(rawText, opts);
   // Pass durationMs = 0 so longer spoken responses are never cleared mid-speech
   // by a timer; the live region will be cleared on the next announcement.
-  announceA11yPolite(announcement, 0, { sessionId: completedSid });
+  announceA11yPolite(announcement, 0, {
+    sessionId: completedSid,
+    ownerSid: sessionId,
+    completedSid,
+    streamId,
+    terminal: true,
+  });
 }
 
 function a11yOnStreamCancel(sessionId, opts = {}) {
   const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || sessionId;
+  const streamId = (opts && opts.streamId) || null;
   const isActive = _a11yIsActiveSession(sessionId, completedSid);
-  a11yResetStreamState(sessionId, opts);
+  a11yResetStreamState(sessionId, { ...opts, retiringTurn: true });
   if (!isActive) return;
   const cancelLabel = _a11yTranslate('a11y_response_cancelled', 'Response cancelled');
-  announceA11yPolite(cancelLabel, 3000, { sessionId: completedSid });
+  announceA11yPolite(cancelLabel, 3000, {
+    sessionId: completedSid,
+    ownerSid: sessionId,
+    completedSid,
+    streamId,
+    terminal: true,
+  });
 }
 
 function a11yOnStreamError(sessionId, errorMessage, opts = {}) {
   const completedSid = (opts && (opts.completedSid || opts.canonicalSid)) || sessionId;
+  const streamId = (opts && opts.streamId) || null;
   const isActive = _a11yIsActiveSession(sessionId, completedSid);
-  a11yResetStreamState(sessionId, opts);
+  a11yResetStreamState(sessionId, { ...opts, retiringTurn: true });
   if (!isActive) return;
   const detail = String(errorMessage || '').trim();
   const fallback = _a11yTranslate('a11y_response_error', 'Response interrupted by an error');
-  announceA11yAssertive(detail ? `${fallback}: ${detail}` : fallback, 4500, { sessionId: completedSid });
+  announceA11yAssertive(detail ? `${fallback}: ${detail}` : fallback, 4500, {
+    sessionId: completedSid,
+    ownerSid: sessionId,
+    completedSid,
+    streamId,
+    terminal: true,
+  });
 }
 
 if (typeof window !== 'undefined') {
