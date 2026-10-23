@@ -8892,7 +8892,7 @@ def _repair_bare_custom_provider_model(
             return None
         from api.config import (
             _custom_provider_entries,
-            _custom_provider_slug_from_name,
+            _custom_provider_slug_for_entry,
             get_config,
         )
 
@@ -8908,7 +8908,7 @@ def _repair_bare_custom_provider_model(
         _matching_cp = None
         for _entry in _entries:
             entry_name = str(_entry.get("name") or "").strip().lower()
-            slug = _custom_provider_slug_from_name(_entry.get("name"))
+            slug = _custom_provider_slug_for_entry(_entry)
             if not slug:
                 continue
             if (
@@ -25446,7 +25446,7 @@ def _handle_live_models(handler, parsed):
                 if not (provider == "custom" or provider.startswith("custom:")):
                     return []
                 try:
-                    from api.config import _custom_provider_slug_from_name
+                    from api.config import _custom_provider_slug_for_entry
                     _cp_entries = cfg.get("custom_providers", [])
                     if not isinstance(_cp_entries, list):
                         return []
@@ -25454,7 +25454,7 @@ def _handle_live_models(handler, parsed):
                     for _cp in _cp_entries:
                         if not isinstance(_cp, dict):
                             continue
-                        _slug = _custom_provider_slug_from_name(_cp.get("name", ""))
+                        _slug = _custom_provider_slug_for_entry(_cp)
                         if provider.startswith("custom:"):
                             if _slug == provider:
                                 _matches.append(_cp)

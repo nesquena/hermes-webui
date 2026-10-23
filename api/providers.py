@@ -37,7 +37,8 @@ from api.config import (
     _PROVIDER_MODELS,
     _coerce_provider_cost_budget,
     _configured_model_ids,
-    _custom_provider_slug_from_name,
+    _custom_provider_slug_for_entry,
+    _custom_provider_slug_keys_for_record,
     _get_label_for_model,
     _models_from_live_provider_ids,
     _pool_entry_payloads,
@@ -64,17 +65,28 @@ def _provider_env_var_for(provider_id: str) -> str | None:
     return effective_provider_env_var(provider_id, _PROVIDER_ENV_VAR)
 
 
-def _custom_provider_name_matches(provider_id: str, name: object) -> bool:
-    """Return True when *provider_id* refers to a named custom provider."""
+def _custom_provider_name_matches(provider_id: str, cp: object) -> bool:
+    """Return True when *provider_id* refers to the named custom-provider record *cp*.
+
+    Record-aware identity: a record is recognised by ANY bare key it owns —
+    its name-derived slug (the historical contract for ASCII names) and, when
+    the name slugifies empty (e.g. a pure-CJK name), every key the catalog's
+    fallback can mint for it (provider_key slug/hash, endpoint slugs, name
+    hash) — so a selection advertised as ``@custom:<fallback-slug>:model``
+    round-trips back to its record (#8017).
+    ``_custom_provider_slug_keys_for_record`` mirrors the catalog's identity
+    production EXACTLY, so the credential/key lookups stay in agreement with
+    ``resolve_model_provider()``.
+    """
     pid = str(provider_id or "").strip().lower()
-    raw_name = str(name or "").strip().lower()
-    if not pid or not raw_name:
+    if not pid:
         return False
-    slug = _custom_provider_slug_from_name(raw_name)
-    candidates = {raw_name, f"custom:{raw_name}"}
-    if slug:
-        candidates.add(slug)
-    return pid in candidates
+    if not isinstance(cp, dict):
+        return False
+    if not str(cp.get("name") or "").strip():
+        return False
+    bare = pid.split(":", 1)[1] if pid.startswith("custom:") else pid
+    return bare in _custom_provider_slug_keys_for_record(cp)
 
 _OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/key"
 _PROVIDER_QUOTA_TIMEOUT_SECONDS = 3.0
@@ -1251,7 +1263,7 @@ def _provider_has_shadowed_codex_oauth_value(provider_id: str) -> bool:
     custom_providers = cfg.get("custom_providers", [])
     if isinstance(custom_providers, list):
         for cp in custom_providers:
-            if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp.get("name")):
+            if isinstance(cp, dict) and _custom_provider_name_matches(provider_id, cp):
                 cp_key = cp.get("api_key")
                 if isinstance(cp_key, str) and cp_key.startswith("${") and cp_key.endswith("}"):
                     values.append(_thread_local_env_value(cp_key[2:-1]))
@@ -1422,7 +1434,7 @@ def _provider_has_key(provider_id: str) -> bool:
     if isinstance(custom_providers, list):
         for cp in custom_providers:
             if isinstance(cp, dict):
-                if _custom_provider_name_matches(provider_id, cp.get("name")):
+                if _custom_provider_name_matches(provider_id, cp):
                     if _provider_value_counts_as_api_key(provider_id, cp.get("api_key")):
                         return True
     return False
@@ -1470,7 +1482,7 @@ def _get_provider_api_key(provider_id: str) -> str | None:
         for cp in custom_providers:
             if not isinstance(cp, dict):
                 continue
-            if _custom_provider_name_matches(provider_id, cp.get("name")):
+            if _custom_provider_name_matches(provider_id, cp):
                 cp_key = str(cp.get("api_key") or "").strip()
                 if cp_key.startswith("${") and cp_key.endswith("}"):
                     return _thread_local_env_value(cp_key[2:-1]).strip() or None
@@ -2920,7 +2932,7 @@ def get_providers() -> dict[str, Any]:
             if not isinstance(cp, dict) or not cp.get("name"):
                 continue
             cp_name = str(cp["name"]).strip()
-            cp_id = _custom_provider_slug_from_name(cp_name)
+            cp_id = _custom_provider_slug_for_entry(cp)
             if not cp_id:
                 logger.warning(
                     "Custom provider entry %r produced empty slug; skipping",
@@ -3132,7 +3144,7 @@ def _clean_provider_key_from_config(provider_id: str) -> None:
             if isinstance(custom_providers, list):
                 for cp in custom_providers:
                     if isinstance(cp, dict):
-                        if _custom_provider_name_matches(provider_id, cp.get("name")):
+                        if _custom_provider_name_matches(provider_id, cp):
                             if cp.get("api_key"):
                                 del cp["api_key"]
                                 changed = True

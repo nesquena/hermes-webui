@@ -1656,7 +1656,7 @@ def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
         for slug in (
-            _custom_provider_slug_from_name(entry.get("name"))
+            _custom_provider_slug_for_entry(entry)
             for entry in _custom_provider_entries(config_obj)
         )
         if slug
@@ -1673,7 +1673,7 @@ def _named_custom_provider_slug_for_provider(
     raw_suffix = raw.removeprefix("custom:")
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
-        slug = _custom_provider_slug_from_name(entry_name)
+        slug = _custom_provider_slug_for_entry(entry)
         if not entry_name or not slug:
             continue
         if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
@@ -1808,6 +1808,105 @@ def _custom_endpoint_slugs_for_base_url(value: object) -> set[str]:
     return {f"custom:{host}:{port}", f"custom:{host}-{port}"}
 
 
+def _named_custom_slug_fallback(record: dict, name: str) -> str:
+    """Deterministic ASCII slug for a custom_providers entry with no slugable name.
+
+    ``_custom_provider_slug_from_name()`` returns ``""`` for a name made only of
+    non-ASCII characters (e.g. a pure-CJK name), which made the catalog builder
+    drop the whole entry: its models never reached the picker while the CLI
+    kept working (#8017). Derive a stable identity instead, in order:
+
+    1. an explicit ``provider_key`` (the user's own handle for the endpoint);
+    2. the endpoint-derived slug shape (``custom:<host>-<port>``);
+    3. a short stable hash of the name.
+
+    Returns ``""`` only when the record offers none of these (no key, no
+    usable base_url) — the caller records a diagnostic in that case.
+    """
+    provider_key = str(record.get("provider_key") or "").strip()
+    if provider_key:
+        slug = _custom_provider_slug_from_name(provider_key)
+        if slug:
+            return slug
+        # A non-ASCII provider_key is still a stable, user-chosen identity.
+        digest = hashlib.sha1(provider_key.encode("utf-8")).hexdigest()[:8]
+        return f"custom:{digest}"
+
+    base_url = str(record.get("base_url") or "").strip()
+    endpoint_slugs = _custom_endpoint_slugs_for_base_url(base_url)
+    # Prefer the hyphenated form: it is the one that stays a single path
+    # segment / safe identifier in every downstream consumer.
+    for candidate in sorted(endpoint_slugs):
+        if ":" not in candidate.split(":", 1)[1]:
+            return candidate
+    if endpoint_slugs:
+        return sorted(endpoint_slugs)[0]
+
+    digest = hashlib.sha1(str(name).encode("utf-8")).hexdigest()[:8]
+    return f"custom:{digest}"
+
+
+def _custom_provider_slug_for_entry(entry: dict) -> str:
+    """The slug identity the catalog advertises for a ``custom_providers[]`` entry.
+
+    Name-derived slug when the name slugifies non-empty (the historical
+    contract — an ASCII name keeps exactly the identity it always had), else
+    the SAME deterministic fallback the catalog builder uses so a non-ASCII-only
+    name (e.g. a pure-CJK name) still gets one stable ASCII identity. Returns
+    ``""`` only for a blank name — the catalog treats unnamed entries as
+    generic ``custom`` and never advertises one under a slug.
+    """
+    if not isinstance(entry, dict):
+        return ""
+    name = str(entry.get("name") or "").strip()
+    if not name:
+        return ""
+    return _custom_provider_slug_from_name(name) or _named_custom_slug_fallback(entry, name)
+
+
+def _custom_provider_slug_keys_for_record(entry: dict) -> set[str]:
+    """Canonical bare identity keys (no ``custom:`` prefix) an entry owns.
+
+    Mirrors the catalog's identity production EXACTLY, so a selection advertised
+    under any identity the catalog can mint for the entry resolves BACK to it
+    (#8017 round-trip). An entry whose name slugifies non-empty owns ONLY that
+    name-derived key — the historical contract, and no new collision surface
+    for ASCII names. A name that slugifies to ``""`` owns every key the
+    catalog's fallback may mint for it:
+
+    * the explicit ``provider_key`` (slugified, else the fallback's short
+      stable SHA-1 of the raw key);
+    * the endpoint-derived slug shapes (``<host>:<port>`` and
+      ``<host>-<port>``, the same pair ``_custom_endpoint_slugs_for_base_url``
+      recognises);
+    * a short stable SHA-1 of the name.
+
+    Returns an empty set for a blank name: the catalog never advertises an
+    unnamed entry under a slug identity.
+    """
+    keys: set[str] = set()
+    name = str(entry.get("name") or "").strip()
+    if not name:
+        return keys
+    name_slug = _custom_provider_slug_from_name(name)
+    if name_slug:
+        keys.add(_custom_provider_slug_key(name_slug))
+        return keys
+    provider_key = str(entry.get("provider_key") or "").strip()
+    if provider_key:
+        pk_slug = _custom_provider_slug_from_name(provider_key)
+        if pk_slug:
+            keys.add(_custom_provider_slug_key(pk_slug))
+        else:
+            # The fallback's hashed form for a non-ASCII provider_key
+            # (``custom:<sha1[:8]>``) is still a stable, user-chosen identity.
+            keys.add(hashlib.sha1(provider_key.encode("utf-8")).hexdigest()[:8])
+    for candidate in _custom_endpoint_slugs_for_base_url(entry.get("base_url")):
+        keys.add(_custom_provider_slug_key(candidate))
+    keys.add(hashlib.sha1(str(name).encode("utf-8")).hexdigest()[:8])
+    return keys
+
+
 _LEGACY_CUSTOM_API_KEY_ENV_WARNED: set[str] = set()
 
 
@@ -1862,7 +1961,7 @@ def _named_custom_provider_slug_for_base_url(
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        return _custom_provider_slug_for_entry(entry)
     return ""
 
 
@@ -2723,9 +2822,11 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
         for entry in _custom_provider_entries():
-            slug = _custom_provider_slug_from_name(entry.get("name"))
             entry_name = str(entry.get("name") or "").strip().lower()
-            if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
+            if not (
+                (entry_name and prov == entry_name)
+                or raw_suffix in _custom_provider_slug_keys_for_record(entry)
+            ):
                 continue
             if str(entry.get("model") or "").strip() == model:
                 return True
@@ -2960,6 +3061,13 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     entries share the key so an endpoint and an API key can never be resolved
     from different entries on any path. Returns the matching entry, or ``None``
     when no entry matches.
+
+    An entry matches when the key is ANY identity it owns — its name-derived
+    slug, or (for a name that slugifies empty, e.g. non-ASCII-only) every key
+    the catalog's fallback can mint for it (provider_key, endpoint slugs, name
+    hash). This is the mirror half of the catalog-side fix: the picker
+    advertises ``@custom:<fallback-slug>:model``, so the resolver and the
+    record selection must recognise that slug as THIS entry's (#8017).
     """
     if not slug_key or not isinstance(custom_providers, list):
         return None
@@ -2967,10 +3075,7 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
     for entry in custom_providers:
         if not isinstance(entry, dict):
             continue
-        name = str(entry.get("name") or "").strip()
-        if not name:
-            continue
-        if _custom_provider_slug_key(name) == slug_key:
+        if slug_key in _custom_provider_slug_keys_for_record(entry):
             matches.append(entry)
     if len(matches) >= 2:
         names = [str(e.get("name") or "").strip() for e in matches]
@@ -3164,7 +3269,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
-                    and _custom_provider_slug_key(e.get('name')) == _active_key
+                    and _active_key in _custom_provider_slug_keys_for_record(e)
                 ),
                 None,
             )
@@ -3191,7 +3296,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 entry_model_ids.add(entry_model)
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
-                provider_hint = _custom_provider_slug_from_name(entry_name)
+                provider_hint = _custom_provider_slug_for_entry(entry)
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
                 return _finalize(model_id, provider_hint, entry_base_url or None)
@@ -3345,7 +3450,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
-                        _slug = _custom_provider_slug_from_name(prefix)
+                        _slug = _custom_provider_slug_for_entry(_entry)
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 
@@ -5939,7 +6044,7 @@ def _resolve_model_reasoning_efforts_impl(
     try:
         if provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
-                if _custom_provider_slug_from_name(_entry.get("name")) == provider:
+                if provider == _custom_provider_slug_for_entry(_entry):
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
@@ -7639,7 +7744,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         for entry in _custom_provider_entries(cfg):
             provider_name = str(entry.get("name") or "").strip()
-            provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
+            provider_slug = _custom_provider_slug_for_entry(entry) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
@@ -10152,7 +10257,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         continue
                     entry_name = str(entry.get("name") or "").strip()
                     if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
+                        return _custom_provider_slug_for_entry(entry)
                     return "custom"
 
             return ""
@@ -10502,6 +10607,15 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                     continue
                 _cp_name = (_cp.get("name") or "").strip()
                 _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
+                if not _slug and _cp_name:
+                    # A name with no ASCII characters at all (e.g. a pure-CJK
+                    # name) slugifies to "" — the entry used to be dropped
+                    # silently, so its models never reached the picker while
+                    # the CLI kept working (#8017). Fall back to an explicit
+                    # provider_key, then to the endpoint-derived slug shape,
+                    # then to a short stable hash so the record always has a
+                    # stable ASCII identity to round-trip.
+                    _slug = _named_custom_slug_fallback(_cp, _cp_name)
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
