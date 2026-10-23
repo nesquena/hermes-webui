@@ -1,4 +1,4 @@
-name: Conversation lifecycle (informational)
+name: Conversation lifecycle
 
 # Scoped to the code this browser gate actually exercises — the chat
 # render/streaming surface — so it doesn't spin up playwright+chromium on
@@ -16,6 +16,9 @@ on:
       - 'tests/browser_historical_transcript_hydration.py'
       - 'tests/browser_reconnect_scene_redraw.py'
       - 'tests/browser_settle_visibility_7676.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_running_ring_inset.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -30,6 +33,10 @@ on:
       - 'tests/browser_historical_transcript_hydration.py'
       - 'tests/browser_reconnect_scene_redraw.py'
       - 'tests/browser_settle_visibility_7676.py'
+      - 'tests/browser_live_scene_energy.py'
+      - 'tests/browser_progress_animation.py'
+      - 'tests/browser_running_ring_inset.py'
+      - 'tests/browser_transparent_fade_mutations.py'
       - 'requirements*.txt'
       - 'pyproject.toml'
       - '.github/workflows/conversation-lifecycle.yml'
@@ -68,6 +75,15 @@ jobs:
           - name: settle-visibility-7676
             script: tests/browser_settle_visibility_7676.py
             browsers: chromium
+          - name: live-scene-energy
+            script: tests/browser_live_scene_energy.py
+            browsers: chromium
+          - name: progress-animation
+            script: tests/browser_progress_animation.py
+            browsers: chromium
+          - name: running-ring-inset
+            script: tests/browser_running_ring_inset.py
+            browsers: chromium
     steps:
       - uses: actions/checkout@v4
 
@@ -80,6 +96,15 @@ jobs:
             **/requirements*.txt
             **/pyproject.toml
             .github/workflows/conversation-lifecycle.yml
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # Key on the lockfiles + this workflow: a dependency bump that moves
+          # the Playwright version rebuilds the cache instead of replaying a
+          # browser tree the installed driver can't launch.
+          key: playwright-chromium-${{ runner.os }}-${{ hashFiles('requirements*.txt', '.github/workflows/conversation-lifecycle.yml') }}
 
       - name: Install browser gate dependencies
         run: |
