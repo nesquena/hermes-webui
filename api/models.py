@@ -11261,6 +11261,40 @@ def _decode_state_db_content(value):
     return decoded
 
 
+def _dedupe_display_history_rows(rows):
+    """One row per ``display_order`` group for a display-projection read (#8195).
+
+    Compaction archives the originals and re-inserts carried rows (and the
+    replayed user turn) beside them, so an ``active = 1 OR compacted = 1`` read
+    can hand back several rows for one logical message. Mirror hermes-state's
+    display read: paint each group once, preferring the live row and then the
+    newest row, and keep durable id order. Rows without a ``display_order``
+    (legacy stores) keep their own slot.
+    """
+    def group_key(row):
+        keys = row.keys()
+        display_order = row['display_order'] if 'display_order' in keys else None
+        if display_order is None:
+            return ('row', row['id'] if 'id' in keys else id(row))
+        return ('order', display_order)
+
+    def rank(row):
+        keys = row.keys()
+        row_id = row['id'] if 'id' in keys else 0
+        return (
+            1 if ('active' in keys and row['active'] == 1) else 0,
+            row_id if isinstance(row_id, int) else 0,
+        )
+
+    winners = {}
+    for row in rows:
+        key = group_key(row)
+        current = winners.get(key)
+        if current is None or rank(row) > rank(current):
+            winners[key] = row
+    return [row for row in rows if winners.get(group_key(row)) is row]
+
+
 def _project_state_db_message(row, available, id_col, optional, *, include_row_identity=False):
     """Authoritative state.db row → WebUI message projection (#6826 r4).
 
@@ -11315,6 +11349,7 @@ def get_state_db_session_messages(
     profile=None,
     since_timestamp=None,
     include_inactive: bool = False,
+    include_compacted: bool = False,
     limit=None,
     include_row_identity: bool = False,
     with_revision: Literal[False] = False,
@@ -11329,6 +11364,7 @@ def get_state_db_session_messages(
     profile=None,
     since_timestamp=None,
     include_inactive: bool = False,
+    include_compacted: bool = False,
     limit=None,
     include_row_identity: bool = False,
     with_revision: Literal[True],
@@ -11342,6 +11378,7 @@ def get_state_db_session_messages(
     profile=None,
     since_timestamp=None,
     include_inactive: bool = False,
+    include_compacted: bool = False,
     limit=None,
     include_row_identity: bool = False,
     with_revision: bool = False,
@@ -11375,6 +11412,14 @@ def get_state_db_session_messages(
     ``active=0`` archive rows back in resurrects pre-compaction history and can
     make every later turn re-trigger compression. Pass ``include_inactive=True``
     only for explicit recovery/audit views.
+
+    ``include_compacted=True`` is the narrower DISPLAY projection (#8195): it
+    mirrors hermes-state's ``get_messages(include_compacted=True)`` read —
+    ``active = 1 OR compacted = 1``, one row per ``display_order`` group — so
+    compaction-archived transcript history stays visible while Undo/Rewind rows
+    (``active=0, compacted=0``) stay excluded and the model-context read keeps
+    its default active-only shape. Use it only for rendering the transcript,
+    never for building the next model context.
 
     ``with_revision=True`` returns a :class:`StateDBSessionMessagesSnapshot`.
     Its revision is derived from the exact rows fetched by the same SQLite
@@ -11429,12 +11474,26 @@ def get_state_db_session_messages(
                     revision_cols.append('active')
                 if 'api_content' in available:
                     revision_cols.append('api_content')
+            # Display projection (#8195): compaction-archived rows are visible
+            # only when both flags exist, and never in an audit read.
+            display_history = (
+                bool(include_compacted)
+                and not include_inactive
+                and {'active', 'compacted'} <= available
+            )
             selected = (
                 id_col
                 + ['role', 'content', 'timestamp']
                 + revision_cols
                 + [c for c in optional if c in available]
             )
+            if display_history:
+                # Grouping keys for the display_order dedupe; private, they are
+                # not part of ``optional`` so the projection drops them again.
+                selected += [
+                    c for c in ('active', 'display_order')
+                    if c in available and c not in selected
+                ]
 
             session_chain = [str(sid)]
             if stitch_continuations:
@@ -11509,7 +11568,13 @@ def get_state_db_session_messages(
                     params.append(since_ts)
             active_clause = ""
             if 'active' in available and not include_inactive:
-                active_clause = " AND (active IS NULL OR active != 0)"
+                if display_history:
+                    # hermes-state's display read: compaction-archived history
+                    # stays painted (#8195); rewind rows (active=0,
+                    # compacted=0) still stay out.
+                    active_clause = " AND (active = 1 OR compacted = 1)"
+                else:
+                    active_clause = " AND (active IS NULL OR active != 0)"
             durable_order_column = 'id' if 'id' in available else 'timestamp'
             # Defensive row cap (backstop only — see docstring). Applied as a
             # SQL LIMIT bound parameter (?) so the tail (newest) rows are
@@ -11547,6 +11612,8 @@ def get_state_db_session_messages(
                     ORDER BY {durable_order_column} ASC
                 """, params)
             rows = cur.fetchall()
+            if display_history:
+                rows = _dedupe_display_history_rows(rows)
             revision = None
             if (
                 with_revision
@@ -11556,6 +11623,7 @@ def get_state_db_session_messages(
                 and str(session_chain[0]) == str(sid)
                 and since_timestamp is None
                 and not include_inactive
+                and not display_history
                 and limit is None
                 and all(row['active'] == 1 for row in rows)
             ):
@@ -14008,12 +14076,17 @@ def _tool_call_assistant_should_precede_content_assistant(existing: dict, msg: d
     )
 
 
-def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
+def _insert_state_message_chronologically(messages: list, msg: dict, *, allow_before_sidecar_start: bool = False) -> bool:
     """Insert a state.db-only row before newer sidecar rows when safe.
 
     Returns False when the only chronological slot would resurrect an old state
     row before the sidecar/context begins. This keeps no-watermark compression
     display paths from reintroducing rows that were already compacted out.
+
+    ``allow_before_sidecar_start`` is set by the display-projection merge
+    (#8195): rows read back through ``include_compacted`` are the transcript the
+    Desktop app paints, so a sidecar that was materialized from the post-
+    compaction active rows must not hide them.
     """
     timestamp = _message_timestamp_as_float(msg)
     if timestamp is None:
@@ -14039,7 +14112,12 @@ def _insert_state_message_chronologically(messages: list, msg: dict) -> bool:
         if not should_insert:
             idx += 1
             continue
-        if idx == 0 and existing_timestamp is not None and existing_timestamp > timestamp:
+        if (
+            idx == 0
+            and existing_timestamp is not None
+            and existing_timestamp > timestamp
+            and not allow_before_sidecar_start
+        ):
             # With no surviving sidecar/context row before this slot, a real
             # interruption rescue is indistinguishable from a compacted-out old
             # prompt; prefer avoiding no-watermark resurrection in that shape.
@@ -14113,11 +14191,19 @@ def merge_session_messages_append_only(
     cancelled_journal_owner_messages: list | None = None,
     cancelled_journal_source_messages: list | None = None,
     cancelled_journal_prefix_start_verified: bool = False,
+    display_history: bool = False,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
     Thin wrapper that scopes the structured-content identity memo to this one
     call; see :func:`_merge_session_messages_append_only_impl` for the merge.
+
+    ``display_history`` marks *state_messages* as a display-projection read
+    (``get_state_db_session_messages(include_compacted=True)``, #8195): rows that
+    predate the sidecar start are compaction-archived transcript history the
+    Desktop app still paints, so the chronological insert may place them in
+    front of the sidecar instead of treating them as a resurrection. Model-
+    context merges never set it.
     """
     token = _STRUCTURED_IDENTITY_MEMO.set({})
     try:
@@ -14130,6 +14216,7 @@ def merge_session_messages_append_only(
             cancelled_journal_owner_messages=cancelled_journal_owner_messages,
             cancelled_journal_source_messages=cancelled_journal_source_messages,
             cancelled_journal_prefix_start_verified=cancelled_journal_prefix_start_verified,
+            display_history=display_history,
         )
     finally:
         _STRUCTURED_IDENTITY_MEMO.reset(token)
@@ -14228,6 +14315,7 @@ def _merge_session_messages_append_only_impl(
     cancelled_journal_owner_messages=None,
     cancelled_journal_source_messages=None,
     cancelled_journal_prefix_start_verified=False,
+    display_history=False,
 ) -> list:
     """Merge sidecar/context and state.db messages without deleting local rows.
 
@@ -14885,7 +14973,9 @@ def _merge_session_messages_append_only_impl(
                 if same_durable_row:
                     _merge_session_display_metadata(duplicate, msg)
                     continue
-            if not _insert_state_message_chronologically(merged_messages, msg):
+            if not _insert_state_message_chronologically(
+                merged_messages, msg, allow_before_sidecar_start=display_history,
+            ):
                 merged_messages.append(msg)
             seen_message_keys.add(key)
             seen_dedup_keys.add(dedup_key)
@@ -15068,7 +15158,9 @@ def _merge_session_messages_append_only_impl(
                         # the row in timestamp order. Falling through to the
                         # generic append path would move older tool-call-only
                         # assistant rows after the settled final answer.
-                        if _insert_state_message_chronologically(merged_messages, msg):
+                        if _insert_state_message_chronologically(
+                            merged_messages, msg, allow_before_sidecar_start=display_history,
+                        ):
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
@@ -15080,7 +15172,9 @@ def _merge_session_messages_append_only_impl(
                         continue
                 else:
                     if msg.get("role") == "user" and content_key not in seen_content_keys:
-                        if _insert_state_message_chronologically(merged_messages, msg):
+                        if _insert_state_message_chronologically(
+                            merged_messages, msg, allow_before_sidecar_start=display_history,
+                        ):
                             seen_message_keys.add(key)
                             seen_dedup_keys.add(dedup_key)
                             seen_content_keys.add(content_key)
@@ -15105,7 +15199,9 @@ def _merge_session_messages_append_only_impl(
             and timestamp is not None
             and timestamp < max_sidecar_timestamp
         ):
-            if not _insert_state_message_chronologically(merged_messages, msg):
+            if not _insert_state_message_chronologically(
+                merged_messages, msg, allow_before_sidecar_start=display_history,
+            ):
                 merged_messages.append(msg)
         else:
             merged_messages.append(msg)
