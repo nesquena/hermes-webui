@@ -2360,6 +2360,8 @@ async function newSession(flash, options={}){
     S.toolCalls=[];
     _messagesTruncated=false;
     _oldestIdx=0;
+    _loadingSessionId=null;
+    _loadSessionGeneration++;
     clearLiveToolCards();
     // Chat-header/rail "+" (btnNewChat) with an active project filter applies
     // that project's bindings (default workspace / model) exactly
@@ -4297,7 +4299,9 @@ async function _ensureMessagesLoaded(sid, opts) {
   // S.messages in a single frame.
   opts = opts || {};
   const _loadGeneration = Number.isFinite(opts.loadGeneration) ? Number(opts.loadGeneration) : null;
-  const _ownsLoad = () => _loadingSessionId === sid && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration);
+  const _ownsLoad = () => _loadingSessionId === sid
+    && (_loadGeneration === null || _loadSessionGeneration === _loadGeneration)
+    && S.session && S.session.session_id === sid;
   if (!_ownsLoad()) return;
   // Metadata-only reads omit regeneration authority. Cached rows alone do
   // not prove that the current session payload can authorize regeneration.
