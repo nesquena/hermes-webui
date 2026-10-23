@@ -1960,8 +1960,49 @@ def _preferred_agent_display_name_for_session(session) -> str:
     return _preferred_agent_display_name()
 
 
-def _cancelled_turn_hint(agent_name: str | None = None) -> str:
+CANCEL_INITIATOR_USER = 'user'
+# The WebUI server itself stopped the run (#7293: shutdown drain deadline,
+# escalated stop, or a forced update restart). The copy must not claim the
+# user cancelled it.
+CANCEL_INITIATOR_SERVER = 'server'
+
+
+def _cancel_initiator_is_server(initiator) -> bool:
+    return str(initiator or '').strip().lower() == CANCEL_INITIATOR_SERVER
+
+
+# stream_id -> reason, for runs a server settle is cancelling (#7293). Recorded
+# before the cancellation is published. When the settle cannot get the session
+# lock in time it falls back to interrupting first, and the released worker may
+# then finalize the turn itself; it reads this to write the server marker and
+# keep the partial output instead of the user-cancel copy. Dropped by the
+# worker's stream teardown.
+_SERVER_SETTLE_REASONS: dict[str, str] = {}
+
+
+def _server_settle_reason(stream_id) -> str | None:
+    if not stream_id:
+        return None
+    return _SERVER_SETTLE_REASONS.get(str(stream_id))
+
+
+def _worker_cancel_event_payload(stream_id) -> dict:
+    """The worker's own terminal cancel event; names the server when it settled the run."""
+    reason = _server_settle_reason(stream_id)
+    if reason is None:
+        return _cancel_event_payload('Cancelled by user')
+    payload = _cancel_event_payload(reason)
+    payload['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+    return payload
+
+
+def _cancelled_turn_hint(agent_name: str | None = None, *, initiator: str = CANCEL_INITIATOR_USER) -> str:
     name = str(agent_name or _preferred_agent_display_name()).strip() or 'Hermes'
+    if _cancel_initiator_is_server(initiator):
+        return (
+            f'The WebUI server stopped this run before {name} finished; '
+            'you did not cancel it. No provider failure occurred.'
+        )
     return f'The run was cancelled by the user before {name} finished. No provider failure occurred.'
 
 
@@ -3249,23 +3290,44 @@ def _session_has_cancel_marker(session) -> bool:
     return False
 
 
-def _cancelled_turn_content(message: str = 'Task cancelled.', agent_name: str | None = None) -> str:
-    """Return cancelled-turn copy matching the verbose provider-error layout."""
+def _cancelled_turn_content(
+    message: str = 'Task cancelled.',
+    agent_name: str | None = None,
+    *,
+    initiator: str = CANCEL_INITIATOR_USER,
+) -> str:
+    """Return cancelled-turn copy matching the verbose provider-error layout.
+
+    ``initiator`` picks who the hint says stopped the run. The default (user)
+    copy is unchanged; ``"server"`` is for runs the WebUI server settled on its
+    own (#7293). The ``**Task cancelled:**`` heading stays the same for both so
+    every cancel-marker detector (``_CANCEL_MARKER_PATTERNS``) keeps working.
+    """
     _message = str(message or 'Task cancelled.').strip()
     if not _message.endswith('.'):
         _message += '.'
     return (
         f"**Task cancelled:** {_message}\n\n"
-        f"*{_cancelled_turn_hint(agent_name)}*"
+        f"*{_cancelled_turn_hint(agent_name, initiator=initiator)}*"
     )
 
 
-def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> None:
+def _persist_cancelled_turn(
+    session,
+    *,
+    message: str = 'Task cancelled.',
+    initiator: str = CANCEL_INITIATOR_USER,
+    partial_stream_id: str | None = None,
+) -> None:
     """Persist a user-cancelled terminal state without provider-error wording.
 
     cancel_stream() usually writes this marker first, but the streaming thread can
     later unwind through the silent-failure or exception path. Those paths must
     not append a misleading provider no-response error after an explicit cancel.
+
+    ``partial_stream_id``: when this writes the marker (cancel_stream has not),
+    first keep that stream's partial output, as cancel_stream would have.
+    ``initiator="server"`` writes the server-settle marker (#7293).
     """
     _materialize_pending_user_turn_before_error(session)
     session.active_stream_id = None
@@ -3274,15 +3336,23 @@ def _persist_cancelled_turn(session, *, message: str = 'Task cancelled.') -> Non
     session.pending_started_at = None
     session.pending_user_source = None
     if not _session_has_cancel_marker(session):
+        if partial_stream_id:
+            try:
+                _snapshot_and_append_partial_on_error(session, partial_stream_id)
+            except Exception:
+                logger.debug("Failed to keep partials on cancel for %s", partial_stream_id, exc_info=True)
         agent_name = _preferred_agent_display_name_for_session(session)
-        session.messages.append({
+        _marker = {
             'role': 'assistant',
-            'content': _cancelled_turn_content(message, agent_name),
+            'content': _cancelled_turn_content(message, agent_name, initiator=initiator),
             '_error': True,
             'provider_details': str(message or 'Task cancelled.').strip(),
             'provider_details_label': 'Cancellation details',
             'timestamp': int(time.time()),
-        })
+        }
+        if _cancel_initiator_is_server(initiator):
+            _marker['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+        session.messages.append(_marker)
 
 
 def _cleanup_ephemeral_cancelled_turn(session) -> None:
@@ -3381,8 +3451,14 @@ def _finalize_cancelled_turn(
     ephemeral: bool = False,
     message: str = 'Task cancelled.',
     stream_id: str | None = None,
+    preserve_partials: bool = False,
 ) -> None:
     """Finalize a cancelled turn for persistent or ephemeral sessions.
+
+    When this writes the cancel marker itself (cancel_stream has not yet),
+    ``preserve_partials`` keeps the stream's partial output first. A run a
+    server settle is cancelling (#7293) always keeps its partials and gets the
+    server marker with the settle's reason.
 
     Generation-guarded (#6623 re-gate): when ``stream_id`` is provided, the
     finalizer only acts while the session has not advanced past that stream.
@@ -3445,7 +3521,20 @@ def _finalize_cancelled_turn(
     if ephemeral:
         _cleanup_ephemeral_cancelled_turn(session)
         return
-    _persist_cancelled_turn(session, message=message)
+    _server_reason = _server_settle_reason(stream_id)
+    if _server_reason is not None:
+        _persist_cancelled_turn(
+            session,
+            message=_server_reason,
+            initiator=CANCEL_INITIATOR_SERVER,
+            partial_stream_id=stream_id,
+        )
+    else:
+        _persist_cancelled_turn(
+            session,
+            message=message,
+            partial_stream_id=stream_id if preserve_partials else None,
+        )
     try:
         session.save()
     except Exception:
@@ -16658,6 +16747,31 @@ def _run_agent_streaming(
                                     '[webui] self-heal: retry also failed: %s', _retry_exc,
                                 )
                                 _heal_ok = False
+                            if cancel_event.is_set():
+                                # This retry runs under _agent_lock, so a Stop or a
+                                # server settle (#7293) could only publish its cancel
+                                # and interrupt it; the turn's terminal state is
+                                # written here. Finalize it as cancelled, keeping the
+                                # streamed partial, never as an auth failure.
+                                _finalize_cancelled_turn(
+                                    s, ephemeral=ephemeral, stream_id=stream_id,
+                                    preserve_partials=True,
+                                )
+                                if not ephemeral:
+                                    try:
+                                        append_turn_journal_event_for_stream(
+                                            s.session_id,
+                                            stream_id,
+                                            {
+                                                "event": "interrupted",
+                                                "created_at": time.time(),
+                                                "reason": "cancelled",
+                                            },
+                                        )
+                                    except Exception:
+                                        logger.debug("Failed to append cancelled turn journal event", exc_info=True)
+                                put('cancel', _worker_cancel_event_payload(stream_id))
+                                return
                             if _heal_ok and _heal_result is not None:
                                 # Retry succeeded — replace result and skip error
                                 result = _heal_result
@@ -18464,6 +18578,7 @@ def _run_agent_streaming(
             # live with the registries in api/config.py.
             for _stream_registry in stream_owned_registries():
                 _stream_registry.pop(stream_id, None)
+            _SERVER_SETTLE_REASONS.pop(stream_id, None)
             unregister_active_run(stream_id)
             # Clean up the stream-owner registry so stale stream_id→session_id
             # mappings do not accumulate over thousands of completed streams (#6351).
@@ -18760,8 +18875,121 @@ def _handle_chat_steer(handler, body: dict) -> bool:
     return j(handler, _deliver_gateway_steer(sid, result, text))
 
 
-def cancel_stream(stream_id: str) -> bool:
+# Bound on how long a server settle waits for the owning session's lock before
+# it falls back to the user-Stop ordering (interrupt first). Settles run in
+# their own threads under a separate overall timeout (api/run_drain.py
+# SHUTDOWN_SETTLE_SECONDS), which must leave room after this wait for the
+# interrupted worker to persist the turn.
+_SERVER_SETTLE_SESSION_LOCK_TIMEOUT = 1.0
+
+
+def _settle_session_lock_for_stream(stream_id: str):
+    """Acquire the session lock a cancel of ``stream_id`` will write under.
+
+    Resolves the session id the same way ``_cancel_stream_impl`` does (agent,
+    then the ACTIVE_RUNS row, then the stream-owner registry). Returns the
+    acquired lock, or ``None`` when no owning session is known or the lock is
+    not free within the bound.
+    """
+    from api import config as _live_config
+
+    session_id = None
+    agent = AGENT_INSTANCES.get(stream_id) or _live_config.AGENT_INSTANCES.get(stream_id)
+    if agent is not None:
+        session_id = getattr(agent, "session_id", None)
+    if not session_id:
+        try:
+            with _live_config.ACTIVE_RUNS_LOCK:
+                row = (_live_config.ACTIVE_RUNS or {}).get(stream_id) or {}
+            session_id = str(row.get("session_id") or "").strip() or None
+        except Exception:
+            session_id = None
+    if not session_id:
+        session_id = stream_owner_session_id(stream_id)
+    if not session_id:
+        return None
+    lock = _get_session_agent_lock(session_id)
+    if not lock.acquire(timeout=_SERVER_SETTLE_SESSION_LOCK_TIMEOUT):
+        logger.warning(
+            "Server settle of stream %s: session %s lock busy; interrupting first "
+            "(the worker holding it persists the turn)",
+            stream_id, session_id,
+        )
+        return None
+    return lock
+
+
+def cancel_stream(
+    stream_id: str,
+    reason: str | None = None,
+    *,
+    initiator: str = CANCEL_INITIATOR_USER,
+) -> bool:
     """Signal an in-flight stream to cancel. Returns True if work was found.
+
+    ``reason`` replaces the default "Task cancelled." detail in the durable
+    cancel marker, the agent interrupt and the terminal cancel event.
+    ``initiator="server"`` marks a run the WebUI server stopped on its own
+    (#7293 restart/shutdown drain settle): the marker hint then says the server
+    stopped it instead of claiming the user cancelled it, and the cancel event
+    carries ``cancel_initiator: "server"``. The default user copy is unchanged.
+    Both go through this same path, so partial output is preserved the same way.
+
+    A server settle additionally owns the run's terminal state: it holds the
+    owning session's lock from before the cancellation is published until the
+    captured partials, the server marker and the terminal cancel event are
+    saved/queued, and interrupts the agent only after that, outside every lock.
+    Interrupting first would release the worker, whose own cancel finalizer
+    could take the session lock first, clear ``active_stream_id`` and write a
+    user-cancel marker without the partials, so the settle would then skip its
+    writeback as stale. A user Stop keeps its established order (interrupt
+    first, then the session cleanup), so its interrupt latency is unchanged.
+
+    When the session lock is not free within its bound (the worker holds it,
+    e.g. the returned-error credential retry runs the provider call under it),
+    the settle falls back to the user-Stop order: publish the cancel, interrupt
+    at once, then wait for the lock. The released worker finalizes the turn
+    under that lock with the partials and the server marker (it reads the
+    reason recorded here first); the settle returns only once it has the lock,
+    i.e. once that is saved, or it writes the turn itself if the worker did not.
+    """
+    if not _cancel_initiator_is_server(initiator):
+        return _cancel_stream_impl(stream_id, reason, initiator=initiator)
+    _SERVER_SETTLE_REASONS[str(stream_id)] = str(reason or '').strip() or 'Task cancelled.'
+    held_lock = _settle_session_lock_for_stream(stream_id)
+    deferred_interrupts: list = []
+    try:
+        return _cancel_stream_impl(
+            stream_id,
+            reason,
+            initiator=initiator,
+            held_session_lock=held_lock,
+            deferred_interrupts=deferred_interrupts if held_lock is not None else None,
+        )
+    finally:
+        if held_lock is not None:
+            held_lock.release()
+        for _agent in deferred_interrupts:
+            try:
+                _agent.interrupt(reason or "Cancelled by user")
+            except Exception:
+                logger.debug("Failed to interrupt agent for stream %s", stream_id, exc_info=True)
+
+
+def _cancel_stream_impl(
+    stream_id: str,
+    reason: str | None = None,
+    *,
+    initiator: str = CANCEL_INITIATOR_USER,
+    held_session_lock=None,
+    deferred_interrupts: list | None = None,
+) -> bool:
+    """Body of ``cancel_stream``.
+
+    ``held_session_lock``: the session agent lock the caller already holds (server
+    settle); the session cleanup then runs under it instead of re-acquiring.
+    ``deferred_interrupts``: when given, the agent is appended instead of being
+    interrupted here; the caller interrupts it after releasing the lock.
 
     Eagerly releases the session lock (pops STREAMS/CANCEL_FLAGS/AGENT_INSTANCES
     and clears session.active_stream_id) so new /api/chat/start requests succeed
@@ -18903,9 +19131,13 @@ def cancel_stream(stream_id: str) -> bool:
                 agent = cached[0]
         except Exception:
             pass
-    if agent:
+    if agent and deferred_interrupts is not None:
+        # Server settle: interrupt only after the terminal state is durable
+        # and the session lock is released (see cancel_stream).
+        deferred_interrupts.append(agent)
+    elif agent:
         try:
-            agent.interrupt("Cancelled by user")
+            agent.interrupt(reason or "Cancelled by user")
         except Exception as e:
             # Log but don't block the cancel flow
             import logging
@@ -18986,7 +19218,11 @@ def cancel_stream(stream_id: str) -> bool:
     # so the cancel-path mutation races neither the checkpoint thread nor
     # concurrent undo/retry calls.
     if _cancel_session_id:
-        with _get_session_agent_lock(_cancel_session_id):
+        _cancel_session_lock = _get_session_agent_lock(_cancel_session_id)
+        if held_session_lock is not None and _cancel_session_lock is held_session_lock:
+            # Server settle: the caller already holds it (see cancel_stream).
+            _cancel_session_lock = contextlib.nullcontext()
+        with _cancel_session_lock:
             try:
                 _cs = get_session(_cancel_session_id)
                 if not isinstance(getattr(_cs, 'messages', None), list):
@@ -19278,17 +19514,23 @@ def cancel_stream(stream_id: str) -> bool:
                 # history on the next turn (prevents model from seeing "Task cancelled."
                 # as a prior assistant reply).
                 if not _cancel_marker_exists:
-                    _cs.messages.append({
+                    _cancel_detail = str(reason or '').strip() or 'Task cancelled.'
+                    _cancel_by_server = _cancel_initiator_is_server(initiator)
+                    _cancel_marker = {
                         'role': 'assistant',
                         'content': _cancelled_turn_content(
-                            'Task cancelled.',
+                            _cancel_detail,
                             _preferred_agent_display_name_for_session(_cs),
+                            initiator=CANCEL_INITIATOR_SERVER if _cancel_by_server else CANCEL_INITIATOR_USER,
                         ),
                         '_error': True,
-                        'provider_details': 'Task cancelled.',
+                        'provider_details': _cancel_detail,
                         'provider_details_label': 'Cancellation details',
                         'timestamp': int(time.time()),
-                    })
+                    }
+                    if _cancel_by_server:
+                        _cancel_marker['cancel_initiator'] = CANCEL_INITIATOR_SERVER
+                    _cs.messages.append(_cancel_marker)
 
                 # A journal-only turn has no in-memory partial to carry into the
                 # cancel save. Persist an exact-stream recovery capability on
@@ -19339,6 +19581,10 @@ def cancel_stream(stream_id: str) -> bool:
                 logger.debug("Failed to note cancel event_id %s for stream %s", _cancel_event_id, stream_id, exc_info=True)
         try:
             _payload = _cancel_event_payload('Cancelled by user', session=_cancel_session_payload)
+            if reason:
+                _payload['message'] = str(reason)
+            if _cancel_initiator_is_server(initiator):
+                _payload['cancel_initiator'] = CANCEL_INITIATOR_SERVER
             q.put_nowait(('cancel', _payload))
         except Exception:
             logger.debug("Failed to put cancel event to queue")

@@ -2009,6 +2009,7 @@
   .update-btn:hover{background:var(--accent-bg-strong);}
   .update-primary{background:var(--accent-bg-strong);border-color:var(--accent);}
   .update-btn:disabled{opacity:0.5;cursor:not-allowed;}
+  @media (pointer:coarse){#updateBanner .update-btn{min-height:44px;padding:8px 14px;}}
   /* ── Composer flyout (approval/clarify slide up from behind composer) ── */
   .composer-flyout{position:relative;height:0;z-index:1;}
   .composer-wrap.terminal-dock-visible .composer-flyout{z-index:4;}

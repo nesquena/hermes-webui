@@ -14083,9 +14083,12 @@ function _formatUpdateApplyExceptionMessage(error){
   const message=(error&&error.message)||String(error||'unknown error');
   return _i18nUpdateText('update_failed_prefix','Update failed: ')+message;
 }
-async function applyUpdates(){
+async function applyUpdates(opts){
   if(window._updateApplyInFlight) return;
   window._updateApplyInFlight=true;
+  // #7293: true only on the re-send after the user explicitly confirmed
+  // interrupting the WebUI agent runs that made the server refuse the update.
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
   const updateText=(key,fallback)=>(typeof _i18nUpdateText==='function'?_i18nUpdateText(key,fallback):fallback);
   const btn=$('btnApplyUpdate');
   const resetApplyButton=(delayMs)=>{
@@ -14125,9 +14128,13 @@ async function applyUpdates(){
       const _applyBody={target};
       const _ch=window._updateData?.[target]?.channel;
       if(_ch==='stable'||_ch==='experimental') _applyBody.channel=_ch;
+      if(forceActiveRuns) _applyBody.force_active_runs=true;
       const res=await api('/api/updates/apply',{method:'POST',body:JSON.stringify(_applyBody),timeoutMs:120000});
       if(!res.ok){
         _showUpdateError(target,res);
+        if(res.restart_blocked&&res.force_available){
+          _renderActiveRunsForceOffer(target,res,()=>applyUpdates({forceActiveRuns:true}));
+        }
         resetApplyButton(0);
         return;
       }
@@ -14181,16 +14188,82 @@ function _showUpdateError(target,res){
     clearLockBtn.style.display='inline-block';
   }
 }
-async function applyClearUpdateLock(btn){
+function _activeRunsUpdateText(key,count,fallback){
+  if(typeof t==='function'){
+    const val=t(key,count);
+    if(val&&val!==key) return val;
+  }
+  return fallback;
+}
+// #7293: the server refuses a WebUI-initiated update/restart while WebUI agent
+// runs are active (restart_blocked + force_available). Offer one explicit,
+// confirmed override that re-sends the same request with
+// force_active_runs:true; the server then saves those runs as interrupted
+// before it restarts. Gateway runs that a restart can reattach are not counted
+// and keep running in the Gateway.
+function _renderActiveRunsForceOffer(target,res,resend){
+  const errEl=$('updateError');
+  if(!errEl||typeof resend!=='function') return;
+  const prior=$('btnForceUpdateActiveRuns');
+  if(prior&&prior.parentNode) prior.parentNode.remove();
+  // Never show two red force buttons: while this offer is up it is the one
+  // way forward (on the conflict path its re-send also carries the hard reset).
+  const legacyForceBtn=$('btnForceUpdate');
+  if(legacyForceBtn) legacyForceBtn.style.display='none';
+  const rawCount=Number(res&&res.active_runs)||Number(res&&res.active_streams)||1;
+  const count=Math.max(1,Math.floor(rawCount));
+  const plural=count===1?'':'s';
+  const label=_activeRunsUpdateText('update_force_active_runs',count,'Force update (interrupts '+count+' run'+plural+')');
+  const actions=document.createElement('div');
+  actions.style.marginTop='6px';
+  const btn=document.createElement('button');
+  btn.type='button';
+  btn.id='btnForceUpdateActiveRuns';
+  btn.className='update-btn';
+  btn.style.background='var(--error,#e05)';
+  btn.style.color='#fff';
+  btn.style.borderColor='var(--error,#e05)';
+  btn.dataset.target=target;
+  btn.textContent=label;
+  btn.onclick=async()=>{
+    if(btn.disabled) return;
+    const confirmed=await showConfirmDialog({
+      title:_activeRunsUpdateText('update_force_active_runs_title',count,'Interrupt active runs?'),
+      message:_activeRunsUpdateText(
+        'update_force_active_runs_message',
+        count,
+        count+' WebUI agent run'+(count===1?' is':'s are')+' still working. Updating now restarts the server and stops '+(count===1?'it':'them')+'; '+(count===1?'it is':'each one is')+' saved as interrupted. Wait for '+(count===1?'it':'them')+' to finish if you can.'
+      ),
+      confirmLabel:_activeRunsUpdateText('update_force_active_runs_confirm',count,'Interrupt and update'),
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed) return;
+    btn.disabled=true;
+    btn.textContent=_i18nUpdateText('update_updating','Updating\u2026');
+    try{
+      await resend();
+    }finally{
+      if(btn.isConnected){btn.disabled=false;btn.textContent=label;}
+    }
+  };
+  actions.appendChild(btn);
+  errEl.appendChild(actions);
+  errEl.style.display='block';
+}
+async function applyClearUpdateLock(btn,opts){
   if(window._clearLockInFlight) return;
   const target=btn.dataset.target;
   if(!target) return;
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);  // #7293
   window._clearLockInFlight=true;
   btn.disabled=true;
   const originalLabel=btn.textContent;
   btn.textContent='Checking lock…';
   try{
-    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify({target}),timeoutMs:60000});
+    const _clearBody={target};
+    if(forceActiveRuns) _clearBody.force_active_runs=true;
+    const res=await api('/api/updates/clear_lock',{method:'POST',body:JSON.stringify(_clearBody),timeoutMs:60000});
     if(res.ok){
       sessionStorage.removeItem('hermes-update-checked');
       sessionStorage.removeItem('hermes-update-dismissed');
@@ -14208,6 +14281,9 @@ async function applyClearUpdateLock(btn){
       const errEl=$('updateError');
       if(errEl){errEl.textContent=msg;errEl.style.display='block';}
       else showToast(msg);
+      if(res.restart_blocked&&res.force_available){
+        _renderActiveRunsForceOffer(target,res,()=>applyClearUpdateLock(btn,{forceActiveRuns:true}));
+      }
     }
   }catch(e){
     const msg='Lock-check request failed: '+((e&&e.message)||String(e));
@@ -14316,26 +14392,38 @@ async function _readHealthServerIdentity() {
     return null;
   }
 }
-async function forceUpdate(btn){
+async function forceUpdate(btn,opts){
   const target=btn&&btn.dataset.target;
   if(!target) return;
-  const confirmed=await showConfirmDialog({
-    title:'Force update '+target+'?',
-    message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
-    confirmLabel:'Force update',
-    danger:true,
-    focusCancel:true,
-  });
-  if(!confirmed) return;
+  // #7293: the active-runs override re-sends this request after its own
+  // confirmation; the discard-local-changes confirmation was already given.
+  const forceActiveRuns=!!(opts&&opts.forceActiveRuns===true);
+  if(!forceActiveRuns){
+    const confirmed=await showConfirmDialog({
+      title:'Force update '+target+'?',
+      message:'This will discard all local changes and delete untracked files in the '+target+' repo, then reset to the latest remote version. This cannot be undone.',
+      confirmLabel:'Force update',
+      danger:true,
+      focusCancel:true,
+    });
+    if(!confirmed) return;
+  }
   btn.disabled=true;btn.textContent='Force updating\u2026';
   const errEl=$('updateError');
   if(errEl){errEl.style.display='none';}
   try{
     const baselineServerIdentity = await _readHealthServerIdentity();
-    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify((()=>{const b={target};const _ch=window._updateData?.[target]?.channel;if(_ch==='stable'||_ch==='experimental')b.channel=_ch;return b;})()),timeoutMs:120000});
+    const _forceBody={target};
+    const _ch=window._updateData?.[target]?.channel;
+    if(_ch==='stable'||_ch==='experimental') _forceBody.channel=_ch;
+    if(forceActiveRuns) _forceBody.force_active_runs=true;
+    const res=await api('/api/updates/force',{method:'POST',body:JSON.stringify(_forceBody),timeoutMs:120000});
     if(!res.ok){
       if(errEl){errEl.textContent='Force update failed: '+(res.message||'unknown error');errEl.style.display='block';}
-      btn.disabled=false;btn.textContent='Force update';
+      btn.disabled=false;btn.textContent='Force update';btn.style.display='inline-block';
+      if(res.restart_blocked&&res.force_available){
+        _renderActiveRunsForceOffer(target,res,()=>forceUpdate(btn,{forceActiveRuns:true}));
+      }
       return;
     }
     showToast('Force update applied — restarting…');

@@ -54,6 +54,35 @@ GATEWAY_RUN_ID_WAIT_TIMEOUT = 5.0
 # stream_id -> (base_url, api_key) of the Gateway the stream's run lives on, for Stop
 # and approval replies; a reattached run's Gateway need not be the process profile's.
 _STREAM_ENDPOINTS: dict[str, tuple[str, str]] = {}
+# #7293: streams whose resumable Gateway run identity (the exact request before
+# admission, then the run id) has been durably saved in the session. Only these
+# survive a WebUI restart (``_resume_gateway_run_for_session`` reattaches them),
+# so only these are left out of restart blocking and shutdown-drain accounting.
+# A legacy /v1/chat/completions relay never records one, and a Runs API launch
+# has none until its first successful save; both count as WebUI-owned work.
+_DURABLE_RUN_STREAMS: set[str] = set()
+_DURABLE_RUN_STREAMS_LOCK = threading.Lock()
+
+
+def _mark_gateway_run_durable(stream_id: str) -> None:
+    stream_id = str(stream_id or "").strip()
+    if stream_id:
+        with _DURABLE_RUN_STREAMS_LOCK:
+            _DURABLE_RUN_STREAMS.add(stream_id)
+
+
+def gateway_run_durably_resumable(stream_id: str) -> bool:
+    """True once ``stream_id``'s Gateway run identity is saved for reattachment.
+
+    Stays true until the stream's Gateway state is released: a later save that
+    clears the record also persists the turn's terminal state, so the run is
+    either reattachable from disk or already settled there.
+    """
+    stream_id = str(stream_id or "").strip()
+    if not stream_id:
+        return False
+    with _DURABLE_RUN_STREAMS_LOCK:
+        return stream_id in _DURABLE_RUN_STREAMS
 
 
 def gateway_run_endpoint(run_id: str) -> tuple[str, str]:
@@ -175,6 +204,8 @@ def release_gateway_stream_state(stream_id: str, *, finish_pending: bool = True)
     _clear_gateway_run_starting(stream_id)
     with _STREAM_RUN_STARTING_CONDITION:
         _STREAM_ENDPOINTS.pop(stream_id, None)
+    with _DURABLE_RUN_STREAMS_LOCK:
+        _DURABLE_RUN_STREAMS.discard(stream_id)
 
 
 def gateway_run_id_pending(stream_id: str) -> bool:
@@ -1623,6 +1654,8 @@ def _record_gateway_run(session_id: str, stream_id: str, run_id: str, request=No
             if not run_id:
                 session.gateway_run["request"] = request
             session.save(touch_updated_at=False)
+            # Only now can a restart reattach this run (#7293 drain accounting).
+            _mark_gateway_run_durable(stream_id)
     except Exception:
         logger.warning("Failed to persist gateway run %s for session %s", run_id, session_id, exc_info=True)
         if not run_id:
@@ -2117,6 +2150,9 @@ def _resume_gateway_run_for_session(session) -> bool:
             provider=session.model_provider,
             backend="gateway",
         )
+    # The record being reattached was loaded from the saved session: a restart
+    # can reattach it again, so it is not WebUI-owned drain work (#7293).
+    _mark_gateway_run_durable(stream_id)
     register_stream_owner(stream_id, sid)
     register_session_writeback_owner(sid, stream_id)
     _mark_gateway_run_starting(stream_id)

@@ -7588,7 +7588,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
                 : (typeof _messageUserUnpinned!=='undefined' && _messageUserUnpinned));
             clearLiveToolCards();if(!assistantText)removeThinking();
             const cancelAgentName=(assistantDisplayName()+'').trim()||'Hermes';
-            S.messages.push({role:'assistant',content:`**Task cancelled:** Task cancelled.\n\n*The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.*`,provider_details:'Task cancelled.',provider_details_label:'Cancellation details',_error:true});
+            // #7293: a run the WebUI server stopped (shutdown drain / forced
+            // update) must not be shown as cancelled by the user.
+            const _cancelByServer=_cancelData&&_cancelData.cancel_initiator==='server';
+            const _cancelDetail=_cancelByServer?(String(_cancelData.message||'').trim()||'The WebUI server stopped this run'):'Task cancelled.';
+            const _cancelDetailText=_cancelDetail.endsWith('.')?_cancelDetail:`${_cancelDetail}.`;
+            const _cancelHint=_cancelByServer
+              ?`The WebUI server stopped this run before ${cancelAgentName} finished; you did not cancel it. No provider failure occurred.`
+              :`The run was cancelled by the user before ${cancelAgentName} finished. No provider failure occurred.`;
+            S.messages.push({role:'assistant',content:`**Task cancelled:** ${_cancelDetailText}\n\n*${_cancelHint}*`,provider_details:_cancelDetail,provider_details_label:'Cancellation details',_error:true});
             _attachProjectedAnchorSceneToLastAssistant(S.messages);
             renderMessages({preserveScroll:true});
             if(_wasFollowingAtCancelFb && typeof scrollToBottom==='function') scrollToBottom();
