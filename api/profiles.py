@@ -865,6 +865,95 @@ class cron_profile_context:
         return False
 
 
+# ── Lock-free per-thread cron store scope (#7295, #6753) ─────────────────────
+# A long in-process cron job (the scheduled fire wrapped by
+# install_cron_scheduler_profile_isolation(), or the in-chat cronjob
+# action=run) holds _cron_env_lock and points os.environ['HERMES_HOME'] and the
+# cron module path globals at its own profile for the whole run. Request
+# handlers that only touch the cron store must not wait for that, and must not
+# read those globals either. Newer Agents expose context-local overrides that
+# take priority over the globals:
+#   * cron.jobs.use_cron_store(home)            -> jobs.json / output / locks
+#   * hermes_constants.set_hermes_home_override  -> get_hermes_home() readers
+#     (executions/notepad DBs, config.yaml timezone and model-pin reads)
+# cron_store_scope*() binds both for the current thread only and never takes
+# _cron_env_lock. If either helper is missing (older Agent, test stub) it falls
+# back to the lock-based contexts above, unchanged. Callers whose code path
+# reads process-global state (os.environ, cron.scheduler._hermes_home, gateway
+# status via get_process_hermes_home) must keep using the lock-based contexts.
+
+
+_RLOCK_TYPES = tuple(
+    t for t in (type(threading.RLock()), getattr(threading, '_PyRLock', None)) if isinstance(t, type)
+)
+
+
+def _agent_jobs_lock_is_reentrant(cron_jobs_mod) -> bool:
+    """True when the thread holding the Agent's ``_jobs_lock()`` may re-enter it.
+
+    The lock-free paths hold ``_jobs_lock()`` around Agent calls that take it
+    again internally (Create's two writes, Resume, List/Run reads). Agents that
+    ship ``use_cron_store`` nest it through a thread-local depth counter over an
+    ``RLock`` (``_jobs_lock_state`` / ``_jobs_file_lock``). Older Agents (e.g.
+    e5b4cf7bea2) use a plain ``threading.Lock``, where that outer hold
+    deadlocks the inner acquire. Anything else is treated as non-reentrant,
+    which keeps the locked fallback (slower, never a hang).
+    """
+    return isinstance(getattr(cron_jobs_mod, '_jobs_file_lock', None), _RLOCK_TYPES) and isinstance(
+        getattr(cron_jobs_mod, '_jobs_lock_state', None), threading.local
+    )
+
+
+def _cron_store_scope_helpers():
+    """Return ``(use_cron_store, hermes_constants)`` when the Agent supports it."""
+    try:
+        import cron.jobs as _cj
+    except Exception:
+        return None
+    use_cron_store = getattr(_cj, 'use_cron_store', None)
+    if not callable(use_cron_store) or not callable(getattr(_cj, 'get_cron_output_dir', None)):
+        return None
+    # Lock-free writers rely on the Agent's jobs.json lock to serialize against
+    # each other and against a running job's bookkeeping (Resume holds it across
+    # its read/compute/write), and hold it around Agent calls that take it
+    # again, so it must be re-entrant. Otherwise keep the locked fallback.
+    if not callable(getattr(_cj, '_jobs_lock', None)) or not _agent_jobs_lock_is_reentrant(_cj):
+        return None
+    home_mod = _resolve_hermes_home_override()
+    if home_mod is None:
+        return None
+    return use_cron_store, home_mod
+
+
+@contextmanager
+def cron_store_scope_for_home(home: Path):
+    """Route cron store access in this thread to *home* without the env lock."""
+    home = Path(home)
+    helpers = _cron_store_scope_helpers()
+    if helpers is None:
+        with cron_profile_context_for_home(home):
+            yield home
+        return
+    use_cron_store, home_mod = helpers
+    token = home_mod.set_hermes_home_override(str(home))
+    try:
+        with use_cron_store(home):
+            yield home
+    finally:
+        home_mod.reset_hermes_home_override(token)
+
+
+@contextmanager
+def cron_store_scope():
+    """TLS-active-profile variant of :func:`cron_store_scope_for_home`."""
+    if _cron_store_scope_helpers() is None:
+        with cron_profile_context():
+            yield
+        return
+    with cron_store_scope_for_home(get_active_hermes_home()):
+        yield
+
+
 def get_hermes_home_for_profile(name: str) -> Path:
     """Return the HERMES_HOME Path for *name* without mutating any process state.
 
