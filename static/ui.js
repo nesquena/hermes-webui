@@ -7271,6 +7271,68 @@ function _fitComposerFooter(){
   if(!left) return;
   if(!left.clientWidth) return;
   const overflows=function(){return left.scrollWidth>left.clientWidth+1;};
+  // #1804 re-gate 9/24: the busy-mode send button renders a Stop/Queue/
+  // Interrupt/Steer label that widens it from a 34px round button to a
+  // 74-108px pill (see .send-btn[data-action=...]: width:auto). That
+  // extra width steals room from .composer-left, so measuring overflow
+  // with the pill in place resolves a tighter stage than with the
+  // icon-only (idle) button — the footer would otherwise flicker between
+  // stages the moment a turn starts (the #4968 chip-label flicker) and
+  // clip the mobile config burger under the pill at narrow widths.
+  // #7686 re-gate (must fix): the fitter must not let the busy-mode pill
+  // decide the STAGE. Measuring with the label visible (the previous round's
+  // fix for the idle clipping) resolves a tighter stage whenever the pill
+  // would only fit in cf-icons, so starting a turn flipped the whole footer
+  // into cf-icons — 46px → 56px, Saved prompts and the menu hidden — and it
+  // stayed that way after the turn ended.
+  //
+  // The stage is now resolved against the button's real ICON footprint
+  // (34px desktop / 44px phone, the shape that is always painted), with the
+  // label hidden during the measurement only. Once the stage is committed,
+  // the pill is restored and any overflow it causes is absorbed by
+  // collapsing only the label/button geometry through .cf-action-icon
+  // (see style.css) instead of re-deciding the stage.
+  //
+  // Pin the label hidden so the button is at its idle width during the
+  // measurement, the same shape as the existing height/visibility
+  // freeze: commit nothing to the screen, restore both in `finally`.
+  // Tolerate a host that exposes only querySelector (the mobile-layout fit
+  // harness drives this function with a footer/left pair and no
+  // getElementById): without the button there is nothing to measure or
+  // collapse, and the stage resolution below still runs.
+  const sendBtn=(typeof document.getElementById==='function')?document.getElementById('btnSend'):null;
+  const sendBtnLabel=sendBtn&&sendBtn.querySelector('.send-btn-label');
+  const prevLabelDisplay=sendBtnLabel?sendBtnLabel.style.display:'';
+  const _btnStyle=sendBtn&&sendBtn.style?sendBtn.style:null;
+  const prevBtnWidth=_btnStyle?_btnStyle.width:'';
+  const prevBtnMinWidth=_btnStyle?_btnStyle.minWidth:'';
+  // #7686 re-gate (2026-10-18): the busy button's horizontal padding and gap
+  // must be zeroed for the icon measurement too. Hiding the label alone leaves
+  // `padding: 0px 12px 0px 10px; gap: 6px` active, so native measurement reads
+  // 38px busy versus 34px idle — a stage-boundary window survives the minimum.
+  // Zeroing padding/gap alongside width/minWidth produces the required 34px.
+  const prevBtnPadding=_btnStyle?_btnStyle.padding:'';
+  const prevBtnGap=_btnStyle?_btnStyle.gap:'';
+  // Hide the label so the measured footprint is the icon's, not the pill's.
+  if(sendBtnLabel) sendBtnLabel.style.display='none';
+  if(_btnStyle){
+    // width:auto + a min-width that survives the burger stage's width:34px, so
+    // the measured footprint is the real icon button, never the bare 16px SVG.
+    _btnStyle.width='auto';
+    // #7686 [SILENT]: the idle measurement must keep the button's real
+    // minimum. `width:auto; min-width:0` measures the bare 16px SVG, so the
+    // stage was sized for an icon smaller than the button that is actually
+    // painted — at 1102px with the workspace open that clipped 16px of the
+    // Reasoning control at idle (master and the rejected head clip 0px).
+    // Reserve 34px desktop / 44px phone during the measurement; `finally`
+    // still restores the previous value afterwards.
+    _btnStyle.minWidth=(window.innerWidth<=640?'44px':'34px');
+    // The icon footprint carries no horizontal padding and no gap (see
+    // .send-btn.cf-action-icon in style.css); mirror that here so the
+    // measurement and the collapsed paint agree.
+    _btnStyle.padding='0';
+    _btnStyle.gap='0';
+  }
   // Burger-mode cleanup trigger: cf-burger can flip WITHOUT any 640px
   // boundary crossing (this fit path measures real overflow at any width,
   // e.g. a constant 760px viewport). CSS hides the inline model/reasoning/
@@ -7310,6 +7372,40 @@ function _fitComposerFooter(){
     // task so no intermediate geometry is ever committed to the screen.
     footer.classList.toggle('cf-icons',next.includes('cf-icons'));
     footer.classList.toggle('cf-burger',next.includes('cf-burger'));
+    // Restore the label and the button's own width FIRST, while the footer is
+    // still frozen hidden — the pill that is about to be painted must be the
+    // one the overflow probe below sees.
+    if(sendBtnLabel) sendBtnLabel.style.display=prevLabelDisplay;
+    if(_btnStyle){
+      _btnStyle.width=prevBtnWidth;
+      _btnStyle.minWidth=prevBtnMinWidth;
+      _btnStyle.padding=prevBtnPadding;
+      _btnStyle.gap=prevBtnGap;
+    }
+    // #7686 re-gate (2026-10-18): remove any PREVIOUS collapse BEFORE probing
+    // the fully restored pill for overflow. The check reads .composer-left's
+    // scrollWidth, and while the previous pass's .cf-action-icon is still on
+    // the button the probe sees the collapsed geometry: when the collapsed icon
+    // fits, the check removes the class, restoring a pill that does NOT fit —
+    // so the next fit collapses it again. A 480px footer with a 400px budget
+    // and the Interrupt action alternated 34px/0px -> 107.75px/58px across six
+    // consecutive fits (three independent browser runs). Clearing the class
+    // first makes the six-pass control stable with no clipping.
+    if(sendBtn&&sendBtn.classList) sendBtn.classList.remove('cf-action-icon');
+    // #7686 re-gate (must fix): the stage was resolved against the ICON
+    // footprint, so restoring the busy pill can now overflow .composer-left.
+    // Absorb that by collapsing only the label/button geometry through
+    // .cf-action-icon — the stage classes stay as measured, so Saved prompts
+    // and the menu remain visible and the footer height does not change.
+    // The label still shows at widths where the pill fits (the maintainer's
+    // prototype keeps "Interrupt" at 107px), so the collapse is conditional
+    // on a real overflow, not unconditional.
+    if(sendBtn&&sendBtn.classList&&left.scrollWidth>left.clientWidth+1){
+      sendBtn.classList.add('cf-action-icon');
+    }
+    // Releasing the frozen box is the LAST write of the pass: the height and
+    // visibility go back together, so no sample between the probe and the
+    // paint ever shows an expanded footer.
     if(frozenHeight>0){
       footer.style.height=prevHeight;
       footer.style.visibility=prevVisibility;
@@ -11057,8 +11153,31 @@ function _setComposerPrimaryButtonIcon(btn,action){
     stop:'<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="5" width="14" height="14" rx="2"></rect></svg>',
     disabled:'<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>'
   };
-  const next=icons[action]||icons.send;
-  if(btn.innerHTML!==next) btn.innerHTML=next;
+  // #1804 re-gate 9/24: surface a short text label next to the icon for
+  // busy-mode actions so the user can see the current mode without
+  // relying on the hover tooltip. The label is a real <span
+  // class="send-btn-label"> child (not a ::after pseudo-element) so it
+  // does not collide with the .has-tooltip::after rule that owns the
+  // hover tooltip. The text is resolved through t() so non-English
+  // locales get the translated name.
+  const _labelKeys={stop:'composer_action_stop',queue:'composer_action_queue',interrupt:'composer_action_interrupt',steer:'composer_action_steer'};
+  // #7686 finding 5 (should fix): the composer_action_* keys live only in the
+  // English block of static/i18n.js, so t() returns the KEY for every other
+  // locale and Chinese users saw the English word "Stop". Resolve through the
+  // English string explicitly instead of falling back to the key name.
+  const _labelFallback={stop:'Stop',queue:'Queue',interrupt:'Interrupt',steer:'Steer'};
+  let _fullInner=icons[action]||icons.send;
+  if(_labelKeys[action]){
+    const _key=_labelKeys[action];
+    const _val=(typeof t==='function')?t(_key):'';
+    // t() echoes the key when the locale has no entry; that is not a
+    // translation, so fall through to the English word.
+    const _text=(_val&&_val!==_key)?_val:(_labelFallback[action]||_key);
+    // Escape for safe innerHTML injection of translator-controlled text.
+    const _esc=String(_text).replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c]);
+    _fullInner+='<span class="send-btn-label">'+_esc+'</span>';
+  }
+  if(btn.innerHTML!==_fullInner) btn.innerHTML=_fullInner;
 }
 
 function updateSendBtn(){
@@ -11087,6 +11206,14 @@ function updateSendBtn(){
   }
   btn.title=_btnTitle;
   btn.setAttribute('aria-label',_btnTitle);
+  // #1804 re-gate 9/24: #btnSend is .has-tooltip and its hover tooltip
+  // is driven by the [data-tooltip] attribute (see .has-tooltip::after at
+  // static/style.css:2110). The static markup ships data-tooltip="Send
+  // message" (composer_send), so every busy mode showed "Send message"
+  // on hover even though title/aria-label carried the correct mode name.
+  // Mirror the same string into [data-tooltip] so the hover tooltip and
+  // the screen-reader label stay in sync with the action.
+  btn.setAttribute('data-tooltip',_btnTitle);
   _setComposerPrimaryButtonIcon(btn,action);
   if(typeof _applyBusyComposerPlaceholder==='function') _applyBusyComposerPlaceholder();
   // Single primary action button: while busy/no-draft it becomes the red Stop
