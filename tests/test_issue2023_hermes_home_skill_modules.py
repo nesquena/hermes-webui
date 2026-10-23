@@ -148,3 +148,44 @@ def test_skill_modules_support_profile_home_returns_false_when_module_missing(mo
     monkeypatch.setitem(sys.modules, "tools.skill_manager_tool", skill_manager_tool)
 
     assert _skill_modules_support_profile_home(profile_home) is False
+
+
+def test_symlinked_skills_dir_keeps_streaming_concurrent_but_fails_approval_containment(
+    monkeypatch, tmp_path
+):
+    """A profile whose skills/ is a symlink outside its home keeps master's streaming
+    semantics (concurrent path, no whole-turn lock), while write-approval apply/diff,
+    which call the strict ``_locked`` variant, still refuse to act through the link.
+    """
+    from api.profiles import (
+        _skill_modules_support_profile_home,
+        _skill_modules_support_profile_home_locked,
+    )
+
+    profile_home = tmp_path / "profile"
+    profile_home.mkdir()
+    shared_skills = tmp_path / "shared-skills"
+    shared_skills.mkdir()
+    (profile_home / "skills").symlink_to(shared_skills, target_is_directory=True)
+    expected = profile_home / "skills"
+    baseline = tmp_path / "base" / "skills"
+
+    for name in ("tools.skills_tool", "tools.skill_manager_tool"):
+        module = types.ModuleType(name)
+        module.HERMES_HOME = profile_home.parent
+        module.SKILLS_DIR = baseline
+        module._SKILLS_DIR_AT_IMPORT = baseline
+        module._skills_dir = lambda: expected
+        monkeypatch.setitem(sys.modules, name, module)
+
+    assert _skill_modules_support_profile_home(profile_home) is True
+    assert _skill_modules_support_profile_home_locked(profile_home) is False
+
+    # A plain skills/ directory passes both checks.
+    plain_home = tmp_path / "plain"
+    (plain_home / "skills").mkdir(parents=True)
+    plain_expected = plain_home / "skills"
+    for name in ("tools.skills_tool", "tools.skill_manager_tool"):
+        sys.modules[name]._skills_dir = lambda: plain_expected
+    assert _skill_modules_support_profile_home(plain_home) is True
+    assert _skill_modules_support_profile_home_locked(plain_home) is True
