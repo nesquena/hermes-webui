@@ -266,7 +266,7 @@ def test_session_reload_preserves_large_persisted_window_when_recompute_hits_256
     monkeypatch.setattr(
         config,
         "resolve_model_provider",
-        lambda _model: ("deepseek-v4-1m", "deepseek", "https://runtime-base.invalid/v1"),
+        lambda _model, **_kwargs: ("deepseek-v4-1m", "deepseek", "https://runtime-base.invalid/v1"),
     )
 
     s = _stub_route_session()
@@ -336,7 +336,7 @@ def test_session_reload_preserves_large_window_for_slash_qualified_model(monkeyp
     monkeypatch.setattr(
         config,
         "resolve_model_provider",
-        lambda _model: ("deepseek-v4-1m", "deepseek", "https://runtime-base.invalid/v1"),
+        lambda _model, **_kwargs: ("deepseek-v4-1m", "deepseek", "https://runtime-base.invalid/v1"),
     )
 
     s = _stub_route_session(model="deepseek/deepseek-v4-1m")
@@ -417,7 +417,7 @@ def test_session_reload_accepts_real_256k_when_effective_model_changes(monkeypat
     monkeypatch.setattr(
         config,
         "resolve_model_provider",
-        lambda _model: ("deepseek-v4-256k", "deepseek", "https://runtime-base.invalid/v1"),
+        lambda _model, **_kwargs: ("deepseek-v4-256k", "deepseek", "https://runtime-base.invalid/v1"),
     )
 
     s = _stub_route_session(model="deepseek-v4-1m")
@@ -457,7 +457,7 @@ def test_session_context_lookup_keeps_base_url_when_custom_helper_is_missing(mon
     monkeypatch.setattr(
         config,
         "resolve_model_provider",
-        lambda _model: ("deepseek-v4-1m", "deepseek", "https://runtime-base.invalid/v1"),
+        lambda _model, **_kwargs: ("deepseek-v4-1m", "deepseek", "https://runtime-base.invalid/v1"),
     )
     monkeypatch.delattr(config, "resolve_custom_provider_connection", raising=False)
 
