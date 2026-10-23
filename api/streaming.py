@@ -3699,12 +3699,15 @@ def _capture_turn_served_model(s, agent) -> str | None:
     return _used_model
 
 
-def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str) -> dict:
+def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, session_id: str, profile_home: str, profile_name: str = "") -> dict:
     """Build thread-local agent env with per-run values overriding profile defaults.
 
     Profile runtime env may include TERMINAL_CWD from config.yaml. Passing it as
     **kwargs alongside an explicit TERMINAL_CWD raises TypeError before the
     agent starts, so merge into one dict first and let the active workspace win.
+
+    profile_name sets HERMES_SESSION_PROFILE so hermes-agent persistent Docker
+    and tools bind to the correct profile container/sandbox (#8452).
     """
     env = dict(profile_runtime_env or {})
     env.update({
@@ -3721,6 +3724,8 @@ def _build_agent_thread_env(profile_runtime_env: dict | None, workspace: str, se
         'HERMES_SESSION_CHAT_ID': str(session_id),
         'HERMES_HOME': profile_home,
     })
+    if profile_name:
+        env['HERMES_SESSION_PROFILE'] = str(profile_name)
     return env
 
 
@@ -3809,12 +3814,18 @@ def _reset_streaming_hermes_home_override(override_mod, override_token, override
 # the _run_agent_streaming thread (concurrent tool batches use
 # contextvars.copy_context() so children inherit this binding); binding the
 # context-local here makes the capture task/thread-local and race-immune.
-def _set_turn_session_identity(session_id: str, workspace: str = ""):
+def _set_turn_session_identity(
+    session_id: str,
+    workspace: str = "",
+    profile: str | None = None,
+    *,
+    profile_name: str | None = None,
+):
     """Bind THIS turn's session identity to the current (task/thread-local)
     context and return an opaque token for _reset_turn_session_identity.
 
-    Binds four context-locals so every session-key / UI-owner consumer is
-    covered without a race:
+    Binds five context-locals so every session-key / UI-owner / profile consumer
+    is covered without a race:
       * ``tools.approval._approval_session_key`` — checked FIRST by
         ``get_current_session_key`` (the exact call terminal_tool.py makes for
         a notify_on_complete background spawn: the bug path).
@@ -3836,6 +3847,11 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
         already set per turn for the same purpose but is a process-global that
         concurrent turns overwrite; this contextvar is task-local, so it is
         race-immune for exactly the reason the three bindings above are.
+      * ``gateway.session_context._SESSION_PROFILE`` — this turn's profile, read
+        by ``get_session_env("HERMES_SESSION_PROFILE")`` and
+        ``tools.terminal_tool._current_session_profile`` to key persistent Docker
+        containers and sandboxes (#8452). Task/context-local binding prevents
+        cross-profile collisions under concurrent turns.
 
     It deliberately does NOT call ``gateway.session_context.set_session_vars``:
     that blanket setter also zeroes the platform/chat_id/user contextvars,
@@ -3844,6 +3860,7 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
     would break the ``notify_on_complete`` watcher registration gate.
     """
     sid = str(session_id or "")
+    prof = profile if profile is not None else profile_name
     tokens: dict = {}
     try:
         from api.agent_compat import agent_attr
@@ -3873,6 +3890,12 @@ def _set_turn_session_identity(session_id: str, workspace: str = ""):
             tokens["session_cwd"] = _SCWD.set(str(workspace))
         except Exception:
             logger.debug("per-turn _SESSION_CWD bind failed", exc_info=True)
+    if prof is not None:
+        try:
+            from gateway.session_context import _SESSION_PROFILE as _SPROF
+            tokens["session_profile"] = _SPROF.set(str(prof))
+        except Exception:
+            logger.debug("per-turn _SESSION_PROFILE bind failed", exc_info=True)
     return tokens
 
 
@@ -3887,6 +3910,13 @@ def _reset_turn_session_identity(tokens) -> None:
     """
     if not tokens:
         return
+    tok = tokens.get("session_profile")
+    if tok is not None:
+        try:
+            from gateway.session_context import _SESSION_PROFILE as _SPROF
+            _SPROF.reset(tok)
+        except Exception:
+            logger.debug("per-turn _SESSION_PROFILE reset failed", exc_info=True)
     tok = tokens.get("session_cwd")
     if tok is not None:
         try:
@@ -3921,7 +3951,13 @@ def _reset_turn_session_identity(tokens) -> None:
 
 
 @contextlib.contextmanager
-def _bind_turn_session_identity(session_id: str):
+def _bind_turn_session_identity(
+    session_id: str,
+    workspace: str = "",
+    profile: str | None = None,
+    *,
+    profile_name: str | None = None,
+):
     """Context-manager form of the per-turn session-identity binding.
 
     The ``_run_agent_streaming`` worker uses the explicit ``_set``/``_reset``
@@ -3930,7 +3966,9 @@ def _bind_turn_session_identity(session_id: str):
     spawn; this wrapper is the canonical single-call API for other callers and
     for tests, and shares the exact same code path.
     """
-    tokens = _set_turn_session_identity(session_id)
+    tokens = _set_turn_session_identity(
+        session_id, workspace=workspace, profile=profile, profile_name=profile_name
+    )
     try:
         yield
     finally:
@@ -14269,6 +14307,15 @@ def _run_agent_streaming(
             agent = None
         return current
 
+    old_profile_env = {}
+    old_cwd = None
+    old_exec_ask = None
+    old_session_key = None
+    old_session_id = None
+    old_session_platform = None
+    old_session_chat_id = None
+    old_hermes_home = None
+    old_session_profile = None
     # Initialised here (before any code that may raise) so the outer `finally`
     # block can safely check `if _checkpoint_stop is not None` even when an
     # exception fires before the checkpoint thread is created (Issue #765).
@@ -14290,13 +14337,22 @@ def _run_agent_streaming(
         # session's own record cannot disagree. Guarded: a turn must not die
         # here because a workspace path is malformed.
         s = get_session(session_id)
+        _resolved_profile_name = getattr(s, 'profile', None)
+        if not _resolved_profile_name:
+            try:
+                from api.profiles import get_active_profile_name
+                _resolved_profile_name = get_active_profile_name()
+            except Exception:
+                _resolved_profile_name = None
         try:
-            _turn_workspace_cwd = str(_resolve_path(workspace, profile=getattr(s, 'profile', None)))
+            _turn_workspace_cwd = str(_resolve_path(workspace, profile=_resolved_profile_name))
         except Exception:
             _turn_workspace_cwd = ""
             logger.debug("per-turn workspace cwd resolve failed", exc_info=True)
         _turn_session_identity_tokens = _set_turn_session_identity(
-            session_id, workspace=_turn_workspace_cwd
+            session_id,
+            workspace=_turn_workspace_cwd,
+            profile=_resolved_profile_name or "",
         )
         _turn_pending_source = getattr(s, 'pending_user_source', None) or 'webui'
         _active_turn_identity = _active_turn_authority(s, stream_id, msg_text)
@@ -14411,19 +14467,21 @@ def _run_agent_streaming(
         # threading.Thread and does not inherit TLS. At compression time,
         # get_active_profile_name() would fall back to the process-global
         # _active_profile, which may belong to a different concurrent tab.
-        _resolved_profile_name = getattr(s, 'profile', None)
         if not _resolved_profile_name:
-            try:
-                from api.profiles import get_active_profile_name
-                _resolved_profile_name = get_active_profile_name()
-            except Exception:
-                _resolved_profile_name = None
+            _resolved_profile_name = getattr(s, 'profile', None)
+            if not _resolved_profile_name:
+                try:
+                    from api.profiles import get_active_profile_name
+                    _resolved_profile_name = get_active_profile_name()
+                except Exception:
+                    _resolved_profile_name = None
         
         _thread_env = _build_agent_thread_env(
             _profile_runtime_env,
             str(s.workspace),
             session_id,
             _profile_home,
+            profile_name=_resolved_profile_name or "",
         )
         _streaming_hermes_home_override_ctx = _set_streaming_hermes_home_override(_profile_home)
         _set_thread_env(**_thread_env)
@@ -14484,6 +14542,7 @@ def _run_agent_streaming(
             old_session_platform = os.environ.get('HERMES_SESSION_PLATFORM')
             old_session_chat_id = os.environ.get('HERMES_SESSION_CHAT_ID')
             old_hermes_home = os.environ.get('HERMES_HOME')
+            old_session_profile = os.environ.get('HERMES_SESSION_PROFILE')
             os.environ.update(_safe_profile_runtime_env)
             os.environ['TERMINAL_CWD'] = str(s.workspace)
             os.environ['HERMES_EXEC_ASK'] = '1'
@@ -14493,6 +14552,8 @@ def _run_agent_streaming(
             # process_complete wiring (ours-original, Option B): see
             # _build_agent_thread_env above.
             os.environ['HERMES_SESSION_CHAT_ID'] = str(session_id)
+            if _resolved_profile_name:
+                os.environ['HERMES_SESSION_PROFILE'] = str(_resolved_profile_name)
             if _profile_home:
                 os.environ['HERMES_HOME'] = _profile_home
                 # Prefer context-local Hermes-home overrides when available.
@@ -17807,6 +17868,8 @@ def _run_agent_streaming(
                 else: os.environ['HERMES_SESSION_CHAT_ID'] = old_session_chat_id
                 if old_hermes_home is None: os.environ.pop('HERMES_HOME', None)
                 else: os.environ['HERMES_HOME'] = old_hermes_home
+                if old_session_profile is None: os.environ.pop('HERMES_SESSION_PROFILE', None)
+                else: os.environ['HERMES_SESSION_PROFILE'] = old_session_profile
 
     except Exception as e:
         print('[webui] stream error:\n' + traceback.format_exc(), flush=True)
