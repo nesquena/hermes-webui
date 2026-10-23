@@ -25,6 +25,16 @@
 
 ### Performance
 
+- **The sidebar transcript reconcile no longer re-reads every settled session on every poll.** `GET /api/sessions`
+  reconciles the visible message count of each session whose state.db has grown by loading its sidecar and merging the
+  state.db transcript. On a board of a few hundred settled sessions that was one merge per row per poll, every poll.
+  The merge now memoises its answer by (session, state.db message count) for the duration of one payload, so a board
+  that has not moved pays one state.db read per row instead of one per poll, and it refuses a transcript that no longer
+  answers the count the caller aggregated. The transcript window is bounded separately
+  (`HERMES_WEBUI_STATE_DB_OVERRIDE_RECONCILE_TOP_N`, default 60) plus every session carrying a truncation cutoff, while
+  the count/latest-timestamp tier keeps its documented top-300 default (`HERMES_WEBUI_STATE_DB_OVERRIDE_TOP_N`), so
+  settled conversations still sort by their newest reply. Reported by @b3nw. (#8368)
+
 - **Fork a scheduled-job (cron) conversation into your own editable chat.** Cron-run sessions are read-only (the scheduler owns them), so you couldn't continue one. You can now branch/fork a cron session into a new WebUI-owned conversation — the original read-only session is never modified, and the fork picks up its history so you can carry on. Only genuine cron sessions qualify (verified by the server-side source, not a guessable id), and every other read-only session stays unbranchable. Thanks @rodboev. (#5555, #5477)
 
 - **Pick the exact time and day for scheduled jobs — no cron syntax needed.** The Tasks "New job" form now builds the schedule as a plain sentence: choose a frequency (Hourly / Daily / Weekdays / Weekly / Monthly / Custom) and it shows just the controls that matter — a time picker, a day-of-week dropdown, or a day-of-month dropdown — e.g. "Weekly on Monday at 09:00." The generated cron expression is previewed inline, and the raw cron field now appears only under "Custom." Thanks @rodboev. (#5554, #5552)
