@@ -53,6 +53,12 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     session.pending_user_message = "Do the long task."
     session.pending_started_at = 1.0
     session.save()
+    old_draft = {'text': 'archived draft', 'files': [{'name': 'old.txt'}]}
+    continuation_draft = {'text': 'continuation draft', 'files': [{'name': 'new.txt'}]}
+    models._save_session_draft(old_sid, old_draft)
+    models._session_draft_path(new_sid).write_text(json.dumps(continuation_draft), encoding='utf-8')
+    old_draft_bytes = models._session_draft_path(old_sid).read_bytes()
+    new_draft_bytes = models._session_draft_path(new_sid).read_bytes()
     models.SESSIONS[old_sid] = session
     streaming.SESSIONS[old_sid] = session
     event_queue = queue.Queue()
@@ -158,6 +164,11 @@ def test_compression_exhausted_after_session_rotation_preserves_snapshot_and_err
     assert "Context compression exhausted" in new_payload["messages"][-1]["content"]
     assert old_sid not in streaming.SESSIONS
     assert streaming.SESSIONS[new_sid].session_id == new_sid
+    assert session.composer_draft == continuation_draft
+    assert session.compact()['composer_draft'] == continuation_draft
+    assert models.Session.load(new_sid).composer_draft == continuation_draft
+    assert models._session_draft_path(old_sid).read_bytes() == old_draft_bytes
+    assert models._session_draft_path(new_sid).read_bytes() == new_draft_bytes
 
 
 @pytest.mark.parametrize("scenario", ["marker-failure", "cache-conflict", "publication-boundary"])

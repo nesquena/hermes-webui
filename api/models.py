@@ -3,6 +3,7 @@ import collections
 import contextvars
 import copy
 import datetime
+import functools
 import hashlib
 import inspect
 import json
@@ -252,15 +253,21 @@ _WINDOWS_REPLACE_INITIAL_DELAY = 0.05  # 50 ms
 
 def _safe_replace(src: Path, dst: Path) -> None:
     """Atomic replace with retries on Windows file-locking errors."""
+    _replace_with_retry(src, dst, os.replace)
+
+
+def _replace_with_retry(src: Path, dst: Path, publish):
+    """Retry publication callbacks; guarded callbacks release before backoff.
+
+    False means the publication condition failed, not a sharing violation.
+    """
     if os.name != 'nt':
-        os.replace(src, dst)
-        return
+        return publish(src, dst)
 
     delay = _WINDOWS_REPLACE_INITIAL_DELAY
     for attempt in range(_WINDOWS_REPLACE_MAX_RETRIES):
         try:
-            os.replace(src, dst)
-            return
+            return publish(src, dst)
         except PermissionError:
             if attempt == _WINDOWS_REPLACE_MAX_RETRIES - 1:
                 raise
@@ -307,22 +314,140 @@ def _sidecar_write_generation(session_id) -> tuple[int, int]:
     return total, own
 
 
-def _replace_session_sidecar(tmp: Path, path: Path, session_id) -> None:
-    _note_sidecar_write(session_id)
+class _DraftOwnerPublicationGate:
+    """Concurrent owner replacements; exclusive draft/creation decisions.
+
+    FIFO admission prevents either mode from overtaking queued work. Consecutive
+    shared tickets can overlap; an exclusive ticket waits for them to drain.
+    Never nest or upgrade modes.
+    """
+
+    def __init__(self):
+        self._condition = threading.Condition(threading.Lock())
+        self._owners = 0
+        self._exclusive = False
+        self._waiting_exclusive = 0
+        self._queue = collections.deque()
+
+    @contextmanager
+    def shared(self):
+        with self._condition:
+            ticket = object()
+            self._queue.append(ticket)
+            try:
+                self._condition.wait_for(lambda: not self._exclusive and self._queue[0] is ticket)
+            finally:
+                # Also remove interrupted waiters; wake the next shared ticket
+                # immediately so consecutive owners need not serialize bodies.
+                self._queue.remove(ticket)
+                self._condition.notify_all()
+            self._owners += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._owners -= 1
+                if not self._owners:
+                    self._condition.notify_all()
+
+    @contextmanager
+    def exclusive(self):
+        with self._condition:
+            ticket = object()
+            self._queue.append(ticket)
+            self._waiting_exclusive += 1
+            try:
+                self._condition.wait_for(
+                    lambda: not self._exclusive and not self._owners and self._queue[0] is ticket)
+                self._exclusive = True
+            finally:
+                self._queue.remove(ticket)
+                self._waiting_exclusive -= 1
+                self._condition.notify_all()
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._exclusive = False
+                self._condition.notify_all()
+
+
+# Publication only: preparation and guarded-publisher backoff stay outside, but
+# ordinary owner saves keep shared mode through _safe_replace's bounded Windows
+# retry. Callers may own index/lifecycle locks; holders never take those, cache
+# or agent locks.
+_DRAFT_OWNER_PUBLICATION_GATE = _DraftOwnerPublicationGate()
+
+
+def _replace_session_sidecar(tmp: Path, path: Path, session_id, *, only_if_absent=False):
+    def publish(src, dst):
+        gate = _DRAFT_OWNER_PUBLICATION_GATE
+        with gate.exclusive() if only_if_absent else gate.shared():
+            if only_if_absent and _draft_owner_revision(session_id) is not None:
+                return False
+            _note_sidecar_write(session_id)
+            try:
+                # Preserve the two-argument owner replacement seam. Its bounded
+                # Windows backoff retains shared mode, never exclusive mode.
+                replace = os.replace if only_if_absent else _safe_replace
+                replace(src, dst)
+            finally:
+                _note_sidecar_write(session_id)
+    if only_if_absent:
+        return _replace_with_retry(tmp, path, publish)
+    return publish(tmp, path)
+
+
+def _draft_owner_revision(session_id):
     try:
-        _safe_replace(tmp, path)
-    finally:
-        _note_sidecar_write(session_id)
+        stat = (SESSION_DIR / f'{session_id}.json').stat()
+    except FileNotFoundError:
+        return None
+    return (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
 
 
-_DRAFT_LIFECYCLE_LOCK_STRIPES: "tuple[threading.Lock, ...]" = tuple(
-    threading.Lock() for _ in range(64)
+def _draft_owner_revisions_are_current(revisions):
+    """Validate the complete bounded authorization read set at one boundary."""
+    with _DRAFT_OWNER_PUBLICATION_GATE.exclusive():
+        return all(_draft_owner_revision(sid) == revision for sid, revision in revisions)
+
+
+def _draft_owner_is_current(session):
+    """Linearize a draft read against the revision used for authorization."""
+    return _draft_owner_revisions_are_current([
+        (session.session_id, getattr(session, '_draft_owner_revision', None)),
+    ])
+
+
+_EMBEDDED_DRAFT_PUBLICATION_LOCK = threading.Lock()
+
+
+def _publish_embedded_draft(session, published_stat, draft):
+    """Refresh fallback only while this save still owns the published sidecar.
+
+    Replacements remain independent (including concurrent skip-index saves).
+    Only the revision check and fallback assignment are serialized, so a save
+    delayed after replacement cannot regress a newer publication's fallback.
+    ctime is excluded because rename itself may change it.
+    """
+    with _EMBEDDED_DRAFT_PUBLICATION_LOCK:
+        try:
+            current = session.path.stat()
+        except FileNotFoundError:
+            return
+        fields = ('st_dev', 'st_ino', 'st_size', 'st_mtime_ns')
+        if all(getattr(current, key) == getattr(published_stat, key) for key in fields):
+            session._composer_draft = copy.deepcopy(draft)
+
+
+_DRAFT_LIFECYCLE_LOCK_STRIPES = tuple(
+    threading.RLock() for _ in range(64)
 )
 _DRAFT_LIFECYCLE_LOCK_STRIPE_COUNT = len(_DRAFT_LIFECYCLE_LOCK_STRIPES)
 
 
-def _draft_lifecycle_lock_for_session_id(session_id: str) -> threading.Lock:
-    """Return the per-session lock that serializes draft save/delete operations."""
+def _draft_lifecycle_lock_for_session_id(session_id: str):
+    """Return the reentrant stripe serializing draft read/merge/save/delete."""
     sid = _normalize_session_id_for_path(session_id)
     if not sid:
         raise ValueError(f"Unsafe session_id {session_id!r}; refusing to lock draft lifecycle")
@@ -384,12 +509,16 @@ def _apply_session_draft_overlay(data: dict, session_id: str) -> dict:
         return data
     draft = _load_session_draft(session_id)
     if isinstance(draft, dict):
+        # Keep the embedded recovery snapshot separate from the live overlay.
+        # A later damaged record must not turn its last loaded value into the
+        # legacy fallback for an already-cached Session.
+        data['_embedded_composer_draft'] = data.get('composer_draft')
         data["composer_draft"] = draft
     return data
 
 
-def _save_session_draft(session_id: str, draft) -> None:
-    """Persist a draft payload to the dedicated per-session draft sidecar."""
+def _save_session_draft(session_id: str, draft, *, owner=None) -> bool:
+    """Persist a draft, optionally comparing its authorized owner at publication."""
     if not _normalize_session_id_for_path(session_id):
         raise ValueError(f"Unsafe session_id {session_id!r}; refusing to persist dedicated draft")
     sid = _normalize_session_id_for_path(session_id)
@@ -403,13 +532,30 @@ def _save_session_draft(session_id: str, draft) -> None:
         )
         body = json.dumps(payload, ensure_ascii=False, indent=2)
         try:
+            body.encode('utf-8')
+        except UnicodeEncodeError:
+            body = json.dumps(payload, ensure_ascii=True, indent=2)
+        try:
             with open(tmp, 'w', encoding='utf-8') as f:
                 f.write(body)
                 f.flush()
                 os.fsync(f.fileno())
-            if not (SESSION_DIR / f"{sid}.json").exists():
-                return
-            _safe_replace(tmp, path)
+            # Encoding, writes and fsync stay outside the publication lock.
+            # An owner save can complete during any of that work; compare again
+            # and replace atomically with respect to both Session.save modes.
+            def publish(src, dst):
+                with _DRAFT_OWNER_PUBLICATION_GATE.exclusive():
+                    revision = _draft_owner_revision(sid)
+                    if revision is None:
+                        # A never-persisted empty chat stays diskless. A deleted
+                        # durable owner must not regain that exception.
+                        return (owner is not None and not getattr(owner, '_draft_identity_persisted', False)
+                                and not payload.get('text') and not payload.get('files'))
+                    if owner is not None and (owner.session_id != sid or revision != getattr(owner, '_draft_owner_revision', None)):
+                        return False
+                    os.replace(src, dst)
+                    return True
+            return _replace_with_retry(tmp, path, publish)
         except Exception:
             try:
                 tmp.unlink(missing_ok=True)
@@ -451,6 +597,15 @@ def _delete_session_draft_by_dir(session_id: str, sessions_dir: Path) -> bool:
 def _delete_session_draft(session_id: str) -> bool:
     """Delete the dedicated draft sidecar for *session_id*."""
     return _delete_session_draft_by_dir(session_id, SESSION_DIR)
+
+
+def _remove_session_with_draft(path) -> bool:
+    """Remove an owner and its draft under the same lifecycle lock."""
+    path = Path(path)
+    with _draft_lifecycle_lock_for_session_id(path.stem):
+        with _DRAFT_OWNER_PUBLICATION_GATE.exclusive():
+            path.unlink(missing_ok=True)
+        return _delete_session_draft_by_dir(path.stem, path.parent)
 
 
 # Serializes index writers so concurrent Session.save() calls cannot race on
@@ -1849,7 +2004,9 @@ class Session:
         self.source_label = kwargs.get('source_label')
         self.read_only = bool(kwargs.get('read_only', False))
         self.enabled_toolsets = enabled_toolsets  # List[str] or None — per-session toolset override
-        self.composer_draft = composer_draft if isinstance(composer_draft, dict) else {}
+        self._composer_draft_session_id = self.session_id
+        self._draft_identity_persisted = False
+        self.composer_draft = kwargs.get('_embedded_composer_draft', composer_draft)
         self.anchor_activity_scenes = anchor_activity_scenes if isinstance(anchor_activity_scenes, dict) else {}
         self.process_wakeup_pause = process_wakeup_pause if isinstance(process_wakeup_pause, dict) else {}
         self.share_token = str(share_token).strip() if share_token else None
@@ -1892,10 +2049,25 @@ class Session:
         )
 
     @property
+    def composer_draft(self):
+        # Compression snapshot saves temporarily rebind session_id. Only the
+        # permanent ownership handoff may change this property's store identity.
+        draft = _load_session_draft(self._composer_draft_session_id)
+        return draft if isinstance(draft, dict) else self._composer_draft
+
+    @composer_draft.setter
+    def composer_draft(self, value):
+        self._composer_draft = value if isinstance(value, dict) else {}
+
+    @property
     def path(self):
         return SESSION_DIR / f'{self.session_id}.json'
 
-    def save(self, touch_updated_at: bool = True, skip_index: bool = False) -> None:
+    def save(self, touch_updated_at: bool = True, skip_index: bool = False, *, only_if_absent: bool = False) -> bool | None:
+        # First-draft shells must not replace an owner published during fsync.
+        # Normal saves retain their existing return value and indexing behavior.
+        if only_if_absent and not skip_index:
+            raise ValueError('Create-only session publication requires skip_index')
         if not is_safe_session_id(self.session_id):
             raise ValueError(f"Unsafe session_id {self.session_id!r}; refusing to write outside session store")
         # ── #1558 P0 guard ──────────────────────────────────────────────
@@ -2034,7 +2206,7 @@ class Session:
         # via /api/session/recover, sessions whose JSON has fewer messages than
         # their .bak get restored automatically.
         try:
-            if self.path.exists():
+            if not only_if_absent and self.path.exists():
                 # The on-disk count, without reading the body.
                 #
                 # The decision below is a function of ONE integer -- how many
@@ -2170,11 +2342,19 @@ class Session:
                 f.write(payload)
                 f.flush()
                 os.fsync(f.fileno())
+                published_stat = os.fstat(f.fileno())
             if skip_index:
                 # Callers that explicitly skip the sidebar projection retain
                 # the existing same-session concurrency contract: their unique
                 # temp files may replace the sidecar independently.
-                _replace_session_sidecar(tmp, self.path, self.session_id)
+                if only_if_absent:
+                    if _replace_session_sidecar(tmp, self.path, self.session_id, only_if_absent=True) is False:
+                        tmp.unlink(missing_ok=True)
+                        return False
+                else:
+                    _replace_session_sidecar(tmp, self.path, self.session_id)
+                self._draft_identity_persisted = True
+                _publish_embedded_draft(self, published_stat, meta['composer_draft'])
             else:
                 # Publish the sidecar and its sidebar projection as one ordered
                 # operation. _write_session_index() uses this same RLock, so the
@@ -2184,6 +2364,8 @@ class Session:
                 # only the index with its frozen projection.
                 with _INDEX_WRITE_LOCK:
                     _replace_session_sidecar(tmp, self.path, self.session_id)
+                    self._draft_identity_persisted = True
+                    _publish_embedded_draft(self, published_stat, meta['composer_draft'])
                     # Build the sidebar entry from the same guarded transcript
                     # snapshot as the JSON payload. A shallow copy avoids
                     # rebinding/mutating the live Session while keeping message
@@ -2242,6 +2424,7 @@ class Session:
         data['messages'], _collapsed_partials = _collapse_adjacent_duplicate_partials(data.get('messages'))
         data = _apply_session_draft_overlay(data, sid)
         session = cls(**data)
+        session._draft_identity_persisted = True
         if _collapsed_partials:
             try:
                 # Self-heal bloated sessions on first full load without touching
@@ -6798,6 +6981,190 @@ def _resolve_session(sid, metadata_only=False, *, promote_cache=True, cache_on_m
             _finish_full_session_resolve(session_id, event)
 
 
+def _read_draft_owner_fields(path, fields):
+    """Read selected top-level values, skipping other JSON without retaining it.
+
+    Modern files validate the complete metadata header through the first
+    messages-array opener, even with oversized metadata. Legacy layouts with
+    missing provenance validate through EOF, once per uncached file revision.
+    Neither the transcript nor skipped string values are materialized.
+    """
+    string_special = re.compile(r'["\\\x00-\x1f]')
+    wanted = set(fields)
+    data = {}
+    with open(path, 'r', encoding='utf-8') as stream:
+        buf, pos = '', 0
+
+        def peek():
+            nonlocal buf, pos
+            if pos == len(buf):
+                buf, pos = stream.read(32 * 1024), 0
+            return buf[pos:pos + 1]
+
+        def take():
+            nonlocal pos
+            char = peek()
+            if not char:
+                raise ValueError('Truncated session ownership JSON')
+            pos += 1
+            return char
+
+        def whitespace():
+            while peek() and peek() in ' \r\n\t':
+                take()
+
+        def expect(char):
+            if take() != char:
+                raise ValueError('Invalid session ownership JSON')
+
+        def string(keep):
+            nonlocal pos
+            expect('"')
+            parts = []
+            while True:
+                if not peek():
+                    raise ValueError('Truncated session ownership string')
+                match = string_special.search(buf, pos)
+                end = match.start() if match else len(buf)
+                if keep:
+                    parts.append(buf[pos:end])
+                pos = end
+                if match is None:
+                    continue
+                char = take()
+                if char == '"':
+                    return json.loads('"' + ''.join(parts) + '"') if keep else None
+                if char != '\\':
+                    raise ValueError('Invalid session ownership string')
+                escape = take()
+                raw = '\\' + escape
+                if escape == 'u':
+                    digits = ''.join(take() for _ in range(4))
+                    if any(c not in '0123456789abcdefABCDEF' for c in digits):
+                        raise ValueError('Invalid session ownership escape')
+                    raw += digits
+                elif escape not in '"\\/bfnrt':
+                    raise ValueError('Invalid session ownership escape')
+                if keep:
+                    parts.append(raw)
+
+        def value(keep):
+            whitespace()
+            char = peek()
+            if char == '"':
+                return string(keep)
+            if char in ('{', '['):
+                take()
+                is_object = char == '{'
+                close = '}' if is_object else ']'
+                mapping, items = {}, []
+                whitespace()
+                if peek() == close:
+                    take()
+                    return mapping if is_object else items
+                while True:
+                    key = None
+                    if is_object:
+                        key = string(keep)
+                        whitespace()
+                        expect(':')
+                    child = value(keep)
+                    if keep:
+                        if is_object:
+                            mapping[key] = child
+                        else:
+                            items.append(child)
+                    whitespace()
+                    delimiter = take()
+                    if delimiter == close:
+                        return mapping if is_object else items
+                    if delimiter != ',':
+                        raise ValueError('Invalid session ownership container')
+                    whitespace()
+            token = []
+            while peek() and peek() not in ' \r\n\t,]}':
+                token.append(take())
+            # The decoder validates literals/numbers even in skipped values.
+            scalar = json.loads(''.join(token))
+            return scalar if keep else None
+
+        whitespace()
+        expect('{')
+        whitespace()
+        if peek() == '}':
+            take()
+            whitespace()
+            if peek():
+                raise ValueError('Trailing session ownership JSON')
+            return data
+        in_header = True
+        while True:
+            key = string(True)
+            whitespace()
+            expect(':')
+            whitespace()
+            if key == 'messages':
+                # Only the first transcript boundary can finish a modern header.
+                # Seeing every field once is not enough: later header duplicates
+                # use the same last-value semantics as json.loads(). A legacy
+                # layout missing any field must instead validate through EOF.
+                if in_header and wanted <= data.keys() and peek() == '[':
+                    take()
+                    return data
+                in_header = False
+            keep = key in wanted
+            child = value(keep)
+            if keep:
+                data[key] = child
+            whitespace()
+            delimiter = take()
+            if delimiter == '}':
+                whitespace()
+                if peek():
+                    raise ValueError('Trailing session ownership JSON')
+                return data
+            if delimiter != ',':
+                raise ValueError('Invalid session ownership object')
+            whitespace()
+
+
+@functools.lru_cache(maxsize=128)
+def _draft_owner_metadata(path, signature):
+    # Retain ownership fields only, never messages. Atomic replacement or an
+    # external metadata edit invalidates the cache even on a warm Session hit.
+    fields = ('session_id', 'title', 'workspace', 'profile', 'composer_draft',
+              'source_tag', 'raw_source', 'session_source',
+              'pre_compression_snapshot', 'pre_compression_continuation_session_id',
+              'parent_session_id')
+    return _read_draft_owner_fields(path, fields)
+
+
+def get_session_for_draft(sid, *, allow_missing_cached=False):
+    """Resolve fixed draft ownership without transcript loading or recovery."""
+    if not is_safe_session_id(sid):
+        raise KeyError(sid)
+    path = SESSION_DIR / f'{sid}.json'
+    try:
+        stat = path.stat()
+        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        data = _draft_owner_metadata(path, signature)
+    except FileNotFoundError:
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            if (cached is not None and cached.session_id == sid
+                    and not getattr(cached, '_loaded_metadata_only', False)
+                    and (allow_missing_cached or not getattr(cached, '_draft_identity_persisted', False))):
+                return cached
+        raise KeyError(sid) from None
+    if data.get('session_id') != sid:
+        raise KeyError(sid)
+    session = Session(**data)
+    session._loaded_metadata_only = True
+    session._draft_identity_persisted = True
+    session._draft_owner_revision = signature
+    return session
+
+
 def get_session(sid, metadata_only=False):
     """Load a session, optionally with metadata only (skipping messages)."""
     return _resolve_session(sid, metadata_only=metadata_only)
@@ -6816,12 +7183,9 @@ def get_session_profile_readonly(sid):
             return profile
     path = SESSION_DIR / f'{sid}.json'
     try:
-        prefix = _read_metadata_json_prefix(path)
-        data = json.loads(prefix) if prefix else None
-        # Legacy layouts may put profile after messages/scenes. Read the JSON
-        # directly: Session.load() can collapse partials and save a shrink backup.
-        if not isinstance(data, dict) or 'profile' not in data:
-            data = json.loads(path.read_bytes())
+        stat = path.stat()
+        signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+        data = _draft_owner_metadata(path, signature)
     except FileNotFoundError:
         raise KeyError(sid) from None
     if not isinstance(data, dict) or data.get('session_id') != sid:
