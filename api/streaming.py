@@ -16858,16 +16858,42 @@ def _run_agent_streaming(
 
                 # ── Handle context compression side effects ──
                 # Also detect compression via the result dict or compressor state
+                _compressor = getattr(agent, 'context_compressor', None)
                 if not _compressed:
-                    _compressor = getattr(agent, 'context_compressor', None)
                     if _compressor and getattr(_compressor, 'compression_count', 0) > _pre_compression_count:
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
-                    s.context_messages = _prune_context_tool_results_after_compression(
-                        agent,
-                        s.context_messages,
-                    )
+                    # LCM-X (and other non-native context engines) manages its
+                    # own post-compression budget via summary compression and
+                    # externalized payloads. The hard pruner below would replace
+                    # LCM-X `[Externalized tool output … ref=*.json]` markers with
+                    # dynamic budget strings ("omitted N chars"), which breaks
+                    # LCM-X rehydration and invalidates the KV-cache prefix on
+                    # every compression cycle. Only run the pruner for the
+                    # hermes-native ContextCompressor, which has no other
+                    # mechanism to cap tool-result size.
+                    #
+                    # Gate on the configured context engine. When a non-native
+                    # engine (e.g. lcm-x) is active, it owns its own context
+                    # budget and the hard pruner would destroy its ref markers
+                    # / KV-cache prefix.
+                    try:
+                        from hermes_cli.config import load_config
+                        from hermes_cli.plugins_discovery import cfg_get
+                        _ctx_engine = cfg_get(load_config(), 'context', 'engine', default='compressor')
+                    except Exception:
+                        _ctx_engine = 'compressor'
+                    if _ctx_engine == 'compressor':
+                        s.context_messages = _prune_context_tool_results_after_compression(
+                            agent,
+                            s.context_messages,
+                        )
+                    else:
+                        logger.debug(
+                            "post-compression tool-result pruning skipped "
+                            "(context engine: %s)", _ctx_engine,
+                        )
                     s.post_compression_context_tokens_estimate = _estimate_post_compression_context_tokens(
                         agent,
                         s.context_messages,
