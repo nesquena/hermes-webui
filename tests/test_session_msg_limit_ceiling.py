@@ -92,6 +92,13 @@ def test_frontend_declares_live_ceiling_at_module_scope_with_fallback():
 
 
 def test_frontend_reload_width_paths_read_the_live_ceiling():
-    """Both reload-width decisions read the live `_msgLimitMax`, not the mirror."""
-    assert "reloadLimit <= _msgLimitMax" in _SESSIONS_JS       # _ensureMessagesLoaded
+    """Both reload-width decisions read the live `_msgLimitMax`, not the mirror.
+
+    The reload-width ceiling test moved INSIDE _messageReloadLimitForSession so
+    the bounded-vs-full-transcript decision has a single owner (the full desired
+    window must fit under the ceiling or the helper returns the bare-request
+    fallback). It still reads the live `_msgLimitMax`, which is what this test
+    guards.
+    """
+    assert "const ceiling=Math.max(0,Number(_msgLimitMax)||0);" in _SESSIONS_JS  # _messageReloadLimitForSession
     assert "requestedLimit >= _msgLimitMax" in _SESSIONS_JS    # _loadOlderMessages

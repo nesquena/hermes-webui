@@ -285,6 +285,7 @@ function createEnvironment() {
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
+  globalThis._sameSessionForceReloadHint = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
   globalThis._messageRenderWindowSize = 0;
