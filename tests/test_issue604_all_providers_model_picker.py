@@ -41,11 +41,11 @@ class TestProviderDetectionEnvVars:
         assert re.search(r'XAI_API_KEY.*?add\("x-ai"\)', src, re.DOTALL), \
             "XAI_API_KEY must map to provider 'x-ai'"
 
-    def test_mistral_env_maps_to_mistralai_provider(self):
-        """MISTRAL_API_KEY should add 'mistralai' (not 'mistral')."""
+    def test_mistral_env_maps_to_mistral_provider(self):
+        """MISTRAL_API_KEY should add 'mistral'."""
         src = _src()
-        assert re.search(r'MISTRAL_API_KEY.*?add\("mistralai"\)', src, re.DOTALL), \
-            "MISTRAL_API_KEY must map to provider 'mistralai'"
+        assert re.search(r'MISTRAL_API_KEY.*?add\("mistral"\)', src, re.DOTALL), \
+            "MISTRAL_API_KEY must map to provider 'mistral'"
 
     def test_all_provider_env_vars_map_to_known_providers(self):
         """Every detected_provider.add() call should reference a known provider."""
@@ -101,8 +101,8 @@ class TestProviderModelsCompleteness:
     def test_has_xai(self):
         assert "x-ai" in _PROVIDER_MODELS_KEYS
 
-    def test_has_mistralai(self):
-        assert "mistralai" in _PROVIDER_MODELS_KEYS
+    def test_has_mistral(self):
+        assert "mistral" in _PROVIDER_MODELS_KEYS
 
     def test_has_openrouter(self):
         # openrouter uses _FALLBACK_MODELS, not _PROVIDER_MODELS

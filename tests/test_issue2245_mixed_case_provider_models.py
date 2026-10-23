@@ -123,6 +123,41 @@ def test_mixed_case_provider_key_produces_configured_models(monkeypatch):
     )
 
 
+@pytest.mark.parametrize(
+    "providers",
+    [
+        {
+            "mistralai": {"models": ["legacy-model"]},
+            "mistral": {"models": ["canonical-model"]},
+        },
+        {
+            "mistral": {"models": ["canonical-model"]},
+            "mistralai": {"models": ["legacy-model"]},
+        },
+    ],
+)
+def test_native_mistral_config_wins_over_legacy_key_in_any_order(monkeypatch, providers):
+    _stub_hermes_cli(monkeypatch)
+    monkeypatch.setattr("socket.getaddrinfo", lambda *a, **k: [])
+    restore = _with_config(
+        {
+            "model": {"default": "canonical-model", "provider": "mistral"},
+            "providers": providers,
+        }
+    )
+    try:
+        result = config.get_available_models()
+        static_result = config._static_models_catalog_without_live_probes()
+    finally:
+        restore()
+
+    for catalog in (result, static_result):
+        groups = {group["provider_id"]: group for group in catalog["groups"]}
+        model_ids = {model["id"].split(":", 1)[-1] for model in groups["mistral"]["models"]}
+        assert "canonical-model" in model_ids
+        assert "legacy-model" not in model_ids
+
+
 # ---------------------------------------------------------------------------
 # Test case 2 — underscore provider key
 # ---------------------------------------------------------------------------

@@ -17,9 +17,11 @@ from api.config import (
     DEFAULT_WORKSPACE,
     _FALLBACK_MODELS,
     _HERMES_FOUND,
+    _get_provider_cfg,
     invalidate_models_cache,
     _PROVIDER_DISPLAY,
     _PROVIDER_MODELS,
+    _resolve_provider_alias,
     _get_config_path,
     get_available_models,
     get_config,
@@ -199,14 +201,13 @@ _SUPPORTED_PROVIDER_SETUPS = {
         "models": list(_PROVIDER_MODELS.get("nvidia", [])),
         "category": "specialized",
     },
-    "mistralai": {
+    "mistral": {
         "label": "Mistral",
         "env_var": "MISTRAL_API_KEY",
         "default_model": "mistral-large-latest",
         "default_base_url": "https://api.mistral.ai/v1",
         "requires_base_url": False,
-        # No catalog entry for mistralai today — wizard shows a free-text input.
-        "models": list(_PROVIDER_MODELS.get("mistralai", [])),
+        "models": list(_PROVIDER_MODELS.get("mistral", [])),
         "category": "specialized",
     },
     "x-ai": {
@@ -562,6 +563,8 @@ def _extract_current_provider(cfg: dict) -> str:
     if isinstance(model_cfg, dict):
         provider = str(model_cfg.get("provider") or "").strip().lower()
         if provider:
+            if provider in {"mistral", "mistralai"}:
+                return _resolve_provider_alias(provider)
             return provider
     return ""
 
@@ -586,6 +589,8 @@ def _provider_api_key_present(
     provider: str, cfg: dict, env_values: dict[str, str]
 ) -> bool:
     provider = (provider or "").strip().lower()
+    if provider in {"mistral", "mistralai"}:
+        provider = _resolve_provider_alias(provider)
     if not provider:
         return False
 
@@ -611,7 +616,11 @@ def _provider_api_key_present(
     # ``... or {}`` degrades that null to an empty mapping (salvage of #3967).
     providers_cfg = cfg.get("providers") or {}
     if isinstance(providers_cfg, dict):
-        provider_cfg = providers_cfg.get(provider, {})
+        provider_cfg = (
+            _get_provider_cfg(provider, config_obj=cfg)
+            if provider == "mistral"
+            else providers_cfg.get(provider, {})
+        )
         if (
             isinstance(provider_cfg, dict)
             and str(provider_cfg.get("api_key") or "").strip()
@@ -993,6 +1002,8 @@ def apply_onboarding_setup(body: dict) -> dict:
         return get_onboarding_status()
 
     provider = str(body.get("provider") or "").strip().lower()
+    if provider in {"mistral", "mistralai"}:
+        provider = _resolve_provider_alias(provider)
     model = str(body.get("model") or "").strip()
     api_key = str(body.get("api_key") or "").strip()
     base_url = _normalize_base_url(str(body.get("base_url") or ""))

@@ -210,7 +210,13 @@ class TestLiveModelsCustomProviderFallback:
 
         r._clear_live_models_cache()
         monkeypatch.setattr(c, "get_config", lambda: cfg)
-        monkeypatch.setattr(c, "_resolve_provider_alias", lambda p: p)
+
+        def _resolve_test_alias(provider):
+            if str(provider or "").strip().lower() in {"mistral", "mistralai"}:
+                return "mistral"
+            return provider
+
+        monkeypatch.setattr(c, "_resolve_provider_alias", _resolve_test_alias)
         monkeypatch.setattr(r, "j", lambda _handler, payload, **_kw: payload)
         TestLiveModelsCustomProviderFallback._install_provider_model_ids(monkeypatch, lambda _p: [])
 
@@ -420,7 +426,7 @@ class TestLiveModelsCustomProviderFallback:
         resp = self._call_live_models(monkeypatch, cfg, "mistralai")
 
         assert requests == []
-        assert resp["provider"] == "mistralai"
+        assert resp["provider"] == "mistral"
         assert resp["models"], "static fallback models should still be returned"
 
     def test_standard_provider_live_fetch_can_use_matching_top_level_key(self, monkeypatch):
@@ -468,7 +474,7 @@ class TestLiveModelsCustomProviderFallback:
                 "timeout": 8,
             }
         ]
-        assert resp["provider"] == "mistralai"
+        assert resp["provider"] == "mistral"
 
     def test_standard_provider_live_fetch_allows_matching_active_provider_alias(self, monkeypatch):
         """Alias-equivalent active providers should still count as the same provider."""

@@ -2347,7 +2347,7 @@ _PROVIDER_ALIASES = {
 _OPENAI_COMPAT_ENDPOINTS = {
     "zai": "https://api.z.ai/v1",
     "minimax": "https://api.minimax.chat/v1",
-    "mistralai": "https://api.mistral.ai/v1",
+    "mistral": "https://api.mistral.ai/v1",
     "xai": "https://api.x.ai/v1",
     "deepseek": "https://api.deepseek.com",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -8072,6 +8072,8 @@ def _clean_session_model_provider(value: str | None) -> str | None:
     if provider.startswith("@"):
         parsed = _parse_provider_qualified_model_id(provider)
         provider = parsed[1].strip() if parsed else provider[1:]
+    if provider == "mistralai":
+        provider = "mistral"
     return provider or None
 
 
@@ -25547,7 +25549,7 @@ def _handle_live_models(handler, parsed):
                 if _base_url and _api_key:
                     try:
                         import urllib.request
-                        import json
+                        import json as _json
                         
                         # Build the models endpoint URL
                         # AxonHub and similar OpenAI-compat endpoints serve /v1/models
@@ -25564,7 +25566,7 @@ def _handle_live_models(handler, parsed):
                         )
                         
                         with urllib.request.urlopen(_req, timeout=CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS) as _resp:
-                            _body = json.loads(_resp.read())
+                            _body = _json.loads(_resp.read())
                         
                         # Parse response: {"data": [{"id": "model1", ...}, ...]}
                         if isinstance(_body, dict):
@@ -25632,8 +25634,13 @@ def _handle_live_models(handler, parsed):
             if _ep:
                 try:
                     import urllib.request
+                    from api.config import _get_provider_cfg
+
                     _providers_cfg = cfg.get("providers") or {}
-                    _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
+                    if provider in {"mistral", "mistralai"}:
+                        _prov = _get_provider_cfg(provider, config_obj=cfg)
+                    else:
+                        _prov = _providers_cfg.get(provider, {}) if isinstance(_providers_cfg, dict) else {}
                     # Only use a provider-scoped key.  A top-level model.api_key
                     # is safe here only when it belongs to the requested provider;
                     # otherwise /api/models/live?provider=<other> could forward
