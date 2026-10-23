@@ -26,7 +26,7 @@ def test_safe_resolve_blocks_external_symlink_directory(tmp_path):
         list_dir(workspace, "escape")
 
     # The escape symlink is now emitted (display-only) with target_outside_workspace=True.
-    entries = {e["name"]: e for e in list_dir(workspace, ".")}
+    entries = {e["name"]: e for e in list_dir(workspace, ".")["entries"]}
     assert "escape" in entries
     assert entries["escape"]["type"] == "symlink"
     assert entries["escape"]["target_outside_workspace"] is True
@@ -50,7 +50,7 @@ def test_read_file_blocks_external_symlink_file(tmp_path):
         read_file_content(workspace, "secret-link.txt")
 
     # The escape symlink is now emitted (display-only) with target_outside_workspace=True.
-    entries = {e["name"]: e for e in list_dir(workspace, ".")}
+    entries = {e["name"]: e for e in list_dir(workspace, ".")["entries"]}
     assert "secret-link.txt" in entries
     assert entries["secret-link.txt"]["type"] == "symlink"
     assert entries["secret-link.txt"]["target_outside_workspace"] is True
@@ -73,7 +73,7 @@ def test_internal_symlink_still_resolves_within_workspace(tmp_path):
     assert read_file_content(workspace, "inside-link.txt")["content"] == "inside"
     if not w._DIR_FD_OK:
         pytest.skip("internal symlink listing is platform-dependent without dir_fd")
-    assert "inside-link.txt" in {entry["name"] for entry in list_dir(workspace, ".")}
+    assert "inside-link.txt" in {entry["name"] for entry in list_dir(workspace, ".")["entries"]}
 
 
 def test_authorized_escape_request_reanchors_descendants(tmp_path):
@@ -238,7 +238,7 @@ def test_list_dir_toctou_swap_to_external_symlink_blocked(tmp_path, monkeypatch)
 
     monkeypatch.setattr(w, "safe_resolve_ws", racing_resolve)
     try:
-        entries = w.list_dir(workspace, "sub")
+        entries = w.list_dir(workspace, "sub")["entries"]
         names = {e["name"] for e in entries}
         assert "secret.txt" not in names, "TOCTOU symlink swap leaked external dir listing"
     except (FileNotFoundError, ValueError):
@@ -341,12 +341,12 @@ def test_list_read_create_work_on_no_dir_fd_fallback(tmp_path, monkeypatch):
     (outside / "s.txt").write_text("x", encoding="utf-8")
     (workspace / "escape").symlink_to(outside)
 
-    names = {e["name"] for e in w.list_dir(workspace, ".")}
+    names = {e["name"] for e in w.list_dir(workspace, ".")["entries"]}
     assert "a.txt" in names
     if w._DIR_FD_OK:
         assert "internal" in names          # legit internal symlink listed
     assert "escape" in names            # external symlink emitted (display-only)
-    escape_entry = next(e for e in w.list_dir(workspace, ".") if e["name"] == "escape")
+    escape_entry = next(e for e in w.list_dir(workspace, ".")["entries"] if e["name"] == "escape")
     assert escape_entry["target_outside_workspace"] is True
     assert w.read_file_content(workspace, "a.txt")["content"] == "hi"
 
@@ -416,7 +416,7 @@ def test_list_dir_in_workspace_symlink_shape(tmp_path):
     (workspace / "data.txt").write_text("hello", encoding="utf-8")
     (workspace / "link.txt").symlink_to(workspace / "data.txt")
 
-    entries = {e["name"]: e for e in w.list_dir(workspace, ".")}
+    entries = {e["name"]: e for e in w.list_dir(workspace, ".")["entries"]}
     assert "link.txt" in entries
     assert entries["link.txt"]["type"] == "symlink"
     assert entries["link.txt"]["target_outside_workspace"] is False
@@ -433,7 +433,7 @@ def test_list_dir_outside_workspace_symlink_emitted_with_flag(tmp_path):
     (outside / "file.txt").write_text("external", encoding="utf-8")
     (workspace / "ext-link.txt").symlink_to(outside / "file.txt")
 
-    entries = {e["name"]: e for e in list_dir(workspace, ".")}
+    entries = {e["name"]: e for e in list_dir(workspace, ".")["entries"]}
     assert "ext-link.txt" in entries
     assert entries["ext-link.txt"]["type"] == "symlink"
     assert entries["ext-link.txt"]["target_outside_workspace"] is True
@@ -452,7 +452,7 @@ def test_list_dir_external_symlink_blocked_system_path_unchanged(tmp_path):
     (workspace / "etc-link").symlink_to("/etc")
     (workspace / "usr-link").symlink_to("/usr")
 
-    names = {e["name"] for e in list_dir(workspace, ".")}
+    names = {e["name"] for e in list_dir(workspace, ".")["entries"]}
     assert "etc-link" not in names
     assert "usr-link" not in names
 
@@ -468,7 +468,7 @@ def test_list_dir_escape_symlink_read_still_blocked(tmp_path):
     (workspace / "escape.txt").symlink_to(outside / "secret.txt")
 
     # Listing emits the entry with target_outside_workspace=True
-    entries = {e["name"]: e for e in list_dir(workspace, ".")}
+    entries = {e["name"]: e for e in list_dir(workspace, ".")["entries"]}
     assert "escape.txt" in entries
     assert entries["escape.txt"]["target_outside_workspace"] is True
 
