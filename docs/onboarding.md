@@ -91,6 +91,14 @@ A port held by a healthy WebUI is not a conflict: re-running bootstrap (or
 instance ready and exits 0. Only a foreground/supervisor launch, which
 would be a second server on the same port, reports the duplicate start.
 
+That holds when the running WebUI is bound to a LAN or Tailscale address only
+(`--host 100.x.y.z`) and you start bootstrap with a wildcard (`--host 0.0.0.0`):
+the wildcard bind conflicts with it, so bootstrap looks on this machine's own
+interface addresses, recognises the instance, and reports the address it is
+actually reachable on rather than `localhost`, which nothing is listening on
+there. It is announced under its own address only after answering with the
+WebUI's `/health` payload.
+
 Only the WebUI's own `/health` payload counts as that running instance: any
 other service, including one answering a generic `{"status": "ok"}`, is
 reported as the conflict above. A bind address that cannot be used at all
