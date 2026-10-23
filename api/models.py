@@ -9431,6 +9431,184 @@ def _cli_sessions_cache_ttl_seconds() -> float:
         return 5.0
 
 
+# ── Single-session metadata fast path ───────────────────────────────────────
+# ``get_cli_sessions()`` projects the WHOLE agent state.db into sidebar rows.
+# On a long-lived install state.db reaches multiple GB, so a cold projection
+# costs seconds, and the cache key embeds a live state.db fingerprint — meaning
+# every agent write invalidates it again. Hot request paths that only need ONE
+# session's metadata (``/api/session/import_cli``, ``/api/git-info``) must not
+# pay that cost: they read an existing snapshot, and when none is cached they
+# warm it out-of-band instead of blocking the request.
+_CLI_SESSIONS_WARM_INFLIGHT: set = set()
+_CLI_SESSIONS_WARM_INFLIGHT_LOCK = threading.Lock()
+
+
+def peek_cli_sessions_index(*, all_profiles: bool = False) -> dict:
+    """Return ``{session_id: row}`` from a cached CLI-sessions snapshot.
+
+    Rebuild-free companion to :func:`get_cli_sessions`. Never triggers the heavy
+    projection and never raises for missing/garbled cache state: it simply
+    returns ``{}`` so the caller can fall back to a real lookup.
+
+    Both fresh and expired-but-valid snapshots are considered — the projection
+    behind them is expensive and its rows barely change — but entries whose
+    invalidation stamp no longer matches are skipped, since those describe a
+    catalog that was explicitly cleared.
+    """
+    now = time.monotonic()
+    stamp_now = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+    candidates = []
+    with _CLI_SESSIONS_CACHE_LOCK:
+        for key, entry in list(_CLI_SESSIONS_CACHE.items()):
+            try:
+                key_is_all = bool(key) and str(key[0]) == 'all_profiles'
+            except Exception:
+                continue
+            if key_is_all != bool(all_profiles):
+                continue
+            try:
+                if len(entry) == 3:
+                    expires_at, entry_stamp, sessions = entry
+                else:
+                    expires_at, sessions = entry
+                    entry_stamp = stamp_now
+            except Exception:
+                continue
+            if entry_stamp != stamp_now:
+                continue
+            candidates.append((bool(expires_at > now), expires_at, sessions))
+    if not candidates:
+        return {}
+    # Fresh snapshots first, then the most recently expired one.
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    for _fresh, _expires_at, sessions in candidates:
+        index = _cli_sessions_rows_by_id(sessions)
+        if index:
+            return index
+    return {}
+
+
+def _cli_sessions_rows_by_id(sessions) -> dict:
+    index = {}
+    for row in sessions or ():
+        try:
+            sid = row.get('session_id')
+        except AttributeError:
+            continue
+        if sid:
+            index[sid] = row
+    return index
+
+
+def peek_cli_sessions_last_known_good_index(*, all_profiles: bool = False) -> dict:
+    """Same as :func:`peek_cli_sessions_index`, over the last-known-good map.
+
+    The primary cache is keyed by a tuple that embeds a live ``state.db``
+    fingerprint, so a key churn (any agent write) makes the snapshot
+    unreachable even though it is perfectly usable. The last-known-good map is
+    keyed by the *stable* identity that deliberately drops that component, which
+    is what lets single-session lookups keep hitting after a write.
+    """
+    stamp_now = _CLI_SESSIONS_CACHE_INVALIDATION_VERSION
+    with _CLI_SESSIONS_CACHE_LOCK:
+        entries = list(_CLI_SESSIONS_LAST_KNOWN_GOOD.items())
+    for key, entry in entries:
+        try:
+            key_is_all = bool(key) and str(key[0]) == 'all_profiles'
+        except Exception:
+            continue
+        if key_is_all != bool(all_profiles):
+            continue
+        try:
+            entry_stamp, sessions = entry
+        except Exception:
+            continue
+        if entry_stamp != stamp_now:
+            continue
+        index = _cli_sessions_rows_by_id(sessions)
+        if index:
+            return index
+    return {}
+
+
+def warm_cli_sessions_cache_async(*, all_profiles: bool = False) -> bool:
+    """Schedule a background CLI-sessions rebuild; never blocks the caller.
+
+    Returns ``True`` when this call scheduled the rebuild and ``False`` when one
+    was already in flight, so concurrent requests coalesce onto a single
+    projection instead of stacking rebuilds on a cold cache.
+    """
+    token = bool(all_profiles)
+    with _CLI_SESSIONS_WARM_INFLIGHT_LOCK:
+        if token in _CLI_SESSIONS_WARM_INFLIGHT:
+            return False
+        _CLI_SESSIONS_WARM_INFLIGHT.add(token)
+
+    def _release() -> None:
+        with _CLI_SESSIONS_WARM_INFLIGHT_LOCK:
+            _CLI_SESSIONS_WARM_INFLIGHT.discard(token)
+
+    def _run() -> None:
+        try:
+            get_cli_sessions(all_profiles=all_profiles)
+        except Exception:
+            logger.debug("background CLI sessions warm failed", exc_info=True)
+        finally:
+            _release()
+
+    try:
+        threading.Thread(
+            target=_run,
+            daemon=True,
+            name='cli-sessions-warm',
+        ).start()
+    except Exception:
+        logger.debug("could not start CLI sessions warm thread", exc_info=True)
+        _release()
+        return False
+    return True
+
+
+def lookup_cli_session_row(
+    session_id: str,
+    *,
+    all_profiles: bool = False,
+) -> dict:
+    """Resolve ONE CLI session's sidebar row, cache-first.
+
+    Behaviorally identical to enumerating :func:`get_cli_sessions` and picking
+    the matching row — every caller keeps the same hit/miss semantics — but the
+    enumeration only happens when no snapshot is cached at all. On a long-lived
+    install that projection reads a multi-GB ``state.db`` and costs seconds, and
+    this lookup runs on ~15 request paths (session detail, share, rename,
+    delete, archive, git-info, import), including ones whose miss turns into a
+    bogus "Session not found".
+
+    Two snapshots are consulted before falling back: the primary cache (may be
+    expired but still valid) and the stable-identity last-known-good map, which
+    survives the ``state.db`` fingerprint churn that makes the primary key
+    unreachable after any agent write.
+    """
+    if not session_id:
+        return {}
+    row = peek_cli_sessions_index(all_profiles=all_profiles).get(session_id)
+    if row is not None:
+        return row
+    row = peek_cli_sessions_last_known_good_index(all_profiles=all_profiles).get(session_id)
+    if row is not None:
+        return row
+    # Genuinely cold (fresh process, nothing cached yet). Do the real lookup —
+    # this is what the original code always did — and server startup warms the
+    # catalog in the background so later requests take the fast path.
+    try:
+        for row in get_cli_sessions(all_profiles=all_profiles):
+            if row.get('session_id') == session_id:
+                return row
+    except Exception:
+        logger.debug("cli session lookup failed", exc_info=True)
+    return {}
+
+
 def _path_cache_key(path) -> str | None:
     if path is None:
         return None
