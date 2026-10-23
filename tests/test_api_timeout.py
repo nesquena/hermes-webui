@@ -228,9 +228,13 @@ def test_update_flows_keep_explicit_longer_timeouts():
 def test_session_message_loads_keep_explicit_longer_timeouts():
     """Large state.db installs can take longer than the generic 30s API timeout."""
     src = _source(SESSIONS_JS)
+    # #7925 bounded-tail reload: the append-only fast path splices
+    # msg_after + anchor_fp + transcript_generation (and its own bounded
+    # msg_limit, dropping the `all` width) between reloadLimitParam and
+    # expandParam. The 120s override must survive that rewrite.
     assert (
         "api(\n"
-        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,\n"
+        "      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${appendParam}${expandParam}`,\n"
         "      {timeoutMs:120000}\n"
         "    )"
     ) in src
