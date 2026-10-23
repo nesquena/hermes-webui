@@ -18,7 +18,6 @@ from typing import Any
 from api.config import (
     AGENT_INSTANCES,
     CANCEL_FLAGS,
-    PENDING_GOAL_CONTINUATION,
     STREAM_GOAL_RELATED,
     STREAMS,
     STREAMS_LOCK,
@@ -1854,6 +1853,115 @@ def _process_profile_is_root() -> bool:
         return False  # fail closed: treat the mirrored alias as per-profile
 
 
+def _env_value_is_profile_sourced(profiles_mod, key, value) -> bool:
+    """True when os.environ's *value* for *key* came from a profile's .env rather than the launcher (#8432).
+
+    Two sources put a profile's values into the process environment: the profile loader's mirror (recorded in
+    ``_loaded_profile_env_keys``) and a shell launcher that sourced a NAMED launch home's ``.env`` before Python
+    started (ctl.sh does this for ``$HERMES_HOME/.env``), recorded by the startup snapshot. A value equal to what the
+    named launch home's .env set at startup is that profile's, even if the launcher exported it too (fail closed).
+    The root home's .env is shared by definition, so its values are not profile-sourced.
+    """
+    value = str(value or "").strip()
+    if not value:
+        return False  # an empty value configures nothing
+    if key in (getattr(profiles_mod, "_loaded_profile_env_keys", ()) or ()):
+        return True
+    launch_env = getattr(profiles_mod, "_INITIAL_HERMES_HOME_DOTENV", None) or {}
+    if str(launch_env.get(key) or "").strip() != value:
+        return False
+    launch_home = str(getattr(profiles_mod, "_INITIAL_HERMES_HOME", "") or "").strip()
+    try:
+        return not _same_profile_home(launch_home, profiles_mod.get_hermes_home_for_profile(""))
+    except Exception:
+        return True  # fail closed
+
+
+def _config_url_may_belong_to_a_profile(profiles_mod, process_home) -> bool:
+    """True unless the ambient config's Gateway URL comes from an operator config file outside every profile (#8432).
+
+    Without ``HERMES_CONFIG_PATH`` (or with one a profile .env chose) the ambient config is the process profile's own
+    config.yaml. A launcher-provided file outside every profile home is operator configuration, shared, unless its
+    URL is a ``${VAR}`` template filled from a profile's .env.
+    """
+    import re as _re
+
+    from api.config import _load_yaml_config_file_raw
+    from api.workspace import _safe_resolve
+
+    override = str(os.environ.get("HERMES_CONFIG_PATH") or "").strip()
+    if not override or _env_value_is_profile_sourced(profiles_mod, "HERMES_CONFIG_PATH", override):
+        return True
+    cfg_dir = _safe_resolve(Path(override).expanduser()).parent
+    try:
+        own_home = _safe_resolve(Path(process_home).expanduser())
+        if cfg_dir == own_home or own_home in cfg_dir.parents:
+            return True  # inside the process profile's own home (any layout, isolated included)
+    except Exception:
+        return True  # fail closed
+    try:
+        roots = [_safe_resolve(Path(profiles_mod.get_hermes_home_for_profile("")).expanduser() / "profiles")]
+        canonical = getattr(profiles_mod, "_profiles_root", None)
+        if callable(canonical):
+            roots.append(_safe_resolve(Path(canonical())))
+    except Exception:
+        return True  # fail closed
+    if any(root in cfg_dir.parents for root in roots):
+        return True  # strictly below the profiles root: inside a named profile's directory
+    raw = _load_yaml_config_file_raw(Path(override).expanduser(), _copy=False)
+    raw_url = str(raw.get("webui_gateway_base_url") or "") if isinstance(raw, dict) else ""
+    for ref in _re.findall(r"\$\{([^}]+)\}", raw_url):
+        name = ref.split(":-", 1)[0].strip()
+        value = os.environ.get(name)
+        if value is not None and _env_value_is_profile_sourced(profiles_mod, name, value):
+            return True
+    return False
+
+
+def _shared_url_may_belong_to_process_profile(session_home) -> bool:
+    """True unless the shared Gateway URL is provably the launcher's, under a NAMED process profile (#8432).
+
+    With the root profile as the process profile, os.environ and the ambient config are the shared settings: False.
+    The process profile's own sessions are never affected: False. Nothing configured anywhere (the default URL)
+    belongs to no profile: False. Otherwise the URL may be a profile's (True) when it comes from:
+
+    - os.environ, and the value is profile-sourced (mirrored by the loader, or preloaded from a named launch home);
+    - the ambient config, and that file is the process profile's own config.yaml, a file inside a profile home,
+      a file a profile .env chose, or an operator file whose ``${VAR}`` URL is filled from a profile's .env;
+    - anything undeterminable (an exception): fail closed.
+    """
+    from api import profiles as _profiles
+
+    if _process_profile_is_root():
+        return False
+    try:
+        process_home = _profiles.get_process_profile_home()
+        if _same_profile_home(session_home, process_home):
+            return False
+    except Exception:
+        process_home = None
+    raw_env_url = str(os.environ.get(_WEBUI_GATEWAY_BASE_URL_ENV) or "").strip()
+    try:
+        if raw_env_url:
+            return _env_value_is_profile_sourced(_profiles, _WEBUI_GATEWAY_BASE_URL_ENV, raw_env_url)
+        from api.config import get_config
+
+        cfg = get_config()
+        if not (isinstance(cfg, dict) and str(cfg.get("webui_gateway_base_url") or "").strip()):
+            return False
+        if process_home is None:
+            return True
+        return _config_url_may_belong_to_a_profile(_profiles, process_home)
+    except Exception:
+        return True
+
+
+def _same_profile_home(a, b) -> bool:
+    from api.workspace import _safe_resolve
+
+    return _safe_resolve(Path(a).expanduser()) == _safe_resolve(Path(b).expanduser())
+
+
 def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
     """URL and key for a session's profile, never those of the process-active profile.
 
@@ -1865,9 +1973,17 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
       the cached ambient config); without one it keeps the shared URL.
     - Key, on a URL that is not the shared one: the profile's own HERMES_WEBUI_GATEWAY_API_KEY or API_SERVER_KEY,
       or none; the launcher's and the shared key are never sent to another Gateway.
-    - Key, on the shared URL: the profile's own HERMES_WEBUI_GATEWAY_API_KEY, then the shared alias (the
-      launcher's export, or the root profile's .env), then the profile's API_SERVER_KEY (the key of its own
-      Gateway), then the shared key.
+    - Key, on the shared URL, for another profile: its own HERMES_WEBUI_GATEWAY_API_KEY, then the shared key
+      (what v0.52.492 sends), then its API_SERVER_KEY only when there is no shared key at all. A profile's
+      API_SERVER_KEY is the key of its OWN Gateway route: the Agent's API server picks the profile from the URL
+      and accepts only that profile's key, so on the shared URL it would be a 401.
+    - Key, on the shared URL, for the process profile's own sessions: its own HERMES_WEBUI_GATEWAY_API_KEY, then
+      the shared alias (the launcher's export, or the root profile's .env), then its API_SERVER_KEY (read fresh
+      from its .env), then the shared key.
+    - Exception (#8432): under a NAMED process profile, a profile with a key but no URL gets the process pair
+      (URL and key from one source, as v0.52.492 sends) unless the shared URL is provably the launcher's (an
+      export that no profile .env supplied, or an operator config file outside every profile home), because that
+      URL may be a profile's own Gateway and must never receive another profile's key.
     """
     from api import profiles as _profiles
     from api.config import _expand_env_vars, _load_yaml_config_file_raw, _thread_ctx, get_config
@@ -1917,7 +2033,48 @@ def _gateway_endpoint_for_profile(profile_name) -> tuple[str, str]:
             )
     if url != shared_url:
         return url, own_key  # the profile's own Gateway: its own key or none, never the shared one
-    return url, (own_alias or shared_alias or own_key or shared_key)
+    if not own_url_env and not own_url_cfg and own_key and _shared_url_may_belong_to_process_profile(home):
+        # #8432: this profile set a key but no URL, and the "shared" URL may be the NAMED process profile's own
+        # (mirrored from its .env or read from its config). Never send this profile's key there; use the process
+        # pair, URL and key from one source, exactly what v0.52.492 sends for every fresh turn.
+        return shared_url, shared_key
+    if _session_is_process_profile(home):
+        # The process profile's own sessions: the shared key IS this profile's key, read fresh from its .env.
+        return url, (own_alias or shared_alias or own_key or shared_key)
+    # Another profile on the shared URL. Its API_SERVER_KEY is the key of its OWN Gateway route (the Agent's API
+    # server picks the profile from the URL, its default listener or /p/<profile> under gateway.multiplex_profiles,
+    # and accepts only that profile's key), so it never replaces the shared key here: that was a 401 where
+    # v0.52.492 sends the shared key. Only an explicit WebUI alias set for this profile
+    # (HERMES_WEBUI_GATEWAY_API_KEY in its .env) outranks the shared key; its API_SERVER_KEY is used only when the
+    # WebUI was given no shared key at all. A profile that wants its own route sets its own URL.
+    return url, (own_alias or shared_key or own_key)
+
+
+def _session_is_process_profile(session_home) -> bool:
+    """True when the session's profile home is the profile the WebUI process runs on (fail: False)."""
+    from api import profiles as _profiles
+
+    try:
+        return _same_profile_home(session_home, _profiles.get_process_profile_home())
+    except Exception:
+        return False
+
+
+def _gateway_config_for_profile(profile_name) -> dict | None:
+    """Config of a named non-root profile; None means the process default applies."""
+    from api import profiles as _profiles
+    from api.config import get_config_for_profile_home
+
+    name = str(profile_name or "").strip()
+    if not name or _profiles._is_root_profile(name):
+        return None
+    return get_config_for_profile_home(_profiles.get_hermes_home_for_profile(name))
+
+
+def _settle_delegation_reservation(session_id, stream_id, accepted: bool) -> None:
+    from api.gateway_delegation_wakeup import settle_reservation
+
+    settle_reservation(session_id, stream_id, accepted)
 
 
 def _resume_gateway_run_for_session(session) -> bool:
@@ -2711,7 +2868,8 @@ def _run_gateway_chat_streaming(
         s = get_session(session_id)
         from api.config import get_config  # imported lazily to avoid config-cycle churn
 
-        cfg = get_config()
+        # Profile-bound like the endpoint below: the worker thread has no request profile TLS.
+        cfg = _gateway_config_for_profile(getattr(s, "profile", None)) or get_config()
         reasoning_effort = _gateway_reasoning_effort_for_request(
             cfg,
             model=model,
@@ -2783,10 +2941,13 @@ def _run_gateway_chat_streaming(
                 body_extras["reasoning_effort"] = reasoning_effort
             if _gw_overrides.get("service_tier"):
                 body_extras["service_tier"] = _gw_overrides["service_tier"]
-            record_run = lambda run_id, request=None: _record_gateway_run(
-                session_id, stream_id, run_id, request=request,
-                regeneration=bool(regeneration), goal_related=bool(goal_related),
-            )
+            def record_run(run_id, request=None):
+                _record_gateway_run(
+                    session_id, stream_id, run_id, request=request,
+                    regeneration=bool(regeneration), goal_related=bool(goal_related),
+                )
+                if run_id:  # the Gateway accepted the run: its delegation lease is delivered
+                    _settle_delegation_reservation(session_id, stream_id, accepted=True)
             try:
                 if reattach_run:
                     run_id = str(reattach_run.get("run_id") or "").strip()
@@ -2797,6 +2958,7 @@ def _run_gateway_chat_streaming(
                             reattach_run["request"], stream_id,
                         )
                         record_run(run_id)
+                    _settle_delegation_reservation(session_id, stream_id, accepted=True)
                     final_text, usage = _await_gateway_run_result(
                         session_id, stream_id, run_id, base_url, api_key,
                         put_gateway_event=put_gateway_event,
@@ -2893,6 +3055,7 @@ def _run_gateway_chat_streaming(
             last_payload = {}
             sse_event = "message"
             with urllib.request.urlopen(req, timeout=_gateway_read_timeout_secs()) as resp:
+                _settle_delegation_reservation(session_id, stream_id, accepted=True)
                 for raw_line in _iter_sse_lines_cancellable(resp, cancel_event):
                     if cancel_event.is_set():
                         put_gateway_event("cancel", {"message": "Cancelled by user"})
@@ -3185,7 +3348,11 @@ def _run_gateway_chat_streaming(
                 logger.debug("Failed to append completed turn journal event", exc_info=True)
             success_writeback_committed = True
         try:
-            from api.goals import evaluate_goal_after_turn, has_active_goal
+            from api.goals import (
+                evaluate_goal_after_turn,
+                has_active_goal,
+                register_pending_goal_continuation,
+            )
             from api.profiles import get_hermes_home_for_profile
 
             profile_home = get_hermes_home_for_profile(getattr(s, "profile", None))
@@ -3216,11 +3383,22 @@ def _run_gateway_chat_streaming(
                     })
                 if decision.get("should_continue"):
                     continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
+                    continuation_id = None
                     if continuation_prompt:
-                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        # #1932 + #6885 + #7855: one record (marker + prompt +
+                        # continuation ID). The SSE event fires only when the
+                        # record landed so the frontend queue and the server
+                        # record cannot disagree. The ID — not the prompt text —
+                        # is what admits the turn later, so the browser can
+                        # edit or combine the queued entry freely.
+                        continuation_id = register_pending_goal_continuation(session_id, continuation_prompt)
+                        if not continuation_id:
+                            continuation_prompt = ""
+                    if continuation_prompt:
                         put_gateway_event("goal_continue", {
                             "session_id": session_id,
                             "continuation_prompt": continuation_prompt,
+                            "continuation_id": continuation_id,
                             "text": continuation_prompt,
                             "message": goal_message,
                             "message_key": decision.get("message_key") or "goal_continuing",
@@ -3287,6 +3465,7 @@ def _run_gateway_chat_streaming(
         # so both teardowns stay one implementation. ``runs_api_pending_marked``
         # keeps this call site's original finish-pending semantics.
         release_gateway_stream_state(stream_id, finish_pending=runs_api_pending_marked)
+        _settle_delegation_reservation(session_id, stream_id, accepted=False)  # no-op once committed
         unregister_stream_owner(stream_id)
         unregister_active_run(stream_id)
         # Release the writeback-owner entry the route layer registered for this

@@ -865,8 +865,8 @@
   :root.dark[data-skin="nous"] .session-tree-badge{background:rgba(99,179,237,.2);color:#4682B4;}
   :root.dark[data-skin="nous"] .session-tag{background:rgba(99,179,237,.2);color:#4682B4;}
   /* Image lightbox */
-  :root[data-skin="nous"] .img-lightbox-close:hover{background:rgba(70,130,180,.4);}
-  :root.dark[data-skin="nous"] .img-lightbox-close:hover{background:rgba(70,130,180,.4);}
+  :root[data-skin="nous"] .img-lightbox-close:hover,:root[data-skin="nous"] .img-lightbox-fit:hover{background:rgba(70,130,180,.4);}
+  :root.dark[data-skin="nous"] .img-lightbox-close:hover,:root.dark[data-skin="nous"] .img-lightbox-fit:hover{background:rgba(70,130,180,.4);}
   :root[data-skin="nous"] .img-lightbox-nav:hover{background:rgba(70,130,180,.5);}
   :root.dark[data-skin="nous"] .img-lightbox-nav:hover{background:rgba(70,130,180,.5);}
   /* Diff blocks */
@@ -1150,7 +1150,7 @@
   :root.dark[data-skin="neon"] .mcp-http{color:#c8a0ff;}
   :root.dark[data-skin="neon"] .mcp-status-active{color:#00dd88;}
   /* Image lightbox */
-  :root.dark[data-skin="neon"] .img-lightbox-close:hover{background:rgba(179,71,255,.35);}
+  :root.dark[data-skin="neon"] .img-lightbox-close:hover,:root.dark[data-skin="neon"] .img-lightbox-fit:hover{background:rgba(179,71,255,.35);}
   /* Links: cyan with hover glow */
   :root.dark[data-skin="neon"] a{color:var(--info);transition:text-shadow 0.2s;}
   :root.dark[data-skin="neon"] a:hover{text-shadow:0 0 8px rgba(0,221,255,0.4);}
@@ -1217,7 +1217,7 @@
   :root.dark[data-skin="neon-soft"] .diff-block .diff-plus{color:#b347ff;}
   :root.dark[data-skin="neon-soft"] .mcp-http{color:#c8a0ff;}
   :root.dark[data-skin="neon-soft"] .mcp-status-active{color:#00dd88;}
-  :root.dark[data-skin="neon-soft"] .img-lightbox-close:hover{background:rgba(179,71,255,.35);}
+  :root.dark[data-skin="neon-soft"] .img-lightbox-close:hover,:root.dark[data-skin="neon-soft"] .img-lightbox-fit:hover{background:rgba(179,71,255,.35);}
   :root.dark[data-skin="neon-soft"] a{color:var(--info);transition:text-shadow 0.2s;}
   :root.dark[data-skin="neon-soft"] a:hover{text-shadow:0 0 8px rgba(0,221,255,0.4);}
 
@@ -1283,7 +1283,7 @@
   :root.dark[data-skin="neon-paint"] .diff-block .diff-plus{color:#FF2D95;}
   :root.dark[data-skin="neon-paint"] .mcp-http{color:#FF80BF;}
   :root.dark[data-skin="neon-paint"] .mcp-status-active{color:#00E676;}
-  :root.dark[data-skin="neon-paint"] .img-lightbox-close:hover{background:rgba(255,45,149,.35);}
+  :root.dark[data-skin="neon-paint"] .img-lightbox-close:hover,:root.dark[data-skin="neon-paint"] .img-lightbox-fit:hover{background:rgba(255,45,149,.35);}
   :root.dark[data-skin="neon-paint"] a{color:var(--info);transition:text-shadow 0.2s;}
   :root.dark[data-skin="neon-paint"] a:hover{text-shadow:0 0 10px rgba(0,229,255,0.5);}
 
@@ -1332,7 +1332,7 @@
   :root.dark[data-skin="verdigris"] .mcp-http{color:#E4C28D;}
   :root.dark[data-skin="verdigris"] .mcp-status-active{color:#E4C28D;}
   /* Image lightbox */
-  :root.dark[data-skin="verdigris"] .img-lightbox-close:hover{background:rgba(200,154,90,.35);}
+  :root.dark[data-skin="verdigris"] .img-lightbox-close:hover,:root.dark[data-skin="verdigris"] .img-lightbox-fit:hover{background:rgba(200,154,90,.35);}
   :root.dark[data-skin="verdigris"] .img-lightbox-nav:hover{background:rgba(200,154,90,.40);}
 
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
@@ -2602,9 +2602,12 @@
   /* MEDIA: inline image rendering (feat #450) */
   .msg-media-img{display:inline-block;width:120px;height:90px;border-radius:6px;margin:3px 4px 3px 0;cursor:zoom-in;object-fit:cover;border:1px solid var(--border);vertical-align:bottom;transition:opacity .15s;}
   .msg-media-img:hover{opacity:.85;}
-  .img-lightbox{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;cursor:zoom-out;animation:lb-in .15s ease;}
+  .img-lightbox{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.82);display:flex;align-items:center;justify-content:center;cursor:zoom-out;animation:lb-in .15s ease;outline:none;}
   @keyframes lb-in{from{opacity:0}to{opacity:1}}
-  .img-lightbox img{max-width:90vw;max-height:90vh;object-fit:contain;border-radius:8px;box-shadow:0 8px 48px rgba(0,0,0,.6);cursor:default;}
+  .img-lightbox-viewport{position:relative;width:90vw;height:90vh;overflow:hidden;border-radius:8px;touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab;}
+  .img-lightbox-viewport.is-panning{cursor:grabbing;}
+  .img-lightbox-canvas{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform;}
+  .img-lightbox-canvas img{display:block;width:100%;height:100%;max-width:none;max-height:none;border-radius:8px;box-shadow:0 8px 48px rgba(0,0,0,.6);cursor:inherit;-webkit-user-drag:none;}
   .mermaid-viewer{display:flex;flex-direction:column;gap:6px;max-width:100%;min-width:0;}
   .mermaid-viewer-toolbar{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:4px;align-items:center;flex-shrink:0;}
   .mermaid-viewer-btn{width:28px;height:28px;border:1px solid var(--border2);border-radius:6px;background:var(--input-bg);color:var(--muted);display:inline-flex;align-items:center;justify-content:center;cursor:pointer;transition:background .15s,color .15s,border-color .15s,transform .15s;flex:0 0 auto;padding:0;}
@@ -2620,8 +2623,24 @@
   .mermaid-viewer-canvas{position:absolute;left:0;top:0;transform-origin:0 0;will-change:transform;}
   .mermaid-viewer-svg{display:block;width:100%;height:100%;}
   .img-lightbox .mermaid-lightbox-svg{background:var(--code-bg);cursor:default;}
-  .img-lightbox-close{position:absolute;top:16px;right:20px;width:36px;height:36px;border:none;border-radius:50%;background:rgba(255,255,255,.12);color:#fff;font-size:20px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s;}
-  .img-lightbox-close:hover{background:rgba(255,255,255,.22);}
+  .img-lightbox-close{position:absolute;top:max(16px,env(safe-area-inset-top,0px));right:max(20px,env(safe-area-inset-right,0px));width:36px;height:36px;border:1px solid rgba(255,255,255,.28);border-radius:50%;background:rgba(0,0,0,.5);color:#fff;font-size:26px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s;}
+    /* Hover lightens to a mid-grey disc: visible over the near-black scrim AND over a bright image, where the white
+       glyph keeps its contrast (a darker hover on a dark scrim was invisible; a white one washes out over light
+       images). Shared by the Mermaid lightbox, which reuses this class. */
+    .img-lightbox-close:hover{background:rgba(72,72,78,.88);border-color:rgba(255,255,255,.55);}
+    .img-lightbox-close:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:2px;}
+    .img-lightbox-fit{position:absolute;top:max(16px,env(safe-area-inset-top,0px));right:max(64px,calc(env(safe-area-inset-right,0px) + 64px));width:36px;height:36px;padding:0;border:1px solid rgba(255,255,255,.28);border-radius:50%;background:rgba(0,0,0,.5);color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,border-color .15s;z-index:1;}
+    .img-lightbox-fit:hover{background:rgba(72,72,78,.88);border-color:rgba(255,255,255,.55);}
+    .img-lightbox-fit svg{width:18px;height:18px;display:block;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;}
+    .img-lightbox-fit:focus-visible{outline:2px solid rgba(255,255,255,.85);outline-offset:2px;}
+    /* Touch: 44px targets (WCAG/HIG minimum) with a 12px gap so a near-miss on Fit cannot close a zoomed image. The
+       Mermaid lightbox reuses the close button, so its toolbar keeps clear of the larger target (44px + 12px gap);
+       otherwise a tap on Reset view at 320px lands on close. */
+    @media (pointer:coarse){
+      .img-lightbox-close,.img-lightbox-fit{width:44px;height:44px;}
+      .img-lightbox-fit{right:max(76px,calc(env(safe-area-inset-right,0px) + 76px));}
+      .mermaid-viewer--lightbox .mermaid-viewer-toolbar{padding-right:calc(max(20px,env(safe-area-inset-right,0px)) + 56px);}
+    }
   .img-lightbox-nav{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border:none;border-radius:50%;background:rgba(255,255,255,.12);color:#fff;font-size:28px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:background .15s,opacity .15s;z-index:1;opacity:.6;}
   .img-lightbox-nav:hover{background:rgba(255,255,255,.28);opacity:1;}
   .img-lightbox-nav-prev{left:16px;}

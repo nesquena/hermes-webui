@@ -32,7 +32,6 @@ from api.config import (
     get_config,
     STREAMS, STREAMS_LOCK, CANCEL_FLAGS, AGENT_INSTANCES, STREAM_PARTIAL_TEXT,
     STREAM_REASONING_TEXT, STREAM_LIVE_TOOL_CALLS,
-    STREAM_GOAL_RELATED, PENDING_GOAL_CONTINUATION,
     STREAM_LAST_EVENT_ID,
     stream_owned_registries,
     release_stream_owned_registries,
@@ -13243,6 +13242,8 @@ def _build_run_conversation_kwargs(
     ``persist_user_timestamp`` is signature-gated (#6935): an older
     hermes-agent whose ``run_conversation()`` predates the kwarg must not
     receive it, or the call trips a TypeError before the turn starts.
+    The title-only override is gated the same way and uses the submitted
+    prompt, not the workspace/notification-enriched model input.
     """
     _preserve_legacy_agent_row_identity(callable_obj, legacy_row_identity_owner)
     kwargs = {
@@ -13263,6 +13264,12 @@ def _build_run_conversation_kwargs(
         kwargs,
         "conversation_history_revision",
         conversation_history_revision,
+    )
+    _add_supported_run_conversation_kwarg(
+        callable_obj,
+        kwargs,
+        "title_user_message",
+        persist_user_message,
     )
     return kwargs
 
@@ -17634,7 +17641,11 @@ def _run_agent_streaming(
             # #1932: only evaluate when the turn was goal-related (set via
             # STREAM_GOAL_RELATED or goal_related parameter).
             try:
-                from api.goals import evaluate_goal_after_turn, has_active_goal
+                from api.goals import (
+                    evaluate_goal_after_turn,
+                    has_active_goal,
+                    register_pending_goal_continuation,
+                )
 
                 if not goal_related or not has_active_goal(session_id, profile_home=_profile_home):
                     _goal_decision = {}
@@ -17680,13 +17691,25 @@ def _run_agent_streaming(
                     })
                 if decision.get('should_continue'):
                     continuation_prompt = str(decision.get('continuation_prompt') or '').strip()
+                    continuation_id = None
                     if continuation_prompt:
                         # #1932: mark this session as pending a goal continuation
                         # so the next /chat/start creates a goal-related stream.
-                        PENDING_GOAL_CONTINUATION.add(session_id)
+                        # #6885 + #7855: register marker + prompt + continuation
+                        # ID as ONE record
+                        # (api/goals.register_pending_goal_continuation) so the
+                        # routes.py consumer can tell a genuine user turn from
+                        # the browser's continuation dispatch. Admission is by
+                        # ID, so the browser may edit or combine the queued
+                        # entry without losing the goal.
+                        continuation_id = register_pending_goal_continuation(session_id, continuation_prompt)
+                        if not continuation_id:
+                            continuation_prompt = ''
+                    if continuation_prompt:
                         put('goal_continue', {
                             'session_id': session_id,
                             'continuation_prompt': continuation_prompt,
+                            'continuation_id': continuation_id,
                             'text': continuation_prompt,
                             'message': _goal_message,
                             'message_key': decision.get('message_key') or 'goal_continuing',

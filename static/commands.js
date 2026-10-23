@@ -2211,6 +2211,19 @@ function _statusCardFromSession(s){
   const running=!!(s.active_stream_id||S.activeStreamId||S.busy);
   const profile=s.profile||S.activeProfile||'default';
   const workspace=s.workspace||S.currentDir||t('status_unknown');
+  // #visible-vs-total: `visible_message_count` is the human transcript count with
+  // hidden internal rows (quiet-delegation wakeups) removed; `message_count` is the
+  // raw persisted length. Surface BOTH whenever they differ so the user can see the
+  // true size of the conversation instead of only the filtered count. Context
+  // compression does not shrink either value — it rewrites the model-facing
+  // `context_messages` array, not the persisted transcript — so this total is the
+  // pre-compaction size too.
+  const _visibleStatusMessages=(typeof s.visible_message_count==='number'&&s.visible_message_count>=0)
+    ? s.visible_message_count
+    : (s.message_count??(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length);
+  const _totalStatusMessages=(typeof s.message_count==='number'&&s.message_count>=0)
+    ? s.message_count
+    : _visibleStatusMessages;
   const rows=[
     {label:t('status_session_id'), value:s.session_id||t('status_unknown')},
     {label:t('status_title'), value:s.title||t('untitled')},
@@ -2222,7 +2235,8 @@ function _statusCardFromSession(s){
     {label:t('status_started'), value:_formatStatusTimestamp(s.created_at)},
     {label:t('status_updated'), value:_formatStatusTimestamp(s.updated_at||s.last_message_at)},
     {label:t('status_tokens'), value:_formatStatusTokens(s)},
-    {label:t('status_messages'), value:String((typeof s.visible_message_count==='number'&&s.visible_message_count>=0)?s.visible_message_count:(s.message_count??(S.messages||[]).filter(m=>m&&m.role&&m.role!=='tool'&&m._source!=='delegation_wakeup').length))},
+    {label:t('status_messages'), value:String(_visibleStatusMessages)},
+    ...(_totalStatusMessages>_visibleStatusMessages?[{label:t('status_messages_total'), value:String(_totalStatusMessages)}]:[]),
     {label:t('status_agent_running'), value:running?t('status_yes'):t('status_no')},
   ];
   return {

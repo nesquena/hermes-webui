@@ -273,8 +273,24 @@ function _saveComposerDraft(sid, text, files) {
   _draftSaveTimerSid = sid;
   _draftSaveTimerPayload = _composerDraftPayloadSignature(normalizedText, normalizedFiles);
   _draftSaveTimerRev = _composerDraftRevision(sid);
+  // #7855 (round 9, MUST-FIX 1): snapshot the restored goal-continuation
+  // binding WHEN THE AUTOSAVE IS SCHEDULED. Two clients sharing a session can
+  // otherwise drop an unchanged continuation's token: another client's write
+  // changes the stored draft, and this tab's keystroke autosave then re-saves
+  // the text without the token it still owns locally. The id is sent only
+  // when its bound text equals the text being saved; any other autosave sends
+  // an explicit empty token so a stale binding can never be stored next to an
+  // edited draft (round-7 rule) nor left orphaned server-side.
+  const _restoredCont = (typeof _peekRestoredGoalContinuationDraft === 'function')
+    ? _peekRestoredGoalContinuationDraft()
+    : null;
   _draftSaveTimer = setTimeout(() => {
-    _postComposerDraftPayload(sid, normalizedDraft, intent).catch((error) => {
+    let _autosaveContId = '';
+    if (_restoredCont && _restoredCont.id
+        && String(_restoredCont.text || '').trim() === String(normalizedText || '').trim()) {
+      _autosaveContId = _restoredCont.id;
+    }
+    _postComposerDraftPayload(sid, normalizedDraft, intent, _autosaveContId).catch((error) => {
       _handleComposerDraftPostFailure(error, sid, normalizedText, liveFiles, intent);
     });
   }, _DRAFT_SAVE_DELAY_MS);
@@ -341,12 +357,27 @@ function _handleComposerDraftPostFailure(error, sid, text, files, intent=null) {
   }
 }
 
-function _postComposerDraftPayload(sid, draft, intent=null) {
+function _postComposerDraftPayload(sid, draft, intent=null, goalContinuationId='') {
   const requestSid = _safeDraftSessionId(sid);
   if (!requestSid) return Promise.resolve();
   const normalizedText = String((draft && draft.text) || '');
   const normalizedFiles = Array.isArray(draft && draft.files) ? draft.files.filter(Boolean) : [];
-  const bodyPayload = JSON.parse(JSON.stringify({ text: normalizedText, files: normalizedFiles }));
+  // #7855: the continuation token is part of the draft, so the wire body ALWAYS
+  // carries the field — the continuation's own id, or an explicit empty string
+  // that clears any stored token (round-7 rule). Omitting the key entirely made
+  // a keystroke autosave drop the token an unchanged continuation still owns
+  // (round 9 MUST-FIX 1) and left a stale stored token behind on clear.
+  // The normalizer itself lives in static/messages.js (sibling top-level
+  // scope), so fall back to a local trim when it is not loaded — this file's
+  // own test harness and the boot path both run without it.
+  const normalizedGoalContId = (typeof _normalizeGoalContinuationId === 'function')
+    ? _normalizeGoalContinuationId(goalContinuationId)
+    : String(goalContinuationId || '').trim();
+  const bodyPayload = JSON.parse(JSON.stringify({
+    text: normalizedText,
+    files: normalizedFiles,
+    goal_continuation_id: normalizedGoalContId,
+  }));
   const post = (targetSid, beforeDispatch) => {
     const previous = _composerDraftPostPromisesBySid.get(targetSid);
     let resolveWrite;
@@ -446,12 +477,21 @@ function _rememberComposerDraftPayloadState(sid, text, files) {
 }
 
 // Immediate save used before session switches.
-function _saveComposerDraftNow(sid, text, files) {
+function _saveComposerDraftNow(sid, text, files, goalContinuationId) {
   if (!sid) return Promise.resolve();
   clearTimeout(_draftSaveTimer);
   const normalizedText = String(text || '');
   const liveFiles = Array.isArray(files) ? files.filter(Boolean).slice() : [];
   const normalizedFiles = _composerDraftFilesForPersist(files);
+  // #7855 CORE (round 6): the continuation token is part of the draft. Persisting
+  // the text without it meant a reload between a failed start and its retry
+  // restored the words and dropped the token, and the retry then posted
+  // goal_continuation_id: None — which start admission scores goal_related=false.
+  // The token is only ever persisted together with the exact text it belongs to,
+  // and the restore path re-binds them the same way the in-page restore does.
+  const normalizedGoalContId = (typeof _normalizeGoalContinuationId === 'function')
+    ? _normalizeGoalContinuationId(goalContinuationId)
+    : String(goalContinuationId || '').trim();
   const normalizedDraft = { text: normalizedText, files: normalizedFiles };
   if (_composerDraftHasPayload(normalizedText, normalizedFiles)) {
     _clearComposerDraftRestoreSuppression(sid);
@@ -463,6 +503,7 @@ function _saveComposerDraftNow(sid, text, files) {
   // behind a network POST unless there is new local draft content or an existing
   // server draft that must be cleared.
   if (!_composerDraftHasPayload(normalizedText, normalizedFiles)
+      && !normalizedGoalContId
       && S.session && S.session.session_id === sid
       && !_sessionComposerDraftHasPayload(S.session)
       && !_composerDraftKnownPayloadSessions.has(sid)
@@ -470,7 +511,7 @@ function _saveComposerDraftNow(sid, text, files) {
     return Promise.resolve();
   }
   const intent = _setComposerDraftLocalIntent(sid, normalizedText, liveFiles);
-  return _postComposerDraftPayload(sid, normalizedDraft, intent);
+  return _postComposerDraftPayload(sid, normalizedDraft, intent, normalizedGoalContId);
 }
 
 // Restore composer draft from server onto #msg textarea.
@@ -539,6 +580,21 @@ function _restoreComposerDraft(draft, targetSid, opts={}) {
     if (typeof autoResize === 'function') autoResize();
     if (typeof updateSendBtn === 'function') updateSendBtn();
   }
+  // #7855 CORE (round 6): re-bind the persisted continuation token to the text
+  // it was stored with, exactly like the in-page restore does. Without this the
+  // reload restored the words and left the token on the server, and the retry
+  // posted goal_continuation_id: None.
+  if (typeof _setRestoredGoalContinuationDraft === 'function') {
+    const _restoredContId = draft && typeof draft.goal_continuation_id === 'string'
+      ? draft.goal_continuation_id.trim()
+      : '';
+    if (_restoredContId) {
+      _setRestoredGoalContinuationDraft(_restoredContId, text);
+    } else if (typeof _clearRestoredGoalContinuationDraft === 'function') {
+      _clearRestoredGoalContinuationDraft();
+    }
+  }
+  // Files restoration is skipped for now (requires S.pendingFiles plumbing).
 }
 
 // Clear the saved draft for a session (called when message is sent).
@@ -549,6 +605,12 @@ function _clearComposerDraft(sid, text, files) {
   _clearRememberedNewChatDraftSession(sid);
   if (arguments.length >= 2) _suppressComposerDraftRestoreAfterSubmit(sid, text, files);
   else _suppressComposerDraftRestoreAfterSubmit(sid);
+  // #7855 CORE (round 6): the clear must reach the server as an explicit empty
+  // token — `_postComposerDraftPayload`'s default 4th argument is '' — so the
+  // stored token is dropped together with the draft it belonged to. Omitting
+  // the field entirely would leave a stored continuation token behind after
+  // the draft was submitted, and the next session to restore that draft would
+  // inherit it.
   const intent = _setComposerDraftLocalIntent(sid, '', []);
   return _postComposerDraftPayload(sid, { text: '', files: [] }, intent).catch(() => {
     if (_composerDraftLocalFallbackBySid.get(sid) === intent) {
@@ -2453,6 +2515,8 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    // #7855: a brand-new session starts with no restored-continuation draft.
+    if(typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
     S._pendingSessionToolsets=null;
     if(_sessionSourceFilter==='cli') _sessionSourceFilter='webui';
     if(typeof _hydrateTodosFromSession==='function') _hydrateTodosFromSession(S.session);
@@ -2750,13 +2814,34 @@ async function loadSession(sid){
   // Persist the current composer draft before switching away so it can be
   // restored when the user switches back (#1060). Save to server now so the
   // draft survives page refresh and syncs across clients.
+  // #7855 CORE (round 7): the departing session's composer may hold a
+  // restored goal-continuation binding. Saving only the text/files dropped
+  // the token, so switching away from a restored queued continuation and
+  // coming back restored an ordinary draft — the retry then posted no id
+  // and admission scored goal_related=false (Chromium + real HTTP: master
+  // scores true).
+  //
+  // Read the binding WITHOUT consuming it (the one-shot marker stays armed
+  // for a same-session resend) and only persist it when it still describes
+  // the text being saved — an edited draft must not carry the old token.
+  let _switchContId = '';
+  if (typeof _peekRestoredGoalContinuationDraft === 'function') {
+    const _peeked = _peekRestoredGoalContinuationDraft();
+    if (_peeked && _peeked.id
+        && String(_peeked.text || '').trim() === String(($('msg') || {}).value || '').trim()) {
+      _switchContId = _peeked.id;
+    }
+  }
   if (currentSid && currentSid !== sid) {
     if(typeof window._clearPendingSelections==='function') window._clearPendingSelections();
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     const draftText = ($('msg') || {}).value || '';
     const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
     try {
-      await _saveComposerDraftNow(currentSid, draftText, draftFiles);
+      // #7855 (round 7): the departing session's restored continuation token
+      // must travel with the exact text it belongs to, or a return to this
+      // session restores an ordinary draft and the retry loses the goal.
+      await _saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId);
     } catch (error) {
       _handleComposerDraftPostFailure(error, currentSid, draftText, draftFiles);
     }
@@ -3016,6 +3101,16 @@ async function loadSession(sid){
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // #7855: a session switch is a hard context boundary — drop any restored
+  // goal-continuation draft left over from the previous session (restored but
+  // never sent, or abandoned mid-settle) so it cannot attach to the next send.
+  // A SAME-SESSION force refresh is NOT such a boundary (round 9, MUST-FIX 3):
+  // it may finish seconds after another client changed the stored draft, and
+  // clearing the binding here would drop an unchanged continuation's token
+  // while the visible local text survives — the next send then posts no id and
+  // becomes an ordinary turn where the marker admission would have kept it
+  // goal-related. Only clear when the session actually changed.
+  if (currentSid !== sid && typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
   if(typeof populateModelDropdown==='function'){
     const modelRefreshSid=sid;
     const isActiveModelRefreshSession=()=>!!(S.session&&S.session.session_id===modelRefreshSid);
@@ -3317,6 +3412,15 @@ async function loadSession(sid){
             const _msg=$&&$('msg');
             if(_msg&&_first.text&&!_msg.value){
               _msg.value=_first.text||'';
+              // #7855 (round 5): mark the restored text as an identifiable
+              // CONTINUATION DRAFT — the ID rides on the composer element
+              // together with the exact text it was restored for, and send()
+              // consumes it only while that text is still what is sent. If the
+              // user replaces or abandons the draft, the ID dies with it
+              // instead of attaching to their own message.
+              if(typeof _setRestoredGoalContinuationDraft==='function'){
+                _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_first.text||'');
+              }
               if(typeof autoResize==='function') autoResize();
               if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
             }

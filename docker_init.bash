@@ -223,6 +223,43 @@ load_env() {
   fi
 }
 
+# Inline helper for `find ... -exec sh -c "$_chown_tolerating_vanished" ...
+# OWNER {} +`. Two-container compose shares ~/.hermes with a running agent
+# that replaces files atomically (write temp + rename), so an entry listed by
+# find can be gone before chown reaches it (#8106). Only chown's ENOENT for
+# that vanished entry is tolerated: any other chown failure (EACCES, EROFS
+# outside a pruned path, EIO) still fails the walk.
+_chown_tolerating_vanished='
+  owner=$1; shift
+  chown -h "$owner" "$@" 2>/dev/null && exit 0
+  for f in "$@"; do
+    err=$(LC_ALL=C chown -h "$owner" "$f" 2>&1) && continue
+    case "$err" in *": No such file or directory") continue ;; esac
+    printf "%s\n" "$err" >&2
+    exit 1
+  done
+'
+
+# Run find, tolerating only entries that vanish mid-walk.
+# -ignore_readdir_race covers entries that vanish before find stats them, but
+# find still reports a directory it can no longer open and exits non-zero
+# (#8106). So find's own "No such file or directory" diagnostics for entries
+# below the root are accepted; any other diagnostic, including the chown
+# helper's or one for the root itself, fails the walk.
+find_tolerating_vanished() {
+  local root="$1" err rc=0 line
+  shift
+  err=$(LC_ALL=C find "$root" -ignore_readdir_race "$@" 2>&1 >/dev/null) || rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  [ -n "$err" ] || { echo "find exited with status $rc" >&2; return 1; }
+  while IFS= read -r line; do
+    case "$line" in
+      "find: '$root/"*"': No such file or directory") ;;
+      *) printf "%s\n" "$err" >&2; return 1 ;;
+    esac
+  done <<< "$err"
+}
+
 chown_home_hermeswebui() {
   # macOS Docker bind mounts can expose hermes-agent git object packs as
   # read-only host files. The runtime only needs to read those existing objects;
@@ -236,10 +273,26 @@ chown_home_hermeswebui() {
   # source — prune the entire hermes-agent path from the chown walk so a
   # read-only or partially-read-only mount doesn't break the rest of the home
   # ownership alignment.
-  find /home/hermeswebui \
+  find_tolerating_vanished /home/hermeswebui \
     -path "/home/hermeswebui/.hermes/hermes-agent" -prune \
     -o -name ".git" -prune \
-    -o -exec chown -h "${WANTED_UID}:${WANTED_GID}" {} +
+    -o -exec sh -c "$_chown_tolerating_vanished" chown_home_hermeswebui "${WANTED_UID}:${WANTED_GID}" {} +
+}
+
+# usermod -u used to move the old UID's files to the new UID anywhere under
+# the home. Its walk is skipped (#8106), so this gives the subtrees that
+# chown_home_hermeswebui prunes the same old-UID-only migration: every .git
+# directory (git refuses repositories owned by another user), and the
+# hermes-agent checkout when it is writable (a local development checkout the
+# runtime user keeps working in). Like usermod, only the UID changes. A
+# read-only agent source mount is left untouched.
+migrate_home_old_uid() {
+  local old_uid="$1"
+  local agent="/home/hermeswebui/.hermes/hermes-agent"
+  local skip_agent=()
+  [ -w "$agent" ] || skip_agent=(-path "$agent" -prune -o)
+  find_tolerating_vanished /home/hermeswebui "${skip_agent[@]}" \
+    -uid "$old_uid" -exec sh -c "$_chown_tolerating_vanished" migrate_home_old_uid "${WANTED_UID}" {} +
 }
 
 # The production image does not ship sudo. The entrypoint starts as root only
@@ -267,10 +320,24 @@ if [ "A${whoami}" == "Aroot" ]; then
     fi
   else
     groupmod -o -g "${WANTED_GID}" hermeswebui || error_exit "Failed to set GID of hermeswebui user"
-    usermod -o -u "${WANTED_UID}" hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+    # usermod -u also walks the home directory to chown the old UID's files,
+    # and aborts on the first entry that vanishes mid-walk — which happens
+    # when a running agent replaces files in the shared ~/.hermes (#8106).
+    # Pointing the home at a path that does not exist for that one call skips
+    # usermod's walk; the real home is restored right after, and
+    # chown_home_hermeswebui and migrate_home_old_uid below perform the
+    # ownership walks with race-tolerant error handling.
+    _usermod_nohome="/nonexistent-hermeswebui-home.$$"
+    [ ! -e "$_usermod_nohome" ] || error_exit "Unexpected path $_usermod_nohome exists"
+    _old_hermeswebui_uid=$(id -u hermeswebui)
+    usermod -o -u "${WANTED_UID}" -d "$_usermod_nohome" hermeswebui || error_exit "Failed to set UID of hermeswebui user"
+    usermod -d /home/hermeswebui hermeswebui || error_exit "Failed to restore home directory of hermeswebui user"
   fi
 
   chown_home_hermeswebui || error_exit "Failed to set owner of /home/hermeswebui"
+  if [ -n "${_old_hermeswebui_uid:-}" ] && [ "A${_old_hermeswebui_uid}" != "A${WANTED_UID}" ]; then
+    migrate_home_old_uid "$_old_hermeswebui_uid" || error_exit "Failed to move files of UID ${_old_hermeswebui_uid} under /home/hermeswebui to UID ${WANTED_UID}"
+  fi
 
   echo ""; echo "-- Preparing /app for the hermeswebui runtime user"
   mkdir -p /app || error_exit "Failed to create /app directory"
@@ -409,53 +476,83 @@ mkdir -p "${UV_CACHE_DIR}" || error_exit "Failed to create ${UV_CACHE_DIR} direc
 test -w "${UV_CACHE_DIR}" || error_exit "${UV_CACHE_DIR} is not writable by hermeswebui"
 
 cd /app
-if [ -f /app/venv/bin/python3 ]; then
-  echo ""; echo "== Existing virtual environment found — reusing (fast restart)"
-else
-  echo ""; echo "== Creating new virtual environment"
-  uv venv venv
-fi
-export VIRTUAL_ENV=/app/venv
-test -d /app/venv
-test -f /app/venv/bin/activate
 
-echo "";echo "== Activating hermes webui's virtual environment"
-source /app/venv/bin/activate || error_exit "Failed to activate hermeswebui virtual environment"
-test -x /app/venv/bin/python3
-
-ensure_hindsight_client_docker_dependency() {
-  # Keep this outside the .deps_installed fast-restart guard so existing
-  # two-container Docker venvs self-heal after this dependency was added.
-  _hindsight_client_requirement="hindsight-client>=0.4.22"
-  echo ""; echo "== Checking Hindsight memory provider dependency"
-  if uv pip show hindsight-client >/dev/null 2>&1; then
-    echo "-- hindsight-client already installed"
-  else
-    echo "-- Installing ${_hindsight_client_requirement} for Hindsight memory provider support"
-    uv pip install "${_hindsight_client_requirement}" --trusted-host pypi.org --trusted-host files.pythonhosted.org || error_exit "Failed to install hindsight-client"
+# The staged agent source decides which interpreter the venv needs (#8113), so
+# it is discovered before the venv is created or reused. Previously this lookup
+# lived inside the dependency-install branch below, which meant the venv was
+# already built on the base image's interpreter by the time we knew the agent
+# required a newer one.
+_agent_paths=(
+  "/home/hermeswebui/.hermes/hermes-agent"
+  "/opt/hermes"
+)
+_agent_src=""
+for _p in "${_agent_paths[@]}"; do
+  if [ -d "$_p" ] && [ -f "$_p/pyproject.toml" ]; then
+    _agent_src="$_p"
+    break
   fi
+done
+
+# `auto_install_agent_deps()` (api/startup.py) installs from the writable staged
+# copy rather than the read-only agent mount, which cannot satisfy setuptools'
+# egg_info step under the documented `:ro` compose mounts (#8113). Exported here,
+# before the fast-restart guard, so `server.py` inherits it on the recovery path
+# even when the staging block below is skipped and the copy already exists.
+export HERMES_WEBUI_AGENT_STAGE_DIR="/app/hermes-agent-src"
+
+# Bind a published stage to the Agent it was copied from (#8113). The recovery
+# path (`_agent_install_dir()` in api/startup.py) substitutes the staged copy
+# for the authorized Agent only when this manifest names that Agent's resolved
+# path and the install inputs of both trees still hash to what was recorded
+# here — an unrelated or stale directory that merely passes the ownership/mode
+# check is ignored. Format: `source=<path>` then `<file>=<sha256|->` lines.
+write_agent_stage_manifest() {
+  local _src="$1" _stage="$2" _real _name _sum
+  _real="$(cd "$_src" && pwd -P)" || return 1
+  # The stage is a verbatim copy of the source tree: never write through
+  # anything (e.g. a symlink of the same name) the copy brought along.
+  rm -f "$_stage/.hermes-webui-stage-source" || return 1
+  {
+    printf 'source=%s\n' "$_real"
+    for _name in pyproject.toml requirements.txt; do
+      if [ -f "$_src/$_name" ]; then
+        _sum="$(sha256sum < "$_src/$_name")" || return 1
+        printf '%s=%s\n' "$_name" "${_sum%% *}"
+      else
+        printf '%s=-\n' "$_name"
+      fi
+    done
+  } > "$_stage/.hermes-webui-stage-source" || return 1
+  chmod 0644 "$_stage/.hermes-webui-stage-source"
 }
 
-if [ -f /app/venv/.deps_installed ]; then
-  echo ""; echo "== Dependencies already installed — skipping (fast restart)"
-else
+# ── Rebuilding the agent venv without ever losing a working one (#8113) ─────
+# A rebuild is a transaction. The current venv and the staged agent source are
+# moved aside; the replacement is created, checked against the staged agent's
+# interpreter range and given every dependency; only then are the old copies
+# deleted. Any failure puts them back and startup continues on the old venv,
+# which is fully installed, exactly as it would have without the rebuild.
+_agent_venv=/app/venv
+_agent_venv_prev=/app/venv.previous
+_agent_stage=/app/hermes-agent-src
+_agent_stage_prev=/app/hermes-agent-src.previous
+_agent_venv_journal=/app/.agent-venv-rebuild
+_venv_helper=/app/scripts/docker_venv_python.py
+
+# Install WebUI's requirements and the staged agent into $VIRTUAL_ENV. Returns
+# non-zero on any failure instead of exiting, so a rebuild can roll back (a
+# normal install below still treats a failure as fatal). set -e does not apply
+# inside a function called as a condition, hence the explicit returns.
+install_venv_dependencies() {
   echo ""; echo "== Installing hermes-webui dependencies"
-  uv pip install -r requirements.txt --trusted-host pypi.org --trusted-host files.pythonhosted.org
-  uv pip install -U pip setuptools --trusted-host pypi.org --trusted-host files.pythonhosted.org
-  test -x /app/venv/bin/pip
+  uv pip install -r requirements.txt --trusted-host pypi.org --trusted-host files.pythonhosted.org || return 1
+  uv pip install -U pip setuptools --trusted-host pypi.org --trusted-host files.pythonhosted.org || return 1
+  test -x /app/venv/bin/pip || return 1
 
   echo ""; echo "== Adding hermes-agent's pyproject.toml base dependencies to the virtual environment"
-  _agent_paths=(
-    "/home/hermeswebui/.hermes/hermes-agent"
-    "/opt/hermes"
-  )
-  _agent_src=""
-  for _p in "${_agent_paths[@]}"; do
-    if [ -d "$_p" ] && [ -f "$_p/pyproject.toml" ]; then
-      _agent_src="$_p"
-      break
-    fi
-  done
+  # `$_agent_src` was already resolved above the venv decision (#8113) — that
+  # lookup is what selects the interpreter, so it must not be repeated here.
   if [ -n "$_agent_src" ]; then
     if [ -w "$_agent_src" ]; then
       echo ""
@@ -490,29 +587,37 @@ else
     # with "Permission denied" even though `_stage_src` itself was created
     # writable by hermeswebui. Re-add owner-write on the staged tree after the
     # copy so the build dir is genuinely writable, not just owned by us.
+    # (HERMES_WEBUI_AGENT_STAGE_DIR is exported above the venv decision so the
+    # recovery path inherits it on a fast restart too.)
     _stage_src="/app/hermes-agent-src"
-    rm -rf "$_stage_src"
-    mkdir -p "$_stage_src"
+    rm -rf "$_stage_src" || return 1
+    mkdir -p "$_stage_src" || return 1
     if command -v rsync >/dev/null 2>&1; then
       rsync -a \
         --exclude='*.egg-info' --exclude='build' --exclude='dist' \
         --exclude='__pycache__' --exclude='.git' \
         --exclude='.playwright' \
+        --exclude='.install.lock' \
         "$_agent_src"/ "$_stage_src"/ \
-        || error_exit "Failed to stage hermes-agent source to writable build dir"
+        || { echo "!! Failed to stage hermes-agent source to writable build dir"; return 1; }
     else
       # Fallback when rsync isn't in the image — straight cp -a, then drop
       # the build artifacts that would trip setuptools.
       cp -a "$_agent_src"/. "$_stage_src"/ \
-        || error_exit "Failed to copy hermes-agent source to writable build dir"
+        || { echo "!! Failed to copy hermes-agent source to writable build dir"; return 1; }
       rm -rf "$_stage_src"/*.egg-info "$_stage_src"/build "$_stage_src"/dist 2>/dev/null || true
       rm -rf "$_stage_src"/.playwright 2>/dev/null || true
+      rm -rf "$_stage_src"/.install.lock "$_stage_src"/tools/.install.lock 2>/dev/null || true
       find "$_stage_src" -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
     fi
     chmod -R u+w "$_stage_src" \
-      || error_exit "Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"
+      || { echo "!! Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"; return 1; }
+    # Never fatal: without the manifest the recovery path simply ignores the
+    # stage and falls back to the authorized Agent directory.
+    write_agent_stage_manifest "$_agent_src" "$_stage_src" \
+      || echo "!! WARNING: could not record which hermes-agent source was staged; the startup recovery installer will not use the staged copy"
     uv pip install -e "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
-      || error_exit "Failed to install hermes-agent's requirements"
+      || { echo "!! Failed to install hermes-agent's requirements"; return 1; }
   else
     echo ""
     echo "!! WARNING: hermes-agent source not found."
@@ -526,10 +631,261 @@ else
     echo "!!   https://github.com/nesquena/hermes-webui/blob/master/docker-compose.two-container.yml"
     echo ""
   fi
-  touch /app/venv/.deps_installed
+  touch /app/venv/.deps_installed || return 1
+}
+
+ensure_hindsight_client_docker_dependency() {
+  # Keep this outside the .deps_installed fast-restart guard so existing
+  # two-container Docker venvs self-heal after this dependency was added.
+  # With "soft", a failed install returns non-zero instead of exiting (a
+  # venv rebuild rolls back on it).
+  _hindsight_client_requirement="hindsight-client>=0.4.22"
+  echo ""; echo "== Checking Hindsight memory provider dependency"
+  if uv pip show hindsight-client >/dev/null 2>&1; then
+    echo "-- hindsight-client already installed"
+  else
+    echo "-- Installing ${_hindsight_client_requirement} for Hindsight memory provider support"
+    if ! uv pip install "${_hindsight_client_requirement}" --trusted-host pypi.org --trusted-host files.pythonhosted.org; then
+      if [ "${1:-}" = soft ]; then
+        echo "!! Failed to install hindsight-client"
+        return 1
+      fi
+      error_exit "Failed to install hindsight-client"
+    fi
+  fi
+}
+
+# The journal is the transaction's provenance: it is written before anything is
+# moved ("pending") and flipped to "committed" before the old copies are
+# deleted. Recovery acts only on what a journal says this script did; a
+# .previous directory it did not create is never trusted or deleted.
+write_agent_venv_journal() {
+  printf '%s\n' "$1" > "$_agent_venv_journal.tmp" && mv -f "$_agent_venv_journal.tmp" "$_agent_venv_journal"
+}
+
+# Put the moved-aside venv and staged source back. Non-zero only when the
+# previous venv could not be restored; the current venv is never swapped for a
+# copy that is not a usable venv.
+restore_previous_agent_venv() {
+  if [ -e "$_agent_venv_prev" ]; then
+    [ -e "$_agent_venv_prev/bin/python3" ] || return 1
+    rm -rf "$_agent_venv" || return 1
+    mv -T "$_agent_venv_prev" "$_agent_venv" || return 1
+  fi
+  if [ -e "$_agent_stage_prev" ]; then
+    # A half-copied replacement can still carry the :ro source's mode 555.
+    if [ -e "$_agent_stage" ]; then
+      chmod -R u+w "$_agent_stage" 2>/dev/null
+      rm -rf "$_agent_stage"
+    fi
+    if [ -e "$_agent_stage" ] || ! mv -T "$_agent_stage_prev" "$_agent_stage"; then
+      # The restored venv's editable install points here: keep the journal so
+      # the next start retries, and boot on the venv meanwhile.
+      echo "!! WARNING: could not restore the previous staged hermes-agent source at $_agent_stage;"
+      echo "!! the agent may not import until the next start retries it."
+      return 0
+    fi
+  fi
+  rm -f "$_agent_venv_journal"
+  return 0
+}
+
+# Delete the old copies. Flipping the journal first makes this restartable: a
+# container stopped after it finishes the commit on the next boot instead of
+# rolling back onto the old venv.
+commit_agent_venv_rebuild() {
+  write_agent_venv_journal committed || return 1
+  rm -rf "$_agent_stage_prev" "$_agent_venv_prev" || return 0
+  rm -f "$_agent_venv_journal"
+  return 0
+}
+
+# A container stopped mid-rebuild leaves its journal behind: roll back a pending
+# rebuild, finish a committed one. Leftovers without a journal are not ours.
+recover_interrupted_agent_venv_rebuild() {
+  _rj_state=""
+  if [ -f "$_agent_venv_journal" ]; then
+    _rj_state="$(cat "$_agent_venv_journal" 2>/dev/null || true)"
+  fi
+  case "$_rj_state" in
+    committed)
+      echo ""; echo "== Finishing an interrupted virtual environment rebuild"
+      { rm -rf "$_agent_stage_prev" "$_agent_venv_prev" && rm -f "$_agent_venv_journal"; } \
+        || echo "!! WARNING: could not remove the previous virtual environment at $_agent_venv_prev"
+      ;;
+    pending)
+      if [ -e "$_agent_venv_prev" ] && [ ! -e "$_agent_venv_prev/bin/python3" ]; then
+        echo ""; echo "!! WARNING: the virtual environment an interrupted rebuild moved aside is not usable; keeping the current one"
+        rm -f "$_agent_venv_journal"
+      else
+        echo ""; echo "== Restoring the virtual environment an interrupted rebuild moved aside"
+        restore_previous_agent_venv || error_exit "Failed to restore the virtual environment at $_agent_venv_prev"
+      fi
+      ;;
+    *)
+      if [ -e "$_agent_venv_prev" ] || [ -e "$_agent_stage_prev" ]; then
+        echo ""
+        echo "!! WARNING: $_agent_venv_prev or $_agent_stage_prev exists but no rebuild of this script left it;"
+        echo "!! the current virtual environment is kept as is and will not be rebuilt until it is removed."
+      fi
+      [ -z "$_rj_state" ] || rm -f "$_agent_venv_journal"
+      ;;
+  esac
+}
+
+# Rebuild the venv on <python> ("-" = uv's default) for the staged agent whose
+# pyproject.toml is <pyproject> (may be empty). Returns 0 when the replacement is
+# created, admitted and fully installed; 1 when the existing venv was kept or
+# put back untouched; 2 when it could not be put back.
+rebuild_agent_venv() {
+  _rv_py="$1"
+  _rv_pyproject="$2"
+  if [ -e "$_agent_venv_prev" ] || [ -e "$_agent_stage_prev" ] || [ -e "$_agent_venv_journal" ]; then
+    echo "!! A leftover $_agent_venv_prev, $_agent_stage_prev or rebuild journal exists; keeping $_agent_venv unchanged."
+    return 1
+  fi
+  if ! write_agent_venv_journal pending; then
+    rm -f "$_agent_venv_journal" "$_agent_venv_journal.tmp"
+    echo "!! Could not record the rebuild in $_agent_venv_journal; keeping $_agent_venv unchanged."
+    return 1
+  fi
+  if ! mv -T "$_agent_venv" "$_agent_venv_prev" 2>/dev/null; then
+    rm -f "$_agent_venv_journal"
+    echo "!! Could not move $_agent_venv aside (a mount point?); keeping it unchanged."
+    return 1
+  fi
+  if [ -e "$_agent_stage" ] && ! mv -T "$_agent_stage" "$_agent_stage_prev" 2>/dev/null; then
+    echo "!! Could not move the staged hermes-agent source aside; keeping the existing virtual environment."
+    restore_previous_agent_venv || return 2
+    return 1
+  fi
+  export VIRTUAL_ENV="$_agent_venv"
+  _rv_ok=0
+  if [ "$_rv_py" != "-" ]; then
+    UV_PYTHON="$_rv_py" uv venv "$_agent_venv" && _rv_ok=1
+  else
+    uv venv "$_agent_venv" && _rv_ok=1
+  fi
+  if [ "$_rv_ok" = 1 ] && [ -n "$_rv_pyproject" ] && [ -f "$_venv_helper" ] \
+      && ! python3 "$_venv_helper" --admits "$_rv_pyproject" "$_agent_venv"; then
+    echo "!! uv installed an interpreter the staged agent does not accept."
+    _rv_ok=0
+  fi
+  if [ "$_rv_ok" = 1 ]; then
+    echo "-- Installing dependencies into the replacement virtual environment"
+    if install_venv_dependencies && ensure_hindsight_client_docker_dependency soft && commit_agent_venv_rebuild; then
+      return 0
+    fi
+    echo "!! Could not finish installing the replacement virtual environment."
+  fi
+  restore_previous_agent_venv || return 2
+  return 1
+}
+
+recover_interrupted_agent_venv_rebuild
+
+# Ask the staged agent which interpreter it actually requires instead of
+# inheriting the base image's. A bare `uv venv` pins whatever /app/venv ends up
+# with, and every dependency gated on a newer `python_version` is then silently
+# dropped from the install — the container still starts healthy while
+# `run_agent` fails to import.
+_venv_action="reuse"
+_venv_python="-"
+if [ -f /app/scripts/docker_venv_python.py ] && command -v python3 >/dev/null 2>&1; then
+  _agent_pyproject=""
+  if [ -n "$_agent_src" ]; then
+    _agent_pyproject="$_agent_src/pyproject.toml"
+  fi
+  _base_py="$(python3 -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || echo "0.0")"
+  # Default to today's behaviour ("reuse") if the helper is unreadable, so a
+  # packaging problem can never be what stops the container from booting.
+  _venv_plan="$(python3 /app/scripts/docker_venv_python.py "$_agent_pyproject" /app/venv "$_base_py" 2>/dev/null || echo "reuse -")"
+  _venv_action="${_venv_plan%% *}"
+  _venv_python="${_venv_plan##* }"
+  case "$_venv_action" in
+    create|reuse|rebuild) ;;
+    *) _venv_action="reuse"; _venv_python="-" ;;
+  esac
+fi
+
+# A venv built on an interpreter the staged agent cannot use can never import
+# it, and `.deps_installed` would make the install below skip and pin the
+# broken environment across every subsequent restart. Rebuild it as a
+# transaction (above), so a failed interpreter fetch or dependency install
+# still boots WebUI on the old venv (the readiness check below then reports the
+# agent).
+if [ "$_venv_action" = "rebuild" ]; then
+  echo ""; echo "== Existing virtual environment cannot satisfy the staged agent — rebuilding"
+  _rv_rc=0
+  rebuild_agent_venv "$_venv_python" "${_agent_pyproject:-}" || _rv_rc=$?
+  case "$_rv_rc" in
+    0) _venv_action="rebuilt" ;;
+    1)
+      echo "!! Kept the existing virtual environment: a venv on Python $_venv_python could not be built and installed"
+      echo "!! (no network, or uv downloads disabled?). The agent will not import until it can be."
+      _venv_action="reuse"
+      ;;
+    *) error_exit "Failed to restore the previous virtual environment after a failed rebuild" ;;
+  esac
+fi
+
+if [ "$_venv_action" = "rebuilt" ]; then
+  echo "-- Rebuilt the virtual environment on Python $_venv_python"
+elif [ "$_venv_action" = "reuse" ] && [ -f /app/venv/bin/python3 ]; then
+  echo ""; echo "== Existing virtual environment found — reusing (fast restart)"
+else
+  echo ""; echo "== Creating new virtual environment"
+  if [ "$_venv_python" != "-" ]; then
+    # UV_PYTHON makes uv fetch/select that interpreter rather than inheriting
+    # the base image's.
+    UV_PYTHON="$_venv_python" uv venv venv \
+      || error_exit "Failed to create the virtual environment on Python $_venv_python"
+  else
+    uv venv venv
+  fi
+fi
+export VIRTUAL_ENV=/app/venv
+test -d /app/venv
+test -f /app/venv/bin/activate
+
+echo "";echo "== Activating hermes webui's virtual environment"
+source /app/venv/bin/activate || error_exit "Failed to activate hermeswebui virtual environment"
+test -x /app/venv/bin/python3
+
+if [ -f /app/venv/.deps_installed ]; then
+  if [ "$_venv_action" = "rebuilt" ]; then
+    echo ""; echo "== Dependencies were installed into the rebuilt virtual environment"
+  else
+    echo ""; echo "== Dependencies already installed — skipping (fast restart)"
+  fi
+else
+  install_venv_dependencies || error_exit "Failed to install hermes-webui dependencies"
 fi
 
 ensure_hindsight_client_docker_dependency
+
+# #8113 readiness: before #8113 the container reached "listening on
+# https://0.0.0.0:8787" and /health 200 while the agent was unimportable, so a
+# dropped core dependency was effectively silent. Import the agent's critical
+# dependency with the venv's own interpreter and say so loudly on failure.
+# This never aborts startup — the WebUI still serves without the agent.
+if [ -n "$_agent_src" ] && [ -f /app/scripts/docker_venv_python.py ] && command -v python3 >/dev/null 2>&1; then
+  echo ""; echo "== Verifying the Hermes agent's critical imports"
+  _verify_expected="${_venv_python:-0.0}"
+  if [ "$_verify_expected" = "-" ]; then _verify_expected="0.0"; fi
+  if _verify_detail="$(python3 /app/scripts/docker_venv_python.py --verify /app/venv "$_verify_expected" 2>&1)"; then
+    echo "-- Hermes agent critical imports verified"
+  else
+    echo ""
+    echo "!! WARNING: the Hermes agent is installed but is NOT importable."
+    echo "!!   ${_verify_detail}"
+    echo "!! Agent features (model auto-detection, personality routing, CLI session"
+    echo "!! imports) will be unavailable even though this container is healthy."
+    echo "!! The usual cause is a dependency set resolved for the wrong Python"
+    echo "!! version — see https://github.com/nesquena/hermes-webui/issues/8113"
+    echo ""
+  fi
+fi
 
 echo ""; echo "== Running hermes-webui"
 cd /app; python server.py || error_exit "hermes-webui failed or exited with an error"

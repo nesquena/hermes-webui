@@ -151,14 +151,16 @@ def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
     """Return the apply-path fetch failure message for the given stderr.
 
     A fetch the updater cancelled at its own deadline is a timeout: say so,
-    naming the cancelled command and its bound. Only real network signatures
-    keep the connectivity guidance.
+    naming the cancelled command and its bound. The echoed command is run
+    through the same credential scrub as every other git diagnostic. Only real
+    network signatures keep the connectivity guidance.
     """
     cancelled = _FETCH_DEADLINE_TIMEOUT_RE.search(fetch_out or '')
     if cancelled:
         return (
             f'The fetch was cancelled after {cancelled.group("bound")}s — '
-            f'git {cancelled.group("operation")} did not finish before the update deadline.'
+            f'git {_sanitize_git_diagnostic(cancelled.group("operation"))} '
+            f'did not finish before the update deadline.'
         )
     detail = _sanitize_git_diagnostic(fetch_out)
     if not detail:
