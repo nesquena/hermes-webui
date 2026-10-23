@@ -8659,12 +8659,22 @@ function _isForkWithResolvableParent(s, sessionIdsInList){
   return !!(s&&s.session_source==='fork'&&s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id));
 }
 
-function _sessionLineageKey(s, sessionIdsInList, sessionsById){
+function _sessionLineageKey(s, sessionIdsInList, sessionsById, claimedRootIds){
   if(!s||!s.session_id) return null;
   if(_isChildSession(s)) return null;
   if(s.session_source==='fork') return null;
   const lineageKey=s._lineage_root_id||s.lineage_root_id||null;
   if(lineageKey) return lineageKey;
+  // Server lineage metadata only labels CONTINUATION segments; the root of a
+  // compression lineage carries no `_lineage_root_id` of its own. When both the
+  // sealed root and its continuation are in the sidebar payload, the root would
+  // fall through as its own row — and opening it just follows the backend's
+  // `continuation_session_id` hint to the continuation, so the user sees the
+  // same conversation twice and a row that cannot be opened. Adopt the root
+  // into the lineage that names it, which collapses the pair into one row.
+  if(claimedRootIds&&claimedRootIds.has(s.session_id)&&!(s.parent_session_id&&sessionIdsInList&&sessionIdsInList.has(s.parent_session_id))){
+    return s.session_id;
+  }
   // WebUI-native context compression may only persist parent_session_id:
   // the preserved parent snapshot is marked pre_compression_snapshot while
   // the new continuation points at it.  When both rows are in the sidebar
@@ -9209,9 +9219,15 @@ function _collapseSessionLineageForSidebar(sessions){
   const result=[];
   const sessionIdsInList=new Set((sessions||[]).map(s=>s.session_id));
   const sessionsById=new Map((sessions||[]).filter(s=>s&&s.session_id).map(s=>[s.session_id,s]));
+  // Lineage roots named by another visible row — see `_sessionLineageKey`.
+  const claimedRootIds=new Set();
+  for(const s of sessions||[]){
+    const rootId=s&&(s._lineage_root_id||s.lineage_root_id);
+    if(rootId) claimedRootIds.add(rootId);
+  }
   const groups=new Map();
   for(const s of sessions||[]){
-    const key=_sessionLineageKey(s, sessionIdsInList, sessionsById);
+    const key=_sessionLineageKey(s, sessionIdsInList, sessionsById, claimedRootIds);
     if(!key){result.push(s);continue;}
     if(!groups.has(key)) groups.set(key,[]);
     groups.get(key).push(s);
