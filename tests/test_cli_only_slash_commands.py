@@ -108,10 +108,28 @@ def test_frontend_can_execute_agent_commands_via_api_endpoint():
     assert COMMANDS_JS.count("api('/api/commands/exec'") == 1
 
 
-def test_cli_only_response_mentions_webui_and_cli_scope():
+def test_cli_only_response_mentions_webui_scope():
     assert "function cliOnlyCommandResponse" in COMMANDS_JS
-    assert "Hermes CLI-only command" in COMMANDS_JS
-    assert "cannot run inside the WebUI" in COMMANDS_JS
+    # #7683 review: "isn't available in the WebUI" replaced the longer
+    # "is a Hermes CLI-only command and cannot run inside the WebUI".
+    assert "isn't available in the WebUI" in COMMANDS_JS
+    assert "cannot run inside the WebUI" not in COMMANDS_JS
+
+
+def test_prompt_style_cli_only_response_points_at_a_bare_prompt():
+    """Prompt-style registry commands (/plan, /review, /learn) tell the user
+    their de-slashed text is ALREADY in the composer and to press Send, since
+    that asks the agent directly (#7683 review round 3)."""
+    assert "const PROMPT_STYLE_CLI_ONLY_COMMANDS=new Set(['plan','review','learn']);" in COMMANDS_JS
+    response_idx = COMMANDS_JS.find("function cliOnlyCommandResponse")
+    response = COMMANDS_JS[response_idx : response_idx + 1200]
+    assert "PROMPT_STYLE_CLI_ONLY_COMMANDS.has(name)" in response
+    # The old wording ("Send it without the slash...") read as an
+    # instruction to retype the whole prompt, and following it literally
+    # produced "plan write a migration plan…".
+    assert "Send it without the slash to ask the agent directly." not in response
+    assert "Your request is in the composer without the slash." in response
+    assert "Press Send to ask the agent directly." in response
 
 
 def test_browser_cli_only_response_explains_server_side_browser_tools():
@@ -318,10 +336,13 @@ def test_agent_command_metadata_helper_resolves_name_and_alias():
         const byAlias = await getAgentCommandMetadata('browse');
         const unknown = await getAgentCommandMetadata('does-not-exist');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true,
-          unknown: unknown === null
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true,
+          available: byName && byName.available === true
+            && byAlias && byAlias.available === true
+            && unknown && unknown.available === true,
+          unknown: unknown && unknown.command === null
         };
         """
     )
@@ -330,6 +351,7 @@ def test_agent_command_metadata_helper_resolves_name_and_alias():
         "by_name": "browser",
         "by_alias": "browser",
         "cli_only": True,
+        "available": True,
         "unknown": True,
     }
 
@@ -339,12 +361,12 @@ def test_cli_only_response_helper_uses_canonical_command_name():
         """
         const meta = await getAgentCommandMetadata('browse');
         return {
-          response: cliOnlyCommandResponse('browse', meta)
+          response: cliOnlyCommandResponse('browse', meta && meta.command)
         };
         """
     )
 
-    assert "`/browser` is a Hermes CLI-only command" in result["response"]
+    assert "`/browser` isn't available in the WebUI" in result["response"]
     assert "Attach browser tools" in result["response"]
     assert "configured server-side" in result["response"]
 
@@ -655,9 +677,9 @@ def test_reload_skills_agent_command_metadata_resolves_alias():
         const byName = await getAgentCommandMetadata('reload-skills');
         const byAlias = await getAgentCommandMetadata('reload_skills');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true
         };
         """
     )
@@ -675,9 +697,9 @@ def test_codex_runtime_agent_command_metadata_resolves_alias():
         const byName = await getAgentCommandMetadata('codex-runtime');
         const byAlias = await getAgentCommandMetadata('codex_runtime');
         return {
-          by_name: byName && byName.name,
-          by_alias: byAlias && byAlias.name,
-          cli_only: byAlias && byAlias.cli_only === true
+          by_name: byName && byName.command && byName.command.name,
+          by_alias: byAlias && byAlias.command && byAlias.command.name,
+          cli_only: byAlias && byAlias.command && byAlias.command.cli_only === true
         };
         """
     )
@@ -997,7 +1019,7 @@ def test_alias_typed_text_reaches_exec_dispatch():
     result = _run_commands_js(
         """
         const byAlias = await getAgentCommandMetadata('reload_skills');
-        const canonical = byAlias && byAlias.name;
+        const canonical = byAlias && byAlias.command && byAlias.command.name;
         return { canonical, dispatched: canonical === 'reload-skills' };
         """
     )

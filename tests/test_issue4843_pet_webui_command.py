@@ -500,12 +500,12 @@ def test_pet_slash_intercept_bypasses_generic_agent_execution():
 
     assert [item["role"] for item in pet["messages"]] == ["user", "assistant"]
     assert "Desktop Companion is not installed yet." in pet["messages"][1]["content"]
-    assert "Hermes CLI-only command" not in pet["messages"][1]["content"]
+    assert "isn't available in the WebUI" not in pet["messages"][1]["content"]
     assert pet["commandExecCalls"] == []
     assert pet["remainingInput"] == ""
 
     assert [item["role"] for item in browser["messages"]] == ["user", "assistant"]
-    assert "`/browser` is a Hermes CLI-only command" in browser["messages"][1]["content"]
+    assert "`/browser` isn't available in the WebUI" in browser["messages"][1]["content"]
     assert browser["commandExecCalls"] == []
 
 
