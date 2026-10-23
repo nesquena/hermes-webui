@@ -768,6 +768,59 @@ function _resetMessageRenderWindow(sid){
   _clearRenderCache();
   clearVisibleMessageRowCache();
   _clearMessageVirtualHeightCache();
+  _resetMessageRenderCoalesce();
+}
+// ── #6151: same-task render-burst coalescing ──────────────────────────────
+// renderMessages() is an unconditional wipe-and-rebuild (`inner.innerHTML=''`
+// then reconstruct every row) reached from ~113 call sites. A single logical
+// event fires it many times in a row -- one tool completion alone calls it
+// from ~10 places in messages.js (5860/6138/6143/6344/6374/6523/6587/6633/
+// 8148/8594), and the stream settle adds more -- so a finished tool can rebuild
+// the entire O(N) transcript a dozen times over.
+//
+// Coalescing is scoped to a SINGLE task on purpose. JS is single-threaded, so
+// two renderMessages() calls in the same synchronous task cannot have any DOM
+// mutation slip in between; if the render inputs are identical the rebuild is
+// a no-op by construction, and skipping it cannot change what the reader sees.
+// Deliberately NOT tracked as long-lived "is the DOM clean" state: that would
+// require every out-of-band transcript mutator to remember to invalidate it,
+// and one missed site is a permanently stale transcript.
+//
+// The streaming regime is excluded outright. While a turn is live, tool cards
+// and activity scenes are appended straight into #msgInner (appendLiveToolCard,
+// renderLiveAnchorActivityScene, appendLiveCompressionCard) without touching
+// S.messages/S.toolCalls, so the signature cannot observe them.
+let _messageRenderCoalesceSid=null;
+let _messageRenderCoalesceWindowKey=null;
+let _messageRenderCoalesceSignature=null;
+let _messageRenderCoalesceResetTimer=0;
+function _resetMessageRenderCoalesce(){
+  _messageRenderCoalesceSid=null;
+  _messageRenderCoalesceWindowKey=null;
+  _messageRenderCoalesceSignature=null;
+  if(_messageRenderCoalesceResetTimer){ clearTimeout(_messageRenderCoalesceResetTimer); _messageRenderCoalesceResetTimer=0; }
+}
+function _messageRenderCoalesceCanSkip(sid, windowKey, signature){
+  // Unknown/blank inputs never coalesce -- fail open to a real rebuild.
+  if(!sid||!windowKey||!signature) return false;
+  // A live turn mutates the transcript DOM behind the signature's back.
+  if(S.busy||S.activeStreamId) return false;
+  if(typeof INFLIGHT!=='undefined' && INFLIGHT[sid]) return false;
+  if(_messageRenderCoalesceSid!==sid) return false;
+  if(_messageRenderCoalesceWindowKey!==windowKey) return false;
+  if(_messageRenderCoalesceSignature!==signature) return false;
+  return true;
+}
+function _noteMessageRenderCompleted(sid, windowKey, signature){
+  _resetMessageRenderCoalesce();
+  if(!sid||!windowKey||!signature) return;
+  _messageRenderCoalesceSid=sid;
+  _messageRenderCoalesceWindowKey=windowKey;
+  _messageRenderCoalesceSignature=signature;
+  // Close the window when the current task unwinds so a LATER task always
+  // rebuilds. setTimeout (not a microtask) so every synchronous burst inside
+  // one task coalesces, while anything in a subsequent task rebuilds.
+  _messageRenderCoalesceResetTimer=setTimeout(_resetMessageRenderCoalesce,0);
 }
 function _restoreMessageRenderWindowAfterSettledRender(){
   _messageRenderWindowSize=MESSAGE_RENDER_WINDOW_DEFAULT;
@@ -18207,6 +18260,11 @@ function _revealTransparentEarlierSteps(message, segment, rawIdx, affordanceEl){
   try{
     const sid=S.session&&S.session.session_id;
     if(sid&&_sessionHtmlCache&&typeof _sessionHtmlCache.delete==='function') _sessionHtmlCache.delete(sid);
+    // #6151: this mutates the rendered DOM in place, outside renderMessages, so
+    // a following identical-signature render is NOT redundant -- it is what
+    // picks the un-capped DOM up. Clear the coalesce window for the same reason
+    // the HTML cache is dropped here.
+    _resetMessageRenderCoalesce();
   }catch(_){ }
   if(turnEl){
     turnEl.setAttribute('data-transparent-earlier-revealed','1');
@@ -21260,6 +21318,42 @@ function renderMessages(options){
       return;
     }
   }
+  // ── #6151: same-task render-burst coalescing ────────────────────────────
+  // A single logical event fires renderMessages() from ~10 sites in a row (one
+  // tool completion alone: messages.js 5860/6138/6143/6344/6374/6523/6587/
+  // 6633/8148/8594, plus the stream settle). Every one of those used to wipe
+  // #msgInner and rebuild every row, so a single finished tool could re-render
+  // the entire O(N) transcript a dozen times in one task.
+  //
+  // Within one task JS cannot mutate the DOM between two calls, so an
+  // identical (sid, renderWindowKey, signature) triple means the rebuild is a
+  // no-op by construction — skipping it cannot change what the reader sees.
+  // Deliberately NOT long-lived "is the DOM clean" state: that would require
+  // every out-of-band transcript mutator to remember to invalidate it, and one
+  // missed site is a permanently stale transcript.
+  //
+  // Excluded on purpose:
+  //  - streaming / busy / INFLIGHT — live tool cards and activity scenes are
+  //    appended straight into #msgInner without touching S.messages (see
+  //    appendLiveToolCard, renderLiveAnchorActivityScene), so the signature
+  //    cannot observe them.
+  //  - transient transcript UI (/compress, cross-channel handoff) — window
+  //    state the signature does not cover.
+  //  - the keep-open settle device — a deliberate one-shot re-render.
+  //  - blank inputs — fail open to a real rebuild.
+  //  - absent helpers — standalone renderMessages() test harnesses extract this
+  //    function on its own (see the _isKeepSettledWorklogOpenArmed guard below),
+  //    so every new helper call here must be typeof-guarded to fail open.
+  if((typeof _messageRenderCoalesceCanSkip==='function')
+    &&!hasTransientTranscriptUi
+    &&!(typeof _isKeepSettledWorklogOpenArmed==='function'&&_isKeepSettledWorklogOpenArmed())){
+    const coalesceSignature=(cachedRenderSignature===null)?_messageRenderCacheSignature():cachedRenderSignature;
+    cachedRenderSignature=coalesceSignature;
+    if(_messageRenderCoalesceCanSkip(sid,renderWindowKey,coalesceSignature)){
+      _messageVirtualWindowKey=renderWindowKey;
+      return;
+    }
+  }
   // Mid-stream flicker fix (#3877): when a renderMessages() rebuild is reached
   // while THIS session is actively streaming (e.g. the clarify-response echo at
   // messages.js, or a CLI-import refresh), the `inner.innerHTML=''` below detaches
@@ -23037,6 +23131,16 @@ function renderMessages(options){
         signature:cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature,
       }
       : null;
+  }
+  // #6151: record the completed rebuild so a redundant renderMessages() later in
+  // THIS task coalesces instead of repeating the O(N) rebuild. Same exclusions as
+  // the skip guard — a transient-UI, streaming or keep-open render is not a safe
+  // coalesce baseline, so it arms nothing.
+  // Same standalone-harness typeof guard as the skip guard above.
+  if((typeof _noteMessageRenderCompleted==='function')
+    &&!hasTransientTranscriptUi&&!_keepOpenArmed&&sid
+    &&!(typeof INFLIGHT!=='undefined'&&INFLIGHT[sid])){
+    _noteMessageRenderCompleted(sid,renderWindowKey,cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature);
   }
   _updateMessageVirtualMeasurements(renderVisWithIdx, renderVisibleIdxs, virtualWindow);
   // Kill the pinned/tail-follower mid-stream jitter. Schedule the re-anchor in a MICROTASK,
