@@ -6897,6 +6897,7 @@ _available_models_cache_ts: float = 0.0
 _available_models_live_rebuild_ts: float = 0.0
 _available_models_cache_source_fingerprint: dict | None = None
 _AVAILABLE_MODELS_CACHE_TTL: float = 86400.0  # 24 hours
+_AVAILABLE_MODELS_ENDPOINT_ERROR_TTL: float = 30.0  # 30 seconds for transient probe errors (#8158)
 _SESSION_VISIT_MODELS_FRESHNESS_SECONDS: float = 3600.0
 _available_models_cache_lock = threading.RLock()  # must be RLock: cold path refactoring moved slow work inside this lock, requiring re-entry
 _cache_build_cv = threading.Condition(_available_models_cache_lock)  # shares underlying RLock so notify_all() is safe inside with _available_models_cache_lock
@@ -8546,6 +8547,16 @@ def _is_loadable_disk_cache(cache: object) -> bool:
     return True
 
 
+def _has_models_endpoint_error(cache: dict | None) -> bool:
+    """Return True if any group in the cached catalog carries a transient endpoint error (#8158)."""
+    if not isinstance(cache, dict):
+        return False
+    groups = cache.get("groups")
+    if not isinstance(groups, list):
+        return False
+    return any(isinstance(g, dict) and bool(g.get("models_endpoint_error")) for g in groups)
+
+
 def _load_models_cache_from_disk() -> dict | None:
     """Load /api/models cache from disk if it exists and has current metadata.
 
@@ -8566,6 +8577,17 @@ def _load_models_cache_from_disk() -> dict | None:
             cache = _j.load(f)
         if not _is_loadable_disk_cache(cache):
             return None
+        if _has_models_endpoint_error(cache):
+            built_at = cache.get("_built_at")
+            if isinstance(built_at, (int, float)) and math.isfinite(built_at) and built_at > 0:
+                age = max(0.0, time.time() - float(built_at))
+            else:
+                try:
+                    age = max(0.0, time.time() - cache_path.stat().st_mtime)
+                except OSError:
+                    age = None
+            if age is not None and age >= _AVAILABLE_MODELS_ENDPOINT_ERROR_TTL:
+                return None
         # Strip the disk-only metadata before returning, so the in-memory
         # cache shape stays exactly what the rest of the code expects. The
         # disk save path does not persist `aliases`, so reconstruct them from
@@ -9190,7 +9212,12 @@ def _get_fresh_memory_models_cache(now: float) -> dict | None:
     global _available_models_live_rebuild_ts, _available_models_cache_source_fingerprint
     if _available_models_cache is None:
         return None
-    if (now - _available_models_cache_ts) >= _AVAILABLE_MODELS_CACHE_TTL:
+    effective_ttl = (
+        _AVAILABLE_MODELS_ENDPOINT_ERROR_TTL
+        if _has_models_endpoint_error(_available_models_cache)
+        else _AVAILABLE_MODELS_CACHE_TTL
+    )
+    if (now - _available_models_cache_ts) >= effective_ttl:
         return None
     current_sources = _models_cache_source_fingerprint()
     if _available_models_cache_source_fingerprint != current_sources:
