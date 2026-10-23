@@ -2319,3 +2319,5 @@ format-specific fallback and download link. A 401 directs the user to reload.
   Matching empty wrappers such as `**MEDIA:**` must remain prose.
 - Recheck settled and safe/fade streaming output across callback boundaries.
   Automated coverage: renderer behavior, MEDIA consumer parity, and SMD stream tests.
+
+For labeled-link and bare CJK autolink integration, run `./scripts/test.sh tests/test_issue6550_link_scan_boundaries.py tests/test_fullwidth_autolink_behaviour.py`. Space-bearing labeled destinations and literal raw code stay opaque while neighboring bare URLs use the shared CJK boundary helper in paragraphs, lists, blockquotes and tables. Malformed quoted/parenthesized title grammar is not expanded by this merge repair.
