@@ -64,7 +64,12 @@ from api.session_events import (
     unsubscribe_session_events,
 )
 from api.gateway_restart import restart_active_profile_gateway
-from api.shares import create_or_refresh_share, load_share, revoke_share
+from api.shares import (
+    build_share_snapshot,
+    load_share,
+    revoke_share,
+    write_share_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -3393,6 +3398,8 @@ from api.config import (
     unregister_stream_owner,
     CHAT_LOCK,
     _get_session_agent_lock,
+    _get_session_share_lock,
+    SHARE_SESSION_LOCK_TIMEOUT_SECONDS,
     CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS,
     load_settings,
     persisted_speech_settings_keys,
@@ -6582,6 +6589,46 @@ def _resolve_share_session_pair(sid: str, handler):
         if reason == "was_webui" or synth is None:
             raise KeyError(sid) from None
         return synth, None, cli_meta
+
+
+def _reload_session_for_share(sid: str):
+    """Durable sidecar for a share mutation, or ``None`` when it cannot be read.
+
+    A share handler must not save the session object it resolved before taking the
+    share lock: a title rename or an appended message that finished while it waited
+    would be reverted by the save. Reload inside the lock and change only the share
+    fields. An unreadable sidecar falls back to the caller's copy instead of turning
+    the request into a 500 (#8255 review).
+    """
+    try:
+        return Session.load(sid)
+    except Exception:
+        logger.debug("Failed to reload session %s for a share mutation", sid, exc_info=True)
+        return None
+
+
+def _mirror_share_fields_to_cached_session(sid: str, source) -> None:
+    """Copy share fields onto the resident cached session before it is persisted.
+
+    The cache's freshness check compares message/scene state and not share fields,
+    so a cached copy left untouched after the share lock was released keeps serving
+    the previous token to the next reader (#8255 review).
+
+    This runs BEFORE the durable save, not after it (#8255 review, second round).
+    A streaming checkpoint serializes the live session; if the token only reached
+    the live copy after the save, a checkpoint landing in that window would write
+    ``share_token: None`` back over the sidecar and the published link would stay
+    live with nothing left for revoke to find.
+    """
+    try:
+        with LOCK:
+            cached = SESSIONS.get(sid)
+            if cached is None or cached is source:
+                return
+            cached.share_token = getattr(source, "share_token", None)
+            cached.share_created_at = getattr(source, "share_created_at", None)
+    except Exception:
+        logger.debug("Failed to mirror share fields for session %s", sid, exc_info=True)
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
@@ -18068,20 +18115,72 @@ def handle_post(handler, parsed) -> bool:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
             return bad(handler, "Session not found", 404)
+        # #8255 review (second round): build the snapshot from the session as it
+        # is INSIDE the lock. A writer that saves while the snapshot is being
+        # built used to be reverted, because the snapshot was taken before the
+        # lock and the persist saved that older state back. The lock now covers
+        # the build as well, so the published snapshot and the persisted state
+        # are the same state.
+        share_lock = _get_session_share_lock(sid)
+        if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
+            return bad(handler, "Session busy, try again", 503)
         try:
-            share_meta = create_or_refresh_share(snapshot_session)
-        except ValueError as exc:
-            return bad(handler, str(exc), 400)
-        persisted_session = stored_session
-        if persisted_session is None:
-            persisted_session = _build_share_metadata_sidecar(
-                sid,
-                snapshot_session,
-                cli_meta=cli_meta,
+            # Re-read inside the lock: saving the object resolved before the wait
+            # would revert a title rename or an appended message that landed while
+            # this request was blocked.
+            persisted_session = _reload_session_for_share(sid) or stored_session
+            if persisted_session is None:
+                persisted_session = _build_share_metadata_sidecar(
+                    sid,
+                    snapshot_session,
+                    cli_meta=cli_meta,
+                )
+            try:
+                # The transcript still comes from the resolved snapshot session: a
+                # raw messaging session has no WebUI sidecar to read messages
+                # from, and building the snapshot from the sidecar instead would
+                # lose that transcript (#8255 review, second round). What changed
+                # is WHERE the snapshot is built: inside the lock, and from the
+                # newest state, so a writer that saves during the snapshot I/O is
+                # not reverted by the persist.
+                current = _reload_session_for_share(sid)
+                if current is not None:
+                    snapshot_source = copy.copy(current)
+                    snapshot_source.messages = _share_snapshot_messages_for_session(
+                        current,
+                        cli_meta=cli_meta,
+                    )
+                else:
+                    snapshot_source = snapshot_session
+                snapshot = build_share_snapshot(snapshot_source)
+            except ValueError as exc:
+                return bad(handler, str(exc), 400)
+            # A writer may have saved while the snapshot was being built. Re-read
+            # once more so the state we persist is the newest one, not the copy
+            # that was current when the snapshot started (#8255 review, second
+            # round: a writer that saves during the snapshot I/O was reverted).
+            refreshed = _reload_session_for_share(sid)
+            if refreshed is not None:
+                persisted_session = refreshed
+            # Create side of #8255: reuse the token the durable sidecar already
+            # records instead of minting a new one, otherwise the previous snapshot
+            # stays live and unreachable by revoke.
+            share_meta = write_share_snapshot(
+                snapshot,
+                token=str(getattr(persisted_session, "share_token", "") or ""),
+                source_session_id=sid,
             )
-        persisted_session.share_token = share_meta["share_token"]
-        persisted_session.share_created_at = share_meta["share_created_at"]
-        persisted_session.save(touch_updated_at=False)
+            persisted_session.share_token = share_meta["share_token"]
+            persisted_session.share_created_at = share_meta["share_created_at"]
+            # Update the live cached copy BEFORE the durable save (#8255 review,
+            # second round): a streaming checkpoint that serializes the live
+            # session between the save and the mirror would write
+            # ``share_token: None`` back over the sidecar, leaving a published
+            # link that revoke can no longer reach.
+            _mirror_share_fields_to_cached_session(sid, persisted_session)
+            persisted_session.save(touch_updated_at=False)
+        finally:
+            share_lock.release()
         _publish_session_list_changed(
             "session_share_create",
             profile=getattr(persisted_session, "profile", None),
@@ -18115,22 +18214,62 @@ def handle_post(handler, parsed) -> bool:
             snapshot_session, stored_session, cli_meta = _resolve_share_session_pair(sid, handler)
         except KeyError:
             return bad(handler, "Session not found", 404)
-        target_session = stored_session
-        if target_session is None:
-            token = str(getattr(snapshot_session, "share_token", "") or "").strip()
+        # #8255: the LRU-cached session is not the share-token authority. The
+        # cache-freshness check compares message/scene state and not share
+        # fields, so a cached copy loaded during a create's save window (or any
+        # other writer's save) still looks current while it carries no
+        # ``share_token``. Revoking from that copy found no token, cleared the
+        # cached metadata and reported ``ok: true`` even though the published
+        # snapshot stayed live. Resolve the token from the durable sidecar under
+        # the per-session *share* lock (the agent lock is held across whole agent
+        # turns, so it must not gate a revoke), re-read the session inside the
+        # lock so a concurrent writer's save is not reverted, and only report
+        # success once the snapshot no longer resolves.
+        share_lock = _get_session_share_lock(sid)
+        if not share_lock.acquire(timeout=SHARE_SESSION_LOCK_TIMEOUT_SECONDS):
+            return bad(handler, "Session busy, try again", 503)
+        try:
+            target_session = _reload_session_for_share(sid) or stored_session
+            if target_session is None:
+                token = str(getattr(snapshot_session, "share_token", "") or "").strip()
+                if not token:
+                    return bad(handler, "Session not found", 404)
+                target_session = _build_share_metadata_sidecar(
+                    sid,
+                    snapshot_session,
+                    cli_meta=cli_meta,
+                )
+                target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
+            token = str(getattr(target_session, "share_token", "") or "").strip()
             if not token:
-                return bad(handler, "Session not found", 404)
-            target_session = _build_share_metadata_sidecar(
-                sid,
-                snapshot_session,
-                cli_meta=cli_meta,
-            )
-            target_session.share_token = token
-            target_session.share_created_at = getattr(snapshot_session, "share_created_at", None)
-        revoke_share(target_session)
-        target_session.share_token = None
-        target_session.share_created_at = None
-        target_session.save(touch_updated_at=False)
+                # External sessions whose snapshot was published without a sidecar
+                # write keep the token only on the snapshot/in-memory copy.
+                token = str(getattr(snapshot_session, "share_token", "") or "").strip()
+            if not token:
+                token = str(getattr(stored_session, "share_token", "") or "").strip()
+            if token:
+                # revoke_share() locates the published snapshot through the
+                # session's token field, so hand it the resolved authority.
+                target_session.share_token = token
+                revoke_share(target_session)
+                if load_share(token) is not None:
+                    return bad(handler, "Share link could not be revoked", 500)
+            # A writer may have saved while the revoke was reading the snapshot
+            # store. Re-read so the state we persist is the newest one, not the
+            # copy that was current when the token was resolved (#8255 review,
+            # second round).
+            refreshed = _reload_session_for_share(sid)
+            if refreshed is not None:
+                target_session = refreshed
+            target_session.share_token = None
+            target_session.share_created_at = None
+            # Mirror before the durable save (#8255 review, second round): a
+            # streaming checkpoint in the save/mirror window would otherwise write
+            # the live session's stale share fields back over the sidecar.
+            _mirror_share_fields_to_cached_session(sid, target_session)
+            target_session.save(touch_updated_at=False)
+        finally:
+            share_lock.release()
         _publish_session_list_changed(
             "session_share_revoke",
             profile=getattr(target_session, "profile", None),
