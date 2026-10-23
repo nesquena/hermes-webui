@@ -4257,7 +4257,57 @@ function _messageReloadLimitForSession(sid){
   }
   return _INITIAL_MSG_LIMIT;
 }
-
+function _appendAnchorRowFingerprint(row){
+  // One-row FNV-1a digest of the LAST RENDERED row, byte-identical to
+  // api/routes.py:_append_anchor_fingerprint for any row the JSON round-trip
+  // preserves. The server hashes the row's public projection (internal fields
+  // stripped, content redacted) — the exact bytes this client rendered — so a
+  // rewrite of the seam row, a compaction that touched it, or a change in
+  // what the client would render all make the two digests diverge and the
+  // append-only fast path (#7925 re-gate) is refused in favour of the
+  // authoritative full fetch. Exotic shapes (float 1e-7, a BOM, ints > 2^53,
+  // \x1f) also diverge and fail closed — never a stale row.
+  //
+  // charCodeAt yields UTF-16 CODE UNITS and Math.imul keeps every
+  // intermediate product exact, matching the server's Python modulo
+  // arithmetic bit for bit. Returns '' when the row cannot be described
+  // (non-object row), which the caller treats as "unprovable" and skips the
+  // fast path.
+  if(!row || typeof row!=='object') return '';
+  const role=String(row.role||'');
+  let content=row.content;
+  let text='';
+  if(Array.isArray(content)){
+    for(const part of content){
+      if(part && part.type==='text') text+=String(part.text||'');
+    }
+  }else if(content===undefined || content===null){
+    text='';
+  }else{
+    text=String(content);
+  }
+  const timestamp=(row.timestamp===undefined||row.timestamp===null)
+    ? (row._ts===undefined||row._ts===null?null:row._ts)
+    : row.timestamp;
+  const tids=[];
+  if(Array.isArray(row.tool_calls)){
+    for(const tc of row.tool_calls){
+      if(tc && (tc.id || tc.tool_call_id)) tids.push(String(tc.id||tc.tool_call_id));
+    }
+  }
+  if(Array.isArray(content)){
+    for(const part of content){
+      if(part && part.type==='tool_use' && (part.id||part.tool_use_id)) tids.push(String(part.id||part.tool_use_id));
+    }
+  }
+  const payload=[role,text.trim(),timestamp===null||timestamp===undefined?'':String(timestamp),tids.sort().join(',')].join('\u0000');
+  let hash=0x811c9dc5>>>0;
+  for(let j=0;j<payload.length;j++){
+    hash=(hash^payload.charCodeAt(j))>>>0;
+    hash=(Math.imul(hash,0x01000193))>>>0;
+  }
+  return (hash>>>0).toString(36).padStart(26,'0');
+}
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls){
   const msgs=Array.isArray(messages)?messages:[];
   // During active streaming, skip — clearing S.toolCalls would lose Activity
@@ -4312,23 +4362,80 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   // Fetch session messages with a tail window for fast initial load.
   const reloadLimit = _messageReloadLimitForSession(sid); // defaults to _INITIAL_MSG_LIMIT
-  // A reload window above the server's msg_limit ceiling would be clamped by
-  // the backend (returning only the last _MSG_LIMIT_MAX rows), which can
-  // silently SHRINK an already-loaded transcript that had more than the ceiling
-  // of rows visible (rows 400–999 replaced by 500–999). When the requested
-  // window exceeds the ceiling, fall back to the bare full-transcript request
-  // (no msg_limit / no expand_renderable) so a same-session refresh never drops
-  // already-loaded older rows (Codex gate #6154, silent row-loss).
-  const boundedReloadLimit = (reloadLimit && reloadLimit <= _msgLimitMax) ? reloadLimit : null;
-  const reloadLimitParam = boundedReloadLimit ? `&msg_limit=${boundedReloadLimit}` : '';
+  // #7899: A reload window above the server's msg_limit ceiling used to fall
+  // back to a bare full-transcript request (no msg_limit / no
+  // expand_renderable), turning every focus/SSE reconciliation on a >500-row
+  // session into a full multi-MB transcript download. The reload width is
+  // now either satisfiable under the ceiling (plain bounded tail replace, so
+  // no loaded rows are lost — Codex gate #6154) or it is not, and when it is
+  // not the request is either the explicit full-transcript `msg_limit=all`
+  // (the shape the backend documents for a width the ceiling cannot express)
+  // or the append-only fast path below.
+  //
+  // #7925 re-gate (blocking, scope): `msg_limit=all` and master's bare GET
+  // are the SAME request server-side — both return the full transcript — so
+  // an over-ceiling reload used to re-download a multi-thousand-row
+  // transcript on every refresh. The append-only fast path fixes that: the
+  // client asks for only the rows strictly after its last rendered index
+  // (msg_after + anchor fingerprint + transcript_generation) and APPENDS
+  // them instead of replacing. The server refuses the fast path (and returns
+  // the authoritative full document) when the anchor row's fingerprint or
+  // the transcript generation changed or the count shrank, so
+  // compaction/undo/edits stay exactly as safe as master's full reload.
+  const _reloadWidthExceedsCeiling = !(reloadLimit && reloadLimit <= _msgLimitMax);
+  const boundedReloadLimit = _reloadWidthExceedsCeiling ? 'all' : reloadLimit;
+  let reloadLimitParam = `&msg_limit=${boundedReloadLimit}`;
+  // Append-only fast path: the reload needs a width the ceiling cannot
+  // express (the client loaded more than one bounded window) AND the client
+  // still holds a contiguous transcript it can vouch for. The anchor is the
+  // last rendered absolute index (msg_after), proven unchanged by the anchor
+  // fingerprint + transcript_generation — so this works for a paged window
+  // that ends at the newest row as much as for a pristine prefix from row 0
+  // (the #7899 scenario: >500 rows paged, then a refresh).
+  const _appendFastPath =
+    _reloadWidthExceedsCeiling &&
+    Array.isArray(S.messages) && S.messages.length > 0 &&
+    Number.isFinite(Number(S.session && S.session.transcript_generation));
+  let appendParam = '';
+  // #7925 re-gate (2026-10-21, finding 2): rows can land locally while the
+  // append fetch is in flight (a streaming turn appending to S.messages, a
+  // delegation wakeup, a sibling loader). Concatenating the server's window
+  // onto a transcript that already grew duplicates those rows, and the anchor
+  // the request vouched for no longer describes what is held. Snapshot the
+  // shape the anchor described; any drift routes the response to the
+  // authoritative full fetch instead of the concat.
+  let _appendPreLength = -1;
+  let _appendPreAnchorRow = null;
+  let _appendPreOldestIdx = -1;
+  if (_appendFastPath) {
+    const lastRenderedIdx = _oldestIdx + S.messages.length - 1;
+    const anchorFp = _appendAnchorRowFingerprint(S.messages[S.messages.length - 1]);
+    if (anchorFp !== '') {
+      _appendPreLength = S.messages.length;
+      _appendPreAnchorRow = S.messages[S.messages.length - 1];
+      _appendPreOldestIdx = _oldestIdx;
+      appendParam =
+        `&msg_after=${lastRenderedIdx}` +
+        `&anchor_fp=${encodeURIComponent(anchorFp)}` +
+        `&transcript_generation=${Number(S.session.transcript_generation)}` +
+        `&msg_limit=${_msgLimitMax}`;
+      // The append request carries its own bounded msg_limit; drop the
+      // `all` width (a duplicate msg_limit would make parse_qs take the
+      // first value and cost the server the full-merge path for nothing).
+      reloadLimitParam = '';
+      // The append window is capped like any bounded window (the server's
+      // limited-display merge stays the cheap one); when more new rows exist
+      // the response says so and we fall back to a full fetch.
+    }
+  }
   // Older frontends used expand_renderable=1 to request visible-row expansion.
   // The server now counts msg_limit by visible transcript rows by default; keep
   // the flag for compatibility with mixed-version deployments.
-  const expandParam = boundedReloadLimit ? '&expand_renderable=1' : '';
+  const expandParam = '&expand_renderable=1';
   let data;
   try {
     data = await api(
-      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${expandParam}`,
+      `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0${reloadLimitParam}${appendParam}${expandParam}`,
       {timeoutMs:120000}
     );
   } finally {
@@ -4337,9 +4444,123 @@ async function _ensureMessagesLoaded(sid, opts) {
   if (!_ownsLoad()) return;
   // Guard: api() may have redirected (401) and returned undefined.
   if (!data || !data.session) return;
+  _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
+  if (appendParam && data.session._append_only === true) {
+    // Append-only fast path accepted: retain the rendered prefix and append
+    // only the rows the server returned after the anchor. The cursor is
+    // unchanged (the retained rows still start at _oldestIdx) and the
+    // ephemeral-field carry-forward does not apply (nothing was replaced).
+    //
+    // #7925 re-gate (2026-10-21, finding 2): if rows landed locally while the
+    // append fetch was in flight the anchor no longer describes the held
+    // transcript, and concatenating the window would duplicate them. Treat
+    // that drift exactly like an over-cap window: re-fetch the authoritative
+    // full transcript through the replace path below.
+    const _appendConcurrentChange =
+      _appendPreLength >= 0 &&
+      (S.messages.length !== _appendPreLength ||
+        S.messages[S.messages.length - 1] !== _appendPreAnchorRow ||
+        _oldestIdx !== _appendPreOldestIdx);
+    // The append does not change whether OLDER rows exist beyond the window:
+    // keep the previous truncation state and OR in the response's signal that
+    // more NEWER rows exist beyond the capped append window. Only the newer
+    // signal decides the fallback — a paged window that ends at the newest
+    // row stays truncated (older rows unloaded) with no need for a full fetch.
+    const _appendHasMoreRows = !!data.session._messages_truncated || _appendConcurrentChange;
+    _messagesTruncated = _messagesTruncated || _appendHasMoreRows;
+    if (!_appendHasMoreRows) {
+      const appended = (data.session.messages || []).filter(m => m && m.role);
+      if (appended.length) {
+        S.messages = [...S.messages, ...appended];
+        if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
+      }
+      // #7925 re-gate (2026-10-21, finding 3): the append branch used to
+      // return before tool-card synchronization, so a session-level tool card
+      // that arrived with the append window never reached the client. Merge
+      // the response's cards by tid into the session-level list, rebasing the
+      // window-relative assistant_msg_idx (the server rebases full-transcript
+      // coordinates into the returned window) into the combined transcript's
+      // coordinate space, then run the existing sync over the combined
+      // transcript — the same contract the replace path below upholds.
+      if (S.session && S.session.session_id === sid && Array.isArray(data.session.tool_calls) && data.session.tool_calls.length) {
+        const _appendIdxShift = (Number(data.session._messages_offset) || 0) - _oldestIdx;
+        const _cards = Array.isArray(S.session.tool_calls) ? S.session.tool_calls : [];
+        const _byTid = new Map();
+        for (const tc of _cards) {
+          if (tc && typeof tc === 'object') _byTid.set(tc.tid !== undefined ? tc.tid : tc.id, tc);
+        }
+        for (const tc of data.session.tool_calls) {
+          if (!tc || typeof tc !== 'object') continue;
+          const _idx = Number(tc.assistant_msg_idx);
+          const _rebased = Number.isFinite(_idx)
+            ? Object.assign({}, tc, {assistant_msg_idx: _idx + _appendIdxShift})
+            : Object.assign({}, tc);
+          const _key = _rebased.tid !== undefined ? _rebased.tid : _rebased.id;
+          if (_key !== undefined && _byTid.has(_key)) {
+            const _at = _cards.indexOf(_byTid.get(_key));
+            if (_at >= 0) _cards[_at] = Object.assign({}, _byTid.get(_key), _rebased);
+          } else {
+            _cards.push(_rebased);
+          }
+        }
+        S.session.tool_calls = _cards;
+      }
+      if (!(typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[sid])) {
+        _syncToolCallsForLoadedMessages(S.messages, S.session && S.session.tool_calls);
+      }
+      // Clean append: the new rows are all there is — refresh the session
+      // metadata that every transcript landing must update, then finish. The
+      // regeneration revision is re-adopted from this response (the
+      // transcript changed by construction, so any stored revision is stale).
+      if(S.session&&S.session.session_id===sid){
+        if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
+        S.session.message_count=Number(data.session.message_count || S.messages.length);
+        if(typeof data.session.visible_message_count==='number'&&data.session.visible_message_count>=0){
+          S.session.visible_message_count=data.session.visible_message_count;
+        }
+        if(!S.busy){
+          S.session._visibleBaselineLocal=(Array.isArray(S.messages)?S.messages:[]).filter(m=>m&&m.role&&m._source!=='delegation_wakeup').length;
+          S.session._visibleBaselineServer=(typeof data.session.visible_message_count==='number'&&data.session.visible_message_count>=0)
+            ?data.session.visible_message_count
+            :S.session._visibleBaselineLocal;
+        }
+        S.lastUsage={...(data.session.last_usage||S.lastUsage||{})};
+        if(data.session.todo_state !== undefined){
+          S.session.todo_state = data.session.todo_state;
+        }else{
+          delete S.session.todo_state;
+        }
+        if(typeof _hydrateTodosFromSession === 'function'){
+          _hydrateTodosFromSession(S.session);
+        }
+        if(typeof scheduleTodosRefresh === 'function'){
+          scheduleTodosRefresh();
+        }
+        if(typeof _isSessionActivelyViewedForList !== 'function' || _isSessionActivelyViewedForList(sid)){
+          _setSessionViewedCount(sid, Number(S.session.message_count || S.messages.length));
+        }
+        if(typeof syncTopbar==='function') syncTopbar();
+      }
+      return;
+    }
+    // The capped append window could not cover every new row (>msg_limit rows
+    // arrived since the last refresh — rare), or rows landed locally during
+    // the fetch. Either way the held transcript is not the one the anchor
+    // described: re-fetch the authoritative full transcript and fall through
+    // to the normal replace path below, which re-checks ownership and updates
+    // every session metadata field — exactly master's cost.
+    try {
+      data = await api(
+        `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=all&expand_renderable=1`,
+        {timeoutMs:120000}
+      );
+    } finally {
+      if (_ownsLoad()) _clearSameSessionForceReloadHint(sid);
+    }
+    if (!_ownsLoad() || !data || !data.session) return;
+  }
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
-  _msgLimitMax = data.session._msg_limit_max || _MSG_LIMIT_MAX;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"

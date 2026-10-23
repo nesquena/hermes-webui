@@ -229,8 +229,15 @@ def test_authority_refetch_preserves_loaded_window_and_external_append(
     result = _run_case(total=total, initialTotal=initial, offset=offset)
     fetches = _message_requests(result)
     assert len(fetches) == 1
+    # #7925: a full-width reload is the explicit `msg_limit=all` escape hatch —
+    # self-describing, and byte-identical to the bare GET master sends (both
+    # return the full transcript; the explicit form is the documented shape
+    # for exactly this frontend need). Assert on the ROWS the server returns,
+    # not only the query string: `msg_limit=all` and a bounded request both
+    # contain "msg_limit=", so a shape pin alone cannot detect a full download.
     if limit is None:
-        assert "msg_limit=" not in fetches[0]
+        assert "msg_limit=all" in fetches[0]
+        assert "msg_after=" not in fetches[0]  # no freshness proof sent on a plain load
     else:
         assert f"msg_limit={limit}&" in fetches[0]
     state = result["beforeRegeneration"]
@@ -306,7 +313,11 @@ def test_auth_redirect_keeps_cached_messages_without_authority():
 
 def test_partial_window_above_live_ceiling_uses_existing_full_escape_hatch():
     result = _run_case(total=100, initialTotal=100, offset=30, ceiling=60)
-    assert "msg_limit=" not in _message_requests(result)[0]
+    # The width (70 loaded) exceeds the live ceiling (60): the reload takes
+    # the explicit full-transcript escape hatch (msg_limit=all), preserving
+    # every loaded row. (#7925 re-gate: on a pristine-origin reload with a
+    # known transcript_generation this becomes the append-only fast path.)
+    assert "msg_limit=all" in _message_requests(result)[0]
     assert result["beforeRegeneration"]["count"] == 100
     assert result["beforeRegeneration"]["offset"] == 0
 
@@ -314,7 +325,7 @@ def test_partial_window_above_live_ceiling_uses_existing_full_escape_hatch():
 def test_same_session_force_reload_keeps_existing_full_window_behavior():
     result = _run_case(mode="loader", keepRevision=True, force=True)
     assert len(_message_requests(result)) == 1
-    assert "msg_limit=" not in _message_requests(result)[0]
+    assert "msg_limit=all" in _message_requests(result)[0]
     assert result["beforeRegeneration"]["count"] == 80
     assert result["hint"] is None
 
@@ -360,7 +371,7 @@ def test_interrupted_forced_refresh_retains_saved_window_after_all_responses(
     fetches = _message_requests(result)
     assert len(fetches) == (1 if pending_stage == "metadata" else 2)
     if limit is None:
-        assert "msg_limit=" not in fetches[-1]
+        assert "msg_limit=all" in fetches[-1]
     else:
         assert f"msg_limit={limit}&" in fetches[-1]
     assert result["draftSaves"] == 1
@@ -377,7 +388,7 @@ def test_interrupted_keep_stale_refresh_recaptures_resident_window(pending_stage
     assert result["afterOlderSettles"]["count"] == 80
     assert result["afterOlderSettles"]["first"] == "row 0"
     assert result["afterOlderSettles"] == result["beforeOlderSettles"]
-    assert "msg_limit=" not in _message_requests(result)[-1]
+    assert "msg_limit=all" in _message_requests(result)[-1]
 
 
 @pytest.mark.parametrize("pending_stage", ["metadata", "messages"])

@@ -10628,7 +10628,7 @@ def _tool_result_matches_call_ids(message, call_ids) -> bool:
     return bool(tid) and str(tid) in call_ids
 
 
-def _message_window_for_display(messages, msg_limit=None, msg_before=None, expand_renderable=False) -> tuple[list, int]:
+def _message_window_for_display(messages, msg_limit=None, msg_before=None, msg_after=None, expand_renderable=False) -> tuple[list, int]:
     """Return a paginated message window plus its offset in ``messages``.
 
     ``msg_limit`` is a visible transcript limit, not a raw storage-row cap.
@@ -10637,11 +10637,89 @@ def _message_window_for_display(messages, msg_limit=None, msg_before=None, expan
     suffix containing the last ``msg_limit`` renderable user/assistant rows, plus
     any intervening tool rows needed for card snippets.
 
+    ``msg_after`` selects the append-only fast-path window (#7925 re-gate):
+    the client holds rows ``[0, msg_after]`` (its last rendered absolute index
+    is ``msg_after``) and wants only the rows strictly after it. The window is
+    the CONTIGUOUS suffix starting at ``msg_after + 1``: renderable rows decide
+    how many rows fit the ``msg_limit`` budget, but they no longer decide where
+    the window begins. The earlier shape scanned forward for the first
+    renderable row and started there, which dropped any tool-result row that
+    landed after the anchor was captured (a tab loading mid-turn, an external
+    or CLI run, a hidden tab) — the client then never received that output and
+    its next anchor check failed off-by-one into a full fetch. Trailing
+    tool-result rows whose tool_call_id matches a call already inside the
+    window are kept, mirroring the tail-window rule.
+
     ``expand_renderable`` is accepted for compatibility with older frontend
     callers. Visible-row expansion is now the default for every limited window.
     """
     _ = expand_renderable
     messages = list(messages or [])
+    if msg_after is not None and msg_before is None:
+        # Append-only fast path: window starts strictly after the anchor row.
+        try:
+            after_idx = int(msg_after)
+        except (TypeError, ValueError):
+            after_idx = -1
+        if after_idx < 0 or after_idx >= len(messages):
+            return [], 0
+        source = messages[after_idx + 1:]
+        if not source:
+            return [], len(messages)
+        if not msg_limit:
+            return source, after_idx + 1
+        limit = max(1, int(msg_limit))
+        first_renderable_idx = 0
+        renderable_count = 0
+        last_renderable_idx = None
+        # The window starts at the anchor's NEXT row and is contiguous from
+        # there (#7925 re-gate, 2026-10-19): the previous shape scanned forward
+        # for the first renderable row and started there, on the theory that
+        # everything between the anchor and that row was the anchor's own
+        # trailing tool output. That is wrong when the client captured the
+        # anchor before its results were saved — a tab that loads mid-turn (an
+        # external or CLI run, or a hidden tab) then never receives the tool
+        # row, and the next reload's anchor check fails off-by-one and falls
+        # back to a full fetch. Skipping rows can also hide the output
+        # permanently when the count happens to match afterwards.
+        # Renderable rows still decide how many rows fit the budget; they no
+        # longer decide where the window begins.
+        for idx in range(len(source)):
+            if _message_counts_as_renderable_for_window(source[idx]):
+                renderable_count += 1
+                last_renderable_idx = idx
+                if renderable_count >= limit:
+                    break
+        if last_renderable_idx is None:
+            # No renderable row in the suffix: the rows are all tool/support
+            # rows. Return them anyway when they match a call the anchor
+            # already made (the client needs the output), else nothing.
+            window_tool_call_ids = _tool_call_ids_in_messages(
+                messages[max(0, after_idx - 64) : after_idx + 1]
+            )
+            end_idx = 0
+            while end_idx < len(source) and not _message_counts_as_renderable_for_window(
+                source[end_idx]
+            ):
+                if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
+                    end_idx += 1
+                else:
+                    break
+            return source[:end_idx], after_idx + 1
+        # Keep trailing tool-result rows whose tool_call_id matches a
+        # tool-call on a renderable row already in the window (mirror of the
+        # tail-window rule below; #4070 ship-review).
+        end_idx = last_renderable_idx + 1
+        window_tool_call_ids = _tool_call_ids_in_messages(source[: last_renderable_idx + 1])
+        while end_idx < len(source) and not _message_counts_as_renderable_for_window(
+            source[end_idx]
+        ):
+            if _tool_result_matches_call_ids(source[end_idx], window_tool_call_ids):
+                end_idx += 1
+            else:
+                break
+        window = source[first_renderable_idx:end_idx]
+        return window, after_idx + 1 + first_renderable_idx
     if msg_before is not None:
         before_idx = max(0, min(int(msg_before), len(messages)))
     else:
@@ -10740,6 +10818,174 @@ def _resolve_effective_msg_limit(raw_limit):
     explicit_all = str(raw_limit or "").strip().lower() == "all"
     limit = _parse_msg_limit(raw_limit)
     return limit, explicit_all
+
+
+# ── Append-only fast path (#7925 re-gate) ────────────────────────────────────
+# The client holds a contiguous prefix [0, N] of a >500-row transcript and a
+# refresh needs the full width again. Instead of re-downloading everything,
+# it asks for only the rows strictly after its last rendered index N, proving
+# the prefix is unchanged by sending:
+#   - transcript_generation: bumped ONLY on destructive rewrites
+#     (truncate/retry/undo via _stamp_intentional_shrink_generation), so an
+#     append leaves it unchanged while compaction/undo/edits change it; and
+#   - anchor_fp: an FNV-1a digest of the client's last rendered row, so a
+#     rewrite that touched the seam row (or a redaction/internal-field change
+#     that altered its public projection) is detected.
+# Any check that fails falls back to the authoritative full fetch — exactly
+# what master does today — so the fast path can never serve stale rows.
+_BASE36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
+_BASE36_WIDTH = 26  # ceil(log36(2**32)) — fixed width, zero padded
+
+
+def _base36_fixed_width(value: int, width: int = _BASE36_WIDTH) -> str:
+    """Render *value* as lowercase base-36, zero padded to *width*.
+
+    Matches JavaScript's ``Number.prototype.toString(36)`` digit alphabet and
+    zero padding exactly, so a digest minted here and one re-derived in the
+    browser compare byte-for-byte (#7925 append-only anchor check).
+    """
+    value = int(value) & 0xFFFFFFFF
+    chars = []
+    for _ in range(width):
+        chars.append(_BASE36_DIGITS[value % 36])
+        value //= 36
+    return "".join(reversed(chars))
+
+
+def _canonical_proof_scalar(value) -> str:
+    """Render a scalar the way the browser's ``String()`` renders the JSON.
+
+    The anchor digest is minted here from the row we are about to serialize
+    and re-derived in the browser from the JSON it received, so the two
+    renderings must agree. JSON round-tripping turns a Python ``102.0`` into a
+    JS ``102``, which stringifies back as ``"102"`` — not ``"102.0"``.
+    Collapse integral floats to their integer form and keep shortest-round-trip
+    for the rest, which is what both runtimes do; any other scalar falls back
+    to ``str()``.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return str(value)
+        if value.is_integer():
+            return str(int(value))
+        return repr(value)
+    return str(value)
+
+
+def _append_row_payload(row) -> "str | None":
+    """Build the exact byte-string one row contributes to the anchor digest.
+
+    Returns None when the row is not a dict (the caller's fail-closed shape).
+    Mirrors static/sessions.js:_appendAnchorRowFingerprint field for field:
+    role / visible text / canonical timestamp / sorted tool-call ids.
+    """
+    if not isinstance(row, dict):
+        return None
+    role = str(row.get("role") or "")
+    content = row.get("content")
+    if isinstance(content, list):
+        text = "".join(
+            str(part.get("text") or "")
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    elif isinstance(content, str):
+        text = content
+    elif content is None:
+        text = ""
+    else:
+        text = str(content)
+    timestamp = row.get("timestamp")
+    if timestamp is None:
+        timestamp = row.get("_ts")
+    tool_ids = []
+    for call in row.get("tool_calls") or []:
+        if isinstance(call, dict):
+            identifier = call.get("id") or call.get("tool_call_id")
+            if identifier:
+                tool_ids.append(str(identifier))
+    if isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "tool_use":
+                identifier = part.get("id") or part.get("tool_use_id")
+                if identifier:
+                    tool_ids.append(str(identifier))
+    timestamp_text = _canonical_proof_scalar(timestamp)
+    return "\x00".join([role, text.strip(), timestamp_text, ",".join(sorted(tool_ids))])
+
+
+def _append_anchor_fingerprint(row) -> str:
+    """One-row FNV-1a digest of *row*, rendered as fixed-width base-36.
+
+    The browser re-derives this digest with ``String.prototype.charCodeAt``
+    (UTF-16 CODE UNITS) and ``Math.imul``; the loop below iterates the same
+    UTF-16 LE units with the same FNV-1a constants, so the two agree for any
+    row the JSON round-trip preserves. Divergence (exotic floats, a BOM,
+    integers above 2^53, ``\\x1f``, surrogate escapes) FAILS CLOSED: the fast
+    path is refused and the authoritative full fetch runs, exactly master's
+    behaviour, so none of those shapes is a correctness risk.
+
+    Returns ``""`` when the row cannot be described.
+    """
+    payload = _append_row_payload(row)
+    if payload is None:
+        return ""
+    hash_value = 0x811C9DC5
+    encoded = payload.encode("utf-16-le", errors="surrogatepass")
+    for offset in range(0, len(encoded), 2):
+        hash_value ^= encoded[offset] | (encoded[offset + 1] << 8)
+        hash_value = (hash_value * 0x01000193) & 0xFFFFFFFF
+    return _base36_fixed_width(hash_value)
+
+
+def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw) -> "int | None":
+    """Validate an append-only fast-path request.
+
+    Returns the validated anchor index (the client's last rendered absolute
+    row index, so the window starts strictly after it) when every precondition
+    holds, else ``None`` — the caller then returns the authoritative full
+    transcript, which is exactly what master does today.
+
+    Preconditions (all must hold):
+    1. ``msg_after`` parses to a non-negative index and the anchor row exists.
+    2. The client's ``transcript_generation`` equals the session's current one
+       (no truncate/retry/undo rewrite since the client's view).
+    3. ``anchor_fp`` matches an FNV-1a digest of the anchor row's public
+       projection — the exact bytes the client rendered (internal fields
+       stripped, content redacted), so a rewrite of the seam row or a change
+       in what the client would render is detected.
+    """
+    try:
+        after_idx = int(msg_after_raw)
+    except (TypeError, ValueError):
+        return None
+    if after_idx < 0 or not isinstance(all_messages, list) or after_idx >= len(all_messages):
+        return None
+    anchor_row = all_messages[after_idx]
+    if not isinstance(anchor_row, dict):
+        return None
+    current_generation = max(0, int(getattr(s, "transcript_generation", 0) or 0))
+    try:
+        sent_generation = int(generation_raw) if generation_raw not in (None, "") else -1
+    except (TypeError, ValueError):
+        sent_generation = -1
+    if sent_generation != current_generation:
+        return None
+    if not anchor_fp_raw:
+        return None
+    from api.config import load_settings
+    from api.helpers import _public_message_projection
+    _redact_enabled = bool(load_settings().get("api_redact_enabled", True))
+    projected = _public_message_projection(anchor_row, _enabled=_redact_enabled)
+    if _append_anchor_fingerprint(projected) != str(anchor_fp_raw):
+        return None
+    return after_idx
 
 
 # If a sidecar JSON file exceeds this threshold, the display-path tail
@@ -15546,6 +15792,15 @@ def _handle_session_get(handler, parsed) -> bool:
         msg_before = int(_msg_before) if _msg_before else None
     except (ValueError, TypeError):
         msg_before = None
+    # ?msg_after=N (+ anchor_fp / transcript_generation) — the append-only
+    # fast path (#7925 re-gate): the client holds rows [0, N] and asks for
+    # only the rows strictly after N, proving its prefix is unchanged via the
+    # anchor fingerprint and the transcript generation. When any check fails
+    # the response is the authoritative full transcript (master's behaviour).
+    # Mutually exclusive with msg_before (paging wins).
+    _msg_after = query.get("msg_after", [None])[0]
+    _anchor_fp = query.get("anchor_fp", [None])[0]
+    _transcript_generation = query.get("transcript_generation", [None])[0]
     msg_limit, _msg_limit_explicit_all = _resolve_effective_msg_limit(
         _raw_msg_limit,
     )
@@ -15697,7 +15952,18 @@ def _handle_session_get(handler, parsed) -> bool:
                 # different slices of the same stitched conversation, merge
                 # them chronologically and dedupe exact repeats.
                 _all_msgs = _merged_session_messages_for_display(s, cli_messages)
-            elif msg_limit is not None:
+            elif msg_limit is not None and _msg_after is None:
+                # The limited-display path is for bounded windows whose caller
+                # accepts a windowed document. An append-only fast-path request
+                # (#7925) carries msg_limit to bound the RETURNED window, but
+                # its anchor validation runs against the full display document:
+                # the limited path skips the lineage merge, so a continuation
+                # session's _all_msgs holds only the child's rows and every
+                # append anchor (an absolute index into the merged transcript)
+                # reads as out-of-range. The refusal then answers with the
+                # limited document instead of the authoritative full one and
+                # the client collapses to the child's rows. Route append
+                # requests down the full path; the window below stays bounded.
                 if _display_cache_hit is not None:
                     _all_msgs = _display_cache_hit
                 else:
@@ -15792,13 +16058,35 @@ def _handle_session_get(handler, parsed) -> bool:
                 _display_tool_calls, _display_owner_positions
             )
         if load_messages:
+            # Append-only fast path: validate the client's anchor (last
+            # rendered index) + prefix-freshness proof. `_window_limit` is the
+            # limit the window below is extracted with: the append window (or
+            # `all` → full transcript when the fast path is refused, which is
+            # exactly master's behaviour). `_append_mode_anchor` non-None means
+            # the response carries only the rows after that index and the
+            # client appends them instead of replacing.
+            _append_mode_anchor = None
+            _window_limit = msg_limit
+            if _msg_after is not None and msg_before is None:
+                _append_mode_anchor = _append_fast_path_anchor(
+                    s,
+                    _all_msgs,
+                    _msg_after,
+                    _anchor_fp,
+                    _transcript_generation,
+                )
+                if _append_mode_anchor is not None:
+                    _window_limit = msg_limit if msg_limit is not None else _MAX_MSG_LIMIT
+                else:
+                    _window_limit = None
             _truncated_msgs, _messages_offset = _message_window_for_display(
                 _all_msgs,
-                msg_limit=msg_limit,
-                msg_before=msg_before,
+                msg_limit=_window_limit,
+                msg_before=(None if _append_mode_anchor is not None else msg_before),
+                msg_after=_append_mode_anchor,
                 expand_renderable=expand_renderable,
             )
-            if msg_limit is not None:
+            if _window_limit is not None:
                 _truncated_msgs = _messages_for_limited_payload(_truncated_msgs)
             _truncated_msgs = _hydrate_anchor_activity_scenes(
                 _truncated_msgs,
@@ -15809,6 +16097,8 @@ def _handle_session_get(handler, parsed) -> bool:
         else:
             _truncated_msgs = []
             _messages_offset = 0
+            _window_limit = None
+            _append_mode_anchor = None
         # Index of the first returned message in the full message array.
         # Frontend uses this as cursor for scroll-to-top paging.
         # Session-level tool_calls windowing keys off whether the returned
@@ -15990,10 +16280,30 @@ def _handle_session_get(handler, parsed) -> bool:
         # Signal to the frontend that older messages were omitted. The
         # message window cursor already reflects visible-row pagination and
         # avoids false positives when raw hidden tool rows exceed msg_limit.
-        _truncated = load_messages and msg_limit is not None and _messages_offset > 0
+        # In append-only mode the flag instead means "more rows exist beyond
+        # the returned append window" (the capped window could not cover every
+        # new row), which the client answers with the authoritative full fetch.
+        _truncated = load_messages and _window_limit is not None and _messages_offset > 0
+        if _append_mode_anchor is not None:
+            _truncated = load_messages and (_messages_offset + len(_truncated_msgs)) < len(_all_msgs)
+            # #7925 re-gate (2026-10-21, finding 5): the bounded-payload
+            # clipper trims over-long hidden tool-result rows inside the
+            # append window, so a large tool diff can arrive as a preview
+            # carrying ``_content_truncated``. Fold that into the truncation
+            # signal: the client answers it with the authoritative full
+            # fetch (``msg_limit=all`` skips the clipper), instead of keeping
+            # a permanently clipped diff with no marker that content is
+            # missing.
+            if not _truncated and any(
+                isinstance(m, dict) and m.get("_content_truncated")
+                for m in _truncated_msgs
+            ):
+                _truncated = True
         raw["_messages_truncated"] = _truncated
         raw["_messages_offset"] = _messages_offset
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
+        if _append_mode_anchor is not None:
+            raw["_append_only"] = True
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:
