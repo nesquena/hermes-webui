@@ -13,6 +13,7 @@ from tests._layout_helpers import (
     assert_no_raw_i18n_keys,
     collect_layout_violations,
 )
+from tests._playwright_utils import launch_chromium_or_skip
 
 
 def _require_playwright():
@@ -22,6 +23,11 @@ def _require_playwright():
 
 
 _BROWSER_ARGS = ["--no-sandbox", "--disable-dev-shm-usage"]
+
+
+def _launch(pw):
+    """Launch headless Chromium, or skip if the browser binary is missing."""
+    return launch_chromium_or_skip(pw, headless=True, args=_BROWSER_ARGS)
 
 
 _SCOPE_FIXTURE_HTML = """\
@@ -82,7 +88,7 @@ def test_layout_sane_on_master_pages():
     _LIVE_CHECKS = ["overlap", "clip", "container-escape", "raw-string"]
 
     with sp() as pw:
-        browser = pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        browser = _launch(pw)
         try:
             for path in ["/", "/#settings", "/#sessions"]:
                 ctx = browser.new_context(viewport={"width": 1280, "height": 720})
@@ -99,7 +105,7 @@ def test_default_scope_vs_full_body():
     """Scoping to main.main excludes collapsed rightpanel noise; body scope catches it."""
     sp = _require_playwright()
     with sp() as pw:
-        browser = pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        browser = _launch(pw)
         try:
             page = browser.new_page(viewport={"width": 1280, "height": 720})
             page.set_content(_SCOPE_FIXTURE_HTML)
@@ -114,7 +120,7 @@ def test_injected_overlap_detected():
     """A flex row where a nowrap label's negative margin pulls it over its sibling's box."""
     sp = _require_playwright()
     with sp() as pw:
-        browser = pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        browser = _launch(pw)
         try:
             page = browser.new_page(viewport={"width": 320, "height": 200})
             page.set_content(_OVERLAP_FIXTURE_HTML)
@@ -129,7 +135,7 @@ def test_raw_i18n_key_detected():
     """A raw snake_case i18n key rendered as text should fail the raw-string check."""
     sp = _require_playwright()
     with sp() as pw:
-        browser = pw.chromium.launch(headless=True, args=_BROWSER_ARGS)
+        browser = _launch(pw)
         try:
             page = browser.new_page(viewport={"width": 320, "height": 200})
             page.set_content(_RAW_STRING_FIXTURE_HTML)
