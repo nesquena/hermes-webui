@@ -25,6 +25,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import json
+import logging
 import os
 import threading
 import time
@@ -33,6 +34,8 @@ from pathlib import Path
 from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+
+logger = logging.getLogger(__name__)
 
 _GATEWAY_PID_FILE = "gateway.pid"
 _GATEWAY_RUNTIME_STATUS_FILE = "gateway_state.json"
@@ -513,6 +516,223 @@ def _remote_gateway_base_url() -> str | None:
                     break
             return base
     return None
+
+
+# Gateway lifecycle capability (#8391)
+# ------------------------------------------------------------------
+# The status path above can monitor a Gateway WebUI does not run (an explicit
+# remote health URL), while every lifecycle entrypoint (Settings Start/Stop/
+# Restart, the health-banner restart, the Agent-update restart) drives the LOCAL
+# ``hermes gateway`` CLI for the active profile. Pairing the two let WebUI offer
+# to start a local Gateway next to a healthy remote one, or "restart" a remote
+# Gateway by restarting an unrelated local process. This is the one
+# server-owned answer to "does the local CLI control the Gateway WebUI is
+# monitoring?"; the UI and every lifecycle caller read it instead of inferring
+# ownership from status or from the chat-backend selection.
+
+GATEWAY_EXTERNALLY_MANAGED_MESSAGE = (
+    "This Gateway is managed outside WebUI. Start, stop, or restart it where it runs."
+)
+
+
+def _is_loopback_base_url(base_url: str) -> bool:
+    """Return True only for an http(s) URL whose host is a loopback literal.
+
+    Hostname matching is exact (``localhost`` or a loopback IP), so look-alike
+    names such as ``127.0.0.1.example.com`` or ``localhost.example.com`` are not
+    treated as local, and no DNS resolution happens on this path.
+    """
+    import ipaddress
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(base_url)
+    except ValueError:
+        return False
+    if parts.scheme.lower() not in {"http", "https"}:
+        return False
+    host = (parts.hostname or "").strip().lower()
+    if not host:
+        return False
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+# Persisted local-ownership proof for a loopback Gateway URL. A live PID is the
+# only way to PROVE that the local CLI owns the Gateway behind a loopback URL,
+# but liveness cannot be the ongoing requirement: Stop, a crash, or a restart
+# whose replacement failed to launch all remove the PID, and the very next
+# action (Start, the restart retry) must still be allowed. So the proof, once
+# observed, is recorded in WebUI's own state dir and keyed by the resolved
+# profile home + the exact normalized endpoint. It never authorizes a
+# non-loopback URL, another endpoint, or another profile home; a different
+# configured endpoint for that home drops it (target changed -> prove again).
+_GATEWAY_OWNERSHIP_FILENAME = "gateway_lifecycle_ownership.json"
+_GATEWAY_OWNERSHIP_VERSION = 1
+_gateway_ownership_lock = threading.Lock()
+
+
+def _gateway_ownership_record_path() -> Path:
+    """WebUI-owned record file (never inside an Agent profile home)."""
+    from api.config import STATE_DIR
+
+    return Path(STATE_DIR) / _GATEWAY_OWNERSHIP_FILENAME
+
+
+def _gateway_profile_home_key(profile: str | None) -> str:
+    """Resolved home of the profile the lifecycle CLI targets (same resolution
+    as ``get_active_profile_gateway_running_pid``)."""
+    from api.profiles import get_active_hermes_home, get_hermes_home_for_profile
+
+    home = get_active_hermes_home() if profile is None else get_hermes_home_for_profile(profile)
+    return os.path.realpath(os.fspath(home))
+
+
+def _normalized_gateway_endpoint(base_url: str) -> str | None:
+    """``scheme://host:port[/path]`` identity of a monitored Gateway URL.
+
+    Userinfo, query and fragment are dropped so credentials are never
+    persisted; the default port is made explicit so ``:80`` and no port match.
+    """
+    from urllib.parse import urlsplit
+
+    try:
+        parts = urlsplit(base_url)
+        port = parts.port
+    except ValueError:
+        return None
+    scheme = parts.scheme.lower()
+    host = (parts.hostname or "").strip().lower()
+    if scheme not in {"http", "https"} or not host:
+        return None
+    if port is None:
+        port = 443 if scheme == "https" else 80
+    if ":" in host:
+        host = f"[{host}]"
+    return f"{scheme}://{host}:{port}{parts.path.rstrip('/')}"
+
+
+def _read_gateway_ownership_owners() -> dict[str, Any]:
+    """Return the ``owners`` map; any unreadable/malformed record reads empty."""
+    try:
+        raw = _gateway_ownership_record_path().read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}
+    data = json.loads(raw)
+    if not isinstance(data, dict) or data.get("version") != _GATEWAY_OWNERSHIP_VERSION:
+        return {}
+    owners = data.get("owners")
+    return owners if isinstance(owners, dict) else {}
+
+
+def _write_gateway_ownership_owners(owners: dict[str, Any]) -> None:
+    """Atomically replace the record (caller holds ``_gateway_ownership_lock``)."""
+    import tempfile
+
+    path = _gateway_ownership_record_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = json.dumps(
+        {"version": _GATEWAY_OWNERSHIP_VERSION, "owners": owners},
+        indent=2,
+        sort_keys=True,
+    )
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+
+def _record_gateway_ownership(home_key: str, endpoint: str) -> None:
+    """Persist proof that ``home_key``'s local Gateway was running behind
+    ``endpoint``. Best effort: a failed write only means the next stopped-state
+    check fails closed (it never grants anything)."""
+    try:
+        with _gateway_ownership_lock:
+            try:
+                owners = dict(_read_gateway_ownership_owners())
+            except Exception:
+                owners = {}  # malformed record: replace it with a valid one
+            current = owners.get(home_key)
+            if isinstance(current, dict) and current.get("endpoint") == endpoint:
+                return
+            owners[home_key] = {"endpoint": endpoint, "proven_at": _checked_at()}
+            _write_gateway_ownership_owners(owners)
+    except Exception:
+        logger.debug("Could not persist Gateway lifecycle ownership proof", exc_info=True)
+
+
+def _gateway_ownership_proven(home_key: str, endpoint: str) -> bool:
+    """True only when the record holds exactly this home + endpoint pair.
+
+    A record for this home naming a different endpoint is dropped: the
+    monitored target changed, so ownership must be proven again.
+    """
+    with _gateway_ownership_lock:
+        owners = _read_gateway_ownership_owners()
+        current = owners.get(home_key)
+        if not isinstance(current, dict):
+            return False
+        if current.get("endpoint") == endpoint:
+            return True
+        remaining = {key: value for key, value in owners.items() if key != home_key}
+        try:
+            _write_gateway_ownership_owners(remaining)
+        except Exception:
+            logger.debug("Could not drop stale Gateway lifecycle ownership proof", exc_info=True)
+        return False
+
+
+def gateway_lifecycle_capability(profile: str | None = None) -> dict[str, Any]:
+    """Return whether WebUI's local CLI controls the Gateway it monitors.
+
+    ``{"managed": bool, "reason": str}``:
+
+    * No remote Gateway URL configured: status comes from this host's
+      active-profile Gateway files, which is exactly what ``hermes gateway
+      start|stop|restart`` targets -> managed (``local_gateway``).
+    * A remote URL on a loopback host, for which this profile home's local
+      Gateway has been PROVEN: a confirmed running Gateway process for the
+      target profile on this host, observed now or previously behind this exact
+      endpoint (persisted proof, see above) -> managed (``local_gateway``). The
+      persisted proof keeps Start available after Stop/crash and lets a failed
+      restart be retried. A loopback URL alone is not proof: Docker port maps
+      and SSH tunnels also answer on 127.0.0.1.
+    * Anything else with a remote URL -> not managed (``external_gateway``).
+
+    Fail-closed: any error while proving local ownership reports unmanaged.
+    """
+    remote_base = _remote_gateway_base_url()
+    if remote_base is None:
+        return {"managed": True, "reason": "local_gateway"}
+    try:
+        if _is_loopback_base_url(remote_base):
+            endpoint = _normalized_gateway_endpoint(remote_base)
+            home_key = _gateway_profile_home_key(profile)
+            if endpoint and home_key:
+                if get_active_profile_gateway_running_pid(profile=profile) is not None:
+                    # Record only if the target home did not change while the
+                    # PID was read (an active-profile switch mid-check).
+                    if _gateway_profile_home_key(profile) == home_key:
+                        _record_gateway_ownership(home_key, endpoint)
+                    return {"managed": True, "reason": "local_gateway"}
+                if _gateway_ownership_proven(home_key, endpoint):
+                    return {"managed": True, "reason": "local_gateway"}
+    except Exception:
+        pass
+    return {"managed": False, "reason": "external_gateway"}
 
 
 def _remote_gateway_api_key() -> str:

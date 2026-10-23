@@ -13590,6 +13590,15 @@ function _showAgentHealthAlert(payload){
   if(title) title.textContent='Hermes agent is not responding';
   const state=payload&&payload.details&&payload.details.gateway_state?` State: ${payload.details.gateway_state}.`:'';
   if(details) details.textContent=`Gateway heartbeat failed.${state} Messages may not be delivered until it comes back.`;
+  const restartBtn=$('btnRestartGateway');
+  if(restartBtn){
+    // The restart drives the LOCAL gateway CLI; hide it unless the server
+    // proved WebUI controls the monitored Gateway (#8391). Fails closed.
+    const lifecycle=payload&&payload.gateway_lifecycle;
+    const managed=!!(lifecycle&&lifecycle.managed===true);
+    restartBtn.hidden=!managed;
+    restartBtn.style.display=managed?'':'none';
+  }
   banner.hidden=false;
   banner.classList.add('visible');
 }
