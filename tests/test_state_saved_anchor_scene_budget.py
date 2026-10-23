@@ -144,7 +144,7 @@ def test_full_scene_byte_boundary_preserves_outcomes_until_over_cap(scene_store,
 
 @pytest.mark.parametrize("size", [255_999, 256_000, 256_001])
 @pytest.mark.parametrize("outcomes", ["missing", "empty", "recovered"])
-def test_rows_only_budget_is_still_enforced(scene_store, monkeypatch, size, outcomes):
+def test_rows_only_over_budget_degrades_instead_of_rejecting(scene_store, monkeypatch, size, outcomes):
     session = _session("scene-budget")
     scene = _scene_at_size(size, side_effects=False)
     if outcomes == "empty":
@@ -157,10 +157,15 @@ def test_rows_only_budget_is_still_enforced(scene_store, monkeypatch, size, outc
     result = _persist_scene(monkeypatch, "scene-budget", "budget-run", scene)
     loaded = Session.load("scene-budget")
     if size > 256_000:
-        assert result["status"] == 400
-        assert result["error"] == "scene payload is too large"
-        assert session_file.read_bytes() == before
-        assert loaded.anchor_activity_scenes == {}
+        # #7969: the over-cap rows-only scene degrades (display text clamped,
+        # disclosed by the truncated marker) instead of losing the Worklog.
+        assert result["status"] == 200, result
+        saved = next(iter(loaded.anchor_activity_scenes.values()))["scene"]
+        assert len(_encoded(saved)) <= 256_000
+        assert saved["truncated"] == result["payload"]["truncated"]
+        assert saved["truncated"]["clamped_fields"] == 1
+        assert saved["activity_rows"][0]["text"].endswith(routes._ANCHOR_SCENE_CLAMP_SUFFIX)
+        assert session_file.read_bytes() != before
     else:
         assert result["status"] == 200, result
         saved = next(iter(loaded.anchor_activity_scenes.values()))["scene"]
