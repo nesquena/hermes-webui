@@ -363,6 +363,31 @@ merge checks remain a maintainer-controlled repository setting.
 The maintainer's private QA harness remains broader; later public slices will
 add cancellation, compression, and recovery coverage.
 
+### Approval first-click gate
+
+`tests/browser_approval_first_click.py` covers the approval card's transport-id
+identity (#7091). It drives the real `showApprovalForSession`, `respondApproval`,
+and `dismissApprovalCard` in Chromium against a real WebUI server on isolated
+state, and seeds approvals through the loopback-only
+`/api/approval/inject_test` hook:
+
+- S1: a stale transport id on the rendered card still resolves on the first click.
+- S2: a queued successor A to B never inherits A's click; B needs a fresh click.
+- S3: dismiss with a stale id re-renders the head first and does not resurrect it.
+- S4: a successor that never rendered must produce no `/api/approval/respond`
+  request at all.
+
+```bash
+pip install -r requirements.txt playwright
+python -m playwright install chromium
+python tests/browser_approval_first_click.py
+```
+
+Set `APPROVAL_ARTIFACT_DIR` to keep the screenshots and server log. The
+`approval-first-click` row in the conversation lifecycle workflow is blocking,
+so a regression in the response-id reconciliation fails CI instead of being
+swallowed.
+
 ### Active-session reconnect redraw gate
 
 `tests/browser_reconnect_scene_redraw.py` is an opt-in deterministic browser
