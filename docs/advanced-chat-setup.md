@@ -349,3 +349,32 @@ locally and want browser-originated chat to use the same runtime/tool path as
 messaging surfaces. Attachments, cancellation, approvals, and clarify prompts
 still follow WebUI's current compatibility path and may not match every messaging
 surface until the runtime-adapter migration is complete.
+
+## WebUI-only toolsets
+
+Toolsets are resolved per platform. The CLI reads its list from
+`platform_toolsets.cli`; the WebUI streaming path uses the same cli composite as
+its base (so MCP server toolsets are included, matching native CLI behaviour) and
+then merges `platform_toolsets.webui` on top:
+
+```yaml
+platform_toolsets:
+  cli:
+    - core
+    - files
+  webui:
+    - core
+    - files
+    - browser          # only offered in WebUI browser sessions
+```
+
+The merge is a union: entries under `webui` extend the cli set and never replace
+it, so a toolset enabled for the CLI stays available in WebUI. This is the way to
+add a WebUI-only tool — for example one that needs a browser surface — without
+also exposing it to terminal (CLI) sessions.
+
+A session's own `enabled_toolsets` override still takes precedence: when a
+session carries an explicit list, WebUI uses that list instead of the merged
+config value. The merge is best-effort — on a `hermes-agent` build whose tools
+config does not expose `_get_platform_tools`, the turn proceeds with the cli
+toolsets unchanged rather than failing.
