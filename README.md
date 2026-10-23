@@ -262,6 +262,15 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Auto-stops after ~2s of silence
 - Appends to existing textarea content (doesn't replace)
 - Hidden when browser doesn't support Web Speech API (Chrome, Edge, Safari)
+- **Wake word (opt-in)** -- Settings -> Voice: "Wake word" enables hands-free
+  dictation start. A fully local openWakeWord model (ONNX, vendored, runs in
+  the page via WebAssembly) listens continuously and starts dictation when it
+  hears "Hey Hermes". Saying the word is equivalent to tapping the mic button.
+  Detection is 100% on-device; no audio leaves the browser. The detector
+  releases the microphone and its models when the setting is turned off or the
+  tab closes. Slightly higher battery/CPU use while enabled. Threshold can be
+  tuned via the `hermes-wake-word-score` localStorage key (20-95, default 55);
+  see `docs/wake-word.md` for calibration and the evaluation report.
 
 ### Profiles
 - Profile chip in the **composer footer** -- dropdown showing all profiles with gateway status and model info
