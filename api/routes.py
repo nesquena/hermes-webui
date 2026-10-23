@@ -24584,11 +24584,21 @@ def _handle_media(handler, parsed):
         "text/x-diff",
         "application/vnd.excalidraw+json",
     }
+    # Office documents are download-only artifacts: never previewed inline, but
+    # they can be authorized through an owning session's exact MEDIA: token so a
+    # generated spreadsheet/Word file outside the media roots is still served.
+    _OFFICE_MEDIA_TYPES = {
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+    }
     _SESSION_MEDIA_TOKEN_TYPES = (
         _INLINE_IMAGE_TYPES
         | _AUDIO_VIDEO_PDF_TYPES
         | _ARCHIVE_TYPES
         | _SESSION_TEXT_ARTIFACT_TYPES
+        | _OFFICE_MEDIA_TYPES
         | {"text/html"}
     )
     session_media_allowed = _session_media_token_allows_path(
