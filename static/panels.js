@@ -8560,7 +8560,7 @@ function switchSettingsSection(name,opts){
     _settingsSection = name;
     return;
   }
-  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='extensions'||name==='system'||name==='help')?name:'conversation';
+  let section=(name==='appearance'||name==='preferences'||name==='providers'||name==='plugins'||name==='messaging'||name==='extensions'||name==='system'||name==='help')?name:'conversation';
   // Deep-linking to the Plugins pane when the tab is hidden (no plugins
   // installed, #3457) falls back to Conversation. Resolve this BEFORE toggling
   // panes/sidebar/dropdown below so every downstream selection uses the
@@ -8572,13 +8572,13 @@ function switchSettingsSection(name,opts){
   }
   _settingsSection=section;
   _currentSettingsSection=section;
-  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',extensions:'Extensions',system:'System',help:'Help'};
+  const map={conversation:'Conversation',appearance:'Appearance',preferences:'Preferences',providers:'Providers',plugins:'Plugins',extensions:'Extensions',system:'System',help:'Help',messaging:'Messaging'};
   // Sidebar menu items
   document.querySelectorAll('#settingsMenu .side-menu-item').forEach(it=>{
     it.classList.toggle('active', it.dataset.settingsSection===section);
   });
   // Panes in main
-  ['conversation','appearance','preferences','providers','plugins','extensions','system','help'].forEach(key=>{
+  ['conversation','appearance','preferences','providers','plugins','extensions','system','help','messaging'].forEach(key=>{
     const pane=$('settingsPane'+map[key]);
     if(pane) pane.classList.toggle('active', key===section);
   });
@@ -8591,6 +8591,7 @@ function switchSettingsSection(name,opts){
   if(!(opts&&opts.skipLazyLoad)){
     if(section==='providers') loadProvidersPanel();
     if(section==='plugins') loadPluginsPanel();
+    if(section==='messaging') loadMessagingPanel();
     if(section==='extensions') loadExtensionsPanel();
   }
   if(opts&&opts.fromSidebarItem)_closeMobileSidebarAfterPanelSelection();
@@ -11557,6 +11558,111 @@ async function loadPluginsPanel(){
     }
   }catch(e){
     list.innerHTML='<div style="color:var(--error);padding:12px;font-size:13px">'+t('plugins_load_failed')+esc(e.message||String(e))+'</div>';
+  }
+}
+
+// ── Messaging channels (#8071) ──────────────────────────────────────────────
+// Write-mostly surface: the server returns configured/enabled state and the
+// allowlist, never a bot token. The token input is write-only by construction —
+// nothing is pre-filled from the server, and nothing is echoed back into the DOM.
+
+function _messagingSetMsg(text,kind){
+  const box=$('messagingMsg');
+  if(!box) return;
+  if(!text){ box.style.display='none'; box.textContent=''; return; }
+  const bg=kind==='error'?'rgba(220,80,80,.10)':(kind==='success'?'rgba(60,180,120,.10)':'var(--code-bg)');
+  const border=kind==='error'?'rgba(220,80,80,.35)':(kind==='success'?'rgba(60,180,120,.35)':'var(--border2)');
+  box.style.display=''; box.style.background=bg; box.style.border='1px solid '+border;
+  box.textContent=text;
+}
+
+function _buildMessagingCard(platform){
+  const card=document.createElement('div');
+  card.className='provider-card';
+  const badge=platform.enabled?'Enabled':(platform.configured?'Configured':'Not configured');
+  const badgeColor=platform.enabled?'var(--accent)':'var(--muted)';
+  card.innerHTML=
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'+
+      '<div style="font-weight:700;font-size:13px">'+esc(platform.label||platform.id)+'</div>'+
+      '<span style="font-size:10px;padding:2px 7px;border-radius:999px;border:1px solid var(--border2);color:'+badgeColor+'">'+esc(badge)+'</span>'+
+    '</div>'+
+    '<div style="font-size:11px;color:var(--muted);margin-bottom:8px">Profile: <code>'+esc(platform._profile||'')+'</code></div>'+
+    '<div class="settings-field" style="margin:0 0 8px">'+
+      '<label for="msgToken_'+esc(platform.id)+'">Bot token</label>'+
+      '<input type="password" id="msgToken_'+esc(platform.id)+'" autocomplete="off" spellcheck="false" placeholder="'+(platform.configured?'Enter a new token to replace the saved one':'Paste the bot token from @BotFather')+'" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">'+
+      '<div style="font-size:11px;color:var(--muted);margin-top:4px">'+(platform.configured?'A token is saved. It is never displayed again — leave this blank to keep it.':'Validated with Telegram <code>getMe</code> before it is saved.')+'</div>'+
+    '</div>'+
+    '<div class="settings-field" style="margin:0 0 8px">'+
+      '<label for="msgUsers_'+esc(platform.id)+'">Allowed users</label>'+
+      '<input type="text" id="msgUsers_'+esc(platform.id)+'" autocomplete="off" placeholder="123456789, @username" value="'+esc((platform.allowed_users||[]).join(', '))+'" style="width:100%;padding:8px;background:var(--code-bg);color:var(--text);border:1px solid var(--border2);border-radius:6px;font-size:13px">'+
+      '<div style="font-size:11px;color:var(--muted);margin-top:4px">Comma-separated Telegram user ids or @usernames.</div>'+
+    '</div>'+
+    '<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:8px">'+
+      '<input type="checkbox" id="msgAllowAll_'+esc(platform.id)+'"'+(platform.allow_all_users?' checked':'')+'>'+
+      '<span>Allow any user to message this bot</span>'+
+    '</label>'+
+    '<label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;margin-bottom:10px">'+
+      '<input type="checkbox" id="msgApply_'+esc(platform.id)+'">'+
+      '<span>Restart this profile\'s gateway after saving</span>'+
+    '</label>'+
+    '<div style="display:flex;gap:8px">'+
+      '<button type="button" class="settings-btn" data-msg-save="'+esc(platform.id)+'" style="font-size:12px;padding:5px 14px;border-radius:6px">Save</button>'+
+    '</div>';
+  return card;
+}
+
+async function loadMessagingPanel(){
+  const host=$('messagingPlatforms');
+  const status=$('messagingPanelStatus');
+  if(!host) return;
+  try{
+    const data=await api('/api/messaging/platforms');
+    const platforms=Array.isArray((data||{}).platforms)?data.platforms:[];
+    host.innerHTML='';
+    if(status){
+      status.textContent=platforms.length
+        ? ((data.profile?('Showing settings for profile "'+data.profile+'".'):''))
+        : 'No messaging platforms are available.';
+    }
+    for(const platform of platforms){
+      platform._profile=(data&&data.profile)||'';
+      host.appendChild(_buildMessagingCard(platform));
+    }
+    host.querySelectorAll('[data-msg-save]').forEach(btn=>{
+      btn.onclick=()=>saveMessagingPlatform(btn);
+    });
+  }catch(e){
+    _messagingSetMsg((e&&e.message)||String(e),'error');
+  }
+}
+
+async function saveMessagingPlatform(btn){
+  const id=btn.getAttribute('data-msg-save');
+  const tokenEl=$('msgToken_'+id);
+  const usersEl=$('msgUsers_'+id);
+  const allowAllEl=$('msgAllowAll_'+id);
+  const applyEl=$('msgApply_'+id);
+  const token=tokenEl?String(tokenEl.value||'').trim():'';
+  const usersRaw=usersEl?String(usersEl.value||''):'';
+  const allowedUsers=usersRaw.split(',').map(s=>s.trim()).filter(Boolean);
+  const label=btn.textContent;
+  btn.disabled=true; btn.textContent='Saving…';
+  _messagingSetMsg('');
+  try{
+    const body={allowed_users:allowedUsers,allow_all_users:!!(allowAllEl&&allowAllEl.checked),apply:!!(applyEl&&applyEl.checked)};
+    // Only send a token when the operator typed one — a blank field means
+    // "keep the saved token", not "clear it".
+    if(token) body.token=token;
+    const data=await api('/api/messaging/platforms/'+encodeURIComponent(id),{method:'PUT',body:JSON.stringify(body)});
+    const detail=(data&&data.validated)?(' '+data.validated):'';
+    _messagingSetMsg('Saved.'+detail,'success');
+    // Clear the write-only input so the secret does not linger in the DOM.
+    if(tokenEl) tokenEl.value='';
+    await loadMessagingPanel();
+  }catch(e){
+    _messagingSetMsg((e&&e.message)||String(e),'error');
+  }finally{
+    btn.disabled=false; btn.textContent=label;
   }
 }
 
