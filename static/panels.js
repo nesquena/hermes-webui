@@ -6788,10 +6788,28 @@ async function promptWorkspacePath(){
   }
 }
 
-async function switchToWorkspace(path,name){
+async function switchToWorkspace(path,name,ownerToken){
+  // Optional ownership token (see _foregroundTurnToken in ui.js). When a caller
+  // supplies one it means "act only while this session/profile is still the
+  // foreground one"; this function then re-checks after every await, because a
+  // single check by the caller cannot cover the dirty-preview modal and the
+  // /api/session/update round-trip below. Callers that pass nothing keep the
+  // previous behaviour exactly.
+  const _owned=!!ownerToken;
+  const _tokenCurrent=typeof _foregroundTurnTokenIsCurrent==='function'?_foregroundTurnTokenIsCurrent:null;
+  const _identityCurrent=typeof _foregroundIdentityIsCurrent==='function'?_foregroundIdentityIsCurrent:null;
+  const staleFull=()=>_owned&&(!_tokenCurrent||!_tokenCurrent(ownerToken));
+  // After the deliberate workspace mutation the workspace is *expected* to differ,
+  // so only the session/profile identity is re-checked from that point on.
+  const staleIdentity=()=>_owned&&(!_identityCurrent||!_identityCurrent(ownerToken));
   // Opus review Q6: if called from blank page, auto-create a session bound to
   // the requested workspace so the switch doesn't silently no-op.
   if(!S.session){
+    // An owned caller started from a real session, so a null S.session here means
+    // the user hit New Chat (or the session went away) while this action was
+    // pending. Auto-creating would bind a *different* session to this folder —
+    // abandon instead of silently creating one.
+    if(_owned&&ownerToken.session_id) return;
     const ws=path||(typeof S._profileDefaultWorkspace==='string'&&S._profileDefaultWorkspace)||'';
     if(!ws){showToast(t('no_workspace'));return;}
     try{
@@ -6802,6 +6820,7 @@ async function switchToWorkspace(path,name){
     }catch(e){if(typeof setStatus==='function')setStatus(t('switch_failed')+e.message);return;}
     if(!S.session)return;
   }
+  if(staleFull())return;
   // Workspace mutation during a live turn would desync the active stream context.
   if(S.busy){
     showToast(t('workspace_busy_switch'));
@@ -6827,6 +6846,7 @@ async function switchToWorkspace(path,name){
         danger:true
       });
       if(!discard)return;
+      if(staleFull())return;
       if(typeof cancelEditMode==='function')cancelEditMode();
       if(typeof clearPreview==='function')clearPreview();
     }
@@ -6850,22 +6870,32 @@ async function switchToWorkspace(path,name){
       danger:true
     });
     if(!discard)return;
+    if(staleFull())return;
     if(typeof cancelEditMode==='function')cancelEditMode();
     if(typeof clearPreview==='function')clearPreview();
   }
+  if(staleFull())return;
   const composerDd=(typeof $==='function')?$('composerWsDropdown'):null;
   const restoreComposerFocusTarget=(composerDd&&composerDd.classList.contains('open')&&typeof _getComposerWorkspaceFocusTarget==='function')
     ? _getComposerWorkspaceFocusTarget()
     : null;
   try{
+    // Last gate before the mutation itself: this is the call that rewrites the
+    // foreground session's workspace, so everything above must still belong to the
+    // session this action was started for.
+    if(staleFull())return;
     closeWsDropdown();
     // Invalidate any older /api/list response before the explicit workspace
     // mutation. Otherwise a delayed recovery response for this same session can
     // overwrite the user's newer selection and reject this switch's fresh tree.
     if(typeof bumpWorkspaceTreeGen==='function')bumpWorkspaceTreeGen();
-    await api('/api/session/update',{method:'POST',body:JSON.stringify({
-      session_id:S.session.session_id, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null
-    })});
+    // Capture the identity this request is bound to; /api/session/update is issued
+    // for that session explicitly rather than for whatever is foreground when the
+    // request is built.
+    const _ownerSid=(ownerToken&&ownerToken.session_id)||S.session.session_id;
+    const _updateBody={session_id:_ownerSid, workspace:path, model:S.session.model, model_provider:S.session.model_provider||null};
+    await api('/api/session/update',{method:'POST',body:JSON.stringify(_updateBody)});
+    if(staleIdentity())return;
     S.session.workspace=path;
     // Explicit workspace switch = user overriding any pending profile-switch default.
     // Clear the one-shot flag so a subsequent newSession() inherits this choice instead.
@@ -6879,6 +6909,7 @@ async function switchToWorkspace(path,name){
       typeof _focusComposerWorkspaceTarget==='function'
     ) _focusComposerWorkspaceTarget(restoreComposerFocusTarget);
     await loadDir('.');
+    if(staleIdentity())return;
     if (_currentPanel === 'memory') await loadMemory(true);
     showToast(t('workspace_switched_to',name||getWorkspaceFriendlyName(path)));
   }catch(e){setStatus(t('switch_failed')+e.message);}
