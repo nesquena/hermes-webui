@@ -7,13 +7,27 @@ shell, while every guard that keeps the restart manual stays fail-closed:
 * an Agent update that is active/incomplete/unknown blocks the restart,
 * active chat work blocks the restart exactly like ``/api/updates/apply``,
 * the stale→schedule transition is re-checked under ``_apply_lock`` so a
-  state change between admission and scheduling cannot slip through.
+  state change between admission and scheduling cannot slip through,
+* the delayed worker re-reads the REAL update marker across its idle
+  wait, so an update that begins after scheduling aborts the
+  replacement (the real-boundary regressions below run the shipped
+  guard, real markers and the real lock instead of mocked fields).
 """
 from __future__ import annotations
 
+import os
+import time
 import types
 
 import pytest
+
+# The real-boundary regressions below reuse the shared staging fixture that
+# already exercises the SHIPPED revision guard — a real Git checkout, a real
+# marker directory and a captured (never started) scheduler thread — instead
+# of re-faking those collaborators per test module.
+from tests.test_agent_runtime_revision_guard import (
+    changed_agent_checkout as changed_agent_checkout,
+)
 
 
 REPO = None  # populated lazily; tests import through the repo conftest
@@ -402,3 +416,254 @@ def test_successful_update_restart_keeps_unguarded_semantics(worker_env):
     worker_env.updates._schedule_restart(delay=0.0)
     _wait_for_worker(worker_env)
     assert worker_env.events.execv == 1
+
+
+# ── real-boundary regressions: actual markers against the shipped guard ──
+#
+# The suites above mock the revision guard, the transaction reader and the
+# idle waiter, so they cannot notice a regression that breaks the wiring
+# between a REAL marker file and the REAL guard/worker.  The tests below run
+# that boundary as shipped: a genuine stale checkout, real markers on disk,
+# the real ``_apply_lock``, the real admission scan and under-lock re-check,
+# and the real delayed worker (captured, never started).  Only the
+# process-replacement calls are inert — and counted.
+
+
+def _publish_active_marker(checkout):
+    """A live-PID update marker: a real Agent update is in flight."""
+    marker = checkout.home / ".hermes-update-in-progress"
+    marker.write_text(f"{os.getpid()}\n{time.time()}\n", encoding="utf-8")
+
+
+def _publish_incomplete_marker(checkout):
+    """A recovery marker: the last Agent update did not finish."""
+    (checkout.root / ".update-incomplete").touch()
+
+
+def _publish_unreadable_marker(checkout):
+    """An unverifiable marker: the guard must fail closed as unknown."""
+    marker = checkout.home / ".hermes-update-in-progress"
+    marker.write_text("not-a-pid\nnot-a-time\n", encoding="utf-8")
+
+
+MARKER_PUBLISHERS = [
+    ("active", _publish_active_marker),
+    ("incomplete", _publish_incomplete_marker),
+    ("unknown", _publish_unreadable_marker),
+]
+
+
+@pytest.fixture
+def real_restart_env(changed_agent_checkout, monkeypatch):
+    """Run the recovery route and its delayed worker against real markers.
+
+    ``changed_agent_checkout`` stages the genuine stale runtime (real Git
+    checkout, real ``ensure_agent_runtime_current``, real marker directory)
+    and captures the scheduler's thread.  This env adds only what a test
+    must never do for real — the process-replacement calls — plus a seam on
+    ``_apply_lock`` to publish a marker between the route's admission scan
+    and its under-lock re-check, exactly the window the route must guard.
+    """
+    from api import agent_runtime, updates
+
+    checkout = changed_agent_checkout
+    destructive = types.SimpleNamespace(purge=[], execv=[], spawn=[], exits=[])
+    sleeps: list[float] = []
+    logs = types.SimpleNamespace(warnings=[], infos=[], exceptions=[])
+    hook = types.SimpleNamespace(on_acquire=None)
+
+    def record_purge(repo_dir):
+        destructive.purge.append(repo_dir)
+
+    def record_execv(path, argv):
+        destructive.execv.append((path, argv))
+
+    def record_spawn(*args, **kwargs):
+        destructive.spawn.append(args)
+
+    def record_exit(code):
+        destructive.exits.append(code)
+
+    monkeypatch.setattr(updates, "_purge_agent_pycache", record_purge)
+    monkeypatch.setattr(os, "execv", record_execv)
+    monkeypatch.setattr(updates, "_windows_restart_spawn", record_spawn)
+    monkeypatch.setattr(updates, "_windows_restart_exit", record_exit)
+    # Keep the worker's idle wait real in shape (it still runs and is
+    # recorded) without spending wall-clock seconds per test.
+    monkeypatch.setattr(time, "sleep", sleeps.append)
+
+    class RecordingLogger:
+        def warning(self, msg, *args):
+            logs.warnings.append(msg % args if args else msg)
+
+        def info(self, msg, *args):
+            logs.infos.append(msg % args if args else msg)
+
+        def exception(self, msg, *args, **_kwargs):
+            logs.exceptions.append(msg)
+
+    monkeypatch.setattr(updates, "logger", RecordingLogger())
+
+    real_lock = updates._apply_lock
+
+    class MarkerPublishingLock:
+        """The real ``_apply_lock`` with a publish seam between admission
+        and the under-lock re-check."""
+
+        def acquire(self, blocking=True, timeout=-1):
+            if hook.on_acquire is not None:
+                hook.on_acquire()
+            return real_lock.acquire(blocking, timeout)
+
+        def release(self):
+            real_lock.release()
+
+        def locked(self):
+            return real_lock.locked()
+
+        def __enter__(self):
+            self.acquire()
+            return self
+
+        def __exit__(self, *_exc):
+            self.release()
+
+    monkeypatch.setattr(updates, "_apply_lock", MarkerPublishingLock())
+
+    def destructive_total():
+        return sum(
+            len(calls)
+            for calls in (
+                destructive.purge,
+                destructive.execv,
+                destructive.spawn,
+                destructive.exits,
+            )
+        )
+
+    return types.SimpleNamespace(
+        checkout=checkout,
+        updates=updates,
+        agent_runtime=agent_runtime,
+        hook=hook,
+        lock=real_lock,
+        destructive=destructive,
+        destructive_total=destructive_total,
+        logs=logs,
+        sleeps=sleeps,
+        monkeypatch=monkeypatch,
+    )
+
+
+@pytest.mark.parametrize(("update_state", "publish"), MARKER_PUBLISHERS)
+def test_real_marker_under_the_lock_refuses_without_scheduling(
+    real_restart_env, update_state, publish,
+):
+    """A real marker published between admission and the under-lock
+    re-check must refuse the restart with its freshest diagnostic — zero
+    scheduling, lock released.  Exercises the shipped guard, the real
+    marker classification and the real lock, not fake fields."""
+    env = real_restart_env
+    checkout = env.checkout
+    assert env.agent_runtime._agent_update_transaction_state() == "unverified", (
+        "admission must start from a clean idle transaction"
+    )
+    try:
+        env.hook.on_acquire = lambda: publish(checkout)
+        result = env.updates.restart_stale_runtime()
+    finally:
+        env.hook.on_acquire = None
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == update_state
+    assert result["restart_scheduled"] is False
+    assert result["restart_available"] is True
+    assert checkout.workers == [], "a refused restart must not schedule anything"
+    assert env.lock.locked() is False, "the lock must be released on refusal"
+
+
+def test_runtime_became_current_under_the_real_lock_never_schedules(real_restart_env):
+    """Control: a runtime that becomes current between admission and the
+    under-lock re-check is refused with the typed current response — the
+    real guard's own verdict, no fake fields."""
+    env = real_restart_env
+    checkout = env.checkout
+
+    def become_current():
+        env.monkeypatch.setattr(
+            env.agent_runtime,
+            "_AGENT_REVISION",
+            env.agent_runtime._read_agent_revision(
+                checkout.root, module_path=checkout.root / "run_agent.py",
+            ),
+        )
+
+    try:
+        env.hook.on_acquire = become_current
+        result = env.updates.restart_stale_runtime()
+    finally:
+        env.hook.on_acquire = None
+    assert result["ok"] is False
+    assert result["type"] == "agent_runtime_current"
+    assert checkout.workers == []
+    assert env.lock.locked() is False
+
+
+@pytest.mark.parametrize(("update_state", "publish"), MARKER_PUBLISHERS)
+def test_real_worker_aborts_when_a_marker_appears_across_the_idle_wait(
+    real_restart_env, update_state, publish,
+):
+    """The delayed worker must re-read the REAL marker after its idle wait:
+    an update that began after scheduling was accepted aborts the
+    replacement before any purge/exec/spawn/exit.  This is the
+    marker-to-worker integration the mocked worker env could not reach."""
+    env = real_restart_env
+    checkout = env.checkout
+    result = env.updates.restart_stale_runtime()
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(checkout.workers) == 1, "the real delayed worker must be captured"
+    # The marker only exists AFTER scheduling was accepted — i.e. across
+    # the worker's idle wait, as an external Agent updater would arrive.
+    publish(checkout)
+    checkout.workers[0]()
+    assert env.destructive_total() == 0, (
+        "an in-flight update must abort before any destructive call"
+    )
+    assert env.sleeps, "the worker must observe its idle wait before the guard"
+    assert any("aborted" in w for w in env.logs.warnings)
+
+
+def test_real_worker_replaces_when_the_transaction_stays_allowed(real_restart_env):
+    """Positive control on the real boundary: with the transaction still
+    idle-stale, the captured worker reaches the (intercepted) replacement —
+    proving the abort cases above are the guard's doing, not a broken
+    worker."""
+    env = real_restart_env
+    checkout = env.checkout
+    result = env.updates.restart_stale_runtime()
+    assert result["ok"] is True
+    assert len(checkout.workers) == 1
+    checkout.workers[0]()
+    assert len(env.destructive.execv) == 1
+    assert env.destructive.purge, "the pycache purge must precede the replacement"
+    assert env.logs.warnings == []
+
+
+def test_real_worker_skips_when_the_runtime_became_current(real_restart_env):
+    """Control: a runtime that became current again while the restart was
+    pending has nothing to recover — the worker skips the replacement."""
+    env = real_restart_env
+    checkout = env.checkout
+    assert env.updates.restart_stale_runtime()["ok"] is True
+    assert len(checkout.workers) == 1
+    env.monkeypatch.setattr(
+        env.agent_runtime,
+        "_AGENT_REVISION",
+        env.agent_runtime._read_agent_revision(
+            checkout.root, module_path=checkout.root / "run_agent.py",
+        ),
+    )
+    checkout.workers[0]()
+    assert env.destructive_total() == 0
+    assert any("skipped" in i for i in env.logs.infos)
