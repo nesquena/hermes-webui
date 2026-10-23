@@ -17660,8 +17660,11 @@ def _require_passkey_registration_auth(handler) -> tuple[bool, str, int]:
     passkey-only instance, but only through the same local/private-network
     onboarding gate used for first password setup.
     """
-    from api.auth import is_auth_enabled, parse_cookie, verify_session
+    from api.auth import ensure_trusted_auth_session, is_auth_enabled, parse_cookie, verify_session
 
+    session_info = ensure_trusted_auth_session(handler)
+    if str((session_info or {}).get("bound_profile") or "").strip():
+        return False, "Instance-wide passkey enrollment requires an unbound session", 403
     auth_enabled = is_auth_enabled()
     if not auth_enabled:
         if _onboarding_gate_allows(handler, auth_enabled):
@@ -19984,6 +19987,12 @@ def handle_post(handler, parsed) -> bool:
         )
         requested_passwordless = bool(body.pop("_passwordless", False))
         requested_clear_password = bool(body.get("_clear_password") or requested_passwordless)
+        if requested_password or requested_clear_password:
+            from api.auth import ensure_trusted_auth_session
+
+            session_info = ensure_trusted_auth_session(handler)
+            if str((session_info or {}).get("bound_profile") or "").strip():
+                return bad(handler, "Instance-wide authentication changes require an unbound session", 403)
         if requested_passwordless:
             body["_clear_password"] = True
 
@@ -30643,10 +30652,14 @@ def _llm_git_commit_message(system_prompt: str, user_prompt: str, session=None) 
             _main_api_key = _rt.get("api_key")
             if not _main_provider:
                 _main_provider = _rt.get("provider")
-            if not _main_base_url:
+            if _main_provider == "custom" or not _main_base_url:
+                # Generic-custom credentials and destination must come from
+                # one profile-scoped runtime, not the mutable WebUI cfg alias.
                 _main_base_url = _rt.get("base_url")
         except Exception as _e:
             logger.debug("git commit message runtime provider resolution failed: %s", _e)
+            if _main_provider == "custom":
+                raise ValueError("Could not resolve the active profile's custom provider") from _e
         # Atomic custom-provider authority (see the /api/chat note): the record
         # that supplies the endpoint must also supply the credential — and the
         # wire protocol, credential pool and ACP transport that go with it.
