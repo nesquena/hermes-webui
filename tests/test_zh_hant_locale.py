@@ -7,6 +7,8 @@ REPO = Path(__file__).resolve().parent.parent
 PROFILE_CONCEPT_FALLBACK_KEYS = {
     *PROFILE_CONCEPT_KEYS,
     "workspace_artifact_source_session",
+    "workspace_artifact_outside_workspace",
+    "workspace_artifact_unsupported",
 }
 
 
