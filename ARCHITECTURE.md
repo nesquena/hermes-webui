@@ -74,6 +74,7 @@ actions. The topbar remains focused on conversation context and the workspace/fi
     static/
       index.html           HTML template
       style.css            All CSS incl. mobile responsive, themes + skins, KaTeX
+      a11y.js              Screen reader live-region announcers, focus restoration, stream lifecycle a11y
       ui.js                DOM helpers, renderMd, tool cards, context indicator, file tree
       workspace.js         File preview, file ops, git badge, central api() fetch wrapper
       sessions.js          Session CRUD, list rendering, collapsible groups, search, SSE sync

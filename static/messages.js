@@ -2327,6 +2327,7 @@ function closeLiveStream(sessionId, streamId, source, reconnecting=false){
   if(!live) return;
   if(streamId&&live.streamId!==streamId) return;
   if(source&&live.source!==source) return;
+  const retiringStreamId=live.streamId||streamId||null;
   if(typeof live.dispose==='function') live.dispose(reconnecting);
   if(typeof live.cancelIdleRecovery==='function') live.cancelIdleRecovery();
   // Snapshot the current live-turn DOM BEFORE tearing the stream down. The
@@ -2344,6 +2345,9 @@ function closeLiveStream(sessionId, streamId, source, reconnecting=false){
   if(typeof hideLiveRunStatus==='function') hideLiveRunStatus(sessionId);
   try{if(live.source&&live.source.readyState!==2)live.source.close();}catch(_){ }
   delete LIVE_STREAMS[sessionId];
+  if(!reconnecting && typeof a11yResetStreamState==='function'){
+    a11yResetStreamState(sessionId,{streamId:retiringStreamId});
+  }
   _resumeSessionStreamAfterLiveChat(sessionId);
   // closeLiveStream() is called during session-switch teardown for any session
   // the user is no longer viewing. The stream is still active on the server,
@@ -2453,6 +2457,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       existingLive.source.readyState===EventSource.OPEN||
       (!reconnecting&&existingLive.source.readyState===EventSource.CONNECTING))
   ){
+    if(typeof a11yOnStreamStart==='function') a11yOnStreamStart(activeSid,{reconnecting,streamId});
     // Phase D: restore bottom run status on reattach after the Worklog shell
     // exists. There is no stale transport teardown in this branch.
     if(reconnecting && S.activeStreamId && typeof showLiveRunStatus==='function'){
@@ -2463,6 +2468,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   closeOtherLiveStreams(activeSid);
   closeLiveStream(activeSid);
+  if(typeof a11yOnStreamStart==='function') a11yOnStreamStart(activeSid,{reconnecting,streamId});
   if(!reconnecting&&typeof resetTurnWorkspaceMutations==='function') resetTurnWorkspaceMutations();
   if(!reconnecting&&typeof _resetStreamScrollFollow==='function') _resetStreamScrollFollow();
   // Phase D: restore bottom run status after closeLiveStream(); that helper
@@ -2636,6 +2642,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
   }
   function _setActivePaneIdleIfOwner(){
     if(_isActiveSession()||!S.session||!INFLIGHT[S.session.session_id]){
+      if(typeof a11yResetStreamState==='function') a11yResetStreamState(activeSid,{streamId});
+      else if(typeof a11ySetStreamBusy==='function') a11ySetStreamBusy(false, activeSid);
       setBusy(false);
       setComposerStatus('');
       if(typeof setStatus==='function') setStatus('');
@@ -6330,6 +6338,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       _cancelAnimationFramePendingStreamRender();
     }};
     _bindSidebarIdleRecovery(LIVE_STREAMS[activeSid]);
+    if(!_streamFinalized && !_terminalStateReached && typeof a11yOnStreamStart==='function'){
+      a11yOnStreamStart(activeSid,{reconnecting:true,streamId});
+    }
 
     // Note on #631 Bug B: the original PR description stated the server
     // "replays buffered token events" on reconnect, and proposed resetting
@@ -6499,6 +6510,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
       _flushPendingSegmentRender({force:true});
       appendLiveToolCard(tc,{sessionId:activeSid,streamId});
+      if(typeof a11yOnToolStart==='function') a11yOnToolStart(tc, activeSid);
       snapshotLiveTurn();
       _freshSegment=true;
       _smdEndParser();
@@ -6540,6 +6552,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       } else {
         appendLiveToolCard(tc,{sessionId:activeSid,streamId});
       }
+      if(typeof a11yOnToolComplete==='function') a11yOnToolComplete(tc, activeSid);
       snapshotLiveTurn();
       scrollIfPinned();
     });
@@ -7061,6 +7074,14 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         if(isActiveSession) _queueDrainSid=activeSid;
         renderSessionList();
         _setActivePaneIdleIfOwner();
+        if(typeof a11yOnStreamDone==='function'){
+          a11yOnStreamDone(activeSid,{
+            completedSid,
+            streamId,
+            message:lastAsst,
+            liveDisplayText:typeof _streamDisplay==='function'?_streamDisplay():assistantText,
+          });
+        }
         _dispatchExtensionTurnLifecycle('turn:complete',activeSid,streamId,{
           status:d.status||'completed',
           endedAt:Date.now()/1000,
@@ -7353,6 +7374,12 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         trackBackgroundError(activeSid,_errTitle,d.message||'Error');
       }
       _setActivePaneIdleIfOwner();
+      const _appErrSid=(d&&d.session&&d.session.session_id)||activeSid;
+      if(_extensionErrorType==='turn:cancel'){
+        if(typeof a11yOnStreamCancel==='function') a11yOnStreamCancel(activeSid,{completedSid:_appErrSid,streamId});
+      }else{
+        if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, d.message||'',{completedSid:_appErrSid,streamId});
+      }
       renderSessionList(); // clear streaming indicator immediately on apperror
       _dispatchExtensionTurnLifecycle(_extensionErrorType,activeSid,streamId,{
         status:d.status||d.type||(_extensionErrorType==='turn:cancel'?'cancelled':'error'),
@@ -7567,6 +7594,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const _cancelSessionPayload=_cancelData&&typeof _cancelData.session==='object'?_cancelData.session:null;
       renderSessionList();
       _setActivePaneIdleIfOwner();
+      const _cancelSid=(_cancelSessionPayload&&_cancelSessionPayload.session_id)||activeSid;
+      if(typeof a11yOnStreamCancel==='function') a11yOnStreamCancel(activeSid,{completedSid:_cancelSid,streamId});
       (async()=>{
         try{
           if(_applyCancelSessionPayload(_cancelSessionPayload)) return;
@@ -7966,6 +7995,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     _setActivePaneIdleIfOwner();
+    if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, 'Connection lost', {streamId});
     _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
       status:'connection_lost',
       endedAt:Date.now()/1000,
