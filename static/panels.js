@@ -5356,6 +5356,17 @@ let _currentSkillDetail = null; // { name, category, content }
 let _skillMode = 'empty'; // 'empty' | 'read' | 'create' | 'edit'
 let _skillPreFormDetail = null; // snapshot of previously-viewed skill when entering a form
 let _editingSkillName = null;
+// True when the skill currently open in the detail view is plugin-provided.
+// Plugin skills live in the plugin package, not the local skills/ tree, so
+// Edit/Delete would either create a partial local copy that shadows the real
+// skill or 404 while the plugin keeps serving it (#7770).
+let _currentSkillIsPlugin = false;
+
+function _skillRowIsPlugin(name) {
+  if (!name || !Array.isArray(_skillsData)) return false;
+  const row = _skillsData.find(s => s && s.name === name);
+  return !!(row && row.source === 'plugin');
+}
 
 function _stripYamlFrontmatter(content) {
   if (!content) return { frontmatter: null, body: '' };
@@ -5425,19 +5436,27 @@ function _renderSkillError(name, message) {
   }
   if (empty) empty.style.display = 'none';
   _currentSkillDetail = null;
+  _currentSkillIsPlugin = false;
   _skillMode = 'empty';
   _setSkillHeaderButtons('empty');
 }
 
 function _setSkillHeaderButtons(mode) {
-
   const header = $('mainSkills') && $('mainSkills').querySelector('.main-view-header');  const editBtn = $('btnEditSkillDetail');
   const delBtn = $('btnDeleteSkillDetail');
   const cancelBtn = $('btnCancelSkillDetail');
   const saveBtn = $('btnSaveSkillDetail');
   const show = b => b && (b.style.display = '');
   const hide = b => b && (b.style.display = 'none');
-  if (mode === 'read') { if (header) header.style.display = 'flex';  show(editBtn); show(delBtn); hide(cancelBtn); hide(saveBtn); }
+  if (mode === 'read') {
+    if (header) header.style.display = 'flex';
+    // Plugin-provided skills are read-only here: they live in the plugin
+    // package, so Edit would write a partial local copy and Delete could only
+    // ever 404 while the plugin kept serving the skill (#7770).
+    if (_currentSkillIsPlugin) { hide(editBtn); hide(delBtn); }
+    else { show(editBtn); show(delBtn); }
+    hide(cancelBtn); hide(saveBtn);
+  }
   else if (mode === 'create' || mode === 'edit') { if (header) header.style.display = 'flex'; hide(editBtn); hide(delBtn); show(cancelBtn); show(saveBtn); }
   else { if (header) header.style.display = 'none';  hide(editBtn); hide(delBtn); hide(cancelBtn); hide(saveBtn); }
 }
@@ -5448,6 +5467,7 @@ async function openSkill(name, el) {
   if (el) el.classList.add('active');
   _skillPreFormDetail = null;
   _editingSkillName = null;
+  _currentSkillIsPlugin = _skillRowIsPlugin(name);
   try {
     const data = await api(`/api/skills/content?name=${encodeURIComponent(name)}`);
     if (data && (data.success === false || data.error)) {
@@ -5520,6 +5540,9 @@ function openSkillCreate() {
   if (typeof switchPanel === 'function' && _currentPanel !== 'skills') switchPanel('skills');
   _skillPreFormDetail = _currentSkillDetail ? { ..._currentSkillDetail } : null;
   _editingSkillName = null;
+  // A newly created skill is a local one: the plugin read-only state of the
+  // previously open skill must not carry over (#7770).
+  _currentSkillIsPlugin = false;
   _skillMode = 'create';
   _renderSkillForm({ name: '', category: '', content: '', isEdit: false });
   // Mobile: the new-skill form lives in the main view, which is covered by the

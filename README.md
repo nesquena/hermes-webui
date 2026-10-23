@@ -380,7 +380,7 @@ before the session's named-profile Gateway ownership is known.
 ### Panels
 - **Chat** -- session list, search, pin, archive, projects, new conversation
 - **Tasks** -- view, create, edit, run, pause/resume, delete cron jobs; run history; completion alerts
-- **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer
+- **Skills** -- list all skills by category, search, preview, create/edit/delete; linked files viewer; plugin-registered skills under their qualified `plugin:skill` name (see [`docs/skills.md`](docs/skills.md))
 - **Memory** -- view and edit MEMORY.md and USER.md inline
 - **Profiles** -- create, switch, delete agent profiles; clone config
 - **Todos** -- live task list from the current session; hidden while the in-chat task list toggle is on, which also disables the workspace-panel Todos tab
@@ -788,6 +788,7 @@ The WebUI is still coupled to Hermes Agent internals for runtime execution, prov
 - [`THEMES.md`](THEMES.md) — theme + skin system, custom theme guide
 - [`docs/workspace-git.md`](docs/workspace-git.md) — the workspace Git controls
 - [`docs/kanban.md`](docs/kanban.md) — the Kanban board's status flow: who may set which column, how tasks enter and leave Scheduled, and the parent re-gating on Scheduled/Blocked → Ready
+- [`docs/skills.md`](docs/skills.md) — the Skills panel: directory vs plugin-registered skills, qualified `plugin:skill` names, availability rules, and why plugin skills are read-only
 - [`docs/EXTENSIONS.md`](docs/EXTENSIONS.md) — administrator-controlled WebUI extension injection
 
 **Deploying & operating**
