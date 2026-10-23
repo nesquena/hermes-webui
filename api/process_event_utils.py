@@ -4,6 +4,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 import inspect
+import hashlib
 import logging
 import math
 import re
@@ -26,6 +27,37 @@ _ASYNC_DELIVERY_RETRY_TIMER: threading.Timer | None = None
 _ASYNC_DELIVERY_RETRY_DEADLINE = 0.0
 _ASYNC_DELIVERY_RETRY_QUEUE: Any = None
 _ASYNC_DELIVERY_RETRY_GENERATION = 0
+
+# Shared by both WebUI queue consumers, not the final completion marker.
+PROCESS_HEARTBEAT_DEDUPE_MAX = 1024
+_PROCESS_HEARTBEATS_LOCK = threading.Lock()
+_PROCESS_HEARTBEATS: OrderedDict[tuple[str, str], tuple[int, str]] = OrderedDict()
+
+
+def claim_process_heartbeat(evt: dict, session_id: str) -> bool:
+    """Admit new output once; elapsed time alone never starts a model turn."""
+    process_id = completion_delivery_id(evt)
+    seq = evt.get("seq")
+    if not session_id or not process_id or type(seq) is not int or seq <= 0:
+        return False
+    output = str(evt.get("output") or "").strip()
+    fingerprint = hashlib.sha256(output.encode()).hexdigest() if output else ""
+    key = (session_id, process_id)
+    with _PROCESS_HEARTBEATS_LOCK:
+        last_seq, last_output = _PROCESS_HEARTBEATS.get(key, (0, ""))
+        if seq <= last_seq:
+            return False
+        _PROCESS_HEARTBEATS[key] = (seq, fingerprint or last_output)
+        _PROCESS_HEARTBEATS.move_to_end(key)
+        while len(_PROCESS_HEARTBEATS) > PROCESS_HEARTBEAT_DEDUPE_MAX:
+            _PROCESS_HEARTBEATS.popitem(last=False)
+        return bool(fingerprint and fingerprint != last_output)
+
+
+def forget_process_heartbeat(session_id: str, process_id: str) -> None:
+    """Release progress state after the terminal consumed marker is set."""
+    with _PROCESS_HEARTBEATS_LOCK:
+        _PROCESS_HEARTBEATS.pop((session_id, process_id), None)
 
 
 @dataclass(frozen=True)
