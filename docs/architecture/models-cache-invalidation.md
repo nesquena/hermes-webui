@@ -138,6 +138,50 @@ checked. Empty partials that finish in time do not log a budget-overrun warning.
 Malformed LM Studio responses whose `data` is not a list are ignored, preserving
 the degraded catalog behavior for both models and onboarding callers.
 
+## Retained endpoint diagnostics have a bounded lifetime
+
+A group diagnostic (`models_endpoint_error`, retained deliberately so the picker
+can explain a failed custom-endpoint probe — #7521) does NOT inherit the
+catalog's 24h TTL (#8158). Warm serves of the memory or disk catalog schedule
+one coalesced background re-probe per (profile, provider) through
+`_maybe_schedule_models_endpoint_error_retries`; the read path itself never
+probes. Retries are suppressed for `_MODELS_ENDPOINT_ERROR_RETRY_TTL` (30s) so
+a still-down endpoint is not hammered on every read, and an in-flight retry is
+never duplicated by concurrent readers. The same window applies after a live
+rebuild publishes (`_available_models_live_rebuild_ts`): those errors were just
+observed, so only an older (e.g. disk-loaded) diagnostic is re-probed at once.
+
+The scheduler takes the provider entry from a request-owned whole-config copy
+(`get_config_snapshot()`, copied atomically under `_cfg_lock`, so another
+profile's in-place reload of the shared cache cannot swap it before the copy)
+and confirms that profile's identity is still current. Scheduling runs with no
+catalog lock held: the warm, follower and disk-hit paths of
+`get_available_models` queue it on the `_DeferredCatalogPublication` scope,
+which runs it after releasing the catalog lock, and the session-visit path calls
+it after leaving its own lock scopes; only the fenced admission briefly
+reacquires the catalog lock. The worker probes from that owned snapshot only, never from
+the process-global `cfg`, which a later profile load may replace. It resolves
+the credential exactly as the rebuild
+probe does (literal `api_key`, `key_env`, then the credential-pool fallback),
+applies the same plural-`models` allowlist as `/api/models/live`
+(`_custom_provider_allowlist_ids`; empty = not configured), and
+probes only that provider's `/v1/models` under
+`CUSTOM_MODELS_ENDPOINT_TIMEOUT_SECONDS`, and publishes through the same
+generation/source/ownership fences as a rebuild (`_models_rebuild_seq`, the
+published source fingerprint, `_models_build_identity_current`): a completion
+that lands after invalidation or a newer rebuild is discarded. On success the
+group's error is cleared and the probed models merge ahead of configured rows
+in the otherwise-warm catalog; the group itself is kept even when the probe
+advertises nothing. A successful `/api/models/live` probe clears the retained
+error only through a claim captured BEFORE its request
+(`_models_endpoint_error_claim`: profile, generation, source fingerprint,
+provider entry); any change to one of those while the request was in flight
+drops the result. Fallbacks never clear it.
+
+This is deliberately NOT a sixth source-fingerprint axis: reachability is a
+runtime property the fingerprint cannot observe, so the diagnostic carries its
+own retry lifetime instead of an invalidation axis.
+
 ## Change protocol
 
 1. Add or change a source axis in `_models_cache_source_fingerprint()` only —
