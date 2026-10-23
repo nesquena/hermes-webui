@@ -582,13 +582,48 @@ function _findComposerPathToken(text,cursor){
   return {start,end,prefix};
 }
 
+// #path-autocomplete: typing a ~/path token made every input event fire one
+// GET /api/workspaces/suggest (one request per keystroke, no debounce, no
+// in-flight dedupe). Debounce trailing-side so a typing burst collapses into
+// one request per typing pause, and reuse an in-flight request for the same
+// prefix. Stale results need no request id here: the caller (static/boot.js)
+// discards a response whose (value, selectionStart) no longer match.
+const _PATH_SUGGEST_DEBOUNCE_MS=150;
+const _pathSuggest={timer:null,inflight:new Map()};
+
+function _fetchPathSuggestions(prefix){
+  const key=String(prefix||'');
+  const inFlight=_pathSuggest.inflight.get(key);
+  if(inFlight) return inFlight;
+  const qs=new URLSearchParams({prefix:key}).toString();
+  const pending=Promise.resolve()
+    .then(()=>api(`/api/workspaces/suggest?${qs}`))
+    .then(data=>((data&&data.suggestions)||[]).map(path=>String(path||'')))
+    .catch(()=>[])
+    .then(suggestions=>{
+      _pathSuggest.inflight.delete(key);
+      return suggestions;
+    });
+  _pathSuggest.inflight.set(key,pending);
+  return pending;
+}
+
+function _debouncedPathSuggestions(prefix){
+  return new Promise(resolve=>{
+    if(_pathSuggest.timer) clearTimeout(_pathSuggest.timer);
+    _pathSuggest.timer=setTimeout(()=>{
+      _pathSuggest.timer=null;
+      resolve(_fetchPathSuggestions(prefix));
+    },_PATH_SUGGEST_DEBOUNCE_MS);
+  });
+}
+
 async function getComposerPathAutocompleteMatches(text,cursor){
   const token=_findComposerPathToken(text,cursor);
   if(!token||typeof api!=='function') return [];
-  const qs=new URLSearchParams({prefix:token.prefix}).toString();
-  const data=await api(`/api/workspaces/suggest?${qs}`);
+  const suggestions=await _debouncedPathSuggestions(token.prefix);
   const needle=token.prefix.toLowerCase();
-  return ((data&&data.suggestions)||[])
+  return suggestions
     .map(path=>String(path||''))
     .filter(path=>path&&path.toLowerCase().startsWith(needle))
     .map(path=>({
