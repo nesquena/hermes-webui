@@ -255,7 +255,7 @@ def test_passive_background_polls_suppress_timeout_toasts():
     ui = _source(UI_JS)
     panels = _source(PANELS_JS)
 
-    assert "api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false})" in workspace
+    assert "api('/api/client-events/log',{method:'POST',body:JSON.stringify(payload),timeoutMs:3000,timeoutToast:false,redirect401:false})" in workspace
     assert "const sessionRequestOpts={" in sessions
     assert "timeoutToast:false" in sessions
     assert "api('/api/sessions' + sessionListQS,sessionRequestOpts)" in sessions
