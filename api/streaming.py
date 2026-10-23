@@ -6246,6 +6246,42 @@ def _is_minimax_route(provider: str = '', model: str = '', base_url: str = '') -
     return 'minimax' in text or 'minimaxi.com' in text
 
 
+def _is_ollama_route(provider: str = '', model: str = '', base_url: str = '') -> bool:
+    """Routes served by Ollama's OpenAI-compatible ``/v1`` endpoint (#8149).
+
+    Ollama IGNORES ``reasoning.enabled`` but honours ``reasoning.effort`` /
+    ``reasoning_effort`` — and worse, a bare ``reasoning: {"enabled": false}``
+    sent next to the user's ``reasoning_effort: "none"`` re-enables reasoning
+    (measured in #8149). Title generation must therefore shape the disable
+    differently on these routes.
+
+    Positively identified as Ollama via:
+
+      * provider id ``ollama`` or an ``ollama``-prefixed alias (``ollama-cloud``,
+        custom provider ids like ``ollama-local/...``),
+      * base_url on an ``ollama.com`` host (Ollama Cloud), or
+      * base_url port 11434 (Ollama's default local port).
+
+    Port matching is exact — a proxy whose *path* merely contains ``11434``
+    stays a generic route.
+    """
+    provider_lower = str(provider or '').strip().lower()
+    if provider_lower == 'ollama' or provider_lower.startswith(('ollama-', 'ollama/')):
+        return True
+    # Hostname/port based match (not substring) so a proxy URL that merely
+    # contains one of these strings in a path segment isn't mis-classified.
+    try:
+        from urllib.parse import urlsplit
+        parts = urlsplit(str(base_url or '').strip())
+        host = (parts.hostname or '').lower()
+        port = parts.port
+    except Exception:
+        return False
+    if host == 'ollama.com' or host.endswith('.ollama.com'):
+        return True
+    return port == 11434
+
+
 def _route_rejects_reasoning_extra(provider: str = '', model: str = '', base_url: str = '') -> bool:
     """Routes known to reject an ``extra_body`` ``reasoning`` parameter with HTTP 400.
 
@@ -6296,6 +6332,25 @@ def _get_aux_title_config() -> dict:
         return tg if isinstance(tg, dict) else {}
     except Exception:
         return {}
+
+
+def _task_config_has_reasoning_override() -> bool:
+    """True when the title_generation task config already carries a reasoning setting.
+
+    hermes-agent's ``call_llm`` merges the caller's ``extra_body`` ON TOP of the
+    task's own ``extra_body`` (``effective_extra_body.update(extra_body)``), so
+    an injected ``reasoning`` key would silently replace the user's configured
+    ``reasoning`` object — and on Ollama a bare ``{"enabled": false}`` next to a
+    configured ``reasoning_effort: "none"`` even re-enables reasoning (#8149).
+    When the task config speaks for itself, don't inject anything (#8149).
+    """
+    extra_body = _get_aux_title_config().get('extra_body')
+    if not isinstance(extra_body, dict):
+        return False
+    for key in extra_body:
+        if str(key).strip().lower() in ('reasoning', 'reasoning_effort'):
+            return True
+    return False
 
 
 def _aux_title_generation_enabled() -> bool:
@@ -6497,8 +6552,20 @@ def generate_title_raw_via_aux(
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
     reasoning_extra = {}
-    if not _route_rejects_reasoning_extra(provider, model, base_url):
-        reasoning_extra["reasoning"] = {"enabled": False}
+    # #8149: if the task config's own extra_body carries a reasoning setting,
+    # skip the inject so the user's value survives call_llm's merge (the
+    # caller's keys would otherwise replace it).
+    if (
+        not _route_rejects_reasoning_extra(provider, model, base_url)
+        and not _task_config_has_reasoning_override()
+    ):
+        if _is_ollama_route(provider, model, base_url):
+            # Ollama ignores `enabled` and honours `effort`; sending the bare
+            # disable there burns the title budget on hidden reasoning and
+            # cancels a user-configured reasoning_effort (#8149).
+            reasoning_extra["reasoning"] = {"enabled": False, "effort": "none"}
+        else:
+            reasoning_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
         reasoning_extra["reasoning_split"] = True
     try:
