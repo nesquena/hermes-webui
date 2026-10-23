@@ -24,8 +24,10 @@ def test_models_dev_true_returns_full_efforts(monkeypatch):
 
     import api.config as cfg
 
+    # Since the 2026-09-09 gate (#6018), ultra is GPT-5.6-model-scoped: a
+    # metadata-true Grok returns the full ladder MINUS the Codex-only ultra.
     assert cfg._models_dev_reasoning_efforts("grok-4.3", "xai-oauth") == list(
-        cfg.VALID_REASONING_EFFORTS
+        e for e in cfg.VALID_REASONING_EFFORTS if e != "ultra"
     )
 
 
@@ -45,9 +47,10 @@ def test_models_dev_unknown_allows_compatibility_fallback(monkeypatch):
 
     import api.config as cfg
 
+    # Grok is not GPT-5.6: ultra strips from the compatibility ladder too.
     assert cfg.resolve_model_reasoning_efforts(
         "x-ai/grok-4", provider_id="openrouter"
-    ) == list(cfg.VALID_REASONING_EFFORTS)
+    ) == [e for e in cfg.VALID_REASONING_EFFORTS if e != "ultra"]
 
 
 def test_xai_oauth_grok_uses_agent_metadata(monkeypatch):
@@ -63,7 +66,7 @@ def test_xai_oauth_grok_uses_agent_metadata(monkeypatch):
 
     assert cfg.resolve_model_reasoning_efforts(
         "@xai-oauth:grok-4.3", provider_id="xai-oauth"
-    ) == list(cfg.VALID_REASONING_EFFORTS)
+    ) == [e for e in cfg.VALID_REASONING_EFFORTS if e != "ultra"]
     assert seen == [("xai-oauth", "grok-4.3")]
 
 
@@ -150,5 +153,8 @@ display:
     status = cfg.get_reasoning_status()
 
     assert status["reasoning_effort"] == "medium"
-    assert status["supported_efforts"] == list(cfg.VALID_REASONING_EFFORTS)
+    # Grok-4.3 keeps the full ladder minus the GPT-5.6-only ultra tier.
+    assert status["supported_efforts"] == [
+        e for e in cfg.VALID_REASONING_EFFORTS if e != "ultra"
+    ]
     assert status["supports_reasoning_effort"] is True

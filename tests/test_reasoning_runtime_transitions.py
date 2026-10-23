@@ -1,0 +1,529 @@
+"""#6018 final gate — clamp reasoning after Agent fallback/model transitions."""
+
+import ast
+from contextlib import nullcontext
+import io
+from pathlib import Path
+import sys
+from types import ModuleType, SimpleNamespace
+
+import pytest
+
+from api.agent_runtime import _destination_aware_ai_agent_class
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+class _MinimalAgent:
+    def __init__(self, *, model, provider, base_url, reasoning_config):
+        self.model = model
+        self.provider = provider
+        self.base_url = base_url
+        self.reasoning_config = reasoning_config
+
+
+def _guarded_agent(model="gpt-5.6-sol", effort="ultra"):
+    guarded = _destination_aware_ai_agent_class(_MinimalAgent)
+    return guarded(
+        model=model,
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config={"enabled": True, "effort": effort},
+    )
+
+
+def test_transition_assignments_follow_destination_model_ceiling():
+    agent = _guarded_agent()
+    assert agent.reasoning_config["effort"] == "ultra"
+
+    # Both installed-Agent transition chokepoints assign reasoning_config only
+    # after updating agent.model/provider. The shared assignment guard therefore
+    # clamps fallback and /model writes against the destination.
+    agent.model = "gpt-5.5"
+    agent.reasoning_config = {"enabled": True, "effort": "ultra"}
+    assert agent.reasoning_config["effort"] == "xhigh"
+
+    agent.model = "o3"
+    agent.reasoning_config = {"enabled": True, "effort": "ultra"}
+    assert agent.reasoning_config["effort"] == "high"
+
+
+def test_gpt56_ultra_to_gpt55_fallback_emits_xhigh_on_real_agent_transport(
+    monkeypatch,
+):
+    """Compose the installed Agent resolver and Responses wire transport."""
+    constants = pytest.importorskip("hermes_constants")
+    codex = pytest.importorskip("agent.transports.codex")
+    # ResponsesApiTransport imports this one identity constant lazily from the
+    # heavyweight run_agent module. Supply only that production input so the
+    # wire test does not require the Agent's unrelated terminal/browser deps.
+    monkeypatch.setitem(
+        sys.modules,
+        "run_agent",
+        SimpleNamespace(DEFAULT_AGENT_IDENTITY="Hermes Agent"),
+    )
+
+    cfg = {"agent": {"reasoning_effort": "ultra"}}
+    agent = _guarded_agent(
+        effort=constants.resolve_reasoning_config(cfg, "gpt-5.6-sol")["effort"]
+    )
+    assert agent.reasoning_config["effort"] == "ultra"
+
+    # Production fallback activation updates the route, then assigns the result
+    # of resolve_reasoning_config(load_config(), agent.model).
+    agent.model = "gpt-5.5"
+    agent.reasoning_config = constants.resolve_reasoning_config(cfg, agent.model)
+    assert agent.reasoning_config["effort"] == "xhigh"
+
+    wire = codex.ResponsesApiTransport().build_kwargs(
+        agent.model,
+        [{"role": "user", "content": "fallback probe"}],
+        reasoning_config=agent.reasoning_config,
+        provider=agent.provider,
+        base_url=agent.base_url,
+        is_codex_backend=True,
+    )
+    assert wire["reasoning"]["effort"] == "xhigh"
+    assert wire["reasoning"]["effort"] != "ultra"
+
+
+def test_required_agent_class_is_cached_and_destination_aware(monkeypatch):
+    """The helper shared by every WebUI constructor must never expose the raw class."""
+    from api import agent_runtime
+
+    class RawAgent:
+        pass
+
+    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=RawAgent))
+
+    first = agent_runtime.require_ai_agent_class()
+    second = agent_runtime.require_ai_agent_class()
+
+    assert first is second
+    assert first is not RawAgent
+    assert issubclass(first, RawAgent)
+    assert getattr(first, "_webui_destination_reasoning_guard", False) is True
+
+
+def test_missing_agent_symbol_preserves_lazy_import_retry(monkeypatch):
+    """Gateway-only startup may expose an intentionally empty run_agent stub."""
+    from api import agent_runtime
+
+    monkeypatch.setattr(agent_runtime, "_AIAgent", None)
+    monkeypatch.setattr(agent_runtime, "_AGENT_REVISION", None)
+    monkeypatch.setitem(sys.modules, "run_agent", ModuleType("run_agent"))
+
+    assert agent_runtime.get_ai_agent_class() is None
+
+
+def test_required_agent_class_replaces_canonical_symbol_and_replays_constructor_clamp(
+    monkeypatch,
+):
+    """Delegation/review local imports must receive the guard after route construction."""
+    from api import agent_runtime
+
+    class RawAgent:
+        @property
+        def base_url(self):
+            return self._base_url
+
+        @base_url.setter
+        def base_url(self, value):
+            self._base_url = value
+
+        def __init__(self, *, model, provider, base_url, reasoning_config):
+            self.model = model
+            self.reasoning_config = reasoning_config
+            self.base_url = base_url
+            self.provider = provider
+
+    run_agent = SimpleNamespace(AIAgent=RawAgent)
+    monkeypatch.setitem(sys.modules, "run_agent", run_agent)
+    agent_config = ModuleType("hermes_cli.config")
+    profile_snapshot = {
+        "model": {"default": "inkling", "provider": "custom:profile-gateway"},
+        "custom_providers": [{
+            "name": "profile-gateway",
+            "models": {"inkling": {"reasoning_efforts": ["high", "max"]}},
+        }],
+    }
+    agent_config.__dict__["load_config_readonly"] = lambda: profile_snapshot
+    monkeypatch.setitem(sys.modules, "hermes_cli.config", agent_config)
+
+    guarded = agent_runtime.require_ai_agent_class()
+    assert run_agent.AIAgent is guarded
+
+    child = run_agent.AIAgent(
+        model="claude-sonnet-4-5",
+        provider="anthropic",
+        base_url="https://api.anthropic.com",
+        reasoning_config={"enabled": True, "effort": "ultra"},
+    )
+    assert child.reasoning_config["effort"] == "xhigh"
+
+    profiled_child = run_agent.AIAgent(
+        model="inkling",
+        provider="custom:profile-gateway",
+        base_url="https://profile-gateway.invalid/v1",
+        reasoning_config={"enabled": True, "effort": "max"},
+    )
+    assert profiled_child._webui_reasoning_config_snapshot == profile_snapshot
+    assert profiled_child.reasoning_config["effort"] == "max"
+
+
+def test_api_chat_sync_clamps_transition_through_production_constructor(
+    monkeypatch, tmp_path
+):
+    """POST /api/chat must construct the destination-aware class, not raw AIAgent."""
+    from api import config, oauth, routes
+
+    captured = {}
+
+    class RawAgent:
+        def __init__(self, **kwargs):
+            self.model = kwargs["model"]
+            self.provider = kwargs["provider"]
+            self.base_url = kwargs["base_url"]
+            self.reasoning_config = {"enabled": True, "effort": "ultra"}
+
+        def run_conversation(self, **kwargs):
+            assert self.reasoning_config["effort"] == "ultra"
+            self.model = "gpt-5.5"
+            self.reasoning_config = {"enabled": True, "effort": "ultra"}
+            captured["fallback_effort"] = self.reasoning_config["effort"]
+            return {
+                "messages": [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "ok"},
+                ],
+                "final_response": "ok",
+                "completed": True,
+            }
+
+    class Session:
+        session_id = "sync-reasoning-transition"
+        workspace = str(tmp_path)
+        model = "gpt-5.6-sol"
+        model_provider = "openai-codex"
+        messages = []
+        context_messages = []
+        title = "Reasoning transition"
+        pending_user_source = None
+
+        def save(self):
+            return None
+
+        def compact(self):
+            return {"session_id": self.session_id, "messages": self.messages}
+
+    session = Session()
+    monkeypatch.setitem(sys.modules, "run_agent", SimpleNamespace(AIAgent=RawAgent))
+    hermes_cli = ModuleType("hermes_cli")
+    hermes_cli.__path__ = []
+    runtime_provider = ModuleType("hermes_cli.runtime_provider")
+    runtime_provider.resolve_runtime_provider = lambda **_kwargs: {}
+    monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    monkeypatch.setitem(sys.modules, "hermes_cli.runtime_provider", runtime_provider)
+    monkeypatch.setattr(routes, "_agent_runtime_barrier_response", lambda **_kwargs: None)
+    monkeypatch.setattr(routes, "_session_is_subagent_view_only", lambda _sid: False)
+    monkeypatch.setattr(routes, "get_session", lambda _sid: session)
+    monkeypatch.setattr(routes, "resolve_trusted_workspace", lambda _value: tmp_path)
+    monkeypatch.setattr(routes, "_get_session_agent_lock", lambda _sid: nullcontext())
+    monkeypatch.setattr(
+        routes,
+        "_read_profile_model_config",
+        lambda *_args: ("openai-codex", "gpt-5.6-sol", {}),
+    )
+    monkeypatch.setattr(
+        routes,
+        "_resolve_compatible_session_model_state",
+        lambda *_args, **_kwargs: ("gpt-5.6-sol", "openai-codex"),
+    )
+    monkeypatch.setattr(
+        config,
+        "resolve_model_provider",
+        lambda _model: (
+            "gpt-5.6-sol",
+            "openai-codex",
+            "https://chatgpt.com/backend-api/codex",
+        ),
+    )
+    monkeypatch.setattr(
+        oauth,
+        "resolve_runtime_provider_with_anthropic_env_lock",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(routes, "get_config", lambda: {})
+    monkeypatch.setattr(routes, "load_settings", lambda: {})
+    monkeypatch.setattr(routes, "_resolve_cli_toolsets", lambda: [])
+    monkeypatch.setattr(routes, "public_session_projection", lambda payload: payload)
+
+    class Handler:
+        def __init__(self):
+            self.status = None
+            self.wfile = io.BytesIO()
+
+        def send_response(self, status):
+            self.status = status
+
+        def send_header(self, _name, _value):
+            return None
+
+        def end_headers(self):
+            return None
+
+    handler = Handler()
+    routes._handle_chat_sync(
+        handler,
+        {
+            "session_id": session.session_id,
+            "message": "fallback probe",
+            "workspace": str(tmp_path),
+        },
+    )
+
+    assert handler.status == 200
+    assert captured["fallback_effort"] == "xhigh"
+    assert captured["fallback_effort"] != "ultra"
+
+
+def test_routes_cannot_construct_raw_ai_agent():
+    """Non-vacuous AST guard for every routes.py constructor, including /api/chat."""
+    tree = ast.parse((ROOT / "api" / "routes.py").read_text(encoding="utf-8"))
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+    constructor_owners = [
+        node
+        for node in functions
+        if any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id == "AIAgent"
+            for child in ast.walk(node)
+        )
+    ]
+    raw_imports = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "run_agent"
+        and any(alias.name == "AIAgent" for alias in node.names)
+    ]
+    chat_dispatches = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(child, ast.Constant) and child.value == "/api/chat"
+            for child in ast.walk(node.test)
+        )
+        and any(
+            isinstance(child, ast.Call)
+            and isinstance(child.func, ast.Name)
+            and child.func.id == "_handle_chat_sync"
+            for statement in node.body
+            for child in ast.walk(statement)
+        )
+    ]
+
+    assert len(constructor_owners) == 5, "guard must inventory every routes.py AIAgent constructor"
+    assert "_handle_chat_sync" in {node.name for node in constructor_owners}
+    for owner in constructor_owners:
+        wrapped_bindings = [
+            node
+            for node in ast.walk(owner)
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "AIAgent"
+                for target in node.targets
+            )
+            and isinstance(node.value, ast.Call)
+            and isinstance(node.value.func, ast.Name)
+            and node.value.func.id == "require_ai_agent_class"
+        ]
+        assert len(wrapped_bindings) == 1, owner.name
+    assert len(chat_dispatches) == 1, "POST /api/chat must dispatch to the guarded sync handler"
+    assert raw_imports == []
+
+# --- 2026-09-09 gate regressions (#6018): constructor-phase assignments -------
+
+
+class _InstalledOrderAgent:
+    """Mirror the installed Agent constructor order (rev d6ad555a16b7).
+
+    ``model`` and ``reasoning_config`` flow through _PASSTHROUGH_PARAMS and
+    land on the instance BEFORE ``base_url`` and ``provider`` are assigned.
+    """
+
+    _PASSTHROUGH_PARAMS = ("model", "reasoning_config")
+
+    @property
+    def base_url(self):
+        return self._base_url
+
+    @base_url.setter
+    def base_url(self, value):
+        self._base_url = value
+
+    def __init__(self, *, model, provider, base_url, reasoning_config):
+        # Installed order: model, reasoning_config, base_url, provider.
+        for name in self._PASSTHROUGH_PARAMS:
+            setattr(self, name, locals()[name])
+        self.base_url = base_url
+        self.provider = provider
+
+
+class _ProfileDefaultAgent(_InstalledOrderAgent):
+    """Same installed order, but the profile default route differs from the
+    session destination — reproducing the Gemini/Copilot-profile sandbox."""
+
+
+def test_constructor_max_survives_when_profile_route_differs():
+    # Gate must-fix 2 (2026-09-09): with a Gemini profile default and an
+    # OpenAI-Codex GPT-5.6 session destination, the constructor ``max`` was
+    # re-coerced against the missing-route profile resolution and landed on
+    # ``xhigh``. The constructor assignment must pass through untouched; the
+    # route fields are not on the instance yet.
+    guarded = _destination_aware_ai_agent_class(_ProfileDefaultAgent)
+    agent = guarded(
+        model="gpt-5.6-sol",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config={"enabled": True, "effort": "max"},
+    )
+    assert agent.reasoning_config["effort"] == "max"
+
+
+def test_constructor_ultra_survives_when_profile_route_differs():
+    # Same reproduction with the ultra product tier: it must survive the
+    # constructor phase verbatim for GPT-5.6 on the Codex lane.
+    guarded = _destination_aware_ai_agent_class(_ProfileDefaultAgent)
+    agent = guarded(
+        model="gpt-5.6-sol",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config={"enabled": True, "effort": "ultra"},
+    )
+    assert agent.reasoning_config["effort"] == "ultra"
+
+
+def test_constructor_phase_guard_matches_gemini_and_copilot_reproductions():
+    # The two sandbox reproductions from the gate: a profile whose default
+    # route differs from the session destination. Simulate by ensuring the
+    # guard does not fire while provider/base_url are still missing, then
+    # verifying the first post-construction write re-arms the guard.
+    guarded = _destination_aware_ai_agent_class(_ProfileDefaultAgent)
+    agent = guarded(
+        model="gpt-5.6-sol",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config={"enabled": True, "effort": "max"},
+    )
+    assert agent.reasoning_config["effort"] == "max"
+    assert "base_url" not in vars(agent)
+    assert "_base_url" in vars(agent)
+    assert agent._base_url == "https://chatgpt.com/backend-api/codex"
+
+    # Post-construction writes (fallback / model switch) stay guarded even
+    # when they assign the same value that the constructor stored.
+    agent.model = "gpt-5.5"
+    agent.reasoning_config = {"enabled": True, "effort": "max"}
+    assert agent.reasoning_config["effort"] == "xhigh"
+
+
+@pytest.mark.parametrize("effort", ["max", "ultra"])
+def test_property_backed_route_rearms_guard_after_construction(effort):
+    """Review 2026-09-18: the installed ``AIAgent.base_url`` is a property whose
+    setter stores ``_base_url``; a constructed Agent never carries a literal
+    ``base_url`` instance key. Under a DEFAULT PROFILE route that differs from
+    the session destination (Gemini profile, Codex GPT-5.6 session), the
+    constructor value must pass through untouched, and the first
+    post-construction fallback/switch write must be clamped again.
+    """
+    from unittest.mock import patch
+
+    from api import config as webui_config
+
+    guarded = _destination_aware_ai_agent_class(_InstalledOrderAgent)
+    # The profile default route resolves to Gemini. It is consulted only when
+    # the coercion runs without an instance ``provider`` — i.e. exactly the
+    # constructor phase — and would clamp max/ultra down to ``xhigh``.
+    with patch.object(
+        webui_config,
+        "resolve_model_provider",
+        return_value=("gpt-5.6-sol", "gemini", None),
+    ):
+        agent = guarded(
+            model="gpt-5.6-sol",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            reasoning_config={"enabled": True, "effort": effort},
+        )
+        # Constructor pass-through: route fields did not exist yet.
+        assert agent.reasoning_config["effort"] == effort
+        # Production-shaped instance: property-backed route, no literal key.
+        assert "base_url" not in vars(agent)
+        assert "_base_url" in vars(agent)
+        assert "provider" in vars(agent)
+
+        # Fallback / model switch GPT-5.6 -> GPT-5.5: the guard re-arms on the
+        # property-backed route and clamps the SAME assignment to xhigh.
+        agent.model = "gpt-5.5"
+        agent.reasoning_config = {"enabled": True, "effort": effort}
+        assert agent.reasoning_config["effort"] == "xhigh"
+
+        # Positive control: an unchanged GPT-5.6 Codex destination keeps the
+        # supra-ceiling tier on a post-construction write.
+        control = guarded(
+            model="gpt-5.6-sol",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            reasoning_config={"enabled": True, "effort": effort},
+        )
+        control.reasoning_config = {"enabled": True, "effort": effort}
+        assert control.reasoning_config["effort"] == effort
+
+
+def test_constructor_write_after_route_fields_preserves_max():
+    # Gate control (documented in the fix): assigning the SAME value AFTER the
+    # destination fields exist preserves max for a GPT-5.6 destination — this
+    # is the historical good control; the guard only clamps when the value is
+    # actually above the destination ceiling.
+    guarded = _destination_aware_ai_agent_class(_InstalledOrderAgent)
+    agent = guarded(
+        model="gpt-5.6-sol",
+        provider="openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        reasoning_config={"enabled": True, "effort": "max"},
+    )
+    assert agent.reasoning_config["effort"] == "max"
+    agent.reasoning_config = {"enabled": True, "effort": "max"}
+    assert agent.reasoning_config["effort"] == "max"
+
+
+def test_constructor_regression_respects_installed_assignment_order():
+    # The exact installed order — model, reasoning_config, base_url, provider
+    # — with a deliberately different default profile route (gemini) and
+    # session destination (openai-codex gpt-5.6): the constructor-phase
+    # assignment must not be destination-coerced against the profile route.
+    from api import config as webui_config
+    from unittest.mock import patch
+
+    guarded = _destination_aware_ai_agent_class(_InstalledOrderAgent)
+
+    # The profile default route resolves to Gemini — any coercion run during
+    # the constructor phase would consult this route (model resolution falls
+    # back to the profile when provider/base_url are absent from the instance)
+    # and clamp max/ultra down to xhigh or below.
+    with patch.object(
+        webui_config,
+        "resolve_model_provider",
+        side_effect=RuntimeError("profile route must not be consulted"),
+    ):
+        agent = guarded(
+            model="gpt-5.6-sol",
+            provider="openai-codex",
+            base_url="https://chatgpt.com/backend-api/codex",
+            reasoning_config={"enabled": True, "effort": "max"},
+        )
+    assert agent.reasoning_config["effort"] == "max"
