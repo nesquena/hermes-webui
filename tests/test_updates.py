@@ -5,6 +5,7 @@ import logging
 import os
 import shlex
 import subprocess
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer, SimpleHTTPRequestHandler
@@ -19,6 +20,12 @@ def _git(repo, *args):
     subprocess.run(
         ['git', *args], cwd=str(repo), check=True,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+def _git_bytes(repo, *args):
+    return subprocess.check_output(
+        ['git', *args], cwd=str(repo), creationflags=updates.windows_hide_flags(),
     )
 
 
@@ -501,6 +508,8 @@ def test_force_update_cleans_dirty_stable_checkout_without_changing_head(tmp_pat
     repo, tracked = _dirty_stable_repo(tmp_path)
     head, ok = updates._run_git(['rev-parse', 'HEAD'], repo)
     assert ok
+    dirty_bytes = tracked.read_bytes()
+    untracked_bytes = (repo / "untracked.txt").read_bytes()
     calls = []
     real_run_git = updates._run_git
 
@@ -525,12 +534,9 @@ def test_force_update_cleans_dirty_stable_checkout_without_changing_head(tmp_pat
     reset_refs = [args[2] for args in calls if args[:2] == ['reset', '--hard']]
 
     assert (
-        result == {
-            'ok': True,
-            'message': 'webui force-updated to HEAD',
-            'target': 'webui',
-            'restart_scheduled': True,
-        }
+        result['ok'] is True
+        and result['restart_scheduled'] is True
+        and result['message'].startswith('webui force-updated to HEAD')
         and tracked.read_text(encoding='utf-8') == 'experimental content\n'
         and status_ok and status == ''
         and after_head_ok and after_head == head
@@ -543,6 +549,9 @@ def test_force_update_cleans_dirty_stable_checkout_without_changing_head(tmp_pat
         f'status={status!r}, head={after_head!r}, original_head={head!r}, '
         f'reset_refs={reset_refs!r}, calls={calls!r}'
     )
+    recovery = result['recovery_ref']
+    assert _git_bytes(repo, 'show', f'{recovery}:{tracked.name}') == dirty_bytes
+    assert _git_bytes(repo, 'show', f'{recovery}:untracked.txt') == untracked_bytes
     restart.assert_called_once_with()
 
 
@@ -746,9 +755,13 @@ def test_force_update_dirty_stable_reset_failure_reports_head(tmp_path, monkeypa
     restart = MagicMock()
     monkeypatch.setattr(updates, '_schedule_restart', restart)
 
+    monkeypatch.setattr(updates, '_describe_checkout_sync', lambda *a: {
+        'relationship': 'behind', 'ahead': 0, 'behind': 1,
+    })
     result = updates.apply_force_update('webui', channel='stable')
 
-    assert result == {'ok': False, 'message': 'Force reset to HEAD failed'}
+    assert result['ok'] is False
+    assert result['message'] == 'Force reset to HEAD failed'
     assert calls == [
         ['fetch', 'origin', '--quiet', '--tags', '--force'],
         ['diff-index', '--quiet', 'HEAD', '--'],
@@ -789,6 +802,9 @@ def test_force_update_clean_failure_preserves_reset_boundary(tmp_path, monkeypat
     restart = MagicMock()
     monkeypatch.setattr(updates, '_schedule_restart', restart)
 
+    monkeypatch.setattr(updates, '_describe_checkout_sync', lambda *a: {
+        'relationship': 'behind', 'ahead': 0, 'behind': 1,
+    })
     result = updates.apply_force_update('webui', channel='stable')
 
     assert calls == [
@@ -803,10 +819,12 @@ def test_force_update_clean_failure_preserves_reset_boundary(tmp_path, monkeypat
             'message': 'webui force-updated to origin/main',
             'target': 'webui',
             'restart_scheduled': True,
+            'backup_branch': None,
         }
         restart.assert_called_once_with()
     else:
-        assert result == {'ok': False, 'message': 'Force reset to origin/main failed'}
+        assert result['ok'] is False
+        assert result['message'] == 'Force reset to origin/main failed'
         restart.assert_not_called()
 
 
@@ -1885,6 +1903,9 @@ def test_apply_update_status_lock_error_returns_lock_conflict(tmp_path):
     from api import updates as mod
     with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
          patch(f'{_MODULE}._select_apply_compare_ref', return_value='origin/main'), \
+         patch(f'{_MODULE}._describe_checkout_sync', return_value={
+             'relationship': 'behind', 'ahead': 0, 'behind': 1, 'dirty_tracked': False,
+         }), \
          patch(f'{_MODULE}._run_git') as mock_run_git:
         mock_run_git.side_effect = [
             ('', True),   # fetch succeeds
@@ -1900,6 +1921,9 @@ def test_apply_update_pull_lock_error_returns_lock_conflict(tmp_path):
     from api import updates as mod
     with patch(f'{_MODULE}.REPO_ROOT', tmp_path), \
          patch(f'{_MODULE}._select_apply_compare_ref', return_value='origin/main'), \
+         patch(f'{_MODULE}._describe_checkout_sync', return_value={
+             'relationship': 'behind', 'ahead': 0, 'behind': 1, 'dirty_tracked': False,
+         }), \
          patch(f'{_MODULE}.STREAMS', {}), \
          patch(f'{_MODULE}._run_git') as mock_run_git:
         mock_run_git.side_effect = [
@@ -2176,6 +2200,12 @@ def test_apply_update_pull_lock_restores_stash(tmp_path, monkeypatch):
         updates, '_select_apply_compare_ref',
         lambda path, channel='stable', target=None: 'origin/main'
     )
+    monkeypatch.setattr(
+        updates, '_describe_checkout_sync',
+        lambda path, compare_ref: {
+            'relationship': 'behind', 'ahead': 0, 'behind': 1, 'dirty_tracked': True,
+        },
+    )
 
     result = updates._apply_update_inner('webui')
     assert result['ok'] is False
@@ -2228,6 +2258,12 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
         updates, '_select_apply_compare_ref',
         lambda path, channel='stable', target=None: 'origin/main'
     )
+    monkeypatch.setattr(
+        updates, '_describe_checkout_sync',
+        lambda path, compare_ref: {
+            'relationship': 'behind', 'ahead': 0, 'behind': 1, 'dirty_tracked': False,
+        },
+    )
 
     result = updates._apply_update_inner('webui')
     assert result['ok'] is False
@@ -2235,6 +2271,55 @@ def test_apply_update_pull_lock_no_stash_when_clean(tmp_path, monkeypatch):
     # No stash pop on a clean pull-lock path.
     assert not any(c[0] == 'stash' for c in git_calls)
 
+
+def test_real_repo_force_dirty_tracked_recovery_contains_exact_bytes(tmp_path, monkeypatch):
+    """Force-update recovery artifact must reload the exact dirty tracked bytes."""
+    from tests.test_update_stash_recovery import (
+        _DIRTY_BYTES,
+        _git_bytes,
+        _patch_agent_update,
+        _prepare_history,
+    )
+
+    _origin, agent = _prepare_history(
+        tmp_path, 'behind', dirty_tracked=True, untracked_collider=False,
+    )
+    _patch_agent_update(monkeypatch, agent)
+    result = updates.apply_force_update('agent')
+    assert result.get('ok') is True, result
+    branch = result.get('recovery_ref') or result.get('backup_branch')
+    assert branch, result
+    assert _git_bytes(agent, 'show', f'{branch}:tracked.txt') == _DIRTY_BYTES
+
+
+def test_real_repo_normal_untracked_collider_does_not_keep_only_upstream_bytes(
+    tmp_path, monkeypatch,
+):
+    """Normal apply must recover exact untracked collider bytes, not only upstream."""
+    from tests.test_update_stash_recovery import (
+        _UNTRACKED_LOCAL,
+        _UNTRACKED_UPSTREAM,
+        _git,
+        _git_bytes,
+        _patch_agent_update,
+        _prepare_history,
+    )
+
+    _origin, agent = _prepare_history(
+        tmp_path, 'behind', dirty_tracked=False, untracked_collider=True,
+    )
+    head_before = _git(agent, 'rev-parse', 'HEAD')
+    _patch_agent_update(monkeypatch, agent)
+    result = updates._apply_update_inner('agent')
+    if not result.get('ok'):
+        assert _git(agent, 'rev-parse', 'HEAD') == head_before
+        assert (agent / 'collide.txt').read_bytes() == _UNTRACKED_LOCAL
+        return
+    branch = result.get('recovery_ref') or result.get('backup_branch')
+    assert branch, result
+    recovered = _git_bytes(agent, 'show', f'{branch}:collide.txt')
+    assert recovered == _UNTRACKED_LOCAL
+    assert recovered != _UNTRACKED_UPSTREAM
 
 def test_update_recovery_hints_report_conflict_and_lock(tmp_path, monkeypatch):
     (tmp_path / '.git').mkdir()
@@ -2389,7 +2474,8 @@ def test_update_recovery_hints_leave_gitfile_lock_state_unknown(tmp_path, monkey
     [
         ('collision/local.txt', 'collision'),
         ('foo', 'foo/bar.txt'),
-        (':weird.txt', ':weird.txt'),
+        pytest.param(':weird.txt', ':weird.txt', marks=pytest.mark.skipif(
+            sys.platform == 'win32', reason='colon is not a Windows filename character')),
         (' lead.txt', ' lead.txt'),
     ],
 )
@@ -2768,6 +2854,9 @@ def test_apply_update_pull_timeout_returns_error_not_typeerror(tmp_path):
 
     with patch('subprocess.run', side_effect=fake_run), \
          patch.object(updates, 'REPO_ROOT', repo), \
+         patch.object(updates, '_describe_checkout_sync', return_value={
+             'relationship': 'behind', 'ahead': 0, 'behind': 1,
+         }), \
          patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'):
         result = updates.apply_update('webui')
 
@@ -2814,6 +2903,9 @@ def test_apply_update_pull_timeout_does_not_leak_remote_token(tmp_path):
 
     with patch('subprocess.run', side_effect=fake_run), \
          patch.object(updates, 'REPO_ROOT', repo), \
+         patch.object(updates, '_describe_checkout_sync', return_value={
+             'relationship': 'behind', 'ahead': 0, 'behind': 1,
+         }), \
          patch.object(updates, '_select_apply_compare_ref', return_value='origin/master'):
         result = updates.apply_update('webui')
 
