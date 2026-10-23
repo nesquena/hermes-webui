@@ -9029,6 +9029,45 @@ def _moa_fast_path_model_state(model: str) -> tuple[str, str, bool]:
     return model, "moa", False
 
 
+def _is_stranded_moa_preset_name(
+    model: str,
+    provider: str | None,
+    *,
+    config_obj: dict | None = None,
+) -> bool:
+    """True when a MoA preset name is paired with a non-MoA provider (#8163).
+
+    The virtual ``moa`` provider resolves models by *preset name*, so a session
+    created while MoA was the default stores e.g. ``model="default"`` with
+    ``model_provider="moa"``. If the global default later moves to a real
+    provider and only the provider half is carried over, the pair becomes
+    ``("default", "nous")`` — an id the new provider has never heard of, which
+    404s on every turn and leaves the session permanently broken.
+
+    The check is structural on purpose: the model must be an actually *configured*
+    MoA preset AND the provider must not be ``moa``. Keying on the literal
+    string ``"default"`` would remap any provider that legitimately serves a
+    model by that name. Provider-qualified (``@provider:model``) strings carry
+    their own routing context and are never stranded; MoA being disabled in
+    config means the name is no proof of anything, so we fail closed.
+    """
+    name = str(model or "").strip()
+    prov = _clean_session_model_provider(provider)
+    if not name or not prov or prov == "moa":
+        return False
+    try:
+        from api.config import _moa_preset_models_from_config
+
+        # Profile config is the session's own truth; without one, fall back to
+        # the active global config the same way the picker enumerates presets.
+        presets = _moa_preset_models_from_config(
+            config_obj if isinstance(config_obj, dict) else None
+        )
+    except Exception:
+        return False
+    return any(str(entry.get("id") or "").strip() == name for entry in presets)
+
+
 def _resolve_compatible_session_model_state(
     model_id: str | None,
     model_provider: str | None = None,
@@ -9140,7 +9179,19 @@ def _resolve_compatible_session_model_state(
             if _repaired_model:
                 return _repaired_model, requested_provider, True
 
-            return model, requested_provider, False
+            # #8163: repair a MoA preset name stranded on a non-moa provider.
+            if not explicit_model_pick and _is_stranded_moa_preset_name(
+                model,
+                requested_provider,
+                config_obj=profile_config,
+            ):
+                if _profile_default:
+                    return _profile_default, requested_provider, True
+                # No profile default: drop the unusable name and fall through to
+                # the catalog backstop below, as an empty session model already does.
+                model = ""
+            else:
+                return model, requested_provider, False
 
     # Default (human chat/start) path calls get_available_models() with NO
     # kwargs so it stays signature-compatible with the many tests that stub
