@@ -4892,11 +4892,12 @@ async function _loadOlderMessages() {
   if (!sid || !S.messages.length) return;
   if (_oldestIdx <= 0) { _messagesTruncated = false; return; }
   _loadingOlder = true;
-  // Snapshot the generation BEFORE we await. If S.messages is wholesale
-  // replaced while the request is in flight, the post-await check below
-  // bails out so we never prepend stale older messages onto a freshly
-  // rebuilt transcript (#1937).
+  // Snapshot the transcript view BEFORE we await. Generation can stay stable
+  // when terminal settlement adopts a bounded replacement, so the array
+  // reference and requested offset also belong to this paging request.
   const startGeneration = _messagesGeneration;
+  const requestedMessages = S.messages;
+  const requestedBeforeOffset = _oldestIdx;
   try {
     // Two strategies, chosen by whether the growing tail window still fits under
     // the server's msg_limit ceiling (_MSG_LIMIT_MAX, mirroring backend
@@ -4919,7 +4920,7 @@ async function _loadOlderMessages() {
     const useBeforePaging = requestedLimit >= _msgLimitMax;
     const data = useBeforePaging
       ? await api(
-          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${requestedBeforeOffset}&msg_limit=${_INITIAL_MSG_LIMIT}`,
           {timeoutMs:120000}
         )
       : await api(
@@ -4936,13 +4937,10 @@ async function _loadOlderMessages() {
     if (!data || !data.session) return;
     if (!S.session || S.session.session_id !== sid) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-    // Generation guard: another code path (typically jumpToSessionStart →
-    // _ensureAllMessagesLoaded) may have replaced S.messages while we were
-    // awaiting. Prepending older messages onto that replacement would
-    // duplicate the head of the transcript. Detect via the generation
-    // counter and abort cleanly. _oldestIdx and _messagesTruncated were
-    // already reset by the wholesale-replace path, so no rollback needed.
-    if (_messagesGeneration !== startGeneration) return;
+    // Every response belongs to the exact transcript view it paged from.
+    if (_messagesGeneration !== startGeneration ||
+        _oldestIdx !== requestedBeforeOffset ||
+        S.messages !== requestedMessages) return;
     let responseSession = data.session;
     let expandedMsgs = (responseSession.messages || []).filter(m => m && m.role);
     const currentMsgs = (S.messages || []).filter(m => m && m.role);
@@ -4980,16 +4978,19 @@ async function _loadOlderMessages() {
       // reapplied because we just awaited again (skipped for the reuse case).
       if (!useBeforePaging) {
         const fallback = await api(
-          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${_oldestIdx}&msg_limit=${_INITIAL_MSG_LIMIT}`,
+          `/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_before=${requestedBeforeOffset}&msg_limit=${_INITIAL_MSG_LIMIT}`,
           {timeoutMs:120000}
         );
         if (!fallback || !fallback.session) { _loadingOlder = false; return; }
         if (!S.session || S.session.session_id !== sid) return;
         if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
-        if (_messagesGeneration !== startGeneration) return;
+        if (_messagesGeneration !== startGeneration ||
+            _oldestIdx !== requestedBeforeOffset ||
+            S.messages !== requestedMessages) return;
         responseSession = fallback.session;
       }
-      olderMsgs = (responseSession.messages || []).filter(m => m && m.role);
+      const olderRows = Array.isArray(responseSession.messages) ? responseSession.messages : [];
+      olderMsgs = olderRows.filter(m => m && m.role);
       nextMessages = [...olderMsgs, ...S.messages];
     }
     if (!olderMsgs.length) { _messagesTruncated = !!responseSession._messages_truncated; return; }
@@ -5081,6 +5082,8 @@ async function _loadOlderMessages() {
 
 // Ensure the full message history is loaded (for undo, export, etc).
 // If the session was loaded with msg_limit, this fetches all messages.
+// Explicit regeneration may also force this existing guarded fetch when the
+// terminal event did not provide a trusted revision.
 //
 // Race-safety (#1937): with the endless-scroll opt-in, _loadOlderMessages
 // may be in flight when this runs (e.g. user scrolled near the top, then
@@ -5092,8 +5095,11 @@ async function _loadOlderMessages() {
 //      ensure-all calls from rapid double-clicks on Start.
 //   2. Bump _messagesGeneration before mutating S.messages so any
 //      in-flight prefetch's post-await generation check bails out.
-async function _ensureAllMessagesLoaded() {
-  if (!_messagesTruncated || !S.session) return;
+async function _ensureAllMessagesLoaded(options) {
+  const ensureOptions=options&&typeof options==='object'?options:{};
+  const forceRefresh=!!ensureOptions.forceRefresh;
+  const sidAtStart=S.session&&S.session.session_id;
+  if ((!_messagesTruncated&&!forceRefresh) || !sidAtStart) return;
   if (_loadingOlder) {
     // A prefetch is mid-flight (between the `_loadingOlder = true` line
     // and its post-await guards). Bumping the generation token now
@@ -5106,19 +5112,123 @@ async function _ensureAllMessagesLoaded() {
     while (_loadingOlder) {
       await new Promise(resolve => setTimeout(resolve, 16));
     }
-    if (!_messagesTruncated || !S.session) return;
+    if (!S.session || S.session.session_id!==sidAtStart || (!_messagesTruncated&&!forceRefresh)) return;
   }
   _loadingOlder = true;
   try {
-    const sid = S.session.session_id;
+    const sid = sidAtStart;
+    // A forced authority refresh may outlive the transcript and stream owner
+    // that requested it. Capture the view after taking the existing mutex so
+    // a late response cannot replace a same-session successor turn.
+    const requestedMessages=forceRefresh?S.messages:null;
+    const requestedGeneration=forceRefresh?_messagesGeneration:null;
+    const requestedStreamId=forceRefresh?(S.activeStreamId||null):null;
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=1&resolve_model=0&msg_limit=all`, {timeoutMs:120000});
     // Guard: api() may have redirected (401) and returned undefined.
-    if (!data || !data.session) return;
+    if (!data || !data.session || data.session.session_id!==sid || !Array.isArray(data.session.messages)) return;
     // Session may have been switched while we awaited. Bail rather than
     // overwrite the new session's messages.
     if (!S.session || S.session.session_id !== sid) return;
     if (_loadingSessionId !== null && _loadingSessionId !== sid) return;
+    if(forceRefresh&&(S.messages!==requestedMessages||_messagesGeneration!==requestedGeneration||
+      S.busy||(S.activeStreamId||null)!==requestedStreamId)) return;
+    if(forceRefresh&&(
+      data.session._messages_offset!==0||
+      data.session._messages_truncated!==false
+    )) return;
     const msgs = (data.session.messages || []).filter(m => m && m.role);
+    let regenerationAssistantIndex=null;
+    if(forceRefresh){
+      const expectedTurn=ensureOptions.expectedTurn;
+      if(!expectedTurn||!expectedTurn.user||expectedTurn.user.role!=='user') return;
+      const hasRevision=Object.prototype.hasOwnProperty.call(data.session,'regeneration_revision');
+      const revision=data.session.regeneration_revision;
+      if(!hasRevision){
+        delete S.session.regeneration_revision;
+        return;
+      }
+      if(typeof revision!=='string'||!revision.trim()) return;
+      const sameValue=(left,right)=>{
+        if(left===right) return true;
+        if(Array.isArray(left)||Array.isArray(right)){
+          return Array.isArray(left)&&Array.isArray(right)&&left.length===right.length&&
+            left.every((value,index)=>sameValue(value,right[index]));
+        }
+        if(left&&right&&typeof left==='object'&&typeof right==='object'){
+          const leftKeys=Object.keys(left).sort();
+          const rightKeys=Object.keys(right).sort();
+          return leftKeys.length===rightKeys.length&&leftKeys.every((key,index)=>
+            key===rightKeys[index]&&sameValue(left[key],right[key]));
+        }
+        return false;
+      };
+      const isUserTurn=row=>!!(row&&row.role==='user'&&
+        !(typeof _isContextCompactionMessage==='function'&&_isContextCompactionMessage(row)));
+      const sameTypedUser=(saved,expected)=>!!(
+        isUserTurn(saved)&&
+        sameValue(saved.content,expected.content)&&
+        sameValue(saved.attachments??null,expected.attachments??null)
+      );
+      const identityFields=['message_id','_message_id','id','turn_id','_turn_id'];
+      const stableIdentity=identityFields.filter(field=>{
+        const value=expectedTurn.user[field];
+        return (typeof value==='string'&&value.trim())||typeof value==='number';
+      });
+      let savedUserIndex=-1;
+      if(stableIdentity.length){
+        const matches=[];
+        for(let index=0;index<msgs.length;index++){
+          const row=msgs[index];
+          if(!sameTypedUser(row,expectedTurn.user)||
+            !stableIdentity.every(field=>row[field]===expectedTurn.user[field])) continue;
+          matches.push(index);
+        }
+        if(matches.length!==1) return;
+        savedUserIndex=matches[0];
+      }else{
+        const expectedIndex=expectedTurn.userIndex;
+        const expectedRow=Number.isSafeInteger(expectedIndex)&&expectedIndex>=0?msgs[expectedIndex]:null;
+        if(!sameTypedUser(expectedRow,expectedTurn.user)) return;
+        savedUserIndex=expectedIndex;
+      }
+      let latestUserIndex=-1;
+      for(let index=msgs.length-1;index>=0;index--){
+        if(isUserTurn(msgs[index])){latestUserIndex=index;break;}
+      }
+      if(savedUserIndex!==latestUserIndex) return;
+      for(let index=savedUserIndex+1;index<msgs.length;index++){
+        if(isUserTurn(msgs[index])) return;
+        if(msgs[index]&&msgs[index].role==='assistant') regenerationAssistantIndex=index;
+      }
+      const finalMessage=regenerationAssistantIndex===null?null:msgs[regenerationAssistantIndex];
+      if(!finalMessage||!finalMessage.role||finalMessage.role!=='assistant'||
+        (Array.isArray(finalMessage.tool_calls)&&finalMessage.tool_calls.length)) return;
+      let savedAnswer='';
+      if(Array.isArray(finalMessage.content)){
+        const content=finalMessage.content;
+        let lastToolUse=-1;
+        for(let index=0;index<content.length;index++){
+          const part=content[index];
+          if(!part||typeof part!=='object') continue;
+          const partType=String(part.type||'').toLowerCase();
+          if(partType==='tool_use'||partType==='tool_call'||(!partType&&
+            (part.tool_use_id||part.tool_call_id||part.call_id)&&
+            (part.name||part.tool_name||part.input||part.args))) lastToolUse=index;
+        }
+        savedAnswer=content.slice(lastToolUse+1).filter(part=>{
+          if(!part||typeof part!=='object') return false;
+          const partType=String(part.type||'').toLowerCase();
+          return !partType||partType==='text'||partType==='input_text'||partType==='output_text';
+        }).map(part=>String(part.text||part.content||part.input_text||part.output_text||'')).join('\n').trim();
+      }else{
+        savedAnswer=String(finalMessage.content||'').trim();
+      }
+      const liveAnswer=String(expectedTurn.streamedContent||'');
+      const liveFinalSegment=String(expectedTurn.finalSegment||'');
+      if(!savedAnswer||!(liveFinalSegment
+        ?savedAnswer===liveFinalSegment
+        :liveAnswer.trimEnd().endsWith(savedAnswer))) return;
+    }
     // Bump the generation BEFORE the wholesale replace so any racing
     // prefetch (whose snapshot was taken before this call's mutex
     // acquisition) sees the new value and aborts.
@@ -5186,6 +5296,7 @@ async function _ensureAllMessagesLoaded() {
         delete S.session.regeneration_revision;
       }
     }
+    if(forceRefresh) return {assistantIndex:regenerationAssistantIndex};
   } finally {
     _loadingOlder = false;
   }
@@ -7741,14 +7852,22 @@ async function refreshActiveSessionIfExternallyUpdated(reason){
   if(!opts.ignoreStreamJustFinished && typeof window !== 'undefined' && window._streamJustFinished) return 'skipped';
   if(typeof document !== 'undefined' && document.hidden) return 'skipped';
   const sid = S.session.session_id;
-  const localCount = Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0);
-  const localLast = Number(S.session.last_message_at || S.session.updated_at || 0);
+  const readLocalState = () => [
+    Number(S.session.message_count || (Array.isArray(S.messages)?S.messages.length:0) || 0),
+    Number(S.session.last_message_at || S.session.updated_at || 0),
+  ];
+  const [localCount, localLast] = readLocalState();
   _activeSessionExternalRefreshInFlight = true;
   try{
     const data = await api(`/api/session?session_id=${encodeURIComponent(sid)}&messages=0&resolve_model=0`,{timeoutToast:false});
     if(!data || !data.session) return 'unchanged';
     if(!S.session || S.session.session_id !== sid) return 'skipped';
     if(S.busy || S.activeStreamId) return 'skipped';
+    // A turn that settled while the probe was in flight already applied newer
+    // local state. The probe may predate or match it, so comparing it with the
+    // pre-probe snapshot would force a destructive reload of a current transcript.
+    const [settledCount, settledLast] = readLocalState();
+    if(settledCount !== localCount || settledLast !== localLast) return 'skipped';
     const remoteCount = Number(data.session.message_count || 0);
     const remoteLast = Number(data.session.last_message_at || data.session.updated_at || 0);
     // Force-reload the whole transcript whenever the visible conversation's
@@ -9271,7 +9390,8 @@ function upsertActiveSessionForLocalTurn({title='', messageCount=0, timestampMs=
   if(!S.session||!S.session.session_id) return;
   const sid=S.session.session_id;
   const nowSec=Math.floor((Number(timestampMs)||Date.now())/1000);
-  const localCount=Array.isArray(S.messages)?S.messages.length:0;
+  const loadedOffset=typeof _messagesTruncated!=='undefined'&&_messagesTruncated&&typeof _oldestIdx==='number'&&Number.isSafeInteger(_oldestIdx)&&_oldestIdx>=0?_oldestIdx:0;
+  const localCount=loadedOffset+(Array.isArray(S.messages)?S.messages.length:0);
   const count=Math.max(Number(S.session.message_count||0),Number(messageCount||0),localCount,1);
   // #7882 re-gate (greptile follow-up): send() calls this updater up to twice
   // per send (initial optimistic pass + provisional-title pass), so the count

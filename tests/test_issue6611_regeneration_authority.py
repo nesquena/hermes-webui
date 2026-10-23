@@ -14,7 +14,7 @@ from api.session_ops import (
     regeneration_state,
     resolve_regeneration_turn,
 )
-from api.streaming import _session_payload_with_full_messages
+from api.streaming import _redacted_terminal_session_payload, _session_payload_with_full_messages
 from tests.js_source_extract import extract_function
 
 
@@ -34,6 +34,50 @@ def test_all_terminal_payloads_carry_fresh_revision():
     payload = _session_payload_with_full_messages(session)
     assert payload["regeneration_revision"] == regeneration_authority(session, rows=session.messages)
     assert payload["regeneration_revision"] == regeneration_revision_for(session.messages, session=session, context=session.context_messages)
+
+
+def test_bounded_terminal_projection_preserves_only_eligible_revision_for_browser_adoption():
+    session = _session()
+    canonical_rows, canonical_context = regeneration_state(session)
+    revision = regeneration_authority(
+        session,
+        rows=canonical_rows,
+        context=canonical_context,
+        full_transcript=True,
+        canonical_state=(canonical_rows, canonical_context),
+    )
+    assert revision
+
+    payload = _redacted_terminal_session_payload(session)
+    assert payload["messages"] == canonical_rows
+    assert payload["message_count"] == len(canonical_rows)
+    assert payload["regeneration_revision"] == revision
+
+    ineligible = _session()
+    ineligible.active_stream_id = "still-running"
+    ineligible_payload = _redacted_terminal_session_payload(ineligible)
+    assert "regeneration_revision" not in ineligible_payload
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required")
+    adopter = extract_function(
+        (ROOT / "static" / "sessions.js").read_text(encoding="utf-8"),
+        "_adoptRegenerationRevision",
+    )
+    script = f"""
+const assert=require('node:assert/strict');
+let S={{session:{{session_id:{json.dumps(session.session_id)},regeneration_revision:'stale'}}}};
+const adopt=eval('(' + {json.dumps(adopter)} + ')');
+adopt({json.dumps(payload)});
+assert.equal(S.session.regeneration_revision,{json.dumps(revision)});
+S.session.regeneration_revision='stale';
+adopt({json.dumps(ineligible_payload)});
+assert.equal(Object.hasOwn(S.session,'regeneration_revision'),false);
+process.stdout.write('ok');
+"""
+    result = subprocess.run([node, "-e", script], cwd=ROOT, text=True, capture_output=True, check=True)
+    assert result.stdout == "ok"
 
 
 def test_get_revision_consumer_delegates_imported_ownership_to_shared_authority():
@@ -409,6 +453,291 @@ def test_terminal_payload_embeds_the_rows_it_hashes(monkeypatch):
         rows=canonical_rows,
         context=canonical_context,
     )
+
+
+def test_real_terminal_payload_rebases_tool_owner_after_state_db_insert(monkeypatch, tmp_path):
+    from api import models
+
+    sidecar_rows = []
+    for index in range(32):
+        role = "user" if index % 2 == 0 else "assistant"
+        row = {
+            "role": role,
+            "content": f"sidecar-{index}",
+            "timestamp": 100.0 + index,
+        }
+        if role == "user":
+            row["_source"] = "webui"
+        sidecar_rows.append(row)
+
+    owner_row = sidecar_rows[5]
+    assert owner_row["role"] == "assistant"
+    tool_calls = [{"id": "retained-owner", "assistant_msg_idx": 5}]
+    inserted_row = {
+        "id": 101,
+        "role": "user",
+        "content": "state-only earlier user",
+        "timestamp": 102.5,
+    }
+    db = _make_state_db(tmp_path, [*sidecar_rows, inserted_row])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    session = Session(
+        session_id="s1",
+        messages=sidecar_rows,
+        context_messages=sidecar_rows,
+        tool_calls=[dict(card) for card in tool_calls],
+    )
+
+    full_payload = _session_payload_with_full_messages(session)
+    canonical_rows = full_payload["messages"]
+    inserted_index = next(
+        index for index, row in enumerate(canonical_rows)
+        if row.get("content") == "state-only earlier user"
+    )
+    owner_index = next(
+        index for index, row in enumerate(canonical_rows)
+        if row is owner_row
+    )
+    assert inserted_index == 3
+    assert owner_index == 6
+    assert inserted_index < owner_index
+    assert canonical_rows[owner_index] is owner_row
+    assert full_payload["regeneration_revision"]
+
+    payload = _redacted_terminal_session_payload(session)
+    assert payload["regeneration_revision"] == full_payload["regeneration_revision"]
+    assert payload["message_count"] == 33
+    assert payload["_messages_offset"] == 3
+    assert payload["_messages_offset"] + len(payload["messages"]) == payload["message_count"]
+    assert owner_index >= payload["_messages_offset"]
+    relative_owner_index = owner_index - payload["_messages_offset"]
+    assert payload["tool_calls"] == [
+        {"id": "retained-owner", "assistant_msg_idx": relative_owner_index}
+    ]
+    assert session.tool_calls == tool_calls
+
+
+def test_terminal_window_shift_resets_to_canonical_and_append_keeps_prefix(monkeypatch, tmp_path):
+    """A prior state.db insertion invalidates numeric window coordinates."""
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+    from api import models
+    from api import routes
+
+    sidecar_rows = []
+    for index in range(100):
+        role = "user" if index % 2 == 0 else "assistant"
+        content = "identical repeated text" if index in (10, 80) else f"sidecar-{index}"
+        row = {
+            "id": index + 1,
+            "role": role,
+            "content": content,
+            "timestamp": 100.0 + index,
+            "fixture_row_id": f"sidecar-{index}",
+        }
+        if role == "user":
+            row["_source"] = "webui"
+        sidecar_rows.append(row)
+    assert sidecar_rows[10]["role"] == sidecar_rows[80]["role"] == "user"
+    assert sidecar_rows[10]["content"] == sidecar_rows[80]["content"]
+
+    initial_dir = tmp_path / "initial"
+    initial_dir.mkdir()
+    initial_db = _make_state_db(initial_dir, sidecar_rows)
+    session = Session(
+        session_id="s1",
+        messages=sidecar_rows,
+        context_messages=sidecar_rows,
+        tool_calls=[{"id": "owner-after-insert", "assistant_msg_idx": 80}],
+    )
+    captured = {}
+
+    def capture(_handler, data, status=200, **_kwargs):
+        captured["data"] = data
+        captured["status"] = status
+
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: initial_db)
+    monkeypatch.setattr(routes, "get_session", lambda *_args, **_kwargs: session)
+    monkeypatch.setattr(routes, "_session_visible_to_active_profile", lambda *_args: True)
+    monkeypatch.setattr(routes, "_clear_stale_stream_state", lambda *_args: None)
+    monkeypatch.setattr(routes, "_session_requires_cli_metadata_lookup", lambda *_args: False)
+    monkeypatch.setattr(routes, "_resolve_effective_session_model_for_display", lambda *_args: None)
+    monkeypatch.setattr(routes, "_resolve_effective_session_model_provider_for_display", lambda *_args: None)
+    monkeypatch.setattr(routes, "j", capture)
+    routes.handle_get(
+        SimpleNamespace(_safe_webui_print=lambda *_args: None),
+        urlparse("/api/session?session_id=s1&messages=1&resolve_model=0&msg_limit=50"),
+    )
+    assert captured["status"] == 200
+    loaded_session = captured["data"]["session"]
+    assert loaded_session["_messages_offset"] == 50
+    assert [message["id"] for message in loaded_session["messages"]] == list(range(51, 101))
+    captured_paging = {}
+
+    def capture_paging(_handler, data, status=200, **_kwargs):
+        captured_paging["data"] = data
+        captured_paging["status"] = status
+
+    monkeypatch.setattr(routes, "j", capture_paging)
+    routes.handle_get(
+        SimpleNamespace(_safe_webui_print=lambda *_args: None),
+        urlparse("/api/session?session_id=s1&messages=1&resolve_model=0&msg_limit=150"),
+    )
+    expanded_session = captured_paging["data"]["session"]
+    assert captured_paging["status"] == 200
+    assert expanded_session["_messages_offset"] == 0
+    assert [message["id"] for message in expanded_session["messages"]] == list(range(1, 101))
+
+    inserted_row = {
+        "id": 101,
+        "role": "user",
+        "content": "state-only inserted predecessor",
+        "timestamp": 169.5,
+    }
+    db = _make_state_db(tmp_path, [*sidecar_rows, inserted_row])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: db)
+    payload = _redacted_terminal_session_payload(session)
+    assert payload["_messages_offset"] == 71
+    assert payload["message_count"] == 101
+    assert payload["tool_calls"] == [{"id": "owner-after-insert", "assistant_msg_idx": 10}]
+
+    merge = extract_function(
+        (ROOT / "static" / "messages.js").read_text(encoding="utf-8"),
+        "_applyEmbeddedTerminalSession",
+    )
+    sessions_source = (ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
+    ensure_loaded = extract_function(sessions_source, "_ensureMessagesLoaded", prefix="async function")
+    load_older = extract_function(sessions_source, "_loadOlderMessages", prefix="async function")
+    same_transcript_helpers = {
+        name: extract_function(sessions_source, name)
+        for name in (
+            "_messageComparableText",
+            "_stripAttachedFilesMarker",
+            "_stripForcedSkillEnvelope",
+            "_normalizeUserTranscriptText",
+            "_sameTranscriptMessage",
+            "_advanceVisibleBaselineForServerKnownRows",
+        )
+    }
+    upsert_start = sessions_source.index("function upsertActiveSessionForLocalTurn(")
+    # Match the top-level declaration, not a particular destructured signature.
+    upsert_end = sessions_source.index("\n}", upsert_start) + len("\n}")
+    upsert_local_turn = sessions_source[upsert_start:upsert_end]
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node is required")
+    load_harness = f"""
+const ensure=eval('(' + {json.dumps(ensure_loaded)} + ')');
+const loadOlder=eval('(' + {json.dumps(load_older)} + ')');
+const upsert=eval('(' + {json.dumps(upsert_local_turn)} + ')');
+const _messageComparableText=eval('(' + {json.dumps(same_transcript_helpers['_messageComparableText'])} + ')');
+const _stripAttachedFilesMarker=eval('(' + {json.dumps(same_transcript_helpers['_stripAttachedFilesMarker'])} + ')');
+const _stripForcedSkillEnvelope=eval('(' + {json.dumps(same_transcript_helpers['_stripForcedSkillEnvelope'])} + ')');
+const _normalizeUserTranscriptText=eval('(' + {json.dumps(same_transcript_helpers['_normalizeUserTranscriptText'])} + ')');
+const _sameTranscriptMessage=eval('(' + {json.dumps(same_transcript_helpers['_sameTranscriptMessage'])} + ')');
+const _advanceVisibleBaselineForServerKnownRows=eval('(' + {json.dumps(same_transcript_helpers['_advanceVisibleBaselineForServerKnownRows'])} + ')');
+let _loadingSessionId='s1',_loadSessionGeneration=1,_messagesTruncated=false,_oldestIdx=0,_msgLimitMax=100,_messageRenderWindowSize=50,_pendingCarryForwardSnapshot=null;
+let _loadingOlder=false,_messagesGeneration=0,_programmaticScroll=false,_programmaticScrollSetAt=0,_scrollPinned=false;
+const _MSG_LIMIT_MAX=100,_INITIAL_MSG_LIMIT=100,MESSAGE_RENDER_WINDOW_DEFAULT=50;
+const _clearSameSessionForceReloadHint=()=>{{}},_messageReloadLimitForSession=()=>100;
+const _syncToolCallsForLoadedMessages=()=>{{}},clearLiveToolCards=()=>{{}},clearVisibleMessageRowCache=()=>{{}};
+const _messageRenderableMessageCount=()=>S.messages.length,_currentMessageRenderWindowSize=()=>50;
+const _messageIsRenderable=()=>true,msgContent=message=>String(message&&message.content||''),renderMessages=()=>{{}};
+const _captureMessageViewportAnchor=()=>null,_restoreMessageViewportAnchor=()=>false,_messageVirtualPrependedHeightDelta=()=>0;
+const $=()=>({{scrollHeight:0,scrollTop:0}}),performance={{now:()=>0}},requestAnimationFrame=callback=>callback();
+const _adoptRegenerationRevision=()=>{{}},_hydrateTodosFromSession=()=>{{}},scheduleTodosRefresh=()=>{{}};
+const _isSessionActivelyViewedForList=()=>true,_setSessionViewedCount=()=>{{}},syncTopbar=()=>{{}};
+const _activeSessionIdForSidebar=()=> 's1',renderSessionListFromCache=()=>{{}};
+let _allSessions=[];
+const S={{session:{{session_id:'s1',title:'loaded'}},messages:[],lastUsage:{{}}}};
+const INFLIGHT={{}};
+const initialSession={json.dumps(loaded_session)},expandedSession={json.dumps(expanded_session)};
+globalThis.window={{_carryForwardEphemeralTurnFields:(_previous,next)=>next}};
+const requested=[];
+globalThis.api=async url=>{{requested.push(String(url));return {{session:String(url).includes('msg_limit=150')?expandedSession:initialSession}};}};
+"""
+    shifted_script = f"""
+const assert=require('node:assert/strict');
+const apply=eval('(' + {json.dumps(merge)} + ')');
+const payload={json.dumps(payload)};
+(async()=>{{
+{load_harness}
+await ensure('s1',{{loadGeneration:1}});
+assert.equal(S.messages.length,50);
+assert.deepEqual(S.messages.map(m=>m.id),listRange(51,101));
+await loadOlder();
+assert.equal(requested.some(url=>url.includes('msg_limit=150')),true);
+assert.equal(S.messages.length,100);
+assert.equal(_oldestIdx,0);
+assert.deepEqual(S.messages.map(m=>m.id),listRange(1,101));
+S.session.active_stream_id='stream-1';
+const result=apply(payload,S.session,S.messages,_oldestIdx,'stream-1');
+assert.ok(result);
+assert.equal(result._messages_offset,payload._messages_offset);
+assert.equal(result._messages_truncated,true);
+assert.equal(result.message_count,payload.message_count);
+assert.deepEqual(result.messages.map(m=>m.fixture_row_id||m.content),
+  payload.messages.map(m=>m.fixture_row_id||m.content));
+assert.equal(result.messages.filter(m=>m.fixture_row_id==='sidecar-70').length,1);
+assert.equal(result.messages.some(m=>m.content==='state-only inserted predecessor'),false);
+assert.equal(result.tool_calls.length,1);
+assert.equal(result.tool_calls[0].assistant_msg_idx,10);
+assert.equal(result.messages[result.tool_calls[0].assistant_msg_idx].fixture_row_id,'sidecar-80');
+process.stdout.write('ok');
+}})().catch(error=>{{console.error(error);process.exitCode=1;}});
+function listRange(start,end){{if(end===undefined){{end=start;start=0;}}return Array.from({{length:end-start}},(_,index)=>index+start);}}
+"""
+    result = subprocess.run([node, "-e", shifted_script], cwd=ROOT, text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout == "ok"
+
+    # With no insertion, stable message IDs prove the overlap, so settlement
+    # keeps the loaded prefix and adds only the canonical tail.
+    append_dir = tmp_path / "append-only"
+    append_dir.mkdir()
+    appended_rows = [
+        {"id": 101, "role": "user", "content": "new prompt", "timestamp": 200.0, "_source": "webui", "fixture_row_id": "append-user"},
+        {"id": 102, "role": "assistant", "content": "new answer", "timestamp": 201.0, "fixture_row_id": "append-answer"},
+    ]
+    append_db = _make_state_db(append_dir, [*sidecar_rows, *appended_rows])
+    monkeypatch.setattr(models, "_active_state_db_path", lambda: append_db)
+    append_session = Session(
+        session_id="s1",
+        messages=[*sidecar_rows, *appended_rows],
+        context_messages=[*sidecar_rows, *appended_rows],
+    )
+    append_payload = _redacted_terminal_session_payload(append_session)
+    assert append_payload["_messages_offset"] == 72
+    append_script = f"""
+const assert=require('node:assert/strict');
+const apply=eval('(' + {json.dumps(merge)} + ')');
+const payload={json.dumps(append_payload)};
+(async()=>{{
+{load_harness}
+await ensure('s1',{{loadGeneration:1}});
+assert.equal(S.messages.length,50);
+await loadOlder();
+assert.equal(S.messages.length,100);
+assert.equal(_oldestIdx,0);
+const loadedMessages=[...S.messages];
+S.messages.push({{role:'user',content:'new prompt',_pending:true}});
+upsert({{messageCount:S.messages.length}});
+S.session.active_stream_id='stream-1';
+const result=apply(payload,S.session,S.messages,_oldestIdx,'stream-1');
+assert.ok(result);
+assert.equal(result._messages_offset,0);
+assert.equal(result._messages_truncated,false);
+assert.deepEqual(result.messages.slice(0,72).map(m=>m.fixture_row_id),
+  loadedMessages.slice(0,72).map(m=>m.fixture_row_id));
+assert.deepEqual(result.messages.map(m=>m.fixture_row_id),
+  [...loadedMessages.map(m=>m.fixture_row_id),'append-user','append-answer']);
+process.stdout.write('ok');
+}})().catch(error=>{{console.error(error);process.exitCode=1;}});
+function listRange(start,end){{if(end===undefined){{end=start;start=0;}}return Array.from({{length:end-start}},(_,index)=>index+start);}}
+"""
+    result = subprocess.run([node, "-e", append_script], cwd=ROOT, text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr or result.stdout
+    assert result.stdout == "ok"
 
 
 def test_recovered_display_context_pair_survives_local_and_gateway_apply(monkeypatch):

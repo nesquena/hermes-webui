@@ -480,8 +480,9 @@ class TestMessagePaginationFrontend:
         assert "S.messages || []" in fn_body
         assert "msg_limit=${requestedLimit}" in fn_body
         assert "tailMatches" in fn_body
-        # Race fallback still issues the legacy msg_before page request.
-        assert "msg_before=${_oldestIdx}" in fn_body
+        # Race fallback reuses the cursor captured before the async request.
+        assert "const requestedBeforeOffset = _oldestIdx;" in fn_body
+        assert fn_body.count("msg_before=${requestedBeforeOffset}") == 2
 
     def test_ensure_all_messages_function_exists(self):
         """_ensureAllMessagesLoaded must exist for operations needing full history."""

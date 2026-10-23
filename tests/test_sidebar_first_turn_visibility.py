@@ -1,6 +1,11 @@
 """Regressions for first-turn sessions appearing in the sidebar immediately."""
 
+import json
 import pathlib
+import shutil
+import subprocess
+
+import pytest
 
 REPO = pathlib.Path(__file__).parent.parent
 
@@ -64,6 +69,43 @@ class TestSidebarFirstTurnVisibility:
         assert "is_streaming:true" in body.replace(" ", ""), (
             "Optimistic row should render as streaming until the backend reconciles."
         )
+
+    def test_optimistic_upsert_counts_absolute_paginated_message_end(self):
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("node not on PATH")
+        source = read("static/sessions.js")
+        start = source.index("function upsertActiveSessionForLocalTurn")
+        brace = source.index("){", start) + 1
+        depth = 1
+        end = brace + 1
+        while depth:
+            depth += source[end] == "{"
+            depth -= source[end] == "}"
+            end += 1
+        helper = source[start:end]
+        script = f"""
+const assert=require('node:assert/strict');
+const upsert=eval('(' + {json.dumps(helper)} + ')');
+global._allSessions=[];
+global.renderSessionListFromCache=()=>{{}};
+function count(offset,truncated){{
+  global.S={{session:{{session_id:'sid',message_count:0}},messages:Array.from({{length:4}},()=>({{}}))}};
+  if(offset===undefined) delete global._oldestIdx; else global._oldestIdx=offset;
+  if(truncated===undefined) delete global._messagesTruncated; else global._messagesTruncated=truncated;
+  upsert();
+  return S.session.message_count;
+}}
+assert.equal(count(90,true),94);
+assert.equal(count(90,false),4);
+assert.equal(count(0,true),4);
+assert.equal(count(undefined,true),4);
+assert.equal(count(-1,true),4);
+console.log('ok');
+"""
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=False)
+        assert result.returncode == 0, result.stderr or result.stdout
+        assert result.stdout.strip() == "ok"
 
     def test_messages_comments_document_why_each_optimistic_upsert_stays_separate(self):
         src = read("static/messages.js")

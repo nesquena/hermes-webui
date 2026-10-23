@@ -141,7 +141,7 @@ def test_regenerate_response_loads_the_full_session_before_requiring_revision():
         source.index("// postProcessRenderedMessages")
     ]
     assert "if(!S.session || S.busy || !S.session.regeneration_revision) return;" not in body
-    assert body.index("await _ensureAllMessagesLoaded()") < body.index(
+    assert body.index("await _ensureAllMessagesLoaded({") < body.index(
         "if(!S.session.regeneration_revision)"
     )
 
