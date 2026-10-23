@@ -481,6 +481,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     _is_root_profile,
     _root_profile_names_snapshot,
     _SKILLS_STATS_CACHE,
+    invalidate_profile_skills_stats,
     get_active_profile_name,
     get_active_profile_name as _get_active_profile_name,
     get_active_hermes_home,
@@ -33596,7 +33597,7 @@ def _handle_skill_save(handler, body):
     if skill_file.is_symlink():
         return bad(handler, "Cannot save to a symlinked skill file")
     skill_file.write_text(body["content"], encoding="utf-8")
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     return j(handler, {"ok": True, "name": skill_name, "path": str(skill_file)})
 
 
@@ -33616,7 +33617,7 @@ def _handle_skill_delete(handler, body):
         return bad(handler, "Skill not found", 404)
     skill_dir = matches[0].parent
     shutil.rmtree(str(skill_dir))
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     return j(handler, {"ok": True, "name": body["name"]})
 
 
@@ -33691,7 +33692,7 @@ def _handle_skill_toggle(handler, body):
         _save_yaml_config_file(config_path, cfg)
 
     reload_config()  # outside with block — reload_config() acquires the lock itself
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 
