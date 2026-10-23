@@ -138,6 +138,36 @@ checked. Empty partials that finish in time do not log a budget-overrun warning.
 Malformed LM Studio responses whose `data` is not a list are ignored, preserving
 the degraded catalog behavior for both models and onboarding callers.
 
+## Follower waits during a rebuild
+
+When a models-catalog rebuild is already in flight, a second caller is a
+*follower*: it waits on the same condition variable instead of re-entering the
+cold path (which would run the live probes a second time). The wait is not the
+same for every caller:
+
+| Caller | Wait | When the wait runs out |
+|---|---|---|
+| `prefer_cache=True` (new-chat path) | **none** — answers immediately | n/a |
+| `force_refresh=True` | the remaining live-rebuild budget | stale disk, else static catalog |
+| plain follower | the full 60s follower wait | best catalog it already knows (resident → disk → stale disk → static) |
+
+The `prefer_cache` rule exists because `POST /api/session/new` runs behind a 30s
+browser abort: a follower that waits out someone else's rebuild makes "New
+conversation" look hung even though the server would eventually answer. It
+serves the resident cache while its fingerprint still matches, then disk, then a
+network-free static catalog — and never clears the builder's
+`_cache_build_in_progress` flag, which belongs to the rebuild that owns the slot.
+
+A follower whose wait runs out serves that same "best known" answer instead of
+falling through into the cold path, so a rebuild that overruns its wait cannot
+stack a second set of live probes behind it.
+
+A **plain** follower deliberately keeps the full wait for the slot owner:
+`tests/test_issue7481_custom_probe_budget_fairness.py` pins that a third caller
+waits for the rebuild that owns the single-flight slot and is served *that*
+rebuild's catalog, not a cached one. Shortening the plain-follower wait is a
+separate product decision and does not travel in this contract.
+
 ## Change protocol
 
 1. Add or change a source axis in `_models_cache_source_fingerprint()` only —
