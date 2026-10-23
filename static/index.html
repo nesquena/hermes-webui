@@ -19,6 +19,35 @@
 <link rel="apple-touch-icon" sizes="512x512" href="static/apple-touch-icon.png">
 <script>(function(){try{var _hadAppearance=localStorage.getItem('hermes-theme')!==null||localStorage.getItem('hermes-skin')!==null;var themes={light:1,dark:1,system:1},skins={codex:1,terracotta:1,default:1,ares:1,mono:1,graphite:1,github:1,slate:1,poseidon:1,sisyphus:1,charizard:1,sienna:1,catppuccin:1,hepburn:1,nous:1,'geist-contrast':1,neon:1,'neon-soft':1,'neon-paint':1,zeus:1,'verdigris':1},legacy={slate:['dark','slate'],solarized:['dark','poseidon'],monokai:['dark','sisyphus'],nord:['dark','slate'],oled:['dark','default']},t=(localStorage.getItem('hermes-theme')||'dark').toLowerCase(),s=(localStorage.getItem('hermes-skin')||'').toLowerCase(),m=legacy[t],theme=m?m[0]:(themes[t]?t:'dark');var pendingExt=s&&s!=='default'&&!skins[s]&&!legacy[s];var skin=skins[s]?s:(pendingExt?s:(m?m[1]:'default'));if(_hadAppearance){localStorage.setItem('hermes-theme',theme);localStorage.setItem('hermes-skin',skin);}if(theme==='system')theme=window.matchMedia('(prefers-color-scheme:dark)').matches?'dark':'light';if(theme==='dark')document.documentElement.classList.add('dark');if(skin!=='default')document.documentElement.dataset.skin=skin;}catch(e){document.documentElement.classList.add('dark');}})()</script>
 <script>(function(){try{var fs=localStorage.getItem('hermes-font-size');if(fs&&fs!=='default')document.documentElement.dataset.fontSize=fs;}catch(e){}})()</script>
+<!-- Resolve the UI language before first paint. index.html ships English text on
+     every [data-i18n] node, and static/i18n.js is a defer'd ~1.9 MB bundle, so
+     without this the English shell stays visible until it downloads and runs.
+     When the resolved language is not English the marked nodes stay hidden
+     (layout preserved) until applyLocaleToDOM() paints the translation; the
+     timer is a safety net so a failed i18n.js can never leave them invisible. -->
+<script>(function(){try{
+var l=localStorage.getItem('hermes-lang');
+if(!l){l=(navigator.languages&&navigator.languages[0])||navigator.language||'';}
+var c=String(l||'').toLowerCase();
+var en=(!c||c.indexOf('en')===0);
+if(en)return;
+document.documentElement.lang=(c.indexOf('zh')===0?(c.indexOf('zh-tw')===0||c.indexOf('zh-hk')===0||c.indexOf('zh-hant')===0?'zh-Hant':'zh-CN'):c);
+document.documentElement.setAttribute('data-i18n-pending','');
+var s=document.createElement('style');
+s.textContent='html[data-i18n-pending] [data-i18n]{visibility:hidden}';
+document.head.appendChild(s);
+var t0=Date.now();
+(function chk(){
+  if(typeof t==='function'){return;}                  // bundle is live; it unpaints itself
+  if(Date.now()-t0>6000){document.documentElement.removeAttribute('data-i18n-pending');return;}
+  setTimeout(chk,100);
+})();
+}catch(e){}})()</script>
+<!-- i18n bundle moved into <head>: defer keeps it non-blocking, but the earlier
+     position both starts the download sooner and puts it first in the defer
+     queue, so the translation lands before the CDN-hosted scripts (prism/xterm)
+     can stub out the queue on a slow jsdelivr connection. -->
+<script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
 <!-- theme-color: surfaces the active app chrome color to native status bars (Safari status bar, PWA, native WKWebView wrappers). Updated dynamically by boot.js when theme/skin changes. The light/dark default values match style.css :root --sidebar / :root.dark --sidebar. -->
 <meta name="theme-color" content="#FAF7F0" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#141425" media="(prefers-color-scheme: dark)">
@@ -1823,7 +1852,7 @@
   </div>
 </div>
 <div class="toast" id="toast"></div>
-<script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
+<!-- Cache-control below is fingerprinted (immutable) so this is downloaded once. -->
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
