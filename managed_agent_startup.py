@@ -6,15 +6,38 @@ from pathlib import Path
 import sys
 
 
+def _resolve_agent_dir(webui_root: Path) -> str | None:
+    """Locate the Agent root, discovering it when the env var is unset.
+
+    An exported HERMES_WEBUI_AGENT_DIR always wins, including when it names an
+    empty directory -- that is the browser-only signal and must stay a no-op.
+    Only a completely unset variable falls through to discovery.
+    """
+    agent_dir = os.environ.get("HERMES_WEBUI_AGENT_DIR", "").strip()
+    if agent_dir:
+        return agent_dir
+    # The documented manual launch (`venv/bin/python server.py`) exports nothing,
+    # so this hook used to return before its first action and the managed
+    # dependency set never got attached -- the WebUI then died on `import yaml`.
+    # api.config already resolves the same Agent; api.startup only pulls in
+    # yaml-free path helpers, so it is safe to import before activation.
+    try:
+        from api import startup as _startup
+
+        found = _startup._discover_agent_identity(repo_root=webui_root).agent_dir
+    except Exception:  # noqa: BLE001 - discovery is best-effort, never fatal
+        return None
+    return str(found) if found else None
+
+
 def activate_managed_agent() -> None:
-    agent_dir = os.environ.get("HERMES_WEBUI_AGENT_DIR")
+    webui_root = str(Path(__file__).resolve().parent)
+    agent_dir = _resolve_agent_dir(Path(webui_root))
     if not agent_dir:
         return
     # Browser-only setups may deliberately point at an empty Agent directory.
     if not (Path(agent_dir) / "run_agent.py").is_file():
         return
-
-    webui_root = str(Path(__file__).resolve().parent)
     if webui_root not in sys.path:
         sys.path.insert(0, webui_root)
     # Activate dependencies without importing the application: api.config must
