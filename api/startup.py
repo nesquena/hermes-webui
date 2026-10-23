@@ -343,6 +343,34 @@ def _stage_matches_agent(staged: Path, agent_dir: Path) -> bool:
         return False
 
 
+def _trusted_install_inputs(directory: Path) -> bool:
+    """True when every install input in ``directory`` is a safe, private file.
+
+    ``_trusted_agent_dir`` proves the *directory* is ours, but not the files
+    inside it: a world-writable ``requirements.txt`` in a valid stage passes
+    validation and its contents can change before pip reads it (#8472). Each
+    input pip will read must be a regular file (no symlinks — a link can be
+    repointed after validation), owned by the current user, and not group- or
+    world-writable.
+    """
+    try:
+        for name in _STAGE_INPUTS:
+            path = directory / name
+            try:
+                st = path.lstat()
+            except FileNotFoundError:
+                continue  # absent input: pip never reads it
+            if not stat.S_ISREG(st.st_mode):
+                return False
+            if hasattr(os, 'getuid') and st.st_uid != os.getuid():
+                return False
+            if stat.S_IMODE(st.st_mode) & 0o022:
+                return False
+        return True
+    except OSError:
+        return False
+
+
 def _agent_install_dir(agent_dir: Path) -> Path:
     """Resolve the directory auto-install should actually install *from*.
 
@@ -354,7 +382,9 @@ def _agent_install_dir(agent_dir: Path) -> Path:
     recovery path installs from the staged tree instead of the read-only mount.
 
     Falls back to ``agent_dir`` whenever the staged path is unset, missing,
-    fails the same ownership/permission trust check that guards the mount, or
+    fails the same ownership/permission trust check that guards the mount
+    (applied to the stage directory and, via ``_trusted_install_inputs``, to
+    the ``requirements.txt`` / ``pyproject.toml`` files inside it), or
     is not a current copy of ``agent_dir`` (see ``_stage_matches_agent``) —
     an attacker-controlled env var must never redirect the install, and a
     trusted-but-unrelated or stale directory must not either.
@@ -369,7 +399,7 @@ def _agent_install_dir(agent_dir: Path) -> Path:
         except (OSError, RuntimeError, ValueError):
             # Missing, unresolvable or `~unknown-user`: never fatal at startup.
             return agent_dir
-        if staged.is_dir() and _trusted_agent_dir(staged) and _trusted_ancestry(staged):
+        if staged.is_dir() and _trusted_agent_dir(staged) and _trusted_ancestry(staged) and _trusted_install_inputs(staged):
             if _stage_matches_agent(staged, agent_dir):
                 return staged
             print(f'[!!] Ignoring staged agent copy {staged}: it is not a current copy of {agent_dir}.', flush=True)
