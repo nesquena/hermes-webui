@@ -105,6 +105,32 @@ def test_git_subprocess_inventory_uses_shared_windows_flags() -> None:
     assert helper_definitions == ["api/subprocess_utils.py"]
 
 
+def test_update_network_git_popen_uses_shared_windows_flags() -> None:
+    """The update fetch Popen boundary must preserve the no-console contract."""
+    path = ROOT / "api" / "updates.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    runner = next(node for node in tree.body if isinstance(node, ast.FunctionDef)
+                  and node.name == "_run_network_git")
+    calls = [
+        node for node in ast.walk(runner)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "subprocess"
+        and node.func.attr == "Popen"
+    ]
+    assert len(calls) == 1
+    creationflags = next(
+        (keyword.value for keyword in calls[0].keywords if keyword.arg == "creationflags"),
+        None,
+    )
+    assert (
+        isinstance(creationflags, ast.Call)
+        and isinstance(creationflags.func, ast.Name)
+        and creationflags.func.id == "windows_hide_flags"
+    )
+
+
 def test_windows_hide_flags_returns_win32_sentinel(monkeypatch) -> None:
     """The helper must expose the platform's CREATE_NO_WINDOW value on Win32."""
     from api import subprocess_utils

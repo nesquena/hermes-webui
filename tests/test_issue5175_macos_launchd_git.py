@@ -133,7 +133,8 @@ def test_check_repo_does_not_report_git_not_found_via_launchd_fallback(tmp_path)
     with patch.object(updates.shutil, 'which', return_value=None), \
          patch.object(sys, 'platform', 'darwin'), \
          patch.object(updates.os.path, 'exists', return_value=True), \
-         patch.object(updates.subprocess, 'run', side_effect=fake_run):
+         patch.object(updates.subprocess, 'run', side_effect=fake_run), \
+         patch.object(updates, '_run_network_git', side_effect=fake_run):
         info = updates._check_repo(tmp_path, 'webui')
 
     assert info['behind'] == 0
