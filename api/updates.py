@@ -2394,6 +2394,84 @@ def apply_update(target, channel=None):
         _apply_lock.release()
 
 
+def restart_stale_runtime() -> dict:
+    """Operator-initiated recovery for the stale-Agent-runtime 409 (#7934).
+
+    After ``hermes update`` replaces the Agent checkout,
+    ``ensure_agent_runtime_current()`` answers every local Agent action with
+    ``409 agent_runtime_stale``. The documented recovery is a manual restart
+    from a shell, which is unreachable for native-client users (e.g. Hermex)
+    without SSH. This route performs that same manual step on request — and
+    nothing more:
+
+    * a current runtime is refused, so this is never a general restart button;
+    * an Agent update that is active, incomplete, or unreadable is refused
+      (an unverifiable marker fails closed with the in-flight update);
+    * active chat work returns the shared restart-blocked response, exactly
+      like ``/api/updates/apply``;
+    * the stale check is repeated under ``_apply_lock`` so a runtime that
+      became current (or an update that started) between admission and
+      scheduling is never restarted mid-change.
+    """
+    from api.agent_runtime import (
+        AgentRuntimeChangedError,
+        _agent_update_transaction_state,
+        agent_runtime_stale_payload,
+        ensure_agent_runtime_current,
+    )
+
+    try:
+        ensure_agent_runtime_current()
+    except AgentRuntimeChangedError as exc:
+        stale_payload = agent_runtime_stale_payload(exc)
+    else:
+        return {
+            'ok': False,
+            'type': 'agent_runtime_current',
+            'message': (
+                'The Agent runtime is current; no restart is needed. '
+                'This route only recovers a stale runtime.'
+            ),
+        }
+
+    update_state = _agent_update_transaction_state()
+    if update_state in ('active', 'incomplete', 'unknown'):
+        refused = dict(stale_payload)
+        refused['message'] = (
+            'An Agent update is still running or did not finish '
+            f'(agent_update_state: {update_state}). '
+            'Wait for it to complete, then retry the restart.'
+        )
+        return refused
+
+    blocker_snapshot = _restart_blocker_snapshot()
+    if blocker_snapshot.get('restart_blocked'):
+        return _restart_blocked_response('WebUI', blocker_snapshot)
+
+    if not _apply_lock.acquire(blocking=False):
+        return {'ok': False, 'message': 'Update already in progress'}
+    try:
+        # Re-check under the lock: the runtime may have become current, or an
+        # update may have started, between the admission check above and here.
+        try:
+            ensure_agent_runtime_current()
+        except AgentRuntimeChangedError:
+            pass
+        else:
+            return {
+                'ok': False,
+                'type': 'agent_runtime_current',
+                'message': (
+                    'The Agent runtime became current while scheduling; '
+                    'no restart was performed.'
+                ),
+            }
+        _schedule_restart()
+        return {'ok': True, 'restart_scheduled': True}
+    finally:
+        _apply_lock.release()
+
+
 def _restore_stash_after_pull_failure(
     target: str,
     path: Path,

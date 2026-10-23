@@ -719,7 +719,8 @@ def test_runner_flag_does_not_bypass_webui_owned_hidden_turns(monkeypatch):
         "type": "agent_runtime_stale",
         "retryable": True,
         "restart_scheduled": False,
-    }
+
+        "restart_available": True,    }
 
 
 def test_chat_start_rejects_stale_runtime_before_session_materialization(monkeypatch):
@@ -753,7 +754,8 @@ def test_chat_start_rejects_stale_runtime_before_session_materialization(monkeyp
             "type": "agent_runtime_stale",
             "retryable": True,
             "restart_scheduled": False,
-        },
+
+            "restart_available": True,        },
     }
 
 
@@ -952,7 +954,8 @@ def test_git_commit_message_stale_runtime_returns_typed_409(
             "type": "agent_runtime_stale",
             "retryable": True,
             "restart_scheduled": False,
-        },
+
+            "restart_available": True,        },
     }
 
 
@@ -1058,7 +1061,8 @@ def test_server_side_turn_rejects_stale_runtime_before_session_acceptance(monkey
             "type": "agent_runtime_stale",
             "retryable": True,
             "restart_scheduled": False,
-        },
+
+            "restart_available": True,        },
     )
     monkeypatch.setattr(
         routes,
@@ -1075,5 +1079,6 @@ def test_server_side_turn_rejects_stale_runtime_before_session_acceptance(monkey
         "type": "agent_runtime_stale",
         "retryable": True,
         "restart_scheduled": False,
-        "_status": 409,
+
+        "restart_available": True,        "_status": 409,
     }

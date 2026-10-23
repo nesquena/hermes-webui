@@ -164,4 +164,8 @@ def test_fixture_subprocess_is_not_guarded():
 
 def test_restart_callers_remain_complete():
     source = (REPO / "api" / "updates.py").read_text(encoding="utf-8")
-    assert source.count("_schedule_restart()") == 3
+    # 4 = apply_update / apply_force_update / the agent-update gateway path /
+    # restart_stale_runtime (#7934). A new caller must ship the same guard
+    # chain: admission check, update-state check, restart-blocker snapshot,
+    # _apply_lock acquisition, and a post-lock re-check before scheduling.
+    assert source.count("_schedule_restart()") == 4
