@@ -308,6 +308,19 @@ WebKit when their Playwright builds are installed and launch
 (`python -m playwright install --with-deps firefox webkit`); a missing or
 unlaunchable engine is reported as skipped.
 Run it locally with `python tests/browser_session_row_activation.py`.
+After that, it runs `tests/browser_terminal_screen_reader_mode.py`, which opens the
+composer terminal in a temp workspace (a real local shell) and toggles the
+"Screen reader mode" checkbox in Settings > Preferences. With the preference
+off the terminal must have no xterm.js accessibility tree; checking the box
+must add the tree to the same open terminal, including output printed before
+the switch; unchecking it must remove the tree again; and after a reload with
+the preference on, a new terminal must start with the tree. It uses Firefox
+too when its Playwright build is installed. The page loads xterm.js from
+cdn.jsdelivr.net, so the gate needs network access. Run it locally with
+`python tests/browser_terminal_screen_reader_mode.py`. Manual check with a
+screen reader (for example NVDA + Firefox): with the preference on, typed
+input and new terminal output are read, and the visible rows can be read in
+browse mode.
 
 ## Public conversation lifecycle gate
 

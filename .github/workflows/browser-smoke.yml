@@ -145,3 +145,6 @@ jobs:
       - name: Run session-row activation gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_session_row_activation.py
+      - name: Run terminal screen-reader-mode gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_terminal_screen_reader_mode.py
