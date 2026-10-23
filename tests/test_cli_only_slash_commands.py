@@ -35,7 +35,10 @@ def _extract_busy_intercept_block() -> str:
     marker = "Busy-control slash commands must be intercepted"
     marker_idx = MESSAGES_JS.find(marker)
     assert marker_idx != -1
-    start = MESSAGES_JS.find("if(text.startsWith('/')&&!literalSlash){", marker_idx)
+    start = MESSAGES_JS.find(
+        "if(text.startsWith('/')&&webuiSlashCommandInterceptionEnabled()&&!literalSlash){",
+        marker_idx,
+    )
     assert start != -1
     depth = 0
     for i in range(start, len(MESSAGES_JS)):

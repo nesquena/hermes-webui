@@ -4,8 +4,8 @@ The `/`, `/index.html`, and `/session/<id>` routes are the hottest navigations.
 Each previously re-read the ~190 KB static/index.html from disk and re-ran the
 two process-constant token substitutions (__WEBUI_VERSION__,
 __MAX_UPLOAD_BYTES__) on every request. _render_index_shell_base() caches the
-partially rendered template, keyed by (size, mtime_ns) like _STATIC_CACHE, while
-the per-session CSRF token and per-request extension tags stay per-request.
+partially rendered template, keyed by (size, mtime_ns) like _STATIC_CACHE, while the per-session CSRF token, slash-interception setting, and extension tags
+stay per-request.
 
 These tests guard the load-bearing invariant: caching must change no observable
 output, only avoid redundant work.
@@ -22,7 +22,7 @@ import api.routes as routes
 from api.updates import WEBUI_VERSION
 
 
-def _old_inline_render(csrf_token: str) -> str:
+def _old_inline_render(csrf_token: str, intercept_slash_commands: bool = False) -> str:
     """Reproduce the pre-cache inline render exactly, for equivalence checks."""
     index_path = api_config.get_index_html_path()
     return (
@@ -30,36 +30,49 @@ def _old_inline_render(csrf_token: str) -> str:
         .replace("__WEBUI_VERSION__", quote(WEBUI_VERSION, safe=""))
         .replace("__MAX_UPLOAD_BYTES__", str(routes.MAX_UPLOAD_BYTES))
         .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
+        .replace("__INTERCEPT_SLASH_COMMANDS_JSON__", json.dumps(intercept_slash_commands))
     )
 
 
-def test_base_substitutes_process_constants_but_not_csrf():
+def _render_request(csrf_token: str, intercept_slash_commands: bool = False) -> str:
+    return (
+        routes._render_index_shell_base()
+        .replace("__CSRF_TOKEN_JSON__", json.dumps(csrf_token))
+        .replace("__INTERCEPT_SLASH_COMMANDS_JSON__", json.dumps(intercept_slash_commands))
+    )
+
+
+def test_base_substitutes_process_constants_but_not_request_values():
     base = routes._render_index_shell_base()
     assert "__WEBUI_VERSION__" not in base
     assert "__MAX_UPLOAD_BYTES__" not in base
     # CSRF must remain a placeholder — it varies per request and is applied by
     # the caller, not baked into the shared cache.
     assert "__CSRF_TOKEN_JSON__" in base
+    assert "__INTERCEPT_SLASH_COMMANDS_JSON__" in base
 
 
 def test_cached_render_is_byte_identical_to_old_inline():
     csrf = "test-csrf-abc123"
-    new = routes._render_index_shell_base().replace(
-        "__CSRF_TOKEN_JSON__", json.dumps(csrf)
-    )
+    new = _render_request(csrf)
     assert new == _old_inline_render(csrf)
 
 
 def test_csrf_token_varies_per_request():
-    a = routes._render_index_shell_base().replace(
-        "__CSRF_TOKEN_JSON__", json.dumps("AAA")
-    )
-    b = routes._render_index_shell_base().replace(
-        "__CSRF_TOKEN_JSON__", json.dumps("BBB")
-    )
+    a = _render_request("AAA")
+    b = _render_request("BBB")
     assert json.dumps("AAA") in a
     assert json.dumps("BBB") in b
     assert a != b
+
+
+def test_slash_interception_setting_varies_per_request():
+    disabled = _render_request("csrf", False)
+    enabled = _render_request("csrf", True)
+
+    assert "interceptSlashCommands:false" in disabled
+    assert "interceptSlashCommands:true" in enabled
+    assert disabled != enabled
 
 
 def test_second_call_returns_cached_object():
