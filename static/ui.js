@@ -20033,6 +20033,7 @@ function _assistantToolAnchorIdxForMessage(messages, rawIdx){
   if(_assistantMessageHasVisibleContent(current)) return rawIdx;
   if(_assistantReasoningPayloadText(current)) return rawIdx;
   for(let idx=rawIdx-1;idx>=0;idx--){
+    if(list[idx]&&list[idx].role==='user') break;
     if(_assistantMessageHasVisibleContent(list[idx])) return idx;
   }
   return rawIdx;

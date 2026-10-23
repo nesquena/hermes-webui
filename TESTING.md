@@ -1,5 +1,47 @@
 # Hermes Web UI: Browser Testing Plan
 
+## User-bounded legacy tool anchors (#8427)
+
+Run `./scripts/test.sh -q -rs tests/test_issue8427_tool_anchor_user_boundary.py`.
+The dependency-free helper cases execute the real `ui.js` functions in Node;
+missing Node is reported as a skip. If `jsdom` is already installed (or available
+through `NODE_PATH`), six additional cases exercise the real settled renderer
+across all three activity modes with Thinking on/off. They check three synthetic
+turns, all legacy tool metadata sources, final prose, tool ownership, collapsed
+Worklogs, and re-rendering. Missing jsdom skips only those six cases. No new npm
+install is required for the helper checks:
+
+```bash
+node tests/fixtures/issue8427_tool_anchor.cjs helpers
+node tests/fixtures/issue8427_tool_anchor.cjs renderer compact_worklog true
+```
+
+For native-browser visibility evidence, serve a disposable checkout on a fresh
+localhost origin, not a running WebUI, and open
+`/tests/fixtures/issue8427_tool_anchor.html`. For example:
+`python3 -m http.server 8789 --bind 127.0.0.1` from the checkout root. Use a fresh
+browser profile. Repeat at desktop and narrow widths with
+`?mode=compact_worklog&thinking=true`, `transparent_stream`, and
+`hide_all_activity`, with `thinking=true` and `false`. The page sets
+`document.documentElement.dataset.result` to `PASS` or `FAIL` and reports the
+stage/result in its header. All three final answers must remain ordinary visible
+prose after explicitly expanding, collapsing, and re-rendering activity. The native
+browser fixture clicks the actual disclosure summaries; the Node driver calls
+those same handlers directly because jsdom does not execute inline listeners.
+The page records the actual viewport dimensions for screenshot evidence. These
+checks do not certify OS-level pointer delivery. The helper may borrow visible prose
+across tool rows only within the same user turn; its own prose/reasoning owner
+still wins.
+
+This portable fixture loads production JS/CSS without `boot.js`, uses synthetic
+in-memory state and a minimal transcript shell, and disables `fetch`; it does not
+exercise API loading, live streaming, persisted preferences, or provider behavior.
+The Node driver additionally stubs layout observers, animation frames, and scroll
+APIs; jsdom assertions are not real-browser evidence. For staged screenshots,
+`issue8427.prepare(mode, showThinking)`, `issue8427.render()`,
+`issue8427.expand(true)`, `issue8427.collapse(true)`, and
+`issue8427.render(true)` expose the same flow.
+
 ## Project-picker deferred repaint handoff regression
 
 Expand a parent with fork-child menus, open a picker, defer a list repaint,
