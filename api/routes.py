@@ -26827,6 +26827,7 @@ def _rearm_process_wakeup_after_launch_failure(
     wakeup_prompt,
     process_id: str = "",
     retry_attempt: int = 0,
+    consumed_claimed_by_dispatch: bool = False,
 ) -> None:
     """Re-arm the process-wakeup drain after a launch-failure abort (#7680).
 
@@ -26855,6 +26856,17 @@ def _rearm_process_wakeup_after_launch_failure(
     so by the time a failure inside that drain reaches here the registry is
     already empty and the coalesce guard cannot fire — without this marker a
     persistent launch failure spun a new timer every 2s forever.
+
+    ``consumed_claimed_by_dispatch`` is the transport-claim provenance of the
+    shared registry consumed key (claimed by ``_process_one``'s idle dispatch,
+    not by an agent read), threaded down from
+    ``_start_server_side_wakeup_turn``. It is recorded on the queued entry
+    BEFORE the retry timer is scheduled, and that ordering is load-bearing: the
+    abort's exception can take longer than the 2s delay to reach the
+    dispatcher's handler, so the timer-fired drain may run first. If that drain
+    finds an untagged entry whose key is set, it reads the dispatch's own claim
+    as an agent read and drops the retry — no timer is left afterwards, so the
+    wakeup is lost (#8363 review, maintainer's stalled-unwind ordering).
     """
     wakeup_prompt = str(wakeup_prompt or "").strip()
     if not wakeup_prompt:
@@ -26883,7 +26895,12 @@ def _rearm_process_wakeup_after_launch_failure(
             except Exception:
                 _process_id = ""
         try:
-            record_deferred_wakeup(sid, _process_id, wakeup_prompt)
+            record_deferred_wakeup(
+                sid,
+                _process_id,
+                wakeup_prompt,
+                consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+            )
         except Exception:
             logger.debug(
                 "Failed to record deferred wakeup for session %s", sid, exc_info=True,
@@ -27799,6 +27816,7 @@ def _start_chat_stream_for_session(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    consumed_claimed_by_dispatch: bool = False,
     on_admitted=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn.
@@ -27815,6 +27833,13 @@ def _start_chat_stream_for_session(
     async-delegation completions share ``source="process_wakeup"`` but own a
     durable retry, so re-arming for them double-delivered one completion
     (#7680 CORE, maintainer 2026-10-01).
+
+    ``consumed_claimed_by_dispatch`` says the shared registry consumed key was
+    claimed by the DISPATCH that started this turn (transport dedupe), not by an
+    agent read. The launch-abort re-arm must record that provenance on the
+    retried entry, otherwise a timer-fired retry drains an untagged entry whose
+    key reads as "already read" and is dropped even though no process read and
+    no accepted turn happened (#8363 review).
     """
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
@@ -28119,6 +28144,7 @@ def _start_chat_stream_for_session(
                             wakeup_prompt=msg,
                             process_id=process_id,
                             retry_attempt=retry_attempt,
+                            consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                         )
                     raise
                 break
@@ -28294,6 +28320,7 @@ def _start_run(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    consumed_claimed_by_dispatch: bool = False,
     on_admitted=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
@@ -28308,6 +28335,11 @@ def _start_run(
     ``source`` is the StartRunRequest.source (``"webui"`` for browser POSTs,
     ``"process_wakeup"`` for the drain-thread wakeup). ``route`` is the
     metadata.route label that lands on the run record for observability.
+
+    ``process_id``/``retry_attempt``/``rearm_deferred_wakeup``/
+    ``consumed_claimed_by_dispatch`` are passed through unchanged to the
+    in-process start: they carry the process-wakeup delivery identity and the
+    transport-claim provenance into the launch-abort re-arm (#8363 review).
 
     Returns a dict with ``_status`` plus the legacy chat-start response
     fields (``stream_id``, ``session_id``, etc.). Adapter selection that
@@ -28383,6 +28415,7 @@ def _start_run(
                 process_id=process_id,
                 retry_attempt=retry_attempt,
                 rearm_deferred_wakeup=rearm_deferred_wakeup,
+                consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                 on_admitted=on_admitted,
             )
 
@@ -28436,6 +28469,7 @@ def _start_run(
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
+        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
         on_admitted=on_admitted,
     )
 
@@ -28499,11 +28533,17 @@ def start_session_turn(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    consumed_claimed_by_dispatch: bool = False,
     on_admitted=None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
     ``on_admitted`` is forwarded to ``_start_chat_stream_for_session``.
+
+    ``consumed_claimed_by_dispatch`` is forwarded too: the process-completion
+    dispatch claims the shared registry consumed key as a transport dedupe, and
+    a launch-abort re-arm must preserve that provenance so the retry is not
+    dropped as if the agent had read the completion (#8363 review).
 
     Option Z primary wakeup entrypoint. This is the minimal, HTTP-handler-free
     core that ``/api/chat/start`` already reaches via ``_handle_chat_start`` →
@@ -28703,6 +28743,7 @@ def start_session_turn(
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
+        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
         on_admitted=on_admitted,
     )
 
