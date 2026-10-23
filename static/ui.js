@@ -26431,8 +26431,10 @@ async function promptNewFolder(targetDir = S.currentDir || '.'){
       if(addAsSpace){
         try{
           const data=await api('/api/workspaces/add',{method:'POST',body:JSON.stringify({path:absPath})});
-          if(typeof _workspaceList!=='undefined')_workspaceList=data.workspaces||_workspaceList||[];
-          if(typeof renderWorkspacesPanel==='function')renderWorkspacesPanel(_workspaceList);
+          // r14 P2-2: publish through the rev gate — a direct assignment
+          // resurrected rows a newer publish had removed and poisoned the
+          // gated cache (the gate's published-rev then rejected repairs).
+          if(typeof _publishWorkspaceList==='function'&&_publishWorkspaceList(data.rev,data.workspaces||[],data.boot,data.profile)&&typeof renderWorkspacesPanel==='function')renderWorkspacesPanel(_workspaceList);
           showToast(t('workspace_added'));
         }catch(e2){setStatus((t('error_prefix')||'Error: ')+e2.message);}
       }
