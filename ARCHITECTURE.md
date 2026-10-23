@@ -256,6 +256,16 @@ Session is a plain Python class (not a dataclass, not SQLAlchemy):
 title_from(): takes messages list, finds first user message, returns first 64 chars.
 Called after run_conversation() completes to set the session title retroactively.
 
+#### Agent-facing reasoning transport (`model_options`)
+
+All Agent-facing HTTP lanes (`/v1/chat/completions` and `/v1/runs`, including
+`runner-local`) place the effective reasoning effort in nested `model_options`,
+which is the current Agent receiver contract. Gateway lanes nest
+`service_tier` there as well. Gateway chat and runner-local also retain the
+top-level `reasoning_effort` scalar for older receivers. Supra-legacy efforts
+are preserved only when the receiver advertises them; otherwise they degrade to
+the highest known-safe level.
+
 #### Session transcript reconciliation with `state.db`
 
 `reconciled_state_db_messages_for_session()` uses

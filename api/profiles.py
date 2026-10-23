@@ -72,6 +72,17 @@ def _read_dotenv_values(env_path) -> dict[str, str]:
 # is the provenance record that tells them apart (#8432).
 _INITIAL_HERMES_HOME_DOTENV = _read_dotenv_values(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else {}
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
+_GATEWAY_DEPLOYMENT_ENV_KEYS = (
+    'HERMES_WEBUI_GATEWAY_BASE_URL',
+    'HERMES_WEBUI_GATEWAY_API_KEY',
+    'HERMES_WEBUI_GATEWAY_USE_RUNS_API',
+    'API_SERVER_KEY',
+)
+_INITIAL_GATEWAY_DEPLOYMENT_ENV = {
+    key: value
+    for key in _GATEWAY_DEPLOYMENT_ENV_KEYS
+    if (value := os.environ.get(key)) is not None
+}
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
 _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
@@ -80,6 +91,12 @@ _ISOLATED_PROFILE_TRUTHY_VALUES = frozenset({'1', 'true', 'yes', 'on'})
 _active_profile = 'default'
 _profile_lock = threading.Lock()
 _loaded_profile_env_keys: set[str] = set()
+# Parsed ``.env`` of the process owner, recorded whenever a *permanent* reload
+# runs for that owner home. Deployment-level reads (owner ``config.yaml``
+# ``${VAR}`` expansion, owner Gateway endpoint) resolve against this plus the
+# launcher snapshot instead of live ``os.environ``, which may hold a named
+# profile's background-worker mirror at that moment.
+_PROCESS_OWNER_DOTENV: dict[str, str] = {}
 
 # Thread-local profile context: set per-request by server.py, cleared after.
 # Enables per-client profile isolation (issue #798) — each HTTP request thread
@@ -879,6 +896,21 @@ def get_hermes_home_for_profile(name: str) -> Path:
     return _resolve_profile_home_for_name(name)
 
 
+def get_process_owner_environ() -> dict[str, str]:
+    """Return the process owner's stable environment for deployment-level reads.
+
+    The launcher environment captured at import, overlaid with the owner's
+    parsed ``.env`` from the last permanent reload. Live ``os.environ`` is
+    deliberately excluded: while a named-profile background worker holds its
+    environment mirror, ``os.environ`` carries that profile's values, and the
+    owner's ``config.yaml`` ``${VAR}`` expansion and Gateway endpoint must not
+    follow them.
+    """
+    environ = dict(_INITIAL_PROCESS_ENV)
+    environ.update(_PROCESS_OWNER_DOTENV)
+    return environ
+
+
 _TERMINAL_ENV_MAPPINGS = {
     'backend': 'TERMINAL_ENV',
     'env_type': 'TERMINAL_ENV',
@@ -1441,7 +1473,7 @@ def profile_env_for_thread_readonly(
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
     if not profile or (profile == "default" and not include_root):
-        yield
+        yield None
         return
 
     try:
@@ -1460,7 +1492,7 @@ def profile_env_for_thread_readonly(
             profile,
             exc_info=True,
         )
-        yield
+        yield None
         return
 
     previous_env = getattr(_thread_ctx, "env", {})
@@ -1474,13 +1506,61 @@ def profile_env_for_thread_readonly(
     try:
         _thread_ctx.env = thread_env
         _thread_ctx.block_process_env_fallback = True
-        yield
+        yield dict(thread_env)
     finally:
         _thread_ctx.block_process_env_fallback = previous_block
         if previous_env:
             _thread_ctx.env = previous_env
         else:
             _thread_ctx.env = {}
+
+
+@contextmanager
+def profile_scope_for_request_read(
+    profile_name,
+    purpose: str = "request read",
+    logger_override: Optional[logging.Logger] = None,
+):
+    """Bind a profile's TLS and thread-local env for a read, leaving ``os.environ`` alone.
+
+    ``profile_scope_for_detached_worker`` binds the same TLS but ALSO mirrors
+    the profile env into the process-wide ``os.environ`` through
+    ``profile_env_for_background_worker``, which detached agent bodies need
+    because some Hermes readers still call ``os.getenv()``. A request-time read
+    must not do that: while any thread is inside the mirrored scope, every other
+    thread that reads ``os.environ`` sees this profile's values — e.g. a
+    default-profile request resolving ``_gateway_base_url()`` /
+    ``_gateway_api_key()`` picks up the named profile's Gateway endpoint and key.
+
+    Yields the profile-owned environment for callers to pass explicitly to those
+    readers. It never yields ``None``: an empty or root profile name binds the
+    stable root environment (the launcher snapshot with the root home's ``.env``
+    over it) instead of leaving the reads to a live ``os.environ`` that another
+    profile's background worker may be mirroring. Values must come from this
+    mapping, never from ``os.environ``.
+    """
+    name = (profile_name or "").strip()
+    previous_profile = getattr(_tls, "profile", None)
+    if name:
+        set_request_profile(name)
+    try:
+        with profile_env_for_thread_readonly(
+            name or "default",
+            purpose,
+            logger_override=logger_override,
+            include_root=True,
+        ) as bound_env:
+            if isinstance(bound_env, dict):
+                yield dict(bound_env)
+            else:
+                # Resolution failed. Keep the launcher snapshot rather than
+                # falling through to a live os.environ another profile owns.
+                yield dict(_INITIAL_PROCESS_ENV)
+    finally:
+        if previous_profile is None:
+            clear_request_profile()
+        else:
+            set_request_profile(previous_profile)
 
 
 @contextmanager
@@ -1704,6 +1784,61 @@ def _set_hermes_home(home: Path):
         logger.debug("Failed to patch cron.scheduler module")
 
 
+def _refresh_gateway_deployment_snapshot(home: Path, loaded_env: dict[str, str]) -> None:
+    """Refresh gateway_chat's deployment snapshot after a permanent dotenv reload.
+
+    ``api.gateway_chat`` captures the launcher-owned Gateway settings once at
+    import; a runtime ``_reload_dotenv()`` (onboarding apply, process-wide
+    switch) changes the process env underneath it, and without this refresh
+    every sparse named profile keeps serving the stale endpoint/key/runs flag
+    while the default profile already reads the new ones. A missing ``.env``
+    also counts as a permanent change: the previous profile's keys were just
+    cleared above.
+
+    Only the stable process owner's dotenv may update the snapshot. Values are
+    rebuilt from the launcher snapshot plus that file's parsed values rather
+    than live ``os.environ``, which may currently contain a named worker's
+    temporary mirror. Request-owned onboarding reloads are therefore isolated.
+
+    Only an already-imported ``api.gateway_chat`` is refreshed: a
+    not-yet-imported module captures the then-current env at import anyway,
+    and importing it from here would add a module-load cycle. Temporary
+    worker-environment mirrors never call this — only the permanent reload
+    path does.
+
+    The owner's parsed dotenv is recorded here in every case, because
+    deployment-level readers (``get_process_owner_environ``) resolve the owner
+    ``config.yaml`` placeholders and Gateway endpoint from it plus the launcher
+    snapshot rather than from live ``os.environ``.
+    """
+    global _PROCESS_OWNER_DOTENV
+
+    try:
+        is_process_owner = home.expanduser().resolve() == get_process_profile_home().expanduser().resolve()
+    except OSError:
+        is_process_owner = home.expanduser() == get_process_profile_home().expanduser()
+    if not is_process_owner:
+        return
+
+    _PROCESS_OWNER_DOTENV = dict(loaded_env)
+
+    gateway_chat = sys.modules.get("api.gateway_chat")
+    if gateway_chat is None:
+        return
+    deployment_env = dict(_INITIAL_GATEWAY_DEPLOYMENT_ENV)
+    deployment_env.update(
+        {
+            key: value
+            for key, value in loaded_env.items()
+            if key in _GATEWAY_DEPLOYMENT_ENV_KEYS
+        }
+    )
+    try:
+        gateway_chat.refresh_gateway_deployment_env(deployment_env)
+    except Exception:
+        logger.debug("Failed to refresh the gateway deployment snapshot", exc_info=True)
+
+
 def _reload_dotenv(home: Path):
     """Load .env from the profile dir into os.environ with profile isolation.
 
@@ -1713,13 +1848,23 @@ def _reload_dotenv(home: Path):
     """
     global _loaded_profile_env_keys
 
-    # Remove keys loaded from the previous profile first.
-    for key in list(_loaded_profile_env_keys):
+    # Remove keys loaded from the previous profile first. A dotenv value is an
+    # overlay on the process launch environment, so restore the launcher's
+    # Gateway value only for the keys this reload actually removed: updating
+    # every deployment key would overwrite a concurrent named-profile worker's
+    # live mirror with the deployment credential and URL.
+    removed_keys = [key for key in _loaded_profile_env_keys if key in os.environ]
+    for key in removed_keys:
         os.environ.pop(key, None)
     _loaded_profile_env_keys = set()
+    for key in removed_keys:
+        if key in _INITIAL_GATEWAY_DEPLOYMENT_ENV:
+            os.environ[key] = _INITIAL_GATEWAY_DEPLOYMENT_ENV[key]
 
     env_path = home / '.env'
+    loaded_env: dict[str, str] = {}
     if not env_path.exists():
+        _refresh_gateway_deployment_snapshot(home, loaded_env)
         return
     try:
         loaded_keys: set[str] = set()
@@ -1742,10 +1887,36 @@ def _reload_dotenv(home: Path):
                         continue
                     os.environ[k] = v
                     loaded_keys.add(k)
+                    loaded_env[k] = v
+        # The canonical and legacy Gateway key names are one precedence group
+        # in the reload layer, but a dotenv alias must not demote an explicit
+        # launcher ``HERMES_WEBUI_GATEWAY_API_KEY`` (docs/advanced-chat-setup.md:
+        # the canonical name wins, ``API_SERVER_KEY`` is the fallback when it is
+        # absent). Mirroring an alias-only dotenv onto the canonical name made
+        # every canonical reader prefer the dotenv value — and the Agent clones
+        # the root ``.env``, whose ``API_SERVER_KEY`` is the Agent's own key, so
+        # that copy replaced the launcher credential on the shared Gateway and
+        # the receiver answered 401. Only mirror the alias onto both names when
+        # no launcher canonical exists; a dotenv canonical (an explicit choice)
+        # still replaces the launcher one.
+        if loaded_env.get('HERMES_WEBUI_GATEWAY_API_KEY'):
+            profile_gateway_key = loaded_env['HERMES_WEBUI_GATEWAY_API_KEY']
+        elif loaded_env.get('API_SERVER_KEY') and not _INITIAL_GATEWAY_DEPLOYMENT_ENV.get(
+            'HERMES_WEBUI_GATEWAY_API_KEY'
+        ):
+            profile_gateway_key = loaded_env['API_SERVER_KEY']
+        else:
+            profile_gateway_key = ''
+        if profile_gateway_key:
+            for gateway_key in ('HERMES_WEBUI_GATEWAY_API_KEY', 'API_SERVER_KEY'):
+                os.environ[gateway_key] = profile_gateway_key
+                loaded_env[gateway_key] = profile_gateway_key
+                loaded_keys.add(gateway_key)
         _loaded_profile_env_keys = loaded_keys
     except Exception:
         _loaded_profile_env_keys = set()
         logger.debug("Failed to reload dotenv from %s", env_path)
+    _refresh_gateway_deployment_snapshot(home, loaded_env)
 
 
 def init_profile_state() -> None:
