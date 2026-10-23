@@ -8,7 +8,7 @@ This is the comprehensive Docker reference. For a 5-minute quickstart, see the [
 |---|---|---|
 | **Single-container** (recommended) | You just want chat working. WebUI runs the agent in-process. | `docker-compose.yml` |
 | **Two-container** | You want isolation between gateway (CLI/Telegram/cron) and chat UI. | `docker-compose.two-container.yml` |
-| **Three-container** | Two-container PLUS the dashboard for monitoring. | `docker-compose.three-container.yml` |
+| **Three-container** | Two-container PLUS a separate dashboard container. Deprecated: that container's `--insecure` non-loopback bind is rejected unless a dashboard auth provider is registered — use **Three-service** (`HERMES_DASHBOARD=1`). | `docker-compose.three-container.yml` |
 | **All-in-one image** (community fork — third-party, not maintained by us) | Podman 3.4 / multi-arch / supervisord-style preference. | [sunnysktsang/hermes-suite](https://github.com/sunnysktsang/hermes-suite) — see [#1399](https://github.com/nesquena/hermes-webui/issues/1399) for the original discussion |
 
 ### Available Docker tags
@@ -80,9 +80,14 @@ auto-detects your UID/GID from the mounted volume.
 The single-container setup runs the WebUI only. It can create cron jobs and run
 them manually from the Tasks panel. In Docker, scheduled jobs require the Hermes gateway daemon
 to tick while you are away. If System Settings shows `Gateway not configured`,
-use `docker-compose.two-container.yml`,
-`docker-compose.three-container.yml`, or run `hermes gateway` separately before
-relying on offline scheduled runs. See [Scheduled jobs and the gateway daemon](#scheduled-jobs-and-the-gateway-daemon) below for the full background and verification steps.
+use `docker-compose.two-container.yml`, or run `hermes gateway` separately
+before relying on offline scheduled runs; for the built-in dashboard use
+`docker-compose.three-service.yml`, which sets `HERMES_DASHBOARD=1` (the agent
+requires it to start the integrated dashboard) and registers its own dashboard
+auth provider. `docker-compose.three-container.yml` is deprecated for that
+purpose: its separate dashboard container runs `dashboard --host 0.0.0.0
+--insecure`, and the current agent image rejects that non-loopback bind unless a
+dashboard auth provider is registered. See [Scheduled jobs and the gateway daemon](#scheduled-jobs-and-the-gateway-daemon) below for the full background and verification steps.
 
 For troubleshooting, reinstall, or onboarding reproduction trials, do not mount
 your real `~/.hermes` unless you intentionally want to test real state. Use an
@@ -211,7 +216,7 @@ docker compose -f docker-compose.two-container.yml up -d --force-recreate
 The compose file forwards the same value to the WebUI as
 `HERMES_WEBUI_GATEWAY_API_KEY`, so the health probe authenticates automatically.
 
-The three-container layout adds the dashboard but is otherwise the same shape. If you must stay single-container, you can run `hermes gateway` inside the container as a long-lived background process, but the compose split is sturdier.
+The three-container layout adds a separate dashboard container but is otherwise the same shape; its dashboard does not start unless a dashboard auth provider is registered for it (the three-service file wires one). If you must stay single-container, you can run `hermes gateway` inside the container as a long-lived background process, but the compose split is sturdier.
 
 If you maintain a custom compose file, make sure the **WebUI service** points at
 the gateway service over the compose network:
@@ -240,7 +245,7 @@ services:
 
 Do not copy only `API_SERVER_ENABLED=true` / `API_SERVER_HOST=0.0.0.0` into the
 agent service as a standalone fix. If you intentionally enable the agent API
-server, the agent also requires a real `API_SERVER_KEY` (at least 8 characters),
+server, the agent also requires a real `API_SERVER_KEY` (at least 16 characters),
 and the WebUI still needs `HERMES_API_URL` or `HERMES_WEBUI_GATEWAY_BASE_URL` to
 reach that service from its container.
 
@@ -260,8 +265,9 @@ Refs #2785, #4483.
 ## Three-service unified setup (v0.14+)
 
 Since v0.14, `hermes-agent` can serve the gateway API and the built-in dashboard
-from the same process by setting `HERMES_DASHBOARD_HOST` and
-`HERMES_DASHBOARD_PORT`. Running agent and dashboard in one container means a
+from the same process. Enable the dashboard with `HERMES_DASHBOARD=1` and bind it
+via `HERMES_DASHBOARD_HOST`/`HERMES_DASHBOARD_PORT` — the flag is required;
+host/port alone never start it. Running agent and dashboard in one container means a
 single writer to `hermes-home`, eliminating the concurrent-init write conflicts
 that occur when `hermes-agent` and `hermes-dashboard` both start from the same
 image against the same volume.
@@ -291,8 +297,20 @@ services:
       - HERMES_HOME=/home/hermes/.hermes
       - HERMES_UID=${UID:-1000}
       - HERMES_GID=${GID:-1000}
+      - HERMES_DASHBOARD=1
       - HERMES_DASHBOARD_HOST=0.0.0.0
       - HERMES_DASHBOARD_PORT=9119
+      # Required: the dashboard auth gate refuses a non-loopback bind without
+      # a registered provider. Set DASHBOARD_PASSWORD in your .env.
+      - HERMES_DASHBOARD_BASIC_AUTH_USERNAME=${DASHBOARD_USER:-admin}
+      - HERMES_DASHBOARD_BASIC_AUTH_PASSWORD=${DASHBOARD_PASSWORD:?set DASHBOARD_PASSWORD in .env}
+      # Gateway API (port 8642): the listener must be enabled AND bound
+      # off-loopback inside the container, otherwise the WebUI in the sibling
+      # container cannot reach http://hermes-agent:8642. The key (>=16 chars)
+      # is what authenticates the WebUI health probe and Tasks calls.
+      - API_SERVER_ENABLED=true
+      - API_SERVER_HOST=0.0.0.0
+      - API_SERVER_KEY=${API_SERVER_KEY:?set a >=16-char API_SERVER_KEY in .env}
     restart: unless-stopped
     networks:
       - hermes-net
@@ -314,6 +332,10 @@ services:
       - HERMES_WEBUI_STATE_DIR=/home/hermeswebui/.hermes/webui
       - WANTED_UID=${UID:-1000}
       - WANTED_GID=${GID:-1000}
+      # Same gateway over the compose network, authenticated with the
+      # matching key, so the health pill and the Tasks surfaces work.
+      - HERMES_API_URL=http://hermes-agent:8642
+      - HERMES_WEBUI_GATEWAY_API_KEY=${API_SERVER_KEY:?set a >=16-char API_SERVER_KEY in .env}
     restart: unless-stopped
     networks:
       - hermes-net
@@ -328,15 +350,29 @@ volumes:
 ```
 
 Open http://localhost:8787 for chat and http://localhost:9119 for the dashboard.
+Because the dashboard binds beyond loopback inside the container, it is protected
+by its own basic-auth provider — the browser will prompt for the `DASHBOARD_USER` /
+`DASHBOARD_PASSWORD` you set. `API_SERVER_KEY` does not cover the dashboard; it
+guards only the gateway API on port 8642.
+Set `API_SERVER_KEY` (a random string of at least 16 characters) in `.env`
+before `docker compose up`: without it — or without `API_SERVER_ENABLED=true`
+and `API_SERVER_HOST=0.0.0.0`, which the snippet above sets — the agent leaves
+port 8642 closed and the WebUI reports the agent gateway as unreachable in
+System Settings and in the Tasks panel. `HERMES_API_URL` together with the matching
+`HERMES_WEBUI_GATEWAY_API_KEY` is what points the UI at that gateway and
+authenticates its health probe.
 Check `hermes gateway run --help` for the exact flag names for your agent release —
-the env-var equivalents shown above (`HERMES_DASHBOARD_HOST`, `HERMES_DASHBOARD_PORT`)
-are available in recent releases alongside the CLI flags.
+the env-var equivalents shown above (`HERMES_DASHBOARD=1`, `HERMES_DASHBOARD_HOST`,
+`HERMES_DASHBOARD_PORT`) are available in recent releases alongside the CLI flags.
 
-If you need the separate dashboard container (e.g. resource limits per service),
-`docker-compose.three-container.yml` still works. Add a `depends_on` from
-`hermes-dashboard` to `hermes-agent` with a `condition: service_healthy` healthcheck
-so the dashboard waits for the gateway to finish initialising agent-home before it
-starts its own init pass.
+If you need the dashboard with per-service resource limits, use
+`docker-compose.three-service.yml`: it runs the dashboard inside the
+`hermes-agent` process, so there is no separate container to order. The older
+`docker-compose.three-container.yml` is deprecated for this: its dashboard runs
+`dashboard --host 0.0.0.0 --insecure`, and the current agent image refuses that
+non-loopback bind unless a dashboard auth provider is registered
+(`HERMES_DASHBOARD_BASIC_AUTH_USERNAME`/`_PASSWORD`, or an OAuth provider).
+A `depends_on` ordering alone cannot make its dashboard come up.
 
 ## What goes wrong (and how to fix it)
 
