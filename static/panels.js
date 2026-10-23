@@ -12671,6 +12671,32 @@ function _refreshModelDropdownsAfterProviderChange(){
   }
 }
 
+// Re-render just the card the user refreshed so its model list and
+// "<n> models" header reflect the fresh catalog — without a full
+// loadProvidersPanel() rebuild (which collapses every open card and
+// re-fetches quota). Mirrors _buildProviderCard's markup and preserves the
+// card's expanded state.
+async function _reloadProviderCard(providerId){
+  const list=$('providersList');
+  if(!list||!providerId) return;
+  let old=null;
+  list.querySelectorAll('.provider-card').forEach(c=>{
+    if(c.dataset&&c.dataset.provider===providerId) old=c;
+  });
+  if(!old) return;
+  const wasOpen=old.classList.contains('open');
+  try{
+    const data=await api('/api/providers',{cache:'no-store'});
+    const p=(data.providers||[]).find(x=>x&&x.id===providerId);
+    if(!p) return;
+    const fresh=_buildProviderCard(p);
+    if(wasOpen) fresh.classList.add('open');
+    old.replaceWith(fresh);
+  }catch(_e){
+    // Best-effort: the dropdown flush already ran; keep the old card.
+  }
+}
+
 async function _refreshProviderModels(providerId, btn){
   btn.disabled=true;
   const orig=btn.innerHTML;
@@ -12680,6 +12706,7 @@ async function _refreshProviderModels(providerId, btn){
     if(res.ok){
       showToast(t('providers_models_refreshed')||('Models refreshed for '+res.provider));
       _refreshModelDropdownsAfterProviderChange();
+      await _reloadProviderCard(providerId);
     }else{
       showToast(res.error||'Failed to refresh models');
     }
