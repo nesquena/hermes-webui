@@ -21174,6 +21174,15 @@ function _insertSegmentBlock(seg, html){
   }
   seg.insertAdjacentHTML('beforeend', html);
 }
+function _assistantSegmentIsTurnFinal(row, mi){
+  // True for the row's last assistant segment — the turn's final answer, the one
+  // that owns turn-level footer labels (switch/failover warnings). A turn
+  // without discoverable segments counts as final so its labels still render.
+  if(!row) return true;
+  const segs=row.querySelectorAll('.assistant-segment[data-msg-idx]');
+  const last=segs.length?segs[segs.length-1]:null;
+  return !last||String(last.dataset.msgIdx)===String(mi);
+}
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
@@ -22627,8 +22636,17 @@ function renderMessages(options){
       if(msg.role!=='assistant') continue;
       const routing=msg._gatewayRouting||null;
       const gatewayText=_formatGatewayModelLabel(String(msg._usedModel||'').trim()||(S.session&&S.session.model)||'', '', routing);
-      const failoverText=_gatewayRoutingFailoverText(routing);
-      const modelWarningText=_gatewayModelWarningText(routing);
+      const seg=assistantSegments.get(mi);
+      const row=seg?seg.closest('.assistant-turn'):null;
+      // Switch/failover warnings describe the whole turn, not one segment; the
+      // model label below is per-segment. Render the warnings on the turn's
+      // final assistant segment only, so a routed turn with interim answers
+      // shows each label once instead of once per segment.
+      // typeof guard: node harnesses extract renderMessages() without its
+      // helpers (#6717); without the helper every segment counts as final.
+      const isTurnFinal=typeof _assistantSegmentIsTurnFinal==='function' ? _assistantSegmentIsTurnFinal(row, mi) : true;
+      const failoverText=isTurnFinal?_gatewayRoutingFailoverText(routing):'';
+      const modelWarningText=isTurnFinal?_gatewayModelWarningText(routing):'';
       const hasTurnUsage=!!msg._turnUsage;
       // The Worklog summary owns the "Done in …" duration whenever this
       // assistant message contributes tool or thinking detail to a folded
@@ -22637,9 +22655,11 @@ function renderMessages(options){
       const durationText=compactWorklogForMessage?'':_formatTurnDuration(msg._turnDuration);
       const usedModelText=_usedModelTurnChipLabel(msg);
       if(!hasTurnUsage&&!durationText&&!gatewayText&&!failoverText&&!modelWarningText&&!usedModelText) continue;
-      const seg=assistantSegments.get(mi);
-      const row=seg?seg.closest('.assistant-turn'):null;
-      const footerRows=row?row.querySelectorAll('.msg-foot'):[];
+      // Scope the footer lookup to this message's own segments. The turn's
+      // last .msg-foot belongs to the turn's final answer, and the duplicate
+      // guard below would then make the final message skip its own labels
+      // after an interim answer wrote into that foot (issue #8287).
+      const footerRows=row?row.querySelectorAll(`.assistant-segment[data-msg-idx="${mi}"] .msg-foot`):[];
       const targetFoot=footerRows.length?footerRows[footerRows.length-1]:null;
       if(!targetFoot||targetFoot.querySelector('.msg-usage-inline,.msg-duration-inline,.msg-gateway-inline,.gateway-failover-inline,.msg-model-warning-inline,.msg-used-model-inline')) continue;
       const fragments=[];
