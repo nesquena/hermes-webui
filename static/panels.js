@@ -14060,9 +14060,9 @@ function toggleMcpServer(name, enabled){
       _refreshMcpToolsetsCatalog();
       showToast(t(enabled?'mcp_enabled_toast':'mcp_disabled_toast',name));
     }
-    else showToast(t('mcp_toggle_failed'),'error');
+    else showToast(t('mcp_toggle_failed'),null,'error');
     loadMcpServers();
-  }).catch(()=>{showToast(t('mcp_toggle_failed'),'error');loadMcpServers();});
+  }).catch(()=>{showToast(t('mcp_toggle_failed'),null,'error');loadMcpServers();});
 }
 function _refreshMcpToolsetsCatalog(payload){
   if(typeof window.invalidateToolsetsCatalog==='function') window.invalidateToolsetsCatalog(payload);
