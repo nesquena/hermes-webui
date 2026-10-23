@@ -48,8 +48,14 @@ def test_usage_merge_helper_keeps_context_when_latest_omits_it():
 
 
 def test_session_load_prefers_positive_last_usage_context_over_stale_snapshot():
-    assert "const _pickPositive=(latest,stored,dflt=0)=>Number(latest)>0?latest:(Number(stored)>0?stored:dflt);" in SESSIONS_JS
-    assert "context_length:    _pickPositive(u.context_length, _s.context_length)," in SESSIONS_JS
+    # #7732 collapsed the inline projection in loadSession() into the ONE shared
+    # _projectCtxUsageForDisplay() helper, so assert the helper (and the call site)
+    # still carry the #3660 intent: a positive live window is never dropped when the
+    # session snapshot has none, and loadSession no longer open-codes a variant.
+    assert "function _projectCtxUsageForDisplay(" in UI_JS
+    assert "_projectCtxUsageForDisplay(S.lastUsage||{},_s)" in SESSIONS_JS
+    assert "Number(u.context_length)>0?u.context_length:0" in UI_JS
+    assert "_pickPositive(u.context_length, _s.context_length)" not in SESSIONS_JS
 
 
 def test_deferred_model_resolve_does_not_zero_out_existing_context_window():
