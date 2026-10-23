@@ -924,3 +924,75 @@ def test_non_auth_seeded_replayed_assistant_does_not_satisfy_current_turn(tmp_pa
     assert apperrors, "expected apperror for seeded replay silent failure"
     assert apperrors[-1]["type"] == "no_response"
     assert not any(event == "done" for event, _ in events)
+
+
+def test_exception_path_self_heal_binds_default_profile_under_a_named_process_profile(
+    tmp_path,
+    monkeypatch,
+):
+    """#7724 review CORE finding: the except-path "Credential self-heal on 401
+    (#1401)" guarded its re-resolve with ``profile_scope_for_detached_worker``
+    but omitted ``bind_root``.
+
+    Under a NAMED process profile that scope is a deliberate no-op for an
+    explicit ``default`` name, so the self-heal re-resolved the named profile's
+    provider, alias and custom-provider key for a ``default`` session and then
+    retried the connection against it. This asserts the scope the heal actually
+    runs inside resolves ``default``.
+    """
+    from api import profiles
+
+    session = _prepare_session(
+        "auth_bindroot", "stream_auth_bindroot", pending_user_message="Retry"
+    )
+    session.profile = "default"
+    session.save()
+
+    class RetryAgent(MockAgent):
+        runs = 0
+
+        def run_conversation(self, **kwargs):
+            type(self).runs += 1
+            if type(self).runs == 1:
+                raise RuntimeError("401 unauthorized")
+            return {
+                "messages": list(kwargs.get("conversation_history") or [])
+                + [{"role": "assistant", "content": "Recovered answer"}]
+            }
+
+    heal_rt = {"provider": "test-provider", "api_key": "fresh-key", "base_url": None}
+    seen = {}
+
+    def _recording_heal(*args, **kwargs):
+        # Runs INSIDE the self-heal scope, so this is the profile the re-resolve
+        # would actually read.
+        seen["profile"] = profiles.get_active_profile_name()
+        return heal_rt
+
+    # A NAMED process profile is exactly the setup where a default scope
+    # without bind_root stays a no-op (see the contract test in
+    # tests/test_issue3957_profile_providers_models.py).
+    monkeypatch.setattr(profiles, "_active_profile", "work")
+    monkeypatch.setattr(
+        profiles, "_is_root_profile", lambda name: name in ("", "default")
+    )
+
+    fake_queue = queue.Queue()
+    streaming.STREAMS["stream_auth_bindroot"] = fake_queue
+    config.STREAM_PARTIAL_TEXT["stream_auth_bindroot"] = ""
+    with mock.patch.object(streaming, "get_session", return_value=session), \
+         mock.patch.object(streaming, "_get_ai_agent", return_value=RetryAgent), \
+         mock.patch.object(streaming, "resolve_model_provider", return_value=("test-model", "test-provider", None)), \
+         mock.patch("api.config.get_config", return_value={}), \
+         mock.patch("api.config._resolve_cli_toolsets", return_value=[]), \
+         mock.patch.object(
+             streaming, "_attempt_credential_self_heal", side_effect=_recording_heal
+         ):
+        streaming._run_agent_streaming(
+            session.session_id, "Retry", "test-model", str(tmp_path), "stream_auth_bindroot"
+        )
+
+    assert seen.get("profile") == "default", (
+        "the except-path self-heal must resolve the session's OWN profile; got "
+        f"{seen.get('profile')!r} (the named process profile) instead"
+    )
