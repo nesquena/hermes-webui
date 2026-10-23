@@ -51,6 +51,159 @@ never the prefill message bodies.
 
 ## Session title generation
 
+OpenAI-compatible title routes first request a strict JSON object with one
+`title` string. Unsupported schemas, empty schema results, and reasoning-only
+schema results retry the same prompt and budget with the existing compatibility
+request shape. Compatibility reasoning-only output still stops further attempts.
+When a transport silently strips the schema request and answers with a valid
+plain-text title, that same response is parsed with the compatibility
+extractor and accepted after validation — one provider call, no re-send.
+Malformed JSON-looking objects or arrays are rejected, not reused as prose;
+the compatibility request may still supply a valid recovery title.
+Only an unsupported-schema rejection permits a compatibility-mode re-send. HTTP
+400 and 422 responses are treated as one, whatever their message says.
+Authentication, rate-limit, server and timeout failures remain transport errors
+even when their messages mention `response_format`/`json_schema`. The schema request carries
+the same route-gated reasoning disable as the compatibility request, so
+reasoning models do not spend the title budget on hidden thoughts first.
+
+Fresh candidates reject reasoning traces, option lists, and output over 12 words.
+Saved-title self-healing is much narrower, and stays close to master. Beyond
+master's own checks (including its `<think>` marker) and provider channel
+markers (`<|channel|>analysis …`), a persisted title is regenerated only for:
+- a sentence-case echo of the prompt's length rule (`Title should be 3-8
+  words, …`; the range must follow "should be" directly, keep its `-` or "to",
+  and be followed by the whole word `words`)
+- two or more quoted multi-word alternatives after `Options:`, `Good title:`,
+  `Something like` or master's `Title options:`-style headings, separated only
+  by `or` or list punctuation and with no subject prose after them (`Something
+  like "Fix Login Flow" or "Audit Login …`, `Options: "Call Options"; "Put
+  Options"`)
+
+Everything else is subject matter and is kept: any other tag, even a complete
+wrapper (`<analysis> Element Reference`, `<analysis><!-- </analysis> -->
+HTML Comment Parsing`; a legacy saved `<analysis>…</analysis> Title` also
+stays, while fresh candidates with these tags are rejected), other prompt
+vocabulary (`Title
+should be a topic label`, `Title should be 38 WordPress Themes`, `Title should
+be 3-8 word n-grams`), single quoted words or trailing subject prose
+(`Options: "Yes", "No", and the Art of Choosing`, `Title Suggestions: "Merge"
+or "Rebase" in Git`), unquoted hyphens or semicolons (`Good Title: Summer; a
+Memoir`), and one quoted name with appositives (`Options: "Summer", a Memoir,
+Revised Edition`). Saved
+`Analysis:`/`Thinking:`/`Reasoning:`/`Thought:` headings are not self-heal
+signals, even when their subject matter resembles a reasoning clause; newly
+generated candidates with those headings are still rejected. Manual titles
+remain protected. Compatibility extraction removes completed thinking wrappers
+and supported thinking preambles before validating the remaining visible title,
+so a usable title can be reused without another provider call. Unwrapped
+reasoning that embeds a candidate is still rejected, and the visible text is
+validated with the candidate predicates before extraction: a heading-prefixed
+reasoning sentence ("Analysis: I should not use …") cannot hide an embedded
+candidate. JSON containers are validated only at payload boundaries: the whole
+visible response, a fenced block, or a supported prose envelope (for example,
+`Here is the JSON:` or `Sure.`). They must satisfy the schema contract — an
+object whose only key is a usable string `title`. Malformed outer containers
+and arrays fail closed without searching their contents for a nested title.
+JSON literals within ordinary title prose (`Fix [1, 2] Parsing Bug`, `Handle {}
+In Config Parser`) and closed bracket labels (`Login Repair [2026]`) remain
+prose. A literal container followed by title prose (`[1, 2] Parsing Tutorial`)
+is preserved rather than extracted. Prose is never returned verbatim while it
+still carries a payload that boundary validation did not accept: a `"title":`
+key anywhere, an unclosed JSON opener (`{"`, `["`, `[{`), or a leading
+string-bearing container followed by prose (`{"title": "X"} Done`). A
+container directly after a `Title:` label counts as leading, because the label
+is stripped before saving (`Title: ["A", "B"]`). A decoded title string that is
+itself such a payload (`"{\"title\": \"X\"}"`) is rejected the same way. Those
+checks treat any short label as a payload boundary — up to four words ending in
+a colon, an em/en dash or a spaced hyphen (`Title —`, `1. Result:`,
+`Here's my pick:`), after Markdown headings, blockquotes, bullets or numbering —
+and recognize backtick or tilde fences after labels, nested arrays and escaped
+JSON-string arrays. Label wording is not the only signal: a string-bearing
+container (one holding a string value) that ends the reply, or follows any separator
+(`:`, `：`, `|`, `=>`, `->`, a dash), is the payload whatever precedes it
+(`Here is my chosen output: […]`, `Result => […] hope this helps`). A container
+in the middle of a title is subject matter whatever its contents
+(`Compare ["React", "Vue"] Performance`, `We use ["a"] as Defaults`). HTML entities and tags, invisible format characters
+(zero-width, bidi isolates) and leading emoji are ignored for this validation;
+`<code>` marks a literal mention like backticks. Bracket prose after a label (`Notes - [Draft] Review`) and
+non-string literals (`Changelog: [1, 2, 3]`, `JSON: {}`) remain titles, as do
+literals in the middle of a title (`Use ["a", "b"] As Default List`). A
+string-bearing container after a separator or at the end (`Arrays: ["a", "b"]
+Basics`, `Sorting ["b", "a"]`) fails closed. Only after the `Title:` label,
+which is stripped before saving, does any container fail closed. A reply with two
+or more dash, star, bullet or numbered (`1.`, `1)`) lines is a menu whatever
+heading introduces it; steps on one line stay titles (`Tutorial: 1. Install 2.
+Configure`). Unicode-escaped
+title keys count as evidence too; this normalization is used only for rejection
+and never rewrites the saved title.
+These responses fail closed into the compatibility request. Bare `Maybe`, `Options:`,
+`topic label`, or `3-8 words` subject matter is not reasoning evidence;
+structural menus, instruction echoes and hedged reasoning sentences (`Maybe I
+should call it …`, `Maybe we can …`, `Maybe I'll …`) remain rejected,
+including Markdown emphasis on the hedge or on the clause after it.
+`Possibly` and `Probably` clauses and bullet/blockquoted hedges use the same
+candidate-only check. Sentence-shaped `I think`, `I guess`, `I suppose`,
+`I believe`, `I'd suggest`, `I'd say`, `I'd go with`, `Let's go with`,
+`My pick is`, `How about` and `What about` replies are also rejected, including
+after a hedge or conversational filler (`Perhaps, I think, …`, `Well, I think …`,
+`So I guess …`), while title-cased subjects such as `I Think Therefore I Am`,
+`What About Bob Film Review` and `I Believe I Can Fly Lyrics` remain valid.
+Only the opinion words decide casing, so a following code literal does not
+(`Let's Use pytest Fixtures`), and mixed-case brand words count as capitalized
+(`How About iPhone Repair`, `I Guess eBPF on linux`).
+Filler and hedges may interleave (`Maybe well I think …`).
+Hedge prefixes are processed iteratively with a 32-token bound rather than
+recursive calls. After a hedge, a reasoning phrase in lowercase or all caps is a
+sentence; a title-cased one is a subject (`Maybe We Should Talk Podcast`,
+`Maybe I'll Be There Lyrics`). Curly, full-width, single or backslash-escaped
+quote representations of a `"title":` key count as payload evidence without
+rewriting ordinary title text, so subjects quoting a title key
+(`Python dict {'title': 1} lookups`) also fail closed.
+
+Fresh-candidate rules fail closed, and none of them renames a saved title. A
+rejected candidate leads to a compatibility retry or the alternate route where
+one is available; otherwise the provisional or existing title stays. Some
+legitimate titles are therefore rejected as fresh candidates:
+- more than 12 words
+- `Analysis:`, `Thinking:`, `Reasoning:` or `Thought:` headings
+- `Something like …`, `A good title: …` and `Title should …` openings
+- a `"X" or "Y"` quoted choice
+- a thinking-tag marker anywhere (`Parsing <analysis> Tags`)
+- a whole reply that is a bare JSON value: a scalar (`1984`) or a container
+  without a usable title (`[]`, `{}`, `[1, 2]`)
+- an unmatched JSON opener (`Python [" Syntax Error Guide`)
+- a quoted title key
+- a string-bearing container at the start, at the end or after a separator
+  (`["a", "b"] Python List Tutorial`, `Sorting ["b", "a"]`)
+- an all-caps hedge, or a hedge whose reasoning phrase or the word after it is
+  lowercase (`Maybe We Can build a compiler`)
+- a recognized multi-line list, or two bulleted quoted items
+
+These checks deliberately stop at shapes that can be told apart from real
+titles. Shapes that master also saves are still saved as titles:
+- a container mid-sentence (`I picked ["A", "B"] for you`)
+- a menu collapsed onto one line (`Titles: 1. A 2. B`, `Titles: (1) A (2) B`)
+- multi-line menus with other markers (`a)`, `I.`, entity-encoded `1&#46;`)
+- a capitalized opinion lead followed by a sentence (`I Guess this is a good
+  title`)
+- opinion verbs outside the list above (`I recommend …`)
+- meta-commentary or preambles without a listed hedge or opinion lead, in any
+  case (`The best title is X`, `This conversation is about …`, `after
+  reviewing the chat, X fits best`, `here is your title: X`)
+- thinking markup the checks above don't recognize: other tag names
+  (`<thinking>…</thinking>`), an opener cut off before `>`, or entity-encoded
+  tags (`&lt;analysis&gt;`)
+
+The active-Agent Codex Responses and Anthropic Messages transports return
+their normalized text without this payload validation, as on master.
+Invalid reasoning output is classified with the invalid-
+trace statuses rather than empty content. Adaptive refresh tries the
+alternate route for invalid-trace output just as it does for other invalid
+model output. Invalid output retains the provisional title until a later
+exchange or the existing bounded recovery cap; this does not change retry
+ownership.
+
 Hermes WebUI derives a provisional session title from the first user message
 and, after the first response, may call an LLM to generate a better title
 (and periodically refresh it for long sessions).

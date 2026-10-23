@@ -22,6 +22,7 @@ import time
 import traceback
 import unicodedata
 import copy
+from html import unescape as _html_unescape
 import inspect
 from pathlib import Path
 from typing import Optional
@@ -4834,8 +4835,13 @@ def _settle_turn_reasoning(s, _previous_messages, _reasoning_segments,
             _rm['reasoning'] = _existing_reasoning
 
 
-def _strip_thinking_markup(text: str) -> str:
-    """Remove common reasoning/thinking wrappers from model text."""
+def _strip_thinking_markup(text: str, *, collapse_whitespace: bool = True) -> str:
+    """Remove common reasoning/thinking wrappers from model text.
+
+    ``collapse_whitespace=False`` keeps line breaks, so a caller that still has
+    to validate the text (the title extractor's option-menu detector splits
+    candidates on newlines) sees the same boundaries the model sent.
+    """
     if not text:
         return ''
     s = str(text)
@@ -4855,8 +4861,9 @@ def _strip_thinking_markup(text: str) -> str:
         r"|(?:okay|alright|sure|of course),?\s+let me\b[^\n]*\n?)",
         ' ', s, flags=re.IGNORECASE
     )
-    s = re.sub(r'\s+', ' ', s).strip()
-    return s
+    if collapse_whitespace:
+        s = re.sub(r'\s+', ' ', s)
+    return s.strip()
 
 
 def _strip_xml_tool_calls(text: str) -> str:
@@ -4899,25 +4906,28 @@ def _strip_xml_tool_calls(text: str) -> str:
     return s.strip()
 
 
+_TITLE_LABEL_PREFIX_RE = re.compile(
+    r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*:\s*(?:[*_`~]+\s*)?',
+    flags=re.IGNORECASE,
+)
+
+
 def _sanitize_generated_title(text: str) -> str:
     """Sanitize LLM-generated title text before persisting to session."""
     # Preserve newline candidate boundaries before markup normalization.
     if _looks_like_title_option_menu(text):
         return ''
     s = _strip_thinking_markup(text or '')
-    s = re.sub(
-        r'^\s*(?:[*_`~]+\s*)?(?:session\s+title|title)\s*:\s*(?:[*_`~]+\s*)?',
-        '',
-        s,
-        flags=re.IGNORECASE,
-    )
+    s = _TITLE_LABEL_PREFIX_RE.sub('', s)
     s = re.sub(r'^\s*title\s*:\s*', '', s, flags=re.IGNORECASE)
     if _looks_like_title_option_menu(s):
+        return ''
+    if _is_bad_new_title(s):
         return ''
     s = s.strip(" \t\r\n\"'`*_~")
     s = re.sub(r'\s+', ' ', s).strip()
     # Guard against chain-of-thought leakage, meta-reasoning, and trivial echo.
-    if _is_bad_new_title(s):
+    if _is_bad_new_title(s) or len(s.split()) > 12:
         return ''
     return s[:80]
 
@@ -4950,8 +4960,41 @@ _TITLE_MENU_COMMA_VERB_RE = re.compile(
     flags=re.IGNORECASE,
 )
 
+# The persisted self-heal treats only a verbatim echo of the title prompt's
+# length rule as a leak ("The title should be 3-8 words, matching ...").
+# Style-guide subjects ("Title should be a topic label", "Title Should
+# Reflect Content") stay; fresh candidates with the bare shape are still
+# rejected whole by ``_is_bad_new_title``.
+_TITLE_SHOULD_ECHO_RE = re.compile(
+    # The range directly after "should be", delimited, and a whole word:
+    # "38 words", "3-8 WordPress Themes" and "Title should be italicized,
+    # not 3-8 words" are subjects.
+    r'^\s*(?:[*_`~]+\s*)?(?:[Tt]he\s+)?[Tt]itle\s+should\s+be\s+'
+    r'(?i:3\s*[-–]\s*8\s*words|three\s+to\s+eight\s+words)\b',
+)
 
-def _looks_like_title_option_menu(text: str) -> bool:
+
+def _quoted_title_alternatives(text: str) -> bool:
+    """Two or more quoted multi-word titles with only list punctuation or
+    "or" between them ("Something like "Project Docs Review" or "File
+    Project Documents..."). One quoted name, single quoted words and trailing
+    subject prose ("Options: "Yes", "No", and the Art of Choosing") are a
+    saved title."""
+    items = list(re.finditer(r'["“]([^"”\n]+)(?:["”]|$)', text))
+    if len(items) < 2 or any(len(item[1].split()) < 2 for item in items):
+        return False
+    marker = r'\s*(?:[-*•]|\d{1,2}[.)])?\s*'
+    if not re.fullmatch(marker, text[:items[0].start()]):
+        return False
+    if not re.fullmatch(r'[\s.,;…]*', text[items[-1].end():]):
+        return False
+    return all(
+        re.fullmatch(r'\s*(?:or|[,;/|]\s*(?:or)?)?' + marker, text[a.end():b.start()], re.I)
+        for a, b in zip(items, items[1:], strict=False)
+    )
+
+
+def _looks_like_title_option_menu(text: str, *, require_list_syntax: bool = False) -> bool:
     """Return True for a title-model menu rather than one selected title.
 
     The preamble alone is not enough: legitimate single titles like
@@ -4961,12 +5004,24 @@ def _looks_like_title_option_menu(text: str) -> bool:
     two or more list entries, or delimiter-separated standalone alternatives.
     Matching works on both raw stored text and the whitespace-collapsed sanitize
     form. A grammatical comma inside one title is not a candidate boundary.
+
+    ``require_list_syntax`` (persisted self-heal of rewritten bare
+    preambles) accepts only quoted multi-word alternatives; any other saved
+    heading ("Options: Stocks, Bonds, ETFs", "Good Title: Summer; a Memoir")
+    is subject matter and must survive.
     """
     s = str(text or '')
     s_m = _TITLE_OPTION_MENU_RE.match(s)
     if not s_m:
         return False
     rest = s[s_m.end():]
+    if require_list_syntax:
+        return _quoted_title_alternatives(rest)
+    # Quoted multi-word alternatives are a menu, even if the stored output was
+    # truncated before the last closing quote; "Merge" or "Rebase" in Git is a
+    # subject.
+    if _quoted_title_alternatives(rest):
+        return True
     if len(_TITLE_MENU_LIST_RE.findall(rest)) >= 2:
         return True
     # Only separators outside quoted terms delimit candidates. Two quoted
@@ -5031,23 +5086,83 @@ def _looks_like_title_option_menu(text: str) -> bool:
 def _looks_invalid_generated_title(text: str) -> bool:
     """True when an existing/persisted title is structurally invalid (CoT leak).
 
-    Intentionally does NOT reject short conversational words like "Done" or
-    "Cool" — those can be legitimate stored titles. Use ``_is_bad_new_title``
-    when validating a freshly generated candidate.
+    This is the persisted-title self-heal predicate. Keep it unambiguous:
+    master's ``<think>`` and provider channel markers, verbatim echoes of the
+    prompt's length rule ("Title should be 3-8 words …"), and structural
+    candidate-list syntax. Ordinary subject matter — "Analysis: Q3 Sales Trends",
+    "Options: Stocks, Bonds, ETFs", "Title Should Reflect Content",
+    "Maybe Monad Error Handling", "Something Like Summer Discussion",
+    "Parsing <analysis> Tags" — must survive (re-gate 2026-10-19 finding 1).
+    Use ``_is_bad_new_title`` for freshly generated candidates, which keeps
+    the aggressive bare-heading/menu/echo shapes candidate-only.
     """
     s = str(text or '')
     if not s.strip():
         return True
     return bool(
-        re.search(r'<think>|<\|channel\|>thought|<\|turn\|>thinking', s, flags=re.IGNORECASE)
+        # Master's wrapper check. Other tag names stay subjects when saved
+        # ("<analysis> Element Reference"); fresh candidates reject them.
+        re.search(r'<think>', s, flags=re.IGNORECASE)
+        or re.search(
+            r'^\s*(?:[*_`~]+\s*)?<\|channel\|?>\s*(?:thought|analysis|reasoning|thinking)\b',
+            s,
+            flags=re.IGNORECASE,
+        )
+        or re.search(
+            r'^\s*(?:[*_`~]+\s*)?<\|turn\|?>\s*thinking',
+            s,
+            flags=re.IGNORECASE,
+        )
+        or _TITLE_SHOULD_ECHO_RE.search(s)
+        # Direct "title options:/suggestions:/ideas:" preambles already name a
+        # menu, so comma/semicolon fragments are real candidates there; only
+        # the rewritten bare-prefix forms (plain "Options:"/"Good title:"/
+        # "Something like") need structural list evidence (re-gate finding 1).
+        or _looks_like_title_option_menu(s)
+        or _looks_like_title_option_menu(re.sub(
+            r'^\s*(?:[*_`~]+\s*)?(?:(?:a\s+)?good title\s*:|options\s*:|something like\s+)',
+            'Title options:', s, flags=re.IGNORECASE,
+        ), require_list_syntax=True)
         or re.search(r'^\s*(the|ther)\s+user\s+', s, flags=re.IGNORECASE)
         or re.search(r'^\s*user\s+\w+\s+', s, flags=re.IGNORECASE)
         or re.search(r'\b(they|user)\s+want(s)?\s+me\s+to\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*(i|we)\s+(should|need to|will|can)\b', s, flags=re.IGNORECASE)
         or re.search(r'^\s*let me\b', s, flags=re.IGNORECASE)
         or re.search(r"^\s*here(?:'s| is) (?:a |my )?(?:thinking|thought)", s, flags=re.IGNORECASE)
-        or _looks_like_title_option_menu(s)
     )
+
+
+_TITLE_HTML_TAG_RE = re.compile(r'</?[A-Za-z][A-Za-z0-9-]*\b[^<>]*>')
+
+
+def _title_presentation_text(text: str) -> str:
+    """Candidate text without presentation noise, for validation only.
+
+    HTML entities and tags, invisible format characters (zero-width, bidi
+    isolates) and leading emoji must not hide a reasoning lead or a payload
+    label. ``<code>`` marks a literal mention, like backticks. The saved
+    title is never rewritten through this helper.
+    """
+    s = _html_unescape(str(text or ''))
+    s = re.sub(r'</?code\b[^<>]*>', '`', s, flags=re.I)
+    s = _TITLE_HTML_TAG_RE.sub(' ', s)
+    s = ''.join(ch for ch in s if unicodedata.category(ch) != 'Cf')
+    s = re.sub(r'[ \t ]+', ' ', s).lstrip()
+    index = 0
+    while index < len(s) and ord(s[index]) > 127 and (
+        unicodedata.category(s[index]) in ('So', 'Sk', 'Mn', 'Me')
+    ):
+        index += 1
+    return s[index:].lstrip()
+
+
+# Opinion leads that open a reasoning reply rather than a title ("I guess X",
+# "How about X"); title-cased spans ("I Think Therefore I Am") stay subjects.
+_TITLE_OPINION_LEAD = (
+    r"(?:how\s+about|what\s+about|i\s+(?:think|guess|suppose|believe|reckon|feel)"
+    r"|i['’]d\s+(?:suggest|say|go\s+with)|let['’]s\s+(?:go\s+with|call|name|use|try)"
+    r"|my\s+(?:pick|choice|suggestion|vote)\s+(?:is|would\s+be))\b"
+)
 
 
 def _is_bad_new_title(text: str) -> bool:
@@ -5055,10 +5170,40 @@ def _is_bad_new_title(text: str) -> bool:
 
     Includes structural CoT rejection plus trivial single-token echo replies
     (pong, yes, done, cool, …) that are useless as first-generation titles.
+    Anywhere-in-string wrappers, quoted alternatives, and bullet lists are
+    candidate-only so ordinary persisted titles are not silently renamed.
     """
     if _looks_invalid_generated_title(text):
         return True
     s = str(text or '').strip()
+    if re.search(
+        r'<\s*(?:think|analysis|reasoning|thought)(?:\s[^>]*)?>',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(
+        r'<\|channel\|?>\s*(?:thought|analysis|reasoning|thinking)\b',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if re.search(r'<\|turn\|?>\s*thinking', s, flags=re.IGNORECASE):
+        return True
+    if re.search(
+        r'["“][^"”\n]+["”]\s+or\s+["“][^"”\n]+["”]',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    # Two bulleted quoted options, also once collapsed onto one line; a
+    # single bulleted quoted name ("- "Summer" Memoir Review") is a title.
+    if re.search(r'^\s*[-*•]\s*["“][^"”\n]+["”]\s*[-*•]\s*["“]', s):
+        return True
+    if re.search(r'^\s*(?:[*_`~]+\s*)?something like\b', s, flags=re.IGNORECASE):
+        return True
+    if re.search(r'^\s*(?:[*_`~]+\s*)?(?:a\s+good title\s*:)', s, re.IGNORECASE):
+        return True
     _token = re.sub(r'[\s.!?]+$', '', s, flags=re.IGNORECASE)
     if re.fullmatch(
         r'(?:pong|ping|yes|no|yep|nope|hi|hello|hey|thanks|thank you|sure|k|kk|cool|nice|lol|ok|okay|done)',
@@ -5066,6 +5211,73 @@ def _is_bad_new_title(text: str) -> bool:
         flags=re.IGNORECASE,
     ):
         return True
+    # Candidate-only (re-gate 2026-10-19 finding 1): these shapes are fine for
+    # rejecting a fresh candidate (it costs one retry, not a silent rename),
+    # but ordinary persisted titles like "Analysis: Q3 Sales Trends",
+    # "Options: Stocks, Bonds, ETFs" and "Title Should Reflect Content" must
+    # survive `_looks_invalid_generated_title` untouched.
+    if re.search(
+        r'^\s*(?:[*_`~]+\s*)?(?:analysis|thinking|reasoning|thought)\s*:',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    if _looks_like_title_option_menu(s):
+        return True
+    # A title is one line; two or more list-item lines are a menu whatever
+    # heading introduces them ("Titles:", "Here are two:").
+    if len(re.findall(r'^\s*(?:[-*•]|\d{1,2}[.)])\s+\S', s, flags=re.M)) >= 2:
+        return True
+    if re.search(
+        r'^\s*(?:[*_`~]+\s*)?(?:the\s+)?title should\b',
+        s,
+        flags=re.IGNORECASE,
+    ):
+        return True
+    # Strip only leading hedge tokens (including their Markdown emphasis).
+    # Iterate rather than recurse over untrusted model output. Title-cased
+    # subject matter is not evidence of a reasoning sentence.
+    # Presentation markers must not hide a reasoning clause. This is only
+    # candidate validation; persisted-title self-heal remains unchanged.
+    clause = re.sub(r'^\s*(?:[-•>]\s+|["“‘]\s*)+', '', _title_presentation_text(s)).lstrip()
+    # Conversational filler ("Well,", "So", "Hmm,") may precede or follow a
+    # hedge ("Maybe well I think …"); it is only skipped for detection.
+    hedged = False
+    for _ in range(32):
+        match = re.match(
+            r'^\s*[*_`~]*(?:(maybe|perhaps|possibly|probably)|hmm+|well|so|okay|ok|alright|um+|uh+)'
+            r'(?![^\W_])[*_`~]*[\s,:;.!-]+(?=\S)',
+            clause, re.I,
+        )
+        if not match:
+            break
+        hedged = hedged or bool(match.group(1))
+        clause = clause[match.end():]
+    else:
+        return True  # Pathological hedge chains are not useful title candidates.
+    if hedged or re.match(_TITLE_OPINION_LEAD, clause, re.I):
+        # Emphasis may wrap the clause too ("*Maybe*, *I should …*").
+        clause = re.sub(r'[*_`~]+', '', clause).lstrip()
+        sentence = re.match(
+            r"(?:i|we)(?:['’](?:ll|d)|\s+(?:should|could|might|would|need|want|will|can|may)\b)(?:\s+\w+)?"
+            r'|(?:the\s+user|they)\s+(?:wants?|needs?|asked)\b'
+            r'|(?:the\s+)?(?:title|name)\s+(?:could|should|might|would|can)\s+be\b'
+            r'|something\s+like\b|let\s+me\b|(?:call|name)\s+(?:it|this)\b|go\s+with\b|use\b',
+            clause, re.I,
+        )
+        # Title-cased spans ("We Should Talk Podcast", "I'll Be There") are
+        # subjects; lowercase or all-caps spans are reasoning sentences.
+        if not sentence:
+            # Only the opinion words decide casing: "Let's Use pytest" is a
+            # subject even though the code literal after it is lowercase.
+            sentence = re.match(_TITLE_OPINION_LEAD, clause, re.I)
+        if sentence:
+            span = sentence.group(0)
+            words = re.findall(r"[^\W\d_]+(?:['’][^\W\d_]+)?", span)
+            shouting = span.isupper() and len(re.sub(r'[^\w]', '', span)) > 1
+            # Mixed-case brand words ("iPhone", "eBPF") count as capitalized.
+            if shouting or not all(any(ch.isupper() for ch in word) for word in words):
+                return True
     return bool(
         re.search(
             r'^\s*(ok|okay|done|all set|complete|completed|finished)\b[\s.!?]*$',
@@ -6368,6 +6580,44 @@ def _title_retry_completion_budget(provider: str = '', model: str = '', base_url
     return max(1024, _title_completion_budget(provider, model, base_url) * 2)
 
 
+# Schema-attempt failures permit a compatibility resend only when they prove
+# the route itself rejected the JSON-schema request shape. A 401/429/timeout
+# must not be re-labeled "schema unavailable" — that silently re-sends the
+# identical request in compatibility mode and pays a second failing provider
+# call. Classification lives in `_schema_rejection_error` (docstring carries
+# the re-gate 2026-10-21 semantics).
+def _schema_rejection_error(error) -> bool:
+    """Only an unsupported-schema rejection permits a compatibility resend.
+
+    Re-gate 2026-10-21 (#7539): when the failure carries an HTTP status, that
+    status is the whole verdict — ``response_format`` is the only difference
+    from the compatibility request, so any 400/422 proves the route rejected
+    the schema shape; 401/403/408/429 and 5xx stay transport failures.
+    Message-only errors fall back to text sniffing: non-retry signals
+    (auth, throttling, timeouts, connection) are excluded first — numeric
+    codes anchored to ``error code`` / ``status`` / ``http`` context, bare
+    otherwise — and schema-shape positive evidence
+    (``response_format`` / ``json_schema`` / ``structured output``)
+    qualifies. The former field-name + English-keyword requirement missed
+    "unavailable now", ``must be one of`` and non-English 400 bodies, and a
+    bare ``5\\d\\d`` exclusion misfired on ``max_tokens 512``.
+    """
+    message = str(error or '')
+    status = getattr(error, 'status_code', None)
+    if status is None:
+        status = getattr(getattr(error, 'response', None), 'status_code', None)
+    if status is not None:
+        return status in (400, 422)
+    if re.search(
+        r'(?:error code|status|http)\s*:?\s*(?:401|403|408|429|5\d\d)\b'
+        r'|unauthorized|forbidden|timed? ?out|rate.limit|too many requests|connection',
+        message,
+        flags=re.IGNORECASE,
+    ):
+        return False
+    return bool(re.search(r'response.?format|json.?schema|structured output', message, flags=re.IGNORECASE))
+
+
 def _title_retry_status(status: str) -> bool:
     # Whether to grant a second budget attempt within the same prompt+model
     # combination.  ``llm_length`` indicates the model would have produced
@@ -6430,7 +6680,199 @@ def _safe_text_value(value) -> str:
     return str(value or '').strip()
 
 
-def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
+_TITLE_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "session_title",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {"title": {"type": "string"}},
+            "required": ["title"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+_TITLE_SENTINELS = frozenset({'none', 'null', 'undefined'})
+
+
+def _usable_title_string(value: str) -> str:
+    title = str(value or '').strip()
+    if not title or title.lower() in _TITLE_SENTINELS:
+        return ''
+    return title
+
+
+_TITLE_QUOTE_EVIDENCE = str.maketrans({
+    '“': '"', '”': '"', '＂': '"', '‘': "'", '’': "'", '＇': "'",
+})
+
+
+# Up to four words ending in a colon, an em/en dash, or a spaced hyphen
+# ("Title-Case" is a word, not a label).
+_TITLE_PAYLOAD_LABEL_RE = re.compile(
+    r"^(?:(?!```|~~~)[*_`~]+\s*)?[^\W\d_][\w'’]*(?:\s+[\w'’]+){0,3}"
+    r'(?:\s*[:–—]|\s+-|\s*-(?=\s*[\[{]))\s*(?:(?!```|~~~)[*_`~]+\s*)?',
+)
+
+
+def _json_strings(value, limit: int = 64) -> list:
+    """String values (not object keys) in a decoded JSON value, iteratively."""
+    found, pending = [], [value]
+    while pending and len(found) < limit:
+        item = pending.pop()
+        if isinstance(item, str):
+            found.append(item)
+        elif isinstance(item, dict):
+            pending.extend(item.values())
+        elif isinstance(item, list):
+            pending.extend(item)
+    return found
+
+
+def _json_has_string(value) -> bool:
+    # Only string values count: {"ok": true} is a literal, {"name": "X"} is not.
+    return bool(_json_strings(value, limit=1))
+
+
+def _has_title_payload_evidence(text: str) -> bool:
+    """True when compatibility prose still carries a JSON title payload.
+
+    Prose returned verbatim must not smuggle a payload that boundary
+    validation did not accept: a ``"title":`` key anywhere, a JSON-shaped
+    opener (``{"``, ``["``, ``[{``) that never closes, or a leading
+    string-bearing container followed by prose (``{"title": …} Done``,
+    ``["A", "B"] Title Ideas``). Literal containers in ordinary titles
+    (``Fix [1, 2] Parsing Bug``, ``{} Config Parser Guide``, ``Parse {"a": 1}
+    Payload Example``) carry no such evidence.
+    """
+    evidence = _title_presentation_text(text).translate(_TITLE_QUOTE_EVIDENCE)
+    # Normalize evidence only, never the title: an escaped key still names
+    # "title", and escaped quotes may hide an encoded container.
+    evidence = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m[1], 16)), evidence)
+    evidence = re.sub(r'\\+(?=["\'])', '', evidence)
+    if re.search(r'["\']title["\']\s*:', evidence, re.I):
+        return True
+    # Recognize payload boundaries without scanning ordinary JSON literals
+    # out of subject prose. Any short label ("Title —", "1. Result:",
+    # "Here's my pick:") bounds the payload after it; an allowlist of label
+    # words always misses one. Do not treat a fence as Markdown emphasis.
+    evidence = evidence.strip(' \t\r\n"\'')
+    evidence = re.sub(r'^(?:(?:#{1,6}|>|[-•*]|\d{1,2}[.)])\s+)+', '', evidence)
+    # The sanitizer strips a "Title:" label, so any container after one
+    # would become the whole saved title; other labels stay in the title.
+    stripped_label = bool(_TITLE_LABEL_PREFIX_RE.match(evidence))
+    label = _TITLE_PAYLOAD_LABEL_RE.match(evidence)
+    if label:
+        evidence = evidence[label.end():].lstrip()
+    evidence = re.sub(r'^(?:```|~~~)(?:json)?\s*', '', evidence, flags=re.I)
+    lead = 0
+    decoder = json.JSONDecoder()
+    if label and evidence.startswith(('{', '[')):
+        try:
+            value, end = decoder.raw_decode(evidence)
+        except (ValueError, RecursionError):
+            # Only a JSON-shaped opener is a broken payload; "[Draft] Review"
+            # and "[object Object]" after a label are bracket prose.
+            if (re.match(r'\{\s*"|\[\s*(?:[\[\{"]|-?\d|true\b|false\b|null\b)', evidence)
+                    and not re.match(r'\[[\w.-]+\]\s+\S', evidence)):
+                return True
+        else:
+            # "Changelog: [1, 2, 3]" is a subject; a string-bearing payload
+            # is not.
+            if (evidence[end:].strip() in ('', '```', '~~~')
+                    and (stripped_label or _json_has_string(value))):
+                return True
+    for match in re.finditer(r'\{\s*"|\[\s*[\[\{"]', evidence):
+        try:
+            value, end = decoder.raw_decode(evidence, match.start())
+        except (ValueError, RecursionError):
+            return True
+        if not _json_has_string(value):
+            continue
+        # Leading, ending the reply after any prefix ("Here is my chosen
+        # output: […]"), or right after a separator ("Result => […] hope this
+        # helps"). Literals mid-title ("Use ["a"] As Default") stay prose.
+        before = evidence[:match.start()].rstrip(' \t*_~`')
+        after = evidence[end:].strip(' \t\r\n.!`~')
+        if (match.start() == lead or not after
+                or before.endswith((':', '：', '|', '>', '-', '–', '—', '='))):
+            return True
+    return False
+
+
+def _payload_free_title(value: str) -> str:
+    """A decoded title string, unless it is itself a JSON title payload."""
+    title = _usable_title_string(value)
+    return '' if title and _has_title_payload_evidence(title) else title
+
+
+def _extract_title_text(content: str, *, mode: str = 'compatibility') -> str:
+    """Validate a complete payload, or keep compatibility title prose intact.
+
+    JSON is recognized only at the whole-response, fence, or supported prose
+    envelope boundary. Never scan into a broken outer container for a title.
+    """
+    raw = str(content or '').strip()
+    if not raw:
+        return ''
+    if mode == 'compatibility':
+        raw = _strip_thinking_markup(raw, collapse_whitespace=False).strip()
+        if _is_bad_new_title(raw):
+            return ''
+    fenced = re.fullmatch(r'```(?:json)?\s*(.*?)\s*```', raw, re.I | re.S)
+    if fenced:
+        raw = fenced.group(1).strip()
+    envelope = re.match(
+        r"^(?:here (?:is|are) (?:the )?(?:requested )?json\s*:|sure\b[.!:]?)\s*(?=[{\[\"`])",
+        raw, re.I,
+    )
+    if envelope and mode == 'compatibility':
+        raw = raw[envelope.end():].strip()
+        fenced = re.fullmatch(r'```(?:json)?\s*(.*?)\s*```', raw, re.I | re.S)
+        if fenced:
+            raw = fenced.group(1).strip()
+        if _is_bad_new_title(raw):
+            return ''
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        if mode == 'schema':
+            return ''
+        # At a payload boundary a failed outer decode is terminal. A complete
+        # container followed by title prose, however, is not the payload.
+        if raw.startswith(('{', '[')):
+            try:
+                parsed, end = json.JSONDecoder().raw_decode(raw)
+            except ValueError:
+                label = re.match(r'^\[[\w.-]+\]\s+\S', raw)
+                if raw.startswith('{') or (not label and re.match(
+                    r'^\[\s*(?:[\{\]"\-\d]|true\b|false\b|null\b)', raw
+                )):
+                    return ''
+            else:
+                trailing = raw[end:].strip()
+                if envelope:
+                    # Retain the established requested-JSON envelope's Done.
+                    # Other suffixes are not silently discarded.
+                    if trailing.lower() not in ('', 'done', 'done.'):
+                        return ''
+                    if isinstance(parsed, dict) and set(parsed) == {'title'} and isinstance(parsed['title'], str):
+                        return _payload_free_title(parsed['title'])
+                    return ''
+                if trailing:
+                    return '' if _has_title_payload_evidence(raw) else raw
+        return '' if envelope or _has_title_payload_evidence(raw) else raw
+    if isinstance(parsed, dict) and set(parsed) == {'title'} and isinstance(parsed['title'], str):
+        return _payload_free_title(parsed['title'])
+    if mode == 'compatibility' and isinstance(parsed, str):
+        return _payload_free_title(parsed)
+    return ''
+
+
+def _extract_title_response(resp, *, aux: bool = False, mode: str = 'compatibility') -> tuple[str, str]:
     """Return (content, empty_status) from an OpenAI-compatible response."""
     suffix = '_aux' if aux else ''
     try:
@@ -6439,7 +6881,24 @@ def _extract_title_response(resp, *, aux: bool = False) -> tuple[str, str]:
         message = _safe_obj_value(choice, 'message')
         content = _safe_text_value(_safe_obj_value(message, 'content'))
         if content:
-            return content, ''
+            title_text = _extract_title_text(content, mode=mode)
+            if title_text:
+                return title_text, ''
+            # Re-gate 2026-10-21 finding 2: non-empty content whose FULL text
+            # is a reasoning trace is invalid model output (not an empty
+            # response) — surface a distinct invalid status so the worker
+            # keeps the provisional title and retries like the sanitize-layer
+            # llm_invalid family, while the schema attempt still falls through
+            # to the compatibility request.
+            # Re-gate 2026-10-21 round-7 must-fix 1: candidate-shaped output
+            # (a heading-prefixed reasoning sentence, an option menu, a prompt
+            # echo) is invalid model output, not empty content — the cleaned
+            # visible text is validated with the same candidate predicate
+            # extraction uses, so persistent traces keep the provisional title
+            # and the adaptive-refresh alternate route still triggers.
+            cleaned = _strip_thinking_markup(content)
+            if _looks_invalid_generated_title(content) or _is_bad_new_title(cleaned):
+                return '', f'llm_invalid_trace{suffix}'
         finish_reason = _safe_text_value(_safe_obj_value(choice, 'finish_reason')).lower()
         reasoning = (
             _safe_text_value(_safe_obj_value(message, 'reasoning'))
@@ -6496,15 +6955,23 @@ def generate_title_raw_via_aux(
     if not caller_supplied_route:
         api_key = str(configured.get('api_key', '') or '').strip()
     base_max_tokens = _title_completion_budget(provider, model, base_url)
+    schema_extra = {"response_format": _TITLE_RESPONSE_FORMAT}
     reasoning_extra = {}
     if not _route_rejects_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}
+        # Re-gate 2026-10-19 finding 3: the schema request carries the same
+        # route-gated reasoning disable, so reasoning models do not burn the
+        # 512-token title budget on hidden thoughts during the first call.
+        schema_extra["reasoning"] = {"enabled": False}
     if _is_minimax_route(provider, model, base_url):
+        schema_extra["reasoning_split"] = True
         reasoning_extra["reasoning_split"] = True
     try:
         _timeout = _aux_title_timeout()
         from agent.auxiliary_client import call_llm
         last_status = 'llm_error_aux'
+        attempted = 0
+        schema_unavailable = False
         for idx, prompt in enumerate(prompts):
             messages = [
                 {"role": "system", "content": prompt},
@@ -6513,22 +6980,58 @@ def generate_title_raw_via_aux(
             budgets = [base_max_tokens]
             try:
                 for budget_idx, max_tokens in enumerate(budgets):
-                    resp = call_llm(
-                        task='title_generation',
-                        provider=provider or None,
-                        model=model or None,
-                        base_url=base_url or None,
-                        api_key=api_key or None,
-                        messages=messages,
-                        max_tokens=max_tokens,
-                        temperature=0.2,
-                        timeout=_timeout,
-                        extra_body=reasoning_extra or None,
-                    )
-                    raw, empty_status = _extract_title_response(resp, aux=True)
-                    if raw:
-                        return raw, ('llm_aux' if idx == 0 and budget_idx == 0 else 'llm_aux_retry')
-                    last_status = empty_status or 'llm_empty_aux'
+                    modes = ('compatibility',) if schema_unavailable else ('schema', 'compatibility')
+                    for mode in modes:
+                        try:
+                            attempted += 1
+                            resp = call_llm(
+                                task='title_generation',
+                                provider=provider or None,
+                                model=model or None,
+                                base_url=base_url or None,
+                                api_key=api_key or None,
+                                messages=messages,
+                                max_tokens=max_tokens,
+                                temperature=0.2,
+                                timeout=_timeout,
+                                extra_body=(schema_extra if mode == 'schema' else (reasoning_extra or None)),
+                            )
+                        except Exception as e:
+                            last_status = 'llm_error_aux'
+                            # Re-gate finding (low): only a schema-shaped
+                            # rejection proves the route cannot do JSON schema.
+                            # A 401/429/timeout is a transport failure —
+                            # re-sending the identical request in compatibility
+                            # mode would just pay a second failing provider call.
+                            if mode == 'schema' and _schema_rejection_error(e):
+                                schema_unavailable = True
+                                logger.debug("Aux title schema attempt %s failed: %s", idx + 1, e)
+                                continue
+                            raise
+                        raw, empty_status = _extract_title_response(resp, aux=True, mode=mode)
+                        if not raw and mode == 'schema':
+                            # Re-gate finding 2: a transport that silently
+                            # strips `response_format` still answers the schema
+                            # request with a valid plain-text title. Parse the
+                            # SAME response with the compatibility extractor
+                            # instead of re-sending the identical request;
+                            # empty/reasoning-only responses keep falling
+                            # through to the retry path below.
+                            prose_raw, prose_status = _extract_title_response(resp, aux=True, mode='compatibility')
+                            if prose_raw:
+                                raw = prose_raw
+                                empty_status = ''
+                            elif prose_status:
+                                empty_status = prose_status
+                        if raw:
+                            return raw, ('llm_aux' if attempted == 1 else 'llm_aux_retry')
+                        last_status = empty_status or 'llm_empty_aux'
+                        if mode == 'schema' and last_status in {
+                            'llm_empty_aux', 'llm_empty_reasoning_aux', 'llm_invalid_trace_aux',
+                        }:
+                            schema_unavailable = True
+                            continue
+                        break
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(provider, model, base_url))
             except Exception as e:
@@ -6566,6 +7069,8 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
     prev_reasoning = getattr(agent, 'reasoning_config', None)
     try:
         agent.reasoning_config = disabled_reasoning
+        attempted = 0
+        schema_unavailable = False
         for idx, prompt in enumerate(prompts):
             api_messages = [
                 {"role": "system", "content": prompt},
@@ -6578,6 +7083,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                     raw = ""
                     empty_status = ''
                     if getattr(agent, 'api_mode', '') == 'codex_responses':
+                        attempted += 1
                         codex_kwargs = agent._build_api_kwargs(api_messages)
                         codex_kwargs.pop('tools', None)
                         if 'max_output_tokens' in codex_kwargs:
@@ -6588,6 +7094,7 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                         if not raw:
                             empty_status = 'llm_empty'
                     elif getattr(agent, 'api_mode', '') == 'anthropic_messages':
+                        attempted += 1
                         from agent.anthropic_adapter import build_anthropic_kwargs
                         ant_kwargs = build_anthropic_kwargs(
                             model=agent.model,
@@ -6607,10 +7114,10 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                         if not raw:
                             empty_status = 'llm_empty'
                     else:
-                        api_kwargs = agent._build_api_kwargs(api_messages)
-                        api_kwargs.pop('tools', None)
-                        api_kwargs['temperature'] = 0.1
-                        api_kwargs['timeout'] = 15.0
+                        base_api_kwargs = agent._build_api_kwargs(api_messages)
+                        base_api_kwargs.pop('tools', None)
+                        base_api_kwargs['temperature'] = 0.1
+                        base_api_kwargs['timeout'] = 15.0
                         # Reasoning suppression for title gen is already handled
                         # route-correctly by `_build_api_kwargs()` from the
                         # `agent.reasoning_config = {"enabled": False}` set above —
@@ -6622,22 +7129,58 @@ def generate_title_raw_via_agent(agent, user_text: str, assistant_text: str, *, 
                         # re-adds a 400-rejected param on top of the profile output
                         # (#4161). MiniMax still needs reasoning_split, which the
                         # profile path does not add.
-                        _tg_extra = dict(api_kwargs.get('extra_body') or {})
-                        if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
-                            _tg_extra['reasoning_split'] = True
-                        if _tg_extra:
-                            api_kwargs['extra_body'] = _tg_extra
-                        if 'max_completion_tokens' in api_kwargs:
-                            api_kwargs['max_completion_tokens'] = max_tokens
-                        else:
-                            api_kwargs['max_tokens'] = max_tokens
-                        resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
-                            **api_kwargs,
-                        )
-                        raw, empty_status = _extract_title_response(resp)
+                        modes = ('compatibility',) if schema_unavailable else ('schema', 'compatibility')
+                        for mode in modes:
+                            api_kwargs = dict(base_api_kwargs)
+                            _tg_extra = dict(base_api_kwargs.get('extra_body') or {})
+                            if mode == 'schema':
+                                _tg_extra['response_format'] = _TITLE_RESPONSE_FORMAT
+                            if _is_minimax_route(getattr(agent, 'provider', ''), getattr(agent, 'model', ''), getattr(agent, 'base_url', '')):
+                                _tg_extra['reasoning_split'] = True
+                            if _tg_extra:
+                                api_kwargs['extra_body'] = _tg_extra
+                            if 'max_completion_tokens' in api_kwargs:
+                                api_kwargs['max_completion_tokens'] = max_tokens
+                            else:
+                                api_kwargs['max_tokens'] = max_tokens
+                            try:
+                                attempted += 1
+                                resp = agent._ensure_primary_openai_client(reason='title_generation').chat.completions.create(
+                                    **api_kwargs,
+                                )
+                            except Exception as e:
+                                # Same rule as the aux route: only a
+                                # schema-shaped rejection proves the route
+                                # cannot do JSON schema; 401/429/timeouts stay
+                                # transport failures instead of triggering a
+                                # compatibility-mode re-send (#7539 re-gate).
+                                if mode == 'schema' and _schema_rejection_error(e):
+                                    schema_unavailable = True
+                                    logger.debug("Agent title schema attempt %s failed: %s", idx + 1, e)
+                                    continue
+                                raise
+                            raw, empty_status = _extract_title_response(resp, mode=mode)
+                            if not raw and mode == 'schema':
+                                # Re-gate finding 2 (agent route): a transport
+                                # that stripped `response_format` answered with
+                                # valid prose — parse the SAME response with
+                                # the compatibility extractor rather than
+                                # re-sending the identical request.
+                                prose_raw, prose_status = _extract_title_response(resp, mode='compatibility')
+                                if prose_raw:
+                                    raw = prose_raw
+                                    empty_status = ''
+                                elif prose_status:
+                                    empty_status = prose_status
+                            if mode == 'schema' and empty_status in {
+                                'llm_empty', 'llm_empty_reasoning', 'llm_invalid_trace',
+                            }:
+                                schema_unavailable = True
+                                continue
+                            break
                     raw = str(raw or '').strip()
                     if raw:
-                        return raw, ('llm' if idx == 0 and budget_idx == 0 else 'llm_retry')
+                        return raw, ('llm' if attempted == 1 else 'llm_retry')
                     last_status = empty_status or 'llm_empty'
                     if budget_idx == 0 and _title_retry_status(last_status):
                         budgets.append(_title_retry_completion_budget(
@@ -6862,6 +7405,8 @@ _TITLE_FAILURE_HUMAN_REASONS = {
     'llm_language_mismatch_aux': 'the generated title did not match the conversation language',
     'llm_invalid': 'the title model returned an unusable title',
     'llm_invalid_aux': 'the title model returned an unusable title',
+    'llm_invalid_trace': 'the title model returned reasoning text instead of a title',
+    'llm_invalid_trace_aux': 'the title model returned reasoning text instead of a title',
     'llm_empty': 'the title model returned an empty title',
     'llm_empty_aux': 'the title model returned an empty title',
     'llm_error': 'the title model could not be reached',
@@ -6954,16 +7499,16 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             rejected_model_output = False
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch')
-                if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                rejected_model_output = llm_status in ('llm_invalid', 'llm_language_mismatch', 'llm_invalid_trace')
+                if not next_title and llm_status in ('llm_error', 'llm_invalid', 'llm_invalid_trace'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
-                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux', 'llm_invalid_trace_aux')
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
-                rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux')
-                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                rejected_model_output = llm_status in ('llm_invalid_aux', 'llm_language_mismatch_aux', 'llm_invalid_trace_aux')
+                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux', 'llm_invalid_trace_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch')
+                    rejected_model_output = rejected_model_output or llm_status in ('llm_invalid', 'llm_language_mismatch', 'llm_invalid_trace')
             source = llm_status
             # An invalid response is different from an unavailable title model:
             # choosing a local fallback here would mark a warm-up opener as
@@ -6972,6 +7517,8 @@ def _run_background_title_update(session_id: str, user_text: str, assistant_text
             invalid_model_output = rejected_model_output or llm_status in {
                 'llm_invalid',
                 'llm_invalid_aux',
+                'llm_invalid_trace',
+                'llm_invalid_trace_aux',
                 'llm_language_mismatch',
                 'llm_language_mismatch_aux',
             }
@@ -7095,11 +7642,11 @@ def _run_background_title_refresh(session_id: str, user_text: str, assistant_tex
             aux_title_configured = _aux_title_configured()
             if agent and not aux_title_configured:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
-                if not next_title and llm_status in ('llm_error', 'llm_invalid'):
+                if not next_title and llm_status in ('llm_error', 'llm_invalid', 'llm_invalid_trace'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, agent=agent, use_agent_model=True, conversation_id=session_id)
             else:
                 next_title, llm_status, raw_preview = _generate_llm_session_title_via_aux(user_text, assistant_text, conversation_id=session_id)
-                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux'):
+                if not next_title and agent and llm_status in ('llm_error_aux', 'llm_invalid_aux', 'llm_invalid_trace_aux'):
                     next_title, llm_status, raw_preview = _generate_llm_session_title_for_agent(agent, user_text, assistant_text)
         if not next_title:
             _put_title_status(put_event, session_id, 'refresh_skipped', llm_status or 'empty', effective, raw_preview)
