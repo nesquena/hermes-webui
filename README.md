@@ -455,6 +455,7 @@ Full list of environment variables:
 | `HERMES_WEBUI_EXTENSION_MANIFEST` | *(unset)* | Optional relative JSON manifest inside `HERMES_WEBUI_EXTENSION_DIR` listing bundled scripts/styles to inject; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_WEBUI_EXTENSION_SCRIPT_URLS` | *(unset)* | Optional comma-separated same-origin script URLs to inject; appended after manifest scripts; see [WebUI Extensions](docs/EXTENSIONS.md) |
 | `HERMES_WEBUI_EXTENSION_STYLESHEET_URLS` | *(unset)* | Optional comma-separated same-origin stylesheet URLs to inject; appended after manifest stylesheets; see [WebUI Extensions](docs/EXTENSIONS.md) |
+| `HERMES_WEBUI_PROVIDER_STATUS_URL` | *(unset)* | Optional HTTPS/HTTP URL for a generic version-1 provider incident feed. The server performs a bounded, credential-free fetch, matches exact canonical provider slugs, keeps local quota state authoritative, and hides invalid or failed public data without affecting the quota route |
 | `HERMES_HOME` | Windows: `%LOCALAPPDATA%\hermes`; POSIX: `~/.hermes` | Base directory for Hermes state (affects all paths) |
 | `HERMES_CONFIG_PATH` | `$HERMES_HOME/config.yaml` | Path to Hermes config file |
 | `HERMES_WEBUI_SERVER_CWD` | *(unset)* | Working directory for the server process. Defaults to the agent dir; point it at a writable workspace when the agent dir is read-only so fallback relative writes land somewhere writable |
@@ -479,6 +480,8 @@ The run journal stores one `{run_id}.jsonl` per run under `sessions/_run_journal
 - deleting a session deletes its archives too.
 
 Where `dir_fd` primitives are unavailable (Windows), the sweep disables itself rather than fall back to path-based moves a directory swap could redirect.
+
+The provider status feed is an optional server-side integration. Its generic v1 JSON object contains `meta.version: "v1"`, an ISO-8601 UTC `meta.generatedAt`, and `data.providers`; each row contains an exact canonical `slug`, `currentStatus.code` (`operational`, `degraded`, `partial_outage`, `major_outage`, `maintenance`, or `unknown`), and `source.checkedAt`. `currentStatus.summary` is optional, whitespace-normalized, and capped at 500 characters. `partial_outage` and `major_outage` display as outage, `maintenance` displays as a visible advisory, and `unknown` or unsupported codes are hidden. A normalized `source.statusPageUrl` is preferred over `source.officialUrl`. The WebUI fetch has a 3-second wall-clock bound across connection, headers, and body reads, plus a 256 KiB body limit; it sends fixed non-sensitive headers, accepts only fresh rows, and fails soft by hiding public context. Public rows annotate the local quota card and never replace local account state.
 
 Extension deployments can inspect sanitized, authenticated diagnostics at `GET /api/extensions/status`; see [WebUI Extensions](docs/EXTENSIONS.md#diagnostics).
 

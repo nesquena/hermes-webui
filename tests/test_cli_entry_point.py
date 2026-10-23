@@ -14,10 +14,12 @@ guard the wiring without booting a real server:
 """
 from __future__ import annotations
 
+import ast
 import importlib
 import importlib.metadata
 import os
 import tomllib
+from pathlib import Path
 
 import pytest
 
@@ -37,6 +39,26 @@ def test_console_script_declared_in_pyproject():
     """The packaged CLI entry point is declared and maps to bootstrap.main."""
     scripts = _pyproject_scripts()
     assert scripts.get(EXPECTED_SCRIPT) == EXPECTED_TARGET
+
+
+def test_entry_point_top_level_imports_are_packaged():
+    """Ship every top-level module imported by a packaged entry point."""
+    root = Path(REPO_ROOT)
+    with open(root / "pyproject.toml", "rb") as fh:
+        pyproject = tomllib.load(fh)
+    packaged = set(pyproject.get("tool", {}).get("setuptools", {}).get("py-modules", []))
+    top_level = {path.stem for path in root.glob("*.py")}
+    imported = set()
+    for filename in ("bootstrap.py", "server.py", "mcp_server.py"):
+        tree = ast.parse((root / filename).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            names = []
+            if isinstance(node, ast.Import):
+                names.extend(alias.name.split(".", 1)[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+                names.append(node.module.split(".", 1)[0])
+            imported.update(name for name in names if name in top_level)
+    assert imported <= packaged, f"Unpackaged entry-point modules: {sorted(imported - packaged)}"
 
 
 def test_console_script_target_resolves_to_callable():
