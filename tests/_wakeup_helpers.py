@@ -29,8 +29,18 @@ class FakeProcessRegistry:
         self.completion_queue: queue.Queue = queue.Queue()
         self._procs: dict[str, types.SimpleNamespace] = {}
 
-    def register(self, process_id: str, session_key: str) -> None:
-        self._procs[process_id] = types.SimpleNamespace(session_key=session_key)
+    def register(self, process_id: str, session_key: str, *, owner: str | None = None) -> None:
+        """Register a tracked process.
+
+        ``owner`` models the immutable spawn-time owner a modern producer
+        stamps (``origin_ui_session_id``); it defaults to ``session_key``, the
+        WebUI session that spawned it. Pass ``owner=""`` for a legacy/ownerless
+        process — those are parked, never routed by session_key alone (#6752).
+        """
+        owner = session_key if owner is None else owner
+        self._procs[process_id] = types.SimpleNamespace(
+            session_key=session_key, origin_ui_session_id=owner
+        )
 
     def get(self, process_id: str):
         return self._procs.get(process_id)

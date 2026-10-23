@@ -105,6 +105,9 @@ from api.process_event_utils import (
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    event_origin_ui_session_id,
+    park_ownerless_completion,
+    process_session_immutable_owner,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     restore_durable_process_completions,
@@ -4071,18 +4074,18 @@ def _drain_webui_process_notifications(
             ):
                 continue
             evt_session_key = str(evt.get('session_key') or '') if isinstance(evt, dict) else ''
-            evt_origin_ui_session_id = (
-                str(evt.get('origin_ui_session_id') or '') if isinstance(evt, dict) else ''
-            )
+            # Immutable owner (#6752): the event's exact origin_ui_session_id,
+            # else an env-immune spawn owner on the ProcessSession — the SAME
+            # rule the background _process_one consumer applies, so neither
+            # consumer can win the shared-queue race with a weaker check.
+            evt_origin_ui_session_id = event_origin_ui_session_id(evt)
             if not evt_session_key or not evt_origin_ui_session_id:
                 proc = process_registry.get(evt_sid)
                 if not evt_session_key:
-                    evt_session_key = str(getattr(proc, 'session_key', '') or '')
+                    _proc_key = getattr(proc, 'session_key', '')
+                    evt_session_key = _proc_key if isinstance(_proc_key, str) else ''
                 if not evt_origin_ui_session_id:
-                    evt_origin_ui_session_id = (
-                        str(getattr(proc, 'origin_ui_session_id', '') or '')
-                        or str(getattr(proc, 'spawn_session_id', '') or '')
-                    )
+                    evt_origin_ui_session_id = process_session_immutable_owner(proc)
         except Exception:
             evt_session_key = ''
             evt_origin_ui_session_id = ''
@@ -4093,13 +4096,25 @@ def _drain_webui_process_notifications(
         # is present, this drain claims/ACKs the event ONLY for the origin
         # session — otherwise the next-turn drain could win the shared-queue
         # race and deliver+ACK a completion to the wrong (session-key-index)
-        # session, leaving the true origin empty. Fall back to the session-key
-        # target check only for legacy events that carry no origin address.
+        # session, leaving the true origin empty.
         if evt_origin_ui_session_id:
             if evt_origin_ui_session_id != session_id:
                 skipped_events.append(evt)
                 continue
-        elif not _completion_event_targets_webui_session(evt_session_key, session_id):
+        elif _completion_event_targets_webui_session(evt_session_key, session_id):
+            # #6752 FAIL CLOSED: no immutable owner, so the session-key mapping
+            # that addresses this session is not ownership proof. Park a
+            # neutral, output-free record instead of injecting it into this
+            # turn. Async rows are not claimed or ACKed (WebUI cannot prove it
+            # owns them) and are not requeued: parking is WebUI's terminal
+            # disposition for this offer.
+            park_ownerless_completion(
+                evt,
+                addressed_session_id=session_id,
+                consumer='webui-next-turn',
+            )
+            continue
+        else:
             skipped_events.append(evt)
             continue
         # Age-gate stale completions: a completion that fires long after the

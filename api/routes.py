@@ -16847,6 +16847,22 @@ def handle_get(handler, parsed) -> bool:
         from api.background import get_results
         return j(handler, {"results": get_results(sid)})
 
+    if parsed.path == "/api/background/parked-completions":
+        # #6752: neutral, session-less list of background completions that
+        # were withheld because they carried no immutable owner. The store is
+        # process-global (spans every profile), so the caller must hold
+        # unbound full access BEFORE anything reads it.
+        if not _request_has_unbound_full_access(handler):
+            return bad(handler, _PARKED_COMPLETIONS_FORBIDDEN, 403)
+        from api.process_event_utils import (
+            PARKED_OWNERLESS_COMPLETIONS_MAX,
+            list_parked_ownerless_completions,
+        )
+        return j(handler, {
+            "parked": list_parked_ownerless_completions(),
+            "max": PARKED_OWNERLESS_COMPLETIONS_MAX,
+        })
+
     if parsed.path == "/api/sessions":
         diag = RequestDiagnostics.maybe_start("GET", parsed.path, logger=logger, print_fn=getattr(handler, '_safe_webui_print', None))
         try:
@@ -19632,6 +19648,9 @@ def handle_post(handler, parsed) -> bool:
 
     if parsed.path == "/api/background":
         return _handle_background(handler, body)
+
+    if parsed.path == "/api/background/parked-completions/dismiss":
+        return _handle_parked_completions_dismiss(handler, body)
 
     if parsed.path == "/api/goal":
         return _handle_goal_command(handler, body)
@@ -28743,6 +28762,63 @@ def start_session_turn(
             "server_turn_started fan-out failed for session %s", session_id, exc_info=True
         )
     return resp
+
+
+_PARKED_COMPLETIONS_FORBIDDEN = (
+    "Parked background completions are only available to an unrestricted "
+    "(not profile-bound) session"
+)
+
+
+def _request_has_unbound_full_access(handler) -> bool:
+    """Return whether *handler*'s caller may see process-global, cross-profile state.
+
+    Auth disabled is the local single-user mode: every caller already has full
+    access, so this returns True. When auth is enabled the caller must present a
+    VERIFIED session that is NOT bound to a profile (trusted-header group-map
+    sessions are always bound, including the ``default`` fallback). A missing,
+    forged, expired, or rejected session, a profile-bound session, or any error
+    while resolving it fails closed. (#6752 Codex r1)
+    """
+    try:
+        from api.auth import ensure_trusted_auth_session, is_auth_enabled
+
+        if not is_auth_enabled():
+            return True
+        info = ensure_trusted_auth_session(handler)
+        if getattr(handler, "_trusted_auth_session_rejected", False):
+            return False
+        if not isinstance(info, dict) or not info.get("token"):
+            return False
+        bound = info.get("bound_profile")
+        if bound is not None and (not isinstance(bound, str) or bound.strip()):
+            return False
+        return True
+    except Exception:
+        logger.debug("parked-completions access check failed; denying", exc_info=True)
+        return False
+
+
+def _handle_parked_completions_dismiss(handler, body):
+    """Dismiss parked ownerless background completions (#6752).
+
+    Body: ``{"ids": ["<record id>", ...]}`` or ``{"all": true}``. Dismissal
+    only removes the neutral notice; it never delivers the completion.
+    """
+    from api.helpers import j
+    from api.process_event_utils import dismiss_parked_ownerless_completions
+
+    # Gate BEFORE any parsing or mutation: both ``ids`` and ``all`` touch the
+    # process-global (cross-profile) parking store.
+    if not _request_has_unbound_full_access(handler):
+        return bad(handler, _PARKED_COMPLETIONS_FORBIDDEN, 403)
+    body = body if isinstance(body, dict) else {}
+    if body.get("all") is True:
+        return j(handler, {"ok": True, "dismissed": dismiss_parked_ownerless_completions(None)})
+    ids = body.get("ids")
+    if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
+        return bad(handler, "ids must be a list of parked completion ids, or set all=true")
+    return j(handler, {"ok": True, "dismissed": dismiss_parked_ownerless_completions(ids)})
 
 
 def _handle_bg_task_complete_ack(handler, body):

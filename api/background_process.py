@@ -52,9 +52,13 @@ from typing import Any, Optional
 
 from api.process_event_utils import (
     ASYNC_DELIVERY_ROUTING_RETRY_SECONDS,
+    COMPLETION_OWNER_ATTRS,
     claim_async_delegation_delivery,
     complete_async_delegation_delivery,
     completion_delivery_id,
+    event_origin_ui_session_id,
+    park_ownerless_completion,
+    process_session_immutable_owner,
     release_async_delegation_delivery,
     requeue_async_delegation_event,
     restore_durable_process_completions,
@@ -1341,39 +1345,24 @@ def _mark_registry_completion_consumed(process_id: str) -> None:
 # some future regression reintroduces a capture race, a positively-detected
 # mismatch must not wake the wrong session.
 #
-# The proc->owner link the WebUI drain trusts is ProcessSession.session_key,
-# which the terminal tool captured from the (historically racy) env at spawn.
-# An env-IMMUNE spawn-time owner would be the authoritative cross-check, but
-# adding such a field to the core ProcessSession is out of scope for this
-# WebUI-only change. So this resolver is forward-compatible by DUCK-TYPING:
-# if a future core grows an env-immune spawn-owner attribute (any of the
-# names below) AND it positively disagrees with the session_key-resolved
-# target, re-route to the env-immune owner and log ERROR. When the owner is
-# absent/empty/unknown (today's core, cron/CLI processes sharing the
-# registry, pre-Option-1 spawns) it is a PURE PASS-THROUGH — it never
-# suppresses a legitimate Option Z wakeup on uncertainty (Option Z must keep
-# working).
-_ENV_IMMUNE_OWNER_ATTRS = (
-    "origin_ui_session_id",  # modern hermes-agent exact browser-tab return address
-    "spawn_session_id",
-    "owner_session_id",
-    "turn_session_id",
-)
+# The proc->owner link the WebUI drain historically trusted is
+# ProcessSession.session_key, which the terminal tool captured from the
+# (historically racy) env at spawn. An env-IMMUNE spawn-time owner is the
+# authoritative cross-check; this resolver is forward-compatible by
+# DUCK-TYPING: if the core grows an env-immune spawn-owner attribute (any of
+# the names below) it wins over the session_key-resolved target, and a positive
+# disagreement is logged at ERROR. When the owner is absent/empty/unknown
+# (today's core for ordinary processes, cron/CLI processes sharing the
+# registry, pre-Option-1 spawns) the resolver FAILS CLOSED and returns "":
+# a session_key mapping alone is a routing hint, never ownership proof
+# (#6752 owner decision — the caller parks the completion instead).
+_ENV_IMMUNE_OWNER_ATTRS = COMPLETION_OWNER_ATTRS
 
 
 def _env_immune_spawn_owner(proc_session) -> str:
     """Return the env-immune spawn-time owner sid from the ProcessSession, or
     "" when none is available (the only contract today; forward-compatible)."""
-    if proc_session is None:
-        return ""
-    for attr in _ENV_IMMUNE_OWNER_ATTRS:
-        try:
-            val = getattr(proc_session, attr, "")
-        except Exception:
-            val = ""
-        if val:
-            return str(val)
-    return ""
+    return process_session_immutable_owner(proc_session)
 
 
 def _resolve_wakeup_target(
@@ -1384,18 +1373,21 @@ def _resolve_wakeup_target(
 ) -> str:
     """Cross-check the session_key-resolved wakeup target against the
     env-immune spawn owner. Returns the sid the server-side wakeup turn should
-    actually target.
+    actually target, or "" when no immutable owner exists.
 
-    - Owner unknown/empty  -> pass-through (return session_key_resolved_sid).
-    - Owner == resolved    -> pass-through (the normal + post-Option-1 case).
+    - Owner unknown/empty  -> "" (FAIL CLOSED, #6752: the session_key mapping
+      alone never authorizes delivery; the caller parks the completion).
+    - Owner == resolved    -> the owner (the normal + post-Option-1 case).
     - Owner != resolved    -> POSITIVE mismatch: log ERROR and RE-ROUTE to the
       env-immune owner (do NOT wake the wrong session — this is the exact
       agent.log:6632 cross-session misroute).
     """
     resolved = str(session_key_resolved_sid or "")
     owner = _env_immune_spawn_owner(proc_session)
-    if not owner or owner == resolved:
-        return resolved
+    if not owner:
+        return ""
+    if owner == resolved or not resolved:
+        return owner
     logger.error(
         "xsession wakeup misroute BLOCKED (Option 3 safety net): process %r "
         "session_key resolved to session %r but the env-immune spawn owner "
@@ -1742,13 +1734,14 @@ def _resolve_completion_target(
 
     Modern Hermes Agent events carry ``origin_ui_session_id`` as an exact,
     immutable return address captured from the commissioning browser turn.
-    It is authoritative over the mutable/legacy session-key index. Older
-    Agent events omit it and retain the existing session-key fallback.
+    It is authoritative over the mutable/legacy session-key index. An event
+    without it has no owner here and resolves to "" (FAIL CLOSED, #6752): the
+    session-key mapping alone never selects a delivery target.
     """
     resolved = str(session_key_resolved_sid or "")
     owner = str(origin_ui_session_id or "")
     if not owner:
-        return resolved
+        return ""
     if resolved and resolved != owner:
         logger.error(
             "cross-session completion route BLOCKED: session_key resolved to %r "
@@ -1776,32 +1769,35 @@ def _process_one(evt: dict) -> None:
 
     process_id = completion_delivery_id(evt)
     session_key = str(evt.get("session_key") or "")
-    origin_ui_session_id = str(evt.get("origin_ui_session_id") or "")
+    origin_ui_session_id = event_origin_ui_session_id(evt)
     # Root-cause fix (t_0f447014): the notify_on_complete completion event
     # enqueued by ProcessRegistry._move_to_finished() historically carried NO
     # "session_key" field — only the watch_match enqueue included one. Without
     # it the old `evt.get("session_key") or process_id` fell back to the
     # process id ("proc_xxxx"), which is never a PROCESS_SESSION_INDEX key.
     # Recover spawn-time routing metadata from the process registry.
-    if process_id and (not session_key or not origin_ui_session_id):
+    _ps_xs = None
+    if process_id and _process_registry is not None:
         try:
-            if _process_registry is not None:
-                _ps = _process_registry.get(process_id)
-                if _ps is not None:
-                    if not session_key and getattr(_ps, "session_key", ""):
-                        session_key = str(_ps.session_key)
-                    if not origin_ui_session_id:
-                        origin_ui_session_id = (
-                            str(getattr(_ps, "origin_ui_session_id", "") or "")
-                            or str(getattr(_ps, "spawn_session_id", "") or "")
-                        )
+            _ps_xs = _process_registry.get(process_id)
         except Exception:
+            _ps_xs = None
             logger.debug(
                 "session ownership recovery from process registry failed for %r",
                 process_id,
                 exc_info=True,
             )
-    if not session_key and not origin_ui_session_id:
+    if _ps_xs is not None and not session_key:
+        try:
+            _ps_key = getattr(_ps_xs, "session_key", "")
+        except Exception:
+            _ps_key = ""
+        if isinstance(_ps_key, str) and _ps_key:
+            session_key = _ps_key
+    # Env-immune spawn owner recovered from the ProcessSession (restart-safe:
+    # it rides the checkpoint, unlike the in-memory session-key index).
+    proc_owner = _env_immune_spawn_owner(_ps_xs)
+    if not session_key and not origin_ui_session_id and not proc_owner:
         logger.debug(
             "process_complete drop: no recoverable session_key or exact UI owner "
             "for process_id=%r",
@@ -1814,7 +1810,7 @@ def _process_one(evt: dict) -> None:
     if session_key:
         with _cfg.PROCESS_SESSION_INDEX_LOCK:
             session_id = _cfg.PROCESS_SESSION_INDEX.get(session_key) or ""
-    if not session_id and not origin_ui_session_id:
+    if not session_id and not origin_ui_session_id and not proc_owner:
         # No mapping — could be a cron/gateway process that uses the same
         # registry but a non-WebUI session_key. Durable delegation events stay
         # pending and are retried because their WebUI ownership mapping can be
@@ -1823,34 +1819,36 @@ def _process_one(evt: dict) -> None:
         if evt.get("type") == "async_delegation":
             _retry_unclaimed_async_delegation_event(_process_registry, evt)
         return
-    # ── xsession wakeup misroute defense-in-depth (Option 3) ──────────────
-    # First retain the process-registry spawn-owner cross-check for legacy
-    # terminal events. Then apply origin_ui_session_id as the final authority;
-    # that exact owner is shared by process and async-delegation completions.
-    try:
-        _ps_xs = _process_registry.get(process_id) if (_process_registry is not None and process_id) else None
-    except Exception:
-        _ps_xs = None
-    session_id = _resolve_wakeup_target(
-        process_id=process_id,
-        session_key_resolved_sid=session_id,
-        proc_session=_ps_xs,
-    )
-    # origin_ui_session_id is the exact, immutable return address; it is the
-    # FINAL routing authority over the (mutable) session-key/Option-3 result.
-    session_id = _resolve_completion_target(
-        session_key_resolved_sid=session_id,
-        origin_ui_session_id=origin_ui_session_id,
-    )
+    # ── Immutable-owner admission (#6752, fail closed) ────────────────────
+    # The session-key result above is only the session the mutable index
+    # POINTS AT. Delivery requires an immutable owner: the event's exact
+    # origin_ui_session_id (final authority), else an env-immune spawn owner
+    # on the ProcessSession (Option 3, which also re-routes on a positive
+    # mismatch). With neither, both resolvers return "" and the completion is
+    # parked below instead of being emitted to / woken in the mapped session.
+    key_mapped_session_id = session_id
+    if origin_ui_session_id:
+        session_id = _resolve_completion_target(
+            session_key_resolved_sid=session_id,
+            origin_ui_session_id=origin_ui_session_id,
+        )
+    else:
+        session_id = _resolve_wakeup_target(
+            process_id=process_id,
+            session_key_resolved_sid=session_id,
+            proc_session=_ps_xs,
+        )
     if not session_id:
-        logger.debug("process_complete drop: completion target resolved empty")
-        # An async delegation event that resolves empty here must NOT silently
-        # return: no durable claim was taken, so the core row stays pending and
-        # the restart-restore sweep would re-deliver it forever. Route it into
-        # the bounded retry instead (arms a durable retry / one best-effort
-        # legacy requeue), so it stays retryable without a spurious ACK.
-        if evt.get("type") == "async_delegation":
-            _retry_unclaimed_async_delegation_event(_process_registry, evt)
+        # No immutable owner: never route by the session-key mapping alone.
+        # Park a neutral, output-free record and log it. Async delegations are
+        # NOT claimed, ACKed, or hot-retried: WebUI cannot prove it owns the
+        # durable row, so it stays pending for a consumer that can (and is
+        # re-parked, not re-delivered, if this process restores it again).
+        park_ownerless_completion(
+            evt,
+            addressed_session_id=key_mapped_session_id,
+            consumer="webui-background",
+        )
         return
     # ── THE SEAM: async delegations take the durable-claim delivery path,
     # routed to the origin-resolved session. The claim/complete/release
