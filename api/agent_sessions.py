@@ -1711,6 +1711,8 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             entry['_state_db_raw_source'] = source_meta.get('raw_source')
             entry['_state_db_session_source'] = source_meta.get('session_source')
             entry['_state_db_source_label'] = source_meta.get('source_label')
+            entry['_state_db_message_count'] = row.get('actual_message_count')
+            entry['_state_db_last_message_at'] = row.get('last_message_at')
 
         parent_id = row.get('parent_session_id')
         parent_row = rows.get(parent_id) if parent_id else None

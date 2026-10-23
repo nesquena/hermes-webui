@@ -8104,20 +8104,11 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
             session['is_cli_session'] = False
             if state_db_source == 'subagent':
                 session['read_only'] = True
-        # Overlay the real state.db message count for WebUI-owned rows AND for
-        # delegated subagent children (#5308). A subagent child
-        # (state_db_source == 'subagent') is backed by the delegate runner's
-        # state.db session, but its sidebar row is built from a stale sidecar
-        # that often reports message_count == 0. Without overlaying the true
-        # count, the front-end visibility predicate
-        # (_sidebarRowHasVisibleMessages) drops the row and the subagent
-        # session vanishes from the sidebar entirely (regression seam behind
-        # #5308, same state.db-blind-metadata root as the #5307 transcript
-        # recovery). The count overlay keeps the same conservative
-        # anti-resurrection guard used for WebUI rows. Source metadata is
-        # authoritative for WebUI rows and delegated subagent children;
-        # foreign CLI sources retain their existing flags.
-        if state_db_source in ('webui', 'subagent'):
+        # Overlay activity for WebUI rows, delegated children (#5308), and
+        # imported CLI sessions continued externally. Their sidecars can lag
+        # state.db messages. Keep the same anti-resurrection guard for counts
+        # and timestamps; CLI source flags and sidecar UI metadata stay intact.
+        if state_db_source in ('webui', 'subagent', 'cli'):
             try:
                 current_count = max(0, int(session.get('message_count') or 0))
                 state_count = max(0, int(state_db_message_count or 0))
@@ -8139,7 +8130,12 @@ def _apply_sidebar_state_db_override_metadata(sessions: list[dict], metadata: di
             # sidecar metadata-only write happened after the state.db append,
             # keep the conservative anti-resurrection guard and wait for a
             # newer settled state.db message before overlaying counts again.
-            if state_count > current_count and (state_last <= 0 or state_last > current_last):
+            # CLI imports need a real newer message timestamp: a stale
+            # sessions.message_count alone cannot prove activity after deletion.
+            newer_activity = state_last > current_last or (
+                state_db_source != 'cli' and state_last <= 0
+            )
+            if state_count > current_count and newer_activity:
                 try:
                     existing_actual = max(0, int(session.get('actual_message_count') or 0))
                 except (TypeError, ValueError):
@@ -8257,6 +8253,8 @@ def _enrich_sidebar_lineage_metadata(sessions: list[dict]) -> None:
                 '_state_db_raw_source',
                 '_state_db_session_source',
                 '_state_db_source_label',
+                '_state_db_message_count',
+                '_state_db_last_message_at',
             ):
                 entry.pop(key, None)
             # Importer rows carry parent_source (null = parent outside its window); keep it,

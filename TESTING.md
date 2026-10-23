@@ -40,6 +40,18 @@ and touch flows in real Chromium.
 
 ---
 
+## Imported CLI sidebar activity
+
+Run `./scripts/test.sh tests/test_session_lineage_metadata_api.py -k imported_cli_sidebar`.
+The isolated SQLite/sidecar tests append messages externally after a CLI import,
+then read `all_sessions()` with and without lineage enrichment. Sidebar activity
+uses the newer message timestamp only when the count also grows; title, profile,
+archive state, saved transcript, sidecar and index remain unchanged by reads.
+A newer sidecar update blocks old truncated history, and deleted/missing SQLite
+messages cannot refresh activity from a stale denormalized count alone. The
+existing top-N metadata lookup limits still apply. This is backend projection
+coverage, not a live CLI/Bitrix or browser-rendering test.
+
 ## Cancelled-journal recovery combinations
 
 Run `./scripts/test.sh tests/test_cancel_recovery_properties.py tests/test_cancel_restart_journal_recovery.py`.
