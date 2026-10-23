@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+import time
 import copy
 import hashlib
 import math
@@ -1078,6 +1079,15 @@ def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
     old_msg_count = len(full_messages)
     old_ctx_count = len(getattr(session, 'context_messages', None) or [])
     session.messages = full_messages[:keep]
+    # The live array is now the whole transcript. The load-time sidecar counts
+    # describe the pre-truncation file, and compact() prefers them over the
+    # live array, so the clear route (keep=0, save, return s.compact()) used to
+    # answer with the old total. Drop them: compact() then counts the live
+    # array, exactly as for a session that was never loaded. Nothing is
+    # re-assigned at save time, so concurrent saves cannot race a stale value
+    # back in (#8310 /status "Total messages" row).
+    session._metadata_message_count = None
+    session._metadata_visible_message_count = None
     _stamp_intentional_shrink_generation(session, old_msg_count, len(session.messages))
     if isinstance(getattr(session, 'context_messages', None), list):
         session.context_messages = truncate_context_for_display_keep(
@@ -1087,6 +1097,8 @@ def truncate_session_at_keep(session, keep: int) -> tuple[int, int]:
         )
     session.truncation_watermark = _truncation_watermark_for(session.messages)
     session.truncation_boundary = session.truncation_watermark
+    # Gateway delegation results delivered before this point are cleared away with the transcript.
+    session.delegation_cutoff_ts = time.time()
     return old_msg_count, old_ctx_count
 
 

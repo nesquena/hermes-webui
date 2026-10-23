@@ -257,7 +257,7 @@ def test_kanban_filtered_view_capped_at_chip_limit():
     assert "KANBAN_PROJECT_CHIP_LIMIT if source_filter == 'kanban'" in src, (
         "a bounded kanban-only project-chip limit must exist for the filtered view"
     )
-    assert '("cron", "webhook", "kanban") if source_filter is None' in src, (
+    assert '("cron", "webhook", "kanban", "oneshot") if source_filter is None' in src, (
         "kanban must not consume the bounded interactive-session query"
     )
     assert 'include_sources=("kanban",)' in src, (

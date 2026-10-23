@@ -5,6 +5,10 @@
 
 ### Added
 
+- **Pinch, pan and zoom in the image lightbox.** An enlarged chat image can now be pinched to zoom and panned with two fingers on touch screens, zoomed with the mouse wheel at the cursor and dragged on desktop, and zoomed or reset with `+`, `-` and `F` on the keyboard. A Fit button next to close returns it to fit, the zoom carries across previous/next images, and the image can no longer be dragged out of view. An edge swipe inside the open lightbox no longer opens the session drawer behind it, and keyboard focus now moves into the dialog. A maintainer fold makes both buttons 44×44 on touch screens with a gap between them, gives them a hover state you can see over the dark backdrop and over bright images (the close button in the diagram lightbox included), and keeps Tab order in visual order. Thanks @silent-reader-cn. (#6896)
+
+- **Native OIDC login works with identity providers that accept only HTTP Basic client authentication.** WebUI always sent the client secret in the token request body (`client_secret_post`), which providers that support only `client_secret_basic` reject. In the default `auto` mode it now switches to Basic only when the provider's discovery document says `client_secret_post` is not supported, so existing deployments send byte-for-byte the same request; `webui_oidc.token_auth_method` (or `HERMES_WEBUI_OIDC_TOKEN_AUTH_METHOD`) can force either method. Basic credentials are form-encoded first as RFC 6749 section 2.3.1 requires, and an unsupported configured value is logged once instead of on every auth check. Thanks @chesterXalan. (#6471)
+
 - **Insights: pick an exact date range.** The period menu has a Custom range… option with Start and End date pickers (labelled, translated in all 15 languages), so usage, cost and model numbers can cover any window, not just the presets. Today is always selectable, and typing a date no longer clears the field. Thanks @silent-reader-cn. (#6970)
 
 - **Kanban Scheduled column.** Scheduled tasks get their own board column, and the task editor, task detail and bulk
@@ -19,26 +23,7 @@
   conversation keeps most of the height, with a fade marking more items. While it's on, the workspace Todos tab is
   disabled with a note. Off by default. Thanks @silent-reader-cn. (#6978)
 
-- **Project bindings: pin workspaces and a model to a sidebar project.** Right-click a project chip and choose
-  **Project settings…** to bind one or more workspaces (one marked default) and a model, so the project's quick-create
-  (+) button opens a new session already set up for that project. Thanks @silent-reader-cn.
-  (#6836)
-
-- **English multilingual Edge TTS voices.** The English multilingual Edge text-to-speech voices are allowed and listed in
-  Settings alongside the existing voices; the server still accepts only allowlisted voice IDs. Thanks
-  @judah-hermes-agent. (#8210)
-
 ### Performance
-
-- **Draft autosave no longer rewrites the whole session.** Typing in a long conversation could stall, because every
-  changed composer draft was saved by rewriting the full session JSON file. Drafts now go to a small per-session draft
-  file that is overlaid when the session loads, with first-write durability, compression ownership, explicit clears,
-  deletion and session cleanup all preserved. A draft save that fails while switching sessions keeps navigation working
-  without losing the unsaved text. Thanks @starship-s. (#6524)
-
-- **Opening a session reuses a recent model catalog for up to an hour.** The session-visit freshness window for the
-  disk-backed models catalog is 1 h instead of 5 min, so installs with many or slow providers stop rebuilding the full
-  catalog on most session visits. Thanks @cxk1993. (#8261)
 
 - **Fork a scheduled-job (cron) conversation into your own editable chat.** Cron-run sessions are read-only (the scheduler owns them), so you couldn't continue one. You can now branch/fork a cron session into a new WebUI-owned conversation — the original read-only session is never modified, and the fork picks up its history so you can carry on. Only genuine cron sessions qualify (verified by the server-side source, not a guessable id), and every other read-only session stays unbranchable. Thanks @rodboev. (#5555, #5477)
 
@@ -68,6 +53,14 @@
 
 ### Security
 
+- **The request log no longer records a client-chosen address as `forwarded_for`.** The structured request log, which fail2ban jails read, copied the left-most `X-Forwarded-For` hop from any peer, so any client could write an arbitrary address there and get someone else banned. It now records `forwarded_for` only when the socket peer is a trusted proxy (loopback, or listed in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`), resolving the chain right to left to a validated address, and it never reads `X-Real-IP` for this field. A request whose forwarded header was not recorded carries `forwarded_for_ignored: true` instead, and the first one from an untrusted peer logs a one-time warning naming the peer and the setting to change. If a fail2ban jail matches `forwarded_for` and your proxy is not on loopback, add the proxy's address to `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`; `docs/remote-access.md` documents both fields. Thanks @happy5318. (#7864, fixes #7863)
+
+- **Behind a reverse proxy, login rate limiting is per client again, and a client cannot pick its own bucket.** The password and passkey login limiters keyed on the socket peer, which behind a proxy is the proxy itself, so one user's failed logins locked out everyone. They now key on the forwarded client address, but only when `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` and the proxy's address is listed in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS` (implicit loopback trust is not enough, so a direct or SSH-tunnel client cannot send a fresh `X-Forwarded-For` on every attempt). Every `X-Forwarded-For` and `X-Real-IP` field is checked: if they disagree, a field is empty or a value is not an address, failed logins count against the socket peer as before. `.env.example` explains the trade-off of listing a loopback address. Thanks @codechrl. (#7850)
+
+- **Gateway chat no longer sends one profile's Gateway key to another profile's Gateway.** When the WebUI runs on a named profile whose `.env` sets its own Gateway URL, a session on a different profile that sets only a Gateway key (no URL of its own) sent that key to the first profile's Gateway, so the request failed with 401 or exposed the key to the wrong server. Such a profile now uses the WebUI's own Gateway URL and key together, which is what v0.52.492 and earlier sent. Profiles that set their own `HERMES_WEBUI_GATEWAY_BASE_URL`, shared operator configuration and launcher-exported URLs behave as before. To give a profile its own Gateway, set its own `HERMES_WEBUI_GATEWAY_BASE_URL`. (#8435, fixes #8432)
+
+- **Update timeout messages never echo credentials.** When an in-app update's fetch times out, the message names the cancelled operation; that operation text now goes through the same credential scrub as every other update diagnostic, so a remote URL with embedded userinfo or a token would be shown redacted. The message is unchanged for the fetches the updater runs today. Thanks @pcsokonay. (#8415)
+
 - **Pressing Enter on the approval card's Deny button denies.** While a tool approval was pending, Enter on any focused
   control outside a text field ran "Allow once": Enter on **Deny**, **Allow session** or **Always allow** approved the
   command once, and Enter on the ⋮ menu, a menu row, the project picker or a control that closes itself on Enter approved
@@ -81,6 +74,83 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **An OpenRouter model from the overflow list no longer appears twice in the model picker.** Restoring a model that lives past the shown rows (for example an ID ending in `:free`) in the composer or Settings picker used to add a second, ungrouped copy of it. It now shows once, in its provider group, stays selected, and the "(a of b)" count stays right, for new chats and for reopened ones. Thanks @starship-s.
+
+- **CI: browser-gate jobs no longer time out on a slow package mirror.** `playwright install --with-deps` downloads Chromium's system packages with apt on every job, and on some runners the Ubuntu mirror serves them at 25-65 kB/s, so the install alone ran past the 10-minute job limit. On 2026-10-22 that cancelled about 7% of `browser-smoke` jobs (a required check) and about 4% of `conversation-lifecycle` jobs, including its two blocking rows. Both limits are now 30 minutes; no job, step or required check changes. (#8494)
+
+- **Docker: an Agent that needs a newer Python major gets a matching venv.** When choosing the interpreter for the Agent's venv, Docker startup only searched the base image's Python major, so a `requires-python` range such as `>=4.0,<4.2` on a 3.12 image silently kept the 3.12 venv. It now searches the primary major first, then every other major the range names at or above the image's own. Every range a released Agent declares today selects exactly as before. Thanks @MuhammadUsamaMX. (#8459, follow-up to #8113)
+
+- **Docker first start survives files vanishing during the ownership walk.** A fresh container could fail its first
+  start at random when files disappeared while the init script aligned ownership. The walk now tolerates only
+  `chown`'s own ENOENT, migrates old-UID files in writable Agent checkouts and `.git` metadata after a UID change, and
+  still fails on real permission, read-only or disk-full errors. Thanks @gakugaku. (#8154, fixes #8106)
+
+- **Docker: the staged Agent copy that auto-install uses is checked and used as one path, and a bad stage setting no longer stops startup.** Since exp-v0.52.540 the WebUI installs Agent dependencies from a writable staged copy when the Agent source is mounted read-only. The staged path was resolved only after its trust checks, so a symlink swapped in between could point the install at a directory nothing had checked. A value like `~unknown-user` could also abort startup. The path is now resolved once and checked as resolved. Any unusable value falls back to the Agent directory, and a stage another user could replace through a parent folder is refused. (#8471)
+
+- **Non-English users are no longer told that a failed conversation delete succeeded.** When the WebUI cannot delete a conversation because the session store could not commit the delete, it keeps the conversation and its files and shows an error. Since exp-v0.52.519 the English text said so, but the 14 translations still said the conversation had been deleted. All 14 now say it could not be deleted, its files were kept, and to restart the agent and try again. (#8466)
+
+- **Run-journal archiving keeps the runs a session still needs to recover an answer.** The hourly retention sweep added in exp-v0.52.534 could archive the journal of an interrupted or cancelled run that its session had not recovered yet. Current releases read archives, but rolling back to a release that predates the archive format (such as v0.52.492) lost that recovered answer. The sweep now leaves a session's active run and any run named by an interrupted-turn marker live, and still archives everything else under the usual caps. (#8464)
+
+- **Gateway chat no longer fails with 401 for a profile that keeps its own `API_SERVER_KEY` but uses the shared Gateway URL.** Since exp-v0.52.493, such a profile sent its own key to the shared/default Gateway URL. The Agent's API server picks the profile from the URL (its default listener, or `/p/<profile>` with `gateway.multiplex_profiles`) and accepts only that profile's key, so these chats were rejected where v0.52.492 works. Common cases: the WebUI running on a named profile with no URL configured, and multiplexing deployments whose secondary profiles keep `API_SERVER_KEY` in their `.env`. On the shared URL another profile now sends its own `HERMES_WEBUI_GATEWAY_API_KEY` if it set one, otherwise the shared key, as v0.52.492 does; its `API_SERVER_KEY` is used there only when the WebUI has no shared key at all. To send a profile's turns to its own route, set its `HERMES_WEBUI_GATEWAY_BASE_URL` (for a multiplexing Gateway, `http://<gateway>/p/<profile>`). (#8463)
+
+- **Multi-container Docker installs can import the Agent again (#8113), and a venv rebuild never loses a working venv.** Since Agent v0.21.6 every base Agent dependency is gated on Python 3.14, but the WebUI image's 3.12 venv silently dropped them, so the container reported healthy while the Agent could not import. `docker_init.bash` now asks the staged Agent which interpreter it needs (its full `requires-python` range and dependency gates, micro version included) and builds the venv on it; an existing venv on the wrong interpreter is rebuilt as a transaction: the old venv and staged Agent source are moved aside under a journal and deleted only once the replacement is created on an accepted interpreter and fully installed. An offline restart, a failed install or a container stopped mid-way keeps or restores the old venv and still boots, and a leftover it did not create is never touched. Startup now reports loudly when the Agent is installed but not importable, the staged Agent copy is bound to the authorized source, and the unreadable `tools/.install.lock` is no longer staged. The Docker smoke test restarts every compose variant. Thanks @MuhammadUsamaMX. (#8360)
+
+- **Agent oneshot runs no longer push your conversations out of the sidebar.** `hermes -z` one-off runs are small and numerous; an agent delegating through them filled the 20-row interactive sidebar window and hid real Desktop sessions. Oneshot runs are now treated like the other background sources (kept out of that window, still listed with the oneshot source filter), while an opened oneshot session stays fully usable: it is looked up by id rather than from the newest 20, the Files pane lists its workspace under the profile that owns it (with that profile's workspace trust checks), and an older oneshot filed under a project keeps resolving as before. (#8349, fixes #8265, thanks @balabommablock-cpu)
+
+- **Agent session titles come from what you typed, not the workspace prefix.** With a workspace attached, the Agent's own auto-title (the one stored in `state.db`) was generated from the model input, so sessions could be titled `[Workspace::v1: /home/user/project]`. WebUI now passes the submitted prompt as the Agent's title input on the first send, on both credential self-heal retries and on the synchronous `POST /api/chat` route; the model still receives the workspace context. Older Agents without the setting are called exactly as before. Thanks @mickek. (#8436)
+
+- **Gateway chat: finished background delegations can wake the agent.** With the Gateway chat backend (`HERMES_WEBUI_CHAT_BACKEND=gateway`), an `[ASYNC DELEGATION COMPLETE]` result landed in history but nothing happened until you typed again. The WebUI now picks those completion rows up and starts the wakeup turn itself, reserving each row through the Agent's own delivery API so a result is folded exactly once (by the wakeup or by your next turn, never both); results from turns you cleared or rewound are retired instead of replayed. This turns on only when the installed Hermes Agent provides the delivery reserve/commit API; on older Agent builds it stays off and logs that it is inactive. Thanks @carlotestor. (#7901)
+
+- **Run journals no longer grow without bound.** Each run's journal used to stay on disk forever, so a long-lived session's journal directory kept growing. An hourly maintenance sweep now compresses settled runs into `sessions/_run_journal_archive/` once they pass a size, count or age limit (defaults: 256 MiB of live journal per session, 40 live runs per session, 14 days). The compressed copy is verified byte-for-byte before the live file is removed, runs that have not provably finished are never touched, and every read path (run status, session reload, replay after a reconnect) falls back to the archive transparently. Archives are kept forever by default; the optional archive TTL never deletes an archive a session still needs to recover an interrupted answer. On platforms without `dir_fd` support (Windows) the sweep turns itself off. Thanks @aleesposito85. (#7642, fixes #7613)
+
+- **A message you send while a /goal continuation is pending runs as your own turn.** The pending continuation no longer claims the next message for the goal: each continuation carries its own ID, and only that continuation is treated as goal-related. A continuation restored into the composer after a reload, or saved while a clarify question is open, keeps its ID while the text is unchanged. A regenerate no longer uses up the pending continuation, and deleting a session clears it. (#7855, part of #6885, thanks @happy5318)
+
+- **Insights cache hit rate is no longer stuck at or below 50%.** Cache reads are already counted inside input tokens, so the rate now divides cache reads by the full prompt total, in the daily chart and the per-model and overall figures. Thanks @balabommablock-cpu. (#8372, fixes #8345)
+
+- **Today's messaging DM stays in Today.** After a Telegram/Discord `session_reset`, the new session is shown as its own top-level conversation (keeping its lineage link) instead of being nested under the old chat, so it no longer drops out of "Today". Branches, subagents, CLI and compression children are grouped as before. (#8298, thanks @solarmaster961)
+
+- **Test suite: no real DNS lookups.** The shared test network guard now blocks DNS as well as connections (IP literals and `localhost` still resolve). A real lookup in the custom-provider address check could take longer than the 4-second model-list limit on a slow CI resolver, which made `test_seeded_config_survives_a_stale_loaded_config_path` fail on unrelated PRs. (#8396)
+
+- **The finished reply stays on screen in Transparent Stream.** When a long Transparent Stream turn settles, the reply is finalized in place instead of re-rendering the whole transcript, so it no longer blanks for a moment at the end of a turn; disclosure choices, detail scroll and table sort/filter controls survive. (#7833, closes #7676, thanks @MuhammadUsamaMX)
+
+- **Steer goes to the live Gateway run.** With the Gateway backend, Steer now forwards your message to the running turn instead of queueing it as the next one. If the connection to the Gateway drops and the run finishes before it reads the steer text, the text is replayed instead of lost. (#7919, thanks @carlotestor)
+
+- **Long chats stop jumping while you scroll.** In long virtualized transcripts, rows measured during a scroll no longer pull the view back and forth or teleport it mid-gesture, the scrollbar thumb lands where you drop it, and jump-to-question lands on the answer. Older-row loading and streaming tail-follow keep their place. (#8122, closes #7591, thanks @MuhammadUsamaMX)
+
+- **Archiving a session from another profile works.** With All profiles on, archiving or restoring a CLI or imported session that belongs to another profile no longer fails with "Session not found", keeps the session's CLI source details, and never writes a copy into the wrong profile. A request that names the wrong owner gets a clear profile-mismatch error. (#7731, closes #7549, thanks @MuhammadUsamaMX)
+
+- **Long messages no longer show another message's text.** The render cache identified messages over 500 characters by their length plus their first and last 20 characters, so two equal-length messages from the same template (status reports, cron summaries, regenerated answers) shared an entry and the second displayed the first one's body. Long messages are now keyed on a hash of the whole text. Saved data was never affected. (#8387)
+
+- **Tool calls without a result no longer break a conversation.** An assistant tool call whose result never arrived (an interrupted run, a crash between call and result) is now repaired the same way the Agent repairs it, so the next reply stays in the saved model context instead of being dropped, including when an older tool call had empty or broken arguments. (#7237, thanks @happy5318)
+
+- **Subagent runs stay with their parent conversation in the sidebar.** With All profiles on and a project filter such as Unassigned, delegated subagent sessions whose parent was filed in another project, or belonged to another profile, or was itself a subagent, showed up as contextless top-level "Subagent Session" rows (18 on one real install). They now follow their parent: nested when the parent is visible, hidden with it when it is filtered out, and still listed as an openable orphan when the parent is missing, compressed, or a CLI conversation. (#7771, thanks @carlotestor)
+
+- **Windows file links open the right file.** A `file:///C:/...` link or image in a reply now reaches the media route with its drive letter intact, so it previews or downloads on a Windows server (on a POSIX server a `/C:/...` path stays absolute and can never alias a workspace file). Streaming and finished replies convert links the same way, a network-share `file://server/...` link is left as a plain link, and a `#` or `?` in a file name is kept. (#8243, closes #8033, thanks @happy5318)
+
+- **The quota chip follows the open conversation's provider.** The chip by the model picker (and the Quota pill in the phone composer) used to show the server default's numbers: a DeepSeek chat showed Codex's 5-hour window. It now shows the conversation's own provider in its units (percent windows for plans, a balance for prepaid accounts), refreshes on a conversation, provider or profile switch, and clears at once so another account's numbers never show. Thanks @sheldon-im. (#6506)
+
+- **Test suite: the mobile camera-choice test no longer fails in full runs.** `test_issue6942_mobile_camera_choice_render` started its own server with the shared test server's config path, so after earlier tests configured a provider there it auto-completed and saved onboarding, and later browser contexts skipped the request the test waited for. The test's server now uses its own config and workspace. Test-only. (PR #8382)
+
+- **Composer menus stay open when the on-screen keyboard opens on tablets.** On tablets and foldables, typing in the model picker's search box no longer snaps the model, reasoning or workspace menu shut. They close only on a real switch between phone and desktop layouts, or when the composer collapses into its compact menu. Thanks @jatinbharadia. (#7472)
+
+- **Deleting a conversation now also clears its Gateway runtime records.** Deleting a session removed its messages but left the Gateway's runtime ledger (admissions, worker receipts, routing, spillover and mutation receipts) behind, so a deleted conversation could keep blocking or confusing later Gateway work. Deletes now run the Agent's own retirement step inside the same transaction. A conversation that is still running or finishing background work is refused with a clear message instead of being half-deleted, and in a batch delete only those sessions stay selected while the rest are removed. On an Agent too old to provide the step, or an install missing the Agent's dependencies, sessions with no runtime records still delete normally. (#8300, PR #8323, thanks @Overview3833)
+
+- **Agent update: a slow fetch is reported as a timeout, not a network outage.** When the in-app Agent update's fetch ran past its 15-second budget, the error said the remote couldn't be reached and suggested checking your connection. It now says the fetch was cancelled at the deadline and names the command. Real network failures keep their connectivity guidance. Thanks @pcsokonay. (#8375, fixes #8337)
+
+- **Terminal keeps your keystrokes in order.** Keys typed into the composer terminal are now sent one request at a time per shell, with anything typed meanwhile queued and sent next, so fast typing or a paste followed by Enter can no longer reach the shell out of order. Long pastes are split under the server's size limit, and unsent keys are dropped when the terminal is closed or restarted. Thanks @grzezlo. (#8341)
+
+- **Windows: starting the WebUI again reports "already running".** When our own WebUI already listens on the port, Windows can refuse the second bind with a permission error (WSAEACCES) instead of "address in use"; the launcher now recognises its own server behind that error. Thanks @Thanatos9404. (#8301, #8137)
+
+- **Faster session switching on code-heavy chats.** The copy-button pass marks code blocks it has already handled, so re-rendering a cached transcript no longer re-walks every code block to add nothing. Thanks @MuhammadUsamaMX. (#8309, #2168)
+
+- **Dashboard link setting rejects double-slash paths.** A browser dashboard URL whose path contains `//` (for example `https://host//dashboard`) is now refused when you save it, closing the last authority-like path shape the earlier #7844 hardening missed. Thanks @MuhammadUsamaMX. (#8354)
+
+- **Skills panel works again with current Hermes Agent builds.** The Agent renamed its skills-ordering helper on 2026-10-18 without keeping the old name, so the Skills list and skill usage stats returned a server error after the WebUI restarted. The WebUI now accepts both the old and new name (and falls back to the same ordering if neither exists), so it works with older and newer Agents alike. Thanks @sh4rknado. (#8367)
+
+- **Less CPU while chats are open.** Finding a run's journal file walked every session directory on each lookup, and those lookups sit on per-poll paths (stream reconnect probes, ownership checks). With hundreds of sessions that walk took a large share of the process and slowed even `/health`. Run paths are now cached (bounded, revalidated on use), hundreds of times faster per warm lookup. Thanks @silent-reader-cn. (#8322)
+
+- **Chats on a named custom provider keep their model.** A session pinned to `@custom:<name>:<model>` could silently switch to the catalog default on another provider when the catalog was cold (the provider lives in `custom_providers`, often in a profile config). Valid models are now kept, including server-side wakeup turns, and a model that was really removed from the provider's list moves to the provider's current default, with `${VAR}` defaults expanded in the session's own profile environment. Thanks @MoBluey. (#8256)
 
 - **Scheduled Tasks mark the job that just ran.** When a job finishes in the background, the Tasks list now refreshes on its own and marks the job with a dot, and an open job's Last Output card is marked too, without collapsing output you have open. The marker uses the app's unread colour and sits in the row's gutter so titles don't shift. Thanks @martindell. (#6767)
 
@@ -156,142 +226,6 @@
   shared one with the launcher key, and with a root `.env` alias a cloned profile sent a copied key while a sparse
   profile sent none. Each turn now resolves both from the session's profile; the launcher's exported key still wins on
   the shared URL. Thanks @conradmicallef. (#7983)
-
-- **Per-turn token usage survives a reload.** The usage badge on an assistant reply ("1.2k in · 800 out") was
-  computed client-side at the end of a stream and lost on reload; it's now persisted on the settled assistant
-  message. Thanks @cxk1993. (#8258)
-
-- **Stopping a Gateway chat now carries the interrupted turn into the model's next context.** The cancelled prompt and its
-  partial answer are reconciled into context exactly once (also for empty-context sessions, eager-save mode, forks,
-  same-second interrupts and cleared sessions), and display-only recovered rows are never resurrected into context.
-  Thanks @Ejmathewp. (#8166)
-
-- **API paths are case-insensitive under `/api/`.** `/API/Settings` and `/Api/...` now route like `/api/...`, and the
-  folded path is what the auth check sees, while dynamic segments (share tokens, MCP server names, session ids) keep
-  their original case. Thanks @webtecnica. (#6589, fixes #3943)
-
-- **Long virtualized transcripts measure rows before writing, and settle without a redundant second rebuild.** Row
-  heights are read before layout is invalidated, and the transparent settle skips a rebuild that only repeated the
-  first, so scrolling a long session does less work and keeps its place. Thanks @MuhammadUsamaMX. (#8232, fixes #7677)
-
-- **Cron jobs created from chat run under the right profile again.** The Agent renamed its scheduling tool from `cronjob`
-  to `cronjob_manage`, which left WebUI's cron profile wrapper inert. The wrapper now installs under the new name and
-  still works with older Agents that expose `cronjob`. Thanks @angel291592. (#8201)
-
-- **Outline jumps land on the message right after a long session opens.** Load-time bottom settling no longer pulls
-  the reader back, and the jump reuses already-loaded history instead of fetching it again. Thanks @dss539. (#8219)
-
-- **Edit, regenerate and fork act on the message you clicked, even after the outline loads full history.** Opening the
-  conversation outline loads older messages without re-rendering, which left on-screen rows with indexes relative to
-  the old window. These actions now resolve each row's current index. Thanks @dss539. (#8218)
-
-- **Updates recover from a renamed remote branch instead of failing to fetch.** When a branch on the remote was renamed
-  so its old name now blocks the new one (`'refs/remotes/origin/x' exists; cannot create ...`, or on git 2.51+ only
-  "some local refs could not be updated; try running 'git remote prune origin'"), the updater prunes just the stale
-  remote-tracking ref and retries once. Local branches, local tags and working-tree changes are never touched. Thanks
-  @UncleLiu-0306. (#8227)
-
-- **WebUI finds the same Agent whether it starts as a service or through bootstrap, and recovers from a half-finished
-  Agent install.** Direct service startup and `bootstrap.py` now share one Agent discovery path, keep the interpreter
-  that actually proved the Agent install for later Agent subprocesses, and retry an incomplete install instead of
-  starting against it. Thanks @rodboev. (#7247, fixes #1019)
-
-- **A git pull that times out no longer returns a 500, and its output can't leak credentials.** The partial git
-  output is decoded instead of crashing the update handler. Credentials embedded in remote URLs or query strings
-  (including values containing quotes) are redacted from the pull-failure and timeout messages, and the redacted
-  text is no longer cut short. Thanks @happy5318. (#8202, fixes #8198)
-
-- **Background-subagent wakeups no longer appear as messages you typed.** When delegated background work finishes, the
-  wakeup the Agent needs is still delivered, but the transcript no longer shows it as a user bubble, and it no longer
-  counts toward message totals, provisional titles, forks or exports. That holds across reloads, session switches and
-  streaming. Thanks @CharlesMcquade. (#7882)
-
-- **Settings search shows results right away.** Typing in the Settings search box now lists matches from the
-  already-loaded panes immediately, instead of waiting for every pane to finish loading, and a result you've clicked
-  no longer reappears when the slower panes arrive. Thanks @yugui923. (#6370)
-
-- **Faster secret redaction on long values.** The redactor no longer runs its environment-assignment and code-key
-  matchers on strings that contain no `=`, which those patterns need to match, so long URL-bearing values in API
-  responses are masked with less CPU. Every other masking rule is unchanged. Thanks @tobenot. (#8192)
-
-- **A finished reply no longer vanishes when the final update arrives empty.** If the stream's closing event carried an
-  empty message list, the done handler replaced the visible transcript with nothing, so the reply you just watched stream
-  disappeared until a reload. The settle now keeps the streamed transcript when the payload is empty. Thanks
-  @MuhammadUsamaMX. (#7836, fixes #6112)
-
-- **Signing in works when another app on the same host sets a malformed cookie.** A cookie with illegal characters
-  from a different service on the same host or domain made the WebUI ignore every cookie after it, so a correct password
-  bounced back to the login page and a switched profile fell back to `default`. Cookies are now read one pair at a time,
-  for both the session and the profile cookie. Thanks @pcsokonay. (#8124, #8123)
-
-- **Insights: the Models card gets three times the width of its neighbours in the usage row.** Long model ids such as
-  `anthropic/claude-...` and `openrouter/...` were cut to an 80 px name column, so several rows read identically. The card
-  now takes a 3x share of the row, and on narrow screens its table stays inside the card instead of spilling past
-  the window. Thanks @aleesposito85. (#8157)
-
-- **Metadata-only session reads no longer rebuild a conversation's regeneration history.** A `GET /api/session?messages=0`
-  built the canonical regeneration state even though it returns no messages. It now skips that work, and the browser
-  takes regeneration authority from its message load instead, keeping the history it already has loaded, including
-  after you switch away and back while a refresh is in flight. Metadata-only responses no longer carry
-  `regeneration_revision`. Thanks @tobenot. (#8173)
-
-- **A turn's unanswered tool call no longer passes as answered because a later turn reused its id.** The model context
-  kept any tool call whose id appeared anywhere in the history's tool results, so an earlier interrupted call could pair
-  with a later, unrelated result and send a malformed tool sequence to the provider. Tool calls now pair only with a
-  result immediately after them, in both model-facing projections. Thanks @happy5318. (#8194)
-
-- **Switching back to a long-running conversation no longer freezes the browser.** Reconnecting to a conversation
-  whose agent has been reasoning for a long time replayed every reasoning chunk with its own render. A 500-chunk replay
-  now paints once per frame instead, cutting the longest main-thread task from about 8-9 s to under 100 ms with the
-  same text. A dropped connection also paints the last words received before it reconnects, without rewinding text in
-  the fade modes. Thanks @UncleLiu-0306. (#8171)
-
-- **The composer model chip and the sidebar now name the model that actually answered after a provider fallback.**
-  When a direct-provider turn fell back to another model, the chip and sidebar kept the configured model. The session
-  now records the served model only when the turn's route still matches the conversation's model/provider, so a mid-turn
-  model pick is never mislabelled. Reopening a session keeps that attribution until you pick a different model in that
-  tab. Thanks @Guts1005. (#7438, fixes #6594)
-
-- **Browser chats now honour a profile's OpenRouter `provider_routing` block** (`sort`, `only`, `ignore`, `order`,
-  `require_parameters`, `data_collection`), as Discord, Telegram and the TUI already did. Both the streaming and the
-  non-streaming chat paths forward it to the agent, editing it takes effect on the next turn, and a `${VAR}` the
-  profile doesn't define is dropped with a warning instead of being sent to OpenRouter as a literal provider name.
-  Thanks @TheDevMoth. (#7812)
-
-- **Chats no longer fail on every message with older Hermes Agent builds.** Each streaming turn re-registers the
-  agent's `cronjob` tool to scope it to the chat's profile, and it copied `ToolEntry.dynamic_schema_overrides`
-  unconditionally; Agent builds from before that field existed raised `AttributeError` before the agent ran, so every
-  chat failed. The field is now forwarded only when both the entry and `register()` support it. Thanks @Yi-111-a.
-  (#8187, fixes #8186)
-
-- **Feishu and DingTalk chats now show up as messaging sessions in the sidebar.** Gateway sessions from those two
-  platforms were classified as "other" with a raw source label, so they missed the messaging filter and the external
-  session handling every other chat platform gets. Both are now in the messaging source set with proper labels, on the
-  server and in the sidebar's fallback tables. Thanks @HenryLoveMiller. (#8174)
-
-- **The model picker no longer trusts a models cache that was only recently touched.** The session-visit freshness
-  check used the cache file's modified time, so anything that touched the file (a copy, a sync, a backup) kept a stale
-  catalog looking fresh. The cache now records when it was actually built (`_built_at`) and the 300 s refresh is measured
-  from that; caches written by older versions, or carrying an invalid or future stamp, fall back to the file time as
-  before. Cache hits still do no writes. Thanks @webtecnica. (#7932, refs #7723)
-
-- **A run that saved memory or a skill just before the WebUI restarted no longer loses that update.** If the server
-  stopped after the run journal recorded a `state_saved` side effect but before the session applied it, reconnecting
-  restored the Worklog rows but silently dropped the saved-state entry. Recovery now replays those side effects from
-  the journal into the turn, exactly once, without touching the journal; very large turns keep their Worklog rows
-  instead of failing the save. Thanks @franksong2702. (#7859)
-
-- **The same mermaid diagram in two replies now renders in both.** Identical replies reuse cached markdown, so both
-  diagrams carried the same render id; drawing the second one silently emptied the first (and a later identical reply
-  could fall back to a plain code block), even after a reload. Each diagram now gets its own id before it is drawn.
-  Thanks @johnDEFI. (#8159)
-
-- **New chats answer faster: the session ID no longer breaks the model's prompt cache.** Every new chat put its own
-  session ID near the end of the system prompt, so no two chats ever shared a cacheable prompt and the model had to
-  re-read it from that line on each time (on a local backend the reporter saw 15-18 s first responses drop to 2-3 s).
-  The ID is now left out by default, matching hermes-agent's own `pass_session_id`. Set `webui.pass_session_id: true`
-  in config.yaml to include it again; it is then added last, so everything before it stays shareable. Thanks @ybai08,
-  and @apakuts for the report. (#8150, fixes #8148)
 
 - **Background workers for the default profile keep their own profile.** A detached worker (a model-catalog
   rebuild, the process-wakeup credential check) entered for the default/root profile used to skip binding the
@@ -526,6 +460,12 @@
 
 ### Changed
 
+- **Keyboard and screen reader users can reach conversations in the sidebar directly.** Conversation titles are now real buttons (the open one is marked as the current page), the Chat label is a heading, and a keyboard-focused row shows a clear focus ring, including in forced-colours mode and the Geist Contrast skin. Focus stays on the same conversation when the list refreshes, J/K navigation keeps working after a mouse click, and opening a conversation closes any open project or model menu. On touch screens, the first tap on a tag filters by it, a long press on a tag still opens the conversation's actions, and a swipe that starts on a tag still swipes. (#7049, thanks @sheldon-im)
+
+- **`/status` shows the true message total when it differs from the visible count.** The status card's "Messages" row counts what you can see; hidden internal rows (delegation wakeups) are part of the session too, so the card now adds a "Total messages" row whenever the two numbers differ, and shows nothing extra when they match. Spanish, German and Simplified Chinese also get a translated "Messages" label (they showed the English word before). A maintainer fold makes clearing or truncating a conversation drop its stale cached counts, so the card no longer shows the pre-clear total right after "Clear conversation". Thanks @fedebyes. (#8310)
+
+- **Test suite: the run-journal echo-scan scaling check no longer flakes on a busy runner,** while still failing on a genuinely quadratic rebuild. Thanks @MuhammadUsamaMX. (#8328)
+
 - **Russian: the last English strings translated.** The Profiles explainer and the Transparent Stream timestamp setting now read in Russian. Thanks @RajPabnani03. (#8001)
 
 - **German: Scheduled Tasks strings translated.** The cron editor's weekdays, time fields and hints were still English in German. Thanks @solarmaster961. (#8289)
@@ -534,26 +474,13 @@
   keeps the newest text in view instead of sitting at the top. Scroll up inside the card to hold your place; scroll back
   to the bottom to resume following. Thanks @esc247. (#7988)
 
-- **The WAL snapshot refusal test now exercises a real temporary database.** Thanks @tobenot. (#8233)
-
-- **An order-dependent CI test failure is fixed.** `test_custom_provider_detected_by_get_available_models` (and four
-  siblings) seeded the config in memory but didn't pin the loaded-config path, so a stale path left by an earlier test
-  reloaded `config.yaml` over the seed in CI shard 0. The tests now pin it, and a regression test proves the fix.
-  (#8237, fixes #8226)
-
-- **Faster status polls and history reads on long sessions.** Finding the `messages` key in a session file's metadata
-  prefix uses a regex tokenizer instead of a per-character Python walk, with identical results. Thanks @dss539. (#8216)
-
-- **Faster saves on long sessions.** The exact-duplicate guard that runs on every save, including draft saves while
-  typing, now fingerprints only rows whose identity actually repeats, instead of hashing the whole transcript. The
-  rows it keeps are unchanged. Thanks @dss539. (#8215)
-
-- **Faster transcript rendering.** Message and worklog timestamps reuse cached Intl formatters instead of building a new
-  one per call, and the cache resets when the language or clock setting changes. Thanks @dss539. (#8217)
-
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **The local full test suite passes in the release sandbox (test-only).** Twenty-one tests failed only because of the host: no package index, the worktree's git dir hidden from git, `HOME=/tmp`, unmapped supplementary groups, no network route for Chromium, a process-wide truststore injection, and two newer-Agent shape changes. They now pass there, or skip with the missing condition named (package index, spare group, Agent org skill mirror). No product code changes, and CI still runs the packaging tests.
+
+- **Running the tests can no longer delete the checkout.** An exported-but-empty `HERMES_WEBUI_TEST_STATE_DIR=` used to resolve the test state directory to the current directory, and the session fixture's cleanup then deleted the whole repository, `.git` included. An empty or whitespace-only value now falls back to the temp-dir default, and the suite refuses to start when the state directory is the checkout, one of its parents, or a directory inside it (such as `tests` or `static`). Test-only; no runtime change. Thanks @Overview3833. (#8414, fixes #8413)
 
 - **Test suite keeps the Agent on `sys.path`.** The per-test `sys.path` guard restored a snapshot taken before
   `api.config` added the Agent directory, so after the first test any newly added Agent module could not be imported
@@ -572,6 +499,202 @@
 - **Test suite reads static assets as UTF-8 so it runs on Windows.** 34 test files that opened `static/` assets without an explicit encoding now pass `encoding="utf-8"`, so the suite no longer fails under a non-UTF-8 default locale (Windows `cp1252`). Two method signatures over-matched by the encoding sweep were reverted. Assertions are unchanged. Thanks @mo7al876any. (#5537)
 
 - **Added regression coverage for messaging clear-watermark semantics.** New test locks the watermark behavior so a future change can't silently regress it. Thanks @rodboev. (#5589, #5572)
+
+## [v0.52.492] — 2026-10-21
+
+### Added
+
+- **Project bindings: pin workspaces and a model to a sidebar project.** Right-click a project chip and choose
+  **Project settings…** to bind one or more workspaces (one marked default) and a model, so the project's quick-create
+  (+) button opens a new session already set up for that project. Thanks @silent-reader-cn.
+  (#6836)
+
+- **English multilingual Edge TTS voices.** The English multilingual Edge text-to-speech voices are allowed and listed in
+  Settings alongside the existing voices; the server still accepts only allowlisted voice IDs. Thanks
+  @judah-hermes-agent. (#8210)
+
+### Performance
+
+- **Draft autosave no longer rewrites the whole session.** Typing in a long conversation could stall, because every
+  changed composer draft was saved by rewriting the full session JSON file. Drafts now go to a small per-session draft
+  file that is overlaid when the session loads, with first-write durability, compression ownership, explicit clears,
+  deletion and session cleanup all preserved. A draft save that fails while switching sessions keeps navigation working
+  without losing the unsaved text. Thanks @starship-s. (#6524)
+
+- **Opening a session reuses a recent model catalog for up to an hour.** The session-visit freshness window for the
+  disk-backed models catalog is 1 h instead of 5 min, so installs with many or slow providers stop rebuilding the full
+  catalog on most session visits. Thanks @cxk1993. (#8261)
+
+### Security
+
+- **Pressing Enter on the approval card's Deny button denies.** While a tool approval was pending, Enter on any focused
+  control outside a text field ran "Allow once": Enter on **Deny**, **Allow session** or **Always allow** approved the
+  command once, and Enter on the ⋮ menu, a menu row, the project picker or a control that closes itself on Enter approved
+  the pending action instead of doing its own job. Enter now approves only when it isn't pressed on a control, so each
+  button does what it says. Enter with nothing focused still means Allow once. (#8131, #8130)
+
+- **A malformed passkey response is refused with 400/401, never a server error.** Registering or signing in with a
+  crafted passkey response, for example one whose declared credential ID is longer than the real one, could make the
+  CBOR reader raise an unexpected error and answer `500 Internal server error`. Every malformed registration or login
+  response now gets a clean 400/401 with nothing stored and no session issued, and valid passkeys register and sign in
+  exactly as before. Thanks @ybai08. (#8138, fixes #8126)
+
+### Fixed
+
+- **Per-turn token usage survives a reload.** The usage badge on an assistant reply ("1.2k in · 800 out") was
+  computed client-side at the end of a stream and lost on reload; it's now persisted on the settled assistant
+  message. Thanks @cxk1993. (#8258)
+
+- **Stopping a Gateway chat now carries the interrupted turn into the model's next context.** The cancelled prompt and its
+  partial answer are reconciled into context exactly once (also for empty-context sessions, eager-save mode, forks,
+  same-second interrupts and cleared sessions), and display-only recovered rows are never resurrected into context.
+  Thanks @Ejmathewp. (#8166)
+
+- **API paths are case-insensitive under `/api/`.** `/API/Settings` and `/Api/...` now route like `/api/...`, and the
+  folded path is what the auth check sees, while dynamic segments (share tokens, MCP server names, session ids) keep
+  their original case. Thanks @webtecnica. (#6589, fixes #3943)
+
+- **Long virtualized transcripts measure rows before writing, and settle without a redundant second rebuild.** Row
+  heights are read before layout is invalidated, and the transparent settle skips a rebuild that only repeated the
+  first, so scrolling a long session does less work and keeps its place. Thanks @MuhammadUsamaMX. (#8232, fixes #7677)
+
+- **Cron jobs created from chat run under the right profile again.** The Agent renamed its scheduling tool from `cronjob`
+  to `cronjob_manage`, which left WebUI's cron profile wrapper inert. The wrapper now installs under the new name and
+  still works with older Agents that expose `cronjob`. Thanks @angel291592. (#8201)
+
+- **Outline jumps land on the message right after a long session opens.** Load-time bottom settling no longer pulls
+  the reader back, and the jump reuses already-loaded history instead of fetching it again. Thanks @dss539. (#8219)
+
+- **Edit, regenerate and fork act on the message you clicked, even after the outline loads full history.** Opening the
+  conversation outline loads older messages without re-rendering, which left on-screen rows with indexes relative to
+  the old window. These actions now resolve each row's current index. Thanks @dss539. (#8218)
+
+- **Updates recover from a renamed remote branch instead of failing to fetch.** When a branch on the remote was renamed
+  so its old name now blocks the new one (`'refs/remotes/origin/x' exists; cannot create ...`, or on git 2.51+ only
+  "some local refs could not be updated; try running 'git remote prune origin'"), the updater prunes just the stale
+  remote-tracking ref and retries once. Local branches, local tags and working-tree changes are never touched. Thanks
+  @UncleLiu-0306. (#8227)
+
+- **WebUI finds the same Agent whether it starts as a service or through bootstrap, and recovers from a half-finished
+  Agent install.** Direct service startup and `bootstrap.py` now share one Agent discovery path, keep the interpreter
+  that actually proved the Agent install for later Agent subprocesses, and retry an incomplete install instead of
+  starting against it. Thanks @rodboev. (#7247, fixes #1019)
+
+- **A git pull that times out no longer returns a 500, and its output can't leak credentials.** The partial git
+  output is decoded instead of crashing the update handler. Credentials embedded in remote URLs or query strings
+  (including values containing quotes) are redacted from the pull-failure and timeout messages, and the redacted
+  text is no longer cut short. Thanks @happy5318. (#8202, fixes #8198)
+
+- **Background-subagent wakeups no longer appear as messages you typed.** When delegated background work finishes, the
+  wakeup the Agent needs is still delivered, but the transcript no longer shows it as a user bubble, and it no longer
+  counts toward message totals, provisional titles, forks or exports. That holds across reloads, session switches and
+  streaming. Thanks @CharlesMcquade. (#7882)
+
+- **Settings search shows results right away.** Typing in the Settings search box now lists matches from the
+  already-loaded panes immediately, instead of waiting for every pane to finish loading, and a result you've clicked
+  no longer reappears when the slower panes arrive. Thanks @yugui923. (#6370)
+
+- **Faster secret redaction on long values.** The redactor no longer runs its environment-assignment and code-key
+  matchers on strings that contain no `=`, which those patterns need to match, so long URL-bearing values in API
+  responses are masked with less CPU. Every other masking rule is unchanged. Thanks @tobenot. (#8192)
+
+- **A finished reply no longer vanishes when the final update arrives empty.** If the stream's closing event carried an
+  empty message list, the done handler replaced the visible transcript with nothing, so the reply you just watched stream
+  disappeared until a reload. The settle now keeps the streamed transcript when the payload is empty. Thanks
+  @MuhammadUsamaMX. (#7836, fixes #6112)
+
+- **Signing in works when another app on the same host sets a malformed cookie.** A cookie with illegal characters
+  from a different service on the same host or domain made the WebUI ignore every cookie after it, so a correct password
+  bounced back to the login page and a switched profile fell back to `default`. Cookies are now read one pair at a time,
+  for both the session and the profile cookie. Thanks @pcsokonay. (#8124, #8123)
+
+- **Insights: the Models card gets three times the width of its neighbours in the usage row.** Long model ids such as
+  `anthropic/claude-...` and `openrouter/...` were cut to an 80 px name column, so several rows read identically. The card
+  now takes a 3x share of the row, and on narrow screens its table stays inside the card instead of spilling past
+  the window. Thanks @aleesposito85. (#8157)
+
+- **Metadata-only session reads no longer rebuild a conversation's regeneration history.** A `GET /api/session?messages=0`
+  built the canonical regeneration state even though it returns no messages. It now skips that work, and the browser
+  takes regeneration authority from its message load instead, keeping the history it already has loaded, including
+  after you switch away and back while a refresh is in flight. Metadata-only responses no longer carry
+  `regeneration_revision`. Thanks @tobenot. (#8173)
+
+- **A turn's unanswered tool call no longer passes as answered because a later turn reused its id.** The model context
+  kept any tool call whose id appeared anywhere in the history's tool results, so an earlier interrupted call could pair
+  with a later, unrelated result and send a malformed tool sequence to the provider. Tool calls now pair only with a
+  result immediately after them, in both model-facing projections. Thanks @happy5318. (#8194)
+
+- **Switching back to a long-running conversation no longer freezes the browser.** Reconnecting to a conversation
+  whose agent has been reasoning for a long time replayed every reasoning chunk with its own render. A 500-chunk replay
+  now paints once per frame instead, cutting the longest main-thread task from about 8-9 s to under 100 ms with the
+  same text. A dropped connection also paints the last words received before it reconnects, without rewinding text in
+  the fade modes. Thanks @UncleLiu-0306. (#8171)
+
+- **The composer model chip and the sidebar now name the model that actually answered after a provider fallback.**
+  When a direct-provider turn fell back to another model, the chip and sidebar kept the configured model. The session
+  now records the served model only when the turn's route still matches the conversation's model/provider, so a mid-turn
+  model pick is never mislabelled. Reopening a session keeps that attribution until you pick a different model in that
+  tab. Thanks @Guts1005. (#7438, fixes #6594)
+
+- **Browser chats now honour a profile's OpenRouter `provider_routing` block** (`sort`, `only`, `ignore`, `order`,
+  `require_parameters`, `data_collection`), as Discord, Telegram and the TUI already did. Both the streaming and the
+  non-streaming chat paths forward it to the agent, editing it takes effect on the next turn, and a `${VAR}` the
+  profile doesn't define is dropped with a warning instead of being sent to OpenRouter as a literal provider name.
+  Thanks @TheDevMoth. (#7812)
+
+- **Chats no longer fail on every message with older Hermes Agent builds.** Each streaming turn re-registers the
+  agent's `cronjob` tool to scope it to the chat's profile, and it copied `ToolEntry.dynamic_schema_overrides`
+  unconditionally; Agent builds from before that field existed raised `AttributeError` before the agent ran, so every
+  chat failed. The field is now forwarded only when both the entry and `register()` support it. Thanks @Yi-111-a.
+  (#8187, fixes #8186)
+
+- **Feishu and DingTalk chats now show up as messaging sessions in the sidebar.** Gateway sessions from those two
+  platforms were classified as "other" with a raw source label, so they missed the messaging filter and the external
+  session handling every other chat platform gets. Both are now in the messaging source set with proper labels, on the
+  server and in the sidebar's fallback tables. Thanks @HenryLoveMiller. (#8174)
+
+- **The model picker no longer trusts a models cache that was only recently touched.** The session-visit freshness
+  check used the cache file's modified time, so anything that touched the file (a copy, a sync, a backup) kept a stale
+  catalog looking fresh. The cache now records when it was actually built (`_built_at`) and the 300 s refresh is measured
+  from that; caches written by older versions, or carrying an invalid or future stamp, fall back to the file time as
+  before. Cache hits still do no writes. Thanks @webtecnica. (#7932, refs #7723)
+
+- **A run that saved memory or a skill just before the WebUI restarted no longer loses that update.** If the server
+  stopped after the run journal recorded a `state_saved` side effect but before the session applied it, reconnecting
+  restored the Worklog rows but silently dropped the saved-state entry. Recovery now replays those side effects from
+  the journal into the turn, exactly once, without touching the journal; very large turns keep their Worklog rows
+  instead of failing the save. Thanks @franksong2702. (#7859)
+
+- **The same mermaid diagram in two replies now renders in both.** Identical replies reuse cached markdown, so both
+  diagrams carried the same render id; drawing the second one silently emptied the first (and a later identical reply
+  could fall back to a plain code block), even after a reload. Each diagram now gets its own id before it is drawn.
+  Thanks @johnDEFI. (#8159)
+
+- **New chats answer faster: the session ID no longer breaks the model's prompt cache.** Every new chat put its own
+  session ID near the end of the system prompt, so no two chats ever shared a cacheable prompt and the model had to
+  re-read it from that line on each time (on a local backend the reporter saw 15-18 s first responses drop to 2-3 s).
+  The ID is now left out by default, matching hermes-agent's own `pass_session_id`. Set `webui.pass_session_id: true`
+  in config.yaml to include it again; it is then added last, so everything before it stays shareable. Thanks @ybai08,
+  and @apakuts for the report. (#8150, fixes #8148)
+
+### Changed
+
+- **The WAL snapshot refusal test now exercises a real temporary database.** Thanks @tobenot. (#8233)
+
+- **An order-dependent CI test failure is fixed.** `test_custom_provider_detected_by_get_available_models` (and four
+  siblings) seeded the config in memory but didn't pin the loaded-config path, so a stale path left by an earlier test
+  reloaded `config.yaml` over the seed in CI shard 0. The tests now pin it, and a regression test proves the fix.
+  (#8237, fixes #8226)
+
+- **Faster status polls and history reads on long sessions.** Finding the `messages` key in a session file's metadata
+  prefix uses a regex tokenizer instead of a per-character Python walk, with identical results. Thanks @dss539. (#8216)
+
+- **Faster saves on long sessions.** The exact-duplicate guard that runs on every save, including draft saves while
+  typing, now fingerprints only rows whose identity actually repeats, instead of hashing the whole transcript. The
+  rows it keeps are unchanged. Thanks @dss539. (#8215)
+
+- **Faster transcript rendering.** Message and worklog timestamps reuse cached Intl formatters instead of building a new
+  one per call, and the cache resets when the language or clock setting changes. Thanks @dss539. (#8217)
 
 ## [v0.52.458] — 2026-10-14
 
@@ -1213,6 +1336,7 @@
   accepts either library. A broken Agent bootstrap now logs a warning instead of stopping WebUI.
   The interim workaround `HERMES_DISABLE_LAZY_INSTALLS=1` is no longer needed. Thanks @snoyberg
   (#7876) and @carlotestor (#7875); closes #7831, #7848.
+- **The request log no longer records a spoofable client IP, and says so when it drops the field.** The structured request log took the left-most `X-Forwarded-For` hop at face value, so any client could write a header that a fail2ban jail keyed on the log would act on (ban an arbitrary address). A forwarded IP is now asserted only when the un-spoofable raw socket peer is a trusted proxy (loopback, or an address in `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`), the chain is walked right-to-left to the first untrusted hop, and the value is validated with `ipaddress` before it is written; malformed/empty chains and direct clients fail closed. On the default deployment a proxy on a Docker bridge or LAN address is not allowlisted, so its `forwarded_for` silently disappears — the log path now emits a one-time (process-wide) operator warning naming the peer and the env fix instead of changing the output in silence. Other `X-Forwarded-For` consumers (the local-origin gate, trusted-header auth) are unchanged. (#7863, #7864)
 
 - **Gateway-backend turns survive a WebUI restart.** With the Gateway runs API enabled
   (`HERMES_WEBUI_CHAT_BACKEND=gateway` + `HERMES_WEBUI_GATEWAY_USE_RUNS_API=true`), the Gateway

@@ -1,6 +1,7 @@
 """Hermes Web UI -- startup helpers."""
 from __future__ import annotations
 import os, re, shutil, stat, subprocess, sys
+import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -299,6 +300,105 @@ def _trusted_agent_dir(agent_dir: Path) -> bool:
         return False
 
 
+# docker_init.bash (`write_agent_stage_manifest`) publishes this file inside the
+# staged copy. It names the Agent the stage was copied from (resolved path) and
+# the sha256 of that Agent's install inputs at copy time ('-' when absent).
+_STAGE_MANIFEST = '.hermes-webui-stage-source'
+_STAGE_INPUTS = ('pyproject.toml', 'requirements.txt')
+
+
+def _install_inputs(directory: Path) -> dict[str, str]:
+    """sha256 of each file auto-install reads from ``directory``, '-' when absent."""
+    digests = {}
+    for name in _STAGE_INPUTS:
+        path = directory / name
+        digests[name] = hashlib.sha256(path.read_bytes()).hexdigest() if path.is_file() else '-'
+    return digests
+
+
+def _stage_matches_agent(staged: Path, agent_dir: Path) -> bool:
+    """True only when ``staged`` is a current copy of the authorized ``agent_dir``.
+
+    Ownership and mode prove the stage is ours, not that it was copied from this
+    Agent: the manifest must name ``agent_dir``, and the install inputs of both
+    the Agent and the stage must still hash to what was recorded at copy time.
+    That rejects an unrelated directory, a stage published for another Agent,
+    a stage left behind after the Agent was upgraded, and a stage edited since.
+    """
+    manifest = staged / _STAGE_MANIFEST
+    # Same ownership/mode bar as the directories it vouches for.
+    if not manifest.is_file() or not _trusted_agent_dir(manifest):
+        return False
+    try:
+        recorded = dict(
+            line.split('=', 1)
+            for line in manifest.read_text(encoding='utf-8').splitlines()
+            if '=' in line
+        )
+        if recorded.get('source') != str(agent_dir.resolve()):
+            return False
+        published = {name: recorded.get(name) for name in _STAGE_INPUTS}
+        return _install_inputs(agent_dir) == published == _install_inputs(staged)
+    except (OSError, ValueError):
+        return False
+
+
+def _agent_install_dir(agent_dir: Path) -> Path:
+    """Resolve the directory auto-install should actually install *from*.
+
+    In the documented multi-container compose stacks the agent source is a
+    read-only mount (:ro). setuptools' ``egg_info`` step writes into the source
+    tree, so installing from that mount fails immediately with
+    ``could not create 'hermes_agent.egg_info': Read-only file system`` (#8113).
+    ``docker_init.bash`` stages a writable copy and exports it here, so the
+    recovery path installs from the staged tree instead of the read-only mount.
+
+    Falls back to ``agent_dir`` whenever the staged path is unset, missing,
+    fails the same ownership/permission trust check that guards the mount, or
+    is not a current copy of ``agent_dir`` (see ``_stage_matches_agent``) —
+    an attacker-controlled env var must never redirect the install, and a
+    trusted-but-unrelated or stale directory must not either.
+    """
+    raw = os.environ.get('HERMES_WEBUI_AGENT_STAGE_DIR', '').strip()
+    if raw:
+        # Resolve once, before any check, and check and return that same
+        # canonical path. Resolving after the checks let a symlink swapped in
+        # between redirect the install to a directory nothing had validated.
+        try:
+            staged = Path(raw).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError, ValueError):
+            # Missing, unresolvable or `~unknown-user`: never fatal at startup.
+            return agent_dir
+        if staged.is_dir() and _trusted_agent_dir(staged) and _trusted_ancestry(staged):
+            if _stage_matches_agent(staged, agent_dir):
+                return staged
+            print(f'[!!] Ignoring staged agent copy {staged}: it is not a current copy of {agent_dir}.', flush=True)
+    return agent_dir
+
+
+def _trusted_ancestry(path: Path) -> bool:
+    """True when no other user can replace ``path`` through one of its parents.
+
+    Each parent must be owned by root or by the current user, and must not be
+    group- or world-writable unless it is sticky (like ``/tmp`` or the image's
+    ``/app``), where only an entry's owner may rename or remove it. POSIX only:
+    elsewhere ``_trusted_agent_dir`` skips the owner check too.
+    """
+    if not hasattr(os, 'getuid'):
+        return True
+    uid = os.getuid()
+    try:
+        for parent in path.parents:
+            st = parent.stat()
+            if st.st_uid not in (0, uid):
+                return False
+            if stat.S_IMODE(st.st_mode) & 0o022 and not st.st_mode & stat.S_ISVTX:
+                return False
+    except OSError:
+        return False
+    return True
+
+
 def auto_install_agent_deps(expected_agent_dir: Path | None = None) -> bool:
     enabled = os.environ.get('HERMES_WEBUI_AUTO_INSTALL', '').strip().lower() in ('1', 'true', 'yes')
     if not enabled:
@@ -314,14 +414,19 @@ def auto_install_agent_deps(expected_agent_dir: Path | None = None) -> bool:
     if not _trusted_agent_dir(agent_dir):
         print('[!!] Auto-install skipped: agent directory failed trust check (check ownership/permissions).', flush=True)
         return False
-    req_file = agent_dir / 'requirements.txt'
-    pyproject = agent_dir / 'pyproject.toml'
+    # Identity is still validated against the *authorized* agent above; only the
+    # install target moves to the writable staged copy (#8113).
+    install_dir = _agent_install_dir(agent_dir)
+    if install_dir != agent_dir:
+        print(f'[ok] Agent source is mounted read-only — installing from the staged copy {install_dir}.', flush=True)
+    req_file = install_dir / 'requirements.txt'
+    pyproject = install_dir / 'pyproject.toml'
     if req_file.exists():
         install_args = [sys.executable, '-m', 'pip', 'install', '--quiet', '-r', str(req_file)]
         print(f'     Installing from {req_file} ...', flush=True)
     elif pyproject.exists():
-        install_args = [sys.executable, '-m', 'pip', 'install', '--quiet', str(agent_dir)]
-        print(f'     Installing from {agent_dir} (pyproject.toml) ...', flush=True)
+        install_args = [sys.executable, '-m', 'pip', 'install', '--quiet', str(install_dir)]
+        print(f'     Installing from {install_dir} (pyproject.toml) ...', flush=True)
     else:
         print('[!!] Auto-install skipped: no requirements.txt or pyproject.toml in agent dir.', flush=True)
         return False

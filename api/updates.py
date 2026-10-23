@@ -69,6 +69,15 @@ _FETCH_NETWORK_FAILURE_SIGNATURES = (
     'tls connection was non-properly terminated',
     'ssl certificate problem',
 )
+# `_run_git` reports a command it cancelled at its own timeout as
+# "git <args> timed out after <n>s". That line is our deadline, not a network
+# symptom: the apply fetch runs with a 15 s budget, so classify the marker as
+# a timeout with its bound. libcurl's real "Operation timed out after <n>
+# milliseconds" stalls are not `git `-prefixed and keep network guidance.
+_FETCH_DEADLINE_TIMEOUT_RE = re.compile(
+    r'^git (?P<operation>.+?) timed out after (?P<bound>\d+(?:\.\d+)?)s$',
+    re.MULTILINE,
+)
 # Git < 2.51 names the blocking ref ("'refs/remotes/origin/x' exists; cannot
 # create 'refs/remotes/origin/x/y'"). Git >= 2.51 batches fetch ref updates
 # and reports the same name conflict only through the summary hint, which
@@ -139,7 +148,20 @@ def _sanitize_git_diagnostic(output: str, *, limit: int = _GIT_DIAGNOSTIC_MAX_CH
 
 
 def _apply_fetch_failure_message(fetch_out: str, network_message: str) -> str:
-    """Return the apply-path fetch failure message for the given stderr."""
+    """Return the apply-path fetch failure message for the given stderr.
+
+    A fetch the updater cancelled at its own deadline is a timeout: say so,
+    naming the cancelled command and its bound. The echoed command is run
+    through the same credential scrub as every other git diagnostic. Only real
+    network signatures keep the connectivity guidance.
+    """
+    cancelled = _FETCH_DEADLINE_TIMEOUT_RE.search(fetch_out or '')
+    if cancelled:
+        return (
+            f'The fetch was cancelled after {cancelled.group("bound")}s — '
+            f'git {_sanitize_git_diagnostic(cancelled.group("operation"))} '
+            f'did not finish before the update deadline.'
+        )
     detail = _sanitize_git_diagnostic(fetch_out)
     if not detail:
         return network_message

@@ -290,6 +290,11 @@ passes so a high-volume worker source cannot consume that interactive window:
 - Cron: up to `CRON_PROJECT_CHIP_LIMIT` rows.
 - Webhook: up to `WEBHOOK_PROJECT_CHIP_LIMIT` rows.
 - Kanban: up to `KANBAN_PROJECT_CHIP_LIMIT` rows.
+- One-shot (`hermes -z`): kept out of the interactive window and its
+  unassigned refill, with no default pass of its own. They keep normal project
+  chips, so the assigned recovery pass still reaches one filed under a project.
+  An explicit `source_filter="oneshot"` lists the newest ones, and a session
+  the user opens by id resolves through `get_cli_session_by_id()`.
 
 Source-specific views still use their dedicated bounds, and the later sidebar
 visibility stage decides whether recovered background rows are shown. In
@@ -1836,6 +1841,11 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
     /api/session/new           {"model"?, "workspace"?} -> new session
     /api/session/update        {"session_id", "workspace"?, "model"?} -> updated session
     /api/session/delete        {"session_id"} -> {"ok": true}
+                               -> 409 {"ok": false, "error": <code>} when the gateway
+                                  ledger refuses (session_busy / unknown_execution /
+                                  runtime_ledger_unavailable); files and rows are kept.
+                               -> 500 {"ok": false, "error": "state_db_cleanup_failed"}
+                                  when the state.db delete fails; files are kept.
     /api/chat/start            {"session_id", "message", "model"?, "workspace"?}
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
