@@ -939,11 +939,23 @@ def test_auto_compression_rotation_tracks_origin_and_continuation_ids_for_sse():
     assert rotate_end != -1, "compression side-effect block end not found"
     block = src[rotate_start:rotate_end]
 
+    # The rotation body now lives in one helper so the self-heal retry (which
+    # runs after the first migration and can rotate again) can reuse it.
     assert "_compression_origin_session_id = session_id" in block
     assert "_compression_continuation_session_id = None" in block
-    assert "_compression_origin_session_id = old_sid" in block
-    assert "_compression_continuation_session_id = new_sid" in block
+    assert "_migrate_compression_rotation(" in block, (
+        "the side-effect block must migrate through the shared helper"
+    )
     assert "'new_session_id': _compression_continuation_session_id" in block
+
+    helper_start = src.find("def _migrate_compression_rotation(")
+    assert helper_start != -1, "compression rotation helper not found"
+    helper_end = src.find("\ndef ", helper_start + 1)
+    helper = src[helper_start:helper_end]
+    assert "old_sid = session_id" in helper
+    assert "new_sid = agent_sid" in helper
+    assert "return old_sid, new_sid, True" in helper
+    assert "return session_id, None, False" in helper
 
 
 def test_auto_compression_card_reuses_compression_card_renderer():
