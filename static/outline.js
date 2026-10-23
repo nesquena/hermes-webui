@@ -212,18 +212,26 @@ async function _jumpToFullSessionMessage(fullIdx, targetSid, query) {
   // Loading full history elsewhere (e.g. the outline panel) re-bases indices
   // without a re-render: a stale row with the same local id must not stand in
   // for the target, so re-render first when its absolute index disagrees.
+  const targetVisible = function() {
+    const rows = container ? container.querySelectorAll('[data-msg-idx="' + localIdx + '"]') : [];
+    for (let i = 0; i < rows.length; i++) if (rows[i].getClientRects().length > 0) return true;
+    return false;
+  };
+  let offWindow = false;
   if (!rerender && container) {
     const rows = container.querySelectorAll('[data-msg-idx="' + localIdx + '"]');
     for (let i = 0; i < rows.length; i++) {
       const abs = Number(rows[i].dataset && rows[i].dataset.sessionMsgIdx);
       if (Number.isFinite(abs) && abs !== expectedAbs) { rerender = true; break; }
     }
+    if (!rerender) offWindow = !targetVisible();
   }
+  // Fresh or stale history: render the whole transcript so the rows match the loaded messages.
   if (rerender) {
     _cancelBottomSettle();
     _beginMessageJumpScroll(container);
     _expandOutlineRenderWindow();
-    if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true });
+    if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true, _virtualFallback: true });
     await new Promise(function(resolve) { requestAnimationFrame(resolve); });
     if (!stillTarget()) return false;
   }
@@ -232,7 +240,23 @@ async function _jumpToFullSessionMessage(fullIdx, targetSid, query) {
   // segments as well as user rows. A user hit passes no assistant index so the
   // row itself is centred and highlighted.
   if (typeof jumpToTurnQuestion !== 'function') return false;
-  await jumpToTurnQuestion(localIdx, msg.role === 'user' ? -1 : localIdx);
+  const assistantIdx = msg.role === 'user' ? -1 : localIdx;
+  await jumpToTurnQuestion(localIdx, assistantIdx);
+  if (!offWindow) return true;
+  // A target outside the virtual window. jumpToTurnQuestion() mounts it through the window when it can, which is
+  // cheap; it cannot when no earlier history is hidden, and then leaves the view at the tail with no error (Codex
+  // round F, 2026-10-23: a compression continuation's hit on a phone). Let its mounting frames run, check, and only
+  // then render the whole transcript (a full render took ~1.1 s for 1,500 messages on a phone).
+  for (let i = 0; i < 3; i++) await new Promise(function(resolve) { requestAnimationFrame(resolve); });
+  if (!stillTarget()) return false;
+  if (targetVisible()) return true;
+  _cancelBottomSettle();
+  _beginMessageJumpScroll(container);
+  _expandOutlineRenderWindow();
+  if (typeof renderMessages === 'function') renderMessages({ preserveScroll: true, _virtualFallback: true });
+  await new Promise(function(resolve) { requestAnimationFrame(resolve); });
+  if (!stillTarget()) return false;
+  await jumpToTurnQuestion(localIdx, assistantIdx);
   return true;
 }
 

@@ -208,11 +208,15 @@ global._currentMessageRenderWindowSize=()=>_messageRenderWindowSize;
 global._messageRenderableMessageCount=()=>S.messages.length;
 // DOM: rows stamped like ui.js does (data-msg-idx local, data-session-msg-idx
 // absolute = _oldestIdx + local, user rows also get id msg-user-<local>).
+// scenario.mountedFrom models transcript virtualization: only rows from that
+// local index on are mounted, until a full (_virtualFallback) render.
 let rows=[];
-function stamp(base){
-  rows=S.messages.map((m,i)=>({id:m.role==='user'?'msg-user-'+i:'',dataset:{msgIdx:String(i),sessionMsgIdx:String(base+i)},m}));
+function stamp(base, full){
+  const from=(!full&&scenario.mountedFrom!=null)?scenario.mountedFrom:0;
+  rows=S.messages.map((m,i)=>({id:m.role==='user'?'msg-user-'+i:'',dataset:{msgIdx:String(i),sessionMsgIdx:String(base+i)},m,
+    getClientRects(){return [{}];}})).filter((r,i)=>i>=from);
 }
-stamp(scenario.staleBase!=null?scenario.staleBase:_oldestIdx);
+stamp(scenario.staleBase!=null?scenario.staleBase:_oldestIdx, false);
 const container={
   querySelectorAll(sel){
     const mm=/data-msg-idx="(\d+)"/.exec(sel);
@@ -223,7 +227,12 @@ global.document={getElementById:id=>id==='messages'?container:(rows.find(r=>r.id
 global.requestAnimationFrame=f=>{frames.push(f);return frames.length;};
 global._cancelBottomSettle=()=>events.push('cancel-settle');
 global._beginMessageJumpScroll=()=>events.push('begin-jump');
-global.renderMessages=()=>{events.push('render');stamp(_oldestIdx);};
+global.renderMessages=(opts)=>{
+  const full=!!(opts&&opts._virtualFallback);
+  events.push(full?'render-full':'render');
+  if(full) events.push('render');
+  stamp(_oldestIdx, full);
+};
 global.api=async()=>{events.push('direct-api');return null;};
 let ensureOpts=null;
 global._ensureAllMessagesLoaded=async(opts)=>{
@@ -247,6 +256,8 @@ global._ensureAllMessagesLoaded=async(opts)=>{
 };
 let delegated=null;
 global.jumpToTurnQuestion=async(q,a)=>{
+  // scenario.jumpMounts: the transcript's virtualized jump mounts the target itself (the cheap path).
+  if(scenario.jumpMounts) stamp(_oldestIdx, true);
   const row=document.getElementById('msg-user-'+q)||rows.find(r=>r.dataset.msgIdx===String(q))||null;
   delegated={q,a,rowSessionIdx:row?Number(row.dataset.sessionMsgIdx):null,rowContent:row?row.m.content:null};
   events.push('delegate');
@@ -352,6 +363,43 @@ def test_stale_row_with_same_local_id_is_rerendered_before_jumping():
     assert r["events"].index("render") < r["events"].index("delegate")
     assert r["delegated"]["rowSessionIdx"] == 2
     assert r["delegated"]["rowContent"] == "NEEDLE 2"
+
+
+@needs_node
+@pytest.mark.parametrize("truncated", [False, True])
+def test_target_outside_the_virtual_window_is_mounted_before_jumping(truncated):
+    """Every message is loaded but virtualization mounts only the tail (rows 6+),
+    and the transcript's virtualized jump cannot mount the target. The helper
+    must then render the whole transcript (_virtualFallback) and jump again; a
+    single delegation would leave the view at the tail (Codex round F on
+    exp-v0.52.552). History loaded by the jump itself renders in full up front."""
+    r = _run_jump(idx=2, mountedFrom=6, truncated=truncated)
+    events = r["events"]
+    assert r["ok"] is True
+    assert "render-full" in events
+    last_delegate = len(events) - 1 - events[::-1].index("delegate")
+    assert events.index("render-full") < last_delegate
+    assert r["delegated"]["rowSessionIdx"] == 2
+    assert r["delegated"]["rowContent"] == "NEEDLE 2"
+
+
+@needs_node
+def test_virtualized_jump_that_mounts_the_target_skips_the_full_render():
+    """When the transcript's virtualized jump mounts an off-window target itself,
+    no full render runs: one costs ~1.1 s on a 1,500-message transcript on a
+    phone (Codex round F re-check)."""
+    r = _run_jump(idx=2, mountedFrom=6, jumpMounts=True)
+    assert r["ok"] is True
+    assert r["events"] == ["delegate"]
+    assert r["delegated"]["rowContent"] == "NEEDLE 2"
+
+
+@needs_node
+def test_mounted_target_jumps_without_a_full_render():
+    """A target already mounted (inside the virtual window) needs no render."""
+    r = _run_jump(idx=8, mountedFrom=6)
+    assert r["events"] == ["delegate"]
+    assert r["delegated"]["rowContent"] == "msg 8"
 
 
 def test_full_history_loader_is_uncapped():
