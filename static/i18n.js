@@ -47,6 +47,7 @@ const LOCALES = {
     project_chip_all: 'All',
     project_chip_unassigned: 'Unassigned',
     project_chip_unassigned_title: 'Show conversations not yet assigned to a project',
+    project_chip_new_in_project: 'New conversation in this project',
     import_failed: 'Import failed: ',
     import_invalid_json: 'Invalid JSON',
     image_pasted: 'Image pasted: ',
@@ -1962,6 +1963,7 @@ const LOCALES = {
     project_chip_all: 'Tutti',
     project_chip_unassigned: 'Non assegnato',
     project_chip_unassigned_title: 'Mostra le conversazioni non ancora assegnate a un progetto',
+    project_chip_new_in_project: 'Nuova conversazione in questo progetto',
     _speech: 'it-IT',
     // boot.js
     cancelling: 'Annullamento\u2026',
@@ -3779,6 +3781,15 @@ const LOCALES = {
     pb_save: 'Salva',
     pb_updated: 'Impostazioni progetto salvate',
     pb_update_failed: 'Impossibile salvare le impostazioni del progetto: ',
+
+    profile_concept_title: 'Profili e spazi di lavoro',
+    profile_concept_subtitle: 'I profili definiscono come lavora l\'agente; gli spazi di lavoro su quali file lavora.',
+    profile_concept_desc_profiles: 'Identità dell\'agente, memoria, competenze, configurazione modello/provider e strumenti collegati. Crea profili per ruoli come ricercatore, scrittore, marketer o sviluppatore quando quei ruoli devono avere contesto o capacità diverse.',
+    profile_concept_desc_workspaces: 'Cartelle di progetto o prodotto su disco. Usa uno spazio di lavoro per repo/prodotto così chat, terminal e file browser puntano ai file giusti.',
+    profile_concept_desc_together: 'Un profilo può avere uno spazio di lavoro predefinito, ma puoi cambiare spazio di lavoro in qualsiasi momento. I profili rispondono a «chi sta lavorando?»; gli spazi di lavoro a «dove stanno lavorando?».',
+    profile_concept_example: 'Esempio: crea un profilo «ricerca» con le competenze di ricerca web attivate e uno spazio di lavoro «my-app» che punta alla cartella del progetto. Il profilo di ricerca ricorda le tue preferenze di ricerca; lo spazio di lavoro tiene chat, terminal e file browser puntati a quel progetto.',
+    profile_concept_label_together: 'Insieme',
+    profile_concept_label_example: 'Esempio',
   },
 
   ja: {
@@ -3842,6 +3853,7 @@ const LOCALES = {
     project_chip_all: 'すべて',
     project_chip_unassigned: '未割り当て',
     project_chip_unassigned_title: 'まだプロジェクトに割り当てられていない会話を表示',
+    project_chip_new_in_project: 'このプロジェクトで新しい会話を作成',
     _speech: 'ja-JP',
     // boot.js
     cancelling: 'キャンセル中…',
@@ -5664,6 +5676,15 @@ const LOCALES = {
     pb_save: '保存',
     pb_updated: 'プロジェクト設定を保存しました',
     pb_update_failed: 'プロジェクト設定を保存できませんでした: ',
+
+    profile_concept_title: 'プロファイルとワークスペース',
+    profile_concept_subtitle: 'プロファイルはエージェントの動作を、ワークスペースは対象ファイルを決めます。',
+    profile_concept_desc_profiles: 'エージェントのアイデンティティ、メモリ、スキル、モデル/プロバイダー設定、接続されたツール。研究者、ライター、マーケター、開発者など、異なるコンテキストや機能を持たせたいロールにプロファイルを作成します。',
+    profile_concept_desc_workspaces: 'ディスク上のプロジェクトまたは製品フォルダー。リポジトリ/製品ごとにワークスペースを1つ使うと、チャット、ターミナル、ファイル閲覧が正しいファイルを指します。',
+    profile_concept_desc_together: 'プロファイルにはデフォルトのワークスペースを設定できますが、ワークスペースはいつでも切り替えられます。プロファイルは「誰が作業しているか」、ワークスペースは「どこで作業しているか」に答えます。',
+    profile_concept_example: '例：Web検索スキルを有効にした「researcher」プロファイルと、プロジェクトフォルダーを指す「my-app」ワークスペースを作成します。researcherプロファイルは調査の好みを覚え、ワークスペースはチャット・ターミナル・ファイル閲覧をそのプロジェクトに向けたままにします。',
+    profile_concept_label_together: '組み合わせ',
+    profile_concept_label_example: '例',
   },
 
   ru: {
@@ -5751,6 +5772,7 @@ const LOCALES = {
     project_chip_all: 'Все',
     project_chip_unassigned: 'Без проекта',
     project_chip_unassigned_title: 'Показать диалоги, ещё не привязанные к проекту',
+    project_chip_new_in_project: 'Новый диалог в этом проекте',
     import_failed: 'Не удалось импортировать: ',
     import_invalid_json: 'Неверный JSON',
     image_pasted: 'Изображение вставлено: ',
@@ -6051,7 +6073,7 @@ const LOCALES = {
     workspace_new_worktree_conversation_meta: 'Создать изолированный git worktree для этого рабочего пространства.',
     workspace_worktree_created: 'Разговор в worktree создан',
     workspace_worktree_failed: 'Не удалось создать worktree: ',
-    session_worktree_badge: 'Worktree',
+    session_worktree_badge: 'Рабочее дерево',
     model_search_placeholder: 'Поиск моделей…',
     model_scope_advisory: 'Применяется к этой беседе со следующего сообщения.',
     session_toolsets: 'Наборы инструментов сессии',
@@ -6441,7 +6463,7 @@ const LOCALES = {
     kanban_workspace_path: 'Путь рабочей области',
     kanban_workspace_path_placeholder: 'Путь к рабочей области',
     kanban_workspace_scratch: 'Черновая',
-    kanban_workspace_worktree: 'Worktree',
+    kanban_workspace_worktree: 'Рабочее дерево',
     kanban_workspace_dir: 'Каталог',
     kanban_workspace_path_required: 'Для нечерновых рабочих областей нужен путь.',
     kanban_skills: 'Навыки',
@@ -7499,11 +7521,11 @@ const LOCALES = {
     wiki_no_pages: 'Страницы wiki не найдены',
     wiki_not_configured: 'Wiki не настроена',
   
-    kanban_bulk_status_aria: 'Bulk status',
-    insights_period_7d: '7 days',
-    insights_period_30d: '30 days',
-    insights_period_90d: '90 days',
-    insights_period_365d: '365 days',
+    kanban_bulk_status_aria: 'Массовое изменение статуса',
+    insights_period_7d: '7 дней',
+    insights_period_30d: '30 дней',
+    insights_period_90d: '90 дней',
+    insights_period_365d: '365 дней',
     settings_send_key_enter: 'Enter (Shift+Enter — новая строка)',
     settings_send_key_ctrl_enter: 'Ctrl+Enter (Enter — новая строка)',
     settings_send_key_shift_enter: 'Shift+Enter (Enter — новая строка)',
@@ -7596,6 +7618,7 @@ const LOCALES = {
     project_chip_all: 'Todos',
     project_chip_unassigned: 'Sin asignar',
     project_chip_unassigned_title: 'Mostrar las conversaciones aún no asignadas a un proyecto',
+    project_chip_new_in_project: 'Nueva conversación en este proyecto',
     _speech: 'es-ES',
     // boot.js
     cancelling: 'Cancelando…',
@@ -9358,6 +9381,15 @@ const LOCALES = {
     pb_save: 'Guardar',
     pb_updated: 'Ajustes del proyecto guardados',
     pb_update_failed: 'No se pudieron guardar los ajustes del proyecto: ',
+
+    profile_concept_title: 'Perfiles y espacios de trabajo',
+    profile_concept_subtitle: 'Los perfiles definen cómo trabaja el agente; los espacios de trabajo, sobre qué archivos trabaja.',
+    profile_concept_desc_profiles: 'Identidad del agente, memoria, skills, configuración de modelo/proveedor y herramientas conectadas. Crea perfiles para roles como investigador, redactor, marketeador o desarrollador cuando esos roles deban llevar distinto contexto o capacidades.',
+    profile_concept_desc_workspaces: 'Carpetas de proyecto o producto en disco. Usa un espacio de trabajo por repositorio/producto para que chat, terminal y explorador de archivos apunten a los archivos correctos.',
+    profile_concept_desc_together: 'Un perfil puede tener un espacio de trabajo predeterminado, pero puedes cambiar de espacio de trabajo en cualquier momento. Los perfiles responden «¿quién trabaja?»; los espacios de trabajo, «¿dónde trabajan?».',
+    profile_concept_example: 'Ejemplo: crea un perfil «researcher» con las skills de búsqueda web activadas y un espacio de trabajo «my-app» que apunte a la carpeta de tu proyecto. El perfil researcher recuerda tus preferencias de investigación; el espacio de trabajo mantiene chat, terminal y explorador de archivos en ese proyecto.',
+    profile_concept_label_together: 'Juntos',
+    profile_concept_label_example: 'Ejemplo',
   },
 
   de: {
@@ -9423,6 +9455,7 @@ const LOCALES = {
     project_chip_all: 'Alle',
     project_chip_unassigned: 'Nicht zugewiesen',
     project_chip_unassigned_title: 'Konversationen anzeigen, die noch keinem Projekt zugeordnet sind',
+    project_chip_new_in_project: 'Neue Unterhaltung in diesem Projekt',
     _speech: 'de-DE',
     // boot.js
     cancelling: 'Wird abgebrochen\u2026',
@@ -11179,6 +11212,15 @@ const LOCALES = {
     pb_save: 'Speichern',
     pb_updated: 'Projekteinstellungen gespeichert',
     pb_update_failed: 'Projekteinstellungen konnten nicht gespeichert werden: ',
+
+    profile_concept_title: 'Profile und Arbeitsbereiche',
+    profile_concept_subtitle: 'Profile bestimmen, wie der Agent arbeitet; Arbeitsbereiche, an welchen Dateien er arbeitet.',
+    profile_concept_desc_profiles: 'Agent-Identität, Gedächtnis, Fähigkeiten, Modell-/Provider-Konfiguration und verbundene Tools. Lege Profile für Rollen wie Forscher, Autor, Marketer oder Entwickler an, wenn diese Rollen anderen Kontext oder andere Fähigkeiten mitbringen sollen.',
+    profile_concept_desc_workspaces: 'Projekt- oder Produktordner auf der verwendeten Festplatte. Nutze einen Arbeitsbereich pro Repo/Produkt, damit Chat, Terminal und Dateibrowser auf die richtigen Dateien zeigen.',
+    profile_concept_desc_together: 'Ein Profil kann einen Standard-Arbeitsbereich haben, du kannst jederzeit wechseln. Profile beantworten „wer arbeitet?“; Arbeitsbereiche „wo arbeiten sie?“.',
+    profile_concept_example: 'Beispiel: Lege ein Profil „Forscher“ mit aktivierten Web-Suchfähigkeiten und einen Arbeitsbereich „my-app“ an, der auf deinen Projektordner zeigt. Das Forscher-Profil merkt sich deine Recherchevorstellungen; der Arbeitsbereich hält Chat, Terminal und Dateibrowser auf diesem Projekt.',
+    profile_concept_label_together: 'Zusammen',
+    profile_concept_label_example: 'Beispiel',
   },
 
   zh: {
@@ -11244,6 +11286,7 @@ const LOCALES = {
     project_chip_all: '全部',
     project_chip_unassigned: '未分配',
     project_chip_unassigned_title: '显示尚未分配到项目的对话',
+    project_chip_new_in_project: '在此项目中新建会话',
     _speech: 'zh-CN',
     // boot.js
     cancelling: '正在取消...',
@@ -12993,6 +13036,15 @@ const LOCALES = {
     pb_save: '保存',
     pb_updated: '项目设置已保存',
     pb_update_failed: '项目设置保存失败：',
+
+    profile_concept_title: '配置文件与工作区',
+    profile_concept_subtitle: '配置文件决定智能体如何工作；工作区决定它处理哪些文件。',
+    profile_concept_desc_profiles: '智能体的身份、记忆、技能、模型/提供商配置以及已连接的工具。当研究员、写作者、营销人员或开发者等角色需要不同的上下文或能力时，可为这些角色创建配置文件。',
+    profile_concept_desc_workspaces: '磁盘上的项目或产品文件夹。每个仓库/产品使用一个工作区，让聊天、终端和文件浏览都指向正确的文件。',
+    profile_concept_desc_together: '配置文件可以有默认的工作区，但你可以随时切换工作区。配置文件回答“谁在工作？”；工作区回答“他们在哪里工作？”。',
+    profile_concept_example: '示例：创建一个启用网络搜索技能的“researcher”配置文件，以及指向项目文件夹的“my-app”工作区。researcher 配置文件会记住你的研究偏好；工作区让聊天、终端和文件浏览始终指向该项目。',
+    profile_concept_label_together: '组合',
+    profile_concept_label_example: '示例',
   },
 
   // Traditional Chinese (zh-Hant)
@@ -13058,6 +13110,7 @@ const LOCALES = {
     project_chip_all: '全部',
     project_chip_unassigned: '未指派',
     project_chip_unassigned_title: '顯示尚未指派至專案的對話',
+    project_chip_new_in_project: '在此專案中新增對話',
     _speech: 'zh-TW',
     // boot.js
     cancelling: '正在取消……',
@@ -14877,6 +14930,15 @@ const LOCALES = {
     pb_save: '儲存',
     pb_updated: '專案設定已儲存',
     pb_update_failed: '專案設定儲存失敗：',
+
+    profile_concept_title: '設定檔與工作區',
+    profile_concept_subtitle: '設定檔決定代理如何運作；工作區決定它處理哪些檔案。',
+    profile_concept_desc_profiles: '代理的身分、記憶、技能、模型/供應商設定與已連線的工具。當研究員、撰稿人、行銷人員或開發者等角色需要不同的脈絡或能力時，請為這些角色建立設定檔。',
+    profile_concept_desc_workspaces: '磁碟上的專案或產品資料夾。每個儲存庫/產品使用一個工作區，讓聊天、終端機與檔案瀏覽都指向正確的檔案。',
+    profile_concept_desc_together: '設定檔可以有預設工作區，但隨時都能切換工作區。設定檔回答「誰在工作？」；工作區回答「在哪裡工作？」。',
+    profile_concept_example: '範例：建立啟用網路搜尋技能的「researcher」設定檔，以及指向專案資料夾的「my-app」工作區。researcher 設定檔會記住你的研究偏好；工作區則讓聊天、終端機與檔案瀏覽持續指向該專案。',
+    profile_concept_label_together: '一起',
+    profile_concept_label_example: '範例',
   },
 
   pt: {
@@ -14940,6 +15002,7 @@ const LOCALES = {
     project_chip_all: 'Todos',
     project_chip_unassigned: 'Não atribuído',
     project_chip_unassigned_title: 'Mostrar as conversas ainda não atribuídas a um projeto',
+    project_chip_new_in_project: 'Nova conversa neste projeto',
     _speech: 'pt-BR',
     media_preview_unauthorized: 'Sua sessão do WebUI expirou. Recarregue a página e tente novamente.',
     media_preview_forbidden: 'O WebUI não conseguiu acessar este arquivo. Mova-o ou copie-o para o espaço de trabalho ativo, ou verifique as permissões do arquivo e tente novamente.',
@@ -16576,6 +16639,15 @@ const LOCALES = {
     pb_save: 'Salvar',
     pb_updated: 'Configurações do projeto salvas',
     pb_update_failed: 'Não foi possível salvar as configurações do projeto: ',
+
+    profile_concept_title: 'Perfis e espaços de trabalho',
+    profile_concept_subtitle: 'Os perfis definem como o agente trabalha; os espaços de trabalho, em quais arquivos ele trabalha.',
+    profile_concept_desc_profiles: 'Identidade do agente, memória, skills, configuração de modelo/provedor e ferramentas conectadas. Crie perfis para funções como pesquisador, redator, marketeer ou desenvolvedor quando essas funções precisarem de contexto ou capacidades diferentes.',
+    profile_concept_desc_workspaces: 'Pastas de projeto ou produto no disco. Use um espaço de trabalho por repositório/produto para que chat, terminal e navegador de arquivos apontem para os arquivos certos.',
+    profile_concept_desc_together: 'Um perfil pode ter um espaço de trabalho padrão, mas você pode trocar de espaço de trabalho a qualquer momento. Os perfis respondem «quem está trabalhando?»; os espaços de trabalho, «onde estão trabalhando?».',
+    profile_concept_example: 'Exemplo: crie um perfil «researcher» com as skills de busca na web ativadas e um espaço de trabalho «my-app» apontando para a pasta do seu projeto. O perfil researcher memoriza suas preferências de pesquisa; o espaço de trabalho mantém chat, terminal e navegador de arquivos naquele projeto.',
+    profile_concept_label_together: 'Juntos',
+    profile_concept_label_example: 'Exemplo',
   },
   ko: {
     offline_title: '연결이 끊겼습니다',
@@ -16638,6 +16710,7 @@ const LOCALES = {
     project_chip_all: '전체',
     project_chip_unassigned: '할당되지 않음',
     project_chip_unassigned_title: '아직 프로젝트에 할당되지 않은 대화 표시',
+    project_chip_new_in_project: '이 프로젝트에서 새 대화',
     _speech: 'ko-KR',
     // boot.js
     cancelling: '취소 중\u2026',
@@ -18445,6 +18518,15 @@ const LOCALES = {
     pb_save: '저장',
     pb_updated: '프로젝트 설정이 저장되었습니다',
     pb_update_failed: '프로젝트 설정을 저장하지 못했습니다: ',
+
+    profile_concept_title: '프로필과 작업 공간',
+    profile_concept_subtitle: '프로필은 에이전트가 어떻게 작동하는지, 작업 공간은 어떤 파일을 다루는지를 결정합니다.',
+    profile_concept_desc_profiles: '에이전트의 정체성, 기억, 스킬, 모델/공급자 설정, 연결된 도구. 연구자, 작가, 마케터, 개발자처럼 다른 맥락이나 기능을 갖춰야 하는 역할에는 프로필을 만드세요.',
+    profile_concept_desc_workspaces: '디스크의 프로젝트 또는 제품 폴더. 저장소/제품마다 작업 공간 하나를 사용하면 채팅, 터미널, 파일 탐색기가 올바른 파일을 가리킵니다.',
+    profile_concept_desc_together: '프로필에 기본 작업 공간을 지정할 수 있지만 작업 공간은 언제든지 전환할 수 있습니다. 프로필은 “누가 작업하는지”에 답하고, 작업 공간은 “어디서 작업하는지”에 답합니다.',
+    profile_concept_example: '예: 웹 검색 스킬이 활성화된 “researcher” 프로필과 프로젝트 폴더를 가리키는 “my-app” 작업 공간을 만드세요. researcher 프로필은 검색 기본 설정을 기억하고, 작업 공간은 채팅, 터미널, 파일 탐색기를 해당 프로젝트에 고정합니다.',
+    profile_concept_label_together: '함께',
+    profile_concept_label_example: '예',
   },
 
   fr: {
@@ -18508,6 +18590,7 @@ const LOCALES = {
     project_chip_all: 'Tous',
     project_chip_unassigned: 'Non attribué',
     project_chip_unassigned_title: 'Afficher les conversations pas encore assignées à un projet',
+    project_chip_new_in_project: 'Nouvelle conversation dans ce projet',
     _speech: 'fr-FR',
     cancelling: 'Annulation\u2026',
     cancel_failed: 'Échec de l\'annulation.',
@@ -20297,6 +20380,15 @@ const LOCALES = {
     pb_save: 'Enregistrer',
     pb_updated: 'Paramètres du projet enregistrés',
     pb_update_failed: 'Impossible d’enregistrer les paramètres du projet : ',
+
+    profile_concept_title: 'Profils et espaces de travail',
+    profile_concept_subtitle: 'Les profils définissent comment l\'agent travaille ; les espaces de travail, sur quels fichiers il travaille.',
+    profile_concept_desc_profiles: 'Identité de l\'agent, mémoire, compétences, configuration du modèle/fournisseur et outils connectés. Créez des profils pour des rôles comme chercheur, rédacteur, marketeur ou développeur lorsque ces rôles doivent porter un contexte ou des capacités différents.',
+    profile_concept_desc_workspaces: 'Dossiers de projet ou de produit sur le disque. Utilisez un espace de travail par dépôt/produit pour que le chat, le terminal et la navigation de fichiers pointent vers les bons fichiers.',
+    profile_concept_desc_together: 'Un profil peut avoir un espace de travail par défaut, mais vous pouvez changer d\'espace de travail à tout moment. Les profils répondent à « qui travaille ? » ; les espaces de travail, à « où travaillent-ils ? ».',
+    profile_concept_example: 'Exemple : créez un profil « researcher » avec les compétences de recherche web activées et un espace de travail « my-app » pointant vers le dossier de votre projet. Le profil researcher mémorise vos préférences de recherche ; l\'espace de travail garde le chat, le terminal et la navigation de fichiers sur ce projet.',
+    profile_concept_label_together: 'Ensemble',
+    profile_concept_label_example: 'Exemple',
   },
 
   cs: {
@@ -20306,6 +20398,7 @@ const LOCALES = {
     project_chip_all: 'Vše',
     project_chip_unassigned: 'Nepřiřazeno',
     project_chip_unassigned_title: 'Zobrazit konverzace, které ještě nejsou přiřazeny k projektu',
+    project_chip_new_in_project: 'Nová konverzace v tomto projektu',
     _lang: 'cs',
     remote_image_open: 'Otevřít obrázek',
     remote_image_reason: 'Vzdálený obrázek nebyl načten automaticky. Otevře {host} na nové kartě.',
@@ -22137,6 +22230,15 @@ const LOCALES = {
     pb_save: 'Uložit',
     pb_updated: 'Nastavení projektu bylo uloženo',
     pb_update_failed: 'Nastavení projektu se nepodařilo uložit: ',
+
+    profile_concept_title: 'Profily a pracovní prostředí',
+    profile_concept_subtitle: 'Profily určují, jak agent pracuje; pracovní prostředí určuje, na jaké soubory pracuje.',
+    profile_concept_desc_profiles: 'Identita agenta, paměť, dovednosti, nastavení modelu/providera a připojené nástroje. Vytvářejte profily pro role jako výzkumník, spisovatel, marketér nebo vývojář, když tyto role potřebují jiný kontext nebo jiné schopnosti.',
+    profile_concept_desc_workspaces: 'Složky projektů nebo produktů na disku. Používejte jeden pracovní prostor na repozitář/produkt, aby chat, terminál a procházení souborů ukazovaly na správné soubory.',
+    profile_concept_desc_together: 'Profil může mít výchozí pracovní prostor, ale pracovní prostor můžete kdykoli přepnout. Profily odpovídají na otázku „kdo pracuje?“; pracovní prostředí na „kde pracují?“.',
+    profile_concept_example: 'Příklad: vytvořte profil „výzkumník“ s povolenými dovednostmi vyhledávání na webu a pracovní prostor „my-app“ směřující na složku vašeho projektu. Profil výzkumníka si pamatuje vaše výzkumné preference; pracovní prostor udržuje chat, terminál a procházení souborů na tomto projektu.',
+    profile_concept_label_together: 'Spolu',
+    profile_concept_label_example: 'Příklad',
   },
   tr: {
 
@@ -22203,6 +22305,7 @@ const LOCALES = {
     project_chip_all: 'Tümü',
     project_chip_unassigned: 'Atanmamış',
     project_chip_unassigned_title: 'Henüz bir projeye atanmamış sohbetleri göster',
+    project_chip_new_in_project: 'Bu projede yeni sohbet',
     _speech: 'tr-TR',
     // boot.js
     cancelling: 'İptal ediliyor\u2026',
@@ -24012,6 +24115,15 @@ const LOCALES = {
     pb_save: 'Kaydet',
     pb_updated: 'Proje ayarları kaydedildi',
     pb_update_failed: 'Proje ayarları kaydedilemedi: ',
+
+    profile_concept_title: 'Profiller ve çalışma alanları',
+    profile_concept_subtitle: 'Profiller ajanın nasıl çalıştığını, çalışma alanları hangi dosyalar üzerinde çalıştığını belirler.',
+    profile_concept_desc_profiles: 'Ajan kimliği, bellek, beceriler, model/sağlayıcı yapılandırması ve bağlı araçlar. Araştırma yazar, pazarlamacı veya geliştirici gibi farklı bağlam veya yetenekler taşıması gereken roller için profiller oluşturun.',
+    profile_concept_desc_workspaces: 'Disk üzerindeki proje veya ürün klasörleri. Depo/ürün başına bir çalışma alanı kullanın ki sohbet, terminal ve dosya gezgini doğru dosyalara baksın.',
+    profile_concept_desc_together: 'Bir profilin varsayılan bir çalışma alanı olabilir, ancak istediğiniz zaman çalışma alanları arasında geçiş yapabilirsiniz. Profiller „kim çalışıyor?“ sorusuna, çalışma alanları „nerede çalışıyorlar?“ sorusuna yanıt verir.',
+    profile_concept_example: 'Örnek: web arama becerileri etkin bir „researcher“ profili ve proje klasörünüzü gösteren bir „my-app“ çalışma alanı oluşturun. researcher profili araştırma tercihlerinizi hatırlar; çalışma alanı sohbeti, terminali ve dosya gezginini o projede tutar.',
+    profile_concept_label_together: 'Birlikte',
+    profile_concept_label_example: 'Örnek',
   },
   pl: {
     offline_title: 'Połączenie utracone',
@@ -24074,6 +24186,7 @@ const LOCALES = {
     project_chip_all: 'Wszystkie',
     project_chip_unassigned: 'Bez przypisania',
     project_chip_unassigned_title: 'Pokaż rozmowy jeszcze nie przypisane do projektu',
+    project_chip_new_in_project: 'Nowa rozmowa w tym projekcie',
     _speech: 'pl-PL',
     // boot.js
     cancelling: 'Anulowanie…',
@@ -25887,6 +26000,15 @@ const LOCALES = {
     pb_save: 'Zapisz',
     pb_updated: 'Ustawienia projektu zapisane',
     pb_update_failed: 'Nie udało się zapisać ustawień projektu: ',
+
+    profile_concept_title: 'Profile i obszary robocze',
+    profile_concept_subtitle: 'Profile określają, jak działa agent; obszary robocze — na jakich plikach pracuje.',
+    profile_concept_desc_profiles: 'Tożsamość agenta, pamięć, umiejętności, konfiguracja modelu/dostawcy i połączone narzędzia. Twórz profile dla ról, takich jak badacz, pisarz, marketer lub deweloper, gdy role te mają nieść inny kontekst lub inne możliwości.',
+    profile_concept_desc_workspaces: 'Foldery projektów lub produktów na dysku. Używaj jednego obszaru roboczego na repozytorium/produkt, aby czat, terminal i przeglądanie plików wskazywały na właściwe pliki.',
+    profile_concept_desc_together: 'Profil może mieć domyślny obszar roboczy, ale obszary robocze można przełączać w dowolnym momencie. Profile odpowiadają na pytanie „kto pracuje?“; obszary robocze — „gdzie pracują?“.',
+    profile_concept_example: 'Przykład: utwórz profil „badacz“ z włączonymi umiejętnościami wyszukiwania w sieci oraz obszar roboczy „my-app“ wskazujący na folder twojego projektu. Profil badacza pamięta twoje preferencje badawcze; obszar roboczy utrzymuje czat, terminal i przeglądanie plików na tym projekcie.',
+    profile_concept_label_together: 'Razem',
+    profile_concept_label_example: 'Przykład',
   },
   vi: {
     offline_title: 'Mất kết nối',
@@ -25949,6 +26071,7 @@ const LOCALES = {
     project_chip_all: 'Tất cả',
     project_chip_unassigned: 'Chưa gán',
     project_chip_unassigned_title: 'Hiện các cuộc hội thoại chưa được gán vào dự án',
+    project_chip_new_in_project: 'Cuộc hội thoại mới trong dự án này',
     _speech: 'vi-VN',
     // boot.js
     cancelling: 'Đang hủy…',
@@ -27763,6 +27886,15 @@ const LOCALES = {
     pb_save: 'Lưu',
     pb_updated: 'Đã lưu cài đặt dự án',
     pb_update_failed: 'Không thể lưu cài đặt dự án: ',
+
+    profile_concept_title: 'Hồ sơ và không gian làm việc',
+    profile_concept_subtitle: 'Hồ sơ định nghĩa cách agent hoạt động; không gian làm việc định nghĩa agent làm việc với tệp nào.',
+    profile_concept_desc_profiles: 'Danh tính agent, bộ nhớ, kỹ năng, cấu hình mô hình/nhà cung cấp và các công cụ đã kết nối. Tạo hồ sơ cho các vai trò như nhà nghiên cứu, người viết, marketer hay lập trình viên khi vai trò đó cần ngữ cảnh hay khả năng khác.',
+    profile_concept_desc_workspaces: 'Thư mục dự án hoặc sản phẩm trên ổ đĩa. Dùng một không gian làm việc cho mỗi repo/sản phẩm để chat, terminal và trình duyệt tệp trỏ đúng tệp.',
+    profile_concept_desc_together: 'Một hồ sơ có thể có không gian làm việc mặc định, nhưng bạn có thể chuyển không gian làm việc bất cứ lúc nào. Hồ sơ trả lời “ai đang làm việc?”; không gian làm việc trả lời “họ làm việc ở đâu?”.',
+    profile_concept_example: 'Ví dụ: tạo một hồ sơ “researcher” với kỹ năng tìm kiếm web được bật và một không gian làm việc “my-app” trỏ tới thư mục dự án của bạn. Hồ sơ researcher ghi nhớ sở thích nghiên cứu của bạn; không gian làm việc giữ chat, terminal và trình duyệt tệp trên dự án đó.',
+    profile_concept_label_together: 'Kết hợp',
+    profile_concept_label_example: 'Ví dụ',
   },
 
 };
