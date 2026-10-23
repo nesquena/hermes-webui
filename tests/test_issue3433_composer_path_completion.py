@@ -48,8 +48,13 @@ def _run_commands_js(script_body: str) -> dict:
         }});
         """
     )
+    # Feed the script over stdin instead of `-e <argv>`: static/commands.js is
+    # embedded whole, and Linux caps a single argv string at MAX_ARG_STRLEN
+    # (128 KiB). At 126 KB of commands.js the `-e` form crosses that cap and
+    # node dies with OSError [Errno 7] before running anything.
     proc = subprocess.run(
-        [NODE, "-e", script],
+        [NODE, "-"],
+        input=script,
         check=True,
         capture_output=True,
         text=True,
