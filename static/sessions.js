@@ -11664,6 +11664,7 @@ async function deleteSession(sid, beforeDelete=null){
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
       $('emptyState').style.display='';
+      if(typeof a11yTreeReset==='function') a11yTreeReset($('fileTree'), {focusTo: $('workspaceFilesTab')});
       $('fileTree').innerHTML='';
       if(typeof S!=='undefined') S.session=null;
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();

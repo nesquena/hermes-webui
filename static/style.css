@@ -3845,7 +3845,8 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
   display:flex;align-items:center;justify-content:center;
   line-height:1;
 }
-.file-item:hover .file-del-btn{ width:16px;opacity:1;margin-left:2px; }
+.file-item:hover .file-del-btn,.file-item:focus-visible .file-del-btn{ width:16px;opacity:1;margin-left:2px; }
+.file-item:focus-visible{ outline:2px solid var(--accent);outline-offset:-2px; }
 .file-del-btn:hover{ color:var(--accent); }
 
 /* file-name must be a flex child that can shrink to zero */

@@ -145,3 +145,7 @@ jobs:
       - name: Run session-row activation gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_session_row_activation.py
+
+      - name: Run file-tree keyboard gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_file_tree_keyboard.py
