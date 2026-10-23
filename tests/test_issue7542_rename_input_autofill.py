@@ -249,6 +249,7 @@ def test_sites_reference_helper_defined_in_loaded_script():
         ("/api/projects/rename", SESSIONS_JS),
         ("/api/file/rename", UI_JS),
     ],
+    ids=["session rename", "project create", "project rename", "file rename"],
 )
 def test_save_paths_still_call_their_endpoints(endpoint, source):
     """The fix is purely additive (input attributes); it must not touch
