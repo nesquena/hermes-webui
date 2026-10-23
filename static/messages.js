@@ -1578,7 +1578,14 @@ async function send(){
   if(!text&&!S.pendingFiles.length&&!_pendingSelections.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // Don't send while an inline message edit is active
   if(document.querySelector('.msg-edit-area')){_sendInProgress=false;_sendInProgressSid=null;return;}
-  _flushSelectionBlocksToComposer();
+  // #7862: a tokenized automatic goal continuation is NOT a human send, so a
+  // pending selected-text reply must not be flushed into its composer. The
+  // queued prompt is the recorded continuation verbatim; prepending the
+  // selection blocks made the store's text match reject it even though the
+  // continuation token was correct, and the intent then stayed pending until
+  // expiry -- the goal loop died on a legitimate automatic turn. Leave the
+  // pending selections alone; they belong to the user's next real message.
+  if(!(options&&options.goalContinuationId)) _flushSelectionBlocksToComposer();
   text=$('msg').value.trim();
   if(!text&&!S.pendingFiles.length){_sendInProgress=false;_sendInProgressSid=null;return;}
   // #7855: a refresh-restored continuation contributes its token only when the
@@ -1850,6 +1857,20 @@ async function send(){
   const activeSid=S.session.session_id;
   _sendInProgressSid=activeSid;
 
+  // #7862 re-gate round 3 (finding 1): a ``/goal resume`` binds the pending
+  // continuation's token to this session's next send. The resume message tells
+  // the user to "type continue", and that literal control is a new human turn
+  // the recorded prompt never matches, so without the token the store refused
+  // the admission and the goal loop stopped. Claim the bound token exactly
+  // once (one-shot) and carry it on the payload below. A token already
+  // supplied by the caller (the automatic queue drain) always wins.
+  let _resumeContinuationId='';
+  if(!(options&&options.goalContinuationId)){
+    _resumeContinuationId=typeof _claimResumeGoalContinuationToken==='function'
+      ? _claimResumeGoalContinuationToken(activeSid)
+      : '';
+  }
+
   // Salvage of #4750 (@harryazj): capture the composer text and clear the
   // textarea NOW — immediately after capture and BEFORE the uploadPendingFiles()
   // / forced-skill-directive awaits below. send() re-reads the LIVE composer when
@@ -2061,7 +2082,14 @@ async function send(){
       // (#6885 again). The explicit empty string keeps the key present so the
       // server can tell "genuine turn" from "pre-upgrade tab that must still
       // get marker admission".
-      goal_continuation_id:_goalContinuationId||''
+      // #7862 re-gate round 3 (finding 1): the payload also falls back to the
+      // token a ``/goal resume`` bound to this session, so the literal
+      // ``continue`` the resume message asks for is admitted by identity.
+      // The fallback chain keeps master's Round-9 contract: the key is always
+      // PRESENT (empty string when neither identity exists), never omitted,
+      // so JSON.stringify cannot make a genuine turn and a pre-upgrade tab
+      // byte-identical on the wire.
+      goal_continuation_id:(options&&options.goalContinuationId)||_resumeContinuationId||_goalContinuationId||''
     })});
     _pendingMoaConfig=null;
     postStartData = startData;

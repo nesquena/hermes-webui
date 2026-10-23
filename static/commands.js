@@ -1422,6 +1422,14 @@ async function cmdGoal(args){
       renderMessages({preserveScroll:true});
       showToast(msg.split('\n')[0],2600);
     }
+    // #7862 re-gate round 3 (finding 1): ``/goal resume`` returns the pending
+    // continuation's identity token so the literal ``continue`` the resume
+    // message tells the user to type can be admitted by identity instead of by
+    // text. Bind it to this session's next send; without it the store refused
+    // the tokenless ``continue`` and the goal loop stopped after every resume.
+    if(typeof _setResumeGoalContinuationToken==='function'){
+      _setResumeGoalContinuationToken(activeSid, r&&r.continuation_id?String(r.continuation_id):'');
+    }
     if(!r||!r.stream_id)return;
     // #6705: consume the one-shot pending explicit-pick marker only after a
     // successful kickoff. Re-read the stored marker and clear it only if it
