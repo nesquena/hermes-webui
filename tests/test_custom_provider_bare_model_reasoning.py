@@ -145,6 +145,312 @@ def test_openrouter_slash_prefix_unaffected():
     assert set(efforts) >= {"low", "medium", "high"}
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gemini-3.6-flash",
+        "github_copilot/gemini-3.6-flash",
+        "github_copilot/gemini-3.1-pro-preview",
+        "grok-4.6",
+        "github_copilot/grok-4.5",
+    ],
+)
+def test_custom_litellm_gemini_and_grok_routes_expose_reasoning(model_id):
+    efforts = cfg.resolve_model_reasoning_efforts(
+        model_id,
+        provider_id="custom:litellm",
+    )
+    assert set(efforts) >= {"low", "medium", "high"}, (
+        f"{model_id} via custom:litellm should expose reasoning efforts"
+    )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gemini-1.5-pro",
+        "gemini-2.0-flash",
+        "grok-4",
+        "grok-4-fast",
+    ],
+)
+def test_custom_litellm_pre_reasoning_gemini_grok_stay_hidden(model_id):
+    assert cfg.resolve_model_reasoning_efforts(
+        model_id,
+        provider_id="custom:litellm",
+    ) == [], f"{model_id} must not expose a reasoning ladder"
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        # xAI ships dated ids for the base Grok 4 line. A naive version parser
+        # reads "0709" / "20250709" as a minor >= 5 and wrongly exposes the
+        # ladder for a model that rejects reasoning_effort outright.
+        "grok-4-0709",
+        "grok-4-20250709",
+        "github_copilot/grok-4-0709",
+        # Same class on the Gemini side.
+        "gemini-2-20250219",
+    ],
+)
+def test_dated_model_ids_are_not_read_as_minor_versions(model_id):
+    assert cfg.resolve_model_reasoning_efforts(
+        model_id,
+        provider_id="custom:litellm",
+    ) == [], (
+        f"{model_id}: a trailing date stamp must not be parsed as a minor "
+        "version — the base model rejects reasoning_effort"
+    )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "grok-4.5",
+        "grok-4.6",
+        "gemini-2.5-pro",
+    ],
+)
+def test_date_stamp_guard_does_not_hide_real_minor_versions(model_id):
+    """The date-stamp guard must not over-tighten.
+
+    Paired with the test above: clamping the minor group to 1-2 digits has to
+    keep genuine `<major>.<minor>` ids working, or the fix trades a false
+    positive for a false negative.
+    """
+    efforts = cfg.resolve_model_reasoning_efforts(
+        model_id,
+        provider_id="custom:litellm",
+    )
+    assert set(efforts) >= {"low", "medium", "high"}, (
+        f"{model_id} has a real minor version and must still expose the ladder"
+    )
+
+
+# ── Grok: explicit shapes, NOT a monotonic version comparison ────────────────
+#
+# xAI's lineup is not ordered by version: grok-3-mini accepts an effort dial
+# while grok-3 does not, and within the 4.20 line only the multi-agent build
+# accepts one. A ">= 4.5" rule is wrong in BOTH directions, so both directions
+# are asserted here.
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "grok-3-mini",
+        "grok-3-mini-fast",
+        "grok-4.3",
+        "grok-4.5",
+        "grok-4.6",
+        "grok-4.20-multi-agent",
+    ],
+)
+def test_grok_effort_capable_shapes_expose_ladder(model_id):
+    efforts = cfg.resolve_model_reasoning_efforts(
+        model_id, provider_id="custom:litellm"
+    )
+    assert set(efforts) >= {"low", "medium", "high"}, (
+        f"{model_id} accepts reasoning_effort and must expose the ladder"
+    )
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        # Reason natively but REJECT a reasoning_effort dial.
+        "grok-3",
+        "grok-4",
+        "grok-4-fast",
+        "grok-4-fast-reasoning",
+        "grok-4-fast-non-reasoning",
+        "grok-4-1-fast",
+        "grok-4.20",
+        "grok-4.20-non-reasoning",
+        "grok-code-fast-1",
+        # Dated build of the base 4 line.
+        "grok-4-0709",
+    ],
+)
+def test_grok_effort_incapable_shapes_stay_hidden(model_id):
+    """These would 400 on a `reasoning_effort` parameter.
+
+    `grok-4-fast-reasoning` is the interesting one: the generic
+    "reasoning"/"thinking" keyword shortcut in `_candidate_supports_reasoning`
+    claims any id containing that token, but "this model reasons" is a
+    different question from "this model exposes an effort control".
+    """
+    assert cfg.resolve_model_reasoning_efforts(
+        model_id, provider_id="custom:litellm"
+    ) == [], f"{model_id} rejects reasoning_effort and must stay hidden"
+
+
+# ── Gemini: non-text routes have no ladder at any version ────────────────────
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "gemini-embedding-001",
+        "gemini-3-pro-image-preview",
+        "gemini-imagine-2",
+        "gemini-2.5-flash-image",
+    ],
+)
+def test_gemini_non_text_routes_never_expose_ladder(model_id):
+    """Image / imagine / embedding routes must be denied before the version gate.
+
+    Checking the version first would let `gemini-3-pro-image-preview` in on
+    its `3`. Asserted for both provider shapes because the deny has to sit
+    above the Copilot branch as well as the custom-provider heuristic.
+    """
+    for provider in ("custom:litellm", "copilot"):
+        assert cfg.resolve_model_reasoning_efforts(
+            model_id, provider_id=provider
+        ) == [], f"{model_id} via {provider} must not expose a reasoning ladder"
+
+
+@pytest.mark.parametrize(
+    ("model_id", "expected_ladder"),
+    [
+        # The non-text keyword sits in the WRAPPER segment while the model
+        # segment is an ordinary text Gemini. Scanning the whole route for
+        # `image`/`embedding` and the family name separately denied these.
+        ("image-router/gemini-3.6-flash", True),
+        ("embedding-gateway/gemini-3.1-pro-preview", True),
+        ("imagine-proxy/gemini-2.5-pro", True),
+        # The keyword is inside the MODEL segment itself: still denied.
+        ("vendor/gemini-3-pro-image-preview", False),
+        ("vendor/gemini-embedding-001", False),
+        ("router/gemini-imagine-2", False),
+    ],
+)
+def test_gemini_non_text_deny_is_scoped_to_the_model_segment(model_id, expected_ladder):
+    """The keyword and the family name must be read from the SAME segment.
+
+    A routed id can nest a model under a wrapper namespace. Asking "does the
+    route contain image/imagine/embedding" and "does the route mention gemini"
+    as two independent questions lets a wrapper name deny a valid text model:
+    `image-router/gemini-3.6-flash` matched `image` in the wrapper and `gemini`
+    in the model, and lost its ladder entirely.
+
+    Both directions are asserted here because either one alone is satisfiable
+    by a broken predicate: a whole-route scan passes the negatives, and
+    dropping the deny passes the positives.
+    """
+    for provider in ("custom:litellm", "custom:newapi"):
+        efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id=provider)
+        if expected_ladder:
+            assert efforts, (
+                f"{model_id} via {provider}: the model segment is a text Gemini, "
+                f"but the wrapper name suppressed its ladder"
+            )
+            assert set(efforts) <= {"minimal", "low", "medium", "high"}, (
+                model_id,
+                provider,
+                efforts,
+            )
+        else:
+            assert efforts == [], (
+                f"{model_id} via {provider}: a non-text model segment must never "
+                f"expose a ladder (got {efforts})"
+            )
+
+
+def test_gemini_segment_helpers_agree_on_identity_and_text_ness():
+    """The two predicates must read the same segment, not different ones."""
+    # Wrapper namespace does not contribute identity...
+    assert cfg._gemini_model_segments("image-router/gemini-3.6-flash") == [
+        "gemini-3.6-flash"
+    ]
+    assert cfg._gemini_model_segments("acme-gemini-router/deepseek-r1") == []
+    # ...and non-text-ness is judged only on the identified segment.
+    assert cfg._gemini_route_is_non_text("image-router/gemini-3.6-flash") is False
+    assert cfg._gemini_route_is_non_text("vendor/gemini-3-pro-image-preview") is True
+
+
+@pytest.mark.parametrize(
+    "model_id,provider_id",
+    [
+        ("gemini-3.6-flash", "custom:litellm"),
+        ("gemini-3.6-flash", "gemini"),
+        ("gemini-3.6-flash", "copilot"),
+        ("gemini-2.5-pro", "gemini"),
+        ("google/gemini-2.5-pro", "openrouter"),
+        ("vertex/gemini-3-pro-preview", "custom:newapi"),
+        ("github_copilot/gemini-3.6-flash", "custom:litellm"),
+    ],
+)
+def test_gemini_ladder_is_exact_never_xhigh_or_max(model_id, provider_id):
+    """Gemini never offers `xhigh` or `max`, on any route.
+
+    Gemini has no such levels; the adapter reads an unknown `max` as medium,
+    so offering one would report a thinking depth that never happened.
+
+    Whether a ladder is offered AT ALL is a separate question answered by the
+    runtime, not by this test: on Copilot the control only appears when the
+    installed core resolves that model (see
+    `test_copilot_gemini_ladder_matches_runtime_capability` below), and on the
+    native provider the ladder is narrowed to the levels the adapter can
+    actually distinguish. Asserting a non-empty ladder unconditionally here
+    would contradict both of those and re-assert the visible-but-inert
+    behaviour this PR removes.
+    """
+    efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id=provider_id)
+    assert "xhigh" not in efforts, (model_id, provider_id, efforts)
+    assert "max" not in efforts, (model_id, provider_id, efforts)
+    assert set(efforts) <= {"minimal", "low", "medium", "high"}, (
+        model_id,
+        provider_id,
+        efforts,
+    )
+
+
+def test_copilot_gemini_ladder_matches_runtime_capability():
+    """On Copilot, the Gemini control appears exactly when the runtime sends it.
+
+    This replaces an unconditional "must expose a ladder" assertion. The real
+    contract is agreement with the installed runtime: if the core resolves a
+    ladder for the model, the UI must offer one; if it does not, the UI must
+    stay empty rather than render a control the runtime ignores.
+    """
+    try:
+        import hermes_cli.models as copilot_models
+    except ImportError:
+        pytest.skip("hermes_cli not available")
+
+    model_id = "gemini-3.6-flash"
+    wire = list(copilot_models.github_model_reasoning_efforts(model_id) or [])
+    ui = cfg.resolve_model_reasoning_efforts(model_id, provider_id="copilot")
+
+    if wire:
+        assert ui, (
+            f"{model_id}: the runtime resolves {wire} but the UI offers nothing"
+        )
+        assert set(ui) <= set(wire), (
+            f"{model_id}: UI offers levels the runtime will not send: "
+            f"ui={ui} wire={wire}"
+        )
+    else:
+        assert ui == [], (
+            f"{model_id}: the runtime sends no reasoning field, so the control "
+            f"must stay hidden (got {ui})"
+        )
+
+
+@pytest.mark.parametrize(
+    "model_id,provider_id",
+    [
+        ("claude-opus-5", "anthropic"),
+        ("gpt-5.5", "openai-codex"),
+        ("deepseek-v4-flash", "custom:newapi"),
+    ],
+)
+def test_gemini_clamp_does_not_touch_other_families(model_id, provider_id):
+    """The Gemini clamp must not narrow anyone else's ladder."""
+    efforts = cfg.resolve_model_reasoning_efforts(model_id, provider_id=provider_id)
+    assert "xhigh" in efforts, (model_id, provider_id, efforts)
+
+
 def test_generalized_model_families_and_suffixed_ids():
     test_models = [
         # GPT
@@ -252,20 +558,28 @@ def test_deepseek_non_reasoning_variants_excluded(model_id):
 
 
 @pytest.mark.parametrize(
-    "model_id",
+    ("model_id", "expected"),
     [
-        "vertex/gemini-3.1-pro-preview",
-        "vertex/gemini-3-pro-preview",
-        "gemini_cli/gemini-3-pro-preview",
+        # Ladders are model-specific and come from Google's published
+        # "Controlling thinking" table. 3 Pro exposes only the two endpoints,
+        # so asserting a fixed low/medium/high for every route would demand a
+        # level the model does not accept.
+        ("vertex/gemini-3.1-pro-preview", {"low", "medium", "high"}),
+        ("vertex/gemini-3-pro-preview", {"low", "high"}),
+        ("gemini_cli/gemini-3-pro-preview", {"low", "high"}),
     ],
 )
-def test_custom_nested_gemini_routes_expose_reasoning(model_id):
+def test_custom_nested_gemini_routes_expose_reasoning(model_id, expected):
     efforts = cfg.resolve_model_reasoning_efforts(
         model_id,
         provider_id="custom:newapi",
     )
-    assert set(efforts) >= {"low", "medium", "high"}, (
-        f"{model_id} via custom:newapi should expose reasoning efforts"
+    # The point of this test is that a nested/prefixed route still resolves a
+    # usable ladder at all — plus that the ladder matches what the model
+    # actually publishes.
+    assert efforts, f"{model_id} via custom:newapi should expose reasoning efforts"
+    assert set(efforts) == expected, (
+        f"{model_id} via custom:newapi should expose exactly {sorted(expected)}"
     )
 
 
