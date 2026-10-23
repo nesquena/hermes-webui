@@ -458,6 +458,8 @@
 
 ### Changed
 
+- **Keyboard and screen reader users can reach conversations in the sidebar directly.** Conversation titles are now real buttons (the open one is marked as the current page), the Chat label is a heading, and a keyboard-focused row shows a clear focus ring, including in forced-colours mode and the Geist Contrast skin. Focus stays on the same conversation when the list refreshes, J/K navigation keeps working after a mouse click, and opening a conversation closes any open project or model menu. On touch screens, the first tap on a tag filters by it, a long press on a tag still opens the conversation's actions, and a swipe that starts on a tag still swipes. (#7049, thanks @sheldon-im)
+
 - **`/status` shows the true message total when it differs from the visible count.** The status card's "Messages" row counts what you can see; hidden internal rows (delegation wakeups) are part of the session too, so the card now adds a "Total messages" row whenever the two numbers differ, and shows nothing extra when they match. Spanish, German and Simplified Chinese also get a translated "Messages" label (they showed the English word before). A maintainer fold makes clearing or truncating a conversation drop its stale cached counts, so the card no longer shows the pre-clear total right after "Clear conversation". Thanks @fedebyes. (#8310)
 
 - **Test suite: the run-journal echo-scan scaling check no longer flakes on a busy runner,** while still failing on a genuinely quadratic rebuild. Thanks @MuhammadUsamaMX. (#8328)
@@ -473,6 +475,8 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **The local full test suite passes in the release sandbox (test-only).** Twenty-one tests failed only because of the host: no package index, the worktree's git dir hidden from git, `HOME=/tmp`, unmapped supplementary groups, no network route for Chromium, a process-wide truststore injection, and two newer-Agent shape changes. They now pass there, or skip with the missing condition named (package index, spare group, Agent org skill mirror). No product code changes, and CI still runs the packaging tests.
 
 - **Running the tests can no longer delete the checkout.** An exported-but-empty `HERMES_WEBUI_TEST_STATE_DIR=` used to resolve the test state directory to the current directory, and the session fixture's cleanup then deleted the whole repository, `.git` included. An empty or whitespace-only value now falls back to the temp-dir default, and the suite refuses to start when the state directory is the checkout, one of its parents, or a directory inside it (such as `tests` or `static`). Test-only; no runtime change. Thanks @Overview3833. (#8414, fixes #8413)
 

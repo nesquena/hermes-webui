@@ -70,7 +70,7 @@ def test_session_list_pointer_hover_and_scroll_activity_are_tracked():
     ensure_block = _block("function _ensureSessionVirtualScrollHandler", "function renderSessionListFromCache")
 
     assert "list.matches(':hover')" in interaction_block
-    assert "list.matches(':focus-within')" in interaction_block
+    assert "list.matches(':has(:focus-visible)')" in interaction_block
     assert "_sessionListLastScrollAt=Date.now();" in schedule_block
     for event_name in ["pointerdown", "pointerup", "pointercancel", "pointerleave"]:
         assert event_name in ensure_block
