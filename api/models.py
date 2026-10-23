@@ -12473,6 +12473,7 @@ def _session_messages_have_prefix(messages, prefix) -> bool:
 _SESSION_MESSAGE_DISPLAY_METADATA_KEYS = (
     "_turnDuration",
     "_turnTps",
+    "_turnToolSeconds",
     "_turnUsage",
     "_firstTokenMs",
     "_usedModel",

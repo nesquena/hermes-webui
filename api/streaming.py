@@ -14667,6 +14667,12 @@ def _run_agent_streaming(
             _interim_reasoning_idx: list = []
             _unbound_reasoning_idx = [None]
             _live_tool_calls = []  # tool progress fallback when final messages omit tool IDs
+            # Wall-clock attribution for the settled throughput chips. Tool
+            # durations come from the agent's tool_progress_callback `duration`
+            # kwarg; when a build does not provide it, the start timestamp we
+            # record below is used as a fallback.
+            _tool_seconds_total = [0.0]
+            _tool_started_at: dict = {}
 
             # Throttle: emit metering events at most every 100 ms so the per-message
             # TPS label feels live during fast token streams without flooding SSE.
@@ -14996,6 +15002,20 @@ def _run_agent_streaming(
                     _tool_boundary_advanced = True
 
                 args_snap = _tool_args_snapshot(args)
+
+                # Record tool wall-clock time for the settled message chips.
+                # `duration` is authoritative when the agent supplies it; the
+                # timestamp is the fallback for builds that do not.
+                _tool_key = str(name or '')
+                if event_type in (None, 'tool.started') and _tool_key:
+                    _tool_started_at.setdefault(_tool_key, time.monotonic())
+                if event_type == 'tool.completed':
+                    _tool_dur = cb_kwargs.get('duration')
+                    _tool_started = _tool_started_at.pop(_tool_key, None)
+                    if isinstance(_tool_dur, (int, float)) and _tool_dur >= 0:
+                        _tool_seconds_total[0] += float(_tool_dur)
+                    elif _tool_started is not None:
+                        _tool_seconds_total[0] += max(0.0, time.monotonic() - _tool_started)
 
                 # Modern Hermes Agent builds can call both tool_progress_callback
                 # and the structured tool_start/tool_complete callbacks for the
@@ -15826,6 +15846,14 @@ def _run_agent_streaming(
             # or has been zeroed out (e.g. via a buggy migration / manual file edit).
             # Truthy-check covers None, missing-attr, and 0 uniformly.
             _turn_started_at = _pending_started_at if _pending_started_at else time.time()
+            # Baseline for the per-turn API-call count. The agent's rolling
+            # output/latency histories are maxlen=10 and survive across turns on
+            # a cached agent, so the delta tells us which trailing entries belong
+            # to this turn.
+            try:
+                _turn_api_calls_base = int(getattr(agent, 'session_api_calls', 0) or 0)
+            except (TypeError, ValueError):
+                _turn_api_calls_base = 0
             _external_state_snapshot = get_state_db_session_messages(
                 session_id,
                 profile=getattr(s, 'profile', None),
@@ -17030,9 +17058,46 @@ def _run_agent_streaming(
                     _turn_duration_seconds = max(0.0, time.time() - float(_turn_started_at))
                 except Exception:
                     _turn_duration_seconds = 0.0
-                _turn_tps = None
-                if output_tokens and _turn_duration_seconds > 0:
-                    _turn_tps = round(float(output_tokens) / _turn_duration_seconds, 1)
+                # Two throughput readings share the settled header:
+                #  - tps: pure generation speed = this turn's provider-call
+                #    completion tokens / provider-call wall time. The agent keeps
+                #    one entry per call in rolling maxlen=10 histories, so use the
+                #    trailing entries produced by this turn.
+                #  - tps_turn: whole-turn average = completion delta / wall clock,
+                #    which includes tool execution, queueing and TTFT.
+                # `tps` must not fall back to the agent's cumulative session
+                # counter: the WebUI reuses a cached agent across messages (#1617).
+                _turn_wall_tps = None
+                if turn_output_tokens and _turn_duration_seconds > 0:
+                    _turn_wall_tps = round(float(turn_output_tokens) / _turn_duration_seconds, 1)
+                _turn_tps = _turn_wall_tps
+                _turn_api_seconds = None
+                try:
+                    _api_calls_this_turn = max(
+                        0,
+                        int(getattr(agent, 'session_api_calls', 0) or 0) - _turn_api_calls_base,
+                    )
+                    _out_hist = list(getattr(agent, '_api_output_history', ()) or ())
+                    _lat_hist = list(getattr(agent, '_api_latency_history', ()) or ())
+                    _hist_n = min(_api_calls_this_turn, len(_out_hist), len(_lat_hist))
+                    if _hist_n > 0:
+                        _api_out = sum(
+                            int(x) for x in _out_hist[-_hist_n:]
+                            if isinstance(x, (int, float))
+                        )
+                        _turn_api_seconds = sum(
+                            float(x) for x in _lat_hist[-_hist_n:]
+                            if isinstance(x, (int, float)) and x > 0
+                        )
+                        if _api_out > 0 and _turn_api_seconds > 0:
+                            _turn_tps = round(_api_out / _turn_api_seconds, 1)
+                except Exception:
+                    logger.debug('Failed to compute pure-generation TPS', exc_info=True)
+                    _turn_tps = _turn_wall_tps
+                    _turn_api_seconds = None
+                _turn_tool_seconds = (
+                    round(_tool_seconds_total[0], 1) if _tool_seconds_total[0] > 0 else None
+                )
                 _gateway_routing = _extract_gateway_routing_metadata(
                     agent,
                     result,
@@ -17087,6 +17152,8 @@ def _run_agent_streaming(
                             _dm['_turnDuration'] = round(_turn_duration_seconds, 3)
                             if _turn_tps is not None:
                                 _dm['_turnTps'] = _turn_tps
+                            if _turn_tool_seconds is not None:
+                                _dm['_turnToolSeconds'] = _turn_tool_seconds
                             if _gateway_routing:
                                 _dm['_gatewayRouting'] = _gateway_routing
                             _ttft_ms = meter().get_ttft_ms(stream_id)
@@ -17498,6 +17565,12 @@ def _run_agent_streaming(
             }
             if _turn_tps is not None:
                 usage['tps'] = _turn_tps
+            if _turn_wall_tps is not None:
+                usage['tps_turn'] = _turn_wall_tps
+            if _turn_tool_seconds is not None:
+                usage['tool_seconds'] = _turn_tool_seconds
+            if _turn_api_seconds is not None:
+                usage['api_seconds'] = round(_turn_api_seconds, 1)
             if _gateway_routing:
                 usage['gateway_routing'] = _gateway_routing
             _ttft_ms = meter().get_ttft_ms(stream_id)
