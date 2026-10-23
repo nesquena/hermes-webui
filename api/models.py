@@ -30,7 +30,7 @@ except ImportError:  # pragma: no cover
     _msvcrt = None
 
 import api.config as _cfg
-from api.compression_anchor import is_context_compression_marker
+from api.compression_anchor import is_context_compression_marker, is_user_originated_turn
 from api.config import (
     SESSION_DIR, SESSION_INDEX_FILE, SESSIONS, SESSIONS_MAX,
     LOCK, STREAMS, STREAMS_LOCK, DEFAULT_WORKSPACE, DEFAULT_MODEL, PROJECTS_FILE, HOME,
@@ -2402,18 +2402,19 @@ class Session:
         ``_row_may_need_sidecar_metadata_refresh``) consumes this field as
         if the sidecar were the source of truth. Mixing the two sources
         would silently flip the field's semantics.
+
+        #7681: synthetic compression / task-summary cards are stored with
+        role='user' for provider alternation but are NOT user turns —
+        ``api.compression_anchor.is_context_compression_marker()`` classifies
+        them explicitly. Counting them here would over-report the turn count
+        for every session that has been compressed at least once.
         """
         if not isinstance(messages, list):
             return 0
         n = 0
         for m in messages:
-            if isinstance(m, dict):
-                # Inline role check to avoid the _message_role helper call
-                # on every iteration. dict.get('role') with default '' is
-                # materially faster than a function call for the hot loop.
-                role = m.get('role')
-                if isinstance(role, str) and role == 'user':
-                    n += 1
+            if is_user_originated_turn(m):
+                n += 1
         return n
 
     def compact(
@@ -10609,6 +10610,14 @@ def _load_cli_sessions_uncached(
             '_lineage_root_id': row.get('_lineage_root_id'),
             '_lineage_tip_id': row.get('_lineage_tip_id'),
             '_compression_segment_count': row.get('_compression_segment_count'),
+            # #7681 findings 1/2/4: internal markers the visibility recheck in
+            # api/routes.py reads back off the HTTP row. Without them a collapsed
+            # ACP chain with real user turns disappeared from the sidebar, a
+            # legacy unknown-count row was read as a confident zero, and the
+            # inactive-row flag could not reach the client at all.
+            'lineage_user_message_count': row.get('lineage_user_message_count'),
+            'user_message_count_unknown': row.get('user_message_count_unknown'),
+            'has_inactive_user_rows': row.get('has_inactive_user_rows'),
             'is_cli_session': is_cli_session_row({**row, **_source_meta}),
         })
 
@@ -10699,6 +10708,10 @@ def _load_cli_sessions_uncached(
                     '_lineage_root_id': row.get('_lineage_root_id'),
                     '_lineage_tip_id': row.get('_lineage_tip_id'),
                     '_compression_segment_count': row.get('_compression_segment_count'),
+                    # #7681 finding 4: the primary projection carries the
+                    # inactive-row flag; the additive cron pass must too, or a
+                    # compacted/rewound cron session renders an inflated count.
+                    'has_inactive_user_rows': row.get('has_inactive_user_rows'),
                     'is_cli_session': is_cli_session_row(row),
                 })
                 existing_sids.add(sid)
@@ -10768,6 +10781,10 @@ def _load_cli_sessions_uncached(
                     '_lineage_root_id': row.get('_lineage_root_id'),
                     '_lineage_tip_id': row.get('_lineage_tip_id'),
                     '_compression_segment_count': row.get('_compression_segment_count'),
+                    # #7681 finding 4: the additive webhook pass must carry the
+                    # inactive-row flag like the primary projection, or a
+                    # compacted/rewound webhook session renders an inflated count.
+                    'has_inactive_user_rows': row.get('has_inactive_user_rows'),
                     'is_cli_session': is_cli_session_row({**row, **_source_meta}),
                 })
                 existing_sids.add(sid)
@@ -10835,6 +10852,10 @@ def _load_cli_sessions_uncached(
                     '_lineage_root_id': row.get('_lineage_root_id'),
                     '_lineage_tip_id': row.get('_lineage_tip_id'),
                     '_compression_segment_count': row.get('_compression_segment_count'),
+                    # #7681 finding 4: the additive kanban pass must carry the
+                    # inactive-row flag like the primary projection, or a
+                    # compacted/rewound kanban session renders an inflated count.
+                    'has_inactive_user_rows': row.get('has_inactive_user_rows'),
                     'is_cli_session': is_cli_session_row({**row, **_source_meta}),
                 })
                 existing_sids.add(sid)

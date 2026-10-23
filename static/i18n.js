@@ -1253,6 +1253,7 @@ const LOCALES = {
     wiki_not_configured: 'Wiki not configured',
     workspace_desc: 'Add and switch workspaces for your sessions.',
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
+    session_meta_user_turns: (n) => `${n} user turn${n === 1 ? '' : 's'}`,
     session_meta_children: (n) => `${n} child${n === 1 ? '' : 'ren'}`,
     // Softened label: avoids exposing the technical internal term
     // 'segment' in the default visible badge. User-facing copy remains
@@ -3132,6 +3133,7 @@ const LOCALES = {
     insights_skill_usage_col_patches: 'Patch',
     workspace_desc: 'Aggiungi e cambia workspace per le tue sessioni.',
     session_meta_messages: (n) => `${n} msg`,
+    session_meta_user_turns: (n) => `${n} turn${n === 1 ? 'o' : 'i'} utente`,
     session_meta_children: (n) => `${n} figli${n === 1 ? 'o' : ''}`,
     session_meta_segments: (n) => `${n} segment${n === 1 ? 'o' : 'i'}`,
     session_lineage_toggle_hint: '{0} — i turni di contesto precedenti sono compressi qui. Fai clic per mostrarli o nasconderli.',
@@ -5017,6 +5019,7 @@ const LOCALES = {
     insights_skill_usage_col_patches: 'パッチ',
     workspace_desc: 'セッション用のワークスペースを追加・切り替えします。',
     session_meta_messages: (n) => `${n} 件`,
+    session_meta_user_turns: (n) => `${n} 件のユーザー発言`,
     session_meta_children: (n) => `${n} 子`,
     session_meta_segments: (n) => `${n} セグメント`,
     session_lineage_toggle_hint: '{0} — 以前のコンテキストターンはここに折りたたまれています。クリックして表示/非表示を切り替えます。',
@@ -6532,6 +6535,7 @@ const LOCALES = {
     current_task_list: 'Текущий список задач',
     workspace_desc: 'Добавляйте рабочие пространства и переключайтесь между ними в своих сеансах.',
     session_meta_messages: (n) => `${n} ${_i18nRuPlural(n, 'сообщение', 'сообщения', 'сообщений')}`,
+    session_meta_user_turns: (n) => `${n} ${_i18nRuPlural(n, 'сообщение пользователя', 'сообщения пользователя', 'сообщений пользователя')}`,
     session_meta_children: (n) => `${n} ${_i18nRuPlural(n, 'дочерний сеанс', 'дочерних сеанса', 'дочерних сеансов')}`,
     session_meta_segments: (n) => `${n} ${_i18nRuPlural(n, 'предыдущий ход', 'предыдущих хода', 'предыдущих ходов')}`,
     session_lineage_toggle_hint: '{0} — предыдущие ходы контекста свернуты здесь. Нажмите, чтобы показать или скрыть их.',
@@ -8385,6 +8389,7 @@ const LOCALES = {
     current_task_list: 'Lista de tareas actual',
     workspace_desc: 'Añade y cambia espacios de trabajo para tus sesiones.',
     session_meta_messages: (n) => `${n} mens.`,
+    session_meta_user_turns: (n) => `${n} turno${n === 1 ? '' : 's'} de usuario`,
     session_meta_children: (n) => `${n} ${n === 1 ? 'hijo' : 'hijos'}`,
     session_meta_segments: (n) => `${n} ${n === 1 ? 'segmento' : 'segmentos'}`,
     session_lineage_toggle_hint: '{0} — los turnos de contexto anteriores están contraídos aquí. Haz clic para mostrarlos u ocultarlos.',
@@ -10178,6 +10183,7 @@ const LOCALES = {
     current_task_list: 'Aktuelle Aufgabenliste',
     workspace_desc: 'Workspaces hinzufügen und wechseln.',
     session_meta_messages: (n) => `${n} Nachr.`,
+    session_meta_user_turns: (n) => `${n} Benutzer-Nachricht${n === 1 ? '' : 'en'}`,
     session_meta_children: (n) => `${n} ${n === 1 ? 'Subagent' : 'Subagents'}`,
     session_meta_segments: (n) => `${n} Segment${n === 1 ? '' : 'e'}`,
     session_lineage_toggle_hint: '{0} — frühere Kontext-Turns sind hier eingeklappt. Klicken, um sie ein- oder auszublenden.',
@@ -12044,6 +12050,7 @@ const LOCALES = {
     current_task_list: '当前任务列表',
     workspace_desc: '为你的会话添加并切换工作区。',
     session_meta_messages: (n) => `${n} 条消息`,
+    session_meta_user_turns: (n) => `${n} 条用户消息`,
     session_meta_children: (n) => `${n} 子会话`,
     session_meta_segments: (n) => `${n} 段`,
     session_lineage_toggle_hint: '{0} — 较早的上下文轮次已折叠在这里。点击显示或隐藏。',
@@ -14226,6 +14233,7 @@ const LOCALES = {
     insights_skill_usage_col_patches: 'Patch',
     workspace_desc: '新增工作區，並為對話切換工作區。',
     session_meta_messages: (n) => `${n} 則訊息`,
+    session_meta_user_turns: (n) => `${n} 條使用者訊息`,
     session_meta_children: (n) => `${n} 則子`,
     // Softened label: avoids exposing the technical internal term
     // 'segment' in the default visible badge. User-facing copy remains
@@ -15944,6 +15952,7 @@ const LOCALES = {
     current_task_list: 'Lista de tarefas atual',
     workspace_desc: 'Adicionar e trocar workspaces para suas sessões.',
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
+    session_meta_user_turns: (n) => `${n} turno${n === 1 ? '' : 's'} de utilizador`,
     session_meta_children: (n) => `${n} child${n === 1 ? '' : 'ren'}`,
     session_meta_segments: (n) => `${n} segment${n === 1 ? '' : 's'}`,
     session_lineage_toggle_hint: '{0} — turnos de contexto anteriores estão recolhidos aqui. Clique para mostrar ou ocultar.',
@@ -17721,6 +17730,7 @@ const LOCALES = {
     current_task_list: '현재 작업 목록',
     workspace_desc: '세션용 워크스페이스를 추가하고 전환합니다.',
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
+    session_meta_user_turns: (n) => `${n}개의 사용자 메시지`,
     session_meta_children: (n) => `${n} child${n === 1 ? '' : 'ren'}`,
     session_meta_segments: (n) => `${n} segment${n === 1 ? '' : 's'}`,
     session_lineage_toggle_hint: '{0} — 이전 컨텍스트 턴이 여기에 접혀 있습니다. 클릭하여 표시하거나 숨기세요.',
@@ -19669,6 +19679,7 @@ const LOCALES = {
     wiki_not_configured: 'Wiki non configuré',
     workspace_desc: 'Ajouter et changer d\'espace de travail pour vos sessions.',
     session_meta_messages: (n) => `${n} msg${n === 1 ? '' : 's'}`,
+    session_meta_user_turns: (n) => `${n} message${n === 1 ? '' : 's'} utilisateur${n === 1 ? '' : 's'}`,
     session_meta_children: (n) => `${n} enfant${n === 1 ? '' : 's'}`,
     session_meta_segments: (n) => `${n} tour${n === 1 ? '' : 's'} antérieur${n === 1 ? '' : 's'}`,
     session_lineage_toggle_hint: '{0} — les tours de contexte précédents sont repliés ici. Cliquez pour les afficher ou les masquer.',
@@ -21143,6 +21154,7 @@ const LOCALES = {
     session_link_copy_failed: 'Kopírování odkazu na konverzaci selhalo: ',
     session_meta_children: (n) => `${n} potomek${n === 1 ? '' : 'ci'}`,
     session_meta_messages: (n) => `${n} zpráv${n === 1 ? 'a' : ''}`,
+    session_meta_user_turns: (n) => `${n} ${_i18nCsPlural(n, 'zpráva uživatele', 'zprávy uživatele', 'zpráv uživatele')}`,
     session_meta_segments: (n) => `${n} předchozích tah${n === 1 ? '' : 'ů'}`,
     session_move_project: 'Přesunout do projektu',
     session_move_project_desc_has: 'Změnit projekt této konverzace',
@@ -23300,6 +23312,10 @@ const LOCALES = {
     current_task_list: 'Mevcut görev listesi',
     workspace_desc: 'Oturumlarınız için çalışma alanları ekleyin ve değiştirin.',
     session_meta_messages: (n) => `${n} mesaj${n === 1 ? '' : 'S'}`,
+    // Turkish has no plural inflection after a counted noun phrase: every
+    // number takes the same accusative form (the old code rendered
+    // "1 kullanıcı mesaj" without the suffix).
+    session_meta_user_turns: (n) => `${n} kullanıcı mesajı`,
     session_meta_children: (n) => `${n} çocuk${n === 1 ? '' : 'ren'}`,
     session_meta_segments: (n) => `${n} segment${n === 1 ? '' : 'S'}`,
     session_lineage_toggle_hint: '{0} — önceki bağlam turları burada daraltıldı. Göstermek veya gizlemek için tıklayın.',
@@ -25237,6 +25253,7 @@ const LOCALES = {
     insights_skill_usage_col_patches: 'Poprawki',
     workspace_desc: 'Dodawaj i przełączaj obszary robocze dla swoich sesji.',
     session_meta_messages: (n) => n === 1 ? '1 wiadomość' : `${n} wiadomości`,
+    session_meta_user_turns: (n) => n === 1 ? `${n} wiadomość użytkownika` : (n < 5 ? `${n} wiadomości użytkownika` : `${n} wiadomości użytkownika`),
     session_meta_children: (n) => n === 1 ? '1 podrzędna' : `${n} podrzędne`,
     session_meta_segments: (n) => n === 1 ? '1 wcześniejsza tura' : `${n} wcześniejszych tur`,
     session_lineage_toggle_hint: '{0} — wcześniejsze tury kontekstu są tutaj zwinięte. Kliknij, aby je pokazać lub ukryć.',
@@ -26952,6 +26969,7 @@ const LOCALES = {
     insights_skill_usage_col_patches: 'Patch',
     workspace_desc: 'Thêm và chuyển đổi workspace cho các phiên.',
     session_meta_messages: (n) => `${n} tin nhắn`,
+    session_meta_user_turns: (n) => `${n} lượt người dùng`,
     session_meta_children: (n) => `${n} phiên con`,
     // Softened label: avoids exposing the technical internal term
     // 'segment' in the default visible badge. User-facing copy remains

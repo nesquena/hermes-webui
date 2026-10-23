@@ -100,6 +100,14 @@ _SIDEBAR_SESSION_RESPONSE_FIELDS = {
     "_lineage_collapsed_count",
     "_parent_lineage_root_id",
     "_parent_lineage_tip_id",
+    # Internal visibility/accuracy markers consumed by is_cli_session_row_visible()
+    # in api/routes.py and by the client's count renderer. They must survive the
+    # cache projection: dropping them made an ACP chain with real user turns
+    # vanish from the sidebar and inflated counts render as if they were accurate
+    # (#7681 findings 1, 2 and 4).
+    "lineage_user_message_count",
+    "user_message_count_unknown",
+    "has_inactive_user_rows",
     "_cross_surface_child_session",
     "match_type",
     "match_preview",
