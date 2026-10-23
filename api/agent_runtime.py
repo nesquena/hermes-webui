@@ -165,6 +165,10 @@ def agent_runtime_stale_payload(exc: AgentRuntimeChangedError) -> dict:
         "type": "agent_runtime_stale",
         "retryable": True,
         "restart_scheduled": False,
+        # Advertise that this server exposes the operator-initiated
+        # /api/runtime/restart recovery (#7934) so clients only offer a
+        # Restart action where the route exists. Older servers omit the key.
+        "restart_available": True,
     }
     if exc.agent_update_state is not None:
         payload["agent_update_state"] = exc.agent_update_state
