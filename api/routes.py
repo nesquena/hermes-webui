@@ -16824,6 +16824,22 @@ def handle_get(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
 
+    if parsed.path == "/api/session/delegations":
+        # #8019: advisory read-only live-delegation snapshot for one session.
+        # Counts only; an unreadable ledger is reported as unknown, never zero,
+        # so a pre-switch guard cannot mistake "could not check" for "safe".
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        from api.delegation_status import session_delegation_status
+        try:
+            profile = get_session_profile_readonly(sid)
+        except Exception:
+            # Unknown ownership falls back to the active profile's ledger; the
+            # result stays advisory either way.
+            profile = None
+        return j(handler, session_delegation_status(sid, profile=profile))
+
     if parsed.path == "/api/session/yolo":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
         if not sid:
