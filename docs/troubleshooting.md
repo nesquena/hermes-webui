@@ -425,6 +425,27 @@ For a foreground `python3 bootstrap.py`, stop it with Ctrl-C and start it again.
 
 ---
 
+## "This page is running an older WebUI build than the server; reload to continue"
+
+**Symptom.** Sending a message is refused with the status "Hermes WebUI was updated. Please reload the app to continue." The typed message stays in the composer and is saved as the session's draft, so it is still there after the reload. Attachments stay in the composer until the reload but are **not** restored by it (the saved draft keeps only their names); when the rejected message had attachments, the status also asks the user to re-attach them after reloading. Before this barrier existed the same situation showed up as approval and clarify cards that never appeared (#8155).
+
+**Why.** A browser tab or a native shell (Hermex iOS, an installed PWA) can keep running frontend JavaScript loaded from a previous WebUI process indefinitely: it never re-navigates, so neither the versioned `static/*?v=` URLs nor the service worker ever refresh it. That old bundle then talks to a newer server with mismatched contracts. Every `api()` call from the page sends its build stamp (`window.__HERMES_WEBUI_BUNDLE_VERSION__`) in the `X-Hermes-WebUI-Bundle` request header; `POST /api/chat/start` compares it with the server's `WEBUI_VERSION` **before touching any session state** and refuses a mismatch with a retryable `409`:
+
+```json
+{"type": "stale_client_bundle", "retryable": true,
+ "client_version": "exp-v0.52.458", "server_version": "exp-v0.52.470", "error": "..."}
+```
+
+The comparison accepts the raw version and its URL-quoted form (the page stamp is percent-encoded, so a build version containing `+` arrives as `%2B`). A request with **no** header is always accepted: WebUI Bridge API clients, `curl`, scripts, and native shells that predate the header are never locked out by this barrier.
+
+**Client recovery.** On the typed `409` the page tears down the rejected turn's pollers and cards and restores the original text and attachments to the owning session's composer through the shared failed-send recovery, which persists the text as that session's server-side draft and never overwrites anything typed in the meantime. When the original went back into the composer, the rejected turn is removed from the transcript. When newer typing kept the composer, the rejected turn is removed from the transcript and goes back on the session's queue instead, ahead of any follow-ups, with its attachments and goal continuation ID. Follow-up messages queued behind the rejected turn stay queued: draining them would only send each one into the same `409`. The reload keeps queued messages: the first goes into an empty composer when the session has no saved draft, and every other one stays queued and sends after the next response (attachments on queued messages do not survive a reload). The page deliberately does **not** reload itself: a reload from inside an interrupted send would race the draft save, a queued follow-up message, and staged attachments. Regenerate goes through the same server check and reports the same message as a regenerate failure.
+
+**Fix.** Reload the page; in an installed PWA or Hermex, close and reopen the app. If the message persists after a reload, something between the client and the server is still serving the old shell: a reverse proxy or CDN caching `index.html`, or a service worker that could not update (see the PWA section above). Clear site data for the Hermes origin, or bypass the cache for `/` and `/static/*`.
+
+**When to file a bug.** File a WebUI bug if a freshly loaded page is refused (client and server versions in the error differ only by encoding, or are identical), or if the rejection drops the typed message or staged attachments.
+
+---
+
 ## Agent sessions list slowly (or the `state.db` read index is missing)
 
 **Symptom.** The sidebar's imported/CLI session list takes seconds per refresh on a large Hermes profile, or a log line says a `state.db` read failed. Sessions still appear; nothing is lost.

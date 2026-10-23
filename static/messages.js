@@ -1520,6 +1520,17 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
+// #8155: the server refused /api/chat/start because this page's bundle
+// (window.__HERMES_WEBUI_BUNDLE_VERSION__) differs from the build it serves.
+// api() attaches the raw body on the Error; parse the typed marker from it.
+function _isStaleClientBundleError(e){
+  if(!e) return false;
+  try{
+    const body=typeof e.body==='string'?JSON.parse(e.body):(e.body||null);
+    return !!(body&&body.type==='stale_client_bundle');
+  }catch(_){ return false; }
+}
+
 async function send(){
   // Static guards expect _defaultMessageMode to stay near send() while the actual
   // read remains in the S.busy branch below.
@@ -2067,6 +2078,71 @@ async function send(){
     postStartData = startData;
   }catch(e){
     const errMsg=String((e&&e.message)||'');
+    // #8155: this page runs a bundle from an older WebUI build than the server
+    // (a native shell or long-lived tab that never re-navigated after an
+    // upgrade). The server refused the turn with a typed 409 before touching
+    // session state. Restore the draft and ask the user to refresh.
+    if(e&&e.status===409&&_isStaleClientBundleError(e)){
+      // Do NOT auto-reload: a reload from inside a half-finished send races the
+      // draft clear/save, a follow-up queued for this session, newer typing and
+      // staged File objects (review of #8156). Treat it like every other
+      // pre-start rejection — restore what the user had — and tell them to
+      // refresh. The server rejected the turn before touching session state,
+      // so nothing was lost on that side.
+      delete INFLIGHT[activeSid];
+      if(typeof clearInflightState==='function') clearInflightState(activeSid);
+      if(typeof clearOptimisticSessionStreaming==='function') clearOptimisticSessionStreaming(activeSid);
+      if(!_approvalSessionId || _approvalSessionId===activeSid) hideApprovalCard(true);
+      if(!_clarifySessionId || _clarifySessionId===activeSid) hideClarifyCard(true, 'terminal');
+      if(typeof stopClarifyPollingForSession==='function') stopClarifyPollingForSession(activeSid);
+      // Visible-pane cleanup only while the rejected session is on screen: after
+      // a switch, S.busy, the thinking row and the queue drain belong to the
+      // session now shown, which may still be running.
+      const _staleVisible=(S.session&&S.session.session_id)===activeSid;
+      if(_staleVisible){
+        removeThinking();
+        // Clear busy WITHOUT draining this session's queue: every queued
+        // follow-up would hit the same 409 (the page is still the old bundle),
+        // overwrite the draft restored below and burn the queue down to its
+        // last item. The entries stay queued (and persisted) for after the reload.
+        setBusy(false,{drain:false});
+      }
+      // Same recovery as every other pre-start rejection (#5472): the ORIGINAL
+      // draft + attachments go back to the owning session's composer (without
+      // clobbering newer typing) and the text is persisted server-side, ordered
+      // after the send-time draft clear. A background session gets the captured
+      // draft persisted as its only copy. The server rejected the turn before
+      // consuming a pending goal continuation, so its ID travels with the
+      // restored text (#7855), exactly as on the generic failure path.
+      const _staleRestored=_restoreComposerDraftAfterFailedSend(_failedSendDraftText, _failedSendFilesSnapshot, activeSid, _composerDraftClearPromise, _goalContinuationId);
+      if(_staleVisible){
+        if(!_staleRestored){
+          // Newer typing kept the composer, so the rejected turn goes back on
+          // this session's queue, ahead of any follow-ups, with its files and
+          // goal continuation ID (the server refused it before consuming the
+          // pending continuation). The queue survives the reload (the restore
+          // in loadSession keeps queued entries) and sends after the next
+          // response.
+          const _staleModel=modelStateForPostStart||_chatPayloadModelState();  // the model this turn was posted with
+          const _staleEntry={text:_failedSendDraftText,files:[..._failedSendFilesSnapshot],model:_staleModel.model,model_provider:_staleModel.model_provider,profile:S.activeProfile||'default'};
+          if(_goalContinuationId) _staleEntry.goal_continuation_id=_goalContinuationId;
+          queueSessionMessage(activeSid,_staleEntry,{front:true});
+          updateQueueBadge(activeSid);
+        }
+        // The original is kept either way (composer or queue): remove ONLY this
+        // send's turn (optimisticMessages is a copy of the whole transcript, so
+        // filtering it out would blank the conversation).
+        S.messages=S.messages.filter(m=>m!==userMsg);
+        if(typeof renderMessages==='function') renderMessages();
+      }
+      // A reload restores the draft text but not the File objects (the
+      // persisted draft holds only their metadata), so say so up front.
+      const _staleStatus=t(_failedSendFilesSnapshot&&_failedSendFilesSnapshot.length?'stale_bundle_refresh_files':'stale_bundle_refresh');
+      showToast(_staleStatus,8000);
+      setComposerStatus(_staleStatus);
+      if(typeof renderSessionList==='function') void renderSessionList();
+      return;
+    }
     // If /api/chat/start returns 404, the session was deleted server-side
     // (its sidecar is gone) while GET kept returning a CLI stub (#2782). Strip
     // the stale /session/<id> URL and clear localStorage so a reload does not

@@ -184,8 +184,11 @@ def test_send_chat_start_404_self_heals_instead_of_error_bubble():
     )
     # The error bubble (`**Error:**`) lives after the conflictActiveStream
     # marker, so confirming the 404 branch + return precede that marker is
-    # enough to prove no bubble is appended on a 404.
-    assert "**Error:**" not in block, (
+    # enough to prove no bubble is appended on a 404. Inspect from the 404
+    # branch on: earlier typed branches (the #8155 stale-bundle 409 keeps a
+    # rejected message with a "not sent" bubble) are not the 404 path.
+    block_404 = block[block.index("if(e&&e.status===404)"):]
+    assert "**Error:**" not in block_404, (
         "the 404 self-heal branch must run before the error-bubble path"
     )
 

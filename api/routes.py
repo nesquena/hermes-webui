@@ -6756,7 +6756,9 @@ def apply_cors_preflight_headers(handler) -> None:
     handler.send_header("Access-Control-Allow-Origin", origin)
     handler.send_header("Vary", "Origin")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    # api() sends the page's build stamp on every call (#8155); an allowlisted
+    # cross-origin page is refused at preflight unless the header is listed.
+    handler.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Hermes-WebUI-Bundle")
 
 
 def _csrf_exempt_path(path: str) -> bool:
@@ -27688,6 +27690,63 @@ def _active_run_stream_for_session(session_id: str | None) -> str | None:
     return None
 
 
+STALE_CLIENT_BUNDLE_HEADER = "X-Hermes-WebUI-Bundle"
+
+
+def _stale_client_bundle_response(handler) -> dict | None:
+    """Return the typed 409 payload when the calling page runs a bundle from a
+    different WebUI build than this process serves; ``None`` otherwise (#8155).
+
+    A native shell (Hermex iOS) or a long-lived tab can keep running JS loaded
+    from a previous process forever: it never re-navigates, so neither the
+    ``?v=`` cache-bust nor the service worker ever fires, and the old bundle
+    keeps talking to a newer server with mismatched contracts. The page sends
+    its ``window.__HERMES_WEBUI_BUNDLE_VERSION__`` as ``X-Hermes-WebUI-Bundle``
+    on every ``api()`` call; a missing header (curl, tests, Bridge API clients,
+    native shells that predate the header) is always accepted, so this is a
+    barrier, not a lock-out. Checked before any session state is touched, like
+    ``_agent_runtime_barrier_response``.
+    """
+    try:
+        raw_header = handler.headers.get(STALE_CLIENT_BUNDLE_HEADER)
+    except Exception:
+        return None
+    if not isinstance(raw_header, str):
+        return None
+    client_version = raw_header.strip()
+    if not client_version:
+        return None
+    server_version = str(globals().get("WEBUI_VERSION") or _current_webui_version() or "").strip()
+    if not server_version:
+        return None
+    # The page is stamped with quote(WEBUI_VERSION, safe="") (see
+    # _render_index_shell_base), so a version containing "+" (setuptools-scm
+    # local segments such as "v0.50.1.dev1+gabc123") arrives as "%2B". Accept
+    # the raw and the quoted spelling, and the decoded header, so a fresh page
+    # is never rejected by its own encoding.
+    accepted = {server_version, quote(server_version, safe="")}
+    if client_version in accepted or unquote(client_version) == server_version:
+        return None
+    return {
+        "error": (
+            "This page is running an older WebUI build than the server "
+            f"({client_version} vs {server_version}); reload to continue."
+        ),
+        "type": "stale_client_bundle",
+        "retryable": True,
+        "client_version": client_version,
+        "server_version": server_version,
+    }
+
+
+def _current_webui_version() -> str:
+    try:
+        from api.updates import WEBUI_VERSION as _v
+        return str(_v or "")
+    except Exception:
+        return ""
+
+
 def _agent_runtime_barrier_response(
     *,
     runner_local_owned: bool = False,
@@ -29273,6 +29332,14 @@ def _handle_chat_start(handler, body, diag=None):
                     "error": "Regeneration is not supported by the runner backend.",
                     "code": "unsupported_regeneration_backend",
                 }, status=409)
+        # Reject a page running a bundle from another WebUI build before any
+        # session state is touched (#8155): the old JS may lack the contracts
+        # this server expects (e.g. the approval poll), so the turn would run
+        # with prompts the user can never see. Typed 409; the client restores the
+        # draft and asks the user to reload (it never reloads by itself).
+        stale_bundle = _stale_client_bundle_response(handler)
+        if stale_bundle is not None:
+            return j(handler, stale_bundle, status=409)
         # Reject a stale local Agent runtime before materialising, claiming, or
         # mutating any session state. Gateway-backed turns run in the gateway's
         # process and do not depend on this WebUI process's imported checkout.

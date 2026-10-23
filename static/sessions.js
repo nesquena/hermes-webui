@@ -3407,11 +3407,20 @@ async function loadSession(sid){
             .find(m=>m&&m.role==='assistant');
           const _lastAsst=_lastMsg?(_lastMsg.timestamp||_lastMsg._ts||0)*1000:0;
           const _fresh=_entries.filter(e=>!e._queued_at||e._queued_at>_lastAsst);
-          if(_fresh.length){
+          // The saved composer draft is restored further down and replaces the
+          // composer text, so with a draft (text or attachment metadata) the
+          // first entry stays queued too instead of being put in the composer
+          // and then overwritten.
+          const _queueDraft=S.session&&S.session.composer_draft;
+          const _queueHasDraft=!!(_queueDraft&&(String(_queueDraft.text||'').trim()
+            ||(Array.isArray(_queueDraft.files)&&_queueDraft.files.length)));
+          let _keep=_fresh;
+          if(_fresh.length&&!_queueHasDraft){
             const _first=_fresh[0];
             const _msg=$&&$('msg');
             if(_msg&&_first.text&&!_msg.value){
               _msg.value=_first.text||'';
+              _keep=_fresh.slice(1);
               // #7855 (round 5): mark the restored text as an identifiable
               // CONTINUATION DRAFT — the ID rides on the composer element
               // together with the exact text it was restored for, and send()
@@ -3422,10 +3431,26 @@ async function loadSession(sid){
                 _setRestoredGoalContinuationDraft(_first.goal_continuation_id||'',_first.text||'');
               }
               if(typeof autoResize==='function') autoResize();
-              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (showing first)`:'Queued message restored')+' — review and send when ready');
+              if(typeof showToast==='function') showToast((_fresh.length>1?`${_fresh.length} queued messages restored (first in the composer, the rest still queued)`:'Queued message restored')+' — review and send when ready');
             }
           }
           if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
+          // Every other fresh entry goes back on the session queue (its chips;
+          // it sends after the next response) instead of being dropped (#8156:
+          // a stale-bundle rejection asks for a reload with follow-ups queued).
+          // Only when this page holds no queue for the session (a reload or tab
+          // restore); after a session switch the in-memory queue is the truth,
+          // so rewrite the durable copy from it rather than leave it cleared.
+          // Browser File objects do not survive JSON persistence, so attachments
+          // are not carried over.
+          const _requeue=_keep.filter(e=>String(e&&e.text||'').trim());
+          const _liveQueued=typeof getQueuedSessionCount==='function'?getQueuedSessionCount(sid):0;
+          if(_liveQueued){
+            if(typeof _persistSessionQueueStorage==='function') _persistSessionQueueStorage(sid,_getSessionQueue(sid,false));
+          }else if(_requeue.length){
+            for(const _e of _requeue) queueSessionMessage(sid,{..._e,files:[]});
+            if(_keep===_fresh&&typeof showToast==='function') showToast(`${_requeue.length} queued message${_requeue.length>1?'s':''} restored to the queue — sent after your next message`);
+          }
         }
       }catch(_){if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);}
     }

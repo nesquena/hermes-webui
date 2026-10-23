@@ -265,12 +265,15 @@ function _readPersistedSessionQueue(sid){
   }
   return [];
 }
-function queueSessionMessage(sid, payload){
+function queueSessionMessage(sid, payload, opts){
   if(!sid||!payload) return 0;
   const q=_getSessionQueue(sid,true);
   // Stamp created_at so the restore path can detect stale entries (agent already responded)
   const entry={...payload, _queued_at: Date.now()};
-  q.push(entry);
+  // {front:true}: a turn the server refused before starting goes back ahead of
+  // the follow-ups queued behind it (#8156).
+  if(opts&&opts.front) q.unshift(entry);
+  else q.push(entry);
   _persistSessionQueueStorage(sid,q);
   return q.length;
 }
@@ -11071,7 +11074,7 @@ async function handleComposerPrimaryAction(){
   await send();
 }
 
-function setBusy(v){
+function setBusy(v,opts){
   S.busy=v;
   updateSendBtn();
   if(!v){
@@ -11081,6 +11084,9 @@ function setBusy(v){
     const sid=_queueDrainSid||(S.session&&S.session.session_id);
     _queueDrainSid=null;
     updateQueueBadge(sid);
+    // {drain:false}: the caller knows every queued send would fail the same way
+    // (#8155 stale bundle), so the queue is left intact for a later run.
+    if(opts&&opts.drain===false) return;
     // Drain one queued message for the finished session after UI settles
     const _isViewedSid=!S.session||sid===S.session.session_id;
     const next=sid&&_isViewedSid?shiftQueuedSessionMessage(sid):null;
