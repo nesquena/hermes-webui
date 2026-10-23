@@ -106,32 +106,35 @@ def test_preferences_picker_ux_fixes_label_touchfocus_shadow():
     (1) the field label targets the interactive chip, not the hidden native select;
     (2) the search auto-focus is skipped on coarse-pointer (no mobile keyboard pop);
     (3) the downward-opening Preferences dropdown casts its shadow downward.
+
+    LOCAL (no-search-autofocus): (2) was tightened from "touch only" to "no device
+    at all" — opening the picker must never steal focus into the search input,
+    because users open it to CHOOSE a model and on phones the focus pops the IME
+    over the list. The policy now lives in ONE place (renderModelDropdown), so the
+    per-call-site coarse-pointer gate and the caller-supplied option are gone;
+    these assertions pin the new contract instead of the old option plumbing.
     """
     # (1) label association -> the visible/interactive chip
     assert 'for="settingsModelChip"' in INDEX_HTML
     assert 'for="settingsModel"' not in INDEX_HTML  # no longer points at the hidden select
 
-    # (2) coarse-pointer guard around the search auto-focus in the settings open path,
-    #     passed through to renderModelDropdown so its OWN initial focus is suppressed too.
+    # (2) the search input never auto-focuses, and the policy is a single source
+    #     inside the shared renderer (no call site can re-enable the keyboard pop).
     open_body = _function_body(UI_JS, "openSettingsModelDropdown")
-    assert "matchMedia('(pointer: coarse)')" in open_body
-    assert "autoFocusSearch:!_coarsePointer" in open_body
-    guard_idx = open_body.index("matchMedia('(pointer: coarse)')")
-    render_idx = open_body.index("renderModelDropdown(")
-    assert guard_idx < render_idx, "coarse-pointer must be computed before the render call"
-    # renderModelDropdown honors the option and defaults it true (composer unchanged).
+    assert "autoFocusSearch:false" not in open_body, "call sites must not pass the option"
+    assert "matchMedia('(pointer: coarse)')" in open_body  # kept for the container-focus block
     render_body = _function_body(UI_JS, "renderModelDropdown")
-    assert "opts.autoFocusSearch!==false" in render_body
+    assert "const _autoFocusSearch=false;" in render_body
     assert "if(_autoFocusSearch||_hadFocus) _si.focus();" in render_body
+    # The container takes focus instead, so keyboard nav survives without the IME.
+    assert "dd.setAttribute('tabindex','-1')" in render_body
     # Focus is still restored during typing (touch user in the search) — the
     # suppression must NOT drop focus mid-word on the per-keystroke re-render.
     assert "document.activeElement===_si" in render_body
-    # The OPEN-picker refresh path (late live-model fetch) must also suppress focus
-    # on touch for the settings branch, or the keyboard pops after opening.
+    # The OPEN-picker refresh path (late live-model fetch) inherits the same rule.
     refresh_body = _function_body(UI_JS, "_refreshOpenModelDropdown")
     settings_branch = refresh_body[refresh_body.index("settingsModelDropdown"):]
-    assert "autoFocusSearch:!_coarsePointer" in settings_branch
-    assert "matchMedia('(pointer: coarse)')" in settings_branch
+    assert "autoFocusSearch" not in settings_branch
 
     # (3) downward shadow override on the settings dropdown block
     block_start = STYLE_CSS.index(".settings-model-dropdown{")

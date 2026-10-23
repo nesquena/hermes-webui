@@ -379,6 +379,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
   };
   node.classList = makeClassList();
@@ -660,6 +661,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(selector) { return this._qs ? this._qs[selector] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() { this._focused = true; },
   };
   node.classList = makeClassList();
@@ -1029,6 +1031,7 @@ function makeNode(tag) {
     addEventListener(type, handler) { this._listeners[type] = handler; },
     querySelector(sel) { return this._qs ? this._qs[sel] || null : null; },
     setAttribute(name, value) { this[name] = value; },
+    hasAttribute(name) { return this[name] !== undefined && this[name] !== null; },
     focus() {},
   };
   const set = new Set();
