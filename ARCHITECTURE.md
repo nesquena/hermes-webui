@@ -1850,6 +1850,14 @@ Complete list of all HTTP endpoints as of Sprint 1 (v0.3).
                                -> {"stream_id", "session_id"}. Starts agent daemon thread.
     /api/chat                  (fallback, sync) {"session_id", "message", "model"?, "workspace"?}
                                -> blocks until agent finishes. Returns full result.
+    /api/rollback/restore      {"workspace", "checkpoint"} -> restores checkpoint regular files.
+                               Pins the authorized workspace directory before selecting the
+                               checkpoint namespace. Each destination is opened relative to
+                               that descriptor with no-follow directory and leaf traversal.
+                               A later root rename/replacement cannot redirect restore writes.
+                               Symlink destinations are refused. Platforms without descriptor-
+                               relative no-follow support reject restore rather than use a
+                               pathname fallback; list and diff are unchanged.
     /api/share/create          {"session_id"} -> creates or refreshes a public read-only snapshot link
     /api/share/revoke          {"session_id"} -> revokes the current public snapshot link
     /api/approval/respond      {"session_id", "choice": once|session|always|deny}

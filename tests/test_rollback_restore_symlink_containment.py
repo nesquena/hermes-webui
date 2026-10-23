@@ -1,4 +1,7 @@
+import os
 import subprocess
+
+import pytest
 
 from api import rollback
 
@@ -14,6 +17,38 @@ def _init_checkpoint_repo(path, files):
         target.write_text(content)
     subprocess.run(["git", "-C", str(path), "add", "."], check=True)
     subprocess.run(["git", "-C", str(path), "commit", "-q", "-m", "checkpoint"], check=True)
+
+
+@pytest.mark.skipif(os.open not in os.supports_dir_fd, reason="requires descriptor-relative opens")
+@pytest.mark.parametrize("existing", [True, False])
+def test_restore_keeps_authorized_root_when_path_is_replaced(monkeypatch, tmp_path, existing):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    if existing:
+        (workspace / "victim.txt").write_text("OLD")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim.txt").write_text("UNTOUCHED")
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_id = "root-replacement"
+    ckpt_dir = checkpoint_root / rollback._workspace_hash(str(workspace)) / checkpoint_id
+    _init_checkpoint_repo(ckpt_dir, {"victim.txt": "RESTORED"})
+    monkeypatch.setattr(rollback, "_resolve_workspace", lambda _workspace: str(workspace))
+    monkeypatch.setattr(rollback, "_checkpoint_root", lambda: checkpoint_root)
+    real_entries = rollback._checkpoint_entry_modes
+    retained = tmp_path / "original-workspace"
+
+    def replace_root(*args):
+        entries = real_entries(*args)
+        workspace.rename(retained)
+        workspace.symlink_to(outside, target_is_directory=True)
+        return entries
+
+    monkeypatch.setattr(rollback, "_checkpoint_entry_modes", replace_root)
+    result = rollback.restore_checkpoint(str(workspace), checkpoint_id)
+    assert (outside / "victim.txt").read_text() == "UNTOUCHED"
+    assert result["files_restored"] == ["victim.txt"]
+    assert (retained / "victim.txt").read_text() == "RESTORED"
 
 
 def test_restore_checkpoint_refuses_symlink_escape(monkeypatch, tmp_path):

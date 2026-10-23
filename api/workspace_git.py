@@ -72,13 +72,18 @@ def _hardened_git_argv(
     hooks_path: str | None = None,
 ) -> list[str]:
     argv = noninteractive_git_argv([], credential_config=credential_config)
+    # Encode filesystem selections individually. A process-wide literal mode
+    # also reaches Git's internal stash/clean invocations and can break them.
+    if args and args[0] in {"add", "diff", "status", "ls-files", "restore", "reset"} and "--" in args:
+        separator = args.index("--") + 1
+        args = args[:separator] + [":(literal)" + path for path in args[separator:]]
     for key, value in _GIT_HARDENED_CONFIG:
         argv.extend(["-c", f"{key}={value}"])
     if destructive:
         for key, value in _GIT_DESTRUCTIVE_HARDENED_CONFIG:
             argv.extend(["-c", f"{key}={value}"])
-        if hooks_path:
-            argv.extend(["-c", f"core.hooksPath={hooks_path}"])
+    if hooks_path:
+        argv.extend(["-c", f"core.hooksPath={hooks_path}"])
     if attributes_file:
         argv.extend(["-c", f"core.attributesFile={attributes_file}"])
     argv.extend(args)
@@ -192,6 +197,8 @@ def _run_git(
 ) -> subprocess.CompletedProcess[str]:
     cwd = ctx_or_cwd.repo_root if isinstance(ctx_or_cwd, GitContext) else ctx_or_cwd
     run_env = _clean_git_env(env)
+    for key in ("GIT_LITERAL_PATHSPECS", "GIT_GLOB_PATHSPECS", "GIT_NOGLOB_PATHSPECS", "GIT_ICASE_PATHSPECS"):
+        run_env.pop(key, None)
     if repository_git_proxy_blocks(args, cwd, run_env):
         raise GitWorkspaceError(
             "Repository-configured core.gitProxy is not allowed for git:// remotes",
@@ -223,7 +230,9 @@ def _run_git(
         if effective_destructive or neutralize_remote_helpers:
             extra_configs.extend(_destructive_remote_helper_overrides(cwd, run_env))
             args = _destructive_remote_command_args(args, cwd, run_env)
-        if hardened_destructive_path:
+        # Read/status calls can run index-refresh hooks too. Temporary-index
+        # writes opt in explicitly even with destructive UI actions disabled.
+        if not destructive or hardened_destructive_path:
             hooks_path = tempfile.mkdtemp(prefix="hermes-webui-git-hooks-")
             temporary_dirs = [hooks_path]
         if extra_configs:
@@ -1443,15 +1452,18 @@ def _selected_temp_index_env(ctx: GitContext, specs: list[str]) -> tuple[dict[st
             destructive=True,
         )
         if head.returncode == 0:
-            _run_git(ctx, ["read-tree", "HEAD"], check=True, env=env, destructive=True)
+            _run_git(ctx, ["read-tree", "HEAD"], check=True, env=env, destructive=True,
+                     force_destructive_hardening=True)
         else:
-            _run_git(ctx, ["read-tree", "--empty"], check=True, env=env, destructive=True)
+            _run_git(ctx, ["read-tree", "--empty"], check=True, env=env, destructive=True,
+                     force_destructive_hardening=True)
         _run_git(
             ctx,
             ["add", "-A", "--", *specs],
             check=True,
             env=env,
             destructive=True,
+            force_destructive_hardening=True,
             disable_filter_attributes=True,
         )
         return env, index_path
