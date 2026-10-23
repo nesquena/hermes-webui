@@ -27,10 +27,7 @@ Every message the reader was just watching, including the streamed final answer,
 dropped from `S.messages`, and the settled `renderMessages()` rebuild paints an empty
 pane.
 
-Nothing downstream recovers it:
-
-* `_filterRecoveryControlMessages([])` returns `[]` — still empty.
-* the #373 no-reply guard is suppressed because the guard is
+Nothing downstream recovers it. The #373 no-reply guard is suppressed because it is
   `... && !assistantText`, and `assistantText` still holds the streamed text — so no
   "**No response received.**" card is pushed either. The pane is simply blank, which
   is precisely the reported "no error card" observation in #6112.
@@ -55,8 +52,8 @@ snapshot must not silently drop a visible transcript. The `done` path had no suc
 guard.
 
 Two rules fix it, both in `static/messages.js::_adoptDoneSnapshotMessages`, which the
-`done` listener now runs as a settle guard immediately after the existing #3018
-carry-forward assignment and before `_filterRecoveryControlMessages`:
+`done` listener now runs after choosing the merged terminal transcript and before
+hydrating settled UI state:
 
 1. only a snapshot that actually carries messages may REPLACE a populated transcript —
    an empty/absent one has nothing to reconcile;
@@ -149,25 +146,23 @@ def _visible_texts(messages) -> list[str]:
 def test_done_settle_has_snapshot_adoption_guard():
     """The `done` listener must run the settle guard over the adopted transcript.
 
-    The guard has to fire AFTER the #3018 carry-forward assignment (which is where an
-    empty/absent `session.messages` blanks the visible transcript) and BEFORE
-    `_filterRecoveryControlMessages` and the settled `renderMessages()` rebuild
-    (#6112).
+    The guard has to fire after bounded terminal-session selection and before
+    settled UI hydration and the `renderMessages()` rebuild (#6112).
     """
     done = _done_listener_src()
-    carry_idx = done.find("S.messages=_carryForwardEphemeralTurnFields(S.messages||[], d.session.messages||[])")
+    settle_idx = done.find("S.session=completedSession;")
     guard_idx = done.find("S.messages=_adoptDoneSnapshotMessages(")
-    filter_idx = done.find("S.messages=_filterRecoveryControlMessages")
-    assert carry_idx != -1, "the done listener must still do the #3018 carry-forward"
+    hydrate_idx = done.find("if(typeof _hydrateTodosFromSession")
+    assert settle_idx != -1, "the done listener must first select the merged terminal session"
     assert guard_idx != -1, (
         "the done listener must run _adoptDoneSnapshotMessages so an empty payload "
         "cannot blank the transcript, and a payload without the streamed answer cannot "
         "drop it (#6112)"
     )
-    assert filter_idx != -1, "the done listener must still filter recovery controls"
-    assert carry_idx < guard_idx < filter_idx, (
-        "the settle guard must run after the carry-forward and before the recovery "
-        "filter / settled render"
+    assert hydrate_idx != -1, "settled UI state must still hydrate after transcript adoption"
+    assert settle_idx < guard_idx < hydrate_idx, (
+        "the settle guard must run after selecting the merged terminal transcript and "
+        "before settled UI hydration"
     )
 
 
@@ -363,14 +358,14 @@ def test_no_streamed_answer_leaves_a_populated_snapshot_alone():
 # The REAL `done`-listener wiring must keep the settled transcript non-empty.
 # The prior tests exercised the helper directly; the blanking bug was in the
 # listener assigning the helper's whole {adopted,messages} return object to
-# S.messages, which _filterRecoveryControlMessages then turned into [].
+# S.messages instead of its messages array.
 # --------------------------------------------------------------------------- #
 
 
 def _listener_settle_harness(prev_messages: str, done_session: str, final_answer: str) -> dict:
     """Execute the real done-listener settle statements in Node.
 
-    Extracts the exact carry-forward / settle-guard / recovery-filter statements
+    Extracts the exact merged-session assignment and settle-guard statements
     from the listener source so the `.messages` wiring is what is under test —
     not a re-implementation.
     """
@@ -384,12 +379,13 @@ def _listener_settle_harness(prev_messages: str, done_session: str, final_answer
         assert j != -1, f"statement end not found: {end_marker[:40]}"
         return done[i:j]
 
-    carry = _grab(
-        "S.session=d.session;S.messages=_carryForwardEphemeralTurnFields",
-        "if(typeof _hydrateTodosFromSession",
+    settle = _grab(
+        "S.session=completedSession;",
+        "// #6112 settle guard.",
     )
-    # Extract the REAL settle-guard + recovery-filter statements (with the
-    # intermediate `_oldestIdx` reset) so the `.messages` wiring is under test.
+    # Extract the REAL bounded-session assignment and settle-guard statements,
+    # so the `.messages` wiring remains under test without restoring the old
+    # recovery-row filter to terminal settlement.
     guard = _grab(
         "// #6112 settle guard.",
         "if(typeof _hydrateTodosFromSession",
@@ -403,25 +399,30 @@ def _listener_settle_harness(prev_messages: str, done_session: str, final_answer
         _extract_function(MESSAGES_JS, "_streamRecoveryControlMessageText"),
         _extract_function(MESSAGES_JS, "_streamRecoveryControlMessage"),
         _extract_function(MESSAGES_JS, "_isMarkerOnlyAssistantMessage"),
-        _extract_function(MESSAGES_JS, "_filterRecoveryControlMessages"),
         "const _EPHEMERAL_TURN_FIELDS=['_turnUsage','_turnDuration','_turnTps','_gatewayRouting','_statusCard','_anchor_stream_id','_anchor_activity_scene'];",
         _extract_function(MESSAGES_JS, "_isHistoricalAnchorActivityScene"),
         # A minimal msgContent so _isMarkerOnlyAssistantMessage/_streamRecoveryControlMessage run.
         "function msgContent(m){return (m && m.content)||'';}",
         "function _isPreservedCompressionTaskListMarkerOnlyText(t){return /active task list was preserved/i.test(String(t||''));}",
         textwrap.dedent(f"""
-            const S = {{ messages: {prev_messages} }};
+            const S = {{ session: {{session_id:'s1'}}, messages: {prev_messages} }};
             const d = {{ session: {done_session} }};
             let _doneFinalAnswer = {json.dumps(final_answer)};
             let _oldestIdx = 0;
+            let _messagesTruncated = false;
+            const completedSession = d.session;
+            const completedSid = 'sid-done';
+            const _currentTerminalMessages = S.messages;
+            const _terminalSessionSameSid = true;
+            const _mergedTerminalSession = true;
+            const _adoptRegenerationRevision=()=>{{}};
             // Master's done listener applies a pending title update between the
             // carry-forward and the settle guard; stub it (not under test here).
-            const completedSid = 'sid-done';
             const _pendingTitleUpdates = new Map();
             const _pendingTitleExpectedCurrent = new Map();
             function applySessionTitleUpdate(){{}}
             const _preSettle=Array.isArray(S.messages)?S.messages:[];
-            {carry}
+            {settle}
             {guard}
             const msgs = Array.isArray(S.messages) ? S.messages : [];
             console.log(JSON.stringify({{
@@ -442,9 +443,7 @@ def test_done_listener_settle_keeps_transcript_non_empty():
     """The real listener wiring must produce a non-array-free, non-empty transcript.
 
     Ordinary `done` payload (user + streamed assistant answer, snapshot carries
-    the same). Before the fix the listener assigned the helper's return OBJECT to
-    S.messages, so `_filterRecoveryControlMessages` saw a non-array and returned
-    `[]` — blanking the pane after every normal turn.
+    the same). The listener must keep the adopted result as a message array.
     """
     result = _listener_settle_harness(
         json.dumps([

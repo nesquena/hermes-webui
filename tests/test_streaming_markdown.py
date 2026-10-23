@@ -588,7 +588,7 @@ class TestDoneEventSmd:
         assert fn, "'done' handler not found"
         done_before_render = fn[:fn.index("renderMessages({preserveScroll:true})")]
         assert "const hasMessageToolMetadata=S.messages.some" in done_before_render
-        assert "!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length" in done_before_render
+        assert "!hasMessageToolMetadata&&completedSession.tool_calls&&completedSession.tool_calls.length" in done_before_render
         assert "S.toolCalls=hasMessageToolMetadata?[]:S.toolCalls.map" in done_before_render
 
 

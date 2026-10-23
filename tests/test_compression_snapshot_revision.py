@@ -209,6 +209,80 @@ def _drain_events(event_queue):
     return events
 
 
+def test_terminal_payload_rebases_tool_calls_to_exact_canonical_owners(monkeypatch):
+    from api.models import Session
+
+    sid = "terminal-tool-owner-rebase"
+    sidecar_messages = []
+    for index in range(32):
+        if index in (2, 3):
+            role, content = "assistant", "equal assistant rows"
+        elif index == 31:
+            role, content = "assistant", "latest answer"
+        elif index == 30 or index % 2 == 0:
+            role, content = "user", f"user-{index}"
+        else:
+            role, content = "assistant", f"assistant-{index}"
+        row = {"role": role, "content": content, "timestamp": float(index + 1)}
+        if role == "user":
+            row["_source"] = "webui"
+        sidecar_messages.append(row)
+
+    original_tool_calls = [
+        {"id": "owner-2", "assistant_msg_idx": 2},
+        {"id": "equal-owner-3", "assistant_msg_idx": 3},
+        {"id": "unproven-owner", "assistant_msg_idx": 100},
+    ]
+    session = Session(
+        session_id=sid,
+        messages=sidecar_messages,
+        context_messages=sidecar_messages,
+        tool_calls=[dict(call) for call in original_tool_calls],
+    )
+
+    def project(canonical_messages):
+        monkeypatch.setattr(
+            streaming,
+            "_session_payload_with_full_messages",
+            lambda _session: session.compact() | {
+                "messages": canonical_messages,
+                "message_count": len(canonical_messages),
+            },
+        )
+        return streaming._redacted_terminal_session_payload(session)
+
+    inserted_row = {"role": "assistant", "content": "durable predecessor", "timestamp": 0.5}
+    canonical_with_insert = [inserted_row, *sidecar_messages]
+    assert canonical_with_insert[3] is sidecar_messages[2]
+    assert canonical_with_insert[4] is sidecar_messages[3]
+    payload = project(canonical_with_insert)
+    assert payload["_messages_offset"] == 3
+    assert payload["message_count"] == 33
+    assert [(call["id"], call["assistant_msg_idx"]) for call in payload["tool_calls"]] == [
+        ("owner-2", 0),
+        ("equal-owner-3", 1),
+    ]
+    assert session.tool_calls == original_tool_calls
+
+    unchanged = project(sidecar_messages)
+    assert unchanged["_messages_offset"] == 2
+    assert unchanged["message_count"] == 32
+    assert [(call["id"], call["assistant_msg_idx"]) for call in unchanged["tool_calls"]] == [
+        ("owner-2", 0),
+        ("equal-owner-3", 1),
+    ]
+    assert session.tool_calls == original_tool_calls
+
+    # A value-equal clone is not the indexed sidecar owner. Keep other exact
+    # identities to prove only the unproven card is dropped.
+    cloned_owner = [*sidecar_messages[:2], dict(sidecar_messages[2]), *sidecar_messages[3:]]
+    unproven = project(cloned_owner)
+    assert [(call["id"], call["assistant_msg_idx"]) for call in unproven["tool_calls"]] == [
+        ("equal-owner-3", 1),
+    ]
+    assert session.tool_calls == original_tool_calls
+
+
 def test_state_db_reader_returns_active_messages_with_matching_revision(tmp_path, monkeypatch):
     sid = "revision-reader"
     db_path = tmp_path / "state.db"
@@ -1047,6 +1121,7 @@ def test_stale_compression_snapshot_emits_actionable_error_without_replaying_tur
         "stale_non_prefix_without_current_user",
         "stale_non_prefix_repeated_prompt_without_authority",
         "no_response_after_streamed_token",
+        "recovered_projection_failure",
     ],
 )
 def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
@@ -1113,7 +1188,7 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
                 if self.stream_delta_callback is not None:
                     self.stream_delta_callback("streamed but not finalized")
                 return {"completed": True, "messages": history}
-            if second_result != "recovered":
+            if second_result not in ("recovered", "recovered_projection_failure"):
                 if second_result == "stale_non_prefix_owned_partial":
                     stale_messages = [
                         {"role": "assistant", "content": "compacted history"},
@@ -1213,6 +1288,15 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
             "credential_pool": None,
         },
     )
+    if second_result == "recovered_projection_failure":
+        def fail_terminal_projection(_session):
+            raise RuntimeError("terminal projection failed")
+
+        monkeypatch.setattr(
+            streaming,
+            "_redacted_terminal_session_payload",
+            fail_terminal_projection,
+        )
 
     streaming._run_agent_streaming(
         session_id=sid,
@@ -1240,9 +1324,16 @@ def test_auth_self_heal_refreshes_revision_after_first_agent_persists_user(
     reloaded = Session.load(sid)
     assert reloaded is not None
     assert AuthThenRecoverAgent.runs == 2
-    if second_result == "recovered":
+    if second_result in ("recovered", "recovered_projection_failure"):
         assert not apperrors
         assert any(message.get("content") == "recovered" for message in reloaded.messages)
+        assert reloaded.active_stream_id is None
+        assert reloaded.pending_user_message is None
+        assert reloaded.pending_attachments == []
+        if second_result == "recovered_projection_failure":
+            assert sum(event == "done" for event, _payload in events) == 1
+            assert sum(event == "stream_end" for event, _payload in events) == 1
+            assert not any(event == "cancel" for event, _payload in events)
     elif second_result == "no_response_after_streamed_token":
         assert len(apperrors) == 1
         assert apperrors[0]["type"] == "auth_mismatch"

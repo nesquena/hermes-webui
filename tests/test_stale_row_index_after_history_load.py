@@ -75,7 +75,7 @@ def test_regenerate_uses_current_row_index():
     body = _function(UI_JS, "regenerateResponse")
     assert "_rowCurrentRawIdx(row,clickedRowIdx)" in body
     # Must happen before history loads and re-bases the rows (#2184 ordering).
-    assert body.index("_rowCurrentRawIdx(row,clickedRowIdx)") < body.index("await _ensureAllMessagesLoaded()")
+    assert body.index("_rowCurrentRawIdx(row,clickedRowIdx)") < body.index("await _ensureAllMessagesLoaded({")
 
 
 def test_fork_rereads_index_from_its_row():

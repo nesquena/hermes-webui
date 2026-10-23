@@ -98,8 +98,11 @@ def test_load_older_snapshots_generation_before_await():
 
 def test_load_older_aborts_when_generation_changed():
     """Post-await guard must compare against the snapshot and abort."""
-    body = _function_body(SESSIONS_JS, "_loadOlderMessages")
-    assert "if (_messagesGeneration !== startGeneration) return;" in body, (
+    body = " ".join(_function_body(SESSIONS_JS, "_loadOlderMessages").split())
+    assert (
+        "if (_messagesGeneration !== startGeneration || _oldestIdx !== requestedBeforeOffset || "
+        "S.messages !== requestedMessages) return;"
+    ) in body, (
         "_loadOlderMessages must bail out (without prepending) when the "
         "generation token changed during its await — that is the signal "
         "that S.messages was wholesale-replaced under it. See #1937."
@@ -108,8 +111,11 @@ def test_load_older_aborts_when_generation_changed():
 
 def test_load_older_generation_check_runs_before_replace():
     """Generation check must come BEFORE the `S.messages = nextMessages` mutation."""
-    body = _function_body(SESSIONS_JS, "_loadOlderMessages")
-    guard_idx = body.index("if (_messagesGeneration !== startGeneration) return;")
+    body = " ".join(_function_body(SESSIONS_JS, "_loadOlderMessages").split())
+    guard_idx = body.index(
+        "if (_messagesGeneration !== startGeneration || _oldestIdx !== requestedBeforeOffset || "
+        "S.messages !== requestedMessages) return;"
+    )
     replace_idx = body.index("S.messages = nextMessages;")
     assert guard_idx < replace_idx, (
         "Generation guard must short-circuit BEFORE the message-array mutation. "

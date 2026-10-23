@@ -49,8 +49,6 @@ pytestmark = pytest.mark.skipif(NODE is None, reason="node not on PATH")
 _SPLICE_DEPS = [
     "_messageIdentityKey",
     "_isTerminalStreamErrorMarkerMessage",
-    "_streamRecoveryControlMessage",
-    "_filterRecoveryControlMessages",
     "_carryForwardEphemeralTurnFields",
 ]
 
@@ -66,7 +64,7 @@ def _splice_block() -> str:
     start_marker = "const _currentVisibleEndsWithTerminalMarker=("
     start = MESSAGES_JS.find(start_marker)
     assert start >= 0, "terminal-marker detection not found in static/messages.js"
-    end_marker = "S.messages=_filterRecoveryControlMessages(_resolvedMessages || []);"
+    end_marker = "S.messages=_resolvedMessages || [];"
     end = MESSAGES_JS.find(end_marker, start)
     assert end >= 0, "S.messages assignment after the splice not found"
     return MESSAGES_JS[start : end + len(end_marker)]
@@ -179,7 +177,7 @@ _oldestIdx = __OFFSET__;
 
 // The state the splice block reads, mirroring the lines just above it.
 const _currentMessages = S.messages.slice();
-const _currentVisibleMessages = _filterRecoveryControlMessages(_currentMessages);
+const _currentVisibleMessages = _currentMessages;
 const _stagedMessages = _carryForwardEphemeralTurnFields(_currentMessages, session.messages);
 const preserveVisibleOnShorterTerminalSnapshot = true;
 S.session = session;

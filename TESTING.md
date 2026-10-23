@@ -309,6 +309,49 @@ WebKit when their Playwright builds are installed and launch
 unlaunchable engine is reported as skipped.
 Run it locally with `python tests/browser_session_row_activation.py`.
 
+## Terminal session windows
+
+Ordinary terminal SSE snapshots carry up to 30 renderable messages, with a
+300-raw-row backstop and explicit raw offsets and total counts. The persisted
+transcript remains complete. Settlement preserves an already-loaded prefix
+only when unique stable row identities prove the overlap. A stream-owned
+pending user can be replaced within a proven overlap, but neither that row
+alone nor a parent-session link proves alignment. Shifted, adjacent, or
+unidentifiable windows reset to the authoritative bounded window; earlier
+history remains available through pagination. This also applies to compression
+continuations. The merge retains pagination coordinates, tool metadata, and
+the final answer. Gateway cancellation retains its existing bounded
+session-recovery request.
+
+Run `./scripts/test.sh -q tests/test_terminal_session_tail_and_merge.py` for
+projection and reconciliation regressions. For browser validation, complete a
+turn in a long conversation after loading earlier messages; confirm the loaded
+prefix and scroll position remain available, tool cards survive, and no full
+history is sent in the terminal event. Exercise cancellation and compression
+continuation as well as normal completion. Compare payload bytes and browser
+main-thread settlement timing on the same transcript and base revision.
+
+A missing or rejected terminal snapshot preserves the streamed answer but
+invalidates its regeneration revision. Regeneration then loads saved rows and
+their revision through the full-history loader. It rejects a late response if
+the session or active turn changed. The saved transcript must identify the same
+latest user turn and confirm its final answer. A streamed turn can occupy one
+local assistant row even when saved history contains separate tool-call, tool
+result, and final-answer rows, so the local assistant position is not a saved
+row identity. If the exchange cannot be confirmed, regeneration stops without
+replacing the recovered transcript. A full response that establishes
+ineligibility must not cause repeated refreshes. Normal settlement does not
+fetch full history. Answer matching ignores trailing whitespace without
+changing saved or displayed content. If an upload or expanded command leaves
+different optimistic and saved user text, the guard refuses regeneration until
+the canonical transcript is reloaded; it does not guess the turn's identity.
+
+Run `./scripts/test.sh -q tests/test_issue5720_reasoning_owner.py tests/test_metadata_cached_authority.py tests/test_issue6611_regenerate_browser.py`
+for these recovery cases. Also verify two consecutive completions: when the
+first snapshot is absent or invalid, each answer's usage badge must contain
+only its own tokens and cost. Omitted cumulative usage fields retain their
+previous totals; an explicit zero replaces the previous value.
+
 ## Public conversation lifecycle gate
 
 `tests/browser_conversation_lifecycle.py` adds a public deterministic
