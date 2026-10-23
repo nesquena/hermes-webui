@@ -420,6 +420,7 @@ def _settle_gateway_run_approval(
 
     run_id = str(approval_data.get("run_id") or "").strip()
     identity_v1 = bool(approval_data.get("_gateway_agent_identity_v1"))
+    execution_generation = approval_data.get("_gateway_execution_generation")
     with gateway_yolo_handoff(session_id):
         if _gateway_session_yolo_enabled(session_id):
             try:
@@ -428,6 +429,11 @@ def _settle_gateway_run_approval(
                     api_key,
                     run_id,
                     approval_data["approval_id"] if identity_v1 else "",
+                    **(
+                        {"execution_generation": execution_generation}
+                        if identity_v1 and execution_generation is not None
+                        else {}
+                    ),
                 )
                 return True, None, 0
             except Exception:
@@ -447,6 +453,8 @@ def _auto_approve_gateway_run(
     api_key: str,
     run_id: str,
     approval_id: str,
+    *,
+    execution_generation: int | None = None,
 ) -> None:
     """Resolve one Runs API prompt using only the shipped approval contract.
 
@@ -455,7 +463,8 @@ def _auto_approve_gateway_run(
     flag is enabled. Native Agent-side YOLO would be preferable because it can
     bypass gates before they pause and also covers Agent-owned computer-use
     policy; https://github.com/NousResearch/hermes-agent/pull/61946 tracks that
-    API capability. Until then, do not send speculative fields to the Agent.
+    API capability. Until then, send only the fields the gateway itself
+    published for this prompt (its id and, when present, its generation).
     """
     from api.runner_client import HttpRunnerClient
 
@@ -463,6 +472,7 @@ def _auto_approve_gateway_run(
         run_id,
         approval_id,
         "once",
+        **({"execution_generation": execution_generation} if execution_generation is not None else {}),
     )
 
 
@@ -594,6 +604,22 @@ def _gateway_tool_progress_event(payload: dict) -> tuple[str, dict] | None:
     return ("tool_complete" if is_complete else "tool"), event_payload
 
 
+def _gateway_prompt_identity(payload) -> str:
+    """The exact per-prompt id a gateway published, across payload generations.
+
+    ``request_id`` (session bridge) and ``prompt_id`` (pending-controls
+    projection) are the canonical names; ``approval_id`` / ``id`` are the
+    older shapes kept for gateways that still send them.
+    """
+    return str(
+        payload.get("request_id")
+        or payload.get("prompt_id")
+        or payload.get("approval_id")
+        or payload.get("id")
+        or ""
+    ).strip()
+
+
 def _gateway_runs_approval_event(payload: dict) -> dict | None:
     """Map a runs-API approval.request payload to the WebUI approval contract."""
     if not isinstance(payload, dict):
@@ -605,7 +631,15 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
     pattern_key = str(payload.get("pattern_key") or "").strip()
     args = payload.get("args") if isinstance(payload.get("args"), (list, dict)) else []
     run_id = str(payload.get("run_id") or "").strip()
-    raw_approval_id = str(payload.get("approval_id") or payload.get("id") or "").strip()
+    raw_approval_id = _gateway_prompt_identity(payload)
+    # The canonical Runs API approval payload identifies the prompt as
+    # ``request_id`` (session bridge) or ``prompt_id`` (pending-controls
+    # projection) and fences it with an integer ``execution_generation``. Keep
+    # both: without them the client can only guess a local id and has nothing
+    # the generation-fenced respond endpoint will accept.
+    execution_generation = payload.get("execution_generation")
+    if type(execution_generation) is not int:
+        execution_generation = None
     approval_id = raw_approval_id
     if not approval_id:
         approval_id = uuid.uuid4().hex
@@ -627,14 +661,45 @@ def _gateway_runs_approval_event(payload: dict) -> dict | None:
         "run_id": run_id,
         "approval_id": approval_id,
         "_gateway_raw_approval_id_present": bool(raw_approval_id),
+        "_gateway_execution_generation": execution_generation,
         "choices": choices,
         "allow_permanent": bool(allow_permanent),
     }
 
 
 def _gateway_approval_key(payload) -> str:
-    """Stable id for one gateway approval, shared by the status probe and the event relay."""
-    return str(payload.get("approval_id") or payload.get("id") or payload.get("timestamp") or "")
+    """Stable id for one gateway approval, shared by the status probe and the event relay.
+
+    The execution generation is part of the identity: a run that re-publishes the
+    same prompt id at a newer generation is a different prompt, and answering the
+    old generation is refused by the gateway. Keying on the id alone deduped that
+    replay away and left the mirror pointing at a dead generation.
+    """
+    identity = _gateway_prompt_identity(payload) or str(payload.get("timestamp") or "")
+    generation = payload.get("execution_generation")
+    if identity and type(generation) is int:
+        return f"{identity}#{generation}"
+    return identity
+
+
+def _gateway_status_approval(status: dict) -> dict | None:
+    """The pending approval a durable run status describes, in either projection shape.
+
+    The session bridge answers ``status["approval"]`` with the latest single
+    prompt; the canonical authority projection answers ``pending_controls``,
+    where the run's own queue order puts the prompt that must be answered first
+    at the head.
+    """
+    approval = status.get("approval")
+    if isinstance(approval, dict):
+        return approval
+    controls = status.get("pending_controls")
+    if not isinstance(controls, list):
+        return None
+    for control in controls:
+        if isinstance(control, dict) and control.get("kind") == "approval":
+            return control
+    return None
 
 
 def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, *, put_gateway_event) -> bool:
@@ -649,7 +714,15 @@ def _relay_gateway_run_approval(session_id, run_id, payload, base_url, api_key, 
         return False
     approval_data["run_id"] = run_id
     from api.config import gateway_supports_approval_identity_v1
-    identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and gateway_supports_approval_identity_v1(base_url, api_key)
+    # Exact-id answering needs a trustworthy per-prompt identity. A gateway
+    # that published an ``execution_generation`` for this prompt proves it can
+    # fence the answer to that exact prompt (canonical Runs API contract), so
+    # the generation itself is the authority; the advertised capability remains
+    # the fallback for gateways that only promise it via /v1/capabilities.
+    identity_v1 = bool(approval_data.get("_gateway_raw_approval_id_present")) and (
+        approval_data.get("_gateway_execution_generation") is not None
+        or gateway_supports_approval_identity_v1(base_url, api_key)
+    )
     approval_data["_gateway_agent_identity_v1"] = identity_v1
     auto_approved, head, total = _settle_gateway_run_approval(
         session_id,
@@ -1254,14 +1327,21 @@ def _run_gateway_runs_api_streaming(
         gateway advertises ``approval_identity_v1``; without both, skip the
         status-card insert entirely so the replay alone orders the queue
         A -> B."""
-        approval = status.get("approval")
+        approval = _gateway_status_approval(status)
         if (
             str(status.get("status") or "").strip().lower() == "waiting_for_approval"
             and isinstance(approval, dict)
         ):
-            raw_approval_id = str(approval.get("approval_id") or approval.get("id") or "").strip()
+            raw_approval_id = _gateway_prompt_identity(approval)
+            exact_generation = approval.get("execution_generation")
             from api.config import gateway_supports_approval_identity_v1
-            if not (raw_approval_id and gateway_supports_approval_identity_v1(base_url, api_key)):
+            if not (
+                raw_approval_id
+                and (
+                    type(exact_generation) is int
+                    or gateway_supports_approval_identity_v1(base_url, api_key)
+                )
+            ):
                 return
             approval_key = _gateway_approval_key(approval)
             if approval_key and approval_key not in surfaced_approval_ids:
@@ -1698,7 +1778,7 @@ def _await_gateway_run_result(
             status = _get_gateway_run_status(base_url, api_key, run_id)
         except (urllib.error.URLError, OSError, ValueError):
             return True  # fail open: a stale card 409s, a missing one stalls the run
-        approval = status.get("approval")
+        approval = _gateway_status_approval(status)
         return (
             str(status.get("status") or "").strip().lower() == "waiting_for_approval"
             and isinstance(approval, dict)
@@ -1706,7 +1786,7 @@ def _await_gateway_run_result(
         )
 
     def surface_parked_approval(status):
-        approval = status.get("approval")
+        approval = _gateway_status_approval(status)
         if str(status.get("status") or "").strip().lower() == "waiting_for_approval" and isinstance(approval, dict):
             approval_key = _gateway_approval_key(approval)
             if approval_key not in surfaced_approval_ids:
