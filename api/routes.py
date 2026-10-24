@@ -28033,10 +28033,15 @@ def _start_chat_stream_for_session(
                     exc_info=True,
                 )
 
-    consumed_goal_continuation_receipt = None
-    if s.session_id in PENDING_BG_TASK_COMPLETIONS:
+        # #7193: retire the bare BG-task marker ONLY when a consume actually
+        # runs (this used to sit eagerly at function scope, so a 409 early
+        # return discarded the marker with no restore — the master shape
+        # keeps it inside this closure).
+        if s.session_id in PENDING_BG_TASK_COMPLETIONS:
             PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
             consumed_bg_task_completion = True
+
+    consumed_goal_continuation_receipt = None
 
     def restore_consumed_continuation_markers() -> None:
         # #7249 (exp-v0.52.392) restored only the in-memory marker. Since

@@ -356,7 +356,24 @@ class TestSendBusyBranchDispatch:
         assert guard_start >= 0 and guard_end > guard_start, "send() reentrant guard not found"
         guard = MESSAGES_JS[guard_start:guard_end]
         assert "if(_text && _targetSid)" in guard
-        assert "S.pendingFiles.length" not in guard
+        # #7862 re-gate: the re-entrant branch may additionally claim the
+        # session's one-shot resume identity for the literal `continue`
+        # control. Its `!S.pendingFiles.length` guard is part of that claim
+        # (a continuation must not queue with staged files), NOT the
+        # text-only early-exit this test pins. The dispatch condition itself
+        # stays text-only.
+        claim_idx = guard.find("_claimResumeGoalContinuationToken")
+        if claim_idx >= 0:
+            claim = guard[claim_idx:claim_idx + 200]
+            assert "_isLiteralResumeContinue(_text)" in claim and "!S.pendingFiles.length" in claim, (
+                "the resume-identity claim must be gated on the literal continue text AND no staged files"
+            )
+            guard_before_claim = guard[:claim_idx]
+            assert "S.pendingFiles.length" not in guard_before_claim, (
+                "the reentrant dispatch must stay text-only; files may only gate the resume-identity claim"
+            )
+        else:
+            assert "S.pendingFiles.length" not in guard
         assert "files:[...S.pendingFiles]" in guard
 
     def test_steer_upload_is_cached_and_delivered_files_removed_by_identity(self):
