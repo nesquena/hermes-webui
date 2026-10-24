@@ -204,3 +204,194 @@ def test_catalog_routing_and_resolve_model_provider(monkeypatch):
 
     entry3 = _unique_custom_provider_entry(test_cfg["custom_providers"], slug_ascii.removeprefix("custom:"))
     assert entry3 is ascii_entry
+
+
+def test_active_keyed_cjk_shared_model_routing_and_connection(monkeypatch):
+    """Network-free catalog option resolution chooses active keyed CJK over earlier ASCII sibling."""
+    from api.config import (
+        _static_models_catalog_without_live_probes,
+        resolve_custom_provider_connection,
+    )
+
+    ascii_provider = {
+        "name": "ascii-first",
+        "base_url": "https://ascii.example/v1",
+        "api_key": "ascii-fixture-key",
+        "model": "shared-model-id",
+        "models": ["shared-model-id"],
+    }
+    cjk_keyed_provider = {
+        "name": "晨光账户乙",
+        "provider_key": "account-b",
+        "base_url": "https://cjk-keyed.example/v1",
+        "api_key": "cjk-keyed-fixture-key",
+        "model": "shared-model-id",
+        "models": ["shared-model-id"],
+    }
+    cjk_hash_provider = {
+        "name": "晨光哈希丙",
+        "base_url": "https://cjk-hash.example/v1",
+        "api_key": "cjk-hash-fixture-key",
+        "model": "hash-only-model",
+        "models": ["hash-only-model"],
+    }
+
+    test_cfg = {
+        "model": {
+            "provider": "custom:account-b",
+            "default": "shared-model-id",
+        },
+        "custom_providers": [ascii_provider, cjk_keyed_provider, cjk_hash_provider],
+    }
+    monkeypatch.setattr(config, "cfg", test_cfg)
+    monkeypatch.setattr(config, "get_config", lambda: test_cfg)
+
+    # 1. Obtain options from the actual network-free catalog
+    catalog = _static_models_catalog_without_live_probes()
+    groups = {g["provider_id"]: g for g in catalog.get("groups", [])}
+
+    # Verify catalog groups exist for all three providers
+    assert "custom:account-b" in groups
+    assert "custom:ascii-first" in groups
+    hash_group_id = next(gid for gid in groups if gid.startswith("custom:named-"))
+    assert hash_group_id in groups
+
+    # For the active provider, catalog models may be bare or prefixed
+    active_models = [m["id"] for m in groups["custom:account-b"]["models"]]
+    assert any("shared-model-id" in mid for mid in active_models)
+
+    ascii_models = [m["id"] for m in groups["custom:ascii-first"]["models"]]
+    assert any("shared-model-id" in mid for mid in ascii_models)
+
+    hash_models = [m["id"] for m in groups[hash_group_id]["models"]]
+    assert any("hash-only-model" in mid for mid in hash_models)
+
+    # 2. Resolve the active option (@custom:account-b:shared-model-id or shared-model-id)
+    # Even though ascii_first declares shared-model-id earlier in config, active custom provider wins:
+    active_mid = next(mid for mid in active_models if "shared-model-id" in mid)
+    resolved_model, resolved_provider, resolved_base = resolve_model_provider(active_mid)
+    assert resolved_provider == "custom:account-b"
+    assert resolved_base == "https://cjk-keyed.example/v1"
+
+    # Connection resolution selects the authoritative CJK row and its fixture credential
+    conn_key, conn_base = resolve_custom_provider_connection(resolved_provider)
+    assert conn_key == "cjk-keyed-fixture-key"
+    assert conn_base == "https://cjk-keyed.example/v1"
+
+    # 3. Hash-only CJK control passes and resolves to its own stable named slug
+    hash_mid = next(mid for mid in hash_models if "hash-only-model" in mid)
+    h_model, h_provider, h_base = resolve_model_provider(hash_mid)
+    assert h_provider == hash_group_id
+    assert h_base == "https://cjk-hash.example/v1"
+
+    h_key, h_conn_base = resolve_custom_provider_connection(h_provider)
+    assert h_key == "cjk-hash-fixture-key"
+    assert h_conn_base == "https://cjk-hash.example/v1"
+
+    # 4. ASCII option resolves to earlier ASCII provider
+    ascii_mid = next(mid for mid in ascii_models if "shared-model-id" in mid)
+    a_model, a_provider, a_base = resolve_model_provider(ascii_mid)
+    assert a_provider == "custom:ascii-first"
+    assert a_base == "https://ascii.example/v1"
+
+    a_key, a_conn_base = resolve_custom_provider_connection(a_provider)
+    assert a_key == "ascii-fixture-key"
+    assert a_conn_base == "https://ascii.example/v1"
+
+
+def test_providers_card_and_catalog_identity_agreement(monkeypatch):
+    """Providers card and catalog use identical slug IDs for keyed and hash CJK providers."""
+    import api.providers as providers_mod
+    from api.config import _static_models_catalog_without_live_probes
+
+    cjk_keyed = {
+        "name": "晨光卡片甲",
+        "provider_key": "card-account-a",
+        "base_url": "https://card-a.example/v1",
+        "api_key": "sec-a",
+        "model": "model-a",
+        "models": ["model-a"],
+    }
+    cjk_hash = {
+        "name": "晨光卡片乙",
+        "base_url": "https://card-b.example/v1",
+        "api_key": "sec-b",
+        "model": "model-b",
+        "models": ["model-b"],
+    }
+    ascii_card = {
+        "name": "ascii-card",
+        "base_url": "https://card-c.example/v1",
+        "api_key": "sec-c",
+        "model": "model-c",
+        "models": ["model-c"],
+    }
+
+    test_cfg = {
+        "provider": "openrouter",
+        "custom_providers": [cjk_keyed, cjk_hash, ascii_card],
+    }
+    monkeypatch.setattr(config, "cfg", test_cfg)
+    monkeypatch.setattr(config, "get_config", lambda: test_cfg)
+    monkeypatch.setattr(providers_mod, "get_config", lambda: test_cfg)
+
+    # Catalog provider IDs
+    catalog = _static_models_catalog_without_live_probes()
+    catalog_pids = {g["provider_id"] for g in catalog.get("groups", [])}
+    assert "custom:card-account-a" in catalog_pids
+    assert "custom:ascii-card" in catalog_pids
+    hash_pid = next(pid for pid in catalog_pids if pid.startswith("custom:named-"))
+
+    # Providers card IDs
+    card_data = providers_mod.get_providers()
+    card_pids = {p["id"] for p in card_data.get("providers", [])}
+
+    # Verify identity agreement between Providers cards and Catalog
+    assert "custom:card-account-a" in card_pids
+    assert hash_pid in card_pids
+    assert "custom:ascii-card" in card_pids
+
+    # Key status matching verifies candidate record
+    assert providers_mod._custom_provider_name_matches("custom:card-account-a", cjk_keyed["name"], cjk_keyed)
+    assert providers_mod._custom_provider_name_matches("card-account-a", cjk_keyed["name"], cjk_keyed)
+    assert providers_mod._custom_provider_name_matches(hash_pid, cjk_hash["name"], cjk_hash)
+
+
+def test_session_bare_model_repair_with_keyed_cjk():
+    """_repair_bare_custom_provider_model repairs bare models for keyed and hash CJK providers."""
+    from api.routes import _repair_bare_custom_provider_model
+
+    cjk_keyed = {
+        "name": "晨光修复甲",
+        "provider_key": "account-repair",
+        "base_url": "https://repair.example/v1",
+        "model": "vendor/deepseek-v3",
+        "models": ["vendor/deepseek-v3", "vendor/qwen-2.5"],
+    }
+    cjk_hash = {
+        "name": "晨光修复乙",
+        "base_url": "https://repair2.example/v1",
+        "model": "relay/chat-hash",
+        "models": ["relay/chat-hash"],
+    }
+
+    test_cfg = {
+        "custom_providers": [cjk_keyed, cjk_hash],
+    }
+
+    # Bare model "deepseek-v3" on provider "custom:account-repair" repairs to "vendor/deepseek-v3"
+    repaired_keyed = _repair_bare_custom_provider_model(
+        "deepseek-v3",
+        "custom:account-repair",
+        config_obj=test_cfg,
+    )
+    assert repaired_keyed == "vendor/deepseek-v3"
+
+    # Bare model on hash-only CJK provider
+    hash_slug = _custom_provider_slug_from_name(cjk_hash["name"], cjk_hash)
+    repaired_hash = _repair_bare_custom_provider_model(
+        "chat-hash",
+        hash_slug,
+        config_obj=test_cfg,
+    )
+    assert repaired_hash == "relay/chat-hash"

@@ -2954,7 +2954,7 @@ class AmbiguousCustomProviderError(ValueError):
         self.message = message
 
 
-def _custom_provider_slug_key(value: object) -> str:
+def _custom_provider_slug_key(value: object, entry: dict | None = None) -> str:
     """Canonical bare slug for custom-provider identity + collision detection.
 
     Derived from the SINGLE authoritative slug PRODUCER
@@ -2968,7 +2968,10 @@ def _custom_provider_slug_key(value: object) -> str:
     slipping through a looser key. Returns the bare slug (no ``custom:`` prefix).
     Accepts a bare provider name or a ``custom:<slug>`` id.
     """
-    produced = _custom_provider_slug_from_name(value)
+    if isinstance(value, dict) and entry is None:
+        entry = value
+        value = entry.get("name")
+    produced = _custom_provider_slug_from_name(value, entry)
     return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
 
 
@@ -3191,7 +3194,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
-                    and _custom_provider_slug_key(e.get('name')) == _active_key
+                    and _custom_provider_slug_key(e.get('name'), e) == _active_key
                 ),
                 None,
             )
@@ -3723,7 +3726,7 @@ def _custom_record_claims_slug(record: object, slug: str, *, allow_name: bool = 
         value = record.get(field)
         if not isinstance(value, str) or not value.strip():
             continue
-        if _custom_provider_slug_key(value) == slug:
+        if _custom_provider_slug_key(value, record) == slug:
             return True
     return False
 
@@ -3833,7 +3836,7 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
     if pid in _custom_provider_alias_set(display_name, provider_key):
         return True
     return any(
-        _custom_provider_slug_key(value) == slug
+        _custom_provider_slug_key(value, {"name": display_name, "provider_key": provider_key}) == slug
         for value in (display_name, provider_key)
         if str(value or "").strip()
     )
