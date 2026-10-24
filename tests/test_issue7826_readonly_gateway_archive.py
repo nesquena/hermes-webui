@@ -22,7 +22,6 @@ the row is a genuine read-only Gateway row.
 """
 from __future__ import annotations
 
-import io
 import json
 import sqlite3
 from pathlib import Path
@@ -203,6 +202,13 @@ def test_archive_of_readonly_gateway_row_returns_404_without_sidecar(
     _make_gateway_state_db(gateway_env._gateway_home / "state.db", sid)
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata",
                         lambda _sid, *, all_profiles=False: {})
+    # The row carries a full transcript below — the 404 must happen BEFORE
+    # the messages reader is consulted, otherwise the old handler could
+    # materialize a writable sidecar and the test would pass for the wrong
+    # reason (empty transcript 404).
+    monkeypatch.setattr(routes_module, "get_cli_session_messages",
+                        lambda _sid, **k: [{"role": "user", "content": "hello"},
+                                           {"role": "assistant", "content": "hi"}])
     session_dir = tmp_path / "sessions"
     session_dir.mkdir()
     monkeypatch.setattr(models, "SESSION_DIR", session_dir)
@@ -249,7 +255,8 @@ def test_foreign_owner_gateway_row_still_409s_through_real_lookup(
                         lambda *a, **k: published.append(a))
 
     status, payload = _post_archive(routes_module, {
-        "session_id": sid, "archived": True})
+        "session_id": sid, "archived": True,
+        "all_profiles": True, "profile": "default"})
 
     assert status == 409, f"a foreign owner must 409, got {status}: {payload}"
     assert payload["code"] == "session_profile_mismatch"
@@ -284,7 +291,7 @@ def test_writable_same_profile_cli_row_still_archives_via_normal_lookup(
     messages = [{"role": "user", "content": "hi"},
                 {"role": "assistant", "content": "hello"}]
     monkeypatch.setattr(routes_module, "get_cli_session_messages",
-                        lambda _sid: messages)
+                        lambda _sid, **k: messages)
     fake_session = SimpleNamespace(
         session_id="20261017_cli_writable", archived=False,
         profile="default", messages=[], title="CLI session",

@@ -118,9 +118,12 @@ def test_cross_profile_archive_returns_structured_409(
 ):
     """The exact bug: session exists in another profile → was bare 404.
 
-    Now the handler must emit ``409 session_profile_mismatch`` carrying the
-    owning profile's name so the client can offer a profile switch —
+    A SCOPED request (all_profiles + a claimed owner) whose claim does not
+    match the real owner must emit ``409 session_profile_mismatch`` carrying
+    the owning profile's name so the client can offer a profile switch —
     the same envelope the detail-load endpoint already returns (#7710).
+    An unqualified request stays pinned to the active profile and keeps the
+    bare 404 for a foreign session (#7731 contract).
     """
     calls = []
     owner_calls = []
@@ -144,7 +147,8 @@ def test_cross_profile_archive_returns_structured_409(
                         fake_owner_lookup)
 
     status, payload = _post_archive(routes_module, {
-        "session_id": "20260925_otherprof_abcd", "archived": True})
+        "session_id": "20260925_otherprof_abcd", "archived": True,
+        "all_profiles": True, "profile": "default"})
 
     assert calls[0] is False, "first lookup stays active-profile-scoped"
     assert owner_calls, (
@@ -175,7 +179,8 @@ def test_cross_profile_409_does_not_materialize_a_session(
                         lambda *a, **k: published.append(a))
 
     status, _ = _post_archive(routes_module, {
-        "session_id": "20260925_otherprof_abcd", "archived": True})
+        "session_id": "20260925_otherprof_abcd", "archived": True,
+        "all_profiles": True, "profile": "default"})
 
     assert status == 409
     assert saved == [], f"409 path must not construct/save a Session: {saved}"
@@ -361,7 +366,10 @@ def test_archive_handler_passes_all_profiles_on_retry():
     src = ROUTES_PY.read_text(encoding="utf-8")
     i = src.find('if parsed.path == "/api/session/archive":')
     assert i > 0, "archive handler not found"
-    block = src[i:i + 8000]
+    # The #7731 request-scoped preamble (all_profiles normalization, isolated
+    # mode, sidecar probe) makes the handler long; scan far enough to include
+    # the KeyError fallback's re-probe.
+    block = src[i:i + 14000]
     retry = [ln.strip() for ln in block.splitlines()
              if "_lookup_cli_session" in ln]
     assert retry, "archive handler lost its CLI metadata fallback"
@@ -378,14 +386,16 @@ def test_archive_handler_passes_all_profiles_on_retry():
 # --- #7826 root fix: request-scoped `profile` field --------------------------
 
 
-def test_profile_scoped_archive_of_foreign_session_succeeds(
+def test_profile_claim_without_all_profiles_keeps_404_without_materializing(
     routes_module, archive_env, monkeypatch
 ):
-    """#7826 round 5: the profile field is NOT an authorization. A foreign
-    ``work``-owned session must 409 for a default-bound request even when the
-    request claims ``profile:"work"``, and NOTHING may be materialized — the
-    pre-fix behaviour loaded the sidecar (running its persisted repairs, which
-    rewrite disk) on the way to that 409."""
+    """#7826 round 5 + #7731: the profile field is NOT an authorization. A
+    foreign ``work``-owned session stays DENIED for a default-bound request
+    even when the request claims ``profile:\"work\"`` — and because the claim
+    never widens the active-profile scope, the denial is the bare 404
+    (the CLI lookup stays active-profile-only for unqualified requests),
+    with NOTHING materialized on the way out.
+    """
     lookup_calls = []
     active_calls = []
 
@@ -395,7 +405,8 @@ def test_profile_scoped_archive_of_foreign_session_succeeds(
 
     monkeypatch.setattr(routes_module, "_lookup_cli_session_metadata", fake_lookup)
     # #7826 security: the cross-profile hop uses the read-only exact-owner
-    # query (see test_cross_profile_archive_returns_structured_409).
+    # query (see test_cross_profile_archive_returns_structured_409). It must
+    # NOT run for an unqualified request — master's contract 404s first.
     monkeypatch.setattr(
         routes_module, "_lookup_cli_session_owner_readonly",
         lambda _sid, *, allowed_profiles=None: CLI_META_OTHER)
@@ -411,7 +422,7 @@ def test_profile_scoped_archive_of_foreign_session_succeeds(
             side_effects.append("save")
 
     monkeypatch.setattr(routes_module, "get_cli_session_messages",
-                        lambda _sid: side_effects.append("messages") or [])
+                        lambda _sid, **k: side_effects.append("messages") or [])
     monkeypatch.setattr(routes_module, "Session", _SpySession)
     monkeypatch.setattr(routes_module, "import_cli_session",
                         lambda *a, **k: side_effects.append("import"))
@@ -422,11 +433,10 @@ def test_profile_scoped_archive_of_foreign_session_succeeds(
         "session_id": "20260925_otherprof_abcd", "archived": True,
         "profile": "work"})
 
-    assert status == 409, (
-        f"a foreign row must 409 even when the request claims its profile: "
-        f"{payload}")
-    assert payload["code"] == "session_profile_mismatch"
-    assert payload["profile"] == "work"
+    assert status == 404, (
+        f"a foreign row must stay 404 for an unqualified claim: {payload}")
+    assert lookup_calls and all(c is False for c in lookup_calls), (
+        f"the CLI lookup must stay active-profile-scoped: {lookup_calls}")
     assert side_effects == [], (
         f"a denied archive must not load/materialize anything: {side_effects}")
 
@@ -527,7 +537,7 @@ def test_profile_field_wrong_owner_409s_with_real_owner(
 
     status, payload = _post_archive(routes_module, {
         "session_id": "20260925_otherprof_abcd", "archived": True,
-        "profile": "home"})
+        "all_profiles": True, "profile": "home"})
 
     assert status == 409, f"a foreign row must 409, got {status}: {payload}"
     assert payload["code"] == "session_profile_mismatch"
