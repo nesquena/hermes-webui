@@ -705,6 +705,9 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
             continue
 
         merged = dict(row)
+        # The pin lives on one row of a compression lineage; the projected conversation
+        # keeps it when either the visible head or the tip carries it.
+        merged['pinned'] = bool(row.get('pinned') or tip.get('pinned'))
         # Keep the chain head's visible identity (title, started_at), but
         # point the row at the latest importable segment for navigation AND
         # surface the tip's recency so an actively-used chain bubbles to the
@@ -884,6 +887,8 @@ def read_importable_agent_session_rows(
         origin_chat_id_expr = _optional_col('origin_chat_id', session_cols)
         origin_user_id_expr = _optional_col('origin_user_id', session_cols)
         platform_expr = _optional_col('platform', session_cols)
+        # Durable pin flag shared with Hermes Desktop and `hermes sessions pin`.
+        pinned_expr = _optional_col('pinned', session_cols, fallback="0")
         archived_expr = _optional_col('archived', session_cols)
         project_id_expr = _optional_col('project_id', session_cols)
         # Older/minimal state.db schemas can have NO ``messages`` table at all,
@@ -1081,6 +1086,7 @@ def read_importable_agent_session_rows(
                    {origin_chat_id_expr},
                    {origin_user_id_expr},
                    {platform_expr},
+                   {pinned_expr},
                    {project_id_expr},
                    {parent_expr},
                    {ended_expr},

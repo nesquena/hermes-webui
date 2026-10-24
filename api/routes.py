@@ -410,6 +410,81 @@ def _session_counts_toward_pin_quota(session) -> bool:
     return not _hide_from_default_sidebar(row)
 
 
+def _mirror_pin_to_state_db(session, pinned: bool) -> None:
+    """Best-effort copy of a pin the sidecar already saved into the profile's state.db.
+
+    Desktop and ``hermes sessions pin`` read ``sessions.pinned``, so this mirror is what
+    makes a WebUI pin visible there. A mirror that cannot land (no column, no row, the
+    writer held elsewhere) costs the other app the update until the next pin; the request
+    has already succeeded on the sidecar and is never failed or retried on this account.
+    """
+    try:
+        from api.state_sync import sync_session_pinned
+        sync_session_pinned(
+            str(_session_field(session, "session_id", "") or "").strip(),
+            bool(pinned),
+            profile=_session_field(session, "profile", None),
+        )
+    except Exception:
+        logger.debug("Failed to mirror pin state to state.db", exc_info=True)
+
+
+def _state_db_pin_owner(profile) -> str | None:
+    """Canonical state.db owner of a logical profile name, or None when unresolvable.
+
+    The owner is the home whose ``state.db`` the name reads, so root and renamed-root
+    aliases collapse to one key while two named profiles stay apart. Returning None for
+    an unshaped name keeps a malformed tag from claiming another profile's pins.
+    """
+    name = str(profile or "").strip() or "default"
+    try:
+        from api import profiles as profiles_api
+        if not (profiles_api._is_root_profile(name) or profiles_api._PROFILE_ID_RE.fullmatch(name)):
+            return None
+        return str(Path(profiles_api._resolve_profile_home_for_name(name)).expanduser().resolve())
+    except Exception:
+        logger.debug("Failed to resolve the state.db owner of profile %r", name, exc_info=True)
+        return None
+
+
+def _stamp_state_db_pins(rows: list[dict], profiles) -> None:
+    """Mark rows pinned in their own profile's state.db, as an extra input to the sidecar.
+
+    The sidecar stays the authority, so a state.db pin only ever adds to a row's flag: a
+    WebUI pin whose mirror write lost the lock still renders pinned, while a pin made in
+    Desktop or the CLI shows up here. Pin sets stay keyed by the owner whose database
+    produced them, so the same session id kept in two profiles cannot borrow the other's
+    pin; root and renamed-root aliases share one key. Only the requested profiles'
+    databases are opened, and only for reading.
+    """
+    from api.state_sync import read_state_db_pinned_ids
+    owners: dict[str, str | None] = {}
+
+    def owner_of(profile) -> str | None:
+        name = str(profile or "").strip() or "default"
+        if name not in owners:
+            owners[name] = _state_db_pin_owner(name)
+        return owners[name]
+
+    pins_by_owner: dict[str, set[str]] = {}
+    for name in profiles:
+        owner = owner_of(name)
+        if owner is None or owner in pins_by_owner:
+            continue
+        pins_by_owner[owner] = read_state_db_pinned_ids(name)
+    if not any(pins_by_owner.values()):
+        return
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sid = str(row.get("session_id") or "").strip()
+        if not sid:
+            continue
+        pinned = pins_by_owner.get(owner_of(row.get("profile")))
+        if pinned and sid in pinned:
+            row["pinned"] = True
+
+
 def _session_row_lineage_root_id(session, sessions_by_id) -> str:
     sid = str(_session_field(session, "session_id", "") or "")
     explicit = _session_field(session, "_lineage_root_id", None)
@@ -2948,6 +3023,18 @@ def _build_session_list_cache_payload(
         deduped_cli = []
     diag_stage("sort_sessions")
     merged = webui_sessions + deduped_cli
+    # A pin is authoritative in the WebUI sidecar; state.db (`sessions.pinned`) is read
+    # as an extra input so pins made in Desktop or the CLI appear here too. Only the
+    # requested profiles' databases are opened, and only for reading.
+    diag_stage("state_db_pins")
+    _stamp_state_db_pins(
+        merged,
+        (
+            {str(s.get("profile") or "default") for s in merged}
+            if all_profiles
+            else {str(active_profile or "default")}
+        ),
+    )
     merged.sort(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
         reverse=True,
@@ -20290,6 +20377,10 @@ def handle_post(handler, parsed) -> bool:
             with _get_session_agent_lock(body["session_id"]):
                 s.pinned = pin_requested
                 s.save()
+        # The sidecar save above is the pin. Mirror it to state.db for Desktop/CLI
+        # visibility, best-effort: it never fails this response, and its wait is
+        # bounded by the short (~0.5 s) busy timeout.
+        _mirror_pin_to_state_db(s, pin_requested)
         publish_session_list_changed(
             "session_pin",
             profile=getattr(s, "profile", None),

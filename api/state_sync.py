@@ -19,9 +19,13 @@ any double-counting risk.
 import logging
 import ntpath
 import os
+import sqlite3
 import threading
+from contextlib import closing
 from pathlib import Path
 from typing import Optional
+
+from api.agent_sessions import open_state_db_readonly, state_db_file_uri
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +58,19 @@ def _get_state_db(profile: Optional[str] = None):
     except ImportError:
         return None
 
+    db_path = _resolve_state_db_path(profile)
+    if db_path is None:
+        return None
+
+    try:
+        return SessionDB(db_path)
+    except Exception:
+        logger.debug("Failed to open state.db")
+        return None
+
+
+def _resolve_state_db_path(profile: Optional[str] = None) -> Optional[Path]:
+    """Path of *profile*'s existing state.db, or None (see ``_get_state_db``)."""
     if profile is not None:
         # Explicit-profile path — a resolution failure here MUST NOT
         # silently fall back to HERMES_HOME or the caller's "write to
@@ -102,12 +119,7 @@ def _get_state_db(profile: Optional[str] = None):
     db_path = hermes_home / 'state.db'
     if not db_path.exists():
         return None
-
-    try:
-        return SessionDB(db_path)
-    except Exception:
-        logger.debug("Failed to open state.db")
-        return None
+    return db_path
 
 
 def sync_session_start(session_id: str, model=None, profile: Optional[str] = None) -> None:
@@ -382,3 +394,62 @@ def sync_session_title(session_id: str, title: str, profile: Optional[str] = Non
             db.close()
         except Exception:
             logger.debug("Failed to close state.db")
+
+
+# A pin mirrors with a short busy timeout: Desktop or the CLI can hold the
+# state.db write lock, so the wait is bounded (~0.5 s) rather than unbounded, and
+# a pin must never fail on that account.
+PIN_MIRROR_TIMEOUT_S = 0.5
+
+
+def sync_session_pinned(session_id: str, pinned: bool, profile: Optional[str] = None,
+                        *, timeout: float = PIN_MIRROR_TIMEOUT_S) -> bool:
+    """Mirror a pin into *profile*'s ``sessions.pinned``, the flag Desktop and the CLI share.
+
+    Best-effort by design: the WebUI sidecar is the authority and is already saved, so a
+    missing row, a schema without the column, or a lock held elsewhere returns False after
+    logging at debug. Nothing is queued; the next pin/unpin carries the change over.
+    """
+    db_path = _resolve_state_db_path(profile)
+    if db_path is None:
+        return False
+    try:
+        with closing(sqlite3.connect(
+            state_db_file_uri(Path(db_path).resolve()),
+            uri=True,
+            timeout=max(0.0, float(timeout)),
+            isolation_level=None,
+        )) as conn:
+            columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(sessions)")}
+            if not {"id", "pinned"} <= columns:
+                return False
+            cur = conn.execute(
+                "UPDATE sessions SET pinned = ? WHERE id = ?",
+                (int(bool(pinned)), session_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+    except Exception:
+        logger.debug("Failed to mirror pin state for %s into state.db", session_id, exc_info=True)
+        return False
+
+
+def read_state_db_pinned_ids(profile: Optional[str] = None) -> set[str]:
+    """Ids pinned in *profile*'s own state.db; empty when unreadable or without the column.
+
+    Read-only, and never another profile's database: a profile whose state.db is missing
+    contributes nothing instead of falling back to the active profile (#2762).
+    """
+    db_path = _resolve_state_db_path(profile)
+    if db_path is None:
+        return set()
+    try:
+        with closing(open_state_db_readonly(db_path)) as conn:
+            return {
+                str(row[0]).strip()
+                for row in conn.execute("SELECT id FROM sessions WHERE pinned")
+                if row[0]
+            }
+    except Exception:
+        logger.debug("Failed to read pinned sessions from %s", db_path, exc_info=True)
+        return set()
