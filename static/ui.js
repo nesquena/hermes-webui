@@ -2054,12 +2054,37 @@ function _questionJumpButtonHtml(questionRawIdx, assistantRawIdx){
   return `<button class="msg-question-jump-btn session-jump-btn session-jump-btn--inline" type="button" title="${esc(title)}" aria-label="${esc(title)}" onclick="jumpToTurnQuestion(${questionRawIdx},${aIdx})"><span aria-hidden="true">↑</span><span>${esc(label)}</span></button>`;
 }
 
+// Pick the scroll behavior for a jump to `el` inside `container`. A smooth scroll across a long transcript runs
+// for seconds (86k px took ~1.5 s for a search hit at message 0 of 240) and the highlight, which starts with the
+// scroll, has faded before the row arrives. Far targets (more than two screens away) and reduced-motion users jump
+// instantly so the highlight plays where the user can see it; near targets keep the smooth scroll.
+function _messageJumpScrollBehavior(container, el){
+  try{
+    if(window.matchMedia&&window.matchMedia('(prefers-reduced-motion: reduce)').matches) return 'auto';
+    if(!container||!el) return 'smooth';
+    const distance=Math.abs(el.getBoundingClientRect().top-container.getBoundingClientRect().top);
+    return distance>Math.max(1,container.clientHeight)*2?'auto':'smooth';
+  }catch(_){ return 'smooth'; }
+}
+// Start the pulse on the next frame. A far jump renders and lays out the whole transcript in the same task as the
+// scroll, and an animation started inside that task takes its clock from the frame that began before it: on a
+// 240-message session the first painted frame was already 0.4-0.6 s into the 1.6 s pulse, so the ring appeared at
+// full strength and faded early. One frame later the pulse starts from zero where the user can see it.
 function _highlightQuestionRow(row){
-  if(!row) return;
+  // Cosmetic: never let the landing cue throw inside a jump that owns the scroll.
+  if(!row||!row.classList) return;
   row.classList.remove('msg-question-highlight');
-  void row.offsetWidth;
-  row.classList.add('msg-question-highlight');
-  window.setTimeout(()=>row.classList.remove('msg-question-highlight'),1800);
+  if(row._questionHighlightTimer) window.clearTimeout(row._questionHighlightTimer);
+  const start=()=>{
+    void row.offsetWidth;
+    row.classList.add('msg-question-highlight');
+    row._questionHighlightTimer=window.setTimeout(()=>{
+      row._questionHighlightTimer=0;
+      row.classList.remove('msg-question-highlight');
+    },1800);
+  };
+  if(typeof requestAnimationFrame==='function') requestAnimationFrame(start);
+  else start();
 }
 
 async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
@@ -2081,14 +2106,17 @@ async function jumpToTurnQuestion(questionRawIdx, assistantRawIdx){
       const segs=container.querySelectorAll('[data-msg-idx="'+assistantRawIdx+'"]');
       for(const seg of segs){
         if(seg.getClientRects().length>0){
-          seg.scrollIntoView({block:'start',behavior:'smooth'});
+          seg.scrollIntoView({block:'start',behavior:_messageJumpScrollBehavior(container,seg)});
+          // Assistant targets (search hits in a reply, jump to the start of a response) get the same landing
+          // cue as question rows; without it half of all content hits landed silently (#5106 Fable r3).
+          _highlightQuestionRow(seg);
           return true;
         }
       }
     }
     const row=document.getElementById(_userMessageDomId(questionRawIdx));
     if(!row) return false;
-    row.scrollIntoView({block:'center',behavior:'smooth'});
+    row.scrollIntoView({block:'center',behavior:_messageJumpScrollBehavior(container,row)});
     _highlightQuestionRow(row);
     return true;
   };
