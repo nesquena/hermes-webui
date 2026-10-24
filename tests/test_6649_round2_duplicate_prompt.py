@@ -166,22 +166,29 @@ const assert = require('assert');
 
 # The three producer shapes the reviewer listed, driven through the REAL
 # _prepareRunningLiveTail -> _assistantOnlySnapshotUserTurn composition.
+# Greptile P2 (2026-10-19, "Identity cases go untested"): the drifted and
+# marker-only shapes must ACTUALLY exercise the identity machinery. Both now
+# end with a completed assistant row AFTER the current user, so the strict
+# tail scan (_pendingCurrentTailUserMessage) fails first and the identity
+# checks (_pendingActiveTurnUserMessage / _hasInflightTailUserDuplicate)
+# decide — the drifted row only by the 1e-6 precision epsilon (state.db
+# round-trips drop sub-µs precision, so the stamps never equal exactly), the
+# marked row only by `_active_turn_user` (no _ts at all).
 _SHAPE_DRIFTED = """
   const session = {
     active_stream_id: 'stream-1',
-    pending_started_at: 1000.0000005,
+    pending_started_at: 1000.0000004,
     pending_user_message: 'current work',
-    messages: [
-      { role: 'assistant', content: 'older answer' },
-    ],
+    messages: [],
   };
   const inflight = [
-    { role: 'assistant', content: 'partial', _live: true },
+    { role: 'assistant', content: '', _live: true },
   ];
   const out = _prepareRunningLiveTail([
     { role: 'user', content: 'older', _ts: 900 },
     { role: 'assistant', content: 'older answer' },
     { role: 'user', content: 'current work', _ts: 1000.0000005 },
+    { role: 'assistant', content: 'saved answer' },
   ], inflight, session);
   const injected = inflight.filter(m => m.role === 'user' && m.content === 'current work').length;
   console.log(JSON.stringify({ out, injected }));
@@ -192,9 +199,7 @@ _SHAPE_MARKER_NO_TS = """
     active_stream_id: 'stream-1',
     pending_started_at: 1000.5,
     pending_user_message: 'current work',
-    messages: [
-      { role: 'assistant', content: 'older answer' },
-    ],
+    messages: [],
   };
   const inflight = [
     { role: 'assistant', content: 'partial', _live: true },
@@ -202,7 +207,12 @@ _SHAPE_MARKER_NO_TS = """
   const out = _prepareRunningLiveTail([
     { role: 'user', content: 'older', _ts: 900 },
     { role: 'assistant', content: 'older answer' },
-    { role: 'user', content: 'current work' },
+    { role: 'user', content: 'current work', _active_turn_user: true },
+    // A completed assistant row with no comparable text (a tool/reasoning-
+    // only row): it still forces the strict tail scan to fail so the marker
+    // is the ONLY identity, and it keeps persistedText empty so the live
+    // partial remains the reconciling copy (out stays true).
+    { role: 'assistant', content: '' },
   ], inflight, session);
   const injected = inflight.filter(m => m.role === 'user' && m.content === 'current work').length;
   console.log(JSON.stringify({ out, injected }));
@@ -233,8 +243,8 @@ _SHAPE_TRANSCRIPT_ENDS_AT_PROMPT = """
 @pytest.mark.parametrize(
     "shape_name,body",
     [
-        ("drifted timestamp + _active_turn_user + partial assistant", _SHAPE_DRIFTED),
-        ("_active_turn_user with no timestamp + partial assistant", _SHAPE_MARKER_NO_TS),
+        ("timestamp drifted sub-µs (state.db round-trip) + saved answer after user", _SHAPE_DRIFTED),
+        ("_active_turn_user with no timestamp + completed assistant after user", _SHAPE_MARKER_NO_TS),
         ("transcript ends at the current prompt", _SHAPE_TRANSCRIPT_ENDS_AT_PROMPT),
     ],
 )
