@@ -18406,6 +18406,11 @@ function _cacheSettledTranscriptHtml(){
       msgCount:stash.msgCount,
       renderWindowKey:stash.renderWindowKey,
       signature:stash.signature,
+      // #7778: the snapshot may hold blocks already stamped data-highlighted='1';
+      // record the Prism grammar state the stash was captured under so the
+      // fast-path gate (cached.prismSig===prismSigNow) can restore it instead of
+      // refusing every stash-published entry and rebuilding.
+      prismSig:stash.prismSig,
     });
     if(_sessionHtmlCache.size>8){_sessionHtmlCache.delete(_sessionHtmlCache.keys().next().value);}
     _settleKeepOpenCacheStash=null;
@@ -22985,9 +22990,21 @@ function renderMessages(options){
   // and transient-card renders must not pay a whole-transcript serialization they discard.
   let cacheHtml='';
   if(sid&&!INFLIGHT[sid]&&!hasTransientTranscriptUi){ cacheHtml=inner.innerHTML; }
+  // Apply any cached code highlights synchronously FIRST so blocks that were
+  // already highlighted in a prior render are NOT painted unhighlighted for
+  // one frame on virtualized rebuild (#7752), and are restored WITHOUT a
+  // second Prism pass. Genuinely new blocks (no cache entry) are untouched
+  // here — highlightCode below then tokenizes them synchronously, and the rAF
+  // post-process keeps the deferred pass for async work. This ordering is the
+  // review fix for #7778 round-4: running the cache pass AFTER highlightCode
+  // could never hit, because the sync highlight stamps every block
+  // data-highlighted='1' first.
+  if(typeof _applyCachedCodeHighlights==='function') _applyCachedCodeHighlights(inner);
   // Synchronously highlight code blocks, initialize structured tree views, and attach
   // copy buttons BEFORE the frame is painted so virtualized transcripts do not paint
   // unhighlighted raw text for one frame when scrolled into view (#7752).
+  // Blocks the cache pass just restored already carry data-highlighted='1' and
+  // are skipped by highlightCode's `:not([data-highlighted])` selector.
   try{
   if(typeof highlightCode==='function') highlightCode(inner);
   if(typeof addCopyButtons==='function') addCopyButtons(inner);
@@ -22999,15 +23016,6 @@ function renderMessages(options){
   const recoveryOwnership=_captureMessageRecoveryOwnership();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
-  // Apply any cached code highlights synchronously so blocks that were already
-  // highlighted in a prior render are NOT painted unhighlighted for one frame
-  // on virtualized rebuild (#7752). Genuinely new blocks (no cache hit) are
-  // untouched here — they keep the existing rAF deferral below and are
-  // highlighted the next frame by the post-process pass, preserving the
-  // deferred-frame design for first-appearance code blocks.
-  // NOTE: stays BELOW master's _maybeRecoverVirtualizedBlankViewport() call —
-  // that helper owns the blank-viewport recovery and must run first.
-  if(typeof _applyCachedCodeHighlights==='function') _applyCachedCodeHighlights(inner);
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open
@@ -23055,6 +23063,10 @@ function renderMessages(options){
         renderWindowKey,
         html:cacheHtml,
         signature:cachedRenderSignature===null?_messageRenderCacheSignature():cachedRenderSignature,
+        // #7778: capture the Prism grammar state alongside the snapshot (same
+        // value the normal cache path records at :23037) so the stash-published
+        // entry can pass the fast-path prismSig gate and be reused, not rebuilt.
+        prismSig:(typeof _prismGrammarSignature==='function')?_prismGrammarSignature():0,
       }
       : null;
   }

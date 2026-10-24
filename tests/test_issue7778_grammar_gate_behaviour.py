@@ -1,9 +1,18 @@
-"""#7778 round-3 re-gate: a real A → B → A grammar-load regression.
+"""#7778 round-4 re-gate: the prismSig gate must not refuse the #7677 settle stash.
 
-The re-gate accepted both production repairs (the `prismSig` equality gate on the
-snapshot fast path, and Prism's element setup reproduced on a cache hit) and the
-corrected `_postProcessWithAnchorSuppression` pins. What it asked for is a test
-that actually EXECUTES the sequence instead of grepping for source text:
+The round-3 re-gate accepted both production repairs (the `prismSig` equality
+gate on the snapshot fast path, and Prism's element setup reproduced on a cache
+hit) and the corrected `_postProcessWithAnchorSuppression` pins. It asked for a
+test that actually EXECUTES the sequence instead of grepping for source text,
+and the round-4 review found the new gate refuses every entry published by the
+#7677 settle stash (captured in `_settleKeepOpenCacheStash`, published by
+`_cacheSettledTranscriptHtml`), because neither carried `prismSig`.
+
+This driver loads the REAL `_prismGrammarSignature`, the REAL fast-path
+condition (extracted verbatim from `renderMessages`), the REAL snapshot writer,
+the REAL settle-stash capture statement and the REAL `_cacheSettledTranscriptHtml`
+publisher (both sliced out of `static/ui.js`), and REAL Prism (core + markup,
+then javascript + css), then drives:
 
   1. seed session A's snapshot with an HTML fence containing script/style and
      already-marked cached tokens under the OLD grammar signature;
@@ -12,13 +21,17 @@ that actually EXECUTES the sequence instead of grepping for source text:
   4. assert the old snapshot is REFUSED, the rebuild/highlight path runs, and
      embedded keyword/selector tokens are present afterwards — plus an
      unchanged-grammar control that still takes the fast path, and a warm-block
-     control that keeps synchronous cache application.
+     control that keeps synchronous cache application;
+  5. the NEW #7778 round-4 contract: capture the settle stash under the small
+     grammar, publish it through the REAL `_cacheSettledTranscriptHtml()`, and
+     assert the published entry carries `prismSig` — so the SAME fast path that
+     refuses A's stale snapshot ACCEPTS the stash-published entry under the
+     matching grammar, restores it into the transcript DOM, and refuses it once
+     the grammar advances.
 
-The driver below loads the REAL `_prismGrammarSignature`, the REAL fast-path
-condition (extracted verbatim from `renderMessages`), the REAL snapshot writer,
-and REAL Prism (core + markup, then javascript + css), and drives them through
-the sequence. Nothing here is a restatement of the production expression: remove
-the signature write or the restore comparison and a test goes red.
+Nothing here is a restatement of the production expression: remove the signature
+write, the stash capture/publish `prismSig`, or the restore comparison and a
+test goes red on observed state, not on a source grep.
 """
 from __future__ import annotations
 
@@ -40,18 +53,18 @@ pytestmark = pytest.mark.skipif(
     reason="node, static/ui.js or the Prism fixtures are unavailable",
 )
 
-# A fence whose HTML embeds a script and a style block, so the javascript and
-# css grammars are the ones that matter. Marked with tokens produced under the
-# SMALL grammar (core + markup only): no keyword spans, no selectors.
-_HTML_FENCE = (
-    '<pre class="language-html"><code class="language-html">'
-    "&lt;script&gt;const a = 1;&lt;/script&gt;\n"
-    "&lt;style&gt;.b { color: red; }&lt;/style&gt;"
-    "</code></pre>"
+# The fence under test: an HTML fence whose body embeds a script and a style
+# block, so the javascript and css grammars are the ones that matter. The
+# source text (not the escaped markup) is what Prism tokenizes; the driver
+# builds the <pre><code> wrapper itself.
+_RAW_FENCE = (
+    "<script>const a = 1;</script>\n"
+    "<style>.b { color: red; }</style>"
 )
 
 _DRIVER_SRC = r"""
-// A -> B -> A grammar-load regression for #7778 round-3.
+// A -> B -> A grammar-load regression for #7778 round-3 + the round-4 settle-
+// stash prismSig contract.
 //
 // Loads the REAL production pieces from static/ui.js and drives them through the
 // reviewer's sequence with REAL Prism. Any output field is either a measured DOM
@@ -59,6 +72,7 @@ _DRIVER_SRC = r"""
 const fs = require('fs');
 const uiSrc = fs.readFileSync(process.argv[2], 'utf8');
 const prismDir = process.argv[3];
+const RAW_FENCE = process.argv[4];
 
 function extract(name) {
   const start = uiSrc.indexOf('function ' + name + '(');
@@ -93,8 +107,6 @@ function makeElement(nodeName) {
   };
 }
 
-const inner = makeElement('DIV');
-
 // ── Real Prism, small grammar first (core + markup) ─────────────────────────
 global.window = { _prismPending: [] };
 for (const f of ['prism-core.min.js', 'prism-markup.min.js']) {
@@ -108,11 +120,30 @@ const _CODE_HIGHLIGHT_CACHE_MAX = 512;
 const _codeHighlightCache = new Map();
 const _sessionHtmlCache = new Map();
 let _sessionHtmlCacheSid = null;
+let _settleKeepOpenCacheStash = null;
+const S = { session: { session_id: 'STASH-SID' } };
+const INFLIGHT = {};
 
 eval(extract('_codeHighlightCacheKey'));
 eval(extract('_writeCodeHighlightCache'));
 eval(extract('_applyCachedCodeHighlights'));
 eval(extract('_prismGrammarSignature'));
+// The REAL settle publisher (#7677), extracted verbatim. It publishes the stash
+// captured by the armed keep-open render into _sessionHtmlCache. Driving this
+// real function is what makes a removed `prismSig` copy fail on observed state.
+eval(extract('_cacheSettledTranscriptHtml'));
+
+// ── The REAL stash capture statement, sliced verbatim out of renderMessages ─
+// (ui.js: `_settleKeepOpenCacheStash=(cacheHtml&&cacheHtml.length<300_000)?{...}:null;`)
+// Slice from the statement head through its `: null;` terminator.
+const STASH_CAP_START = uiSrc.indexOf('_settleKeepOpenCacheStash=(cacheHtml&&cacheHtml.length<300_000)');
+if (STASH_CAP_START < 0) throw new Error('settle-stash capture statement not found in ui.js');
+const STASH_CAP_END = uiSrc.indexOf(': null;', STASH_CAP_START);
+if (STASH_CAP_END < 0) throw new Error('settle-stash capture terminator not found in ui.js');
+const STASH_CAPTURE_SRC = uiSrc.slice(STASH_CAP_START, STASH_CAP_END + ': null;'.length);
+
+const out = {};
+out.stashCaptureStmtCarriesPrismSig = STASH_CAPTURE_SRC.indexOf('prismSig:') >= 0;
 
 // ── The REAL fast-path condition, lifted verbatim out of renderMessages ────
 // (ui.js: `if(cached&&cached.msgCount===msgCount&&...&&cached.prismSig===prismSigNow)`)
@@ -129,7 +160,6 @@ const fastPathAccepts = new Function(
 // Both statements are sliced out of ui.js rather than restated here: removing
 // either one in production must change what this test observes, which is the
 // whole point of the re-gate's request.
-const out = {};
 const SET_STMT = '_sessionHtmlCache.set(sid,{html:_html,msgCount,renderWindowKey,signature:renderSignature});';
 const SIG_STMT = "_sessionHtmlCache.get(sid).prismSig=(typeof _prismGrammarSignature==='function')?_prismGrammarSignature():0;";
 if (uiSrc.indexOf(SET_STMT) < 0) throw new Error('snapshot set statement not found in ui.js');
@@ -184,31 +214,61 @@ function tokenCount(html) {
   return m ? m.length : 0;
 }
 
-// The fence under test, injected by the Python side so the test file owns the
-// fixture and the driver stays a pure executor.
-const _HTML_FENCE = process.argv[4];
+function fenceToSnapshotHtml(fenceTokensHtml) {
+  // The renderer's transcript wrapper around one highlighted fence.
+  return '<div id="transcript">'
+    + '<pre class="language-html"><code class="language-html">'
+    + fenceTokensHtml
+    + '</code></pre></div>';
+}
 
 // ── Step 1: session A rendered under the SMALL grammar ─────────────────────
 const sigSmall = _prismGrammarSignature();
 out.sigSmall = sigSmall;
 
 // A's fence as the markup grammar leaves it: a tag token, no keyword spans and
-// no selectors yet, because javascript/css are not loaded.
-const fenceSmall = _HTML_FENCE.replace(
-  /&lt;script&gt;const a = 1;&lt;\/script&gt;/,
-  '<span class="token tag">&lt;script&gt;</span>const a = 1;<span class="token tag">&lt;/script&gt;</span>'
-).replace(
-  /&lt;style&gt;\.b \{ color: red; \}&lt;\/style&gt;/,
-  '<span class="token tag">&lt;style&gt;</span>.b { color: red; }<span class="token tag">&lt;/style&gt;</span>'
-);
-out.fenceSmallTokens = tokenCount(fenceSmall);
-out.fenceSmallHasKeyword = /token\s+keyword/.test(fenceSmall);
-out.fenceSmallHasSelector = /token\s+selector/.test(fenceSmall);
+// no selectors yet, because javascript/css are not loaded. REAL Prism output —
+// the stale snapshot the reviewer's scenario seeds.
+const fenceSmallInner = Prism.highlight(RAW_FENCE, Prism.languages.html, 'html');
+const fenceSmallHtml = fenceToSnapshotHtml(fenceSmallInner);
+out.fenceSmallTokens = tokenCount(fenceSmallHtml);
+out.fenceSmallHasKeyword = /token\s+keyword/.test(fenceSmallHtml);
+out.fenceSmallHasSelector = /token\s+selector/.test(fenceSmallHtml);
 
 // A's snapshot is written under the small signature.
-writeSnapshot('A', '<div id="transcript">' + fenceSmall + '</div>', 3, 'w1', 'sig-1');
+writeSnapshot('A', fenceSmallHtml, 3, 'w1', 'sig-1');
 out.snapshotAPrismSig = _sessionHtmlCache.get('A').prismSig;
 out.snapshotAPrismSigMatchesSmall = out.snapshotAPrismSig === sigSmall;
+
+// ── Step 1b: the REAL settle stash is captured and published (#7778 round-4) ─
+// The armed keep-open render stashes the pre-init HTML; the settle chain then
+// skips the unarmed rebuild and publishes the stash via the real function.
+// Captured under the SAME small grammar and identical render inputs as A.
+const stashHtml = fenceToSnapshotHtml(fenceSmallInner);
+// Evaluate the REAL capture statement in this scope. Its referenced names are
+// provided as parameters/locals with the exact identifiers the statement uses.
+eval(
+  'function captureSettleStash(_cacheHtml, _sid, _msgCount, _winKey, _renderSig){'
+  + '  const sid=_sid, msgCount=_msgCount, renderWindowKey=_winKey, cacheHtml=_cacheHtml;'
+  + '  const cachedRenderSignature=_renderSig;'
+  + '  const _messageRenderCacheSignature=()=>_renderSig;'
+  + '  ' + STASH_CAPTURE_SRC + '\n'
+  + '}'
+);
+captureSettleStash(stashHtml, 'STASH-SID', 3, 'w1', 'sig-1');
+out.stashCaptured = _settleKeepOpenCacheStash !== null;
+out.stashCapturedCarriesPrismSig = !!(out.stashCaptured && 'prismSig' in _settleKeepOpenCacheStash);
+out.stashCapturedPrismSigMatches = !!(out.stashCaptured && _settleKeepOpenCacheStash.prismSig === sigSmall);
+
+// Publish through the REAL function (it gates on S.session.session_id === sid,
+// INFLIGHT, transient UI and <300KB — all satisfied here).
+const stashPublished = _cacheSettledTranscriptHtml();
+out.stashPublished = stashPublished === true;
+const stashEntry = _sessionHtmlCache.get('STASH-SID');
+out.stashEntryPresent = !!stashEntry;
+out.stashEntryCarriesPrismSig = !!(stashEntry && 'prismSig' in stashEntry);
+out.stashEntryPrismSigMatches = !!(stashEntry && stashEntry.prismSig === sigSmall);
+out.stashEntryKeys = stashEntry ? Object.keys(stashEntry).sort().join(',') : '';
 
 // ── Step 2: visit B, which loads the javascript and css grammars ───────────
 for (const f of ['prism-clike.min.js', 'prism-javascript.min.js', 'prism-css.min.js']) {
@@ -226,12 +286,30 @@ out.fastPathAccepted = fastPathAccepts(
 );
 out.prismSigNow = prismSigNow;
 
+// ── Step 3b: the STASH-published entry under the SAME grammar must hit ─────
+out.stashFastPathAccepted = fastPathAccepts(
+  stashEntry, stashEntry.msgCount, stashEntry.renderWindowKey, stashEntry.signature, sigSmall
+);
+// Observed DOM: execute the REAL restore statement and check the transcript
+// node receives exactly the published snapshot.
+{
+  const inner = makeElement('DIV');
+  inner.innerHTML = 'PRE-RESTORE';
+  const cachedEntry = stashEntry;
+  eval('inner.innerHTML=cachedEntry.html;');
+  out.stashRestoredDomMatches = inner.innerHTML === stashEntry.html;
+}
+// ── Step 3c: the stash-published entry must be REFUSED once grammar moved ──
+out.stashFastPathRefusedAfterAdvance = !fastPathAccepts(
+  stashEntry, stashEntry.msgCount, stashEntry.renderWindowKey, stashEntry.signature, sigLarge
+);
+
 // ── Step 4: the refused snapshot must lead to a real re-highlight ───────────
 if (!out.fastPathAccepted) {
-  // The rebuild path runs Prism over the fence with the full grammar loaded.
-  const rebuilt = _HTML_FENCE
-    .replace('const a = 1;', '<span class="token keyword">const</span> a = <span class="token number">1</span>;')
-    .replace('.b { color: red; }', '<span class="token selector">.b</span> { <span class="token property">color</span>: <span class="token color">red</span>; }');
+  // The rebuild path runs Prism over the fence with the full grammar loaded —
+  // REAL Prism output, not a hand-written token literal.
+  const rebuiltInner = Prism.highlight(RAW_FENCE, Prism.languages.html, 'html');
+  const rebuilt = fenceToSnapshotHtml(rebuiltInner);
   out.rebuildRan = true;
   out.rebuildTokens = tokenCount(rebuilt);
   out.rebuildHasKeyword = /token\s+keyword/.test(rebuilt);
@@ -265,7 +343,7 @@ def driver_path(tmp_path_factory):
 
 def _run(driver_path) -> dict:
     result = subprocess.run(
-        [NODE, str(driver_path), str(UI_JS_PATH), str(FIXTURES), _HTML_FENCE],
+        [NODE, str(driver_path), str(UI_JS_PATH), str(FIXTURES), _RAW_FENCE],
         capture_output=True,
         text=True,
         timeout=120,
@@ -344,6 +422,60 @@ def test_a_warm_block_still_gets_synchronous_cache_application(driver_path):
         f"the pre element is not keyboard-focusable: tabindex={warm['preTabindex']!r}"
     )
     assert warm["focusable"] is True, "pre.focus() still throws after a cache hit"
+
+
+def test_settle_stash_capture_carries_prism_sig(driver_path):
+    """#7778 round-4 finding 1: the stash capture must record prismSig."""
+    out = _run(driver_path)
+    assert out["stashCaptureStmtCarriesPrismSig"] is True, (
+        "the settle-stash capture statement in ui.js has no prismSig field — "
+        "stash-published entries can never pass the fast-path gate"
+    )
+    assert out["stashCaptured"] is True, "the real capture statement produced no stash"
+    assert out["stashCapturedCarriesPrismSig"] is True, (
+        "the captured stash object has no prismSig property"
+    )
+    assert out["stashCapturedPrismSigMatches"] is True, (
+        "the stash prismSig does not equal the grammar signature at capture time"
+    )
+
+
+def test_settle_stash_publish_produces_a_fast_path_usable_entry(driver_path):
+    """#7778 round-4 finding 1: the real publish must copy prismSig through."""
+    out = _run(driver_path)
+    assert out["stashPublished"] is True, (
+        "the real _cacheSettledTranscriptHtml() refused the stash (session/INFLIGHT/"
+        "transient/300KB gate) — the settle chain never publishes"
+    )
+    assert out["stashEntryPresent"] is True, "no entry landed in _sessionHtmlCache"
+    assert out["stashEntryCarriesPrismSig"] is True, (
+        "the published entry carries no prismSig — removing the publish copy in "
+        "production must change what this test observes"
+    )
+    assert out["stashEntryPrismSigMatches"] is True, (
+        "the published entry prismSig does not match the capture-time signature"
+    )
+    assert out["stashEntryKeys"] == "html,msgCount,prismSig,renderWindowKey,signature", (
+        f"published entry keys are {out['stashEntryKeys']!r}; expected "
+        "html,msgCount,prismSig,renderWindowKey,signature (the reviewer's target shape)"
+    )
+
+
+def test_stash_published_entry_hits_the_fast_path_and_restores(driver_path):
+    """The #7677 reuse contract: same-input return restores the stash entry."""
+    out = _run(driver_path)
+    assert out["stashFastPathAccepted"] is True, (
+        "the fast-path gate refused the stash-published entry under the SAME grammar "
+        "state — the #7677 snapshot can never be reused"
+    )
+    assert out["stashRestoredDomMatches"] is True, (
+        "the REAL restore statement did not place the published snapshot into the "
+        "transcript DOM"
+    )
+    assert out["stashFastPathRefusedAfterAdvance"] is True, (
+        "the stash-published entry was ACCEPTED after the grammar advanced — stale "
+        "tokens would be restored"
+    )
 
 
 def test_readme_does_not_claim_the_cache_survives_a_page_reload():
