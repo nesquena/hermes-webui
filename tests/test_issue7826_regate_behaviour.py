@@ -137,15 +137,33 @@ def test_the_archive_fallback_still_archives_a_writable_same_profile_row():
     """
     src = _routes_source()
     read_only_idx = src.find('if cli_meta.get("read_only"):')
-    # The provenance guard sits immediately before the read_only guard.
-    provenance_idx = src.find("if _owner_fallback_used:", read_only_idx - 400)
-    assert provenance_idx >= 0, (
-        "the owner-fallback provenance guard is gone — a same-profile fallback "
-        "match would be materialized again"
+    # #7731 rebase: the read-only owner probe no longer feeds ``cli_meta`` at
+    # all — its result (``_owner_meta``) only drives the scoped 409 probe, and
+    # every ``not cli_meta`` path returns 404 BEFORE the read_only guard. The
+    # provenance intent of the old ``if _owner_fallback_used:`` guard is now
+    # structural: a fallback match can never be materialized because it can
+    # never become ``cli_meta``.
+    probe_idx = src.find("_owner_meta = _lookup_cli_session_owner_readonly(sid)")
+    assert probe_idx >= 0, (
+        "the read-only owner probe is gone — an all-profiles projection would "
+        "be back on this denied-archive path"
     )
-    assert provenance_idx < read_only_idx, (
-        "the provenance guard must fire BEFORE the read_only guard so every "
-        "same-profile fallback match 404s"
+    assert probe_idx < read_only_idx, (
+        "the owner probe must run BEFORE the read_only guard so a probe hit "
+        "cannot reach the materialization path"
+    )
+    segment = src[probe_idx:read_only_idx]
+    assert 'return bad(handler, "Session not found", 404)' in segment, (
+        "a probe hit (or miss) must terminate on the 404 self-heal path before "
+        "the materialization guards"
+    )
+    assert "cli_meta = _owner_meta" not in src, (
+        "the owner probe feeds the materialization path again — a same-profile "
+        "fallback match would be materialized"
+    )
+    assert "cli_meta = _lookup_cli_session_owner_readonly" not in src, (
+        "the owner probe feeds the materialization path again — a same-profile "
+        "fallback match would be materialized"
     )
     # The materialization path must still be reachable after the guards for
     # the normal-lookup (non-fallback) path.
