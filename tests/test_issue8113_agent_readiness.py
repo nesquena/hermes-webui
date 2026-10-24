@@ -630,3 +630,74 @@ def test_auto_install_accepts_a_stage_with_trusted_private_input_files(tmp_path,
     req.chmod(0o600)  # stricter than 0644, still fine
     with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
         assert _agent_install_dir(mount.resolve()) == staged.resolve()
+
+
+def test_auto_install_installs_the_authorized_agent_when_a_stage_input_is_unsafe(tmp_path):
+    """Consumer level: an unsafe input redirects the install, it does not cancel it.
+
+    ``_agent_install_dir`` falls back to the authorized Agent directory when a
+    stage fails validation, so ``auto_install_agent_deps`` still runs pip —
+    from the Agent. The pip arguments, not the absence of a call, are what
+    prove the unsafe stage stayed out of the install (#8472). The real trust
+    checks run here: the world-writable input is the only thing wrong with the
+    stage, so only the file-level check can reject it.
+    """
+    from api.startup import auto_install_agent_deps
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    (staged / "requirements.txt").chmod(0o666)
+    env = {
+        "HERMES_WEBUI_AGENT_DIR": str(mount),
+        "HERMES_WEBUI_AGENT_STAGE_DIR": str(staged),
+        "HERMES_WEBUI_AUTO_INSTALL": "1",
+    }
+    with patch.dict("os.environ", env, clear=False):
+        with patch("subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stderr="")
+            assert auto_install_agent_deps(expected_agent_dir=mount) is True
+    assert mock_run.call_count == 1, "rejecting the stage must not cancel the install"
+    args = [str(a) for a in mock_run.call_args[0][0]]
+    assert str(mount.resolve() / "requirements.txt") in args, args
+    assert not any(str(staged) in a for a in args), f"install used the unsafe stage: {args}"
+
+
+def test_auto_install_rejects_a_stage_when_an_input_lstat_fails(tmp_path, monkeypatch):
+    """Fail closed when an input cannot even be stat'ed.
+
+    ``FileNotFoundError`` means pip never reads the input and is skipped; any
+    other ``OSError`` (EACCES, a vanishing mount, …) must reject the stage
+    rather than wave the input through unvalidated.
+    """
+    from api.startup import _agent_install_dir
+
+    mount = _agent(tmp_path, "hermes-agent")
+    staged = _staged_copy(tmp_path, mount)
+    real_lstat = Path.lstat
+
+    def lstat_that_fails(self):
+        if self.name in ("requirements.txt", "pyproject.toml"):
+            raise PermissionError("simulated lstat failure")
+        return real_lstat(self)
+
+    monkeypatch.setattr(Path, "lstat", lstat_that_fails)
+    with patch.dict("os.environ", {STAGE_ENV: str(staged)}, clear=False):
+        assert _agent_install_dir(mount.resolve()) == mount.resolve()
+
+
+def test_trusted_install_inputs_rejects_inputs_the_current_user_does_not_own(tmp_path, monkeypatch):
+    """The ownership branch must be covered where a real chown is not permitted.
+
+    The selector-level case above performs a real ``os.chown`` and skips on an
+    unprivileged runner (as this one does), leaving the branch unexercised;
+    faking ``getuid`` covers it everywhere. The helper is called directly so
+    the fake stays away from ``_trusted_ancestry``, which reads ``getuid`` too.
+    """
+    from api.startup import _trusted_install_inputs
+
+    staged = _agent(tmp_path, "hermes-agent")
+    (staged / "requirements.txt").chmod(0o644)
+    assert _trusted_install_inputs(staged) is True  # control: ours, regular, private
+    real_getuid = os.getuid
+    monkeypatch.setattr(os, "getuid", lambda: real_getuid() + 1)
+    assert _trusted_install_inputs(staged) is False
