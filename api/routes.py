@@ -27138,6 +27138,7 @@ def _start_regeneration_stream_locked(
         from api.gateway_chat import (
             _gateway_session_api_key,
             _gateway_session_base_url,
+            _gateway_session_env,
             _gateway_session_owner_cfg,
         )
 
@@ -27150,6 +27151,13 @@ def _start_regeneration_stream_locked(
         # fails auth or sends the wrong credential to the wrong endpoint.
         worker_kwargs["session_api_key"] = _gateway_session_api_key(s)
         worker_kwargs["session_base_url"] = _gateway_session_base_url(s)
+        # #7170 round-10 P1: capture the session-owning profile's environ so
+        # scoped capability probes inside the worker (the LM Studio reasoning
+        # probe's ``LM_API_KEY``, read via the thread-local env) find the
+        # session profile's own credential instead of probing keyless (401)
+        # on the worker thread — same isolation contract as the api_key /
+        # base_url captures above.
+        worker_kwargs["session_env"] = _gateway_session_env(s)
     else:
         worker_kwargs = _local_agent_worker_kwargs(
             model_provider=model_provider,
@@ -27814,6 +27822,7 @@ def _start_chat_stream_for_session(
                         from api.gateway_chat import (
                             _gateway_session_api_key,
                             _gateway_session_base_url,
+                            _gateway_session_env,
                             _gateway_session_owner_cfg,
                         )
 
@@ -27842,6 +27851,18 @@ def _start_chat_stream_for_session(
                         # falls back to ``_gateway_base_url(cfg)`` for legacy
                         # direct callers.
                         worker_kwargs["session_base_url"] = _gateway_session_base_url(s)
+                        # #7170 round-10 P1: capture the session-owning profile's
+                        # environ on this same request thread so scoped capability
+                        # probes inside the worker (the LM Studio reasoning
+                        # probe's ``LM_API_KEY``, read via the thread-local env)
+                        # find the session profile's own credential. The worker
+                        # thread has no thread-local env of its own and would
+                        # otherwise probe keyless (401) and fail the capability
+                        # check. Built exactly like the api_key/base_url capture
+                        # (ambient loaded-profile keys stripped, session profile's
+                        # filtered runtime env overlaid), so profile isolation
+                        # holds — A's key is never given to B.
+                        worker_kwargs["session_env"] = _gateway_session_env(s)
                     thr = threading.Thread(
                         target=worker_target,
                         args=(s.session_id, msg, model, workspace, stream_id, attachments),

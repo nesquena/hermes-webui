@@ -608,6 +608,39 @@ def _gateway_session_base_url(session) -> str:
         return ""
 
 
+def _gateway_session_env(session) -> dict[str, str]:
+    """Environ for the session-owning profile, for worker-thread scoped reads.
+
+    Built exactly like ``_gateway_session_own_env`` — the env the dispatch
+    already uses to capture ``session_api_key``/``session_base_url``:
+    ``os.environ`` minus ``_profiles._loaded_profile_env_keys`` (so a key
+    some profile's ``.env`` mirrored into the process env can never leak into
+    another profile's capture), overlaid with the session profile's filtered
+    runtime env (its own ``.env``, launcher exports it legitimately carries).
+
+    The detached gateway worker runs on a thread with NO thread-local owner
+    env (``api.config._thread_ctx.env`` is empty there), so scoped capability
+    probes — LM Studio's reasoning probe reads ``LM_API_KEY`` through that
+    thread-local env — went KEYLESS in the worker and 401'd, failing the
+    capability probe (greptile P1: ``xhigh`` was not demoted to ``high``).
+    The dispatch captures this env on the request thread and hands it to the
+    worker as ``session_env``; the worker pins it for the duration of its
+    reasoning-effort resolution. ``{}`` on failure keeps the fail-closed
+    scoped contract: a probe that cannot see the session profile's own key
+    goes keyless rather than borrowing the process-active profile's.
+    """
+    try:
+        from api.models import _get_profile_home
+
+        home = _get_profile_home(getattr(session, "profile", None))
+    except Exception:
+        return {}
+    if not home:
+        return {}
+    environ = _gateway_session_own_env(home)
+    return environ if isinstance(environ, dict) else {}
+
+
 def _gateway_use_runs_api_enabled(config_data=None, environ: dict[str, str] | None = None) -> bool:
     """Return True only when the operator has explicitly opted into the runs API path."""
     source = os.environ if environ is None else environ
@@ -2855,6 +2888,7 @@ def _run_gateway_chat_streaming(
     session_cfg=None,
     session_api_key=None,
     session_base_url=None,
+    session_env=None,
 ):
     """Bridge a WebUI chat turn through Hermes Gateway's API server.
 
@@ -2901,6 +2935,20 @@ def _run_gateway_chat_streaming(
     environ={})``, ambient env excluded), never the ambient env URL. Only
     legacy direct callers that capture NO pair keep the historical
     ``_gateway_base_url(cfg)`` path.
+
+    ``session_env`` is the corresponding environ for the session-owning
+    profile, captured at dispatch time (``_gateway_session_env``) so scoped
+    capability probes that read ``api.config._thread_ctx.env`` — the LM
+    Studio reasoning probe's ``LM_API_KEY`` — find the session profile's own
+    credential on this detached thread instead of going keyless (greptile
+    P1: the 401'd probe failed, so ``xhigh`` was not demoted to ``high``).
+    The env is built exactly like the ``session_api_key``/``session_base_url``
+    capture (ambient loaded-profile keys stripped, session profile's filtered
+    runtime env overlaid), so profile isolation holds: A's key is never given
+    to B. Legacy direct callers that capture no env (``None``) fall back to
+    re-deriving it from the session's own profile home, and a session profile
+    with no key of its own stays keyless (fail-closed, never the ambient
+    process-active profile's credential).
     """
     cancel_event = threading.Event()
     q = peek_stream(stream_id)
@@ -3049,11 +3097,37 @@ def _run_gateway_chat_streaming(
             cfg = copy.deepcopy(cfg)
         except Exception:
             cfg = dict(cfg) if isinstance(cfg, dict) else {}
-        reasoning_effort = _gateway_reasoning_effort_for_request(
-            cfg,
-            model=model,
-            model_provider=model_provider,
-        )
+        # #7170 round-10 P1: scoped capability probes (LM Studio's reasoning
+        # probe reads ``LM_API_KEY`` via ``api.config._thread_ctx.env``) run
+        # keyless on this detached thread — the request thread's thread-local
+        # env does not travel with the worker. Capture the session-owning
+        # profile's env (the dispatch-captured ``session_env`` when provided,
+        # otherwise re-derive it from the session profile home — the same
+        # construction the dispatch uses for ``session_api_key`` /
+        # ``session_base_url``) and pin it for the duration of the
+        # reasoning-effort resolution, then restore the worker's previous
+        # thread state (save/restore pattern mirroring
+        # ``_gateway_endpoint_for_profile``). A session profile with no key
+        # of its own stays keyless (fail-closed: the ambient profile's key is
+        # never borrowed).
+        from api.config import _thread_ctx
+
+        _probe_env = session_env if isinstance(session_env, dict) else {}
+        if not _probe_env:
+            _probe_env = _gateway_session_env(s)
+        _prev_env = getattr(_thread_ctx, "env", {})
+        _prev_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
+        _thread_ctx.env = dict(_probe_env)
+        _thread_ctx.block_process_env_fallback = True
+        try:
+            reasoning_effort = _gateway_reasoning_effort_for_request(
+                cfg,
+                model=model,
+                model_provider=model_provider,
+            )
+        finally:
+            _thread_ctx.env = _prev_env
+            _thread_ctx.block_process_env_fallback = _prev_block
         # #7170 round-7 P1: prefer the dispatch-captured session api key (which
         # was read on the request thread from the session-owning profile's .env)
         # over any ambient read. Pairing the session's URL with the
