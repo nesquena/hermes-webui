@@ -26,15 +26,16 @@ class TestSidebarCancelAction:
         # toast handling, then to 6400 in #2294 for the new "Hide from list"
         # action prepended for external sessions, then to 7600 in #3106 for
         # manual title regeneration controls, then to 8000 in #7731 for the
-        # all-profiles archive payload.
+        # all-profiles archive payload, then to 8600 in #6426: its
+        # touch-cooldown comments and {force:true} call-site annotations grew
+        # the prefix above the delete action past #6713's picker-aware
+        # wrappers.
         # The `session.active_stream_id` / cancelSessionStream / delete checks
         # are positional further down in the function, so growing the prefix
-        # required growing this read window; where the completion repaints route
-        # through the picker-aware wrappers added the last few bytes (#6713).
-        # #7731 keeps 8000 over #6713's 7900: the window is a prefix read, so
+        # required growing this read window; the window is a prefix read, so
         # the larger value is a superset that still covers the all-profiles
         # archive payload this test needs to see.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8000)
+        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8600)
         assert "session.active_stream_id" in body, (
             "sidebar action menu must detect per-session active_stream_id instead of S.activeStreamId"
         )
