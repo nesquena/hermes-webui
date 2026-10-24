@@ -2754,6 +2754,9 @@ def _run_gateway_chat_streaming(
     final user/assistant turn back into the WebUI session.
     """
     cancel_event = threading.Event()
+    _turn_started_at = time.time()
+    _detached_goal_continuation_prompt = ""
+    _detached_goal_continuation_id = ""
     q = peek_stream(stream_id)
     if q is not None:
         # A snapshot lookup is not admission. A concurrent chat/start can classify
@@ -3350,24 +3353,49 @@ def _run_gateway_chat_streaming(
         try:
             from api.goals import (
                 evaluate_goal_after_turn,
+                gateway_evaluated_goal_in_turn,
                 has_active_goal,
+                mark_detached_goal_continuation,
+                stream_channel_has_subscribers,
                 register_pending_goal_continuation,
             )
             from api.profiles import get_hermes_home_for_profile
 
             profile_home = get_hermes_home_for_profile(getattr(s, "profile", None))
-            if goal_related and has_active_goal(session_id, profile_home=profile_home):
+            _gateway_evaluated = gateway_evaluated_goal_in_turn(
+                session_id,
+                min_evaluated_at=_turn_started_at,
+                profile_home=profile_home,
+            )
+            # Review 5603344218 Must fix 1: only a turn the WebUI itself started
+            # goal-related gives the WebUI the continuation decision. When the
+            # native Agent evaluated the goal in-turn (``_gateway_evaluated``)
+            # for a turn that was NOT goal-related, the Agent owns that
+            # decision: its post-turn hook already queued the continuation in
+            # the adapter FIFO (``gateway/run_goals.py`` ``_enqueue_fifo``) or
+            # committed it through the local authority. Adopting the decision
+            # here may only REPORT goal status — registering a record and
+            # dispatching it again would run the same turn twice.
+            _webui_owns_goal = bool(
+                goal_related and has_active_goal(session_id, profile_home=profile_home)
+            )
+            if _gateway_evaluated or _webui_owns_goal:
                 put_gateway_event("goal", {
                     "session_id": session_id,
                     "state": "evaluating",
                     "message": "Evaluating goal progress…",
                     "message_key": "goal_evaluating_progress",
                 })
+                _eval_kwargs: dict[str, Any] = {
+                    "user_initiated": True,
+                    "profile_home": profile_home,
+                }
+                if _gateway_evaluated:
+                    _eval_kwargs["min_evaluated_at"] = _turn_started_at
                 decision = evaluate_goal_after_turn(
                     session_id,
                     assistant_text,
-                    user_initiated=True,
-                    profile_home=profile_home,
+                    **_eval_kwargs,
                 ) or {}
                 goal_message = str(decision.get("message") or "").strip()
                 if goal_message:
@@ -3381,7 +3409,7 @@ def _run_gateway_chat_streaming(
                         "message_args": decision.get("message_args") or [],
                         "decision": decision,
                     })
-                if decision.get("should_continue"):
+                if decision.get("should_continue") and _webui_owns_goal:
                     continuation_prompt = str(decision.get("continuation_prompt") or "").strip()
                     continuation_id = None
                     if continuation_prompt:
@@ -3395,16 +3423,30 @@ def _run_gateway_chat_streaming(
                         if not continuation_id:
                             continuation_prompt = ""
                     if continuation_prompt:
-                        put_gateway_event("goal_continue", {
-                            "session_id": session_id,
-                            "continuation_prompt": continuation_prompt,
-                            "continuation_id": continuation_id,
-                            "text": continuation_prompt,
-                            "message": goal_message,
-                            "message_key": decision.get("message_key") or "goal_continuing",
-                            "message_args": decision.get("message_args") or [],
-                            "decision": decision,
-                        })
+                        # ONE dispatcher: browser (subscriber) XOR detached server.
+                        if stream_channel_has_subscribers(q):
+                            put_gateway_event("goal_continue", {
+                                "session_id": session_id,
+                                "continuation_prompt": continuation_prompt,
+                                "continuation_id": continuation_id,
+                                "text": continuation_prompt,
+                                "message": goal_message,
+                                "message_key": decision.get("message_key") or "goal_continuing",
+                                "message_args": decision.get("message_args") or [],
+                                "decision": decision,
+                            })
+                        else:
+                            # Review 5603344218 Must fix 2: dispatcher ownership
+                            # stays with the record. With no subscriber the
+                            # server is the only dispatcher, so mark the record
+                            # detached-owned; a stopped runner is then retried
+                            # with this same continuation ID on /goal resume and
+                            # when the session goes idle.
+                            mark_detached_goal_continuation(
+                                session_id, str(continuation_id or "")
+                            )
+                            _detached_goal_continuation_prompt = continuation_prompt
+                            _detached_goal_continuation_id = continuation_id
         except Exception as goal_exc:
             logger.debug(
                 "Gateway goal continuation hook failed for session %s: %s",
@@ -3473,3 +3515,35 @@ def _run_gateway_chat_streaming(
         # the process lifetime (compare-and-clear: only clears if still owned by
         # this stream, mirroring the local streaming teardown).
         clear_session_writeback_owner_if_owned(session_id, stream_id)
+        if _detached_goal_continuation_prompt and not cancel_event.is_set():
+            try:
+                from api.goals import start_detached_goal_continuation
+
+                start_detached_goal_continuation(
+                    session_id,
+                    _detached_goal_continuation_prompt,
+                    _detached_goal_continuation_id,
+                )
+            except Exception:
+                logger.debug(
+                    "Failed to start detached gateway goal continuation for %s",
+                    session_id,
+                    exc_info=True,
+                )
+        elif not cancel_event.is_set():
+            # Review 5603344218 Must fix 2, idle half: this turn ended without
+            # handing off a continuation, so any WebUI-owned (detached) record
+            # whose runner stopped — preflight skipped a queued/active turn, or
+            # admission rejected the wakeup — is retried now that the session
+            # is idle. Its existing continuation ID is reused, so at most one
+            # admission can win. Browser-owned records are left alone.
+            try:
+                from api.goals import retry_detached_goal_continuation
+
+                retry_detached_goal_continuation(session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to retry a detached gateway goal continuation for %s",
+                    session_id,
+                    exc_info=True,
+                )

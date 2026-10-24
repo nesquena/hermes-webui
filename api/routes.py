@@ -27868,10 +27868,53 @@ def _start_chat_stream_for_session(
     # newer continuation was armed for this session meanwhile.
     consumed_goal_continuation_receipt = None
 
+    # Review 5593825504 Must fix 2/3: a server-side goal continuation
+    # (source="goal_wakeup") is admitted ONLY by consuming its own record by ID,
+    # under the session lock that /goal pause/clear also take, and only while
+    # the goal is still active. An invalid wakeup is rejected, never downgraded
+    # to an ordinary goal_related=False turn.
+    goal_wakeup_turn = str(source or "") == "goal_wakeup"
+    goal_wakeup_rejection = None
+
+    def _goal_wakeup_admission_error() -> str:
+        if not goal_continuation_id:
+            return "goal_continuation_missing"
+        try:
+            from api.goals import has_active_goal, pending_goal_continuation_matches
+            from api.profiles import get_hermes_home_for_profile
+
+            if not pending_goal_continuation_matches(s.session_id, goal_continuation_id):
+                return "goal_continuation_stale"
+            if not has_active_goal(
+                s.session_id,
+                profile_home=get_hermes_home_for_profile(getattr(s, "profile", None)),
+            ):
+                return "goal_inactive"
+        except Exception:
+            return "goal_state_unknown"
+        return ""
+
     def consume_continuation_markers() -> None:
         nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
-        nonlocal consumed_goal_continuation_receipt
-        if not goal_related and goal_continuation_id:
+        nonlocal consumed_goal_continuation_receipt, goal_wakeup_rejection
+        if goal_wakeup_turn:
+            reason = _goal_wakeup_admission_error()
+            receipt = None
+            if not reason:
+                receipt = _consume_pending_goal_continuation(s.session_id, goal_continuation_id)
+                if not receipt:
+                    reason = "goal_continuation_stale"
+            if reason:
+                goal_wakeup_rejection = {
+                    "error": "goal_continuation_rejected",
+                    "reason": reason,
+                    "_status": 409,
+                }
+                return
+            goal_related = True
+            consumed_goal_continuation = True
+            consumed_goal_continuation_receipt = receipt
+        elif not goal_related and goal_continuation_id:
             receipt = _consume_pending_goal_continuation(s.session_id, goal_continuation_id)
             if receipt:
                 goal_related = True
@@ -27920,6 +27963,8 @@ def _start_chat_stream_for_session(
                 needs_stale_cleanup = False
                 if regeneration is not None:
                     consume_continuation_markers()
+                    if goal_wakeup_rejection is not None:
+                        return goal_wakeup_rejection
                     try:
                         regeneration_response = _start_regeneration_stream_locked(
                             s,
@@ -27985,6 +28030,9 @@ def _start_chat_stream_for_session(
                         sidecar_unknown,
                     )
                 consume_continuation_markers()
+                if goal_wakeup_rejection is not None:
+                    diag.stage("response_write") if diag else None
+                    return goal_wakeup_rejection
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
                 try:
@@ -28500,10 +28548,14 @@ def start_session_turn(
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
     on_admitted=None,
+    goal_continuation_id: str = "",
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
     ``on_admitted`` is forwarded to ``_start_chat_stream_for_session``.
+    ``source="goal_wakeup"`` is a detached goal continuation: it must carry the
+    ``goal_continuation_id`` of its registered record, which admission consumes
+    under the session lock (rejected with 409 if stale or the goal is inactive).
 
     Option Z primary wakeup entrypoint. This is the minimal, HTTP-handler-free
     core that ``/api/chat/start`` already reaches via ``_handle_chat_start`` →
@@ -28690,6 +28742,20 @@ def start_session_turn(
                 }
     if _paused_wakeup_response is not None:
         return _paused_wakeup_response
+    wakeup_goal_related = False
+    if turn_source in ("process_wakeup", "delegation_wakeup"):
+        try:
+            from api.goals import has_active_goal
+            from api.profiles import get_hermes_home_for_profile
+
+            wakeup_goal_related = bool(
+                has_active_goal(
+                    s.session_id,
+                    profile_home=get_hermes_home_for_profile(getattr(s, "profile", None)),
+                )
+            )
+        except Exception:
+            wakeup_goal_related = False
     resp = _start_run(
         s,
         msg=msg,
@@ -28700,6 +28766,12 @@ def start_session_turn(
         normalized_model=normalized_model,
         source=turn_source,
         route="start_session_turn",
+        goal_related=wakeup_goal_related,
+        goal_continuation_id=(
+            _normalize_goal_continuation_id(goal_continuation_id)
+            if turn_source == "goal_wakeup"
+            else ""
+        ),
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
@@ -29036,12 +29108,28 @@ def _handle_goal_command(handler, body):
         previous_goal_state = goal_state_snapshot(s.session_id, profile_home=profile_home)
 
     def _legacy_goal_update(session_id: str, _action: str, text: str) -> dict:
-        return goal_command_payload(
-            session_id,
-            text,
-            stream_running=stream_running,
-            profile_home=profile_home,
-        )
+        if _action not in ("pause", "resume", "clear"):
+            return goal_command_payload(
+                session_id,
+                text,
+                stream_running=stream_running,
+                profile_home=profile_home,
+            )
+        # Review 5593825504 Must fix 3: pause/resume/clear serialize with
+        # detached goal_wakeup admission on the session lock, so admission
+        # either sees the record + active goal before the change, or rejects.
+        with _get_session_agent_lock(session_id):
+            result = goal_command_payload(
+                session_id,
+                text,
+                stream_running=stream_running,
+                profile_home=profile_home,
+            )
+            if _action == "clear" and result.get("ok", True):
+                from api.goals import clear_pending_goal_continuation
+
+                clear_pending_goal_continuation(session_id)
+            return result
 
     goal_adapter = None
     if runner_goal_owned:
@@ -29131,10 +29219,40 @@ def _handle_goal_command(handler, body):
             logger.debug("Failed to sweep expired goal continuations", exc_info=True)
 
     def _rollback_goal_after_failed_kickoff() -> None:
-        restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
+        # A resume kickoff that cannot start leaves the goal resumed (the
+        # user's next turn still runs goal-related); only /goal <text>
+        # restores the prior goal on a failed kickoff.
+        if will_kickoff:
+            restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
 
     if runner_goal_owned:
         return j(handler, payload)
+
+    # Review 5593825504 Should fix 1: /goal resume re-arms the loop. A pending
+    # continuation record is kept as-is; with none pending, resume kicks off a
+    # goal-related turn with the manager's next continuation prompt through the
+    # same kickoff path /goal <text> uses. No bare PENDING_GOAL_CONTINUATION
+    # writes.
+    # Review 5603344218 Must fix 2: when the pending record is WebUI-owned
+    # (detached), resume RETRIES it through the same admission with its existing
+    # continuation ID instead of starting a second dispatcher. That is what
+    # recovers a runner that stopped without dispatching — a pause landing
+    # between tear-down and preflight, or an admission rejected with 409 while
+    # the goal was paused — instead of stalling the goal until /goal clear.
+    # Browser-owned records are untouched: the browser holds that dispatch.
+    if goal_adapter_action == "resume" and not stream_running and not payload.get("kickoff_prompt"):
+        from api.goals import (
+            peek_pending_goal_continuation_id,
+            resume_kickoff_prompt,
+            retry_detached_goal_continuation,
+        )
+
+        if peek_pending_goal_continuation_id(s.session_id) is None:
+            _resume_prompt = resume_kickoff_prompt(s.session_id, profile_home=profile_home)
+            if _resume_prompt:
+                payload["kickoff_prompt"] = _resume_prompt
+        else:
+            retry_detached_goal_continuation(s.session_id)
 
     kickoff_prompt = str(payload.get("kickoff_prompt") or "").strip()
     if kickoff_prompt:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 import re
+import threading
 import secrets
 import time
 import uuid
@@ -12,6 +14,11 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+try:  # Older hermes-agent builds have no quality gates.
+    from hermes_cli.goals import CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE  # type: ignore
+except Exception:  # pragma: no cover - depends on installed hermes-agent
+    CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE = ""  # type: ignore
 
 try:  # Exposed as a module attribute so tests can monkeypatch it directly.
     from hermes_cli.goals import (  # type: ignore
@@ -653,12 +660,509 @@ def has_active_goal(
         return False
 
 
+def resume_kickoff_prompt(
+    session_id: str,
+    *,
+    profile_home: str | Path | None = None,
+) -> str | None:
+    """Continuation prompt to kick off a just-resumed active goal, or None."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    mgr = _manager(sid, profile_home=profile_home)
+    if mgr is None:
+        return None
+    try:
+        if not mgr.is_active():
+            return None
+        prompt = None
+        if hasattr(mgr, "next_continuation_prompt"):
+            prompt = mgr.next_continuation_prompt()
+        if not prompt:
+            goal = str(getattr(getattr(mgr, "state", None), "goal", "") or "").strip()
+            if goal and CONTINUATION_PROMPT_TEMPLATE:
+                prompt = CONTINUATION_PROMPT_TEMPLATE.format(goal=goal)
+        return str(prompt or "").strip() or None
+    except Exception as exc:
+        logger.debug("resume kickoff prompt failed for session=%s: %s", sid, exc)
+        return None
+
+
+def _gather_goal_turn_background_state(
+    session_id: str,
+    *,
+    profile_home: str | Path | None = None,
+) -> tuple[Any, int]:
+    """Return ``(background_processes, active_delegations)`` for *session_id*."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None, 0
+    try:
+        from hermes_cli.goals import (  # type: ignore
+            count_active_delegations,
+            gather_background_processes,
+        )
+    except Exception:
+        return None, 0
+    context_api = _native_profile_context_api(profile_home) if profile_home else None
+    token = None
+    if context_api is not None:
+        try:
+            token = context_api[0](Path(profile_home).expanduser().resolve())
+        except Exception:
+            token = None
+    try:
+        bg_procs = None
+        active_deleg = 0
+        try:
+            bg_procs = gather_background_processes(owner_task_id=sid)
+        except Exception:
+            bg_procs = None
+        try:
+            active_deleg = int(count_active_delegations(sid) or 0)
+        except Exception:
+            active_deleg = 0
+        return bg_procs, active_deleg
+    finally:
+        if token is not None and context_api is not None:
+            try:
+                context_api[1](token)
+            except Exception:
+                pass
+
+
+def gateway_evaluated_goal_in_turn(
+    session_id: str,
+    *,
+    min_evaluated_at: float | None,
+    profile_home: str | Path | None = None,
+) -> bool:
+    """Return True when the Gateway already evaluated *session_id*'s goal in this turn."""
+    if min_evaluated_at is None or GoalManager is None or GoalManager is not _NativeGoalManager:
+        return False
+    sid = str(session_id or "").strip()
+    if not sid:
+        return False
+    if profile_home is not None:
+        try:
+            db_file = Path(profile_home).expanduser().resolve() / "state.db"
+            if not db_file.is_file():
+                return False
+        except Exception:
+            return False
+    mgr = _manager(sid, profile_home=profile_home)
+    if mgr is None:
+        return False
+    state = getattr(mgr, "state", None)
+    if state is None:
+        return False
+    try:
+        last_turn_at = float(getattr(state, "last_turn_at", 0.0) or 0.0)
+        return last_turn_at > 0.0 and last_turn_at >= float(min_evaluated_at)
+    except Exception:
+        return False
+
+
+def _decision_from_evaluated_state(mgr: Any, state: Any) -> Optional[Dict[str, Any]]:
+    """Reconstruct the native decision from a GoalState already updated in-turn.
+
+    Returns ``None`` when the decision cannot be reconstructed faithfully;
+    the caller then does not adopt the persisted state.
+    """
+    status = str(getattr(state, "status", "") or "").strip()
+    verdict = str(getattr(state, "last_verdict", "") or "continue").strip() or "continue"
+    reason = str(getattr(state, "last_reason", "") or "").strip()
+    paused_reason = str(getattr(state, "paused_reason", "") or "").strip()
+    turns_used = int(getattr(state, "turns_used", 0) or 0)
+    max_turns = int(getattr(state, "max_turns", 0) or 0)
+
+    if status == "done":
+        return {
+            "status": "done",
+            "should_continue": False,
+            "continuation_prompt": None,
+            "verdict": "done",
+            "reason": reason,
+            "message": f"✓ Goal achieved: {reason}" if reason else "✓ Goal achieved",
+        }
+
+    if status == "paused":
+        if verdict == "blocked" or paused_reason.startswith("judged unachievable"):
+            msg = (
+                f"🚫 Goal judged unachievable — paused: {reason or paused_reason} "
+                "Re-scope with /goal set, or override with /goal resume."
+            )
+        elif paused_reason.startswith("turn budget exhausted"):
+            msg = (
+                f"⏸ Goal paused — {turns_used}/{max_turns} turns used. "
+                "Use /goal resume to keep going, or /goal clear to stop."
+            )
+        else:
+            detail = paused_reason or reason
+            msg = f"⏸ Goal paused — {detail}" if detail else "⏸ Goal paused."
+        return {
+            "status": "paused",
+            "should_continue": False,
+            "continuation_prompt": None,
+            "verdict": verdict,
+            "reason": reason or paused_reason,
+            "message": msg,
+        }
+
+    if status != "active":
+        # Cleared, inactive or an unknown status: no continuation may be
+        # derived from it (review 5593825504 Must fix 1). A goal cleared
+        # between the in-turn evaluation and this read must not restart.
+        return {
+            "status": status or None,
+            "should_continue": False,
+            "continuation_prompt": None,
+            "verdict": "inactive",
+            "reason": "no active goal",
+            "message": "",
+        }
+    try:
+        if not mgr.is_active():
+            return {
+                "status": status or None,
+                "should_continue": False,
+                "continuation_prompt": None,
+                "verdict": "inactive",
+                "reason": "no active goal",
+                "message": "",
+            }
+    except Exception:
+        return None
+
+    # The manager's live barrier, not the persisted verdict, decides whether
+    # the goal is parked: native resume clears the barrier but leaves
+    # ``last_verdict="wait"`` behind (Must fix 4).
+    is_waiting = False
+    if hasattr(mgr, "is_waiting"):
+        try:
+            is_waiting = bool(mgr.is_waiting())
+        except Exception:
+            return None
+    if is_waiting:
+        if hasattr(mgr, "_waiting_decision"):
+            try:
+                return dict(mgr._waiting_decision(state) or {})
+            except Exception:
+                pass
+        return {
+            "status": "active",
+            "should_continue": False,
+            "continuation_prompt": None,
+            "verdict": "waiting",
+            "reason": reason,
+            "message": f"⏳ Goal parked — waiting: {reason}" if reason else "⏳ Goal parked",
+        }
+
+    # Native ``evaluate_after_turn`` runs the quality gates BEFORE the judge
+    # and a failing gate short-circuits it WITHOUT touching ``last_verdict``.
+    # Gates run in order and stop at the first failure (earlier passing gates
+    # reset ``attempts`` to 0), so the first gate still carrying attempts and
+    # a non-zero exit is the one that failed this turn.
+    failed_gate = None
+    for gate in list(getattr(state, "gates", None) or []):
+        attempts = int(getattr(gate, "attempts", 0) or 0)
+        exit_code = getattr(gate, "last_exit_code", None)
+        if attempts > 0 and exit_code not in (None, 0):
+            failed_gate = gate
+            break
+    if failed_gate is not None:
+        if not CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE:
+            return None  # cannot rebuild the native prompt faithfully: don't adopt
+        command = str(getattr(failed_gate, "command", "") or "")
+        exit_code = getattr(failed_gate, "last_exit_code", None)
+        attempts = int(getattr(failed_gate, "attempts", 0) or 0)
+        max_retries = int(getattr(failed_gate, "max_retries", 0) or 0)
+        try:
+            prompt = CONTINUATION_PROMPT_GATE_FAILED_TEMPLATE.format(
+                goal=getattr(state, "goal", ""),
+                command=command,
+                exit_code=exit_code,
+                attempt=attempts,
+                max_retries=max_retries,
+                output=str(getattr(failed_gate, "last_output_tail", "") or "") or "(no output)",
+            )
+        except Exception:
+            return None
+        return {
+            "status": "active",
+            "should_continue": True,
+            "continuation_prompt": prompt,
+            "verdict": "gate_failed",
+            "reason": f"gate failed (exit {exit_code}): $ {command}",
+            "message": (
+                f"✗ Quality gate failed ({turns_used}/{max_turns} turns, "
+                f"attempt {attempts}/{max_retries}): $ {command}"
+            ),
+        }
+
+    prompt = None
+    if hasattr(mgr, "next_continuation_prompt"):
+        try:
+            prompt = mgr.next_continuation_prompt()
+        except Exception:
+            prompt = None
+    if not prompt:
+        return None
+    # A judge WAIT whose barrier could not be observed continues natively
+    # with verdict "continue"; a live barrier was handled above.
+    if verdict in ("wait", "waiting", "gate_failed"):
+        verdict = "continue"
+    return {
+        "status": "active",
+        "should_continue": True,
+        "continuation_prompt": prompt,
+        "verdict": verdict,
+        "reason": reason,
+        "message": f"↻ Continuing toward goal ({turns_used}/{max_turns}): {reason}",
+    }
+
+
+def stream_channel_has_subscribers(channel: Any) -> bool:
+    """Return True when at least one live SSE subscriber is attached to *channel*."""
+    if channel is None:
+        return False
+    snap_fn = getattr(channel, "diagnostic_snapshot", None)
+    if not callable(snap_fn):
+        return True
+    try:
+        snap = snap_fn() or {}
+        return int(snap.get("subscriber_count", 0) or 0) > 0
+    except Exception:
+        return True
+
+
+def pending_goal_continuation_matches(session_id: str, continuation_id: str) -> bool:
+    """True when *session_id*'s pending record is exactly *continuation_id*.
+
+    Read under ``PENDING_GOAL_CONTINUATION_LOCK`` against the full record
+    (marker AND record with the same ID), not set membership.
+    """
+    sid = str(session_id or "").strip()
+    cid = str(continuation_id or "").strip()
+    if not sid or not cid:
+        return False
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        if sid not in _cfg.PENDING_GOAL_CONTINUATION:
+            return False
+        record = _cfg.PENDING_GOAL_CONTINUATION_PROMPTS.get(sid)
+        if not isinstance(record, dict):
+            return False
+        current = str(record.get("continuation_id") or "").strip()
+        return bool(current) and secrets.compare_digest(current, cid)
+
+
+def detached_goal_continuation_skip_reason(session_id: str, continuation_id: str = "") -> str:
+    """Return why a detached goal continuation must NOT start, or '' if safe.
+
+    Pre-flight only: ``start_session_turn(source="goal_wakeup")`` re-validates
+    the record ID and the active goal under the session lock at admission, so
+    a pause/clear between this check and the start is still rejected.
+
+    Invariants:
+      1. never after a user cancel / pause / clear (record gone or replaced,
+         goal inactive, or a cancel marker persisted on the transcript);
+      2. never races a queued user message or an active/pending turn;
+      3. stays inside the owning profile (goal state resolved from the
+         session's own profile home; isolated mode refuses foreign sessions).
+    """
+    sid = str(session_id or "").strip()
+    if not sid:
+        return "missing_session"
+    if not pending_goal_continuation_matches(sid, continuation_id):
+        return "not_pending"
+    try:
+        from api.models import get_session
+
+        s = get_session(sid)
+    except Exception:
+        return "session_unavailable"
+    owner = getattr(s, "profile", None)
+    try:
+        from api.profiles import (
+            _is_isolated_profile_mode,
+            _profiles_match,
+            get_active_profile_name,
+            get_hermes_home_for_profile,
+        )
+
+        if _is_isolated_profile_mode() and not _profiles_match(
+            owner, get_active_profile_name()
+        ):
+            return "foreign_profile"
+        profile_home = get_hermes_home_for_profile(owner or "default")
+    except Exception:
+        return "profile_unresolved"
+    try:
+        from api.streaming import _session_has_cancel_marker
+
+        if _session_has_cancel_marker(s):
+            return "cancelled"
+    except Exception:
+        return "cancel_state_unknown"
+    if getattr(s, "pending_user_message", None):
+        return "turn_pending"
+    try:
+        from api.background_process import _session_has_active_turn
+
+        if _session_has_active_turn(sid):
+            return "turn_active"
+    except Exception:
+        return "turn_state_unknown"
+    if not has_active_goal(sid, profile_home=profile_home):
+        return "goal_inactive"
+    return ""
+
+
+def start_detached_goal_continuation(
+    session_id: str,
+    continuation_prompt: str,
+    continuation_id: str,
+) -> None:
+    """Run a registered continuation server-side (0 SSE subscribers).
+
+    The caller did NOT publish ``goal_continue`` for this record, so the
+    server is its only dispatcher. Admission consumes the record by ID.
+
+    A skipped preflight or a rejected admission leaves the record in place
+    (and detached-owned): :func:`retry_detached_goal_continuation` runs it
+    again with this same ID on ``/goal resume`` and when the session goes
+    idle, so a stopped runner never silently ends the goal loop.
+    """
+    sid = str(session_id or "").strip()
+    prompt = str(continuation_prompt or "").strip()
+    cid = str(continuation_id or "").strip()
+    if not sid or not prompt or not cid:
+        return
+
+    def _runner() -> None:
+        try:
+            from api.routes import start_session_turn
+
+            reason = detached_goal_continuation_skip_reason(sid, cid)
+            if reason:
+                logger.debug(
+                    "Detached goal continuation skipped for session %s: %s",
+                    sid,
+                    reason,
+                )
+                return
+            result = start_session_turn(
+                sid, prompt, source="goal_wakeup", goal_continuation_id=cid
+            )
+            status = 0
+            if isinstance(result, dict):
+                try:
+                    status = int(result.get("_status", 200) or 200)
+                except Exception:
+                    status = 0
+            if status and status >= 400:
+                # Not a lost cause: the record still owns its dispatcher, so
+                # /goal resume or the next idle teardown retries this ID.
+                logger.debug(
+                    "Detached goal continuation rejected for session %s: status=%s reason=%s",
+                    sid,
+                    status,
+                    result.get("reason") if isinstance(result, dict) else "",
+                )
+        except Exception:
+            logger.debug(
+                "Detached goal continuation start failed for session %s",
+                sid,
+                exc_info=True,
+            )
+
+    threading.Thread(
+        target=_runner,
+        name=f"goal-continue-{sid[:12]}",
+        daemon=True,
+    ).start()
+
+
+def mark_detached_goal_continuation(session_id: str, continuation_id: str) -> bool:
+    """Record that the WebUI server is the SOLE dispatcher of this continuation.
+
+    A ``goal_continue`` published to a browser subscriber is dispatched by
+    that browser; with no subscriber the server runs the turn itself
+    (:func:`start_detached_goal_continuation`). Only the second kind carries
+    dispatcher ownership, so :func:`retry_detached_goal_continuation` never
+    starts a second dispatcher for a record the browser already holds.
+
+    Ownership is bound to the ID (compare under the record lock), so a mark
+    that arrives after the record was consumed or replaced is ignored.
+    """
+    sid = str(session_id or "").strip()
+    cid = str(continuation_id or "").strip()
+    if not sid or not cid:
+        return False
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        if sid not in _cfg.PENDING_GOAL_CONTINUATION:
+            return False
+        record = _cfg.PENDING_GOAL_CONTINUATION_PROMPTS.get(sid)
+        if not isinstance(record, dict):
+            return False
+        current = str(record.get("continuation_id") or "").strip()
+        if not current or not secrets.compare_digest(current, cid):
+            return False
+        record["detached_owned"] = True
+        return True
+
+
+def pending_detached_goal_continuation(session_id: str) -> Optional[Dict[str, Any]]:
+    """Return ``{prompt, continuation_id}`` for a WebUI-owned pending record."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
+        if sid not in _cfg.PENDING_GOAL_CONTINUATION:
+            return None
+        record = _cfg.PENDING_GOAL_CONTINUATION_PROMPTS.get(sid)
+        if not isinstance(record, dict) or not record.get("detached_owned"):
+            return None
+        prompt = str(record.get("prompt") or "").strip()
+        cid = str(record.get("continuation_id") or "").strip()
+        if not prompt or not cid:
+            return None
+        return {"prompt": prompt, "continuation_id": cid}
+
+
+def retry_detached_goal_continuation(session_id: str) -> bool:
+    """Re-dispatch a WebUI-owned (detached) continuation with its EXISTING ID.
+
+    Dispatcher ownership stays with the record: a detached runner can stop
+    without ever dispatching — its preflight skips (queued/active turn, or a
+    pause landing between tear-down and preflight) or admission rejects the
+    wakeup (``409`` after a pause) — and no browser event exists to replay.
+    Called when the session goes idle and when ``/goal resume`` re-arms the
+    loop, so a resumed goal keeps exactly one recoverable dispatch instead of
+    stalling until ``/goal clear``.
+
+    Retrying is safe because admission consumes the record by ID under the
+    session lock: concurrent attempts collapse to at most one admitted turn,
+    and a losing attempt leaves a consumed or replaced record untouched. It
+    also keeps ONE dispatcher: a browser-owned record is never retried here,
+    because the browser holds that dispatch.
+    """
+    record = pending_detached_goal_continuation(session_id)
+    if not record:
+        return False
+    start_detached_goal_continuation(
+        session_id, record["prompt"], record["continuation_id"]
+    )
+    return True
+
+
 def evaluate_goal_after_turn(
     session_id: str,
     last_response: str,
     *,
     user_initiated: bool = True,
     profile_home: str | Path | None = None,
+    min_evaluated_at: float | None = None,
 ) -> Dict[str, Any]:
     """Evaluate a completed turn against the standing goal, if any."""
     sid = str(session_id or "").strip()
@@ -682,16 +1186,50 @@ def evaluate_goal_after_turn(
             "message": "",
         }
     try:
+        state = getattr(mgr, "state", None)
+        if (
+            min_evaluated_at is not None
+            and state is not None
+            and float(getattr(state, "last_turn_at", 0.0) or 0.0) >= float(min_evaluated_at)
+        ):
+            decision = _decision_from_evaluated_state(mgr, state)
+            if decision is not None:
+                return _goal_decision_payload(decision, state)
         if not mgr.is_active():
             return {
-                "status": getattr(getattr(mgr, "state", None), "status", None),
+                "status": getattr(state, "status", None),
                 "should_continue": False,
                 "continuation_prompt": None,
                 "verdict": "inactive",
                 "reason": "no active goal",
                 "message": "",
             }
-        decision = mgr.evaluate_after_turn(str(last_response or ""), user_initiated=user_initiated)
+        eval_kwargs: Dict[str, Any] = {"user_initiated": user_initiated}
+        target_eval = getattr(
+            getattr(mgr, "_manager", mgr),
+            "evaluate_after_turn",
+            mgr.evaluate_after_turn,
+        )
+        try:
+            params = inspect.signature(target_eval).parameters
+            accepts_var_kw = any(
+                p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values()
+            )
+            if (
+                accepts_var_kw
+                or "background_processes" in params
+                or "active_delegations" in params
+            ):
+                bg_procs, active_deleg = _gather_goal_turn_background_state(
+                    sid, profile_home=profile_home
+                )
+                if accepts_var_kw or "background_processes" in params:
+                    eval_kwargs["background_processes"] = bg_procs
+                if accepts_var_kw or "active_delegations" in params:
+                    eval_kwargs["active_delegations"] = active_deleg
+        except Exception:
+            pass
+        decision = mgr.evaluate_after_turn(str(last_response or ""), **eval_kwargs)
     except Exception as exc:
         logger.debug("goal evaluation failed for session=%s: %s", sid, exc)
         return {
@@ -790,6 +1328,10 @@ def register_pending_goal_continuation(session_id: str, continuation_prompt: str
     record = {
         "prompt": prompt,
         "continuation_id": uuid.uuid4().hex,
+        # Dispatcher ownership (review 5603344218 Must fix 2). False until the
+        # writer learns no browser is attached; see
+        # :func:`mark_detached_goal_continuation`.
+        "detached_owned": False,
     }
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
         _cfg.PENDING_GOAL_CONTINUATION.add(session_id)
