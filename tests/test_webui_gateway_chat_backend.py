@@ -1884,7 +1884,7 @@ def test_gateway_chat_401_hint_reports_the_session_profile_key_not_the_process_k
     monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)     # the suite may set one; tests that need it set it themselves
     monkeypatch.setattr(
         gateway_chat, "_gateway_endpoint_for_profile",
-        lambda profile_name: ("http://gateway.local/p/coder", "coder-key"),
+        lambda profile_name: ("http://coder-gw.local", "coder-key"),   # a profile-owned Gateway, not a /p/ route
     )
     monkeypatch.setattr(streaming, "_load_webui_prefill_context", lambda cfg: {"status": "not_configured", "source": "none", "label": "", "message_count": 0, "messages": []})
     monkeypatch.setattr(streaming, "_prefill_messages_with_webui_context", lambda ctx, cfg: [])
@@ -1983,6 +1983,7 @@ def test_gateway_endpoint_keeps_the_shared_pair_for_a_profile_with_no_transport_
     import api.profiles as profiles
 
     _profile_homes(tmp_path, monkeypatch, {"beta": {"TERMINAL_CWD": "/work"}}, config_url=None)
+    monkeypatch.setattr(gateway_chat, "_is_named_profile", lambda name: False)  # shared-URL pair, no /p/ routing
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gw.local:8642")
     monkeypatch.setenv("API_SERVER_KEY", "shared-root-key")
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY"})
@@ -2054,6 +2055,9 @@ def _shared_gateway(monkeypatch, url="http://gw.local:8642", key="shared-root-ke
     if launcher_key:
         monkeypatch.setenv("HERMES_WEBUI_GATEWAY_API_KEY", launcher_key)
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY", "GW_ROUTE"})
+    # Key precedence on the SHARED URL itself; /p/<name> routing of URL-less named profiles is
+    # covered by tests/test_gateway_profile_endpoint.py.
+    monkeypatch.setattr(gateway_chat, "_is_named_profile", lambda name: False)
 
 
 def test_gateway_endpoint_a_profile_with_the_same_url_and_no_key_keeps_the_shared_key(tmp_path, monkeypatch):
@@ -2230,14 +2234,14 @@ def test_8432_a_url_from_the_named_process_profiles_config_is_not_shared(tmp_pat
 
 
 def test_8432_a_launcher_exported_url_stays_shared_under_a_named_process_profile(tmp_path, monkeypatch):
-    """The launcher exported the URL (not mirrored, no named launch home): a key-only profile keeps the shared URL
-    and sends the shared key, exactly what v0.52.492 sends (its API_SERVER_KEY is its own route's key)."""
+    """The launcher exported the URL (not mirrored, no named launch home): the URL is shared, so a URL-less named
+    profile is routed to /p/<name> with its own route key (#7877) and the process key stays out of it."""
     envs = {"default": {}, "alpha": {"HERMES_WEBUI_GATEWAY_API_KEY": "alpha-alias"}, "beta": {"API_SERVER_KEY": "beta-key"}}
     homes = _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
     _mirror_named_process_profile(monkeypatch, homes, envs)
     monkeypatch.setenv("HERMES_WEBUI_GATEWAY_BASE_URL", "http://gw.local:8642")
 
-    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642", "alpha-alias")
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local:8642/p/beta", "beta-key")
 
 
 def test_8432_a_url_a_shell_launcher_preloaded_from_a_named_profile_home_is_not_shared(tmp_path, monkeypatch):
@@ -2261,7 +2265,8 @@ def test_8432_nothing_configured_keeps_the_default_url_with_the_profiles_own_key
     homes = _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
     _mirror_named_process_profile(monkeypatch, homes, envs)
 
-    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://127.0.0.1:8642", "beta-key")
+    # Nothing configured anywhere is the shared default listener, so beta's turn is routed to its own prefix (#7877).
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://127.0.0.1:8642/p/beta", "beta-key")
 
 
 def test_8432_round_review_shapes_keep_masters_pairs(tmp_path, monkeypatch):
@@ -2332,7 +2337,7 @@ def test_8432_a_url_the_root_launch_home_preloaded_is_shared(tmp_path, monkeypat
     monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME", str(profiles.get_hermes_home_for_profile("")))
     monkeypatch.setattr(profiles, "_INITIAL_HERMES_HOME_DOTENV", {"HERMES_WEBUI_GATEWAY_BASE_URL": "http://gw.local/root"})
 
-    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/root", "alpha-local-key")
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://gw.local/root/p/beta", "beta-key")
 
 
 def _operator_config(tmp_path, monkeypatch, url):
@@ -2468,19 +2473,20 @@ def test_8432_an_operator_config_directly_in_the_profiles_container_is_shared(tm
 # ── The key follows the URL on the shared URL (Codex forward audit 492..539) ─────────────────────────────────────
 def test_shared_url_key_codex_case_named_process_default_url_sends_the_process_key(tmp_path, monkeypatch):
     """Named process profile alpha supplies API_SERVER_KEY, nobody configures a URL: the default loopback Gateway is
-    alpha's, so a key-only profile beta sends alpha's key there, exactly what v0.52.492 sends (beta's key was a 401)."""
+    shared, so a key-only profile beta goes to its own /p/beta route with its own key (#7877); alpha, the process
+    profile, keeps the unprefixed listener and its own key."""
     envs = {"default": {}, "alpha": {"API_SERVER_KEY": "alpha-gateway-key"}, "beta": {"API_SERVER_KEY": "beta-key"}}
     homes = _profile_homes(tmp_path, monkeypatch, envs, config_url=None)
     _mirror_named_process_profile(monkeypatch, homes, envs)
 
-    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://127.0.0.1:8642", "alpha-gateway-key")
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://127.0.0.1:8642/p/beta", "beta-key")
     assert gateway_chat._gateway_endpoint_for_profile("alpha") == ("http://127.0.0.1:8642", "alpha-gateway-key")
 
 
 def test_shared_url_key_root_process_multiplex_secondary_sends_the_root_key(tmp_path, monkeypatch):
     """Root process, a multiplexing Gateway whose secondaries keep API_SERVER_KEY in their .env (the key of their
-    /p/<profile> route): a secondary without its own URL reaches the default listener, which accepts only the default
-    profile's key. It sends the shared key, as v0.52.492 does."""
+    /p/<profile> route): a secondary without its own URL is routed to that route with that key (#7877), never the
+    root key, which the /p/<profile> route would reject."""
     import api.profiles as profiles
 
     _profile_homes(tmp_path, monkeypatch, {"default": {"API_SERVER_KEY": "root-key"},
@@ -2488,7 +2494,7 @@ def test_shared_url_key_root_process_multiplex_secondary_sends_the_root_key(tmp_
     monkeypatch.setenv("API_SERVER_KEY", "root-key")
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY"})
 
-    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://127.0.0.1:8642", "root-key")
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://127.0.0.1:8642/p/beta", "beta-route-key")
 
 
 def test_shared_url_key_a_profile_with_its_own_route_sends_its_own_key(tmp_path, monkeypatch):
@@ -2515,14 +2521,16 @@ def test_shared_url_key_an_explicit_webui_alias_still_wins_on_the_shared_url(tmp
     monkeypatch.setenv("API_SERVER_KEY", "root-key")
     monkeypatch.setattr(profiles, "_loaded_profile_env_keys", {"API_SERVER_KEY"})
 
-    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://127.0.0.1:8642", "beta-webui-alias")
+    # Shared-URL key precedence, so routing is off: with it on, the turn goes to /p/beta with the route key (#7877).
+    assert gateway_chat._gateway_endpoint_for_profile("beta", profile_routing=False) == ("http://127.0.0.1:8642", "beta-webui-alias")
 
 
 def test_shared_url_key_without_any_shared_key_a_profile_sends_its_own(tmp_path, monkeypatch):
-    """No shared key at all (v0.52.492 sent none): the profile's own API_SERVER_KEY is the only candidate."""
+    """No shared key at all (v0.52.492 sent none): the profile's own API_SERVER_KEY is the only candidate, and its
+    own /p/<name> route is where that key belongs (#7877)."""
     _profile_homes(tmp_path, monkeypatch, {"default": {}, "beta": {"API_SERVER_KEY": "beta-key"}}, config_url=None)
 
-    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://127.0.0.1:8642", "beta-key")
+    assert gateway_chat._gateway_endpoint_for_profile("beta") == ("http://127.0.0.1:8642/p/beta", "beta-key")
 
 
 def test_shared_url_key_a_legacy_session_under_a_named_process_sends_the_process_key(tmp_path, monkeypatch):
