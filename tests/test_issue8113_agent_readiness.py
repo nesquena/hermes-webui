@@ -685,6 +685,7 @@ def test_auto_install_rejects_a_stage_when_an_input_lstat_fails(tmp_path, monkey
         assert _agent_install_dir(mount.resolve()) == mount.resolve()
 
 
+@pytest.mark.skipif(not hasattr(os, "getuid"), reason="POSIX ownership and modes")
 def test_trusted_install_inputs_rejects_inputs_the_current_user_does_not_own(tmp_path, monkeypatch):
     """The ownership branch must be covered where a real chown is not permitted.
 
