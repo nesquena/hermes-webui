@@ -646,23 +646,33 @@ def get_config() -> dict:
     return _cfg_cache
 
 
+def _ambient_config_snapshot_locked() -> dict:
+    """Return a deep copy of the ambient cached config. Callers MUST hold ``_cfg_lock``.
+
+    Refreshes the cache in place if stale, then deep-copies under the lock so
+    a concurrent ``_refresh_config_cache`` (which clears and repopulates the
+    shared ``_cfg_cache`` object) can never tear the copy mid-flight.
+    """
+    config_path = _get_config_path()
+    try:
+        current_mtime = config_path.stat().st_mtime
+    except OSError:
+        current_mtime = 0.0
+    path_changed = _cfg_path != config_path
+    mtime_stale = current_mtime != _cfg_mtime
+    if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
+        _refresh_config_cache(config_path)
+    try:
+        active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
+    except NameError:
+        active_cfg = _cfg_cache
+    return copy.deepcopy(active_cfg)
+
+
 def get_config_snapshot() -> dict:
     """Return a request-owned config snapshot captured under the cache lock."""
     with _cfg_lock:
-        config_path = _get_config_path()
-        try:
-            current_mtime = config_path.stat().st_mtime
-        except OSError:
-            current_mtime = 0.0
-        path_changed = _cfg_path != config_path
-        mtime_stale = current_mtime != _cfg_mtime
-        if not _cfg_cache or path_changed or (mtime_stale and not _cfg_has_in_memory_overrides()):
-            _refresh_config_cache(config_path)
-        try:
-            active_cfg = cfg if cfg is not _cfg_cache else _cfg_cache
-        except NameError:
-            active_cfg = _cfg_cache
-        return copy.deepcopy(active_cfg)
+        return _ambient_config_snapshot_locked()
 
 
 def get_webui_session_save_mode(config_data: dict | None = None) -> str:
@@ -921,6 +931,52 @@ def get_config_for_profile_home(profile_home: "Path | str | None") -> dict:
     # Read the profile file directly and apply documented defaults locally so the
     # returned dict matches ambient get_config() shape (including built-in
     # personalities) without mutating any global cache state.
+    profile_cfg = _load_yaml_config_file(target / "config.yaml")
+    _apply_config_defaults(profile_cfg)
+    return profile_cfg
+
+
+def get_config_snapshot_for_profile_home(profile_home: "Path | str | None") -> dict:
+    """Return a request-owned config snapshot for an explicit profile home.
+
+    Same resolution as ``get_config_for_profile_home`` (ambient-home fast
+    path, divergent-home disk read, nonexistent home -> ``{}``, profiles-are-
+    islands), but every path that touches the shared cache deep-copies it
+    UNDER ``_cfg_lock``: ``_refresh_config_cache`` clears and repopulates the
+    shared ``_cfg_cache`` object in place, so copying outside the lock can
+    tear the object mid-copy when a concurrent profile reload fires (greptile
+    P1 on ``_gateway_session_owner_cfg``'s out-of-lock deepcopy). The
+    divergent-home read is a pure disk read with no shared mutation and
+    already returns a fresh dict, so it needs no lock — mirroring
+    ``get_config_for_profile_home``'s race-free slow path.
+    """
+    if not profile_home:
+        return get_config_snapshot()
+    try:
+        target = Path(profile_home).expanduser()
+    except Exception:
+        return get_config_snapshot()
+
+    from api.workspace import _safe_resolve as _cfg_safe_resolve
+
+    # Canonicalize both sides (same identity checks as
+    # ``get_config_for_profile_home``: a symlink-aliased home or an
+    # authoritative ``HERMES_CONFIG_PATH`` inside it must take the fast path).
+    target = _cfg_safe_resolve(target)
+    try:
+        from api.profiles import get_active_hermes_home
+
+        if _cfg_safe_resolve(Path(get_active_hermes_home()).expanduser()) == target:
+            return get_config_snapshot()
+    except Exception:
+        pass
+    try:
+        if _cfg_safe_resolve(_get_config_path().parent) == target:
+            return get_config_snapshot()
+    except Exception:
+        pass
+    if not target.exists():
+        return {}
     profile_cfg = _load_yaml_config_file(target / "config.yaml")
     _apply_config_defaults(profile_cfg)
     return profile_cfg

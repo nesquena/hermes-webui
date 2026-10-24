@@ -466,32 +466,28 @@ def _gateway_session_owner_cfg(session) -> dict:
     the session's own profile home at dispatch (issue #3294 pattern) gives
     the worker the same snapshot the in-process path uses.
 
-    The returned dict MUST be a deep copy: ``get_config_for_profile_home()``
-    has its own fast path that hands back the cached ``get_config()`` object
-    verbatim whenever the session's profile home equals the active home (the
-    common single-profile case). Without the copy, the worker would read a
-    live, shared, MUTABLE object — a later profile-A reload would clear and
+    The returned dict is a request-owned snapshot: it is deep-copied from the
+    shared cache UNDER the cache lock (``get_config_snapshot_for_profile_home``),
+    so a concurrent profile reload — which clears and repopulates the cached
+    object in place — can neither tear the copy mid-flight nor mutate it
+    afterwards. Without the lock-held copy, the worker would read a live,
+    shared, MUTABLE object — a later profile-A reload would clear and
     repopulate that very dict in place, so profile B's still-running worker
     could observe A's ``reasoning_overrides``, gateway URL, request options
     and prefill context. A request-owned snapshot removes that coupling: the
     worker keeps the view it was dispatched with, and reloads can no longer
-    mutate it underneath.
+    mutate it underneath (greptile P1: the copy used to run OUTSIDE
+    ``_cfg_lock``, so a concurrent reload could tear it mid-deepcopy).
     """
-    from api.config import get_config_for_profile_home  # imported lazily to avoid config-cycle churn
+    from api.config import get_config_snapshot_for_profile_home  # imported lazily to avoid config-cycle churn
     from api.models import _get_profile_home
 
-    resolved = get_config_for_profile_home(
+    resolved = get_config_snapshot_for_profile_home(
         _get_profile_home(getattr(session, "profile", None))
     )
     if not isinstance(resolved, dict):
         return {}
-    try:
-        return copy.deepcopy(resolved)
-    except Exception:
-        # A deep-copy failure must not take the dispatch down; return the
-        # best-effort copy we can make. Prefer a shallow copy so the worker at
-        # least stops sharing the top-level dict.
-        return dict(resolved)
+    return resolved
 
 
 def _gateway_session_api_key(session) -> str:

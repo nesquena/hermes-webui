@@ -28,6 +28,7 @@ snapshot.
 from collections import OrderedDict
 import json
 from pathlib import Path
+import threading
 
 import pytest
 import yaml
@@ -548,3 +549,83 @@ def test_dispatch_snapshot_is_isolated_for_divergent_profile_home(
     # A full ambient reload must not touch the dispatched snapshot.
     cfg.reload_config()
     assert session_cfg["agent"]["reasoning_overrides"][_MODEL] == "high"
+
+
+def test_snapshot_for_profile_home_is_decoupled_from_live_cache(
+    two_profiles, tmp_path, monkeypatch
+):
+    """``get_config_snapshot_for_profile_home`` must hand back a copy taken
+    under the cache lock — never the live, shared ``_cfg_cache`` object.
+
+    The greptile P1: ``_gateway_session_owner_cfg`` deep-copied the value
+    returned by ``get_config_for_profile_home`` OUTSIDE ``_cfg_lock``, while
+    ``_refresh_config_cache`` clears and repopulates that very object in
+    place under the lock — a concurrent reload could tear the copy
+    mid-flight (``dictionary changed size during iteration``).
+    """
+    cfg, profile_a_home, profile_b_home = two_profiles
+
+    # Profile B active ⇒ the ambient-home fast path returns the cached object.
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(profile_b_home / "config.yaml"))
+    cfg.reload_config()
+
+    import api.models as _models_mod
+
+    monkeypatch.setattr(
+        _models_mod, "_get_profile_home", lambda profile: profile_b_home
+    )
+
+    from api.config import get_config_snapshot_for_profile_home
+
+    snap = get_config_snapshot_for_profile_home(profile_b_home)
+    live = cfg.get_config()
+    assert snap is not live
+    assert snap.get("agent") is not live.get("agent")
+    assert (
+        snap.get("agent", {}).get("reasoning_overrides") is not
+        live.get("agent", {}).get("reasoning_overrides")
+    )
+    # A later in-place mutation of the live cache cannot reach the snapshot.
+    live["agent"]["reasoning_overrides"][_MODEL] = "none"
+    assert snap["agent"]["reasoning_overrides"][_MODEL] == "high"
+
+
+def test_snapshot_for_profile_home_survives_concurrent_reloads(
+    two_profiles, tmp_path, monkeypatch
+):
+    """Stress: a reload thread clearing/repopulating the shared cache must
+    not tear snapshots being taken concurrently (greptile P1 shape)."""
+    cfg, profile_a_home, profile_b_home = two_profiles
+
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(profile_b_home / "config.yaml"))
+    cfg.reload_config()
+
+    import api.models as _models_mod
+
+    monkeypatch.setattr(
+        _models_mod, "_get_profile_home", lambda profile: profile_b_home
+    )
+
+    from api.config import get_config_snapshot_for_profile_home
+
+    stop = threading.Event()
+    errors: list = []
+
+    def reloader():
+        try:
+            while not stop.is_set():
+                cfg.reload_config()
+        except Exception as exc:  # pragma: no cover - failure surfaces via errors
+            errors.append(exc)
+
+    reloader_thread = threading.Thread(target=reloader, daemon=True)
+    reloader_thread.start()
+    try:
+        for _ in range(300):
+            snap = get_config_snapshot_for_profile_home(profile_b_home)
+            assert isinstance(snap, dict)
+            assert snap["agent"]["reasoning_overrides"][_MODEL] == "high"
+    finally:
+        stop.set()
+        reloader_thread.join(timeout=10)
+    assert not errors, f"reload thread failed: {errors!r}"
