@@ -2884,22 +2884,796 @@ function _openMermaidLightbox(svgEl) {
   document.addEventListener('keydown', lb._keyHandler);
   return lb;
 }
+/* Mount pinch/pan/zoom gestures on an enlarged-image lightbox stage.
+ * Mirrors the Mermaid viewer's gesture architecture (see
+ * _mountMermaidViewer): Pointer Events drive single-finger drag/pan,
+ * Touch Events drive two-finger pinch-to-zoom, and the mouse wheel
+ * zooms anchored at the cursor. `touch-action: none` on the viewport
+ * is required so the browser never claims the touch sequence.
+ * state.pendingNav is set by _navigateLightbox to keep the zoom level
+ * while re-centring when switching to the next/previous image. */
+function _mountImgLightboxZoom(viewport, canvas, img, lb) {
+  const state = {
+    boxH: 0,
+    boxW: 0,
+    canvas,
+    dragOriginX: 0,
+    dragOriginY: 0,
+    dragPointerId: null,
+    dragStartX: 0,
+    dragStartY: 0,
+    dragged: false,
+    dragging: false,
+    fitScale: 1,
+    img,
+    navSrc: null,
+    pendingNav: false,
+    pinchCX: 0,
+    pinchCY: 0,
+    pinchDist: 0,
+    pinchIds: null,
+    pinchStartCX: 0,
+    pinchStartCY: 0,
+    pinchStartDist: 0,
+    pinchStartScale: 1,
+    pinchStartX: 0,
+    pinchStartY: 0,
+    pinching: false,
+    pointerX: 0,
+    pointerY: 0,
+    pressOnImage: false,
+    scale: 1,
+    // The pointerIds of the touch contacts currently down, in press order. The
+    // pointer events carry the id, the touch events do not, and the pan has to
+    // be re-armed from the contact still down when a pinch ends (see
+    // _imgArmDragFromRemainingTouch), so the two streams are tied together
+    // here (greptile P2 on 6f462d82, 2026-10-16T01:39:15Z, static/ui.js:3235).
+    touchPointerIds: [],
+    viewport,
+    x: 0,
+    y: 0,
+  };
+
+  function _imgViewportSize() {
+    const rect = viewport.getBoundingClientRect ? viewport.getBoundingClientRect() : null;
+    return {
+      width: Math.max(1, (rect && rect.width) || viewport.clientWidth || 1),
+      height: Math.max(1, (rect && rect.height) || viewport.clientHeight || 1),
+    };
+  }
+
+  function _imgClampPan() {
+    // Keep the transformed canvas inside the clipped viewport: an axis
+    // whose scaled size fits inside the stage gets centered, an overflow
+    // axis is clamped so the image can never be dragged wholly out of
+    // view (no reset path existed before — closing and reopening the
+    // lightbox was the only recovery). Called from _imgApplyTransform so
+    // every pan/pinch/wheel/resize/nav path is covered.
+    const size = _imgViewportSize();
+    const scaledW = state.boxW * state.scale;
+    const scaledH = state.boxH * state.scale;
+    if(scaledW <= size.width){
+      state.x = (size.width - scaledW) / 2;
+    } else {
+      state.x = Math.max(size.width - scaledW, Math.min(0, state.x));
+    }
+    if(scaledH <= size.height){
+      state.y = (size.height - scaledH) / 2;
+    } else {
+      state.y = Math.max(size.height - scaledH, Math.min(0, state.y));
+    }
+  }
+
+  function _imgApplyTransform() {
+    _imgClampPan();
+    canvas.style.transform = 'translate(' + Math.round(state.x) + 'px,' + Math.round(state.y) + 'px) scale(' + state.scale + ')';
+    canvas.style.transformOrigin = '0 0';
+  }
+
+  function _imgMinScale() {
+    return Math.min(0.25, state.fitScale);
+  }
+
+  function _imgFitScale() {
+    const size = _imgViewportSize();
+    // Cap at 1 to preserve the pre-PR no-upscale behavior
+    // (img{max-width:90vw;max-height:90vh;object-fit:contain} constrained
+    // oversized images but left small ones at intrinsic size). An unbounded
+    // ratio on a tiny image (e.g. 50px in a 900px viewport -> 18) would
+    // exceed the 8x zoom max, so the first wheel gesture would snap from 18
+    // to 8 instead of zooming smoothly. state.fitScale stores this bounded
+    // value because _imgMinScale() and the at-fit resize comparison depend
+    // on it.
+    return Math.min(1, size.width / state.boxW, size.height / state.boxH);
+  }
+
+  function _imgSetScale(nextScale, anchorX, anchorY) {
+    const bounded = Math.max(_imgMinScale(), Math.min(8, nextScale));
+    if(!Number.isFinite(bounded) || !state.boxW || !state.boxH) return;
+    const size = _imgViewportSize();
+    const focusX = Number.isFinite(anchorX) ? anchorX : size.width / 2;
+    const focusY = Number.isFinite(anchorY) ? anchorY : size.height / 2;
+    if(state.scale){
+      const ratio = bounded / state.scale;
+      state.x = focusX - (focusX - state.x) * ratio;
+      state.y = focusY - (focusY - state.y) * ratio;
+    }
+    state.scale = bounded;
+    _imgApplyTransform();
+  }
+
+  function _fit() {
+    // A fresh fit owns the geometry, so an in-flight gesture must not be able
+    // to write over it: a pinch or pan that began while the image was still
+    // decoding held a baseline from before the fit existed, and its next
+    // update scaled the just-fitted frame with it — a 4000×3000 image jumped
+    // from the fitted 351px width to 4080px on an iPhone, Fit was undone by
+    // the next finger movement, and a resize restored stale gesture positions
+    // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:2795). Cancel
+    // before measuring so the fit wins.
+    _imgCancelGesture();
+    const size = _imgViewportSize();
+    if(!state.boxW || !state.boxH) return;
+    const fitScale = _imgFitScale();
+    state.fitScale = fitScale;
+    state.scale = fitScale;
+    state.x = (size.width - state.boxW * fitScale) / 2;
+    state.y = (size.height - state.boxH * fitScale) / 2;
+    _imgApplyTransform();
+  }
+
+  function _centerPan() {
+    const size = _imgViewportSize();
+    state.x = (size.width - state.boxW * state.scale) / 2;
+    state.y = (size.height - state.boxH * state.scale) / 2;
+    _imgApplyTransform();
+  }
+
+  // The source + natural size of the frame whose geometry is already
+  // initialized. A cached image is decoded synchronously at mount
+  // (`img.complete`), yet the browser still dispatches its `load` event
+  // afterwards; that duplicate re-ran this initializer (through `_fit()`) after
+  // a navigation had already consumed `pendingNav`, silently dropping the
+  // user's zoom (trusted-Chromium reproduction: 1.7578125 → 0.9 — re-gate
+  // 2026-10-08T19:21:38Z, static/ui.js:3049 vs :2774). The pair is cleared by
+  // `_imgOnError()` so a failed image never looks "already initialized".
+  let _imgInitSrc = null;
+  let _imgInitW = 0;
+  let _imgInitH = 0;
+
+  function _onImgLoad() {
+    const nw = img.naturalWidth || img.width || 0;
+    const nh = img.naturalHeight || img.height || 0;
+    const src = img.currentSrc || img.src || '';
+    // Idempotent for an already initialized frame: a duplicate `load` for the
+    // SAME source and natural size, with no navigation pending, must not
+    // re-initialize (that re-fit is the zoom reset above). A pending navigation
+    // always initializes — that is the new image's geometry — and so does any
+    // change of source or natural size.
+    if(!state.pendingNav && _imgInitSrc === src && _imgInitW === nw && _imgInitH === nh){
+      return;
+    }
+    // A navigation is armed. The source the navigation asked for is recorded
+    // in `navSrc` by _navigateLightbox, so a load event for any OTHER source is
+    // the previous image's late `load` (it cannot be the frame that navigation
+    // asked for — the src swap reports its own source) and must not consume the
+    // flag. Comparing sources alone misread a navigation between two entries
+    // that SHARE a source as that duplicate, so the navigation's own load
+    // skipped init and recentring and the previous off-centre position was kept
+    // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:2843). With no
+    // recorded source (a directly armed flag) the duplicate test still applies.
+    if(state.pendingNav){
+      if(state.navSrc){
+        if(_imgSrcKey(src) !== state.navSrc) return;
+      } else if(src && _imgInitSrc === src && _imgInitW === nw && _imgInitH === nh){
+        return;
+      }
+    }
+    _imgInitSrc = src;
+    _imgInitW = nw;
+    _imgInitH = nh;
+    state.boxW = nw || 800;
+    state.boxH = nh || 450;
+    canvas.style.width = state.boxW + 'px';
+    canvas.style.height = state.boxH + 'px';
+    if(state.pendingNav){
+      state.pendingNav = false;
+      // The navigation this flag was armed for has now initialized its frame;
+      // drop the recorded source so it cannot classify a later load.
+      state.navSrc = null;
+      // The new image has its own fit baseline. Navigation keeps the user's
+      // zoom level, but a stale fitScale from the previous image would skew
+      // _imgMinScale() (zoom-out clamp) and the at-fit resize comparison:
+      // e.g. a small first image (fit 1.0) followed by a huge one (fit 0.1)
+      // would clamp zoom-out at 0.25 and make the real fit unreachable.
+      // Recompute only the baseline and re-clamp the kept scale to the new
+      // image's constraints.
+      //
+      // Fit is carried over, not the raw scale. If the previous image was at
+      // its fit (no user zoom), the new image must open at ITS OWN fit too —
+      // keeping the numeric scale crops a large image or shrinks a small one
+      // (reviewer re-gate 2026-10-08T23:18:39Z, static/ui.js:2800: 100×100 at
+      // fit 1 → 4000×3000 kept scale 1 and cropped; the reverse shrank the
+      // small image to ~25 px). A genuine user zoom (scale != fit) is still
+      // retained, bounded to the new image's constraints.
+      const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;
+      state.fitScale = _imgFitScale();
+      state.scale = wasAtFit
+        ? state.fitScale
+        : Math.max(_imgMinScale(), Math.min(8, state.scale));
+      _centerPan();
+      // A press that began while the new image was still loading recorded its
+      // baseline against the previous geometry, so its first move would undo
+      // the re-centre above. The image change also cancels the gesture (see
+      // _imgCancelGesture).
+      _imgCancelGesture();
+    } else {
+      _fit();
+    }
+  }
+
+  // A pan belongs to the pointer that started it. A second pointer pressing
+  // the stage mid-gesture must neither re-anchor the drag (that teleports the
+  // image to the new pointer) nor end it by releasing, and only the owning
+  // pointer's move/release may drive the pan — the same guard the sidebar
+  // resize handle carries (greptile review of #6896, 2026-10-05).
+  function _imgOwnsDrag(e) {
+    if(!e || e.pointerId == null) return true;
+    return state.dragPointerId == null || e.pointerId === state.dragPointerId;
+  }
+
+  function _imgOnError() {
+    // A failed load (navigating to a broken/missing image) must not leave the
+    // previous image's stage behind: only _onImgLoad used to clear pendingNav
+    // and refresh the canvas geometry, so the broken image inherited the old
+    // boxW/boxH, the old zoom baseline and the armed one-shot nav flag until
+    // some later image happened to load (greptile review of #6896,
+    // 2026-10-05).
+    //
+    // state.scale is deliberately NOT reset: keeping the user's zoom level
+    // across a navigation is this feature's stated contract, so a broken image
+    // in the middle of a sequence must not silently drop it. The next
+    // navigation re-arms pendingNav and the next successful load re-centres at
+    // the preserved scale (greptile follow-up, 2026-10-05).
+    //
+    // fitScale is deliberately left ALONE here. It holds the PREVIOUS image's
+    // fit baseline, and the next load compares |scale - fitScale| < 1e-9 to
+    // decide whether the new image opens at ITS own fit. Overwriting it in the
+    // error path misreads the user's zoom either way: a constant 1 made an
+    // image that WAS at fit (fitScale != 1) look user-zoomed and open cropped
+    // or undersized (greptile P1, 2026-10-08T23:43:03Z), while writing
+    // state.scale classified a deliberate zoom that happens to sit at exactly 1
+    // as "at fit", so the next image threw that zoom away and opened at its own
+    // fit (maintainer re-gate 2026-10-09T00:47:03Z, static/ui.js:2861). With no
+    // geometry (boxW=0) no scale math runs anyway: _fit() and _imgSetScale()
+    // bail out on the missing box.
+    state.pendingNav = false;
+    state.navSrc = null;
+    // A failed load cancels any gesture that is still in flight: the stage
+    // geometry is dropped below, so a pan or pinch baseline measured against it
+    // must not be re-applied to whatever loads next (maintainer re-gate
+    // 2026-10-15T17:54:15Z, static/ui.js:2795).
+    _imgCancelGesture();
+    state.dragging = false;
+    state.dragPointerId = null;
+    state.boxW = 0;
+    state.boxH = 0;
+    state.x = 0;
+    state.y = 0;
+    // Drop the "already initialized" tracking: a failed image has no usable
+    // geometry, so a later load of the very same source must initialize for
+    // real instead of being skipped as a duplicate (re-gate
+    // 2026-10-08T19:21:38Z).
+    _imgInitSrc = null;
+    _imgInitW = 0;
+    _imgInitH = 0;
+    canvas.style.width = '';
+    canvas.style.height = '';
+    canvas.style.transform = '';
+    viewport.classList.remove('is-panning');
+  }
+
+  // Whether a viewport point lands on the transformed canvas — i.e. on the
+  // image's own pixels rather than the letterboxed stage around it. Needed
+  // because pointer capture retargets the trusted click produced by a real
+  // mouse press on image pixels to the viewport (mouseup is captured, so the
+  // click's target is the closest common ancestor, the viewport), which made
+  // `e.target === viewport` also match a click on the image and dismissed the
+  // dialog (maintainer gate recheck of #6896, 2026-10-06).
+  function _imgPointOnCanvas(x, y) {
+    if(!Number.isFinite(x) || !Number.isFinite(y)) return false;
+    if(!canvas || typeof canvas.getBoundingClientRect !== 'function') return false;
+    const r = canvas.getBoundingClientRect();
+    if(!(r.width > 0) || !(r.height > 0)) return false;
+    return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom;
+  }
+
+  function _imgOnPointerDown(e) {
+    if(e.pointerType === 'touch' && e.pointerId != null) _imgTrackTouchPointer(e.pointerId, true);
+    if(state.pinching) return;
+    if(e.button != null && e.button !== 0) return;
+    if(state.dragging) return;
+    // Record where the press landed BEFORE pointer capture is taken, and only
+    // for the press that actually owns the gesture (the guards above refuse a
+    // second pointer): a refused press must not re-classify the active
+    // gesture, or the owning pointer's click would be judged by a foreign
+    // press and a legitimate letterbox dismissal would be blocked (greptile
+    // review of #6896, 2026-10-05). e.target here is still the real hit
+    // element, and the geometric hit-test covers browsers that do not
+    // retarget the follow-up click to the viewport.
+    state.pressOnImage = !!((e.target && e.target !== viewport) ||
+      _imgPointOnCanvas(Number(e.clientX), Number(e.clientY)));
+    state.dragging = true;
+    state.dragged = false;
+    state.dragOriginX = Number(e.clientX) || 0;
+    state.dragOriginY = Number(e.clientY) || 0;
+    // The owning pointer's current position is remembered so a wheel zoom can
+    // rebase this drag's baseline (see _imgRebaseDrag).
+    state.pointerX = state.dragOriginX;
+    state.pointerY = state.dragOriginY;
+    state.dragPointerId = e.pointerId != null ? e.pointerId : null;
+    state.dragStartX = state.x;
+    state.dragStartY = state.y;
+    viewport.classList.add('is-panning');
+    if(viewport.setPointerCapture){
+      try{ viewport.setPointerCapture(e.pointerId); }catch(_){}
+    }
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _imgOnPointerMove(e) {
+    if(state.pinching || !state.dragging) return;
+    if(!_imgOwnsDrag(e)) return;
+    const px = Number(e.clientX) || 0;
+    const py = Number(e.clientY) || 0;
+    // Only the owning pointer's position counts (the guards above refuse any
+    // other pointer), and a wheel zoom reads it to rebase the drag baseline.
+    state.pointerX = px;
+    state.pointerY = py;
+    const dx = px - state.dragOriginX;
+    const dy = py - state.dragOriginY;
+    if(Math.abs(dx) + Math.abs(dy) > 3) state.dragged = true;
+    state.x = state.dragStartX + dx;
+    state.y = state.dragStartY + dy;
+    _imgApplyTransform();
+    // _imgApplyTransform() clamped the pan to the stage. The baseline must
+    // follow the CLAMPED position: leaving the clamped-away overshoot inside
+    // dx made a drag that was reversed after overshooting an edge do nothing
+    // until the overshoot was retraced (maintainer re-gate 2026-10-15T17:54:15Z,
+    // static/ui.js:2993). Identity when the clamp did not bite.
+    state.dragStartX = state.x - dx;
+    state.dragStartY = state.y - dy;
+  }
+
+  function _imgEndPointerDrag(e) {
+    // A touch contact that ends (up / cancel) leaves the tracked set before the
+    // guards below: this handler early-returns whenever the pinch already
+    // cleared `dragging`, so a lost id would leave the set stale (see
+    // _imgTrackTouchPointer).
+    if(e && e.pointerType === 'touch' && e.pointerId != null) _imgTrackTouchPointer(e.pointerId, false);
+    if(!state.dragging) return;
+    // A non-owning pointer's release (or leave/cancel) must not kill the
+    // active pan while its owner is still down.
+    if(e && e.pointerId != null && !_imgOwnsDrag(e)) return;
+    state.dragging = false;
+    if(state.dragPointerId != null && viewport.releasePointerCapture){
+      try{ viewport.releasePointerCapture(state.dragPointerId); }catch(_){}
+    }
+    state.dragPointerId = null;
+    viewport.classList.remove('is-panning');
+    // Chromium withholds the synthesized click of a touch tap that lands in
+    // its post-fling tap-suppression window on a touch-action:none surface,
+    // so a clean letterbox tap right after a flick-pan never reached
+    // _onViewportClick and the dialog stayed open (release gate of #6896,
+    // 2026-10-08: first tap swallowed 4/4, master closed 6/6). Dismiss from
+    // the pointer sequence itself; marking dragged suppresses the click the
+    // browser does synthesize so the close never runs twice.
+    if(e && e.type === 'pointerup' && e.pointerType === 'touch' && !state.dragged && !state.pressOnImage &&
+       !_imgPointOnCanvas(Number(e.clientX), Number(e.clientY))){
+      state.dragged = true;
+      _closeImgLightbox(lb);
+    }
+  }
+
+  // A navigation swaps the image under an in-flight pan. The old gesture's
+  // recorded baseline (dragOrigin/dragStartX/Y) belongs to the previous
+  // image's coordinate space, so the first pointermove after the new image
+  // loads would re-apply it and teleport the freshly-centred image
+  // (maintainer re-warmup of #6896, 2026-10-06: press on the image, 1px move,
+  // ArrowRight, then a 5px move threw the new image 83px up). Changing the
+  // image therefore cancels the owned gesture; the user's zoom level is NOT
+  // touched — the pendingNav re-centre in _onImgLoad keeps it.
+  //
+  // Unlike an ordinary drag end this deliberately KEEPS the pointer capture
+  // (no releasePointerCapture): the browser releases the capture implicitly
+  // when the pointer goes up, and until then the capture keeps a held-button
+  // release retargeted to the viewport, so the follow-up click is still judged
+  // by the recorded press origin. Releasing it here sent a release outside the
+  // viewport straight to the backdrop and dismissed the dialog, bypassing the
+  // drag/click guard (greptile review of #6896, 2026-10-06).
+  function _imgCancelGesture() {
+    // A two-finger pinch keeps pinching/pinchStart* alive and only clears
+    // dragging (_imgOnTouchStart calls _imgEndPointerDrag), so the drag-only
+    // early return below used to let an in-flight zoom outlive a navigation.
+    // The next _imgOnTouchMove then applied the previous image's pinchStart
+    // baselines to the freshly-centred new image (maintainer review of #6896,
+    // 2026-10-06: two fingers down, ArrowRight, spread -> 544px jump).
+    // Clearing pinching makes _imgOnTouchMove a no-op until a fresh two-finger
+    // start re-anchors every pinchStart*; the selected zoom is left intact.
+    state.pinching = false;
+    state.pinchIds = null;
+    if(!state.dragging) return;
+    state.dragging = false;
+    state.dragPointerId = null;
+    viewport.classList.remove('is-panning');
+  }
+
+  function _onViewportClick(e) {
+    const wasDragged = state.dragged;
+    const pressOnImage = state.pressOnImage;
+    state.dragged = false;
+    state.pressOnImage = false;
+    // Suppress the browser's post-drag click (pointerdown+up on the same
+    // element closes the lightbox right after a pan) and clicks on the
+    // transformed canvas (image pixels). An undragged click on the
+    // viewport's own letterboxed area must bubble to the lightbox backdrop
+    // handler so clicking empty space around a fitted image still closes
+    // the dialog — clicks on visible pixels target the img/canvas while
+    // letterboxed clicks target the viewport (the img keeps pointer events so
+    // the native image context menu still works).
+    //
+    // The click's target alone cannot decide that: the pointer capture taken
+    // in _imgOnPointerDown retargets the click of a real mouse press on image
+    // pixels to the viewport, so `e.target === viewport` also matched clicks
+    // on the image and the dialog dismissed itself (maintainer gate recheck of
+    // #6896, 2026-10-06). Fall back to the recorded press origin and to a
+    // hit-test of the click point against the transformed canvas.
+    const onImage = pressOnImage ||
+      (e.target && e.target !== viewport) ||
+      _imgPointOnCanvas(Number(e.clientX), Number(e.clientY));
+    if(wasDragged || onImage){
+      if(e.stopPropagation) e.stopPropagation();
+    }
+  }
+
+  function _imgTouchDist(touches) {
+    if(!touches || touches.length < 2) return 0;
+    const dx = touches[0].clientX - touches[1].clientX;
+    const dy = touches[0].clientY - touches[1].clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  // Identifiers of the two contacts a pinch baseline belongs to. A pinch is a
+  // relationship between two specific fingers, so a baseline anchored on one
+  // pair is meaningless for another: replacing a finger of an active pinch (or
+  // lifting one of three) used to keep the stale baseline, and the next move
+  // rescaled and repositioned the image — an iPhone pinch dropped from 0.1638
+  // to 0.1260 after a 1px move (maintainer re-gate 2026-10-15T17:54:15Z,
+  // static/ui.js:3088).
+  function _imgPinchPair(touches) {
+    if(!touches || touches.length < 2) return null;
+    return [touches[0].identifier, touches[1].identifier];
+  }
+
+  function _imgSamePinchPair(touches) {
+    const pair = _imgPinchPair(touches);
+    const prev = state.pinchIds;
+    return !!(pair && prev && pair[0] === prev[0] && pair[1] === prev[1]);
+  }
+
+  // Anchor (or re-anchor) the pinch baseline on the pair of contacts currently
+  // under the fingers, so the ratio and the midpoint are always measured
+  // against the fingers that are down now.
+  function _imgAnchorPinch(touches) {
+    state.pinchIds = _imgPinchPair(touches);
+    state.pinchStartDist = _imgTouchDist(touches);
+    state.pinchStartScale = state.scale;
+    state.pinchStartX = state.x;
+    state.pinchStartY = state.y;
+    const rect = viewport.getBoundingClientRect();
+    state.pinchStartCX = (touches[0].clientX + touches[1].clientX) / 2 - (rect.left || 0);
+    state.pinchStartCY = (touches[0].clientY + touches[1].clientY) / 2 - (rect.top || 0);
+    // The geometry the contacts have RIGHT NOW, which is what a keyboard zoom
+    // re-anchors onto (see _imgRebasePinch).
+    state.pinchCX = state.pinchStartCX;
+    state.pinchCY = state.pinchStartCY;
+    state.pinchDist = state.pinchStartDist;
+  }
+
+  function _imgOnTouchStart(e) {
+    // Without dimensions there is nothing to zoom: a baseline recorded before
+    // the image decoded would be applied to a frame of unknown size and the fit
+    // that follows would be overwritten by the next touch update (maintainer
+    // re-gate 2026-10-15T17:54:15Z, static/ui.js:2795).
+    if(!state.boxW || !state.boxH) return;
+    if(e.touches.length === 2){
+      // A fresh pinch always anchors (pinchIds is cleared as the pinch ends);
+      // a touchstart that lands on an already-active pinch re-anchors whenever
+      // the pair under the fingers changed.
+      const keepsPair = state.pinching && _imgSamePinchPair(e.touches);
+      state.pinching = true;
+      if(!keepsPair) _imgAnchorPinch(e.touches);
+      _imgEndPointerDrag();
+      if(e.preventDefault) e.preventDefault();
+    }
+  }
+
+  function _imgOnTouchMove(e) {
+    if(!state.pinching || e.touches.length < 2) return;
+    if(!state.boxW || !state.boxH) return;
+    // The pair under the fingers can change without a touchstart (one finger of
+    // three is lifted, a finger is replaced): re-anchor before the ratio math
+    // so a stale baseline cannot resize or reposition the image.
+    if(!_imgSamePinchPair(e.touches)) _imgAnchorPinch(e.touches);
+    const rect = viewport.getBoundingClientRect();
+    const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - (rect.left || 0);
+    const cy = (e.touches[0].clientY + e.touches[1].clientY) / 2 - (rect.top || 0);
+    const currDist = _imgTouchDist(e.touches);
+    state.pinchCX = cx;
+    state.pinchCY = cy;
+    state.pinchDist = currDist;
+    if(state.pinchStartDist > 0 && state.pinchStartScale > 0){
+      const rawScale = state.pinchStartScale * (currDist / state.pinchStartDist);
+      const boundedScale = Math.max(_imgMinScale(), Math.min(8, rawScale));
+      const ratio = boundedScale / state.pinchStartScale;
+      state.scale = boundedScale;
+      state.x = cx - (state.pinchStartCX - state.pinchStartX) * ratio;
+      state.y = cy - (state.pinchStartCY - state.pinchStartY) * ratio;
+      _imgApplyTransform();
+      // Re-anchor the WHOLE pinch baseline onto the frame just produced (the
+      // state.pinchC*/pinchDist set above), exactly as a fresh two-finger start
+      // does. Two reasons: leaving the clamped-away overshoot inside the
+      // baseline made a gesture reversed after overshooting an edge wait until
+      // the overshoot was retraced (greptile P2, 2026-10-15T23:15:55Z,
+      // static/ui.js:3213), and moving only the positional half (x/y) left the
+      // pair (pinchStartCX, pinchStartX) inconsistent with the scale baseline,
+      // so a later spread dragged the image ~700px away from the fingers
+      // (greptile P1, 2026-10-15T23:28:11Z, static/ui.js:3222; measured in
+      // gate1015_pinch_spread_is_path_independent). The anchored-zoom form is
+      // x = cx - (pinchStartCX - pinchStartX) * ratio, so the pair has to be
+      // re-anchored together on the current midpoint.
+      _imgRebasePinch();
+    }
+    if(e.preventDefault) e.preventDefault();
+  }
+
+  function _imgOnTouchEnd(e) {
+    if(e.touches.length < 2 && state.pinching){
+      state.pinching = false;
+      state.pinchIds = null;
+      state.dragged = true;
+      // Lifting one finger of a pinch must leave the contact still down able to
+      // pan, as it can on master: the pinch ended the pointer drag
+      // (_imgOnTouchStart calls _imgEndPointerDrag) and the remaining contact
+      // gets no new pointerdown, so every pointermove of it was dropped until
+      // the user lifted and pressed again (greptile P2 on 6f462d82,
+      // 2026-10-16T01:39:15Z, static/ui.js:3235). Re-arm the pan from the
+      // contact that is still there, anchored on its CURRENT geometry so the
+      // first move continues from the frame the pinch produced instead of
+      // jumping to a stale origin.
+      _imgArmDragFromRemainingTouch(e.touches);
+    }
+  }
+
+  // The touch stream carries no pointer id, so the contacts that are down are
+  // tracked from the pointer events (`down` starts a contact, otherwise it
+  // ended). Only touch pointers are tracked: a mouse press is not part of a
+  // pinch and must not be resurrected as one. Idempotent, so the duplicate
+  // pointerup/pointerleave a touch release delivers is harmless.
+  function _imgTrackTouchPointer(pointerId, down) {
+    if(!Array.isArray(state.touchPointerIds)) state.touchPointerIds = [];
+    const at = state.touchPointerIds.indexOf(pointerId);
+    if(down){
+      if(at === -1) state.touchPointerIds.push(pointerId);
+    } else if(at !== -1){
+      state.touchPointerIds.splice(at, 1);
+    }
+  }
+
+  function _imgArmDragFromRemainingTouch(touches) {
+    if(!touches || touches.length !== 1) return;
+    // A drag that survived the pinch keeps its own baseline.
+    if(state.dragging) return;
+    const contact = touches[0];
+    const ids = Array.isArray(state.touchPointerIds) ? state.touchPointerIds : [];
+    state.dragging = true;
+    // Exactly one tracked contact is expected here (the lifted one has already
+    // reported its pointerup). With anything else the drag stays ownerless
+    // rather than being handed to a pointer that may be gone; _imgOwnsDrag
+    // accepts any pointer while dragPointerId is null, and a second contact
+    // can only arrive through a touchstart, which ends this drag again.
+    state.dragPointerId = ids.length === 1 ? ids[0] : null;
+    state.dragOriginX = Number(contact.clientX) || 0;
+    state.dragOriginY = Number(contact.clientY) || 0;
+    state.pointerX = state.dragOriginX;
+    state.pointerY = state.dragOriginY;
+    state.dragStartX = state.x;
+    state.dragStartY = state.y;
+    // `dragged` stays true (set by the pinch) so the tap-dismiss guards keep
+    // treating this sequence as a gesture rather than a letterbox tap, and
+    // `pressOnImage` keeps the value of the press that started it.
+    viewport.classList.add('is-panning');
+    if(state.dragPointerId != null && viewport.setPointerCapture){
+      try{ viewport.setPointerCapture(state.dragPointerId); }catch(_){}
+    }
+  }
+
+  // Rebase the active pan's baseline onto the geometry the wheel just produced.
+  // A wheel zoom moves the image while the drag's baseline
+  // (dragOrigin / dragStartX/Y) still describes the pre-zoom position, so the
+  // next pointermove re-applied the entire accumulated displacement at the new
+  // scale and the image snapped — a 1px move moved 674px on desktop
+  // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:3134). Moving the
+  // baseline to the new position minus the owning pointer's displacement keeps
+  // the pan continuous.
+  function _imgRebaseDrag() {
+    if(!state.dragging) return;
+    if(!Number.isFinite(state.pointerX) || !Number.isFinite(state.pointerY)) return;
+    state.dragStartX = state.x - (state.pointerX - state.dragOriginX);
+    state.dragStartY = state.y - (state.pointerY - state.dragOriginY);
+  }
+
+  // The keyboard zoom (`state.zoomBy`) can land while a pinch is in flight, and
+  // a pinch holds its own baselines (pinchStartScale / pinchStartX,Y and the
+  // anchor midpoint). Refreshing only the pan left them measured against the
+  // pre-zoom geometry, so the next touchmove rescaled from the OLD scale and
+  // undid the keyboard zoom, and re-applied the old midpoint (greptile P2 on
+  // 860c0e85, 2026-10-15T19:09:46Z, static/ui.js:3293). Re-anchor on the
+  // contacts that are down now - exactly what a fresh two-finger start does - so
+  // the ongoing pinch continues from the new scale instead of reverting it.
+  function _imgRebasePinch() {
+    if(!state.pinching) return;
+    if(!(state.pinchDist > 0)) return;
+    if(!Number.isFinite(state.pinchCX) || !Number.isFinite(state.pinchCY)) return;
+    state.pinchStartScale = state.scale;
+    state.pinchStartX = state.x;
+    state.pinchStartY = state.y;
+    state.pinchStartDist = state.pinchDist;
+    state.pinchStartCX = state.pinchCX;
+    state.pinchStartCY = state.pinchCY;
+  }
+
+  function _imgZoomFromWheel(e) {
+    if(e.preventDefault) e.preventDefault();
+    const rect = viewport.getBoundingClientRect();
+    const anchorX = Number.isFinite(e.clientX) ? e.clientX - rect.left : undefined;
+    const anchorY = Number.isFinite(e.clientY) ? e.clientY - rect.top : undefined;
+    // Normalize the delta's units before scaling them. deltaMode 1 (lines) and
+    // 2 (pages) report a delta of a few units, not pixels, so treating them as
+    // pixels made a three-line tick zoom by 0.45%; the Mermaid viewer already
+    // normalizes with these 30/600 multipliers (maintainer re-gate
+    // 2026-10-15T17:54:15Z, static/ui.js:3133).
+    const deltaMode = Number(e.deltaMode) || 0;
+    const lineScale = deltaMode === 1 ? 30 : deltaMode === 2 ? 600 : 1;
+    const factor = Math.exp((-(Number(e.deltaY) || 0)) * lineScale * 0.0015);
+    _imgSetScale(state.scale * factor, anchorX, anchorY);
+    _imgRebaseDrag();
+    // A wheel tick under two held contacts is the same hazard as a keyboard
+    // zoom: it moves the image but the pinch keeps its own baselines (see
+    // _imgRebasePinch), so the next touchmove rescaled from the OLD scale and
+    // undid the wheel zoom (greptile P2 on the merge-only head 25684d89,
+    // 2026-10-15T22:36:41Z, static/ui.js:3275). Re-anchor the pinch too.
+    _imgRebasePinch();
+  }
+
+  function _onResize() {
+    if(lb._imgZoomResizeTimer && typeof clearTimeout === 'function') clearTimeout(lb._imgZoomResizeTimer);
+    lb._imgZoomResizeTimer = setTimeout(() => {
+      lb._imgZoomResizeTimer = null;
+      // A resize invalidates every gesture baseline (they were measured against
+      // the old viewport size), so it ends the gesture rather than restoring a
+      // stale position on the next move (maintainer re-gate
+      // 2026-10-15T17:54:15Z, static/ui.js:2795).
+      _imgCancelGesture();
+      const wasAtFit = Math.abs(state.scale - state.fitScale) < 1e-9;
+      if(wasAtFit || !state.boxW){
+        _fit();
+      } else {
+        // The fit baseline belongs to the NEW viewport too: keeping the old one
+        // left an obsolete zoom-out limit, so a preview resized from desktop to
+        // an iPhone could not zoom out past 0.25 while its new fit was 0.08775
+        // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:3145).
+        // Recompute the baseline and re-clamp the CHOSEN scale to it.
+        state.fitScale = _imgFitScale();
+        state.scale = Math.max(_imgMinScale(), Math.min(8, state.scale));
+        _centerPan();
+      }
+    }, 120);
+  }
+
+  viewport.onpointerdown = _imgOnPointerDown;
+  viewport.onpointermove = _imgOnPointerMove;
+  viewport.onpointerup = _imgEndPointerDrag;
+  viewport.onpointercancel = _imgEndPointerDrag;
+  viewport.onpointerleave = _imgEndPointerDrag;
+  viewport.onwheel = _imgZoomFromWheel;
+  viewport.onclick = _onViewportClick;
+  viewport.addEventListener('touchstart', _imgOnTouchStart, {passive: false});
+  viewport.addEventListener('touchmove', _imgOnTouchMove, {passive: false});
+  viewport.addEventListener('touchend', _imgOnTouchEnd);
+  viewport.addEventListener('touchcancel', function _imgOnTouchCancel(){ state.pinching = false; });
+
+  if(window && typeof window.addEventListener === 'function'){
+    window.addEventListener('resize', _onResize);
+    lb._imgZoomResizeHandler = _onResize;
+  }
+
+  // Expose keyboard-operable fit/zoom so the lightbox is not pointer-only.
+  state.fit = _fit;
+  state.zoomBy = function(factor){
+    _imgSetScale(state.scale * factor);
+    // A keyboard zoom is a zoom like the wheel's: whatever gesture is in flight
+    // keeps its baseline measured against the geometry it produced, so the next
+    // pointermove/touchmove must not snap the image back (greptile P2 on
+    // 860c0e85, 2026-10-15T19:09:46Z, static/ui.js:3293).
+    _imgRebaseDrag();
+    _imgRebasePinch();
+  };
+  // Used by _navigateLightbox (and by the pendingNav re-centre in
+  // _onImgLoad) to drop a pan that belongs to the image being replaced.
+  state.cancelGesture = _imgCancelGesture;
+
+  if(img.complete && img.naturalWidth){
+    _onImgLoad();
+  }
+  // Always attach onload — a cached/fast image may have taken the sync
+  // branch above, but navigation (src swap) still needs the handler.
+  img.onload = _onImgLoad;
+  // A failed load has its own handler so the stage never keeps the previous
+  // image's geometry (see _imgOnError).
+  img.onerror = _imgOnError;
+
+  return state;
+}
+
 function _openImgLightboxWithNav(src, alt, images, index) {
   const lb = document.createElement('div');
   lb.className = 'img-lightbox';
   lb.setAttribute('role', 'dialog');
   lb.setAttribute('aria-modal', 'true');
   lb.setAttribute('aria-label', alt || 'Image');
+  // Programmatically focusable so opening the dialog moves focus into it
+  // (the document-level shortcuts below then belong to the lightbox).
+  lb.setAttribute('tabindex', '-1');
+  // Zoomable stage: viewport (clip + gestures) > canvas (transform) > img.
+  const viewport = document.createElement('div');
+  viewport.className = 'img-lightbox-viewport';
+  const canvas = document.createElement('div');
+  canvas.className = 'img-lightbox-canvas';
   const img = document.createElement('img');
   img.src = src;
   img.alt = alt || '';
-  img.onclick = e => e.stopPropagation();
+  img.draggable = false;
+  canvas.appendChild(img);
+  viewport.appendChild(canvas);
   const cls = document.createElement('button');
   cls.className = 'img-lightbox-close';
   cls.setAttribute('aria-label', 'Close');
   cls.textContent = '×';
   cls.onclick = () => _closeImgLightbox(lb);
-  lb.appendChild(img);
+  // Fit/reset control — zoom is not pointer-only; a keyboard/button path
+  // recovers the image after it has been zoomed/panned out of view.
+  const fitBtn = document.createElement('button');
+  fitBtn.className = 'img-lightbox-fit';
+  // static/share.html loads ui.js WITHOUT i18n.js, so `t` may be undefined on
+  // the public share page: calling it threw ReferenceError before the lightbox
+  // mounted and broke every shared image preview (maintainer re-gate
+  // 2026-10-09T00:47:03Z, static/ui.js:3153). Fall back to the English string
+  // (the locale i18n.js ships for img_lightbox_fit_title) and reuse the result
+  // for both attributes.
+  const fitTitle = (typeof t === 'function') ? t('img_lightbox_fit_title') : 'Reset zoom to fit (F)';
+  fitBtn.setAttribute('aria-label', fitTitle);
+  fitBtn.setAttribute('title', fitTitle);
+  // Icon-only 36px circle matching the close button: the shared `fit` glyph
+  // from the Mermaid icon set removes the text pill that overlapped the image
+  // band and lost legibility over light images, and is language-neutral. The
+  // translated title/aria-label above keep the control announced for screen
+  // readers (maintainer visual review of #6896, 2026-10-08).
+  fitBtn.innerHTML = _mermaidViewerIcon('fit');
+  fitBtn.onclick = e => { e.stopPropagation(); if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); };
+  lb.appendChild(viewport);
+  // Fit sits LEFT of close, so it comes first in the DOM: Tab order then matches the visual order.
+  lb.appendChild(fitBtn);
   lb.appendChild(cls);
   // Prev/Next navigation — store index and images on lb so a single set of
   // handlers reads live values without closure churn on every nav.
@@ -2925,15 +3699,64 @@ function _openImgLightboxWithNav(src, alt, images, index) {
   }
   lb.onclick = () => _closeImgLightbox(lb);
   document.body.appendChild(lb);
+  // Move focus into the dialog: without this a user could Tab into the
+  // composer behind the overlay and have `+`, `-`, `f` and the arrow keys
+  // hijacked by the shortcuts below (greptile review of #6896, 2026-10-05).
+  // The previous focus is restored when the lightbox closes.
+  lb._restoreFocus = (document.activeElement && document.activeElement !== document.body)
+    ? document.activeElement
+    : null;
+  if(typeof lb.focus === 'function'){
+    try{ lb.focus({preventScroll: true}); }catch(_){ try{ lb.focus(); }catch(__){} }
+  }
+  // Mount zoom gestures AFTER the stage is in the DOM — a synchronously
+  // decoded image (data: URL or cache-hit) otherwise measures a 0x0
+  // viewport and fit-zooms to a near-zero scale.
+  lb._zoom = _mountImgLightboxZoom(viewport, canvas, img, lb);
   // Single keyboard handler — reads lb._navX live, no remove/add churn.
   lb._keyHandler = e => {
     if(e.key==='Escape'){ _closeImgLightbox(lb); return; }
+    // Focus is normally inside the dialog, but never hijack typing: the
+    // handler lives on `document`, so a `+`, `-`, `f` or arrow key typed in
+    // an editable field that happens to hold focus must reach that field
+    // unchanged (greptile review of #6896, 2026-10-05).
+    const tgt = e.target;
+    if(tgt){
+      const tag = String(tgt.tagName || '').toLowerCase();
+      if(tgt.isContentEditable || tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    }
+    // Never hijack a browser/OS shortcut: Ctrl/Meta + '+'/'='/'-'/'_' is the
+    // browser's own page zoom (Ctrl+F is find-in-page, Alt/⌘+Arrow is history
+    // navigation), so leave those combinations unprevented and let the
+    // unmodified image controls below keep working (maintainer gate recheck of
+    // #6896, 2026-10-06).
+    if(e.ctrlKey || e.metaKey || e.altKey) return;
+    if(e.key==='f' || e.key==='F'){ if(lb._zoom && lb._zoom.fit) lb._zoom.fit(); return; }
+    if(e.key==='+' || e.key==='='){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1.25); return; }
+    if(e.key==='-' || e.key==='_'){ e.preventDefault(); if(lb._zoom && lb._zoom.zoomBy) lb._zoom.zoomBy(1/1.25); return; }
     if(lb._navImages){
       if(e.key==='ArrowLeft'){ e.preventDefault(); _navigateLightbox(lb, -1); }
       if(e.key==='ArrowRight'){ e.preventDefault(); _navigateLightbox(lb, 1); }
     }
   };
   document.addEventListener('keydown', lb._keyHandler);
+}
+// Resolve an image source to the form the browser reports back in
+// `img.currentSrc`/`img.src`, so a raw string from the images array and a
+// resolved URL compare equal. Used to tell which frame a navigation asked for
+// (see _navigateLightbox / _onImgLoad): the same attachment can be referenced
+// both ways and two entries can share one source.
+function _imgSrcKey(src) {
+  const s = String(src || '');
+  if(!s) return '';
+  try{
+    if(document && document.createElement){
+      const a = document.createElement('a');
+      a.href = s;
+      return a.href;
+    }
+  }catch(_){ /* fall back to the raw string */ }
+  return s;
 }
 function _navigateLightbox(lb, direction) {
   const images = lb._navImages;
@@ -2944,21 +3767,48 @@ function _navigateLightbox(lb, direction) {
   const nextImg = images[newIndex];
   const lbImg = lb.querySelector('img');
   if(!lbImg) return;
+  // The new image invalidates any in-flight pan baseline, which belongs to
+  // the previous image's coordinate space (see _imgCancelGesture). Cancel
+  // before the src swap so the old gesture cannot outlive its image.
+  if(lb._zoom && lb._zoom.cancelGesture) lb._zoom.cancelGesture();
   lbImg.src = nextImg.src;
   lbImg.alt = nextImg.alt || '';
   lb.setAttribute('aria-label', nextImg.alt || 'Image');
+  // Keep the current zoom level when switching images (re-centre on the
+  // new image once it loads) — matches native photo-gallery behaviour.
+  if(lb._zoom) lb._zoom.pendingNav = true;
+  // Record WHICH source this navigation asked for. _onImgLoad uses it to tell
+  // this frame's load apart from the previous image's late load — and, the
+  // point of the record, to keep a navigation between two entries that SHARE a
+  // source an intentional re-centre instead of classifying it as that duplicate
+  // (maintainer re-gate 2026-10-15T17:54:15Z, static/ui.js:2843).
+  if(lb._zoom) lb._zoom.navSrc = _imgSrcKey(nextImg.src);
   // Update counter via stored reference — no DOM query.
   if(lb._counterEl) lb._counterEl.textContent = (newIndex+1) + ' / ' + images.length;
 }
 function _closeImgLightbox(lb) {
   if(!lb || !lb.parentNode) return;
   document.removeEventListener('keydown', lb._keyHandler);
+  // Hand focus back to whatever was focused before the dialog opened — the
+  // lightbox moved focus into itself on open (see _openImgLightboxWithNav).
+  if(lb._restoreFocus && typeof lb._restoreFocus.focus === 'function' &&
+     typeof document.contains === 'function' && document.contains(lb._restoreFocus)){
+    try{ lb._restoreFocus.focus({preventScroll: true}); }catch(_){}
+  }
+  lb._restoreFocus = null;
   if(lb._mermaidResizeHandler && window && typeof window.removeEventListener === 'function'){
     window.removeEventListener('resize', lb._mermaidResizeHandler);
   }
   if(lb._mermaidResizeTimer && typeof clearTimeout === 'function'){
     clearTimeout(lb._mermaidResizeTimer);
     lb._mermaidResizeTimer = null;
+  }
+  if(lb._imgZoomResizeHandler && window && typeof window.removeEventListener === 'function'){
+    window.removeEventListener('resize', lb._imgZoomResizeHandler);
+  }
+  if(lb._imgZoomResizeTimer && typeof clearTimeout === 'function'){
+    clearTimeout(lb._imgZoomResizeTimer);
+    lb._imgZoomResizeTimer = null;
   }
   lb.style.animation = 'lb-in .12s ease reverse';
   setTimeout(() => lb.parentNode && lb.parentNode.removeChild(lb), 120);
@@ -3813,6 +4663,10 @@ function _providerFromModelValue(modelId){
 function _modelPickerOptionIdentity(modelId, providerId){
   let value=String(modelId||'');
   const provider=String(providerId||'').trim();
+  if(provider.toLowerCase()==='openrouter'){
+    const prefix='@openrouter:';
+    return (value.toLowerCase().startsWith(prefix)?value.substring(prefix.length):value).toLowerCase();
+  }
   if(value.startsWith('@')&&value.includes(':')){
     const exactPrefix=provider ? `@${provider}:` : '';
     if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
@@ -3844,7 +4698,9 @@ function _deduplicateModelPickerOptions(sel,selectedValue){
     const options=Array.from(group.children||[]).filter(opt=>opt&&opt.tagName==='OPTION');
     const byIdentity=new Map();
     for(const opt of options){
-      const identity=_modelPickerOptionIdentity(opt.value,_getOptionProviderId(opt));
+      const provider=String(_getOptionProviderId(opt)||'').toLowerCase();
+      const value=String(opt.value||'');
+      const identity=_modelPickerOptionIdentity(value,provider);
       if(!identity) continue;
       if(!byIdentity.has(identity)) byIdentity.set(identity,[]);
       byIdentity.get(identity).push(opt);
@@ -4317,20 +5173,32 @@ function _findModelInDropdown(modelId, sel, preferredProviderId){
     explicitProvider=rawModel.slice(1,rawModel.lastIndexOf(':'));
   }
   const preferred=String(preferredProviderId||explicitProvider||'').toLowerCase();
+  const isOpenRouterRoute=preferred==='openrouter'&&(rawModel.includes('/')||rawModel.startsWith('@'));
   if(preferred){
-    if(preferred==='custom'||preferred.startsWith('custom:')){
-      // A slash is part of a custom endpoint's upstream model ID, not a
-      // provider namespace. Match the exact routed ID (allowing only the
-      // WebUI's @provider: wrapper and dash/dot spelling compatibility).
+    if(isOpenRouterRoute||preferred==='custom'||preferred.startsWith('custom:')){
+      // Match the full routed ID. OpenRouter's slash IDs are exact; custom
+      // providers retain their legacy dash/dot spelling compatibility.
       const routeNorm=value=>{
         let routed=String(value||'');
         const prefix=`@${preferred}:`;
         if(routed.toLowerCase().startsWith(prefix)) routed=routed.slice(prefix.length);
-        return routed.toLowerCase().replace(/-/g,'.');
+        const normalized=routed.toLowerCase();
+        return isOpenRouterRoute?normalized:normalized.replace(/-/g,'.');
       };
       const providerOptions=options.filter(o=>_getOptionProviderId(o).toLowerCase()===preferred);
+      if(isOpenRouterRoute){
+        const exactRoute=value=>{
+          let routed=String(value||'');
+          const prefix=`@${preferred}:`;
+          if(routed.toLowerCase().startsWith(prefix.toLowerCase())) routed=routed.slice(prefix.length);
+          return routed.toLowerCase();
+        };
+        const exactProviderMatch=providerOptions.find(o=>exactRoute(o.value)===exactRoute(rawModel));
+        if(exactProviderMatch) return exactProviderMatch.value;
+      }
       const providerMatch=providerOptions.find(o=>routeNorm(o.value)===routeNorm(rawModel));
       if(providerMatch) return providerMatch.value;
+      if(isOpenRouterRoute) return null;
       // Legacy sessions may store only the bare suffix of a routed custom
       // option. Preserve #6195's provider-hinted repair, but only for an
       // explicit @provider: row; an unwrapped slash ID belongs to the active
@@ -4466,6 +5334,40 @@ function _ensureModelOptionInDropdown(modelId, sel, preferredProviderId){
       ?_modelStateForSelect(sel,applied)
       :{model:applied,model_provider:null};
     if(!requestedProvider||String(appliedState&&appliedState.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return applied;
+  }
+  if(requestedProvider.toLowerCase()==='openrouter'&&typeof _readModelOverflowData==='function'&&sel.querySelectorAll){
+    const prefix=`@${requestedProvider}:`;
+    const routeKey=value=>{
+      let id=String(value||'');
+      if(id.toLowerCase().startsWith(prefix.toLowerCase())) id=id.slice(prefix.length);
+      return id.toLowerCase();
+    };
+    const target=routeKey(modelId);
+    for(const group of Array.from(sel.querySelectorAll('optgroup'))){
+      if(String(group.dataset&&group.dataset.provider||'').toLowerCase()!==requestedProvider.toLowerCase()) continue;
+      const extra=_readModelOverflowData(group);
+      const matches=extra.map((item,index)=>({item,index})).filter(entry=>routeKey(entry.item.id)===target);
+      const match=matches.find(entry=>String(entry.item.id)===String(modelId))||(matches.length===1?matches[0]:null);
+      if(!match) continue;
+      const opt=document.createElement('option');
+      opt.value=match.item.id;
+      opt.textContent=match.item.label||(typeof getModelLabel==='function'?getModelLabel(opt.value):opt.value);
+      if(String(opt.value).toLowerCase().startsWith(prefix.toLowerCase())){
+        opt.dataset.model=String(opt.value).slice(prefix.length);
+        opt.dataset.provider=requestedProvider;
+      }
+      // A restored overflow row is still an overflow ("extra") row: #7528 sorts a built-in group's curated rows
+      // first and natural-sorts extras after them, so an untagged restore would jump ahead of its siblings.
+      opt.dataset.extra='1';
+      group.appendChild(opt);
+      group.dataset.extraModels=JSON.stringify(extra.filter((_,index)=>index!==match.index));
+      const restored=_applyModelToDropdown(modelId,sel,requestedProvider);
+      if(restored){
+        const state=_modelStateForSelect(sel,restored);
+        if(String(state&&state.model_provider||'').toLowerCase()===requestedProvider.toLowerCase()) return restored;
+      }
+      break;
+    }
   }
   const explicitPrefix=requestedProvider?`@${requestedProvider}:`:'';
   const rawModel=String(modelId||'');
@@ -4755,25 +5657,7 @@ function _addLiveModelsToSelect(provider, models, sel){
   const _isNamedCustomActiveProvider=_ap.startsWith('custom:');
   const _isPortalFetch=_ap && _ap!=='openrouter' && _ap!=='custom' && _ap!=='openai-codex' && (_providerLower===_ap||_isNamedCustomActiveProvider&&_providerLower===_ap);
   // Keep existingNorm.has( within the #907 source slice.
-  const optionIdentity=typeof _modelPickerOptionIdentity==='function'
-    ? (modelId,providerId)=>_modelPickerOptionIdentity(modelId,providerId)
-    : (modelId,providerId)=>{
-        let value=String(modelId||'');
-        const provider=String(providerId||'').trim();
-      if(value.startsWith('@')&&value.includes(':')){
-        const exactPrefix=provider ? `@${provider}:` : '';
-        if(exactPrefix && value.toLowerCase().startsWith(exactPrefix.toLowerCase())){
-          value=value.substring(exactPrefix.length);
-        }else if(value.startsWith('@custom:')){
-          const namedProvider=value.substring('@custom:'.length);
-          const splitAt=namedProvider.indexOf(':');
-          value=splitAt>=0 ? namedProvider.substring(splitAt+1) : namedProvider;
-        }else{
-          value=value.substring(value.indexOf(':')+1);
-        }
-      }
-        return value.split('/').pop().replace(/-/g,'.').toLowerCase();
-      };
+  const optionIdentity=_modelPickerOptionIdentity;
   const existingNorm=new Set([...sel.options].map(o=>optionIdentity(o.value,_getOptionProviderId(o))));
   let added=0;
   for(const m of models){
@@ -5947,7 +6831,18 @@ function renderModelDropdown(){
         // so hoisted-configured models aren't double-counted. (#3691)
         const count=hiddenCount?0:groupRows.length;
         const _plainLabel=String(meta.label||'').replace(/\s*\(\d+\s+of\s+\d+\)\s*$/,'');
-        heading.textContent=count>1?`${_plainLabel} (${count})`:meta.label;
+        // The backend's "(a of b)" is fixed at load time. Restoring an overflow model
+        // moves it from the hidden tail into the group, so recompute "a" from what is
+        // still hidden; otherwise the collapsed heading undercounts the rows below it.
+        let collapsedLabel=meta.label;
+        const _ofMatch=hiddenCount?String(meta.label||'').match(/\((\d+)\s+of\s+(\d+)\)\s*$/):null;
+        if(_ofMatch){
+          const total=Number(_ofMatch[2]);
+          const stillHidden=_modelData.filter(m=>m.groupKey===groupKey&&m.hiddenByDefault).length;
+          const shown=Math.max(0,Math.min(total,total-stillHidden));
+          if(shown!==Number(_ofMatch[1])) collapsedLabel=`${_plainLabel} (${shown} of ${total})`;
+        }
+        heading.textContent=count>1?`${_plainLabel} (${count})`:collapsedLabel;
         dd.appendChild(heading);
         const wrapper=document.createElement('div');
         wrapper.className='model-group-body';

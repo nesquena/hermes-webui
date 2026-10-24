@@ -111,6 +111,12 @@ def test_changing_the_active_org_recounts_after_a_switch(tmp_path, monkeypatch):
     skill_utils = pytest.importorskip("agent.skill_utils")
     if not getattr(skill_utils, "__file__", None):
         pytest.skip("agent.skill_utils is a test stub, not the real agent package")
+    if not hasattr(skill_utils, "read_active_org_id"):
+        # Hermes Agent removed the skills/_org/<org_id>/ mirror and its
+        # .active_org index gating from core (agent 64ad33e32da, 2026-10-03).
+        # Such an agent walks every org dir, so the count legitimately does
+        # not depend on the marker and api.profiles._active_org_marker() is None.
+        pytest.skip("installed Hermes Agent has no org skill mirror (.active_org gating)")
     import api.profiles as profiles
 
     default_home = tmp_path / ".hermes"
