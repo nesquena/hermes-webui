@@ -2297,7 +2297,19 @@ function cmdReasoning(args){
     // Takes effect on the NEXT session/turn (agent re-reads config at
     // construction time), matching CLI semantics where `/reasoning high`
     // also forces an agent re-init.
-    api('/api/reasoning',{method:'POST',body:JSON.stringify({effort:arg})})
+    // #7170 (droopanu, 2026-10-20): send the CURRENT MODEL CONTEXT with the
+    // write, the same context the composer chip sends. Without it the slash
+    // command wrote only the global ``agent.reasoning_effort`` while the
+    // dropdown had written a per-model ``agent.reasoning_overrides`` entry,
+    // and the override wins on read — so `/reasoning high` toasted "high"
+    // while the next turn still ran the stale per-model `low`, and
+    // `/reasoning none` left reasoning on. The backend accepts the same
+    // model/provider pair the chip path already sends.
+    const effCtx=(typeof _reasoningEffortContext==='function')?_reasoningEffortContext():{};
+    const effBody={effort:arg};
+    if(effCtx.model) effBody.model=effCtx.model;
+    if(effCtx.provider) effBody.provider=effCtx.provider;
+    api('/api/reasoning',{method:'POST',body:JSON.stringify(effBody)})
       .then(function(st){
         const eff=(st && st.reasoning_effort)||arg;
         showToast(BRAIN+' Reasoning effort: '+eff+' (saved; applies to next turn)');
