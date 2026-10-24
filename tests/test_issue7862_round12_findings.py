@@ -51,7 +51,6 @@ RED control: each case fails on the pre-fix store/routes/frontend.
 from __future__ import annotations
 
 import re as _re
-from pathlib import Path
 
 import pytest
 

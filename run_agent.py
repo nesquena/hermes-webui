@@ -1,1 +1,0 @@
-/home/xiaobao/.hermes/hermes-agent/run_agent.py

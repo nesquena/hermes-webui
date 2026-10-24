@@ -12542,6 +12542,11 @@ PENDING_GOAL_CONTINUATION_LOCK = threading.Lock()
 # api/goals.py, while goal_continuation_store.py owns the round-7+
 # generation bookkeeping (adoption markers, attempt ids, rollback
 # receipts). Neither consumer reads the other's dict.
+# #7862 re-gate (2026-10-20): the PRODUCTION producer
+# (api.goals.register_pending_goal_continuation) bridges them — it arms
+# the durable store and writes this mirror with the SAME continuation
+# token under one atomic sequence, so the route's store admission and
+# master's marker/peek path can never disagree.
 PENDING_GOAL_CONTINUATION_RECORDS: dict = {}
 
 # ── THE list of per-stream registries (#7302 re-gate) ───────────────────────

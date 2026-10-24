@@ -835,6 +835,21 @@ def register_pending_goal_continuation(session_id: str, continuation_prompt: str
     #6885 distinction. Matching on the prompt text is what previously
     dropped the goal after an edit or a late send.
 
+    #7862 re-gate (2026-10-20 integration blocker): this function is the
+    PRODUCTION producer — api/streaming.py and api/gateway_chat.py both call
+    it — and the chat-start route admits through api.goal_continuation_store's
+    durable registry (PENDING_GOAL_CONTINUATION_RECORDS + the on-disk
+    snapshot). The master merge had split the two: registration wrote only
+    the in-memory PROMPTS mirror, so a real register -> real route
+    composition consumed nothing, the durable consume answered
+    ``not_matching``, and the continuation turn launched with
+    ``goal_related=false``. The authoritative record is now armed FIRST and
+    DURABLY (marker + record + snapshot under the store's lock, with the
+    SAME continuation_id); the in-memory marker/prompt mirror (master's
+    #7855 atomic record) is written only after the durable snapshot
+    committed, so marker, prompt and token can never disagree and the SSE
+    event fires only when the durable record landed.
+
     No wall-clock expiry (#7855): the browser deliberately keeps a queued
     continuation — it survives a refresh and is restored into the composer
     for the user to send later — so a TTL retired a continuation that was
@@ -848,14 +863,36 @@ def register_pending_goal_continuation(session_id: str, continuation_prompt: str
     prompt = str(continuation_prompt or "").strip()
     if not session_id or not prompt:
         return None
-    record = {
-        "prompt": prompt,
-        "continuation_id": uuid.uuid4().hex,
-    }
+    continuation_id = uuid.uuid4().hex
+    try:
+        from api.goal_continuation_store import arm_pending_goal_continuation
+
+        committed = arm_pending_goal_continuation(
+            session_id,
+            continuation_prompt=prompt,
+            reason="goal_continue",
+            continuation_id=continuation_id,
+        )
+    except Exception:
+        logger.debug(
+            "Durable goal-continuation arm failed for session %s",
+            session_id,
+            exc_info=True,
+        )
+        committed = False
+    if not committed:
+        # The durable registry is the authoritative record the route admits
+        # through; a record that did not land durably must not be handed to
+        # the SSE event, or the browser would queue a continuation the route
+        # can never admit (round-7 durability contract).
+        return None
     with _cfg.PENDING_GOAL_CONTINUATION_LOCK:
         _cfg.PENDING_GOAL_CONTINUATION.add(session_id)
-        _cfg.PENDING_GOAL_CONTINUATION_PROMPTS[session_id] = record
-    return str(record["continuation_id"])
+        _cfg.PENDING_GOAL_CONTINUATION_PROMPTS[session_id] = {
+            "prompt": prompt,
+            "continuation_id": continuation_id,
+        }
+    return str(continuation_id)
 
 
 def peek_pending_goal_continuation_id(session_id: str) -> str | None:
