@@ -19047,8 +19047,10 @@ def cancel_stream(stream_id: str) -> bool:
                                 _last_user = _m
                                 _last_user_idx = _idx
                                 break
-                        _already_persisted = False
-                        if _last_user is not None:
+                        _already_persisted = bool(_cancel_turn_token) and any(
+                            _active_turn_token_matches(_m, {'token': _cancel_turn_token})
+                            for _m in _msgs_for_recovery)
+                        if _last_user is not None and not _already_persisted:
                             _last_content = _last_user.get('content')
                             _last_ts = _last_user.get('timestamp') or 0
                             # Only treat as already-persisted if the latest user turn
