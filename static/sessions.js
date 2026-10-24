@@ -5819,7 +5819,9 @@ function _renderBatchActionBar(){
   archiveBtn.onclick=async()=>{
     const ids=[..._selectedSessions];
     const wtCount=_worktreeSessionCount(ids);
-    const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)]));
+    const sessionsById=new Map(ids.map(sid=>[sid,_sessionSnapshotById(sid)
+      ||((typeof _contentSearchResults!=='undefined'&&Array.isArray(_contentSearchResults))
+        ?(_contentSearchResults.find(item=>item&&item.session_id===sid)||null):null)]));
     // #7826 root fix: preflight resolves every row's owner (sidebar row over
     // snapshot, legacy WebUI sidecar → root) — that owner becomes the
     // request-scoped `profile` field per row. Only rows with NO derivable

@@ -20589,7 +20589,12 @@ def handle_post(handler, parsed) -> bool:
             _arch_profile = cli_meta.get("profile") or None
             if not _arch_profile:
                 return bad(handler, "Session not found", 404)
-            if not _profiles_match(_arch_profile, _get_active_profile_name()):
+            # #7826: the active-profile benchmark applies ONLY to unqualified
+            # requests. A scoped request (all_profiles + profile) already went
+            # through the #7731 mismatch check above against its claimed owner,
+            # so a matching scoped archive must succeed instead of 409ing
+            # against the ACTIVE profile.
+            if not _arch_allow_all and not _profiles_match(_arch_profile, _get_active_profile_name()):
                 return j(handler, {
                     "error": "Session belongs to a different profile",
                     "code": "session_profile_mismatch",

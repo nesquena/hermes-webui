@@ -148,6 +148,7 @@ function showToast(msg, dur) {{ events.push('toast:' + msg); }}
 function t(key) {{ return 'T::' + key; }}
 function _sessionArchiveToast(r, s) {{ return 'archive-toast'; }}
 function renderSessionListFromCache() {{ events.push('render-cache'); }}
+function _repaintSidebarAfterSessionCompletion() {{ events.push('render-cache'); }}
 function renderSessionList() {{ events.push('render-full'); }}
 function _captureSessionReflowPositions() {{ return 'reflow'; }}
 function _sessionPrefersReducedMotion() {{ return false; }}
@@ -639,3 +640,68 @@ _renderBatchActionBar();
     assert data["activeProfile"] == "default", data
     assert data["defaultModel"] == "root-model", data
     assert data["activeProvider"] == "root-provider", data
+
+
+def test_batch_archive_content_search_row_archives():
+    """Maintainer finding 1 (2026-10-19 review): a content-search result is
+    rendered from _contentSearchResults (see _sessionSearchMergeMatches) and
+    gets a select checkbox, but its snapshot lookup returns null — the row is
+    absent from S.session and _allSessions — so the batch preflight used to
+    fail closed with the mixed-profiles toast and never sent a request. The
+    sessionsById construction must fall back to _contentSearchResults so the
+    row's owner resolves and it archives exactly like a sidebar row.
+    """
+    if NODE is None:
+        return
+    render_body = _extract_function(SESSIONS_JS, "_renderBatchActionBar")
+    owners_body = _extract_function(SESSIONS_JS, "_archiveBatchOwners")
+    owner_row_body = _extract_function(SESSIONS_JS, "_archiveBatchOwnerForRow")
+    match_body = _extract_function(SESSIONS_JS, "_archiveBatchOwnersMatch")
+    batch_body = _extract_async_function(SESSIONS_JS, "_archiveBatchSessions")
+    script = f"""
+const events=[]; const archivedSids=[]; const requests=[];
+const _allSessions=[];
+const _contentSearchResults=[{{session_id:'cs1',profile:'default',session_source:'webui',match_type:'content'}}];
+const _selectedSessions=new Set(['cs1']);
+const S={{session:null,activeProfile:'default',activeProfileIsDefault:true}};
+const window={{_defaultModel:'root-model',_activeProvider:'root-provider'}};
+const _showArchived=false; const _sessionSwipeReturnOffsets={{set(){{}}}};
+let _pendingSessionReflowPositions=null;
+const bar={{style:{{}},children:[],appendChild(node){{this.children.push(node);}}}};
+function $(id){{return id==='batchActionBar'?bar:null;}}
+const document={{createElement(tag){{return {{tag,style:{{}},className:'',textContent:'',appendChild(){{}},onclick:null}};}}}};
+function t(key){{return key;}} function _worktreeSessionCount(){{return 0;}}
+function _sessionSnapshotById(sid){{return null;}}
+function showConfirmDialog(){{events.push('confirm');return Promise.resolve(true);}}
+function exitSessionSelectMode(){{events.push('exit');}} function showToast(msg){{events.push('toast:'+msg);}}
+function renderSessionList(){{}} function _sessionPrefersReducedMotion(){{return false;}}
+function _sessionResponseRetainsWorktree(){{return false;}}
+function _profileMatchesActiveProfile(profile,active){{return profile===active;}}
+let switchCalls=0;
+async function _switchProfileForSessionLoad(profile){{switchCalls++;S.activeProfile=profile;S.activeProfileIsDefault=false;window._defaultModel=profile+'-model';window._activeProvider=profile+'-provider';}}
+async function api(path,opts){{
+  const body=JSON.parse(opts.body);
+  requests.push(body);
+  archivedSids.push(body.session_id);
+  return {{worktree_retained:false}};
+}}
+{owners_body}
+{owner_row_body}
+{match_body}
+{batch_body}
+{render_body}
+_renderBatchActionBar();
+(async()=>{{const button=bar.children.find(node=>node.textContent==='session_batch_archive');if(!button)throw new Error('no archive button');await button.onclick();console.log(JSON.stringify({{events,archivedSids,switchCalls,requests,activeProfile:S.activeProfile,defaultModel:window._defaultModel,activeProvider:window._activeProvider}}));}})();
+"""
+    data = json.loads(_run_node(script))
+    # One request, owner resolved from the content-search row, archived.
+    assert data["archivedSids"] == ["cs1"], (
+        f"a content-search-only row must archive: {data}")
+    assert data["requests"] == [
+        {"session_id": "cs1", "archived": True, "profile": "default"}
+    ], data
+    assert data["switchCalls"] == 0, (
+        f"content-search rows must not trigger a profile switch: {data}")
+    assert "toast:session_archived" in data["events"], data
+    assert "exit" in data["events"], (
+        f"a successful content-search batch must exit select mode: {data}")
