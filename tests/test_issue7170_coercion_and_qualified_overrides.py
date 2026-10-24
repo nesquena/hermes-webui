@@ -337,6 +337,77 @@ def test_fallback_unmatched_model_still_retains_global_with_qualified_keys(no_co
     )
 
 
+def test_fallback_matches_at_qualified_override_for_at_model(no_core):
+    """Reviewer repro: @-form override key vs @-qualified model id.
+
+    ``configured_reasoning_effort_for_model`` strips ``@openrouter:gpt-5.4-mini``
+    to the bare id before building the fallback candidates, so an override key
+    written in the SAME ``@provider:model`` form was never a candidate and the
+    global effort won (greptile P1). The caller's original @ spelling must be
+    a candidate, ahead of the stripped bare form.
+    """
+    data = _write_overrides({"@openrouter:gpt-5.4-mini": "low"})
+
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="@openrouter:gpt-5.4-mini"
+        )
+        == "low"
+    )
+    # Same through the gateway bridge path.
+    assert (
+        gateway_chat._gateway_reasoning_effort_for_request(
+            data, model="@openrouter:gpt-5.4-mini", model_provider="openrouter"
+        )
+        == "low"
+    )
+
+
+def test_fallback_at_override_outranks_bare_for_at_model(no_core):
+    """The @-qualified spelling wins over the bare key when both are present.
+
+    The @ form is the most specific spelling the caller gave us, so it must
+    outrank the stripped bare-id candidates (exact-first ordering).
+    """
+    data = _write_overrides(
+        {
+            "@openrouter:gpt-5.4-mini": "minimal",
+            "gpt-5.4-mini": "low",
+        }
+    )
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="@openrouter:gpt-5.4-mini"
+        )
+        == "minimal"
+    ), "@-qualified spelling must outrank the bare spelling (exact first)"
+
+
+def test_fallback_bare_override_still_matches_at_model(no_core):
+    """Adding @ candidates must not break the historical bare-key match."""
+    data = _write_overrides({"gpt-5.4-mini": "low"})
+    assert (
+        cfg.configured_reasoning_effort_for_model(
+            data, model_id="@openrouter:gpt-5.4-mini"
+        )
+        == "low"
+    )
+
+
+def test_reasoning_override_keys_for_model_enumerates_at_spelling():
+    """The setter-side enumeration must include the @ spelling the reader now
+    matches, so a level write / Default clears it too (the historical
+    ``model.startswith("@")`` branch only saw the stripped form, so an
+    @-form entry was never removable)."""
+    keys = cfg._reasoning_override_keys_for_model(
+        "@openrouter:gpt-5.4-mini",
+        {"@openrouter:gpt-5.4-mini": "low", "gpt-5.4-mini": "high"},
+        provider_id="openrouter",
+    )
+    assert "@openrouter:gpt-5.4-mini" in keys
+    assert "gpt-5.4-mini" in keys
+
+
 def test_fallback_matches_core_differentially(no_core):
     """No-core fallback must agree with the core resolver, both directions.
 

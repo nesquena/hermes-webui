@@ -6231,13 +6231,21 @@ def _reasoning_override_keys_for_model(
     model = str(model_id or "").strip()
     if not model or not isinstance(overrides, dict) or not overrides:
         return []
+    # Preserve the caller's ORIGINAL spelling: the read side matches an
+    # ``@provider:model`` override key for an @-qualified model id (the
+    # fallback candidate list keeps the @ form — greptile P1), so the setter
+    # must enumerate that same spelling when it supersedes or clears. The
+    # historical ``model.startswith("@")`` tail branch below only ever saw
+    # the STRIPPED form, so an @-form entry was never removable.
+    orig_model = model
     parsed = _parse_provider_qualified_model_id(model)
     if parsed:
         bare, _provider = parsed
         model = bare
-    candidates = [model, model.lower()]
-    if model.startswith("@") and ":" in model:
-        candidates.append(model.rsplit(":", 1)[-1])
+    candidates = []
+    if orig_model.startswith("@") and ":" in orig_model:
+        candidates.extend([orig_model, orig_model.lower()])
+    candidates.extend([model, model.lower()])
     for cand in list(candidates):
         if "/" not in cand:
             continue
@@ -6290,6 +6298,13 @@ def configured_reasoning_effort_for_model(
     effort = agent_cfg.get("reasoning_effort")
     overrides = agent_cfg.get("reasoning_overrides")
     model = str(model_id or "").strip()
+    # Preserve the caller's ORIGINAL spelling before the provider-qualified
+    # strip below: an override key written in the same ``@provider:model``
+    # form the route layer hands us must stay reachable in the fallback
+    # candidate list. Without this, ``@openrouter:gpt-5.4-mini`` was reduced
+    # to the bare id and a matching @-form override key always fell through
+    # to the global effort (greptile P1).
+    orig_model = model
 
     if model:
         parsed_qualified = _parse_provider_qualified_model_id(model)
@@ -6315,9 +6330,16 @@ def configured_reasoning_effort_for_model(
             # install without the companion agent tree resolves the same
             # overrides.  Exact/full-id candidates come FIRST so a full-id
             # override always outranks a bare-tail one.
-            candidates = [model, model.lower()]
-            if model.startswith("@") and ":" in model:
-                candidates.append(model.rsplit(":", 1)[-1])
+            candidates = []
+            if orig_model.startswith("@") and ":" in orig_model:
+                # The caller's own @-qualified spelling (e.g.
+                # ``@openrouter:gpt-5.4-mini``) is the most specific form it
+                # gave us: keep it (and its lowercase form) so an override key
+                # written in the SAME @ form wins over the stripped bare-id
+                # candidates below (greptile P1). The bare form still follows,
+                # so a bare override key keeps matching an @-qualified model.
+                candidates.extend([orig_model, orig_model.lower()])
+            candidates.extend([model, model.lower()])
             # Slash-qualified ids (``openai/gpt-5.4-mini``,
             # ``openrouter/anthropic/claude-opus-4.5``) must also match a bare
             # override key.  Without these the override was silently dropped
