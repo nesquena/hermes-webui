@@ -8233,11 +8233,14 @@ def _canonical_context_provider(value: str | None) -> str:
     return str(provider or "").strip().lower()
 
 
-def _custom_provider_slug_for_context(name: object) -> str:
+def _custom_provider_slug_for_context(name: object, entry: dict | None = None) -> str:
     try:
         from api.config import _custom_provider_slug_from_name
 
-        return _custom_provider_slug_from_name(name)
+        if isinstance(name, dict) and entry is None:
+            entry = name
+            name = entry.get("name")
+        return _custom_provider_slug_from_name(name, entry)
     except Exception:
         raw = str(name or "").strip().lower()
         if not raw:
@@ -8447,7 +8450,7 @@ def _context_length_lookup_inputs_for_model(
             if not isinstance(entry, dict):
                 continue
             entry_name = str(entry.get("name") or "").strip()
-            entry_slug = _custom_provider_slug_for_context(entry_name)
+            entry_slug = _custom_provider_slug_for_context(entry_name, entry)
             entry_base = str(entry.get("base_url") or "").strip()
             entry_base_norm = entry_base.rstrip("/")
             provider_matches = bool(
@@ -8908,7 +8911,7 @@ def _repair_bare_custom_provider_model(
         _matching_cp = None
         for _entry in _entries:
             entry_name = str(_entry.get("name") or "").strip().lower()
-            slug = _custom_provider_slug_from_name(_entry.get("name"))
+            slug = _custom_provider_slug_from_name(_entry.get("name"), _entry)
             if not slug:
                 continue
             if (
@@ -25454,7 +25457,7 @@ def _handle_live_models(handler, parsed):
                     for _cp in _cp_entries:
                         if not isinstance(_cp, dict):
                             continue
-                        _slug = _custom_provider_slug_from_name(_cp.get("name", ""))
+                        _slug = _custom_provider_slug_from_name(_cp.get("name", ""), _cp)
                         if provider.startswith("custom:"):
                             if _slug == provider:
                                 _matches.append(_cp)
