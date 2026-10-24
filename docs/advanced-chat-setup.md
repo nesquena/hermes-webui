@@ -49,6 +49,30 @@ every new browser turn. The browser only receives a compact status event
 (`source`, `label`, message count, compaction metadata, and redacted errors),
 never the prefill message bodies.
 
+### Naming the prefill context
+
+The composer status row shows the prefill source, which for a static file is the
+JSON filename — and the row is narrow enough to ellipsize a long one
+(`prefill_arr_guardrails.md`) into an unreadable fragment. Give it a display-only
+name:
+
+```yaml
+webui_prefill_context_label: Arr guardrails
+```
+
+or:
+
+```bash
+HERMES_WEBUI_PREFILL_CONTEXT_LABEL="Arr guardrails" ./ctl.sh restart
+```
+
+The environment variable wins over the config key, like the other prefill
+settings. Unset or blank keeps today's behaviour: the row shows the real source
+filename. The label is cosmetic — it never changes the reported `source`, never
+invents a context when prefill is unconfigured, and never affects the session's
+cached agent. If a long name still gets clipped, focusing the status row reveals
+it in full (there is no hover on touch devices).
+
 ## Session title generation
 
 Hermes WebUI derives a provisional session title from the first user message

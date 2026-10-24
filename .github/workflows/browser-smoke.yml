@@ -145,3 +145,7 @@ jobs:
       - name: Run session-row activation gate
         if: needs.changes.outputs.docs_only != 'true'
         run: python tests/browser_session_row_activation.py
+
+      - name: Run composer status label gate
+        if: needs.changes.outputs.docs_only != 'true'
+        run: python tests/browser_composer_status_label.py
