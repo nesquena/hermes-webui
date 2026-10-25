@@ -11806,7 +11806,7 @@ function _copyThinkingText(btn){
   if(!text)return;
   _copyText(text).then(()=>{
     _applyButtonCopiedFeedback(btn, ()=>{
-      btn.innerHTML=(typeof li==='function')?li('check',12):'Copied!';
+      btn.innerHTML=li('check',12);
       btn.style.color='var(--accent)';
     }, ()=>{
       btn.style.color='';
@@ -24193,7 +24193,7 @@ function editMessage(btn) {
   // Replace msg-body with an editable textarea
   const ta = document.createElement('textarea');
   ta.className = 'msg-edit-area';
-  ta.setAttribute('aria-label', (typeof t==='function'&&t('edit_message'))||'Edit message');
+  if(typeof ta.setAttribute==='function') ta.setAttribute('aria-label', (typeof t==='function'&&t('edit_message'))||'Edit message');
   ta.value = originalText;
   body.replaceWith(ta);
   // Resize after DOM insertion so scrollHeight is correct

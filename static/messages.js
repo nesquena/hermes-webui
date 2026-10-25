@@ -7995,7 +7995,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       }
     }
     _setActivePaneIdleIfOwner();
-    if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, 'Connection lost', {streamId});
+    if(typeof a11yOnStreamError==='function') a11yOnStreamError(activeSid, 'Connection interrupted', {streamId});
     _dispatchExtensionTurnLifecycle('turn:error',activeSid,streamId,{
       status:'connection_lost',
       endedAt:Date.now()/1000,
