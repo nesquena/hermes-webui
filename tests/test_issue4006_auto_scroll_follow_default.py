@@ -143,8 +143,9 @@ def test_auto_scroll_follow_undefined_true_false_behavior():
     # Extract the exact live expressions (not hand-copied replicas).
     dom_replace_expr = "window._autoScrollFollow && !_messageUserUnpinned && (_scrollPinned || _isMessagePaneNearBottom(120))"
     assert dom_replace_expr in src, "DOM-replace follow gate expression changed"
-    settle_expr = "(!window._autoScrollFollow&&!explicit)||!_scrollPinned||_messageUserUnpinned||_recentNonMessageScrollIntent()"
+    settle_expr = "(!window._autoScrollFollow&&!explicit)||!_bottomFollowOwnsReader(el)"
     assert settle_expr in src, "settle guard expression changed"
+    assert "!_messageUserUnpinned && _scrollPinned && !_recentNonMessageScrollIntent()" in src
     pinned_guard_expr = "!window._autoScrollFollow"
     assert f"if({pinned_guard_expr}) return;" in src, "scrollIfPinned guard changed"
 
@@ -157,6 +158,12 @@ def test_auto_scroll_follow_undefined_true_false_behavior():
             let explicit = {str(explicit).lower()};
             function _isMessagePaneNearBottom(px){{ return {str(near).lower()}; }}
             function _recentNonMessageScrollIntent(){{ return false; }}
+            const el={{scrollTop:100,scrollHeight:200,clientHeight:100}};
+            let _lastScrollTop=100;
+            function _bottomFollowOwnsReader(el){{
+              return !_messageUserUnpinned && _scrollPinned && !_recentNonMessageScrollIntent()
+                && !(el.scrollTop<_lastScrollTop-2 && el.scrollHeight-el.scrollTop-el.clientHeight>1);
+            }}
             let _out;
             try {{
               _out = ({expr});

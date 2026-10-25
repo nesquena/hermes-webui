@@ -57,7 +57,7 @@ const vm = require('vm');
 const src = fs.readFileSync({json.dumps(str(ROOT / 'static' / 'ui.js'))}, 'utf8');
 {_EXTRACT_FUNC_JS}
 
-const sandbox = {{console}};
+const sandbox = {{console, _sourceWindowHistoricalScenes: new WeakSet()}};
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 vm.createContext(sandbox);
@@ -154,7 +154,7 @@ function extractFuncFrom(source, name){{
   finally{{ src = previous; }}
 }}
 
-const sandbox = {{console}};
+const sandbox = {{console, _sourceWindowHistoricalScenes: new WeakSet()}};
 sandbox.window = sandbox;
 sandbox.globalThis = sandbox;
 sandbox._EPHEMERAL_TURN_FIELDS = [

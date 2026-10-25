@@ -1,0 +1,442 @@
+{
+  "oversized": {
+    "provenance": {
+      "ref": null,
+      "head": "5fade53c56ea779e4218750fac81c56b152a7c9b",
+      "activity_mode": "transparent_stream",
+      "fixture": "tools",
+      "tool_turns": "4",
+      "tool_steps": "240",
+      "source_sha256": {
+        "ui.js": "524d6062104771d8cb7dc8b3e75ca35b0d2f9616b9191917998cdc4678d0f5ec",
+        "sessions.js": "7e1041e2d880a61ce45ef00a74a4cee6f443f063342c69b931a869f769fe4a07"
+      }
+    },
+    "results": [
+      {
+        "test": "chromium-desktop-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-natural",
+        "status": "PASS"
+      }
+    ]
+  },
+  "default": {
+    "provenance": {
+      "ref": null,
+      "head": "5fade53c56ea779e4218750fac81c56b152a7c9b",
+      "activity_mode": "transparent_stream",
+      "fixture": "tools",
+      "tool_turns": "12",
+      "tool_steps": "55",
+      "source_sha256": {
+        "ui.js": "524d6062104771d8cb7dc8b3e75ca35b0d2f9616b9191917998cdc4678d0f5ec",
+        "sessions.js": "7e1041e2d880a61ce45ef00a74a4cee6f443f063342c69b931a869f769fe4a07"
+      }
+    },
+    "results": [
+      {
+        "test": "chromium-desktop-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-natural",
+        "status": "PASS"
+      }
+    ]
+  },
+  "neighbor-text": {
+    "provenance": {
+      "ref": null,
+      "head": "5fade53c56ea779e4218750fac81c56b152a7c9b",
+      "activity_mode": "compact_worklog",
+      "fixture": "text",
+      "tool_turns": "12",
+      "tool_steps": "55",
+      "source_sha256": {
+        "ui.js": "524d6062104771d8cb7dc8b3e75ca35b0d2f9616b9191917998cdc4678d0f5ec",
+        "sessions.js": "7e1041e2d880a61ce45ef00a74a4cee6f443f063342c69b931a869f769fe4a07"
+      }
+    },
+    "results": [
+      {
+        "test": "chromium-desktop-continuity",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-identity",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-prepend",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-input",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-switch",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-image",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-cold",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-stream",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-cache",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-disclosure",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-continuity",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-identity",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-prepend",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-input",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-switch",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-image",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-cold",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-stream",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-cache",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-disclosure",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-continuity",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-identity",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-prepend",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-input",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-switch",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-image",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-cold",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-stream",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-cache",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-disclosure",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-continuity",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-identity",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-prepend",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-input",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-switch",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-image",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-cold",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-stream",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-cache",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-disclosure",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-continuity",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-identity",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-prepend",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-input",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-switch",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-image",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-cold",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-stream",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-cache",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-disclosure",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-continuity",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-identity",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-prepend",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-input",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-switch",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-image",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-cold",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-stream",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-cache",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-disclosure",
+        "status": "PASS"
+      }
+    ]
+  },
+  "neighbor-compact": {
+    "provenance": {
+      "ref": null,
+      "head": "5fade53c56ea779e4218750fac81c56b152a7c9b",
+      "activity_mode": "compact_worklog",
+      "fixture": "tools",
+      "tool_turns": "12",
+      "tool_steps": "55",
+      "source_sha256": {
+        "ui.js": "524d6062104771d8cb7dc8b3e75ca35b0d2f9616b9191917998cdc4678d0f5ec",
+        "sessions.js": "7e1041e2d880a61ce45ef00a74a4cee6f443f063342c69b931a869f769fe4a07"
+      }
+    },
+    "results": [
+      {
+        "test": "chromium-desktop-activity",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-desktop-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-activity",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-activity",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-activity",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-activity",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-activity",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-natural",
+        "status": "PASS"
+      }
+    ]
+  },
+  "neighbor-hidden": {
+    "provenance": {
+      "ref": null,
+      "head": "5fade53c56ea779e4218750fac81c56b152a7c9b",
+      "activity_mode": "hide_all_activity",
+      "fixture": "tools",
+      "tool_turns": "4",
+      "tool_steps": "240",
+      "source_sha256": {
+        "ui.js": "524d6062104771d8cb7dc8b3e75ca35b0d2f9616b9191917998cdc4678d0f5ec",
+        "sessions.js": "7e1041e2d880a61ce45ef00a74a4cee6f443f063342c69b931a869f769fe4a07"
+      }
+    },
+    "results": [
+      {
+        "test": "chromium-desktop-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-narrow-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "chromium-mobile-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-desktop-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-narrow-natural",
+        "status": "PASS"
+      },
+      {
+        "test": "webkit-mobile-natural",
+        "status": "PASS"
+      }
+    ]
+  }
+}

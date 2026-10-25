@@ -8805,6 +8805,7 @@ function _syncApprovalCollapseButton(card) {
 
 function _approvalMessagesNearBottom(messages) {
   if (!messages) return false;
+  if (typeof _messageUserUnpinned!=='undefined'&&_messageUserUnpinned) return false;
   return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 150;
 }
 
@@ -9933,6 +9934,7 @@ let _clarifyResizeListenerReady = false;
 
 function _clarifyMessagesNearBottom(messages) {
   if (!messages) return false;
+  if (typeof _messageUserUnpinned!=='undefined'&&_messageUserUnpinned) return false;
   return messages.scrollHeight - messages.scrollTop - messages.clientHeight < 150;
 }
 
