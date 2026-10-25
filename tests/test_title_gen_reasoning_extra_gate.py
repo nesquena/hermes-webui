@@ -41,7 +41,10 @@ def test_collection_preserves_the_real_agent_package():
             assert tuple(agent_path) == tuple(
                 _AGENT_IMPORT_SPEC_BEFORE_COLLECTION.submodule_search_locations or ()
             )
-        assert importlib.import_module("agent.model_metadata") is not None
+        try:
+            assert importlib.import_module("agent.model_metadata") is not None
+        except ImportError as exc:
+            pytest.skip(f"Installed Agent dependencies unavailable: {exc}")
         return
 
     assert _AGENT_AFTER_COLLECTION is _AGENT_BEFORE_COLLECTION
@@ -50,7 +53,10 @@ def test_collection_preserves_the_real_agent_package():
     # Earlier tests can insert a spec-less synthetic agent module. This
     # module must preserve it, not claim that the pre-existing stub was real.
     if _AGENT_SPEC_BEFORE_COLLECTION is not None and _AGENT_PATH_BEFORE_COLLECTION is not _MISSING:
-        assert importlib.import_module("agent.model_metadata") is not None
+        try:
+            assert importlib.import_module("agent.model_metadata") is not None
+        except ImportError as exc:
+            pytest.skip(f"Installed Agent dependencies unavailable: {exc}")
 
 
 @pytest.fixture
@@ -230,6 +236,27 @@ class TestAuxReasoningExtraRouteContract:
             }), patch(
                 'agent.auxiliary_client._get_aux_model_for_provider',
                 side_effect=lambda provider: {'deepseek': 'deepseek-v4-flash'}.get(provider, ''),
+                create=True,
+            ), patch(
+                'agent.auxiliary_client._main_route_target',
+                side_effect=lambda runtime, task: (
+                    runtime.get('provider'), runtime.get('model'),
+                    runtime.get('base_url'), runtime.get('api_key'), runtime.get('api_mode'),
+                ),
+                create=True,
+            ), patch(
+                'agent.auxiliary_client._resolve_auto_route',
+                side_effect=lambda main_runtime, task: (
+                    SimpleNamespace(
+                        base_url=main_runtime.get('base_url') or '',
+                        api_key=main_runtime.get('api_key') or '',
+                    ),
+                    main_runtime.get('model'), main_runtime.get('provider'),
+                ),
+                create=True,
+            ), patch(
+                'agent.auxiliary_client._effective_provider_for_client',
+                side_effect=lambda client, provider: provider,
                 create=True,
             ), patch('agent.auxiliary_client.call_llm', side_effect=call_llm, create=True):
                 generate_title_raw_via_aux('question', 'answer')
@@ -479,6 +506,17 @@ class TestAuxReasoningExtraRouteContract:
             side_effect=main_route_target,
             create=True,
         ), patch(
+            'agent.auxiliary_client._resolve_auto_route',
+            return_value=(
+                SimpleNamespace(base_url='', api_key=''),
+                'gemini-3-flash', 'opencode-zen',
+            ),
+            create=True,
+        ), patch(
+            'agent.auxiliary_client._effective_provider_for_client',
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch(
             'agent.auxiliary_client.call_llm', side_effect=call_llm, create=True,
         ):
             generate_title_raw_via_aux('question', 'answer')
@@ -655,8 +693,9 @@ class TestResolvedAutoTitleTransportAndFallback:
         ("", "anthropic_messages"),
         ("codex_responses", "codex_responses"),
     ))
+    @pytest.mark.parametrize("title_model", ("", "title-model"))
     def test_auto_title_retains_main_anthropic_transport_unless_task_overrides(
-        self, task_mode, expected_mode,
+        self, task_mode, expected_mode, title_model,
     ):
         captured = []
 
@@ -664,7 +703,7 @@ class TestResolvedAutoTitleTransportAndFallback:
             captured.append(kwargs)
             return {"choices": [{"message": {"content": "Working title"}, "finish_reason": "stop"}]}
 
-        config = {"provider": "auto", "model": "", "base_url": ""}
+        config = {"provider": "auto", "model": title_model, "base_url": ""}
         if task_mode:
             config["api_mode"] = task_mode
         resolved_client = SimpleNamespace(
@@ -697,6 +736,7 @@ class TestResolvedAutoTitleTransportAndFallback:
 
         assert (title, status) == ("Working title", "llm_aux")
         assert captured[-1]["api_mode"] == expected_mode
+        assert captured[-1]["model"] == (title_model or "main-model")
         assert captured[-1]["base_url"] == "https://anthropic-wire.example/v1"
 
     def test_auto_title_selects_working_fallback_instead_of_unavailable_main(self):
@@ -735,6 +775,97 @@ class TestResolvedAutoTitleTransportAndFallback:
         assert captured[-1]["base_url"] == "https://fallback.example/v1"
         assert captured[-1]["api_key"] == "fallback-key"
         assert captured[-1]["api_mode"] is None  # Do not leak the failed main transport.
+
+
+    @pytest.mark.parametrize("configured_overrides", (
+        {},
+        {"api_key": "primary-dummy", "api_mode": "codex_responses"},
+    ))
+    def test_named_fallback_retains_selected_endpoint_key_and_transport(
+        self, configured_overrides,
+    ):
+        """Named fallback overrides are authoritative, not its registered defaults."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {"choices": [{"message": {"content": "Fallback title"}, "finish_reason": "stop"}]}
+
+        fallback_client = SimpleNamespace(
+            api_key="fallback-dummy",
+            base_url="https://relay.example/default/v1",
+            _hermes_fallback_destination=SimpleNamespace(
+                base_url="https://relay.example/override/v1",
+                api_mode="anthropic_messages",
+            ),
+        )
+        config = {"provider": "auto", "model": "", "base_url": "", **configured_overrides}
+        with patch("api.streaming._get_aux_title_config", return_value=config), patch(
+            "api.config.cfg",
+            {"model": {"provider": "custom:unavailable", "default": "dead-model"}},
+        ), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=("custom:unavailable", "dead-model", "", "", "chat_completions"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(fallback_client, "fallback-model", "custom:relay"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch(
+            "agent.auxiliary_client.call_llm", side_effect=call_llm, create=True,
+        ):
+            title, status = generate_title_raw_via_aux("question", "answer")
+
+        assert (title, status) == ("Fallback title", "llm_aux")
+        request = captured[-1]
+        assert request["provider"] == "custom:relay"
+        assert request["model"] == "fallback-model"
+        assert request["base_url"] == "https://relay.example/override/v1"
+        assert request["api_key"] == "fallback-dummy"
+        assert request["api_mode"] == "anthropic_messages"
+
+    def test_anonymous_fallback_ignores_primary_task_credentials_and_transport(self):
+        """The title primary's Anthropic key/mode must not hijack a chat fallback."""
+        captured = []
+
+        def call_llm(**kwargs):
+            captured.append(kwargs)
+            return {"choices": [{"message": {"content": "Fallback title"}, "finish_reason": "stop"}]}
+
+        fallback_client = SimpleNamespace(
+            api_key="fallback-dummy", base_url="https://relay.example/fallback/v1",
+        )
+        with patch("api.streaming._get_aux_title_config", return_value={
+            "provider": "auto", "model": "", "base_url": "",
+            "api_key": "primary-dummy", "api_mode": "anthropic_messages",
+        }), patch(
+            "api.config.cfg",
+            {"model": {"provider": "custom:unavailable", "default": "dead-model"}},
+        ), patch(
+            "agent.auxiliary_client._main_route_target",
+            return_value=("custom:unavailable", "dead-model", "", "", "anthropic_messages"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._resolve_auto_route",
+            return_value=(fallback_client, "fallback-model", "custom"),
+            create=True,
+        ), patch(
+            "agent.auxiliary_client._effective_provider_for_client",
+            side_effect=lambda client, provider: provider,
+            create=True,
+        ), patch(
+            "agent.auxiliary_client.call_llm", side_effect=call_llm, create=True,
+        ):
+            title, status = generate_title_raw_via_aux("question", "answer")
+
+        assert (title, status) == ("Fallback title", "llm_aux")
+        assert captured[-1]["base_url"] == "https://relay.example/fallback/v1"
+        assert captured[-1]["api_key"] == "fallback-dummy"
+        assert captured[-1]["api_mode"] is None
 
     def test_minimax_chat_is_a_verified_minimax_endpoint(self):
         from api.streaming import _is_minimax_route

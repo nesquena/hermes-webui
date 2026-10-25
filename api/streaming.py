@@ -4401,11 +4401,10 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
         # replace it with a main-route or display-catalog model.
         return supplied_provider, own_default, supplied_base_url
 
-    # A blank implicit route is Agent-owned. Resolve it with the same title-task
-    # target calculation the auxiliary client uses so opt-ins such as
-    # auxiliary.title_generation.prefer_fast_model cannot be lost by WebUI
-    # pre-resolving the main model and then passing an explicit tuple to call_llm().
-    if implicit_route and not supplied_model and not supplied_base_url:
+    # An implicit route inherits the Agent-selected provider, endpoint, key,
+    # and transport even when the title task specifies only a model override.
+    # Picker models and explicit URLs remain independent request contracts.
+    if implicit_route and not supplied_base_url and not picker_route:
         try:
             model_cfg = get_config().get('model', {})
             if isinstance(model_cfg, dict):
@@ -4447,34 +4446,47 @@ def _effective_aux_title_route(provider: str, model: str, base_url: str, *, reso
                             or auto_provider or ''
                         )
                         if auto_provider and auto_model:
+                            # The Agent may select a fallback with the same
+                            # provider/model as main; honor its destination marker.
+                            destination = getattr(
+                                auto_client, '_hermes_fallback_destination', None
+                            )
                             is_main_route = (
-                                auto_provider == str(resolved_provider or '')
+                                destination is None
+                                and auto_provider == str(resolved_provider or '')
                                 and str(auto_model) == str(resolved_model or '')
                             )
-                            # A named custom fallback owns its configured
-                            # endpoint and transport. Other fallback clients
-                            # must keep the endpoint the Agent actually chose.
+                            selected_url = str(
+                                getattr(destination, 'base_url', '')
+                                or getattr(auto_client, 'base_url', '') or ''
+                            )
+                            # Never discard a named fallback's endpoint override
+                            # and let its registered default take over the call.
                             auto_url = (
                                 str(resolved_base_url or '') if is_main_route
-                                else '' if auto_provider.startswith('custom:')
-                                else str(getattr(auto_client, 'base_url', '') or '')
+                                else selected_url
                             )
                             if resolved_credentials is not None:
-                                selected_key = (
-                                    _resolved_api_key if is_main_route
-                                    else getattr(auto_client, 'api_key', '')
+                                resolved_credentials['fallback_selected'] = not is_main_route
+                                resolved_credentials['api_key'] = (
+                                    (_resolved_api_key if is_main_route
+                                     else getattr(auto_client, 'api_key', '')) or ''
                                 )
-                                resolved_credentials['api_key'] = selected_key or ''
                                 if is_main_route:
-                                    resolved_credentials['api_mode'] = str(_resolved_api_mode or '')
-                                elif (
-                                    auto_provider == 'custom'
-                                    and type(auto_client).__name__ == 'AnthropicAuxiliaryClient'
-                                ):
-                                    # Anonymous fallback with Anthropic wire
-                                    # requires the transport of its selected client.
-                                    resolved_credentials['api_mode'] = 'anthropic_messages'
-                            return auto_provider, str(auto_model), auto_url
+                                    selected_mode = str(_resolved_api_mode or '')
+                                else:
+                                    selected_mode = str(
+                                        getattr(destination, 'api_mode', '') or ''
+                                    )
+                                    if (
+                                        not selected_mode
+                                        and type(auto_client).__name__ == 'AnthropicAuxiliaryClient'
+                                    ):
+                                        selected_mode = 'anthropic_messages'
+                                resolved_credentials['api_mode'] = selected_mode
+                            # A title-model override changes only the model,
+                            # not the endpoint, key, or wire protocol.
+                            return auto_provider, str(supplied_model or auto_model), auto_url
                     except ImportError:
                         # Older Agent installations do not expose full auto
                         # resolution. Retain the legacy candidate fallback.
@@ -4714,12 +4726,18 @@ def generate_title_raw_via_aux(
     provider, model, base_url = _effective_aux_title_route(
         provider, model, base_url, resolved_credentials=route_credentials,
     )
-    if not api_key:
+    fallback_selected = bool(route_credentials.get('fallback_selected'))
+    if fallback_selected:
+        # Primary title-task credentials/transport must not override those of
+        # the actual fallback selected by the Agent.
         api_key = route_credentials.get('api_key', '')
-    # A task-specific transport setting takes precedence. Otherwise keep the
-    # working main route's transport (notably custom anthropic_messages) when
-    # the title route is inherited from the main model.
-    api_mode = str(configured.get('api_mode') or route_credentials.get('api_mode') or '').strip()
+        api_mode = str(route_credentials.get('api_mode') or '').strip()
+    else:
+        if not api_key:
+            api_key = route_credentials.get('api_key', '')
+        api_mode = str(
+            configured.get('api_mode') or route_credentials.get('api_mode') or ''
+        ).strip()
     reasoning_extra = {}
     if _route_accepts_reasoning_extra(provider, model, base_url):
         reasoning_extra["reasoning"] = {"enabled": False}

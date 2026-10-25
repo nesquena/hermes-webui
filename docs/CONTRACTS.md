@@ -183,9 +183,12 @@ must consume that same resolved route.
   for the request rather than freezing an unavailable main route. This also
   includes `auxiliary.title_generation.prefer_fast_model`.
 - An inherited main route retains the main model's resolved transport
-  (`api_mode`, including `anthropic_messages`). An explicit title-task
-  `api_mode` overrides it. A fallback provider retains its own endpoint
-  and transport rather than inheriting the failed main route's protocol.
+  (`api_mode`, including `anthropic_messages`), even when title_generation
+  specifies only a model override. An explicit title-task `api_mode` may
+  override the inherited main route.
+- A fallback provider retains its own selected endpoint, API key and transport
+  (including named-custom fallback overrides). Title-task `api_key` and
+  `api_mode` belong to the primary route; they cannot override the fallback.
 - Reasoning suppression is injected only for a known compatible effective
   route. Unknown/custom routes, rejected provider routes, and routes with no
   resolved model omit it (fail closed). MiniMax `reasoning_split` remains a
