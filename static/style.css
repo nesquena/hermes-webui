@@ -1461,11 +1461,8 @@
   {opacity:1!important;}
   :root[data-skin="gruvbox"] .session-source-chip:not([data-source-key="telegram"]):not([data-source-key="discord"]):not([data-source-key="slack"]):not([data-source-key="claude_code"])
   {color:var(--strong);}
-  /* Master mixes --blue 70% into --sidebar for the sticky Create Project row;
-     the mix lands at 2.92:1 light / 3.80:1 dark on gruvbox surfaces, so
-     restore the full blue (4.81:1 light / 6.00:1 dark on the sidebar). */
-  :root[data-skin="gruvbox"] .project-picker-create{color:var(--blue);}
-  :root[data-skin="gruvbox"] .project-picker-create:hover{color:var(--accent-text);}
+  /* The Create Project label repair lives next to the base rules it overrides
+     (see the #8044 picker-rule ordering contract in style.css). */
   /* #594: app-dialog light mode overrides — base styles use hardcoded dark gradients */
   :root:not(.dark) .app-dialog{
     background:linear-gradient(180deg,rgba(240,237,232,.99),rgba(228,224,216,.99));
@@ -6180,6 +6177,12 @@ main.main > #mainPlugin{display:none;}
    the dimmed label is a color-mix instead of opacity:.7. Identical in the non-scrolling case. */
 .project-picker-create{color:color-mix(in srgb,var(--blue) 70%,var(--sidebar));border-top:1px solid var(--border2);margin-top:2px;padding-top:6px;position:sticky;bottom:-4px;background:var(--sidebar);}
 .project-picker-create:hover{color:var(--blue);background:linear-gradient(var(--accent-bg),var(--accent-bg)),var(--sidebar);}
+/* Gruvbox: the base label is a --blue/--sidebar color-mix for an opaque sticky
+   row, which lands at 2.92:1 light / 3.80:1 dark on gruvbox surfaces. Restore
+   the full blue (4.81:1 light / 6.00:1 dark on the sidebar) and keep the
+   hover re-ink. Scoped after the base rules so the skin's cascade wins. */
+:root[data-skin="gruvbox"] .project-picker-create{color:var(--blue);}
+:root[data-skin="gruvbox"] .project-picker-create:hover{color:var(--accent-text);}
 /* Lives as a flex sibling in .session-title-row (between title and time);
    the row's gap:6px handles spacing, no margin/vertical-align needed. */
 .session-project-dot{width:6px;height:6px;border-radius:50%;flex-shrink:0;display:inline-block;}
