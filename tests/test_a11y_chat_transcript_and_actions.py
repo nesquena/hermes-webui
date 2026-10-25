@@ -39,6 +39,12 @@ def _function_body(source: str, name: str) -> str:
     raise AssertionError(f"Unclosed function {name}")
 
 
+def _run_node(script: str):
+    return json.loads(
+        subprocess.check_output(["node", "-"], input=script, text=True)
+    )
+
+
 def test_assistant_role_header_exposes_level3_heading_and_hides_monogram():
     fn = _function_body(UI_JS, "_assistantRoleHtml")
     script = f"""
@@ -48,7 +54,7 @@ def test_assistant_role_header_exposes_level3_heading_and_hides_monogram():
     {fn}
     console.log(JSON.stringify({{ html: _assistantRoleHtml('2026-10-18 17:00', '42.0 t/s') }}));
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     html = out["html"]
     assert '<div class="role-icon assistant" aria-hidden="true">H</div>' in html
     assert '<span class="msg-role-name" role="heading" aria-level="3">Hermes</span>' in html
@@ -128,7 +134,7 @@ def test_tts_playback_keeps_aria_pressed_synchronized():
     const stoppedSpeaking = btn.dataset.speaking;
     console.log(JSON.stringify({{ activePressed, activeSpeaking, stoppedPressed, stoppedSpeaking }}));
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out == {
         "activePressed": "true",
         "activeSpeaking": "1",
@@ -194,7 +200,7 @@ def test_copy_msg_announces_copied_and_updates_aria_label():
       console.log(JSON.stringify({{ copiedLabel, announced, restoredLabel }}));
     }});
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out == {
         "copiedLabel": "Copied!",
         "announced": "Copied!",
@@ -321,7 +327,7 @@ def test_a11y_stream_lifecycle_and_tool_throttling():
 
     console.log(JSON.stringify(log));
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out == [
         {"phase": "start", "polite": "Hermes: Thinking…", "busy": "true"},
         {"phase": "reconnect", "polite": ""},
@@ -393,7 +399,7 @@ def test_a11y_spoken_response_on_done_short_code_and_long():
 
     console.log(JSON.stringify({{ shortReply, timersAfterShort, codeReply, longReply }}));
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out["shortReply"] == "Hermes: Run pytest to verify all checks pass."
     assert out["timersAfterShort"] == 0, "spoken response must not schedule a short auto-clear timer"
     assert out["codeReply"] == (
@@ -517,7 +523,7 @@ def test_a11y_navigation_and_recovery_lifecycle_retires_busy_and_start_state():
 
     console.log(JSON.stringify(log));
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out == [
         {"step": "start_A", "busy": "true", "announcement": "Hermes: Thinking…"},
         {"step": "switched_to_idle_B", "busy": "false"},
@@ -612,7 +618,7 @@ def test_identical_consecutive_announcements_alternate_whitespace_for_screen_rea
 
     console.log(JSON.stringify(log));
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     base_err = "Response interrupted by an error: Rate limit exceeded"
     base_reply = "Hermes: Yes, that is correct."
     assert out == [
@@ -699,7 +705,7 @@ def test_a11y_compression_rotation_admits_continuation_and_rejects_unrelated():
 
     console.log(JSON.stringify(log));
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out == [
         {"step": "started_parent", "busy": "true"},
         {
@@ -856,7 +862,7 @@ def test_repeated_copy_handlers_preserve_canonical_aria_label_and_drain():
       }});
     }});
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out == [
         {
             "handler": "copyMsg",
@@ -1088,7 +1094,7 @@ def test_attach_live_stream_and_reconnect_preserve_active_turn_and_retire_old_st
       console.log(JSON.stringify(log));
     }})();
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out == [
         {
             "step": "attached_stream1",
@@ -1425,7 +1431,7 @@ def test_done_listener_preserves_completion_across_stream_end_before_and_after_f
       console.log(JSON.stringify(log));
     }})();
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out == [
         {
             "case": "a_to_a_stream_end_before_frame",
@@ -1703,7 +1709,7 @@ def test_polite_copy_does_not_invalidate_assertive_error_before_frame_or_before_
       console.log(JSON.stringify(log));
     }})();
     """
-    out = json.loads(subprocess.check_output(["node", "-e", script], text=True))
+    out = _run_node(script)
     assert out == [
         {
             "case": "copy_before_error_frame",
