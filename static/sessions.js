@@ -5047,10 +5047,48 @@ function _adoptServerStartStampForRecoveryUser(session,inflightMessages,firstLiv
   return false;
 }
 
+// Resolve the current turn's user row from the inflight tail: the nearest
+// user row behind the first live segment, walking past tool rows only.
+function _inflightTailTurnUser(inflight){
+  const list=Array.isArray(inflight)?inflight:[];
+  let firstLiveIdx=-1;
+  for(let i=0;i<list.length;i++){
+    if(list[i]&&list[i]._live){firstLiveIdx=i;break;}
+  }
+  if(firstLiveIdx<0) return null;
+  for(let i=firstLiveIdx-1;i>=0;i--){
+    const msg=list[i];
+    if(!msg) continue;
+    if(String(msg.role||'')==='user') return msg;
+    if(String(msg.role||'')==='tool') continue;
+    return null;
+  }
+  return null;
+}
+
 function _prepareRunningLiveTail(baseMessages,inflightMessages,session){
   const inflight=Array.isArray(inflightMessages)?inflightMessages:[];
   const liveMessages=inflight.filter(m=>m&&m.role==='assistant'&&m._live);
-  if(liveMessages.length>1) return liveMessages.some(m=>!!_messageComparableText(m));
+  if(liveMessages.length>1){
+    // The multi-segment projection proves live content exists, not that the
+    // base transcript's settled answer belongs to THIS stream. In deferred
+    // session-save mode the base still ends with the PREVIOUS turn's settled
+    // user+assistant while the current prompt + live segments live only in
+    // the INFLIGHT snapshot; authorizing the drop on live content alone
+    // removes the immediately preceding reply until an idle reload restores
+    // it from disk. The single-segment path below already gates on
+    // `settledBelongsToCurrentTurn`; the multi-segment path must obey the
+    // same ownership rule: keep every previous settled answer when the
+    // persisted tail is not provably the current turn's own superseded copy.
+    const persistedTextMulti=_currentTurnAssistantText(baseMessages);
+    if(persistedTextMulti){
+      const turnUserMulti=_inflightTailTurnUser(inflight);
+      if(!turnUserMulti||!_hasInflightTailUserDuplicate(baseMessages,turnUserMulti)){
+        return false;
+      }
+    }
+    return liveMessages.some(m=>!!_messageComparableText(m));
+  }
   const live=liveMessages[0]||null;
   if(!live) return false;
   const liveText=_messageComparableText(live);
