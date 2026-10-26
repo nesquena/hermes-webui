@@ -4948,6 +4948,11 @@ function _modelProviderForSend(modelId){
 }
 function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   if(!sel) return null;
+  // #7777: the running session's own model is exempt from the picker exclude
+  // policy. Upstream pins _ensureModelOptionInDropdown's call shape verbatim
+  // (tests/test_model_default_boot_precedence.py:209), so the exemption rides
+  // on this scoped flag instead of an extra argument.
+  let _activeSessionExclusion=false;
   const activeSession=(typeof S!=='undefined'&&S&&S.session)?S.session:null;
   // Fresh boot is the only path where the profile/server default intentionally
   // beats a browser-persisted or static fallback value. Every other model-list
@@ -4972,22 +4977,26 @@ function _reconcileModelDropdownSelection(sel,data,previousState,opts){
   // because the picker already believed it was selected. The active-session
   // branch therefore passes ``allowExcludedForActiveSession`` (the same
   // exception syncTopbar() uses).
-  const _applyOrEnsure = function(modelId, providerId, allowActiveSession) {
+  const _applyOrEnsure = function(modelId, providerId) {
     if (typeof _ensureModelOptionInDropdown === 'function') {
-      return _ensureModelOptionInDropdown(modelId, sel, providerId,
-        allowActiveSession ? {allowExcludedForActiveSession:true} : undefined);
+      if(_activeSessionExclusion){
+        return _ensureModelOptionInDropdown(modelId, sel, providerId,
+          {allowExcludedForActiveSession:true});
+      }
+      return _ensureModelOptionInDropdown(modelId, sel, providerId);
     }
     return _applyModelToDropdown(modelId, sel, providerId);
   };
 
   if(shouldApplyBootDefault && data&&data.default_model && !(activeSession&&activeSession.model)){
-    return _applyOrEnsure(data.default_model, data.active_provider||null, false);
+    return _applyOrEnsure(data.default_model, data.active_provider||null);
   }
   if(activeSession&&activeSession.model){
-    return _applyOrEnsure(activeSession.model, activeSession.model_provider||null, true);
+    _activeSessionExclusion = true;
+    return _applyOrEnsure(activeSession.model, activeSession.model_provider||null);
   }
   if(previousState&&previousState.model){
-    return _applyOrEnsure(previousState.model, previousState.model_provider||null, false);
+    return _applyOrEnsure(previousState.model, previousState.model_provider||null);
   }
   return null;
 }
