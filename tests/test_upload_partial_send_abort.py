@@ -23,6 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 MESSAGES_JS = ROOT.joinpath("static", "messages.js").read_text(encoding="utf-8")
 UI_JS = ROOT.joinpath("static", "ui.js").read_text(encoding="utf-8")
+SESSIONS_JS = ROOT.joinpath("static", "sessions.js").read_text(encoding="utf-8")
 
 
 def _send_upload_block() -> str:
@@ -96,7 +97,7 @@ function updateSendBtn(){}
 function renderTray(){ state.trayRendered = true; }
 function _saveComposerDraftNow(sid, text, files){ state.saved = {sid, text, files}; }
 %s
-_restoreComposerDraftAfterFailedSend(%s, %s, 'sid-1', null, {mergeLiveInput:true});
+_restoreComposerDraftAfterFailedSend(%s, %s, 'sid-1', null, '', {mergeLiveInput:true});
 state.pendingFiles = S.pendingFiles;
 console.log(JSON.stringify({input: state.input.value, files: state.pendingFiles, saved: state.saved}));
 """ % (
@@ -134,15 +135,26 @@ def test_send_reuses_uploads_and_only_uploads_the_missing_files():
 
 
 def test_send_drops_the_reuse_cache_once_the_agent_has_the_turn():
+    explicit = MESSAGES_JS.find("if(entry&&entry.sid===String(activeSid||''))_uploadedFileResults.delete(file);")
     start = MESSAGES_JS.find("_dropUploadResults(activeSid);")
+    assert explicit != -1, "a successful send must delete the submitted File keys explicitly"
     assert start != -1, "send() must drop the per-File upload cache when the send proceeds"
-    assert start < MESSAGES_JS.find("attachLiveStream(activeSid, streamId, uploadedNames);"), (
-        "the cache must be dropped before the stream opens"
+    assert explicit < start < MESSAGES_JS.find("attachLiveStream(activeSid, streamId, uploadedNames);"), (
+        "submitted keys are deleted, then the session index, before the stream opens"
     )
 
 
+def test_partial_upload_reports_in_the_composer_without_a_toast():
+    branch = _partial_upload_branch()
+    assert "setComposerStatus(_partialMsg)" in branch
+    assert "showToast" not in branch
+    catch = _total_upload_catch()
+    assert "Upload error:" in catch
+    assert "showToast" not in catch
+
+
 def _upload_cache_helpers_source() -> str:
-    start = MESSAGES_JS.find("const _uploadedFileResults=new Map();")
+    start = MESSAGES_JS.find("const _uploadedFileResults=new WeakMap();")
     end = MESSAGES_JS.find("\nasync function send(){")
     assert start != -1 and end != -1
     return MESSAGES_JS[start:end]
@@ -312,3 +324,200 @@ def test_upload_restore_keeps_a_file_staged_during_the_upload():
         {"name": "new.txt", "size": 2, "lastModified": 20},
     ]
     assert out["saved"]["files"] == out["files"]
+
+
+def _extract_js_function(src: str, signature: str) -> str:
+    start = src.find(signature)
+    assert start != -1, signature
+    brace = src.find("{", start)
+    depth = 0
+    for i in range(brace, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise AssertionError(f"{signature} is unterminated")
+
+
+def test_upload_failure_does_not_clear_successful_results():
+    """Clearing the cache on every failure re-uploaded a.txt as a-1.txt."""
+    for block in (_partial_upload_branch(), _total_upload_catch()):
+        assert "_dropUploadResults" not in block
+        assert "_forgetUploadedFile" not in block
+        assert "_uploadedFileResults.delete" not in block
+
+
+def test_partial_failure_retries_the_failed_file_only_once():
+    """The successful file stays cached across the failed start and is not uploaded again."""
+    out = _run_node(
+        r"""
+class FakeFormData {
+  constructor() { this.entries = []; }
+  append(key, value, filename) { this.entries.push([key, value, filename]); }
+  file() {
+    const entry = this.entries.find((e) => e[0] === 'file');
+    return entry ? entry[1] : null;
+  }
+}
+const fetchCalls = [];
+globalThis.FormData = FakeFormData;
+globalThis.document = { baseURI: 'http://webui/' };
+globalThis.location = { href: 'http://webui/' };
+globalThis.S = { pendingFiles: [], session: { session_id: 'sid-1' }, currentDir: '.' };
+const MAX_UPLOAD_BYTES = 1024 * 1024;
+const _ARCHIVE_EXTS = /\.zip$/i;
+function _redirectIfUnauth() { return false; }
+function setStatus() {}
+function showToast() {}
+function renderTray() {}
+function loadDir() {}
+function t(key) { return key; }
+function _uploadTooLargeMessage() { return 'too large'; }
+function _uploadPendingFilesUpdateProgress() {}
+function _uploadPendingFilesCurrentSession() { return true; }
+globalThis.fetch = async (url, opts) => {
+  const name = opts.body.file().name;
+  fetchCalls.push(name);
+  if (name === 'bad.txt' && fetchCalls.filter((n) => n === 'bad.txt').length === 1) {
+    return { ok: false, text: async () => 'boom' };
+  }
+  return {
+    ok: true,
+    json: async () => ({ filename: name, path: '/up/' + name, mime: 'text/plain', size: 5, is_image: false }),
+  };
+};
+"""
+        + _upload_pending_files_source()
+        + r"""
+const files = [{name: 'good.txt', size: 5}, {name: 'bad.txt', size: 5}];
+const helpers = %s;
+(async () => {
+  await uploadPendingFiles({files, sessionId: 'sid-1', clearPending: false, onFileUploaded: (f, r) => {
+    helpers._rememberUploadResult(f, 'sid-1', r);
+  }});
+  const afterFailure = {
+    good: helpers._cachedUploadResult(files[0], 'sid-1'),
+    bad: helpers._cachedUploadResult(files[1], 'sid-1'),
+  };
+  const retry = helpers._pendingUploadsFor(files, 'sid-1');
+  await uploadPendingFiles({files: retry.toUpload, sessionId: 'sid-1', clearPending: false, onFileUploaded: (f, r) => {
+    helpers._rememberUploadResult(f, 'sid-1', r);
+  }});
+  console.log(JSON.stringify({
+    afterFailure,
+    fetchCalls,
+    retryUploads: retry.toUpload.map((f) => f.name),
+    reused: helpers._cachedUploadResult(files[0], 'sid-1') && helpers._cachedUploadResult(files[0], 'sid-1').path,
+  }));
+})();
+"""
+        % (
+            "(function(){"
+            + _upload_cache_helpers_source()
+            + "return {_rememberUploadResult,_cachedUploadResult,_pendingUploadsFor};})()"
+        )
+    )
+    assert out["afterFailure"]["good"]["path"] == "/up/good.txt"
+    assert out["afterFailure"]["bad"] is None, "the failed file must not be reused as a success"
+    assert out["retryUploads"] == ["bad.txt"]
+    assert out["fetchCalls"] == ["good.txt", "bad.txt", "bad.txt"]
+    assert out["reused"] == "/up/good.txt"
+
+
+def test_partial_failure_then_tray_removal_drops_that_file():
+    """The real chip-remove handler must forget that File and leave the other one cached."""
+    out = _run_node(
+        _upload_cache_helpers_source()
+        + _extract_js_function(UI_JS, "function renderTray(){")
+        + r"""
+const good = {name: 'good.txt', size: 1, lastModified: 1};
+const other = {name: 'other.txt', size: 2, lastModified: 2};
+_rememberUploadResult(good, 'sid-1', {name: 'good.txt', path: '/up/good.txt'});
+_rememberUploadResult(other, 'sid-1', {name: 'other.txt', path: '/up/other.txt'});
+const chips = [];
+function makeChip() {
+  const button = {};
+  const chip = {
+    className: '',
+    classList: {add(){}, remove(){}, contains(){ return false; }},
+    dataset: {},
+    innerHTML: '',
+    appendChild(){},
+    querySelector(sel) { return sel === 'button' ? button : null; },
+    _button: button,
+  };
+  chips.push(chip);
+  return chip;
+}
+const tray = {
+  innerHTML: '',
+  classList: {add(){}, remove(){}, contains(){ return false; }},
+  appendChild(){},
+};
+globalThis.document = {createElement: () => makeChip()};
+globalThis.$ = (id) => (id === 'attachTray' ? tray : null);
+globalThis.S = {pendingFiles: [good, other]};
+globalThis._IMAGE_EXTS = /^$/;
+globalThis._SVG_EXTS = /^$/;
+globalThis._mediaKindForName = () => '';
+globalThis.esc = (value) => String(value == null ? '' : value);
+globalThis.li = () => '';
+globalThis.t = (key) => key;
+globalThis.updateSendBtn = () => {};
+renderTray();
+chips[0]._button.onclick();
+console.log(JSON.stringify({
+  pending: S.pendingFiles.map((f) => f.name),
+  good: _cachedUploadResult(good, 'sid-1'),
+  other: _cachedUploadResult(other, 'sid-1'),
+}));
+"""
+    )
+    assert out["pending"] == ["other.txt"]
+    assert out["good"] is None
+    assert out["other"]["path"] == "/up/other.txt"
+
+
+def test_partial_failure_then_delete_session_drops_that_sessions_files():
+    """deleteSession() must drop the deleted session's cached Files and no others."""
+    out = _run_node(
+        _upload_cache_helpers_source()
+        + _extract_js_function(SESSIONS_JS, "async function deleteSession(")
+        + r"""
+const good = {name: 'good.txt'};
+const other = {name: 'other.txt'};
+const keeper = {name: 'keeper.txt'};
+_rememberUploadResult(good, 'sid-1', {name: 'good.txt', path: '/up/good.txt'});
+_rememberUploadResult(other, 'sid-1', {name: 'other.txt', path: '/up/other.txt'});
+_rememberUploadResult(keeper, 'sid-2', {name: 'keeper.txt', path: '/up/keeper.txt'});
+globalThis.S = {session: {session_id: 'sid-other'}, messages: [], entries: []};
+globalThis._allSessions = [];
+globalThis.t = (key) => key;
+globalThis._sessionSnapshotById = () => null;
+globalThis.showConfirmDialog = async () => true;
+globalThis._captureSessionReflowPositions = () => null;
+globalThis._clearHandoffStorageForSession = () => {};
+globalThis._forgetComposerDraftLocalFallback = () => {};
+globalThis._optimisticallyRemoveSessionFromList = () => {};
+globalThis._sessionResponseRetainsWorktree = () => false;
+globalThis.showToast = () => {};
+globalThis.renderSessionList = async () => {};
+globalThis.setStatus = () => {};
+globalThis.api = async () => ({});
+(async () => {
+  const deleted = await deleteSession('sid-1');
+  console.log(JSON.stringify({
+    deleted,
+    good: _cachedUploadResult(good, 'sid-1'),
+    other: _cachedUploadResult(other, 'sid-1'),
+    keeper: _cachedUploadResult(keeper, 'sid-2'),
+  }));
+})();
+"""
+    )
+    assert out["deleted"] is True
+    assert out["good"] is None
+    assert out["other"] is None
+    assert out["keeper"]["path"] == "/up/keeper.txt"
