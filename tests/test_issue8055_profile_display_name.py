@@ -287,6 +287,177 @@ global.api = (url) => {
 """
 
 
+_SWITCH_COMMITTED_ANCILARY_DRIVER = r"""
+const fs = require('fs');
+const uiSrc = fs.readFileSync(process.argv[2], 'utf8');
+const panelsSrc = fs.readFileSync(process.argv[3], 'utf8');
+const scenario = process.argv[4];
+function extractFunc(src, name) {
+  const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+  const start = src.search(re);
+  if (start < 0) throw new Error(name + ' not found');
+  let i = src.indexOf('{', start);
+  let depth = 1; i++;
+  while (depth > 0 && i < src.length) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}') depth--;
+    i++;
+  }
+  return src.slice(start, i);
+}
+function makeEl() {
+  return {textContent: '', disabled: false, classList: {add(){}, remove(){}, toggle(){}, contains(){return false;}}, style: {}};
+}
+const els = {};
+global.$ = (id) => { if (!els[id]) els[id] = makeEl(); return els[id]; };
+global.S = {
+  activeProfile: 'work', activeProfileIsDefault: false, activeProfileDisplayName: 'Client A',
+  session: {session_id: 's1', workspace: '/ws', profile: 'work'}, messages: [{role: 'user', content: 'hi'}],
+  _pendingSessionToolsets: null,
+};
+global.t = (k) => k;
+const toasts = [];
+global.showToast = (msg, ms) => { toasts.push({msg, ms}); };
+global.applyBotName = () => {};
+global.syncAppTitlebar = () => {};
+global.syncTopbar = () => {};
+global.startGatewaySSE = () => {};
+const calls = {newSession: 0, renderSessionList: 0, loadDir: 0, clearWorkspaceTreeSkeleton: 0, embargo: []};
+// The ancillary failure: /api/profile/switch COMMITS, then newSession()'s
+// /api/session/new blows up.
+global.newSession = async () => { calls.newSession++; throw new Error('new conversation failed'); };
+global.renderSessionList = async () => {
+  calls.renderSessionList++;
+  if (scenario === 'superseded-during-recovery') {
+    // A newer switch started while the recovery render was in flight.
+    _profileSwitchGeneration++;
+  }
+};
+global.renderSessionListFromCache = () => {};
+global.loadDir = () => { calls.loadDir++; };
+global.clearWorkspaceTreeSkeleton = () => { calls.clearWorkspaceTreeSkeleton++; };
+global.showSessionListSkeleton = () => {};
+global.bumpWorkspaceTreeGen = () => {};
+global.closeSessionActionMenu = () => {};
+global._invalidateSessionListRenders = () => {};
+global._setProfileSwitchListEmbargo = (v) => { calls.embargo.push(v); };
+global._maybeReplayChatTodosRailSync = () => {};
+global._profileSwitchPanelLoad = async () => {};
+global._refreshProfileSwitchBackground = () => {};
+global._openProfileSwitchSessionBrowser = () => {};
+global.animateNextSessionListRefresh = () => {};
+global._clearPersistedModelState = () => {};
+global._profileMatchesActiveProfile = () => true;
+// The skeleton was shown up front (the real showSessionListSkeleton sets this).
+var _sessionListSkeletonActive = true;
+var _profileSwitchGeneration = 0;
+var _workspacePanelMode = 'open';
+eval(extractFunc(uiSrc, 'profileChipDisplayLabel'));
+eval(extractFunc(panelsSrc, 'switchToProfile'));
+global.api = (url) => {
+  if (url === '/api/profile/switch') {
+    return Promise.resolve({active: 'vops', is_default: false, display_name: 'Client B'});
+  }
+  return Promise.resolve({});
+};
+(async () => {
+  const returned = await switchToProfile('vops');
+  console.log(JSON.stringify({
+    scenario,
+    returned,
+    activeProfile: S.activeProfile,
+    activeProfileDisplayName: S.activeProfileDisplayName,
+    activeProfileIsDefault: S.activeProfileIsDefault,
+    chipLabel: $('profileChipLabel').textContent,
+    titlebarLabel: $('titlebarProfileLabel').textContent,
+    skeletonActive: _sessionListSkeletonActive,
+    calls,
+    embargoLiftedLast: calls.embargo.length ? calls.embargo[calls.embargo.length - 1] : null,
+    toasts,
+  }));
+})().catch(e => { console.error(e); process.exit(1); });
+
+"""
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_committed_switch_recovers_skeletons_after_ancillary_failure(tmp_path):
+    """Behavioral: the switch POST commits, then an ancillary failure (the
+    /api/session/new inside newSession()) must NOT strand the up-front
+    skeletons — the session list and workspace spinners came down for an
+    uncommitted failure only, so a committed switch's late error left both
+    loading screens up forever while the profile had already moved
+    (greptile P1, static/panels.js:7684, 2026-10-17).
+
+    The committed target's labels stay (no rollback), the list re-renders
+    fresh (the cached rows are the PREVIOUS profile's — repainting them would
+    show the wrong profile), the workspace tree reloads, and the error is
+    reported with the generic failure prefix rather than 'switch_failed'.
+    """
+    driver = tmp_path / "switch_committed_ancillary_driver.js"
+    driver.write_text(_SWITCH_COMMITTED_ANCILARY_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(REPO_ROOT / "static" / "ui.js"), str(REPO_ROOT / "static" / "panels.js"), "committed"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
+    got = json.loads(result.stdout)
+
+    assert got["returned"] is False
+    # The switch committed server-side: the target stays active, NOT rolled back.
+    assert got["activeProfile"] == "vops"
+    assert got["activeProfileDisplayName"] == "Client B", (
+        "committed switch must keep the target's display name, got: "
+        + repr(got["activeProfileDisplayName"])
+    )
+    assert got["chipLabel"] == "Client B", "chip label must keep the committed target"
+    assert got["titlebarLabel"] == "Client B", "titlebar label must keep the committed target"
+    # Both skeletons recovered.
+    assert got["skeletonActive"] is False, "session-list skeleton must be cleared on committed-ancillary failure"
+    assert got["embargoLiftedLast"] is False, "embargo must be lifted before the recovery render"
+    assert got["calls"]["renderSessionList"] >= 1, "recovery must re-render the list (fresh fetch, not cache)"
+    assert got["calls"]["loadDir"] == 1, "workspace tree must reload on committed-ancillary failure"
+    assert got["calls"]["clearWorkspaceTreeSkeleton"] == 0
+    # The error is reported — with the generic prefix, not 'switch_failed'
+    # (the switch itself succeeded; only the new conversation failed).
+    assert len(got["toasts"]) == 1, f"exactly one error toast expected, got: {got['toasts']}"
+    toast = got["toasts"][0]
+    assert "failed_colon" in toast["msg"], f"toast must use the generic failure prefix, got: {toast['msg']!r}"
+    assert "switch_failed" not in toast["msg"], "a committed switch must not report 'switch_failed'"
+    assert "new conversation failed" in toast["msg"], f"toast must carry the error message, got: {toast['msg']!r}"
+
+
+@pytest.mark.skipif(NODE is None, reason="node not on PATH")
+def test_committed_recovery_yields_to_newer_switch(tmp_path):
+    """Boundary: if a newer switch starts while the recovery render is in
+    flight, the superseded switch must bail out of the recovery (no workspace
+    reload, no toast) — the newer switch owns the skeletons now, same
+    supersession discipline as the success paths.
+    """
+    driver = tmp_path / "switch_committed_superseded_driver.js"
+    driver.write_text(_SWITCH_COMMITTED_ANCILARY_DRIVER, encoding="utf-8")
+    result = subprocess.run(
+        [NODE, str(driver), str(REPO_ROOT / "static" / "ui.js"), str(REPO_ROOT / "static" / "panels.js"), "superseded-during-recovery"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"node driver failed:\nSTDOUT={result.stdout}\nSTDERR={result.stderr}")
+    got = json.loads(result.stdout)
+
+    assert got["returned"] is False
+    # The recovery render ran (that is what the newer switch interrupted)…
+    assert got["calls"]["renderSessionList"] == 1
+    # …but the superseded switch touched nothing else and stayed silent.
+    assert got["calls"]["loadDir"] == 0, "superseded switch must not reload the workspace"
+    assert got["calls"]["clearWorkspaceTreeSkeleton"] == 0
+    assert got["toasts"] == [], "superseded switch must not toast — the newer switch reports"
+
+
 @pytest.mark.skipif(NODE is None, reason="node not on PATH")
 def test_failed_switch_rolls_back_previous_identity_name_pair(tmp_path):
     """Behavioral: a rejected /api/profile/switch must restore the previous
