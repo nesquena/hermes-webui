@@ -1178,25 +1178,49 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
       if(count&&Number.isFinite(height)&&height>0){toolHeight+=height;measuredTools+=count;}
     }
   }
+  // Shared row-height policy for BOTH consumers below (gate-cert 9ba1d994,
+  // finding 2): the solver and the turn-alignment pass must weigh every row
+  // identically — reader row, measured height (including measured zero),
+  // compact/hidden collapsed rows, transparent tool estimate, then the
+  // calibrated role fallback. The alignment pass previously re-derived its own
+  // estimator from the flat role priors, so calibrated transcripts received
+  // top/bottom pads that disagreed with the boundaries the solver had just
+  // chosen — the same viewport-fling class #7591 fixed for the solver itself.
+  const virtualHeights=_messageVirtualHeightCache;
+  const virtualReader=(typeof _messageWindowReader==='function')?_messageWindowReader(visWithIdx):null;
+  const collapsedForIdx=idx=>{
+    const m=visWithIdx[idx]?.m;
+    const next=visWithIdx[idx+1]?.m;
+    return !S.busy&&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'&&
+      _assistantMessageBelongsInWorklog(m,visWithIdx[idx]?.rawIdx,null,undefined,
+        {isTurnFinalAssistant:!next||next.role!=='assistant'});
+  };
+  const estimateForIdx=idx=>transparent&&measuredTools&&toolCount(visWithIdx[idx])
+    ? toolCount(visWithIdx[idx])*toolHeight/measuredTools : null;
+  const roleHeightFor=role=>(typeof _messageVirtualCalibratedRoleHeight==='function')
+    ? _messageVirtualCalibratedRoleHeight(role)
+    : _messageVirtualDefaultHeightForRole(role);
+  const rowHeightFor=idx=>{
+    if(virtualReader&&idx===virtualReader.index&&virtualReader.height>0) return virtualReader.height;
+    const cached=Number(virtualHeights[idx]);
+    if(typeof virtualHeights[idx]==='number'&&Number.isFinite(cached)&&cached>=0) return cached;
+    if(collapsedForIdx(idx)) return 0;
+    const estimate=estimateForIdx(idx);
+    if(Number.isFinite(estimate)&&estimate>0) return estimate;
+    return Math.max(1,roleHeightFor(_messageVirtualRoleForEntry(visWithIdx[idx])));
+  };
   const result=_messageVirtualWindow({
     total:visWithIdx.length,
     scrollTop:container?container.scrollTop:0,
     viewportHeight:container?container.clientHeight:(_messageVirtualEstimatedRowHeight*6),
-    heights:_messageVirtualHeightCache,
+    heights:virtualHeights,
     defaultHeight:_messageVirtualEstimatedRowHeight,
-    estimateForIdx:idx=>transparent&&measuredTools&&toolCount(visWithIdx[idx])
-      ? toolCount(visWithIdx[idx])*toolHeight/measuredTools : null,
+    estimateForIdx,
     roleForIdx:idx=>_messageVirtualRoleForEntry(visWithIdx[idx]),
     defaultHeightForRole:(typeof _messageVirtualCalibratedRoleHeight==='function')?_messageVirtualCalibratedRoleHeight:null,
-    collapsedForIdx:idx=>{
-      const m=visWithIdx[idx]?.m;
-      const next=visWithIdx[idx+1]?.m;
-      return !S.busy&&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'&&
-        _assistantMessageBelongsInWorklog(m,visWithIdx[idx]?.rawIdx,null,undefined,
-          {isTurnFinalAssistant:!next||next.role!=='assistant'});
-    },
+    collapsedForIdx,
     keepTailCount,
-    reader:typeof _messageWindowReader==='function'?_messageWindowReader(visWithIdx):null,
+    reader:virtualReader,
   });
   if(result.virtualized&&!(typeof chatActivityMode==='function'&&chatActivityMode()==='transparent_stream')){
     // Compact/hidden projections own their worklog and final-answer geometry
@@ -1208,14 +1232,9 @@ function _currentMessageVirtualWindow(visWithIdx, keepTailCount){
       while(index>0&&visWithIdx[index]?.m?.role==='assistant'&&visWithIdx[index-1]?.m?.role==='assistant') index--;
       return index;
     };
-    const height=index=>{
-      const cached=_messageVirtualHeightCache[index];
-      if(typeof cached==='number'&&cached>=0) return cached;
-      const m=visWithIdx[index]?.m, next=visWithIdx[index+1]?.m;
-      if(!S.busy&&typeof chatActivityMode==='function'&&chatActivityMode()==='compact_worklog'&&
-         _assistantMessageBelongsInWorklog(m,visWithIdx[index]?.rawIdx,null,undefined,{isTurnFinalAssistant:!next||next.role!=='assistant'})) return 0;
-      return _messageVirtualDefaultHeightForRole(_messageVirtualRoleForEntry(visWithIdx[index]));
-    };
+    // The alignment pass shares the solver's rowHeightFor policy (hoisted
+    // above) instead of re-deriving heights from the flat role priors.
+    const height=index=>rowHeightFor(index);
     const originalStart=result.start;
     result.start=startOfTurn(result.start);
     result.tailStart=startOfTurn(result.tailStart);
@@ -2296,14 +2315,17 @@ function _commitMessageWindow(target, staged, anchor, reuse){
       const key=_messageWindowNodeKey(node);
       if(key&&key!=='live'&&reuse&&target.dataset.windowSession===S.session?.session_id) previous.set(key,node);
     }
-    const desired=Array.from(staged.children).map(node=>{
+    const desired=[],freshRows=[];
+    for(const node of Array.from(staged.children)){
       const key=_messageWindowNodeKey(node), old=previous.get(key);
       // Identity alone is not a content version: anchor keys intentionally use a
       // short prefix. Compare the unenhanced render, not the mutated live DOM
       // (syntax highlighting, disclosures, media and selection live there).
       node._messageWindowMarkup=node.outerHTML.replace(/contain-intrinsic-size: auto [\d.]+px;/g,'');
-      return old&&old._messageWindowMarkup===node._messageWindowMarkup?old:node;
-    });
+      if(old&&old._messageWindowMarkup===node._messageWindowMarkup){ desired.push(old); continue; }
+      desired.push(node);
+      freshRows.push(node);
+    }
     // Insert before removing: the live scroller never sees an empty transcript.
     for(let i=0;i<desired.length;i++){
       const node=desired[i];
@@ -2315,6 +2337,20 @@ function _commitMessageWindow(target, staged, anchor, reuse){
     for(const node of Array.from(target.children)) if(!keep.has(node)) node.remove();
     for(let i=0;i<desired.length;i++){
       if(target.children[i]!==desired[i]) target.insertBefore(desired[i],target.children[i]||null);
+    }
+    // #7752 contract: freshly committed rows must not paint one frame of raw
+    // unhighlighted text while they wait for the deferred pass. Reused rows
+    // keep their enhanced DOM untouched (selection and disclosure identity
+    // live there), so only fresh nodes are initialized — before the reader
+    // restore samples geometry (gate-cert 9ba1d994, finding 3).
+    if(freshRows.length){
+      try{
+        for(const node of freshRows){
+          if(typeof highlightCode==='function') highlightCode(node);
+          if(typeof addCopyButtons==='function') addCopyButtons(node);
+          if(typeof initTreeViews==='function') initTreeViews(node);
+        }
+      }catch(_){ /* fail-safe: the deferred pass keeps the old contained failure */ }
     }
     _restoreMessageWindowReader(target,anchor);
     for(const node of target.querySelectorAll('[data-session-msg-idx]')){
@@ -24326,6 +24362,14 @@ function renderMessages(options){
     for(const row of inner.querySelectorAll('[data-msg-idx]')) row.style.contentVisibility='visible';
     _reconcilePreservedLiveTurn(inner,_preservedLiveTurn);
     _commitMessageWindow(liveInner,inner,windowAnchor,windowOnly);
+    // Owned commits mount freshly staged rows whose footers carry EMPTY
+    // extension-action slots; the other sync sites (cache restoration,
+    // registration-change notifications) never observe this mount, so the
+    // deferred postprocessor cannot fill them either. Reconcile the connected
+    // container so registered controls appear on the rows just committed
+    // instead of waiting for the next unrelated render (gate-cert 9ba1d994,
+    // finding 1).
+    if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(liveInner);
     // Open-state restoration during staging has no laid-out nested geometry.
     // Restore result-body offsets only after the staged nodes are connected.
     _restoreWorklogDetailDisclosureState(liveInner,worklogDetailDisclosureState);
@@ -24351,6 +24395,13 @@ function renderMessages(options){
   if(typeof _syncLiveRunStatusAfterRender==='function') _syncLiveRunStatusAfterRender();
   // Reconcile extension message-action slots BEFORE the cache snapshot so the cached
   // HTML carries the reconciled attribute-bound buttons (same contract as before #7752).
+  // Canonical pre-enhancement stamp: captured BEFORE extension-slot hydration
+  // and the synchronous highlight/copy/tree passes so _commitMessageWindow's
+  // reuse comparison always weighs raw render against raw render. Stamping
+  // after enhancement made every unchanged enhanced row fail its first
+  // full-render-to-owned-render reuse comparison and get replaced
+  // (gate-cert 9ba1d994, finding 3).
+  for(const node of inner.children) node._messageWindowMarkup=node.outerHTML.replace(/contain-intrinsic-size: auto [\d.]+px;/g,'');
   if(typeof _syncExtensionMessageActionSlots==='function') _syncExtensionMessageActionSlots(inner);
   // Snapshot only when this render can be cached (same gate as the .set below): mid-stream
   // and transient-card renders must not pay a whole-transcript serialization they discard.
@@ -24370,8 +24421,6 @@ function renderMessages(options){
   const recoveryOwnership=_captureMessageRecoveryOwnership();
   _scrollAfterMessageRender(preserveScroll, scrollSnapshot);
   if(_maybeRecoverVirtualizedBlankViewport(options, preserveScroll, virtualWindow, recoveryOwnership)) return;
-  // Remember render output before DOM-only enhancements mutate it.
-  for(const node of inner.children) node._messageWindowMarkup=node.outerHTML.replace(/contain-intrinsic-size: auto [\d.]+px;/g,'');
   // Apply syntax highlighting after DOM is built
   requestAnimationFrame(()=>_postProcessWithAnchorSuppression(inner));
   // Refresh todo panel if it's currently open

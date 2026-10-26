@@ -490,3 +490,140 @@ def test_render_path_reconciles_message_actions_before_session_html_is_cached():
     cache_restore = render_body.index("inner.innerHTML=cached.html;")
     cache_return = render_body.index("return;", cache_restore)
     assert guarded_sync in render_body[cache_restore:cache_return]
+
+
+def test_owned_window_commit_reconciles_extension_action_slots_on_connected_container():
+    """Gate-cert 9ba1d994 finding 1: the owned commit path (_windowOnly /
+    _ownedPrepend) moves freshly staged rows into the connected container and
+    returns BEFORE the render-tail slot reconcile. Fresh footers carry EMPTY
+    extension-action slots, and neither remaining sync site (cache restoration,
+    registration-change notifications) observes a row-mount, so a newly mounted
+    row lost its registered controls until some unrelated render happened."""
+    ui_js = UI_JS.read_text(encoding="utf-8")
+    render_start = ui_js.index("function renderMessages(options)")
+    render_end = ui_js.index("function _toolDisplayName", render_start)
+    render_body = ui_js[render_start:render_end]
+
+    owned_idx = render_body.index("if(ownedWindow){")
+    owned_slice = render_body[owned_idx:]
+    commit_pos = owned_slice.index(
+        "_commitMessageWindow(liveInner,inner,windowAnchor,windowOnly);"
+    )
+    sync_call = (
+        "if(typeof _syncExtensionMessageActionSlots==='function') "
+        "_syncExtensionMessageActionSlots(liveInner);"
+    )
+    sync_pos = owned_slice.index(sync_call)
+    # The first return after the commit sits inside the rAF callback, after the
+    # reconcile; the branch's own return follows it. Either way the reconcile
+    # must land between the commit and the branch exit.
+    return_pos = owned_slice.index("return;", commit_pos)
+    assert commit_pos < sync_pos < return_pos, (
+        "the owned branch must reconcile extension action slots on the "
+        "CONNECTED liveInner after _commitMessageWindow and before returning"
+    )
+    # The reconcile targets the connected container, not the staging div: the
+    # staged rows have already been adopted into liveInner at this point.
+    assert "_syncExtensionMessageActionSlots(liveInner);" in sync_call
+
+
+def test_owned_remount_populates_fresh_slots_with_current_invocation_identity():
+    """Behavioral mirror of the owned mount: a freshly staged footer's empty
+    slot is populated on the connected container with the CURRENT session /
+    message identity, and a reused row's button is re-pointed (not replaced)
+    when the same row is re-committed under a new session."""
+    ui_js = UI_JS.read_text(encoding="utf-8")
+    start = ui_js.index("function _extensionMessageActionContext")
+    end = ui_js.index("let _extensionMessageActionChangeUnsubscribe", start)
+    functions = ui_js[start:end]
+    script = textwrap.dedent(
+        f"""
+        const assert = require('assert');
+        let invoked = null;
+        global.window = {{
+          HermesExtensionSettings: {{
+            _hasMessageActions: () => true,
+            _messageActionsForContext: () => [{{
+              extensionId: 'alpha.ext', id: 'pin', label: 'Pin', icon: 'pin',
+              pressed: false, pending: false,
+            }}],
+            _invokeMessageAction(extensionId, actionId, context, options) {{
+              invoked = {{extensionId, actionId, context}};
+              return true;
+            }},
+          }},
+        }};
+        const S = {{
+          session: {{session_id: 'session-1'}},
+          messages: [{{role: 'assistant', content: 'persisted provider payload'}}],
+        }};
+        function _messageSessionIndexForRawIdx(rawIdx) {{ return 7 + rawIdx; }}
+        function esc(value) {{
+          return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;');
+        }}
+        function li(icon) {{ return `<svg data-icon="${{icon}}"></svg>`; }}
+        {functions}
+
+        const owner = {{dataset: {{msgIdx: '0', sessionMsgIdx: '7', rawText: 'Visible plain text'}}}};
+        const roleOwner = {{dataset: {{role: 'assistant'}}}};
+        const connectedRoot = {{querySelectorAll(sel) {{
+          return sel === '[data-extension-message-actions]' ? [slot] : [];
+        }}}};
+        let slotHtml = '';
+        const slot = {{
+          children: [],
+          closest(selector) {{
+            if (selector.startsWith('[hidden')) return null;
+            if (selector.startsWith('[data-msg-idx')) return owner;
+            if (selector === '[data-role]') return roleOwner;
+            return null;
+          }},
+          get innerHTML() {{ return slotHtml; }},
+          set innerHTML(value) {{ slotHtml = value; }},
+        }};
+
+        // Owned mount: the freshly staged row's slot is EMPTY on the connected
+        // container; the reconcile must populate it from the live registration.
+        _syncExtensionMessageActionSlots(connectedRoot);
+        assert.ok(slotHtml.includes('data-extension-id="alpha.ext"'),
+          'freshly mounted owned row must gain its registered control');
+        assert.ok(slotHtml.includes('data-session-id="session-1"'));
+        assert.ok(slotHtml.includes('data-message-index="7"'));
+        assert.ok(slotHtml.includes('data-message-role="assistant"'));
+
+        // The populated control invokes against the CURRENT session/message identity.
+        const attrs = {{}};
+        const button = {{
+          disabled: false,
+          setAttribute(name, value) {{ attrs[name] = value; }},
+          dataset: {{
+            extensionId: 'alpha.ext', extensionActionId: 'pin', sessionId: 'session-1',
+            messageIndex: '7', messageRole: 'assistant',
+          }},
+          closest(selector) {{
+            return selector === '[data-extension-message-actions]' ? slot : null;
+          }},
+        }};
+        assert.strictEqual(invokeExtensionMessageAction(button), true);
+        assert.deepStrictEqual(invoked.context, {{
+          sessionId: 'session-1', messageIndex: 7, role: 'assistant', text: 'Visible plain text',
+        }});
+
+        // Reused row re-committed under a NEW session: the same button object is
+        // re-pointed in place (sameActions path), never left stale.
+        S.session.session_id = 'session-2';
+        slotHtml = '';
+        slot.children = [button];
+        _syncExtensionMessageActionSlots(connectedRoot);
+        assert.strictEqual(slotHtml, '', 'identity-only changes must not replace the connected opener');
+        assert.strictEqual(button.dataset.sessionId, 'session-2');
+        assert.strictEqual(invokeExtensionMessageAction(button), true);
+        assert.strictEqual(invoked.context.sessionId, 'session-2');
+
+        // A button genuinely left stale (identity no longer current) cannot invoke.
+        button.dataset.sessionId = 'session-1';
+        assert.strictEqual(invokeExtensionMessageAction(button), false,
+          'a stale session stamp must be rejected against the current context');
+        """
+    )
+    _run_node(script)
