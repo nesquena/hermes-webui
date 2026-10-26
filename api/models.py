@@ -4346,6 +4346,17 @@ def _append_journaled_partial_output(
         if current_token is not None and isinstance(existing, dict):
             if existing.get('_active_turn_token') == current_token:
                 return True
+        # 2026-10-19 re-gate, finding 1: when the caller narrowed the search
+        # window to its own proven owner->marker slice, a candidate inside
+        # that window whose owner is the user at ``dedupe_min_index - 1`` is
+        # owned BY CONSTRUCTION — the caller already proved that owner is
+        # the journal's turn (the no-hook lazy retry walks back from the
+        # marker to the nearest user row). Requiring that owner to ALSO be
+        # the session's current turn fails on every successor shape: the
+        # gate then judges the in-window answer against the LATEST user
+        # (the successor B), excludes the saved row, and the journal output
+        # is appended as a second copy. The window itself is the ownership
+        # proof, independent of the pending turn.
         owner_idx = None
         for candidate_idx in range(existing_idx - 1, -1, -1):
             candidate = messages[candidate_idx]
@@ -4354,6 +4365,13 @@ def _append_journaled_partial_output(
                 break
         if owner_idx is None:
             return False
+        if (
+            dedupe_min_index is not None
+            and dedupe_max_index is not None
+            and owner_idx == dedupe_min_index - 1
+            and dedupe_min_index <= existing_idx < dedupe_max_index
+        ):
+            return True
         if _message_owns_current_turn(messages[owner_idx], session):
             return True
         # Legacy journal replay has no pending turn metadata.  In that mode,
@@ -5233,7 +5251,39 @@ def _rehome_interrupted_journal_context(session, context_owner, stream_id: str, 
     # provider calls from the journal's truncated display-only tool metadata.
     insert_at = next((i for i in range(owner_positions[0] + 1, len(context))
                       if isinstance(context[i], dict) and context[i].get('role') == 'user'), len(context))
-    session.context_messages = context[:insert_at] + recovered + context[insert_at:]
+    # 2026-10-19 re-gate, finding 2: a dedupe-only resolution reaches this
+    # rehome (``output_accounted_for`` is accepted as recovery now), and the
+    # round-6 stamp above tags legacy untagged rows on reuse — so a projection
+    # whose row is ALREADY in the owner->successor slice would be re-inserted
+    # on every pass, adding one more copy to provider history each time (a
+    # recovered row survived two cold loads as 3 context copies). Consume the
+    # slice one-to-one: drop each projection that already has an equal row
+    # (role + normalized content + tool_call_id) in the slice, and insert only
+    # what is genuinely missing. Removing just the stream-tagged rows fixes
+    # the exact-stream case but not the legacy one — that context copy has no
+    # stream tag either, so the match must be by identity, not provenance.
+    def _context_row_key(r) -> tuple:
+        if not isinstance(r, dict):
+            return ('non-dict',)
+        return (
+            r.get('role'),
+            _normalize_journal_recovery_text(r.get('content')),
+            r.get('tool_call_id'),
+        )
+
+    present_keys = [
+        _context_row_key(r)
+        for r in context[owner_positions[0] + 1:insert_at]
+        if isinstance(r, dict)
+    ]
+    missing_projections = []
+    for row in recovered:
+        row_key = _context_row_key(row)
+        if row_key in present_keys:
+            present_keys.remove(row_key)
+        else:
+            missing_projections.append(row)
+    session.context_messages = context[:insert_at] + missing_projections + context[insert_at:]
 
 
 def _rehome_cancel_journal_rows(

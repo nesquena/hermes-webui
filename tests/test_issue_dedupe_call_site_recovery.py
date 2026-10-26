@@ -1127,6 +1127,251 @@ def test_dedupe_hit_resolves_retry_marker_instead_of_burning_attempts(hermes_hom
     )
 
 
+def _run_lazy_retry_probe(session_id: str, stream_id: str):
+    """Shared driver for the successor-variant probes (2026-10-19 re-gate).
+
+    Runs the real ``_try_retry_journal_recovery_in_place`` lazy walk, re-reads
+    the persisted sidecar with ``Session.load`` (cold read), and builds the
+    next-send provider input the way the streaming layer does. Returns
+    (loaded_session, display_count, context_count, next_send_count) for the
+    journal's answer text.
+    """
+    from api.models import Session as _Session, _try_retry_journal_recovery_in_place
+    from api.streaming import _context_messages_for_new_turn, _sanitize_messages_for_agent
+
+    session = _Session.load(session_id)
+    _try_retry_journal_recovery_in_place(session)
+    loaded = _Session.load(session_id)
+    answer = "partial answer"
+
+    def _count(rows) -> int:
+        return sum(
+            isinstance(r, dict) and r.get("content") == answer
+            for r in (rows or [])
+        )
+
+    display_count = _count(loaded.messages)
+    context_count = _count(loaded.context_messages)
+    next_send_rows = _sanitize_messages_for_agent(
+        _context_messages_for_new_turn(loaded, "next message")
+    )
+    next_send_count = _count(next_send_rows)
+    return loaded, display_count, context_count, next_send_count
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "tokened_successor_row",
+        "tokened_successor_live_pending",
+        "successor_just_sent_no_row",
+    ],
+)
+def test_dedupe_hit_with_successor_does_not_duplicate_saved_answer(
+    hermes_home, variant
+):
+    """2026-10-19 re-gate, finding 1: the no-hook lazy retry must not append a
+    second copy of an already-saved answer when a later turn exists.
+
+    The ownership gate judged the in-window answer against the session's
+    LATEST user (the successor B), so the caller's proven owner->marker window
+    was ignored and the journal output was appended again. Each variant below
+    is one row of the reviewer's reproduction table: a tokened successor row
+    after the marker, the same successor also being the live pending turn, and
+    the successor just sent (pending state set, no B row yet — the ordinary
+    cache-hit retry path).
+    """
+    import time as _time
+
+    sid = "regate_successor_" + variant
+    stream_id = "regate-successor-stream"
+
+    append_run_event(sid, stream_id, "token", {"text": "partial answer"})
+
+    a_user = {
+        "role": "user",
+        "content": "run the check",
+        "timestamp": 900.5,
+        "_active_turn_token": "stream-A:900.5",
+    }
+    a_answer = {
+        "role": "assistant",
+        "content": "partial answer",
+        "timestamp": 900.6,
+    }
+    marker_row = {
+        "role": "assistant",
+        "content": "reload to retry",
+        "type": "interrupted",
+        "_error": True,
+        "timestamp": 900.7,
+        "_pending_journal_recovery": True,
+        "_journal_retry_stream_id": stream_id,
+        "_journal_retry_attempts": 1,
+        "_journal_retry_first_seen_ts": int(_time.time()),
+    }
+    b_user = {
+        "role": "user",
+        "content": "the successor prompt",
+        "timestamp": 20,
+        "_active_turn_token": "stream-B:20",
+    }
+
+    messages = [a_user, a_answer, marker_row]
+    context = [
+        {"role": "user", "content": "run the check", "timestamp": 900.5},
+        {"role": "assistant", "content": "partial answer", "timestamp": 900.6},
+    ]
+
+    session = Session(
+        session_id=sid,
+        title="regate successor",
+        messages=messages,
+    )
+    session.context_messages = context
+
+    if variant == "tokened_successor_row":
+        session.messages = [a_user, a_answer, marker_row, dict(b_user)]
+        session.context_messages = context + [dict(b_user)]
+        session.pending_user_message = None
+        session.active_stream_id = None
+    elif variant == "tokened_successor_live_pending":
+        session.messages = [a_user, a_answer, marker_row, dict(b_user)]
+        session.context_messages = context + [dict(b_user)]
+        session.pending_user_message = "the successor prompt"
+        session.pending_started_at = 20
+        session.active_stream_id = "stream-B"
+    else:  # successor_just_sent_no_row
+        session.pending_user_message = "the successor prompt"
+        session.pending_started_at = 20
+        session.active_stream_id = "stream-B"
+
+    session.save()
+
+    loaded, display_count, context_count, next_send_count = (
+        _run_lazy_retry_probe(sid, stream_id)
+    )
+
+    assert display_count == 1, (
+        f"variant {variant}: the already-saved answer must stay singular in "
+        f"the persisted display transcript (got {display_count})"
+    )
+    assert context_count == 1, (
+        f"variant {variant}: provider context must keep exactly one copy of "
+        f"the saved answer (got {context_count})"
+    )
+    assert next_send_count == 1, (
+        f"variant {variant}: the next-send provider input must contain "
+        f"exactly one copy of the saved answer (got {next_send_count})"
+    )
+    final_marker = loaded.messages[-1]
+    assert not (isinstance(final_marker, dict) and final_marker.get("_pending_journal_recovery")), (
+        f"variant {variant}: a dedupe hit must resolve the retry marker"
+    )
+
+
+@pytest.mark.parametrize("legacy_row", [False, True])
+def test_dedupe_hit_rehome_does_not_duplicate_context_across_cold_loads(
+    hermes_home, legacy_row
+):
+    """2026-10-19 re-gate, finding 2: a dedupe-only resolution now reaches
+    ``_rehome_interrupted_journal_context``, which used to insert a fresh
+    projection of every stream-tagged display row without checking what the
+    owner->successor slice already held — so two cold loads grew the context
+    to 3 copies (2 for the legacy row, which the round-6 stamp tags on reuse).
+    """
+    import time as _time
+
+    sid = "regate_ctx_rehome_" + ("legacy" if legacy_row else "exact")
+    stream_id = "regate-ctx-rehome-stream"
+
+    append_run_event(sid, stream_id, "token", {"text": "partial answer"})
+
+    a_user = {
+        "role": "user",
+        "content": "run the check",
+        "timestamp": 900.5,
+        "_active_turn_token": "stream-A:900.5",
+    }
+    if legacy_row:
+        # Legacy shape: recovered by an earlier pass, written before stream
+        # tagging existed (no _recovered_stream_id).
+        a_answer = {
+            "role": "assistant",
+            "content": "partial answer",
+            "timestamp": 900.6,
+            "_recovered_from_run_journal": True,
+        }
+    else:
+        a_answer = {
+            "role": "assistant",
+            "content": "partial answer",
+            "timestamp": 900.6,
+            "_recovered_from_run_journal": True,
+            "_recovered_stream_id": stream_id,
+        }
+    marker_row = {
+        "role": "assistant",
+        "content": "reload to retry",
+        "type": "interrupted",
+        "_error": True,
+        "timestamp": 900.7,
+        "_pending_journal_recovery": True,
+        "_journal_retry_stream_id": stream_id,
+        "_journal_retry_attempts": 1,
+        "_journal_retry_first_seen_ts": int(_time.time()),
+    }
+    b_user = {
+        "role": "user",
+        "shape": "successor",
+        "content": "the successor prompt",
+        "timestamp": 20,
+        "_active_turn_token": "stream-B:20",
+    }
+    # The context already holds the saved answer between owner and successor.
+    context_rows = [
+        {"role": "user", "content": "run the check", "timestamp": 900.5},
+        {"role": "assistant", "content": "partial answer", "timestamp": 900.6},
+        dict(b_user),
+    ]
+
+    session = Session(
+        session_id=sid,
+        title="regate ctx rehome",
+        messages=[a_user, a_answer, marker_row, dict(b_user)],
+    )
+    session.context_messages = context_rows
+    session.pending_user_message = None
+    session.active_stream_id = None
+    session.save()
+
+    # First cold load + lazy retry.
+    loaded, display_count, context_count, next_send_count = (
+        _run_lazy_retry_probe(sid, stream_id)
+    )
+    assert context_count == 1, (
+        f"legacy_row={legacy_row}: first pass must not add a second context "
+        f"copy (got {context_count})"
+    )
+
+    # Second cold load + lazy retry again (idempotence across reloads).
+    loaded2, display_count2, context_count2, next_send_count2 = (
+        _run_lazy_retry_probe(sid, stream_id)
+    )
+    assert context_count2 == 1, (
+        f"legacy_row={legacy_row}: second cold-load pass must stay at one "
+        f"context copy (got {context_count2})"
+    )
+    assert display_count2 == 1, (
+        f"legacy_row={legacy_row}: display transcript must stay singular "
+        f"across reloads (got {display_count2})"
+    )
+    assert next_send_count2 == 1, (
+        f"legacy_row={legacy_row}: next-send input must stay singular "
+        f"across reloads (got {next_send_count2})"
+    )
+
+
 def test_reused_marker_is_promoted_when_journal_output_resolves_it(hermes_home):
     """Finding 2: when a later repair finds journal output, the reused
     same-stream marker must be UPDATED (retry meta stripped, recovered
