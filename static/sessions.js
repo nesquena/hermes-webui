@@ -11648,6 +11648,7 @@ async function deleteSession(sid, beforeDelete=null){
   const response=deleteResult&&deleteResult.response;
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
   _forgetComposerDraftLocalFallback(sid);
+  if(typeof _dropUploadResults==='function')_dropUploadResults(sid);
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;

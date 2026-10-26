@@ -1437,13 +1437,9 @@ function _mergeRestoredDraftFiles(failedFiles, liveFiles){
   return merged;
 }
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId){
-  // Upload retries pass {mergeLiveInput:true} in this slot. Goal continuation
-  // passes the id string. Tell them apart so neither call site has to move.
-  let opts=null;
-  if(goalContinuationId&&typeof goalContinuationId==='object'){
-    opts=goalContinuationId;
-    goalContinuationId='';
-  }
+  // 6th argument: upload retries pass {mergeLiveInput:true}. The 5th stays the
+  // continuation id; never treat an options object as that id.
+  const opts=arguments.length>5&&arguments[5]&&typeof arguments[5]==='object'?arguments[5]:null;
   const restore=String(draftText||'');
   const files=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   // Upload can take long enough for the user to keep typing or staging files.
@@ -1451,21 +1447,11 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // after /api/chat/start keeps the original "don't clobber" behavior.
   const mergeLiveInput=!!(opts&&opts.mergeLiveInput);
   if(!restore&&!files.length) return false;
-  // #7855 (round 6): the draft's continuation ID is restored TOGETHER with the
-  // text. A failed POST never admitted the turn, so the token is still valid;
-  // restoring the text without it made the retry post an empty ID and the goal
-  // loop ended silently. Recorded as a text-bound restored draft so the token
-  // applies only while the user still sends exactly this text, and dies with a
-  // replaced/abandoned draft (#788).
-  // The normalizer is defined at this file's module scope (line 44); the local
-  // guard keeps a harness that extracts only this helper runnable.
+  // #7855: restore the continuation id with the text. The guard keeps an extracted harness runnable.
   const _restoreContId=(typeof _normalizeGoalContinuationId==='function')
     ?_normalizeGoalContinuationId(goalContinuationId)
     :String(goalContinuationId||'').trim();
 
-  // Only mutate the VISIBLE composer / staged tray when the failed send belongs
-  // to the session the user is currently looking at — otherwise a background
-  // send failure would pollute another session's composer. (Codex #5484 catch.)
   const visibleSid=(S.session&&S.session.session_id)||null;
   const belongsToVisible=!(sid&&visibleSid&&sid!==visibleSid);
   let restoredVisible=false;
@@ -1475,8 +1461,6 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     // Do not clobber a new message the user began typing during the async window.
     if(inp && !String(inp.value||'').trim()){
       inp.value=restore;
-      // Mark the restored text as an identifiable continuation draft BEFORE the
-      // user can act on it, so a one-key resend still carries the token.
       if(_restoreContId&&typeof _setRestoredGoalContinuationDraft==='function'){
         _setRestoredGoalContinuationDraft(_restoreContId,restore);
       } else if(typeof _clearRestoredGoalContinuationDraft==='function'){
@@ -1492,15 +1476,12 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
       }
       restoredVisible=true;
     } else if(mergeLiveInput && inp && restore.trim() && liveText.trim()!==restore.trim()){
-      // Keep the rejected message and whatever was typed while the upload ran.
       inp.value=restore+'\n\n'+liveText;
       if(typeof autoResize==='function') autoResize();
       if(typeof updateSendBtn==='function') updateSendBtn();
       restoredVisible=true;
     }
     if(mergeLiveInput && files.length && String(inp&&inp.value||'').trim()){
-      // The empty-composer branch already merged files. This covers a composer
-      // that already held new text, where that branch never ran.
       const alreadyMerged=restoredVisible && !liveText.trim();
       if(!alreadyMerged){
         S.pendingFiles=_mergeRestoredDraftFiles(files, S.pendingFiles);
@@ -1510,18 +1491,8 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     }
   }
 
-  // Persist the failed session's draft so it survives a reload, ordered AFTER the
-  // send-time _clearComposerDraft POST (text:'') resolves — otherwise the two
-  // same-origin writes can be reordered under HTTP/2 multiplexing and leave the
-  // server draft empty. (Opus #5484 NIT.) Because the persist is deferred, it
-  // must be STALE-AWARE at fire time (Codex #5488 catch): if the failed session
-  // is still visible, re-read the LIVE composer so a post-restore edit is
-  // captured rather than clobbered by the original snapshot; if we restored the
-  // visible session but the user has since switched away, skip entirely (the
-  // session-switch save path already persisted this session's composer).
-  // #7855: the draft ID must survive that reload too, or a refresh between the
-  // failure and the retry restores the text and loses the token. Re-mark the
-  // draft synchronously with the persist so both halves agree.
+  // Re-persist after the send-time clear, re-reading a still-visible composer.
+  // #7855: the continuation id is saved with that text, and only while it still matches.
   if(sid&&typeof _saveComposerDraftNow==='function'){
     const _persist=()=>{
       let persistedText=restore;
@@ -1532,32 +1503,16 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
         const liveText=inp?String(inp.value||''):restore;
         persistedText=liveText;
         persistedFiles=S.pendingFiles?[...S.pendingFiles]:files;
-        // #7855 CORE (round 6): the token survives the reload only if it is
-        // persisted WITH this text. Pass it through; the save helper drops it
-        // when the text is gone, so an abandoned draft cannot orphan a token.
         if(_restoreContId&&typeof _setRestoredGoalContinuationDraft==='function'
            && String(liveText||'').trim()===String(restore||'').trim()){
-          // Unchanged restore: keep the one-shot binding so a one-key resend
-          // still carries the token in-page as well as across a reload.
           _setRestoredGoalContinuationDraft(_restoreContId,restore);
         }
       } else if(!restoredVisible){
-        // Background failure (sid was never the visible session): no live
-        // composer to read, so persist the captured snapshot — it's the only copy.
-        // #7855 CORE (round 7): the token must travel with that snapshot.
-        // The background restore saves only text/files, so a return to this
-        // session and a retry posted no id and start admission scored it
-        // goal_related=false (master scores true). Pass the restored
-        // continuation id alongside the exact text it belongs to.
         persistedText=restore;
         persistedFiles=files;
       } else {
-        // Restored the visible composer, then user switched away — the
-        // session-switch save path already saved sid's composer; skip stale write.
         return;
       }
-      // #7855 (round 6/7): the token travels only with the exact text it was
-      // restored for — an edited draft must not inherit it (round-7 rule).
       const _persistContId=_restoreContId
         && String(persistedText||'').trim()===String(restore||'').trim()
         ?_restoreContId:'';
@@ -1579,24 +1534,48 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   return restoredVisible;
 }
 
-// #8297: successful per-File upload results, scoped to the session they were
-// uploaded for. A send aborted after a partial upload failure keeps the good
-// uploads on disk; the resend must reuse those results instead of uploading
-// the same File again and creating another disk copy (a.txt → a-1.txt → …).
-const _uploadedFileResults=new Map();
+// #8297: successful per-File upload results. The File is a weak key, so removing
+// it from the tray or deleting the session does not pin the bytes for the page
+// lifetime. A WeakMap cannot be walked: a successful send deletes the submitted
+// File keys explicitly, and session teardown follows the WeakRefs registered
+// below. A failed start does not clear successes — the retry reuses them
+// instead of uploading another disk copy (a.txt → a-1.txt).
+const _uploadedFileResults=new WeakMap();
+const _uploadResultRefsBySession=new Map();
 function _cachedUploadResult(file, sessionId){
   const entry=_uploadedFileResults.get(file);
   return entry&&entry.sid===String(sessionId||'')?entry.result:null;
 }
 function _rememberUploadResult(file, sessionId, result){
   if(!file||!result)return;
-  _uploadedFileResults.set(file,{sid:String(sessionId||''),result});
+  const sid=String(sessionId||'');
+  _uploadedFileResults.set(file,{sid,result});
+  let refs=_uploadResultRefsBySession.get(sid);
+  if(!refs){_uploadResultRefsBySession.set(sid,refs=new Set());}
+  for(const ref of refs){if(ref.deref()===file)return;}
+  refs.add(new WeakRef(file));
+}
+function _forgetUploadedFile(file){
+  if(!file)return;
+  const entry=_uploadedFileResults.get(file);
+  _uploadedFileResults.delete(file);
+  if(!entry)return;
+  const refs=_uploadResultRefsBySession.get(entry.sid);
+  if(!refs)return;
+  for(const ref of refs){if(ref.deref()===file)refs.delete(ref);}
+  if(!refs.size)_uploadResultRefsBySession.delete(entry.sid);
 }
 function _dropUploadResults(sessionId){
   const sid=String(sessionId||'');
-  for(const [file,entry] of [..._uploadedFileResults]){
-    if(entry.sid===sid)_uploadedFileResults.delete(file);
+  const refs=_uploadResultRefsBySession.get(sid);
+  if(!refs)return;
+  for(const ref of refs){
+    const file=ref.deref();
+    if(!file)continue;
+    const entry=_uploadedFileResults.get(file);
+    if(entry&&entry.sid===sid)_uploadedFileResults.delete(file);
   }
+  _uploadResultRefsBySession.delete(sid);
 }
 function _pendingUploadsFor(files, sessionId){
   // Split the submitted files into the ones that still need an upload and a
@@ -1979,13 +1958,18 @@ async function send(){
   // THIS send's files; the results of reused uploads are merged back in below
   // so the attachment list keeps the submitted order and the partial-failure
   // check counts reused + fresh results together.
-  const {toUpload:_filesToUpload, results:_uploadResultsByFile}=_pendingUploadsFor(_submittedFiles, activeSid);
+  // A harness that extracts send() stubs unknown helpers as no-ops. Fall back
+  // to uploading the whole snapshot when the splitter is not the real one.
+  const _uploadSplit=(typeof _pendingUploadsFor==='function')?_pendingUploadsFor(_submittedFiles, activeSid):null;
+  const _filesToUpload=Array.isArray(_uploadSplit&&_uploadSplit.toUpload)?_uploadSplit.toUpload:_submittedFiles;
+  const _uploadResultsByFile=(_uploadSplit&&_uploadSplit.results instanceof Map)?_uploadSplit.results:new Map();
   let uploaded=[];
-  try{uploaded=await uploadPendingFiles({files:_filesToUpload, sessionId:activeSid, clearPending:false, onFileUploaded:(file,result)=>{_uploadResultsByFile.set(file,result);_rememberUploadResult(file,activeSid,result);}});}
+  try{uploaded=await uploadPendingFiles({files:_filesToUpload, sessionId:activeSid, clearPending:false, onFileUploaded:(file,result)=>{_uploadResultsByFile.set(file,result);if(typeof _rememberUploadResult==='function')_rememberUploadResult(file,activeSid,result);}});}
   catch(e){
     // Total failure: never start the agent with no attachments. Restore the
-    // draft + staged files so a one-key resend keeps them.
-    _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise, {mergeLiveInput:true});
+    // draft + staged files so a one-key resend keeps them. Keep the continuation
+    // id; merge options are a separate argument.
+    _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise, _goalContinuationId, {mergeLiveInput:true});
     setComposerStatus(`Upload error: ${e.message}`);
     return;
   }
@@ -1998,8 +1982,7 @@ async function send(){
   if(_submittedFiles.length && uploaded.length<_submittedFiles.length){
     const _partialMsg=`${t('upload_failed')}${uploaded.length}/${_submittedFiles.length}`;
     setComposerStatus(_partialMsg);
-    if(typeof showToast==='function') showToast(_partialMsg, 4000, 'error');
-    _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise, {mergeLiveInput:true});
+    _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise, _goalContinuationId, {mergeLiveInput:true});
     return;
   }
   // Clear the uploading status now that upload is done — if we don't clear here
@@ -2338,9 +2321,16 @@ async function send(){
     }
   });
 
-  // The send is with the agent now: its uploads belong to the message, so the
-  // per-File reuse cache for this session must not leak into a later send.
-  _dropUploadResults(activeSid);
+  // The send is with the agent now. Delete this submission's File keys
+  // explicitly (a WeakMap cannot be walked), then drop the session's index.
+  if(typeof _uploadedFileResults!=='undefined'&&_uploadedFileResults){
+    _submittedFiles.forEach((file)=>{
+      if(!file)return;
+      const entry=_uploadedFileResults.get(file);
+      if(entry&&entry.sid===String(activeSid||''))_uploadedFileResults.delete(file);
+    });
+  }
+  if(typeof _dropUploadResults==='function')_dropUploadResults(activeSid);
   // Open SSE stream and render tokens live
   attachLiveStream(activeSid, streamId, uploadedNames);
 

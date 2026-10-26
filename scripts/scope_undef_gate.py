@@ -83,7 +83,7 @@ BROWSER_GLOBALS = [
     "TextEncoder", "caches", "self", "CSS", "Notification", "Response", "Request",
     "Headers", "getSelection", "scrollTo", "scrollBy", "postMessage", "indexedDB",
     # ECMAScript builtins
-    "Promise", "Map", "Set", "WeakMap", "WeakSet", "Symbol", "Proxy", "Reflect", "JSON",
+    "Promise", "Map", "Set", "WeakMap", "WeakSet", "WeakRef", "Symbol", "Proxy", "Reflect", "JSON",
     "Math", "Date", "RegExp", "Array", "Object", "String", "Number", "Boolean", "Error",
     "TypeError", "RangeError", "Intl", "BigInt", "Uint8Array", "Int32Array",
     "Float64Array", "ArrayBuffer", "DataView", "Function", "parseInt", "parseFloat",

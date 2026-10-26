@@ -26510,8 +26510,10 @@ function renderTray(){ // non-media files use paperclip chip
       chip.innerHTML=`${li('paperclip',12)} ${esc(f.name)} <button title="${t('remove_title')}">${li('x',12)}</button>`;
     }
     chip.querySelector('button').onclick=()=>{
-      // Revoke blob URL to avoid memory leak before removing
+      // Revoke blob URL to avoid memory leak before removing.
+      // Drop this File's upload result too, so a removed chip does not pin it.
       if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
+      if(typeof _forgetUploadedFile==='function')_forgetUploadedFile(f);
       S.pendingFiles.splice(i,1);renderTray();
     };
     tray.appendChild(chip);
