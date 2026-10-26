@@ -28296,7 +28296,11 @@ function applyLocaleToDOM() {
   // always wins, without duplicating the four-key map here. The
   // helper also removes the span outside busy mode, so this is a
   // no-op for the common idle path.
-  const _sendBtnLocaleRestamp = document.getElementById('btnSend');
+  // Tolerate a host that exposes only querySelector (the static probes
+  // drive applyLocaleToDOM under node with a bare document): without
+  // getElementById there is no button to restamp, and the live-value
+  // repaints above still run.
+  const _sendBtnLocaleRestamp=(typeof document.getElementById==='function')?document.getElementById('btnSend'):null;
   if (_sendBtnLocaleRestamp && typeof _setComposerPrimaryButtonIcon === 'function') {
     _setComposerPrimaryButtonIcon(_sendBtnLocaleRestamp, _sendBtnLocaleRestamp.dataset.action || 'send');
   }
