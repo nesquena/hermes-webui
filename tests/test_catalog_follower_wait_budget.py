@@ -44,6 +44,28 @@ def _pin_config(monkeypatch, cfg, tmp_path: Path) -> None:
     monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
 
 
+def _patch_catalog_cv_wait(monkeypatch, cfg, fn) -> None:
+    """Install ``fn`` as the catalog condition's ``wait_for``.
+
+    Patch the class, not the instance. ``monkeypatch`` undoes an instance
+    assignment by writing the previous bound method back onto the instance,
+    and that shadow hides every later ``threading.Condition.wait_for`` patch
+    for the rest of the process. The force-refresh follower tests then call
+    the real wait (a short budget looks like "never waited"; budget <= 0
+    blocks with no timeout).
+    """
+    import threading
+
+    original = threading.Condition.wait_for
+
+    def _wait_for(self, predicate, timeout=None):
+        if self is not cfg._cache_build_cv:
+            return original(self, predicate, timeout)
+        return fn(predicate, timeout=timeout)
+
+    monkeypatch.setattr(threading.Condition, "wait_for", _wait_for)
+
+
 def _seed_resident_cache(monkeypatch, cfg, catalog: dict) -> None:
     monkeypatch.setattr(cfg, "_available_models_cache", catalog, raising=False)
     monkeypatch.setattr(cfg, "_available_models_cache_ts", 0.0, raising=False)
@@ -67,7 +89,7 @@ def test_prefer_cache_does_not_wait_on_inflight_rebuild(tmp_path, monkeypatch):
     def _must_not_wait(*_args, **_kwargs):
         raise AssertionError("prefer_cache must not wait on an in-flight rebuild")
 
-    monkeypatch.setattr(cfg._cache_build_cv, "wait_for", _must_not_wait)
+    _patch_catalog_cv_wait(monkeypatch, cfg, _must_not_wait)
 
     started = time.monotonic()
     result = cfg.get_available_models(prefer_cache=True)
@@ -98,7 +120,7 @@ def test_plain_follower_still_waits_for_the_slot_owner(tmp_path, monkeypatch):
         timeouts.append(timeout)
         return False
 
-    monkeypatch.setattr(cfg._cache_build_cv, "wait_for", _wait)
+    _patch_catalog_cv_wait(monkeypatch, cfg, _wait)
 
     result = cfg.get_available_models()
 
@@ -130,7 +152,7 @@ def test_timed_out_follower_serves_the_resident_catalog_not_the_cold_path(
     def _wait(_predicate, timeout=None):
         return False
 
-    monkeypatch.setattr(cfg._cache_build_cv, "wait_for", _wait)
+    _patch_catalog_cv_wait(monkeypatch, cfg, _wait)
 
     def _must_not_rebuild(*_args, **_kwargs):
         raise AssertionError("a timed-out follower must not re-enter the cold path")
