@@ -7296,7 +7296,11 @@ function _fitComposerFooter(){
   // Pin the label hidden so the button is at its idle width during the
   // measurement, the same shape as the existing height/visibility
   // freeze: commit nothing to the screen, restore both in `finally`.
-  const sendBtn=document.getElementById('btnSend');
+  // Tolerate a host that exposes only querySelector (the mobile-layout fit
+  // harness drives this function with a footer/left pair and no
+  // getElementById): without the button there is nothing to measure or
+  // collapse, and the stage resolution below still runs.
+  const sendBtn=(typeof document.getElementById==='function')?document.getElementById('btnSend'):null;
   const sendBtnLabel=sendBtn&&sendBtn.querySelector('.send-btn-label');
   const prevLabelDisplay=sendBtnLabel?sendBtnLabel.style.display:'';
   const _btnStyle=sendBtn&&sendBtn.style?sendBtn.style:null;
