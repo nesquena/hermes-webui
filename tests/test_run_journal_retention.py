@@ -3313,3 +3313,113 @@ def test_plain_read_keeps_separator_rows_whole(tmp_path):
     assert [e["seq"] for e in events] == [1], (events, malformed)
     assert malformed == []
     assert events[0]["payload"]["text"] == "a\u2028b"
+
+
+# ── rollback safety: a run the session still references is never archived ──
+
+
+@pytest.mark.parametrize(
+    "shape", ["active-stream", "pending-recovery-message", "retry-stream-id", "unparseable-sidecar"]
+)
+def test_sweep_keeps_a_run_the_session_still_references_live(tmp_path, shape):
+    """Codex forward audit 492..539: a release that predates the archive format (v0.52.492) reads only live
+    journals, so archiving the one copy of a pending answer loses it after a rollback. Keep it live."""
+    sid, rid = "s1", "run1"
+    _write_run(tmp_path, sid, rid, events=[("token", {"text": "ONLY ANSWER"})], mtime_age_days=30)
+    if shape == "active-stream":
+        _write_session_sidecar(tmp_path, sid, active_stream_id=rid, pending_user_message="Question")
+    elif shape == "pending-recovery-message":
+        _write_session_sidecar(
+            tmp_path, sid,
+            messages=[{"role": "assistant", "content": "partial", "_pending_journal_recovery": True}],
+        )
+    elif shape == "retry-stream-id":
+        _write_session_sidecar(
+            tmp_path, sid,
+            messages=[{"role": "assistant", "content": "partial", "_journal_retry_stream_id": rid}],
+        )
+    else:
+        (tmp_path / f"{sid}.json").write_text("{not json", encoding="utf-8")
+    counters = _sweep(tmp_path)  # default caps: the TTL makes this run due for archival
+    assert counters["archived_files"] == 0, counters
+    assert counters["retained_referenced"] == 1, counters
+    live = tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / f"{rid}.jsonl"
+    assert live.exists() and not _archive_path(tmp_path, sid, rid).exists()
+
+
+def test_sweep_a_frozen_recovery_marker_keeps_only_its_retry_run_live(tmp_path):
+    """A recovery marker frozen behind a later normal assistant turn stays flagged forever (the lazy retry stops at
+    that turn). It must keep only the run it names live, never switch the caps off for the whole session (senior
+    review: 0 of 50 archived before the narrowing, 50 of 50 on origin/master)."""
+    sid = "s1"
+    for i in range(50):
+        _write_run(tmp_path, sid, f"old{i}", mtime_age_days=30 + i / 10)
+    _write_run(tmp_path, sid, "crashed", mtime_age_days=30)
+    _write_session_sidecar(
+        tmp_path, sid,
+        messages=[
+            {"role": "user", "content": "Q1"},
+            {"role": "assistant", "content": "interrupted", "_error": True, "type": "interrupted",
+             "_pending_journal_recovery": True, "_journal_retry_stream_id": "crashed"},
+            {"role": "user", "content": "Q2"},
+            {"role": "assistant", "content": "a normal later answer"},
+        ],
+    )
+    counters = _sweep(tmp_path)
+    assert counters["archived_files"] == 50 and counters["retained_referenced"] == 1, counters
+    assert (tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / "crashed.jsonl").exists()
+
+
+def test_sweep_a_frozen_marker_whose_retry_run_is_gone_keeps_nothing_live(tmp_path):
+    sid = "s1"
+    for i in range(50):
+        _write_run(tmp_path, sid, f"old{i}", mtime_age_days=30 + i / 10)
+    _write_session_sidecar(
+        tmp_path, sid,
+        messages=[{"role": "assistant", "content": "interrupted", "_error": True, "type": "interrupted",
+                   "_pending_journal_recovery": True, "_journal_retry_stream_id": "no-such-run"},
+                  {"role": "assistant", "content": "a normal later answer"}],
+    )
+    counters = _sweep(tmp_path)
+    assert counters["archived_files"] == 50 and counters["retained_referenced"] == 0, counters
+
+
+def test_archive_prune_guard_keeps_its_any_marker_rule(tmp_path):
+    """The destructive archive-TTL prune guard is unchanged: any recovery marker still keeps every archive."""
+    _write_session_sidecar(
+        tmp_path, "s1",
+        messages=[{"role": "assistant", "content": "x", "_pending_journal_recovery": True,
+                   "_journal_retry_stream_id": "r1"}],
+    )
+    assert rj._session_sidecar_keeps_run(tmp_path, "s1", "some-other-run") is True
+    assert rj._session_sidecar_keeps_run(tmp_path, "s1", "r1") is True
+
+
+def test_sweep_still_archives_the_runs_a_session_does_not_reference(tmp_path):
+    sid = "s1"
+    _write_run(tmp_path, sid, "old", mtime_age_days=30)
+    _write_run(tmp_path, sid, "pending", mtime_age_days=30)
+    _write_session_sidecar(tmp_path, sid, active_stream_id="pending", pending_user_message="Q")
+    counters = _sweep(tmp_path)
+    assert counters["archived_files"] == 1 and counters["retained_referenced"] == 1, counters
+    assert _archive_path(tmp_path, sid, "old").exists()
+    assert (tmp_path / rj.RUN_JOURNAL_DIR_NAME / sid / "pending.jsonl").exists()
+
+
+def test_sweep_reads_each_session_sidecar_at_most_once(tmp_path, monkeypatch):
+    sid = "s1"
+    for i in range(5):
+        _write_run(tmp_path, sid, f"r{i}", mtime_age_days=30 + i)
+    _write_session_sidecar(tmp_path, sid)
+    calls = []
+    real = rj._session_sidecar_run_refs
+    monkeypatch.setattr(rj, "_session_sidecar_run_refs", lambda *a, **kw: calls.append(a) or real(*a, **kw))
+    counters = _sweep(tmp_path)
+    assert counters["archived_files"] == 5 and len(calls) == 1, (counters, calls)
+
+
+def test_sweep_archives_when_the_sidecar_is_absent(tmp_path):
+    _write_run(tmp_path, "gone", "r1", mtime_age_days=30)
+    counters = _sweep(tmp_path)
+    assert counters["archived_files"] == 1 and counters["retained_referenced"] == 0, counters
+

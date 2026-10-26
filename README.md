@@ -228,6 +228,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Delegated subagent sessions nest under their parent row. When that parent is filtered out of the current view (project, source tab, hidden), the subagent is hidden with it rather than shown as a stray top-level "Subagent Session"; a subagent without the cross-surface flag (for example in the all-profiles view) stays a top-level row when its parent is in the other (CLI/TUI) tab, was never imported, or is itself shown as a top-level subagent row, and a subagent that matches an active sidebar search is always listed
 - Project bindings -- right-click a project chip and pick **Project settings…** to pin a default workspace (or several workspaces, with one marked default) and a model. The chip's **+** (and New Chat while the project filter is active) then opens a session already in that workspace/model. The reasoning-effort binding stays in the API (`POST /api/projects/bind`) but is dormant: the dialog no longer offers the row, and nothing applies a stored value to a new session any more — the only mechanism would be the **profile-wide** reasoning-effort preference (the same `agent.reasoning_effort` setting the `/reasoning` command writes), so a row inside a per-project dialog read as per-project while silently moving the whole profile's effort; it comes back with per-session effort (#7881)
 - Session tags -- add #tag to titles for colored chips and click-to-filter
+  Clicking a session tag chip filters the list without opening the conversation.
 - Grouped by Today / Yesterday / Earlier in the sidebar (collapsible date groups)
 - Download as Markdown transcript, full JSON export, or import from JSON
 - Create a public read-only share link for the active conversation from the Control Center; shared pages show a sanitized transcript snapshot without workspace, profile, or live controls
@@ -278,6 +279,7 @@ If an AI assistant is helping with install, reinstall, bootstrap, provider setup
 - Optional passkeys/WebAuthn -- register from Settings -> System after signing in with a password; the login page only shows passkey sign-in after at least one passkey exists
 - After registering at least one passkey, Settings -> System can remove the password and keep passkey-only sign-in enabled. Password auth remains the bootstrap/recovery path until you choose to go passwordless; passkeys are same-origin and stored locally in the WebUI state directory
 - Optional native OIDC login for WebUI sessions -- configure `webui_oidc.issuer`, `client_id`, `allow_claim`, and `allow_values` in `config.yaml`, or set the matching `HERMES_WEBUI_OIDC_*` environment variables. OIDC stays disabled until all four are present, and startup prints a warning if the config is partial.
+- Native OIDC sends the client secret in the token-request form body (`client_secret_post`) by default. When the provider's discovery document only advertises `client_secret_basic` in `token_endpoint_auth_methods_supported` (common with strict OIDC stacks such as zitadel/oidc), the secret automatically moves to the HTTP Basic header instead. Set `webui_oidc.token_auth_method` (or `HERMES_WEBUI_OIDC_TOKEN_AUTH_METHOD`) to `client_secret_basic` or `client_secret_post` to pin a method explicitly.
 - Native OIDC stores the PKCE/state nonce flow in process memory. That works for the shipped single-process server, and it also works behind a load balancer when callbacks stay sticky to the same WebUI instance. Multi-instance deployments need session affinity, or the callback can land on a different process and fail state validation.
 - Signed HMAC HTTP-only cookie with 24h TTL
 - Minimal dark-themed login page at `/login`
@@ -472,6 +474,7 @@ The run journal stores one `{run_id}.jsonl` per run under `sessions/_run_journal
 - eligible runs are compressed (gzip) into `sessions/_run_journal_archive/<session_id>/<run_id>.jsonl.gz` — measured at **5–18% of the original size** on real journals;
 - the compressed copy is verified to decompress to the exact original bytes **before** the live file is dropped;
 - runs that have not provably settled (no complete terminal row — including a journal truncated mid-write) are never touched;
+- a run the session still needs to recover an interrupted answer (its active stream, or the run an interrupted-turn marker names) stays live, so a release that predates the archive format can still recover it after a rollback;
 - every read path (run summaries, event reads, session replay, run lookup) transparently falls back to the archive, so a wrong classification costs one compressed copy, not the run;
 - deleting a session deletes its archives too.
 

@@ -3460,6 +3460,10 @@ def _sweep_session_entries(
     max_bytes = int(caps["max_bytes_per_session"])
     retained_bytes = 0
     size_cap_exceeded = False
+    # Runs the persisted session still needs for recovery stay LIVE: a release that predates the archive format
+    # (rolling back to v0.52.492, for one) reads only live journals, so archiving the one copy of a pending answer
+    # would lose it there. Read lazily, once per session, only when a run is due for archival.
+    session_refs = None
     for rank, (name, st) in enumerate(entries):
         size = int(st.st_size)
         archived = False
@@ -3483,20 +3487,27 @@ def _sweep_session_entries(
                         size_cap_exceeded = True
                         over_size = True
                 if over_ttl or over_count or over_size:
-                    archived = _try_archive_entry(
-                        session_root,
-                        session_journal_dir,
-                        name,
-                        st,
-                        session_fd,
-                        archive_fd,
-                        counters,
-                        size,
-                        age_seconds,
-                        budget,
-                        archive_root_fd=archive_root_fd,
-                        chain_synced_before=chain_synced_before,
-                    )
+                    if session_refs is None:
+                        session_refs = _session_sidecar_run_refs(
+                            session_root, session_journal_dir.name, any_marker_keeps_all=False
+                        )
+                    if session_refs is _KEEP_ALL_RUNS or name[: -len(".jsonl")] in session_refs:
+                        counters["retained_referenced"] += 1
+                    else:
+                        archived = _try_archive_entry(
+                            session_root,
+                            session_journal_dir,
+                            name,
+                            st,
+                            session_fd,
+                            archive_fd,
+                            counters,
+                            size,
+                            age_seconds,
+                            budget,
+                            archive_root_fd=archive_root_fd,
+                            chain_synced_before=chain_synced_before,
+                        )
         if not archived:
             # Everything that stays live — including a run that could not be
             # proven terminal — counts against the per-session budget.
@@ -3782,6 +3793,56 @@ def _recover_archive_claims(session_root: Path) -> None:
             pass
 
 
+_KEEP_ALL_RUNS = object()
+
+
+def _session_sidecar_run_refs(session_root: Path, session_id: str, *, any_marker_keeps_all: bool = True):
+    """The run ids the persisted session still needs, read once: a set, or ``_KEEP_ALL_RUNS``.
+
+    ``_KEEP_ALL_RUNS`` when the sidecar exists but is not a plain, readable, parseable file (an unreadable reference
+    is UNKNOWN, not absent), and for a recovery marker: any marker when ``any_marker_keeps_all`` (the archive-TTL
+    prune guard's long-standing rule), otherwise only a marker without a ``_journal_retry_stream_id``. The lazy
+    retry reads exactly that run, in every release since the marker gained the id, so a marker WITH the id adds just
+    that run: a marker can stay flagged forever behind a later normal assistant turn (the retry stops at that turn),
+    and keep-all would then switch the live-journal caps off for the session. An empty set only for a CONFIRMED
+    missing sidecar, or one that references no run. See ``_session_sidecar_keeps_run`` for why each field counts.
+    """
+    sidecar = session_root / f"{session_id}.json"
+    try:
+        st = sidecar.lstat()
+    except FileNotFoundError:
+        return frozenset()
+    except OSError:
+        return _KEEP_ALL_RUNS
+    if not stat.S_ISREG(st.st_mode):
+        return _KEEP_ALL_RUNS
+    try:
+        raw = sidecar.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return frozenset()
+    except OSError:
+        return _KEEP_ALL_RUNS
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return _KEEP_ALL_RUNS
+    if not isinstance(data, dict):
+        return _KEEP_ALL_RUNS
+    refs = set()
+    active = str(data.get("active_stream_id") or "")
+    if active:
+        refs.add(active)
+    for message in data.get("messages") or []:
+        if not isinstance(message, dict):
+            continue
+        retry = str(message.get("_journal_retry_stream_id") or "")
+        if message.get("_pending_journal_recovery") and (any_marker_keeps_all or not retry):
+            return _KEEP_ALL_RUNS
+        if retry:
+            refs.add(retry)
+    return frozenset(refs)
+
+
 def _session_sidecar_keeps_run(session_root: Path, session_id: str, run_id: str) -> bool:
     """True while the persisted session still needs this run's journal.
 
@@ -3798,37 +3859,8 @@ def _session_sidecar_keeps_run(session_root: Path, session_id: str, run_id: str)
     Only a CONFIRMED missing sidecar — the session was deleted, so nothing can
     ever recover from the archive — lets the prune proceed.
     """
-    sidecar = session_root / f"{session_id}.json"
-    try:
-        st = sidecar.lstat()
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    if not stat.S_ISREG(st.st_mode):
-        return True
-    try:
-        raw = sidecar.read_text(encoding="utf-8")
-    except FileNotFoundError:
-        return False
-    except OSError:
-        return True
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return True
-    if not isinstance(data, dict):
-        return True
-    if str(data.get("active_stream_id") or "") == run_id:
-        return True
-    for message in data.get("messages") or []:
-        if not isinstance(message, dict):
-            continue
-        if message.get("_pending_journal_recovery"):
-            return True
-        if str(message.get("_journal_retry_stream_id") or "") == run_id:
-            return True
-    return False
+    refs = _session_sidecar_run_refs(session_root, session_id)
+    return refs is _KEEP_ALL_RUNS or str(run_id) in refs
 
 
 def _prune_run_journal_archive(session_root: Path, caps: dict, now: float, counters: dict) -> None:
@@ -4031,6 +4063,7 @@ def sweep_run_journal(
         "archived_bytes": 0,
         "files_scanned": 0,
         "retained_open": 0,
+        "retained_referenced": 0,
         "pruned_archives": 0,
         "sessions_scanned": 0,
         "skipped_files": 0,

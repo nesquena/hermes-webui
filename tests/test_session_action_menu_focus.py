@@ -921,7 +921,7 @@ def _child_count_toggle_snippet() -> str:
 def _tag_filter_snippet() -> str:
     """Extract the production tag chip, including its filter handler."""
     start = SESSIONS_JS.index("for(const tag of tags){")
-    end = SESSIONS_JS.index("title.appendChild(chip);", start) + len("title.appendChild(chip);")
+    end = SESSIONS_JS.index("titleGroup.appendChild(chip);", start) + len("titleGroup.appendChild(chip);")
     snippet = SESSIONS_JS[start:end]
     assert "_retireProjectPickerForExplicitRepaint" in snippet
     return snippet + "\n    }"
@@ -1021,10 +1021,10 @@ def _explicit_tag_filter_script() -> str:
             "function paintRows(){",
             "  const host = document.getElementById('sessionList');",
             "  const parent = document.createElement('div'); parent.className = 'session-item'; parent.dataset.sid = 'parent';",
-            "  const title = document.createElement('div');",
+            "  const titleGroup = document.createElement('div');",
             "  const tags = ['#triage'];",
             _tag_filter_snippet(),
-            "  parent.appendChild(title);",
+            "  parent.appendChild(titleGroup);",
             "  const query = ($('sessionSearch') && $('sessionSearch').value || '').trim();",
             "  const rowCount = query === '#triage' ? 1 : 15;",
             "  for(let i = 0; i < rowCount; i += 1){ const row = document.createElement('div'); row.className = 'session-row'; row.dataset.sid = 'row-' + i; parent.appendChild(row); }",
