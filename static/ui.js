@@ -6004,12 +6004,8 @@ function _addLiveModelsToSelect(provider, models, sel){
   let added=0;
   for(const m of models){
     let mid=m.id;
-    // #7507: never write an excluded id into the dropdown, whichever code
-    // path supplied the payload (live fetch, cached _liveModelCache entry
-    // captured before a policy change, or the Settings-modal fetch). The
-    // server already filters its own /api/models/live response; this is the
-    // client-side belt for the paths that bypass it. typeof-guarded so the
-    // function stays callable from isolated unit tests.
+    // #7507: never write an excluded id (client-side belt for paths that
+    // bypass the server filter); typeof-guarded for isolated unit tests.
     if(typeof _modelIsPickerExcluded==='function'&&_modelIsPickerExcluded(mid,provider)) continue;
     if(_isPortalFetch && !mid.startsWith('@')){
       mid=`@${provider}:${mid}`;
