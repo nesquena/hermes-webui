@@ -4523,16 +4523,21 @@ function _providerQuotaProfileKey(){
   return (typeof S!=='undefined'&&S&&S.activeProfile)?String(S.activeProfile):'';
 }
 
+// Number(null), Number('') and Number(false) are 0: a missing or rejected
+// measurement must hide, not render as $0.00 / 0%.
+function _isQuotaMeasurement(value){
+  return (typeof value==='number'||(typeof value==='string'&&value.trim()!==''))&&Number.isFinite(Number(value));
+}
 function _formatQuotaMoneyShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   if(Math.abs(n)>=100) return '$'+n.toFixed(0);
   if(Math.abs(n)>=10) return '$'+n.toFixed(1);
   return '$'+n.toFixed(2);
 }
 function _formatQuotaPercentShort(value){
+  if(!_isQuotaMeasurement(value)) return '';
   const n=Number(value);
-  if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
 }
 // Which account window the chip shows (Settings: quota_chip_window). Providers list
@@ -4541,7 +4546,7 @@ function _normalizeQuotaChipWindow(value){
   return value==='shortest'||value==='longest'?value:'most_constrained';
 }
 function _selectQuotaChipWindow(windows){
-  const valid=windows.filter(x=>x&&(typeof x.remaining_percent==='number'||(typeof x.remaining_percent==='string'&&x.remaining_percent.trim()!==''))&&Number.isFinite(Number(x.remaining_percent)));
+  const valid=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
   if(!valid.length) return null;
   const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
   if(mode==='shortest') return valid[0];
