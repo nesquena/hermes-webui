@@ -450,11 +450,22 @@ else:
 _thread_ctx = threading.local()
 
 
-def _thread_local_env_value(name: str, default: str = "") -> str:
-    """Return thread-local profile env first, then process env, for provider reads."""
+def _thread_local_env_value(name: str, default: str = "", env: dict | None = None) -> str:
+    """Return thread-local profile env first, then process env, for provider reads.
+
+    When *env* is given, resolve exclusively against it (no thread-local or
+    process fallback): used to bind a divergent profile-home read to the
+    TARGET home's own env instead of the calling thread's binding.
+    """
     env_name = str(name or "").strip()
     if not env_name:
         return default or ""
+
+    if env is not None:
+        env_value = env.get(env_name)
+        if env_value is None:
+            return default or ""
+        return str(env_value)
 
     thread_env = getattr(_thread_ctx, "env", {})
     if isinstance(thread_env, dict) and env_name in thread_env:
@@ -471,7 +482,7 @@ def _thread_local_env_value(name: str, default: str = "") -> str:
 
 # ── Config file (reloadable -- supports profile switching) ──────────────────
 
-def _expand_env_vars(obj):
+def _expand_env_vars(obj, env: dict | None = None):
     """Recursively expand ${VAR} references in config values.
 
     Uses the thread-local-first profile env lookup (_thread_local_env_value) so a
@@ -481,17 +492,22 @@ def _expand_env_vars(obj):
     raw (unexpanded) dict is what gets cached; this expansion re-runs on every
     read against the current thread's scope, so a cross-profile credential
     (e.g. config api_key: ${ANTHROPIC_TOKEN}) can't be reconstructed from the
-    server process env for a named profile that has no such value (#3961)."""
+    server process env for a named profile that has no such value (#3961).
+
+    When *env* is given, resolve ${VAR} exclusively against that dict (no
+    thread-local or process fallback): used to bind a divergent profile-home
+    read to the TARGET home's own env (see
+    ``get_config_snapshot_for_profile_home``)."""
     if isinstance(obj, str):
         return re.sub(
             r"\${([^}]+)}",
-            lambda m: _thread_local_env_value(m.group(1), m.group(0)),
+            lambda m: _thread_local_env_value(m.group(1), m.group(0), env=env),
             obj,
         )
     if isinstance(obj, dict):
-        return {k: _expand_env_vars(v) for k, v in obj.items()}
+        return {k: _expand_env_vars(v, env=env) for k, v in obj.items()}
     if isinstance(obj, list):
-        return [_expand_env_vars(item) for item in obj]
+        return [_expand_env_vars(item, env=env) for item in obj]
     return obj
 
 
@@ -977,7 +993,30 @@ def get_config_snapshot_for_profile_home(profile_home: "Path | str | None") -> d
         pass
     if not target.exists():
         return {}
-    profile_cfg = _load_yaml_config_file(target / "config.yaml")
+    # Read the profile file directly and apply documented defaults locally so
+    # the returned dict matches ambient get_config() shape (including built-in
+    # personalities) without mutating any global cache state. The ${VAR}
+    # expansion is bound to the TARGET home's own runtime env — the same
+    # construction the request-scope profile binding uses — never the calling
+    # thread's binding: a session owned by profile B but read while the thread
+    # is bound to profile A must still resolve B's references with B's values
+    # (#7170, droopanu 2026-10-27). The raw parse stays memoized; expansion
+    # re-runs per call.
+    _raw_cfg = _load_yaml_config_file_raw(target / "config.yaml", _copy=False)
+    if not isinstance(_raw_cfg, dict) or not _raw_cfg:
+        return {}
+    from api.profiles import (
+        filter_runtime_env_for_gateway_parity,
+        get_profile_runtime_env,
+    )
+
+    _target_env = dict(
+        filter_runtime_env_for_gateway_parity(get_profile_runtime_env(target))
+    )
+    _target_env.setdefault("HERMES_HOME", str(target))
+    profile_cfg = _expand_env_vars(_raw_cfg, env=_target_env)
+    if not isinstance(profile_cfg, dict):
+        return {}
     _apply_config_defaults(profile_cfg)
     return profile_cfg
 
@@ -6266,23 +6305,99 @@ def coerce_reasoning_effort_for_model(
     return raw
 
 
+# Known provider/aggregator prefixes the reasoning-override readers expand.
+# Module-level so the no-core fallback resolver and the setter-side
+# enumeration stay pinned to ONE list — the reader and the writer must agree
+# on the same spelling equivalence class (#7170, droopanu 2026-10-27).
+_MODEL_PREFIX_PROVIDERS = (
+    "anthropic", "openai", "google", "openrouter", "groq", "mistral",
+    "xai", "cohere", "perplexity", "together", "fireworks", "deepseek",
+)
+_MODEL_PREFIX_AGGREGATORS = (
+    "openrouter", "opencode", "fireworks", "groq", "together",
+)
+
+
+def _reasoning_override_variants_for_model(
+    model: str, *, orig_model: str | None = None
+) -> list[str]:
+    """Every spelling the read side resolves *model* under (exact-first).
+
+    Mirrors Hermes core's ``_canonical_model_variants`` — dot/dash derivative
+    forms, the bare tail and aggregator-stripped middle form of slash-qualified
+    ids, known provider prefixes over every bare form, and known aggregator
+    prefixes over every single-slash form (including the provider-prefixed
+    forms just added) — so ``_reasoning_override_keys_for_model`` stays in the
+    same equivalence class as the resolver the read side prefers when the
+    companion agent tree is installed. The WebUI-only ``@provider:model``
+    original spelling is prepended when present: the no-core fallback in
+    ``configured_reasoning_effort_for_model`` matches it too (greptile P1),
+    and its dot/dash equivalents are covered by the canonical comparison the
+    enumerator applies (the fallback canonicalizes dots to dashes on BOTH
+    sides at match time).
+    """
+    model = str(model or "").strip()
+    if not model:
+        return []
+    _dash_to_dot = lambda s: re.sub(r"(\d)-(\d)", r"\1.\2", s)
+    _dot_to_dash = lambda s: re.sub(r"(\d)\.(\d)", r"\1-\2", s)
+    seen: set[str] = set()
+    variants: list[str] = []
+
+    def _add(*values: str) -> None:
+        for v in values:
+            if v and v not in seen:
+                seen.add(v)
+                variants.append(v)
+
+    def _add_with_derivatives(s: str) -> None:
+        dashed, dotted = s.replace(".", "-"), s.replace("-", ".")
+        _add(
+            s, dashed, dotted,
+            _dash_to_dot(s), _dot_to_dash(s),
+            _dash_to_dot(dashed), _dot_to_dash(dotted),
+        )
+
+    orig = str(orig_model or "").strip()
+    if orig.startswith("@") and ":" in orig:
+        _add(orig, orig.lower())
+    _add_with_derivatives(model)
+    parts = model.split("/")
+    if len(parts) >= 2:  # bare tail: strip any provider/aggregator prefix
+        _add_with_derivatives(parts[-1])
+    if len(parts) >= 3:  # aggregator-stripped middle form
+        _add_with_derivatives("/".join(parts[1:]))
+    # Provider-qualified keys: known prefixes over every bare form.
+    for v in [v for v in variants if "/" not in v]:
+        _add(*(f"{p}/{v}" for p in _MODEL_PREFIX_PROVIDERS))
+    # Aggregator-qualified keys: known aggregators over every single-slash
+    # form, including the provider-prefixed forms just added.
+    for v in [v for v in variants if v.count("/") == 1]:
+        _add(*(f"{a}/{v}" for a in _MODEL_PREFIX_AGGREGATORS))
+    return variants
+
+
 def _reasoning_override_keys_for_model(
     model_id: str, overrides: dict, provider_id: str | None = None
 ) -> list[str]:
     """Every existing override key that refers to *model_id*.
 
     ``configured_reasoning_effort_for_model`` resolves a model through a
-    tolerant candidate list (the bare id, its lowercase form, the
-    ``@provider:id`` tail, every slash-qualified form and the
-    provider-prefixed variants), so an override written under ANY of those
-    spellings wins on read. The setter must therefore be able to enumerate the
-    same set when it writes or clears, otherwise a config carrying
-    ``openai/gpt-5.4: low`` keeps answering for ``gpt-5.4`` after the user
-    picked a different level or ``Default`` for the bare id (#7170,
-    droopanu 2026-10-20).
+    tolerant candidate set — the bare id, its lowercase form, dot/dash
+    equivalent spellings, the ``@provider:id`` tail, every slash-qualified
+    form, the provider-prefixed and aggregator-qualified variants, and (via
+    core's reverse lookup) ANY slash-qualified key whose stripped tail or
+    middle form is a spelling of the model. An override written under ANY of
+    those spellings wins on read, so the setter must enumerate the same set
+    when it writes or clears, otherwise a config carrying ``gpt-5-4: low`` or
+    ``openrouter/openai/gpt-5.4: low`` keeps answering for ``gpt-5.4`` after
+    the user picked a different level or ``Default`` for the bare id (#7170,
+    droopanu 2026-10-27).
 
     Returns only keys that are actually present in *overrides*, so the caller
-    can pop them without touching unrelated entries.
+    can pop them without touching unrelated entries. *provider_id* is retained
+    for call-site compatibility; the reverse lookup below covers any provider
+    prefix, so it no longer narrows the enumeration.
     """
     model = str(model_id or "").strip()
     if not model or not isinstance(overrides, dict) or not overrides:
@@ -6296,38 +6411,49 @@ def _reasoning_override_keys_for_model(
     orig_model = model
     parsed = _parse_provider_qualified_model_id(model)
     if parsed:
-        bare, _provider = parsed
-        model = bare
-    candidates = []
-    if orig_model.startswith("@") and ":" in orig_model:
-        candidates.extend([orig_model, orig_model.lower()])
-    candidates.extend([model, model.lower()])
-    for cand in list(candidates):
-        if "/" not in cand:
+        model = parsed[0]
+    variants = _reasoning_override_variants_for_model(model, orig_model=orig_model)
+    wanted_lower = {v.lower() for v in variants}
+    # The no-core fallback canonicalizes dots to dashes on BOTH sides at match
+    # time (``configured_reasoning_effort_for_model``), so the @-form keys —
+    # which carry no core-style derivative variants — must still be matched
+    # dot/dash-equivalently. Both directions are covered here; the bare/slash
+    # spellings are already present as derivative variants.
+    wanted_dashed = {v.lower().replace(".", "-") for v in variants}
+    wanted_dotted = {v.lower().replace("-", ".") for v in variants}
+    matched: list[str] = []
+    for key in overrides:
+        if not isinstance(key, str):
             continue
-        parts = cand.split("/")
-        if len(parts) >= 3:
-            candidates.append("/".join(parts[1:]))
-        candidates.append(parts[-1])
-    # Provider-qualified keys must also be superseded/cleared: the read side
-    # accepts ``<provider>/<model>`` for a bare model id, so a stored
-    # ``openai/gpt-5.4`` answers for ``gpt-5.4``. Only the CALLER's provider is
-    # expanded (plus the known-prefix list the read side mirrors), never an
-    # arbitrary guess, so an unrelated provider's entry is left alone.
-    _MODEL_PREFIX_PROVIDERS = (
-        "anthropic", "openai", "google", "openrouter", "groq", "mistral",
-        "xai", "cohere", "perplexity", "together", "fireworks", "deepseek",
-    )
-    bare_candidates = [c for c in candidates if c and "/" not in c and not c.startswith("@")]
-    prefixes = list(_MODEL_PREFIX_PROVIDERS)
-    prov = str(provider_id or "").strip().lower()
-    if prov and prov not in prefixes:
-        prefixes.append(prov)
-    for cand in bare_candidates:
-        for prefix in prefixes:
-            candidates.append(f"{prefix}/{cand}")
-    wanted = {c for c in candidates if c}
-    return [key for key in overrides if key in wanted or key.lower() in wanted]
+        k = key.strip()
+        if not k:
+            continue
+        kl = k.lower()
+        if (
+            kl in wanted_lower
+            or kl.replace(".", "-") in wanted_dashed
+            or kl.replace("-", ".") in wanted_dotted
+        ):
+            matched.append(key)
+            continue
+        # Core's reverse lookup: a slash-qualified key whose stripped tail or
+        # aggregator-stripped middle form is a spelling of the model matches,
+        # even when the prefix is a custom-provider slug the known-prefix
+        # lists cannot enumerate (``ollama-local/qwen3.6:27b`` for
+        # ``qwen3.6:27b``). Direct matches above still win, so known-prefix
+        # keys stay most specific.
+        if "/" in k:
+            parts = k.split("/")
+            tails = [parts[-1]]
+            if len(parts) >= 3:
+                tails.append("/".join(parts[1:]))
+            if any(
+                tv.lower() in wanted_lower
+                for t in tails
+                for tv in _reasoning_override_variants_for_model(t)
+            ):
+                matched.append(key)
+    return matched
 
 
 def configured_reasoning_effort_for_model(
@@ -6414,13 +6540,8 @@ def configured_reasoning_effort_for_model(
             # "known prefixes added" variants.  A bare model ``gpt-5.4-mini``
             # with override ``openai/gpt-5.4-mini: low`` previously resolved to
             # the global ``high`` because only the model side was expanded.
-            _MODEL_PREFIX_PROVIDERS = (
-                "anthropic", "openai", "google", "openrouter", "groq", "mistral",
-                "xai", "cohere", "perplexity", "together", "fireworks", "deepseek",
-            )
-            _MODEL_PREFIX_AGGREGATORS = (
-                "openrouter", "opencode", "fireworks", "groq", "together",
-            )
+            # Prefix lists are module-level so the setter-side enumeration
+            # stays pinned to the same equivalence class.
 
             def _fallback_provider_prefixes(cand: str) -> list[str]:
                 """Provider-prefixed spellings of one BARE candidate.

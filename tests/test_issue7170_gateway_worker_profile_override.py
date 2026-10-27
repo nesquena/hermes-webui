@@ -629,3 +629,62 @@ def test_snapshot_for_profile_home_survives_concurrent_reloads(
         stop.set()
         reloader_thread.join(timeout=10)
     assert not errors, f"reload thread failed: {errors!r}"
+
+
+def test_snapshot_divergent_home_expands_target_profiles_env(tmp_path, monkeypatch):
+    """droopanu (2026-10-27): a divergent profile-home snapshot must expand
+    the target's ${VAR} references with the TARGET home's own env, never the
+    calling thread's binding.
+
+    ``get_config_snapshot_for_profile_home`` reads a session-owner home that
+    differs from the ambient profile. The read expands ${VAR} through
+    ``_thread_ctx.env`` — the ACTIVE request profile's env — so a session
+    owned by profile B but read while the thread is bound to profile A
+    resolved B's references with A's values. The snapshot reaches the gateway
+    worker as ``session_cfg``, so the wrong credential would ride along.
+    """
+    from api import config as cfg
+
+    profile_a_home = tmp_path / "profiles" / "a"
+    profile_b_home = tmp_path / "profiles" / "b"
+    profile_a_home.mkdir(parents=True)
+    profile_b_home.mkdir(parents=True)
+    # Both profiles define the same var with DIFFERENT values. Under the
+    # calling-thread binding the read sees A's value; B's config must resolve
+    # with B's own value.
+    profile_a_home.joinpath(".env").write_text(
+        'SHARED_TOKEN="from-a"\n', encoding="utf-8"
+    )
+    profile_b_home.joinpath(".env").write_text(
+        'SHARED_TOKEN="from-b"\n', encoding="utf-8"
+    )
+    profile_b_home.joinpath("config.yaml").write_text(
+        yaml.safe_dump(
+            {"model": {"provider": "openai", "api_key": "${SHARED_TOKEN}"}},
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    # Pin the ambient resolver to profile A and bind the calling thread to A's
+    # env (fail-closed: no process-env fallback), the exact shape of a request
+    # thread serving profile A that touches a session owned by profile B.
+    monkeypatch.setenv("HERMES_CONFIG_PATH", str(profile_a_home / "config.yaml"))
+    cfg.reload_config()
+    _prev_env = getattr(cfg._thread_ctx, "env", {})
+    _prev_block = bool(getattr(cfg._thread_ctx, "block_process_env_fallback", False))
+    cfg._thread_ctx.env = {"SHARED_TOKEN": "from-a"}
+    cfg._thread_ctx.block_process_env_fallback = True
+
+    try:
+        snapshot = cfg.get_config_snapshot_for_profile_home(profile_b_home)
+    finally:
+        cfg._thread_ctx.env = _prev_env
+        cfg._thread_ctx.block_process_env_fallback = _prev_block
+        monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+        cfg.reload_config()
+
+    assert snapshot.get("model", {}).get("api_key") == "from-b", (
+        "profile B's ${VAR} must resolve with profile B's own .env value, got "
+        f"{snapshot.get('model', {}).get('api_key')!r}"
+    )

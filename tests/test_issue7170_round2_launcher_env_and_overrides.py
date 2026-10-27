@@ -632,3 +632,85 @@ def test_unrelated_override_entries_survive(tmp_path, monkeypatch):
     assert overrides == {"claude-opus-4-5": "medium"}, (
         f"unrelated override entries must survive, got {overrides!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# droopanu (real user, 2026-10-27): Default must clear EVERY spelling the
+# reader resolves — dot/dash equivalents and aggregator-qualified keys — and
+# nothing that merely resembles the cleared model.
+# ---------------------------------------------------------------------------
+
+
+def test_default_clears_dot_dash_equivalent_spelling(tmp_path, monkeypatch):
+    """Default for ``gpt-5.4`` must clear the dash spelling ``gpt-5-4``.
+
+    The reader canonicalizes dots to dashes at match time, so ``gpt-5-4: low``
+    keeps answering for ``gpt-5.4``. The setter-side enumeration only listed
+    the dot spelling, so the override survived Default and the model kept
+    running at ``low``.
+    """
+    cfgfile = tmp_path / "config.yaml"
+    _write_cfg_with(cfgfile, {"gpt-5-4": "low"})
+    _patch_reasoning_scope(tmp_path, monkeypatch, cfgfile)
+
+    config.set_reasoning_effort("", model_id="gpt-5.4", provider_id="openai")
+
+    on_disk = yaml.safe_load(cfgfile.read_text(encoding="utf-8"))
+    overrides = (on_disk.get("agent") or {}).get("reasoning_overrides") or {}
+    assert not overrides, (
+        f"Default for gpt-5.4 must clear the dot/dash equivalent gpt-5-4, got {overrides!r}"
+    )
+    # And the read side must no longer see the cleared spelling.
+    assert (
+        config.configured_reasoning_effort_for_model(
+            on_disk, model_id="gpt-5.4", provider_id="openai"
+        )
+        != "low"
+    ), "the cleared dash spelling must not keep answering for gpt-5.4"
+
+
+def test_default_clears_aggregator_qualified_spelling(tmp_path, monkeypatch):
+    """Default for ``gpt-5.4`` must clear ``openrouter/openai/gpt-5.4``.
+
+    The reader's aggregator prefix pass matches the fully aggregator-qualified
+    key for a bare model id; the enumeration must do the same.
+    """
+    cfgfile = tmp_path / "config.yaml"
+    _write_cfg_with(cfgfile, {"openrouter/openai/gpt-5.4": "low"})
+    _patch_reasoning_scope(tmp_path, monkeypatch, cfgfile)
+
+    config.set_reasoning_effort("", model_id="gpt-5.4", provider_id="openai")
+
+    on_disk = yaml.safe_load(cfgfile.read_text(encoding="utf-8"))
+    overrides = (on_disk.get("agent") or {}).get("reasoning_overrides") or {}
+    assert not overrides, (
+        f"Default for gpt-5.4 must clear the aggregator-qualified spelling, got {overrides!r}"
+    )
+
+
+def test_default_keeps_unrelated_qualified_and_sibling_overrides(tmp_path, monkeypatch):
+    """Control group: the widened enumeration must not delete overrides that
+    only resemble the cleared model (prefix overlap, dash forms, sibling ids)."""
+    cfgfile = tmp_path / "config.yaml"
+    _write_cfg_with(
+        cfgfile,
+        {
+            "gpt-5.4": "low",
+            "openai/claude-opus-4-5": "medium",
+            "gpt-5.4-mini": "high",
+            "claude-opus-4.5": "minimal",
+        },
+    )
+    _patch_reasoning_scope(tmp_path, monkeypatch, cfgfile)
+
+    config.set_reasoning_effort("", model_id="gpt-5.4", provider_id="openai")
+
+    on_disk = yaml.safe_load(cfgfile.read_text(encoding="utf-8"))
+    overrides = (on_disk.get("agent") or {}).get("reasoning_overrides") or {}
+    assert overrides == {
+        "openai/claude-opus-4-5": "medium",
+        "gpt-5.4-mini": "high",
+        "claude-opus-4.5": "minimal",
+    }, (
+        f"unrelated overrides must survive Default for gpt-5.4, got {overrides!r}"
+    )

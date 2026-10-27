@@ -408,6 +408,55 @@ def test_reasoning_override_keys_for_model_enumerates_at_spelling():
     assert "gpt-5.4-mini" in keys
 
 
+def test_reasoning_override_keys_for_model_enumerates_dot_dash_equivalents():
+    """droopanu (2026-10-27): the setter-side enumeration must cover the
+    reader's dot/dash equivalence class, or Default leaves ``gpt-5-4`` (and
+    ``gpt.5.4``) answering for ``gpt-5.4``."""
+    keys = cfg._reasoning_override_keys_for_model(
+        "gpt-5.4",
+        {
+            "gpt-5.4": "low",
+            "gpt-5-4": "low",
+            "gpt.5.4": "low",
+            "claude-opus-4-5": "medium",
+        },
+        provider_id="openai",
+    )
+    assert "gpt-5-4" in keys, "the dash spelling must be enumerated for the dot model"
+    assert "gpt.5.4" in keys, "the dotted spelling must be enumerated for the dashed model"
+    assert "claude-opus-4-5" not in keys, (
+        "an unrelated model's override must not be enumerated"
+    )
+
+
+def test_reasoning_override_keys_for_model_enumerates_aggregator_and_custom_qualified():
+    """droopanu (2026-10-27): aggregator-qualified keys — and any slash key
+    whose stripped tail is the model (core's reverse lookup) — must be
+    enumerated for the bare model, while unrelated qualified keys stay out."""
+    keys = cfg._reasoning_override_keys_for_model(
+        "gpt-5.4",
+        {
+            "gpt-5.4": "low",
+            "openai/gpt-5.4": "low",
+            "openrouter/openai/gpt-5.4": "low",
+            "my-gateway/gpt-5.4": "low",
+            "openrouter/openai/claude-opus-4-5": "medium",
+        },
+        provider_id="openai",
+    )
+    assert "openai/gpt-5.4" in keys
+    assert "openrouter/openai/gpt-5.4" in keys, (
+        "the aggregator-qualified spelling must be enumerated for the bare model"
+    )
+    assert "my-gateway/gpt-5.4" in keys, (
+        "a custom-provider-prefixed key whose tail is the model (core's "
+        "reverse lookup) must be enumerated too"
+    )
+    assert "openrouter/openai/claude-opus-4-5" not in keys, (
+        "an unrelated model's aggregator-qualified override must not be enumerated"
+    )
+
+
 def test_fallback_matches_core_differentially(no_core):
     """No-core fallback must agree with the core resolver, both directions.
 
