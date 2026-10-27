@@ -323,7 +323,10 @@ def test_live_sse_uses_each_queue_items_own_event_id():
 
 def test_replay_emits_event_ids_and_stale_restart_diagnostic():
     replay_pos = ROUTES_SRC.index("def _replay_run_journal")
-    block = ROUTES_SRC[replay_pos : replay_pos + 1200]
+    # Window widened from 1200 to 2600 chars: the settled-prompt guard
+    # (prescan + per-entry filter) lengthened _replay_run_journal, pushing
+    # the emit call past the old fixed window. Assertions unchanged.
+    block = ROUTES_SRC[replay_pos : replay_pos + 2600]
 
     assert "read_run_events" in block
     assert "_sse_with_id" in block
