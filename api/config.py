@@ -1534,20 +1534,42 @@ def _is_known_model_provider(provider_id: str) -> bool:
     return False
 
 
-def _custom_provider_slug_from_name(name: object) -> str:
+def _custom_provider_slug_from_name(name: object, entry: dict | None = None) -> str:
+    if isinstance(name, dict) and entry is None:
+        entry = name
+        name = entry.get("name")
+
     raw = str(name or "").strip().lower()
-    if not raw:
+    if not raw and not (isinstance(entry, dict) and entry.get("provider_key")):
         return ""
     if raw.startswith("custom:"):
         return raw
+
     # Keep name-derived custom provider slugs out of the @provider:model colon
     # grammar. Endpoint-derived slugs may still be custom:<host>:<port>, but a
     # friendly name like "Local (127.0.0.1:15721)" should not preserve ':'.
     slug = re.sub(r"[^a-z0-9._-]+", "-", raw).strip("-")
     slug = re.sub(r"-{2,}", "-", slug)
+
+    if not slug:
+        if isinstance(entry, dict):
+            # 1. Fall back to provider_key if present
+            pk = str(entry.get("provider_key") or "").strip().lower()
+            if pk:
+                pk_slug = re.sub(r"[^a-z0-9._-]+", "-", pk).strip("-")
+                pk_slug = re.sub(r"-{2,}", "-", pk_slug)
+                if pk_slug:
+                    slug = pk_slug
+
+        # 2. Stable 8-char hex digest of UTF-8 name as last resort (#8017)
+        if not slug and raw:
+            import hashlib
+            slug = "named-" + hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:8]
+
     if not slug:
         return ""
     return "custom:" + slug
+
 
 
 def _custom_provider_entries(config_obj: dict | None = None) -> list[dict]:
@@ -1656,7 +1678,7 @@ def _named_custom_provider_slugs(config_obj: dict | None = None) -> set[str]:
     return {
         slug
         for slug in (
-            _custom_provider_slug_from_name(entry.get("name"))
+            _custom_provider_slug_from_name(entry.get("name"), entry)
             for entry in _custom_provider_entries(config_obj)
         )
         if slug
@@ -1673,10 +1695,11 @@ def _named_custom_provider_slug_for_provider(
     raw_suffix = raw.removeprefix("custom:")
     for entry in _custom_provider_entries(config_obj):
         entry_name = str(entry.get("name") or "").strip().lower()
-        slug = _custom_provider_slug_from_name(entry_name)
+        slug = _custom_provider_slug_from_name(entry_name, entry)
         if not entry_name or not slug:
             continue
-        if raw in {entry_name, slug} or raw_suffix == slug.removeprefix("custom:"):
+        pk = str(entry.get("provider_key") or "").strip().lower()
+        if raw in {entry_name, slug, pk} or raw_suffix in {slug.removeprefix("custom:"), pk}:
             return slug
     return ""
 
@@ -1862,7 +1885,7 @@ def _named_custom_provider_slug_for_base_url(
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        return _custom_provider_slug_from_name(entry.get("name"), entry) or "custom"
     return ""
 
 
@@ -2723,9 +2746,10 @@ def _model_id_declared_in_config(model_id: str, config_provider: str | None) -> 
     if prov.startswith("custom:"):
         raw_suffix = prov.removeprefix("custom:")
         for entry in _custom_provider_entries():
-            slug = _custom_provider_slug_from_name(entry.get("name"))
+            slug = _custom_provider_slug_from_name(entry.get("name"), entry)
             entry_name = str(entry.get("name") or "").strip().lower()
-            if not (prov in {entry_name, slug} or (slug and raw_suffix == slug.removeprefix("custom:"))):
+            pk = str(entry.get("provider_key") or "").strip().lower()
+            if not (prov in {entry_name, slug, pk} or (slug and raw_suffix in {slug.removeprefix("custom:"), pk})):
                 continue
             if str(entry.get("model") or "").strip() == model:
                 return True
@@ -2930,7 +2954,7 @@ class AmbiguousCustomProviderError(ValueError):
         self.message = message
 
 
-def _custom_provider_slug_key(value: object) -> str:
+def _custom_provider_slug_key(value: object, entry: dict | None = None) -> str:
     """Canonical bare slug for custom-provider identity + collision detection.
 
     Derived from the SINGLE authoritative slug PRODUCER
@@ -2944,7 +2968,10 @@ def _custom_provider_slug_key(value: object) -> str:
     slipping through a looser key. Returns the bare slug (no ``custom:`` prefix).
     Accepts a bare provider name or a ``custom:<slug>`` id.
     """
-    produced = _custom_provider_slug_from_name(value)
+    if isinstance(value, dict) and entry is None:
+        entry = value
+        value = entry.get("name")
+    produced = _custom_provider_slug_from_name(value, entry)
     return produced.split(":", 1)[1] if produced.startswith("custom:") else produced
 
 
@@ -2970,8 +2997,11 @@ def _unique_custom_provider_entry(custom_providers: object, slug_key: str) -> di
         name = str(entry.get("name") or "").strip()
         if not name:
             continue
-        if _custom_provider_slug_key(name) == slug_key:
+        entry_slug = _custom_provider_slug_from_name(name, entry)
+        entry_key = entry_slug.removeprefix("custom:")
+        if entry_key == slug_key:
             matches.append(entry)
+
     if len(matches) >= 2:
         names = [str(e.get("name") or "").strip() for e in matches]
         raise AmbiguousCustomProviderError(
@@ -3164,7 +3194,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                     e for e in custom_providers
                     if isinstance(e, dict)
                     and _entry_owns_model(e)
-                    and _custom_provider_slug_key(e.get('name')) == _active_key
+                    and _custom_provider_slug_key(e.get('name'), e) == _active_key
                 ),
                 None,
             )
@@ -3191,7 +3221,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
                 entry_model_ids.add(entry_model)
             entry_model_ids.update(_configured_model_ids(entry.get('models')))
             if entry_name and model_id in entry_model_ids:
-                provider_hint = _custom_provider_slug_from_name(entry_name)
+                provider_hint = _custom_provider_slug_from_name(entry_name, entry)
                 # _finalize() applies the all-entry collision guard on this
                 # bare-'custom' / fall-through path before returning the slug.
                 return _finalize(model_id, provider_hint, entry_base_url or None)
@@ -3345,7 +3375,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             if isinstance(_custom_cfg, list):
                 for _entry in _custom_cfg:
                     if isinstance(_entry, dict) and _entry.get("name", "").strip() == prefix:
-                        _slug = _custom_provider_slug_from_name(prefix)
+                        _slug = _custom_provider_slug_from_name(prefix, _entry)
                         _base = (_entry.get("base_url") or "").strip()
                         return _finalize(model_id, _slug, _base or None)
 
@@ -3696,7 +3726,7 @@ def _custom_record_claims_slug(record: object, slug: str, *, allow_name: bool = 
         value = record.get(field)
         if not isinstance(value, str) or not value.strip():
             continue
-        if _custom_provider_slug_key(value) == slug:
+        if _custom_provider_slug_key(value, record) == slug:
             return True
     return False
 
@@ -3806,7 +3836,7 @@ def _custom_record_names_identity(display_name: object, provider_key: object, pi
     if pid in _custom_provider_alias_set(display_name, provider_key):
         return True
     return any(
-        _custom_provider_slug_key(value) == slug
+        _custom_provider_slug_key(value, {"name": display_name, "provider_key": provider_key}) == slug
         for value in (display_name, provider_key)
         if str(value or "").strip()
     )
@@ -5939,7 +5969,7 @@ def _resolve_model_reasoning_efforts_impl(
     try:
         if provider and provider.startswith("custom:"):
             for _entry in _custom_provider_entries():
-                if _custom_provider_slug_from_name(_entry.get("name")) == provider:
+                if _custom_provider_slug_from_name(_entry.get("name"), _entry) == provider:
                     _re_lists = _configured_reasoning_effort_lists(
                         _entry, hinted_model
                     )
@@ -7639,7 +7669,7 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         for entry in _custom_provider_entries(cfg):
             provider_name = str(entry.get("name") or "").strip()
-            provider_slug = _custom_provider_slug_from_name(provider_name) or "custom"
+            provider_slug = _custom_provider_slug_from_name(provider_name, entry) or "custom"
             if provider_slug != "custom":
                 named_custom_groups.setdefault(
                     provider_slug,
@@ -10152,7 +10182,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         continue
                     entry_name = str(entry.get("name") or "").strip()
                     if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
+                        return _custom_provider_slug_from_name(entry_name, entry)
                     return "custom"
 
             return ""
@@ -10501,7 +10531,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 if not isinstance(_cp, dict):
                     continue
                 _cp_name = (_cp.get("name") or "").strip()
-                _slug = _custom_provider_slug_from_name(_cp_name) if _cp_name else None
+                _slug = _custom_provider_slug_from_name(_cp_name, _cp) if _cp_name else None
                 if _slug and _slug not in _named_custom_groups:
                     _named_custom_groups[_slug] = (_cp_name, [])
 
