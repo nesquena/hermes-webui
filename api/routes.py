@@ -20549,8 +20549,8 @@ def handle_post(handler, parsed) -> bool:
                 # "wrong profile" from "no such session" and both answered 404.
                 # Only an all-profiles request may probe other profiles: a request that carries ``profile`` without
                 # ``all_profiles`` is an active-profile archive and keeps master's 404 for a foreign session.
-                # #7826 security: the re-probe must NOT go through
-                # get_cli_sessions() here. Its projection reaches
+                # #7826 security: the re-probe below must NOT add another
+                # get_cli_sessions() pass. Its projection reaches
                 # Session.load on a legacy sidecar layout, which collapses
                 # duplicate partials and SAVES (with a .bak) — a WRITE that
                 # fired on this DENIED-archive path and rewrote a foreign
@@ -20558,6 +20558,15 @@ def handle_post(handler, parsed) -> bool:
                 # opens each profile's state.db read-only and never loads a
                 # sidecar. Returns {} for unknown ids, so the 404 self-heal
                 # still fires exactly as before.
+                # Accuracy note (2026-10-27 re-gate, senior advisor): this
+                # path still goes through get_cli_sessions(all_profiles=True)
+                # ONCE, inherited from master — the _resolve_cli_import_metadata
+                # call above routes through _lookup_cli_session_metadata, which
+                # enumerates get_cli_sessions(all_profiles=True) when the
+                # request carried all_profiles. The constraint here is on the
+                # NEW re-probe only: it must not add a second such pass. Not
+                # worse than master; the claim is scoped to what it actually
+                # pins.
                 if _arch_allow_all and _arch_profile:
                     _owner_meta = _lookup_cli_session_owner_readonly(sid)
                     _owner_profile = (_owner_meta or {}).get("profile")

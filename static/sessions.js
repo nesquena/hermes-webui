@@ -6522,9 +6522,16 @@ async function _archiveSession(session, archived=true, beforeListRender=null){
   const _ownedProfile=(session&&typeof session.profile==='string'&&session.profile.trim())
     ?session.profile.trim()
     :null;
+  // #7826 re-gate: with the all-profiles view ON, the archive travels as an
+  // explicitly scoped request — `all_profiles: true` alongside the row's
+  // owner profile, master's shape.  Without the flag the server resolves the
+  // archive against the ACTIVE profile, so a foreign row 404s (single) or
+  // 409s.  A legacy row with no owner keeps the plain request: the server
+  // requires a profile whenever all_profiles is set.
+  const _allProfilesArchive=(typeof _showAllProfiles!=='undefined'&&_showAllProfiles&&!!_ownedProfile);
   const _archivePayload=()=>JSON.stringify(
     _ownedProfile
-      ?{session_id:session.session_id,archived,profile:_ownedProfile}
+      ?{session_id:session.session_id,archived,profile:_ownedProfile,...(_allProfilesArchive?{all_profiles:true}:{})}
       :{session_id:session.session_id,archived});
   const _applyArchived=async (response)=>{
     session.archived=archived;
@@ -6695,16 +6702,26 @@ function _archiveBatchOwnerForRow(sid, sessionsById){
 // simply archive row by row. `owner` remains populated for uniform
 // selections so older callers retain their simple fast-path signal.
 // #7826 re-gate: an owner that does not match the ACTIVE profile is NOT
-// eligible. The server ignores the client-supplied `profile` on this
-// endpoint and resolves the row against the active profile itself, so a
-// foreign row's request 409s — and the mid-batch stop-on-failure contract
-// then abandons every row after it. Which rows survive therefore depended
-// on selection order ([foreign, owned] skipped the owned row; [owned,
-// foreign] archived it) where master archives the owned row either way.
-// Root aliases count as a match, mirroring the server's _profiles_match.
+// eligible — UNLESS the all-profiles view is on.  With "Show all profiles"
+// the sidebar legitimately offers another profile's sessions, and master
+// archives them: the request then carries `all_profiles: true` alongside
+// the row's owner profile (see _archiveSession / _archiveBatchSessions) and
+// the server resolves the archive against that claimed owner.  The server
+// ignores the client-supplied `profile` on an UNSCOPED request, so a
+// foreign row's unqualified request 409s — and the mid-batch
+// stop-on-failure contract then abandons every row after it.  Which rows
+// survive therefore depended on selection order ([foreign, owned] skipped
+// the owned row; [owned, foreign] archived it) where master archives the
+// owned row either way.  Root aliases count as a match, mirroring the
+// server's _profiles_match.
 function _archiveBatchOwners(ids, sessionsById){
   const owners=[];
   let owner=null;
+  // The all-profiles view opts every KNOWN owner in (the request carries
+  // its own scoped profile); the default view keeps the active-profile
+  // eligibility rule below.  Read inline: a helper of its own would be a
+  // new dependency for every driver that extracts this function in isolation.
+  const allProfilesOn=(typeof _showAllProfiles!=='undefined'&&_showAllProfiles);
   // The profile the server resolves a batch archive against: the ACTIVE profile,
   // never the client-supplied claim (the server ignores that field on this
   // endpoint). `_profileMatchesActiveProfile` encodes the root-alias rule
@@ -6717,7 +6734,7 @@ function _archiveBatchOwners(ids, sessionsById){
   for(const sid of ids){
     const resolved=_archiveBatchOwnerForRow(sid,sessionsById);
     if(!resolved.owner) return {owner:null, owners:[], reason:resolved.reason};
-    if(!_archiveBatchOwnersMatch(resolved.owner, activeProfile)){
+    if(!allProfilesOn&&!_archiveBatchOwnersMatch(resolved.owner, activeProfile)){
       return {owner:null, owners:[], reason:'foreign-owner:'+resolved.owner};
     }
     if(!owners.some(existing=>_archiveBatchOwnersMatch(existing,resolved.owner))) owners.push(resolved.owner);
@@ -6766,12 +6783,16 @@ async function _archiveBatchSessions(ids, sessionsById){
   let retainedCount=0;
   let archivedCount=0;
   const failedSids=[];
+  // #7826 re-gate: with the all-profiles view ON the batch executor sends
+  // the scoped shape (all_profiles + the row's owner profile) so the server
+  // resolves each row against its claimed owner, master's batch behaviour.
+  const allProfilesOn=(typeof _showAllProfiles!=='undefined'&&_showAllProfiles);
   for(let i=0;i<ids.length;i++){
     const sid=ids[i];
     const owner=resolvedOwners[i];
     const session=(sessionsById&&sessionsById.get)?sessionsById.get(sid):null;
     try{
-      const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true,profile:owner})});
+      const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true,profile:owner,...(allProfilesOn?{all_profiles:true}:{})})});
       if(session) session.archived=true;
       archivedCount++;
       if(_sessionResponseRetainsWorktree(response,session)) retainedCount++;

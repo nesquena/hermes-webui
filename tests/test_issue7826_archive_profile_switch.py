@@ -81,7 +81,8 @@ def _run_node(script: str) -> str:
 
 def _build_driver(archive_body: str, mismatch_body: str, fail_mode: str = 'first',
                   open_session_id: str | None = "root-chat",
-                  session_profile: str | None = None) -> str:
+                  session_profile: str | None = None,
+                  show_all_profiles: bool = False) -> str:
     """Stub every global _archiveSession touches and drive the scenario.
 
     ``fail_mode``:
@@ -94,6 +95,8 @@ def _build_driver(archive_body: str, mismatch_body: str, fail_mode: str = 'first
                   exactly one request carrying the row's own profile.
     ``session_profile``: the archived row's known owner profile (absent on
     legacy root-owned rows).
+    ``show_all_profiles``: drive the all-profiles sidebar view (the
+    ``_showAllProfiles`` toggle on).
     """
     if fail_mode == 'first':
         calls = """
@@ -129,6 +132,7 @@ async function api(path, opts){
     session_js = ("{ session_id:'s1', archived:false }"
                   if session_profile is None
                   else "{ session_id:'s1', archived:false, profile:'%s' }" % session_profile)
+    show_all_js = "let _showAllProfiles = true;" if show_all_profiles else ""
     return f"""
 const events = [];
 const sessions = [];
@@ -154,6 +158,7 @@ function _captureSessionReflowPositions() {{ return 'reflow'; }}
 function _sessionPrefersReducedMotion() {{ return false; }}
 function _isReadOnlySession() {{ return false; }}
 const _showArchived = true;
+{show_all_js}
 const _sessionSwipeReturnOffsets = {{ _m: new Map(), set(k, v) {{ this._m.set(k, v); }} }};
 let _pendingSessionReflowPositions = null;
 
@@ -302,7 +307,8 @@ def test_archive_source_has_no_profile_switch_pipeline():
 
 def _build_batch_driver(owners_body, owner_row_body, match_body, batch_body,
                         scenario, rows, active_profile='default',
-                        active_is_default=True, open_session=None):
+                        active_is_default=True, open_session=None,
+                        show_all_profiles=False):
     """Drive _archiveBatchOwners / _archiveBatchSessions under Node.
 
     ``scenario`` selects the api behaviour:
@@ -311,6 +317,9 @@ def _build_batch_driver(owners_body, owner_row_body, match_body, batch_body,
                        still runs (per-row execution must not stop the batch).
     ``rows`` entries: {id, profile (or None), webui (bool, default True),
     open (bool — the row is S.session)}.
+    ``show_all_profiles``: drive the all-profiles sidebar view (the
+    ``_showAllProfiles`` toggle on) — known foreign owners are eligible
+    there and every request carries ``all_profiles: true``.
     """
     api_impl = {
         'all-ok': """let apiCalls = 0;
@@ -347,6 +356,7 @@ async function api(path, opts){
         'null' if open_sid is None
         else "{session_id:'" + str(open_sid) + "'}"
     )
+    show_all_js = "let _showAllProfiles = true;" if show_all_profiles else ""
     return f"""
 const events = [];
 const archivedSids = [];
@@ -373,6 +383,7 @@ function _profileMatchesActiveProfile(profile, activeProfile){{
   if(eventName === activeName) return true;
   return eventName === 'default' && !!S.activeProfileIsDefault;
 }}
+{show_all_js}
 
 {owner_row_body}
 
@@ -705,3 +716,168 @@ _renderBatchActionBar();
     assert "toast:session_archived" in data["events"], data
     assert "exit" in data["events"], (
         f"a successful content-search batch must exit select mode: {data}")
+
+
+# --- all-profiles view: archive/restore another profile's session -------------
+#
+# 2026-10-27 re-gate regression (CORE): with "Show all profiles" ON the
+# all-profiles sidebar offers archive/restore for sessions owned by another
+# profile.  The profile-scoped rework dropped master's `all_profiles: true`
+# from every archive request, so the server resolved each request against the
+# ACTIVE profile: a single foreign row 404'd/409'd where master returned
+# 200/200, and the batch preflight rejected the whole selection with
+# session_batch_archive_foreign_owner where master sent two requests that
+# both returned 200.  The flag must travel alongside the row's owner profile,
+# and the preflight must accept known foreign owners in that mode only.
+
+
+def test_single_archive_all_profiles_view_sends_all_profiles_flag():
+    """With the all-profiles view ON, a foreign row's archive carries
+    ``all_profiles: true`` alongside its owner profile — master's shape —
+    so the server resolves the request against the claimed owner instead of
+    the active profile.  Still exactly one request and zero switches."""
+    if NODE is None:
+        return
+    archive_body = _extract_async_function(SESSIONS_JS, "_archiveSession")
+    mismatch_body = _extract_function(SESSIONS_JS, "_sessionProfileMismatchFromError")
+    out = _run_node(_build_driver(
+        archive_body, mismatch_body, fail_mode='never',
+        session_profile="work", show_all_profiles=True))
+    data = json.loads(out)
+    assert data["result"] is True, f"archive should succeed: {data}"
+    assert data["apiCalls"] == 1, f"exactly one request: {data}"
+    assert data["switchCalls"] == 0, f"zero profile switches allowed: {data}"
+    assert data["requests"] == [{"path": "/api/session/archive",
+                                 "body": {"session_id": "s1", "archived": True,
+                                          "profile": "work",
+                                          "all_profiles": True}}], (
+        f"all-profiles view must send all_profiles with the owner profile: {data}")
+
+
+def test_single_archive_default_view_sends_no_all_profiles_flag():
+    """Control: the default (active-profile) view keeps the plain scoped
+    request — no all_profiles flag, so a foreign row still 409s there."""
+    if NODE is None:
+        return
+    archive_body = _extract_async_function(SESSIONS_JS, "_archiveSession")
+    mismatch_body = _extract_function(SESSIONS_JS, "_sessionProfileMismatchFromError")
+    out = _run_node(_build_driver(
+        archive_body, mismatch_body, fail_mode='never',
+        session_profile="work"))
+    data = json.loads(out)
+    assert data["requests"] == [{"path": "/api/session/archive",
+                                 "body": {"session_id": "s1", "archived": True,
+                                          "profile": "work"}}], (
+        f"default view must not send all_profiles: {data}")
+
+
+def test_batch_all_profiles_view_accepts_foreign_owner_and_sends_flag():
+    """With the all-profiles view ON, the batch preflight accepts a KNOWN
+    foreign owner (each row archives under its own profile) and every
+    request carries ``all_profiles: true`` — master sends both and both
+    return 200.  Zero switches, active profile untouched."""
+    if NODE is None:
+        return
+    rows = [{"id": "w1", "profile": "work"}, {"id": "w2", "profile": "work"}]
+    data = _run_batch("all-ok", rows, show_all_profiles=True)
+    assert data["preflight"]["owner"] == "work", (
+        f"all-profiles view must accept a known foreign owner: {data}")
+    assert data["preflight"]["owners"] == ["work"], data
+    assert data["outcome"]["ok"] is True, data
+    assert data["outcome"]["archivedCount"] == 2, data
+    assert data["switchCalls"] == 0, (
+        f"batch archive must never switch profiles: {data}")
+    assert data["requests"] == [
+        {"session_id": "w1", "archived": True, "profile": "work",
+         "all_profiles": True},
+        {"session_id": "w2", "archived": True, "profile": "work",
+         "all_profiles": True},
+    ], data
+    assert data["activeProfile"] == "default", (
+        f"active profile must never move: {data}")
+
+
+def test_batch_foreign_owner_still_rejected_without_all_profiles_view():
+    """Control: with the view OFF the preflight still rejects a known
+    foreign owner (the server 409s it) — the all-profiles carve-out must
+    not widen the default view.  (The driver calls the executor
+    unconditionally, so the preflight verdict is the contract here; the
+    button handler's zero-request behaviour is pinned by
+    test_batch_archive_button_handler_mixed_rows_zero_switches.)"""
+    if NODE is None:
+        return
+    rows = [{"id": "w1", "profile": "work"}]
+    data = _run_batch("all-ok", rows)
+    assert data["preflight"]["owner"] is None, data
+    assert data["preflight"]["owners"] == [], data
+    assert data["preflight"]["reason"] == "foreign-owner:work", data
+
+
+def test_batch_archive_button_all_profiles_view_archives_foreign_rows():
+    """The real archive button handler under the all-profiles view: the
+    preflight passes, the confirm dialog opens, both foreign rows archive
+    with all_profiles: true, and the selection is retained semantics of a
+    successful batch (exit select mode) — master's two-200 shape.  This
+    head used to send none and show session_batch_archive_foreign_owner."""
+    if NODE is None:
+        return
+    render_body = _extract_function(SESSIONS_JS, "_renderBatchActionBar")
+    owners_body = _extract_function(SESSIONS_JS, "_archiveBatchOwners")
+    owner_row_body = _extract_function(SESSIONS_JS, "_archiveBatchOwnerForRow")
+    match_body = _extract_function(SESSIONS_JS, "_archiveBatchOwnersMatch")
+    batch_body = _extract_async_function(SESSIONS_JS, "_archiveBatchSessions")
+    script = f"""
+const events=[]; const archivedSids=[]; const requests=[];
+const rows=[{{session_id:'w1',profile:'work',session_source:'webui'}},{{session_id:'w2',profile:'work',session_source:'webui'}}];
+const sessionsById=new Map(rows.map(r=>[r.session_id,r]));
+const _allSessions=rows; const _selectedSessions=new Set(['w1','w2']);
+const S={{session:{{session_id:'root-chat'}},activeProfile:'default',activeProfileIsDefault:true}};
+const window={{_defaultModel:'root-model',_activeProvider:'root-provider'}};
+const _showArchived=false; const _sessionSwipeReturnOffsets={{set(){{}}}};
+let _showAllProfiles = true;
+let _pendingSessionReflowPositions=null;
+const bar={{style:{{}},children:[],appendChild(node){{this.children.push(node);}}}};
+function $(id){{return id==='batchActionBar'?bar:null;}}
+const document={{createElement(tag){{return {{tag,style:{{}},className:'',textContent:'',appendChild(){{}},onclick:null}};}}}};
+function t(key){{return key;}} function _worktreeSessionCount(){{return 0;}}
+function _sessionSnapshotById(sid){{return sessionsById.get(sid)||null;}}
+function showConfirmDialog(){{events.push('confirm');return Promise.resolve(true);}}
+function exitSessionSelectMode(){{events.push('exit');}} function showToast(msg){{events.push('toast:'+msg);}}
+function renderSessionList(){{}} function _sessionPrefersReducedMotion(){{return false;}}
+function _sessionResponseRetainsWorktree(){{return false;}}
+function _profileMatchesActiveProfile(profile,active){{return profile===active;}}
+let switchCalls=0;
+async function _switchProfileForSessionLoad(profile){{switchCalls++;S.activeProfile=profile;S.activeProfileIsDefault=false;window._defaultModel=profile+'-model';window._activeProvider=profile+'-provider';}}
+async function api(path,opts){{
+  const body=JSON.parse(opts.body);
+  requests.push(body);
+  archivedSids.push(body.session_id);
+  return {{worktree_retained:false}};
+}}
+{owners_body}
+{owner_row_body}
+{match_body}
+{batch_body}
+{render_body}
+_renderBatchActionBar();
+(async()=>{{const button=bar.children.find(node=>node.textContent==='session_batch_archive');if(!button)throw new Error('no archive button');await button.onclick();console.log(JSON.stringify({{events,archivedSids,switchCalls,requests,activeProfile:S.activeProfile,defaultModel:window._defaultModel,activeProvider:window._activeProvider}}));}})();
+
+"""
+    data = json.loads(_run_node(script))
+    assert "toast:session_batch_archive_foreign_owner" not in data["events"], (
+        f"all-profiles view must not reject a known foreign owner: {data}")
+    assert "confirm" in data["events"], (
+        f"the confirm dialog must open for an eligible batch: {data}")
+    assert data["archivedSids"] == ["w1", "w2"], data
+    assert data["requests"] == [
+        {"session_id": "w1", "archived": True, "profile": "work",
+         "all_profiles": True},
+        {"session_id": "w2", "archived": True, "profile": "work",
+         "all_profiles": True},
+    ], data
+    assert data["switchCalls"] == 0, data
+    assert data["activeProfile"] == "default", data
+    assert data["defaultModel"] == "root-model", data
+    assert data["activeProvider"] == "root-provider", data
+    assert "exit" in data["events"], (
+        f"a successful batch must exit select mode: {data}")
