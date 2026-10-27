@@ -9588,6 +9588,16 @@ def _hard_prune_post_compression_tool_results(messages, *, compressor=None):
     return pruned, len(replacements)
 
 
+def _should_prune_tool_results_after_compression(agent) -> bool:
+    """True when the active context engine is the native ContextCompressor (or absent)."""
+    _compressor = getattr(agent, 'context_compressor', None)
+    try:
+        from agent.context_compressor import ContextCompressor as _NativeCC
+    except ImportError:
+        return True
+    return (_compressor is None) or isinstance(_compressor, _NativeCC)
+
+
 def _prune_context_tool_results_after_compression(agent, context_messages):
     """Run the active compressor's cheap tool-result pruning on model context.
 
@@ -16963,10 +16973,19 @@ def _run_agent_streaming(
                         _compressed = True
                 # Notify the frontend that compression happened
                 if _compressed:
-                    s.context_messages = _prune_context_tool_results_after_compression(
-                        agent,
-                        s.context_messages,
-                    )
+                    # Only the native engine gets hard tool-result pruning;
+                    # external engines (e.g. lcm-x) own their budget/ref markers.
+                    if _should_prune_tool_results_after_compression(agent):
+                        s.context_messages = _prune_context_tool_results_after_compression(
+                            agent,
+                            s.context_messages,
+                        )
+                    else:
+                        logger.debug(
+                            "post-compression tool-result pruning skipped "
+                            "(active engine: %s)",
+                            type(getattr(agent, 'context_compressor', None)).__name__,
+                        )
                     s.post_compression_context_tokens_estimate = _estimate_post_compression_context_tokens(
                         agent,
                         s.context_messages,

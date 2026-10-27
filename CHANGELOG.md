@@ -51,6 +51,8 @@
 
 ### Fixed
 
+- **Post-compression tool-result pruning follows the context engine that actually owns the turn.** Pruning was gated on the configured engine name, so a fallback to the built-in compressor (empty, unavailable or edited engine setting) skipped it and kept large tool results in context. The gate now reads the active engine object. Thanks @eringerli.
+
 - **Context deduplication keeps a repeated user message that is a genuinely new turn.** When the same text is sent again as its own turn, the replay dedup now decides by stable message id instead of collapsing it into the earlier copy, so the next model call sees both turns. Rows without ids keep the old collapse rule. Thanks @happy5318. (Refs #6310)
 
 - **WebUI starts on every launch method with a self-updating Agent (v0.21.6+).** These Agents restart the process that first loads their startup code, into their own Python and without third-party packages. WebUI loaded that code only when start.sh or bootstrap.py had set `HERMES_WEBUI_AGENT_DIR`. Every other launch loaded it late, and the restarted process died on `No module named 'ruamel'`/`'yaml'`: the README manual launch, a systemd unit with only `PYTHONPATH`, `python server.py`, `pip install -e`, and single-container Docker. WebUI now finds the Agent the same way `api.config` does and loads its startup code first. Only Agents that can restart the process are loaded this early; older Agents behave as before, and your own `HERMES_WEBUI_AGENT_DIR` still wins. Single-container Docker with a self-updating git checkout runs the container's staged copy, so Settings' Agent update says it is not a git repository there: update on the host with `hermes update`. (#8355 by @MuhammadUsamaMX, fixes #8529 and #7843)
