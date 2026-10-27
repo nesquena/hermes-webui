@@ -16,7 +16,6 @@ honouring ``?profile=`` again, or where the isolated clamp stops holding.
 """
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
