@@ -281,11 +281,19 @@ def test_reveal_state_persists_and_invalidates_cache():
     # Page position survives HTML round-trips for the same scene, without a
     # session/index keyed strong set leaking state onto replacement scenes.
     assert "const _transparentScenePages=new WeakMap()" in UI_JS
-    assert "_transparentRevealedTurns" not in UI_JS
+    # Reveal STATE ownership stays with the scene pages: the functions that own
+    # reveal state (render + reveal) must not read the retired session-keyed
+    # strong set. Upstream #5966 Codex F3 keeps a typeof-guarded consultation of
+    # that set inside _transparentSettledTurnWouldBeCapped for its own harness
+    # contract (test_issue7677 pins it); nothing in this tree populates the set,
+    # so that guard is inert here — the state-owning bodies below are where a
+    # strong set would actually leak state onto replacement scenes.
     render = _function_body(UI_JS, "_renderSettledAnchorSceneTransparentForMessage")
+    assert "_transparentRevealedTurns" not in render
+    reveal = _function_body(UI_JS, "_revealTransparentEarlierSteps")
+    assert "_transparentRevealedTurns" not in reveal
     assert "_transparentScenePages.get(scene)" in render
     assert "pageState.rows===scene.activity_rows" in render
-    reveal = _function_body(UI_JS, "_revealTransparentEarlierSteps")
     assert "_transparentScenePages.set(scene,{start:next,rows:scene.activity_rows})" in reveal
     assert "_sessionHtmlCache.delete(sid)" in reveal
 
