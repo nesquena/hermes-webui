@@ -520,7 +520,7 @@ def test_docker_init_publishes_the_stage_manifest_between_copy_and_install():
     call = 'write_agent_stage_manifest "$_agent_src" "$_stage_src"'
     copy_pos = INIT_SH.find('chmod -R u+w "$_stage_src"')
     call_pos = INIT_SH.find(call)
-    install_pos = INIT_SH.find('uv pip install -e "$_stage_src[all]"')
+    install_pos = INIT_SH.find('install_staged_agent "$_stage_src"')  # the install (#8524)
     assert call_pos != -1, "docker_init.bash must publish the stage manifest"
     assert copy_pos != -1 and install_pos != -1
     assert copy_pos < call_pos < install_pos

@@ -51,6 +51,8 @@
 
 ### Fixed
 
+- **Docker: the WebUI container installs Agent v0.22.5 again.** Agent v0.22.5 pins Pillow 13 for its security fixes, while one of its own dependencies still pins Pillow 12.3. The Agent settles that with its `[tool.uv] override-dependencies`, which `uv pip install` never reads from an installed project. Every Docker setup that builds the WebUI venv from the Agent source (two- and three-container stacks) stopped at "requirements are unsatisfiable" and restarted forever. The container now passes the Agent's own overrides to uv, and keeps only entries that are plain requirements. If the overrides can't be prepared (no writable temp space, an older image), it falls back to the previous install and says so in the log. (#8544, fixes #8524)
+
 - **An OpenRouter model from the overflow list no longer appears twice in the model picker.** Restoring a model that lives past the shown rows (for example an ID ending in `:free`) in the composer or Settings picker used to add a second, ungrouped copy of it. It now shows once, in its provider group, stays selected, and the "(a of b)" count stays right, for new chats and for reopened ones. Thanks @starship-s.
 
 - **CI: browser-gate jobs no longer time out on a slow package mirror.** `playwright install --with-deps` downloads Chromium's system packages with apt on every job, and on some runners the Ubuntu mirror serves them at 25-65 kB/s, so the install alone ran past the 10-minute job limit. On 2026-10-22 that cancelled about 7% of `browser-smoke` jobs (a required check) and about 4% of `conversation-lifecycle` jobs, including its two blocking rows. Both limits are now 30 minutes; no job, step or required check changes. (#8494)
