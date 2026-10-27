@@ -14703,8 +14703,17 @@ def _run_agent_streaming(
         # "default" container key (the second empty sandbox from #8452), and an
         # env-only bind would be unsafe under concurrent profiles (A publishes,
         # B replaces, A resolves through B — why #8467 was rejected).
+        # #8452 re-gate (2026-10-27): an UNRESOLVED profile falls back to the
+        # profile .env's HERMES_SESSION_PROFILE. The Agent's get_session_env()
+        # reads ContextVars, then the process env — never WebUI's thread-local
+        # state — so without this fallback only _thread_ctx.env held the dotenv
+        # identity and the Agent resolved the ambient process value instead
+        # (master returns the dotenv value). The process mirror below still
+        # publishes _resolved_profile_name alone, so the ambient restoration
+        # is unchanged.
         _turn_session_identity_tokens = _set_turn_session_identity(
-            session_id, workspace=_turn_workspace_cwd, profile_name=_resolved_profile_name
+            session_id, workspace=_turn_workspace_cwd,
+            profile_name=_resolved_profile_name or _profile_runtime_env.get(_PROFILE_MIRROR_KEY),
         )
         _thread_env = _build_agent_thread_env(
             _profile_runtime_env,

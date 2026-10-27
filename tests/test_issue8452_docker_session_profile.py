@@ -1334,10 +1334,14 @@ def test_streaming_real_dotenv_profile_never_outlives_the_turn(
         assert scene.observed["thread_env_profile"] == "work"
         assert scene.observed["ctx_profile"] == "work"
     else:
-        # Unresolved: the mirror publishes nothing and the generic path no
-        # longer applies the .env value, so the ambient stays visible — the
-        # intended unresolved-profile fallback (CLI/cron consumers inherit).
-        assert scene.observed["ctx_profile"] == "UNSET"
+        # Unresolved: the mirror publishes nothing, so the ambient stays
+        # visible in the process env — the intended unresolved-profile
+        # fallback (CLI/cron consumers inherit). The identity lifecycle
+        # binds the .env value into the ContextVar instead, so the Agent's
+        # get_session_env() resolves the dotenv identity (#8452 re-gate
+        # 2026-10-27: master returns the dotenv value here).
+        assert scene.observed["ctx_profile"] == "dotenv-profile"
+        assert scene.observed["resolved_profile"] == "dotenv-profile"
         assert scene.observed["env_profile"] == ambient, (
             "an unresolved turn must leave the ambient visible, not the .env "
             "value the generic path used to apply"
@@ -1521,4 +1525,200 @@ def test_mixed_overlap_with_real_dotenv_restores_the_ambient(
         "into the process-env fallback"
     )
     assert sync_observed["ctx_profile"] == "work"
+    assert sc._SESSION_PROFILE.get() is sc._UNSET
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-27 re-gate: the title-worker overlap sequence and the unresolved
+# fallback read through the Agent's get_session_env().
+# ---------------------------------------------------------------------------
+
+
+def test_background_title_worker_overlap_never_leaks_the_turns_profile(
+    monkeypatch, tmp_path,
+):
+    """Review finding 1: the title-worker overlap sequence, for real.
+
+    A sync turn publishes ``work``; a title worker whose real ``.env`` sets
+    ``HERMES_SESSION_PROFILE=dotenv-profile`` starts and snapshots the
+    process env; the TURN finishes first (the mirror releases ownership and
+    restores the ambient); the worker then exits its scope. The process env
+    must end exactly as it started (absent): the helper's generic
+    snapshot/restore used to write the completed turn's ``work`` back AFTER
+    the mirror had already released it.
+    """
+    from types import SimpleNamespace
+
+    sc = _session_context(monkeypatch)
+    monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
+
+    from api import profiles as profiles_api
+
+    routes, Handler = _setup_overlap_sync_scene(monkeypatch, tmp_path)
+
+    import api.models as models
+
+    # The worker's own named profile with a REAL .env — the loader is not
+    # stubbed on this path.
+    worker_profile = "title-profile"
+    worker_home = tmp_path / "hermes-home" / "profiles" / worker_profile
+    worker_home.mkdir(parents=True, exist_ok=True)
+    (worker_home / ".env").write_text(
+        "HERMES_SESSION_PROFILE=dotenv-profile\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(
+        profiles_api, "get_hermes_home_for_profile", lambda _name: worker_home
+    )
+
+    turn_sid = "title-overlap-turn"
+    session = models.Session(
+        session_id=turn_sid,
+        workspace=str(tmp_path),
+        messages=[],
+        context_messages=[],
+        model="test-model",
+        model_provider="test-provider",
+        profile="work",
+    )
+    session.save(touch_updated_at=False)
+
+    observed: dict[str, object] = {}
+    statuses: dict[str, int | None] = {}
+    turn_in_agent = threading.Event()
+    turn_release = threading.Event()
+    worker_in_scope = threading.Event()
+    worker_release = threading.Event()
+
+    class TitleOverlapAgent:
+        def __init__(self, **_kwargs):
+            pass
+
+        def run_conversation(self, **kwargs):
+            import gateway.session_context as sc_mod
+
+            observed["turn_ctx_profile"] = (
+                "UNSET"
+                if sc_mod._SESSION_PROFILE.get() is sc_mod._UNSET
+                else sc_mod._SESSION_PROFILE.get()
+            )
+            observed["turn_env_profile"] = os.environ.get("HERMES_SESSION_PROFILE")
+            turn_in_agent.set()
+            assert turn_release.wait(15), "the turn was never released"
+            history = list(kwargs.get("conversation_history") or [])
+            return {
+                "messages": history
+                + [
+                    {"role": "user", "content": kwargs["persist_user_message"]},
+                    {"role": "assistant", "content": "ok"},
+                ],
+                "final_response": "ok",
+                "completed": True,
+            }
+
+    import sys
+
+    monkeypatch.setitem(
+        sys.modules, "run_agent", SimpleNamespace(AIAgent=TitleOverlapAgent)
+    )
+
+    def _run_turn():
+        handler = Handler()
+        try:
+            routes._handle_chat_sync(
+                handler,
+                {
+                    "session_id": turn_sid,
+                    "message": "title overlap",
+                    "workspace": str(tmp_path),
+                },
+            )
+        finally:
+            statuses["value"] = handler.status
+
+    def _run_worker():
+        # The REAL background helper, entered while the turn is published.
+        with profiles_api.profile_env_for_background_worker(
+            worker_profile, "background title"
+        ):
+            observed["worker_env_profile"] = os.environ.get(
+                "HERMES_SESSION_PROFILE"
+            )
+            worker_in_scope.set()
+            assert worker_release.wait(15), "the title worker was never released"
+
+    turn_thread = threading.Thread(target=_run_turn)
+    turn_thread.start()
+    assert turn_in_agent.wait(15), "the turn never reached its Agent"
+    # The turn published first: the env names the turn's profile.
+    assert observed["turn_env_profile"] == "work", observed
+
+    worker_thread = threading.Thread(target=_run_worker)
+    worker_thread.start()
+    assert worker_in_scope.wait(15), "the title worker never entered its scope"
+
+    # Finish the TURN first: the mirror releases ownership and restores the
+    # ambient (absent). The worker is still inside its scope.
+    turn_release.set()
+    turn_thread.join(timeout=30)
+    assert not turn_thread.is_alive(), "the turn did not finish"
+
+    # Now the worker exits its scope — the buggy shape restored the snapshot
+    # taken above ('work') here, after the mirror had already released.
+    worker_release.set()
+    worker_thread.join(timeout=30)
+    assert not worker_thread.is_alive(), "the title worker did not finish"
+
+    assert statuses["value"] == 200, "the overlap turn must succeed"
+    # Mid-worker the .env value is what the worker body sees.
+    assert observed["worker_env_profile"] == "dotenv-profile", observed
+    # THE invariant: the process var is exactly the pre-turn ambient again.
+    assert os.environ.get("HERMES_SESSION_PROFILE") is None, (
+        f"process env kept {os.environ.get('HERMES_SESSION_PROFILE')!r} after "
+        "the turn and the title worker finished — a completed turn's profile "
+        "leaked into the process-env fallback"
+    )
+
+
+def test_unresolved_profile_fallback_reads_the_dotenv_identity(
+    monkeypatch, tmp_path,
+):
+    """Review finding 2: the unresolved-profile fallback, read the way the
+    installed Agent reads it.
+
+    Inputs: unresolved profile, ambient ``operator-ambient``, dotenv
+    ``dotenv-profile``. ``get_session_env()`` reads ContextVars, then the
+    process env — never WebUI's thread-local state — so the identity
+    lifecycle must bind the dotenv value when the turn resolves no profile
+    (master returns ``dotenv-profile``). The process mirror keeps the
+    ambient restoration.
+    """
+    sc = _session_context(monkeypatch)
+    monkeypatch.setenv("HERMES_SESSION_PROFILE", "operator-ambient")
+
+    scene = _StreamingScene(
+        monkeypatch, tmp_path,
+        profile=None,
+        active_profile_name=None,
+        tag="unresolved-fallback",
+        real_profile_env=True,
+    )
+    # The REAL loader reads this file — nothing on this path is stubbed.
+    (scene.profile_home / ".env").write_text(
+        "HERMES_SESSION_PROFILE=dotenv-profile\n", encoding="utf-8"
+    )
+
+    scene.run()
+
+    # The Agent's own reader: ContextVar first, process env second.
+    assert scene.observed["resolved_profile"] == "dotenv-profile", (
+        f"get_session_env() returned {scene.observed['resolved_profile']!r}; "
+        "master returns the dotenv identity for an unresolved profile"
+    )
+    assert scene.observed["ctx_profile"] == "dotenv-profile", scene.observed
+    # The process mirror keeps the ambient restoration you already have.
+    assert scene.observed["env_profile"] == "operator-ambient", scene.observed
+    assert os.environ.get("HERMES_SESSION_PROFILE") == "operator-ambient"
+    # ...and the raw loader still feeds the THREAD env for in-process
+    # WebUI consumers.
+    assert scene.observed["thread_env_profile"] == "dotenv-profile"
     assert sc._SESSION_PROFILE.get() is sc._UNSET
