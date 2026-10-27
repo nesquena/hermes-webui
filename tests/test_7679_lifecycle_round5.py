@@ -36,8 +36,6 @@ import os
 import subprocess
 import tempfile
 
-import pytest
-
 REPO = Path(__file__).resolve().parent.parent
 UI = (REPO / 'static' / 'ui.js').read_text(encoding='utf-8')
 PANELS = (REPO / 'static' / 'panels.js').read_text(encoding='utf-8')
