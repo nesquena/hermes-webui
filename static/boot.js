@@ -415,6 +415,10 @@ function _setWorkspacePanelMode(mode, returnFocusTo){
   }else{
     panel.classList.remove('mobile-open');
   }
+  // Closing the panel leaves the preview (and its editor) mounted, so the
+  // derived dirty state must be recomputed: a hidden editor is not unsaved work
+  // the user can be asked about (#8514).
+  if(typeof _syncPreviewDirty==='function') _syncPreviewDirty();
   syncWorkspacePanelUI();
 }
 
@@ -2771,7 +2775,10 @@ function clearPreview(opts={}){
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
-  _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  _previewCurrentPath='';_previewCurrentMode='';
+  // Reset the editor baseline as well, so a later preview cannot inherit a
+  // stale "unsaved" comparison from the file that was just closed (#8514).
+  if(typeof _resetPreviewDirty==='function') _resetPreviewDirty(); else _previewDirty=false;
   if(typeof _previewOpenGen==='number') _previewOpenGen++;
   // #6710: retire any in-flight preview open (guarded so harnesses that extract
   // this function alone keep working).

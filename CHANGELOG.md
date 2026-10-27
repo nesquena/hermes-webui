@@ -51,6 +51,8 @@
 
 ### Fixed
 
+- **The workspace preview stops asking to discard edits you can't see.** Dirtiness is derived from an on-screen editor whose text differs from what was loaded or saved, so closing the Files panel, hiding the editor, or typing back to the original text no longer triggers the discard prompt, and switching workspaces no longer closes the panel or carries one workspace's unsaved text into another's file. Thanks @fedebyes. (#8515, fixes #8514)
+
 - **New Chat no longer shows the previous session's transcript.** Clicking New Chat while another session was still loading could let that load's response land in the new pane. The transcript commit point now also checks that the session it loaded is still the current one, and New Chat invalidates the in-flight load. Thanks @happy5318. (#8356)
 
 - **The agent is no longer woken again for a background completion it already read.** A completion consumed through a terminal poll is not treated as read (a result longer than the preview is still delivered once), while one the agent actually read is not re-delivered, including when a launch fails and the 2-second retry fires before the failure handler. Thanks @angel291592. (#8363)
