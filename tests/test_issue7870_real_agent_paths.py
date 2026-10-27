@@ -408,6 +408,81 @@ def test_a_default_profile_write_publishes_only_its_own_value(env):
         hermes_constants.pin_process_hermes_home(previous_pin)
 
 
+def test_a_named_profile_put_and_delete_leave_the_shared_environment_unchanged(env):
+    """A named-profile PUT and DELETE must not change the shared os.environ.
+
+    The maintainer asked for this explicitly. The installed writer publishes
+    into the process environment when the write is NOT for a routed profile
+    (``serves_routed_profile()`` is False), so a PUT for a named profile
+    could set the variable for the whole WebUI process -- and a DELETE could
+    pop it, even when the launch profile's own ``.env`` defines the same
+    name.
+
+    The process home is pinned to the launch home first, because that is the
+    production layout: WebUI pins the home it serves as its own, so the
+    launch (default) home is the one that is NOT routed. Without that pin
+    nothing would publish and the test would pass for the wrong reason. The
+    pair of them is the point: the default profile's write DOES publish (its
+    own value -- see the test above), and the named profile's write does
+    NOT, even for the same key name.
+
+    The launch profile's ``.env`` defines the key on purpose: that is the
+    case where a stray publish or pop would destroy a value the process
+    legitimately holds.
+    """
+    import hermes_constants
+
+    config, constants = env.config, env.constants
+    base_home = env.homes
+    probe = "WEBUI_NAMED_PUBLISH_PROBE"
+
+    # The production layout: the process serves the launch (default) home.
+    previous_pin = getattr(hermes_constants, "_PINNED_PROCESS_HERMES_HOME", None)
+    hermes_constants.pin_process_hermes_home(str(base_home))
+    before = dict(os.environ)
+    os.environ.pop(probe, None)
+    try:
+        # The launch profile's own .env defines the key, and the process
+        # environment holds its value.
+        _write_scoped_env(config, constants, base_home, probe, "launch-value")
+        os.environ[probe] = "launch-value"
+
+        env.state["name"] = "alpha"
+        handler = _Handler()
+        _put(env, handler, {"name": probe, "value": "named-value"})
+        assert handler.status == 200, handler.payload
+
+        # The named profile's own file has the new value ...
+        assert (
+            _scoped_env(config, constants, env.homes / "profiles" / "alpha").get(probe)
+            == "named-value"
+        )
+        # ... and the process environment still holds the LAUNCH profile's
+        # value: a named-profile write must not publish over it.
+        assert os.environ.get(probe) == "launch-value", (
+            "a named-profile write published into the shared environment"
+        )
+
+        _delete(env, handler, probe)
+        assert handler.status == 200, handler.payload
+        assert (
+            probe not in _scoped_env(
+                config, constants, env.homes / "profiles" / "alpha"
+            )
+        )
+        # The delete must not pop the launch profile's live value either.
+        assert os.environ.get(probe) == "launch-value", (
+            "a named-profile delete popped the launch profile's value from the "
+            "shared environment"
+        )
+    finally:
+        for key in set(os.environ) - set(before):
+            os.environ.pop(key, None)
+        for key, value in before.items():
+            os.environ[key] = value
+        hermes_constants.pin_process_hermes_home(previous_pin)
+
+
 # ── the reviewer's matrix, driven through the real writer ───────────────────
 
 
