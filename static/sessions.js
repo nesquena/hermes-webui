@@ -2841,8 +2841,8 @@ async function loadSession(sid){
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     const draftText = ($('msg') || {}).value || '';
     const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
-    // Keep the composer the user is leaving. A failed upload of the send that
-    // was already in flight merges this snapshot back instead of overwriting it.
+    // The helper keeps this only while this session's upload is still in flight,
+    // so a failed upload can merge it. A switch with no upload stores nothing.
     if (typeof _noteDepartingUploadDraft === 'function') _noteDepartingUploadDraft(currentSid, draftText, draftFiles);
     try {
       // #7855 (round 7): the departing session's restored continuation token
@@ -11617,6 +11617,9 @@ async function deleteSession(sid, beforeDelete=null){
     danger:true
   });
   if(!ok)return false;
+  // Ops confirmed now. A snapshot noted while the delete request is in flight
+  // belongs to a newer attempt and must survive this teardown.
+  const departingUploadOpsAtDelete=(typeof _departingUploadDraftOps==='function')?_departingUploadDraftOps(sid):null;
   const modelPickAtDelete=typeof _readComposerModelPick==='function'
     ? _readComposerModelPick()
     : null;
@@ -11652,6 +11655,11 @@ async function deleteSession(sid, beforeDelete=null){
   const cleanupFailed=!!(response&&response.state_db_cleanup_failed);
   _forgetComposerDraftLocalFallback(sid);
   if(typeof _dropUploadResults==='function')_dropUploadResults(sid);
+  if(Array.isArray(departingUploadOpsAtDelete)){
+    for(const departingOp of departingUploadOpsAtDelete){
+      if(typeof _forgetDepartingUploadDraft==='function') _forgetDepartingUploadDraft(sid, departingOp);
+    }
+  }
   if(typeof _clearPersistedSessionQueue==='function') _clearPersistedSessionQueue(sid);
   if(!optimisticRendered){
     _pendingSessionReflowPositions=reflowPositions;

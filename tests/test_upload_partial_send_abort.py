@@ -55,7 +55,8 @@ def _total_upload_catch() -> str:
 def test_send_aborts_on_partial_upload():
     branch = _partial_upload_branch()
     assert "_restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles," in branch
-    assert "{mergeLiveInput:true}" in branch
+    assert "mergeLiveInput:true" in branch
+    assert "uploadOpId:_uploadOp" in branch
     assert "return;" in branch
 
 
@@ -64,7 +65,8 @@ def test_send_restores_draft_on_total_upload_failure_with_text():
     text present it fell through and sent a text-only message. Now it restores."""
     catch = _total_upload_catch()
     assert "_restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles," in catch
-    assert "{mergeLiveInput:true}" in catch
+    assert "mergeLiveInput:true" in catch
+    assert "uploadOpId:_uploadOp" in catch
     assert "return;" in catch
 
 
@@ -554,18 +556,22 @@ const c = {name:'c.txt', size:3, lastModified:3};
 //      While the upload runs the user types a newer draft and stages c.txt.
 state.input.value = 'newer';
 S.pendingFiles = [c];
-// 3. Switch to another session. The switch keeps this composer before saving it.
+// 3. Switch to another session while that upload is still in flight.
+const op = _claimDepartingUploadOp('sid-1');
 _noteDepartingUploadDraft('sid-1', state.input.value, S.pendingFiles.slice());
 S.session = {session_id: 'sid-2'};
 state.input.value = '';
 S.pendingFiles = [];
 // 4. b.txt fails. Partial and total failure both restore with mergeLiveInput.
-_restoreComposerDraftAfterFailedSend('original', [a, b], 'sid-1', null, 'goal-1', {mergeLiveInput:true});
+_restoreComposerDraftAfterFailedSend('original', [a, b], 'sid-1', null, 'goal-1', {mergeLiveInput:true, uploadOpId: op});
+const held = [];
+_departingUploadDraftByOp.forEach((snap) => (snap.files || []).forEach((f) => held.push(f.name)));
 console.log(JSON.stringify({
   path: %s,
   saved: state.saved,
   visible: state.input.value,
   pending: S.pendingFiles.map((f) => f.name),
+  held,
 }));
 """ % (helper, json.dumps(path))
     return _run_node(script)
@@ -581,3 +587,325 @@ def test_partial_and_total_upload_failure_merge_the_departing_draft():
         assert out["saved"]["contId"] == "", "the merged newer text must not inherit the rejected continuation id"
         assert out["visible"] == "", "the other session's composer stays untouched"
         assert out["pending"] == []
+        assert out["held"] == [], "settling the failed upload must drop its departing files"
+
+
+def _held_names_js() -> str:
+    return r"""
+function heldNames(){
+  const names=[];
+  _departingUploadDraftByOp.forEach((snap)=>{
+    (snap.files||[]).forEach((file)=>{ names.push(file.name); });
+  });
+  return names;
+}
+"""
+
+
+def test_upload_attempt_snapshot_is_claimed_before_the_upload_and_dropped_on_success():
+    """Success must forget this attempt's id, and only after the upload has finished."""
+    upload = MESSAGES_JS.find("uploaded=await uploadPendingFiles(")
+    claim = MESSAGES_JS.rfind("_claimDepartingUploadOp(activeSid)", 0, upload)
+    assert claim != -1, "the departing snapshot must be claimed before the upload await"
+    partial = MESSAGES_JS.find(
+        "if(_submittedFiles.length && uploaded.length<_submittedFiles.length)",
+        upload,
+    )
+    forget = MESSAGES_JS.find("_forgetDepartingUploadDraft(activeSid, _uploadOp)", partial)
+    release = MESSAGES_JS.find("_releaseDepartingUploadOp(_uploadOp)", forget)
+    assert forget != -1 and release != -1
+    assert forget < release, "success drops the snapshot, then releases the live op"
+
+
+def test_session_leave_without_upload_keeps_no_file():
+    """loadSession notes the composer on every switch; without an upload that stores nothing."""
+    out = _run_node(
+        _restore_helper_source()
+        + _held_names_js()
+        + r"""
+const file = {name:'a.txt', size:1, lastModified:1};
+_noteDepartingUploadDraft('sid-1', 'draft', [file]);
+const other = _claimDepartingUploadOp('sid-2');
+_noteDepartingUploadDraft('sid-1', 'still draft', [file]);
+_releaseDepartingUploadOp(other);
+console.log(JSON.stringify({held: heldNames()}));
+"""
+    )
+    assert out["held"] == []
+
+
+def test_tray_removal_without_upload_keeps_no_file():
+    out = _run_node(
+        _restore_helper_source()
+        + _extract_js_function(UI_JS, "function renderTray(){")
+        + _held_names_js()
+        + r"""
+const chips = [];
+function makeChip() {
+  const button = {};
+  const chip = {
+    className: '',
+    classList: {add(){}, remove(){}, contains(){ return false; }},
+    dataset: {},
+    innerHTML: '',
+    appendChild(){},
+    querySelector(sel) { return sel === 'button' ? button : null; },
+    _button: button,
+  };
+  chips.push(chip);
+  return chip;
+}
+const tray = {
+  innerHTML: '',
+  classList: {add(){}, remove(){}, contains(){ return false; }},
+  appendChild(){},
+};
+globalThis.document = {createElement: () => makeChip()};
+globalThis.$ = (id) => (id === 'attachTray' ? tray : null);
+globalThis.S = {pendingFiles: [], session: {session_id: 'sid-1'}};
+globalThis._IMAGE_EXTS = /^$/;
+globalThis._SVG_EXTS = /^$/;
+globalThis._mediaKindForName = () => '';
+globalThis.esc = (value) => String(value == null ? '' : value);
+globalThis.li = () => '';
+globalThis.t = (key) => key;
+globalThis.updateSendBtn = () => {};
+const file = {name:'a.txt', size:1, lastModified:1};
+_noteDepartingUploadDraft('sid-1', 'draft', [file]);
+S.pendingFiles = [file];
+renderTray();
+chips[chips.length - 1]._button.onclick();
+console.log(JSON.stringify({held: heldNames(), pending: S.pendingFiles.map((f) => f.name)}));
+"""
+    )
+    assert out["pending"] == []
+    assert out["held"] == []
+
+
+def _delete_session_prelude() -> str:
+    return (
+        _restore_helper_source()
+        + _extract_js_function(SESSIONS_JS, "async function deleteSession(")
+        + _held_names_js()
+        + r"""
+function t(key){ return key; }
+function _sessionDeleteErrorMessage(){ return 'err'; }
+globalThis.S = {session: {session_id: 'sid-other'}, messages: [], entries: []};
+globalThis._allSessions = [];
+globalThis._sessionSnapshotById = () => null;
+globalThis._captureSessionReflowPositions = () => null;
+globalThis._clearHandoffStorageForSession = () => {};
+globalThis._forgetComposerDraftLocalFallback = () => {};
+globalThis._optimisticallyRemoveSessionFromList = () => {};
+globalThis._sessionResponseRetainsWorktree = () => false;
+globalThis.showToast = () => {};
+globalThis.renderSessionList = async () => {};
+globalThis.setStatus = () => {};
+globalThis._optimisticallyRemovedSessionIds = {add(){}, delete(){}};
+"""
+    )
+
+
+def test_confirmed_delete_without_upload_keeps_no_file():
+    out = _run_node(
+        _delete_session_prelude()
+        + r"""
+const file = {name:'a.txt', size:1, lastModified:1};
+_noteDepartingUploadDraft('sid-1', 'draft', [file]);
+globalThis.showConfirmDialog = async () => true;
+globalThis.api = async () => ({});
+(async () => {
+  const deleted = await deleteSession('sid-1');
+  console.log(JSON.stringify({deleted, held: heldNames()}));
+})();
+"""
+    )
+    assert out["deleted"] is True
+    assert out["held"] == []
+
+
+def test_tray_removal_drops_that_files_snapshot_only():
+    """No upload is running. Removing a chip drops the snapshot that holds that File."""
+    out = _run_node(
+        _restore_helper_source()
+        + _extract_js_function(UI_JS, "function renderTray(){")
+        + _held_names_js()
+        + r"""
+const chips = [];
+function makeChip() {
+  const button = {};
+  const chip = {
+    className: '',
+    classList: {add(){}, remove(){}, contains(){ return false; }},
+    dataset: {},
+    innerHTML: '',
+    appendChild(){},
+    querySelector(sel) { return sel === 'button' ? button : null; },
+    _button: button,
+  };
+  chips.push(chip);
+  return chip;
+}
+const tray = {
+  innerHTML: '',
+  classList: {add(){}, remove(){}, contains(){ return false; }},
+  appendChild(){},
+};
+globalThis.document = {createElement: () => makeChip()};
+globalThis.$ = (id) => (id === 'attachTray' ? tray : null);
+globalThis.S = {pendingFiles: [], session: {session_id: 'sid-1'}};
+globalThis._IMAGE_EXTS = /^$/;
+globalThis._SVG_EXTS = /^$/;
+globalThis._mediaKindForName = () => '';
+globalThis.esc = (value) => String(value == null ? '' : value);
+globalThis.li = () => '';
+globalThis.t = (key) => key;
+globalThis.updateSendBtn = () => {};
+const oldFile = {name:'old.txt', size:1, lastModified:1};
+const newer = {name:'newer.txt', size:2, lastModified:2};
+const keeper = {name:'keeper.txt', size:3, lastModified:3};
+const op1 = _claimDepartingUploadOp('sid-1');
+_noteDepartingUploadDraft('sid-1', 'old', [oldFile]);
+_releaseDepartingUploadOp(op1);
+const op2 = _claimDepartingUploadOp('sid-1');
+_noteDepartingUploadDraft('sid-1', 'newer', [newer]);
+_releaseDepartingUploadOp(op2);
+const opK = _claimDepartingUploadOp('sid-2');
+_noteDepartingUploadDraft('sid-2', 'keep', [keeper]);
+_releaseDepartingUploadOp(opK);
+S.pendingFiles = [oldFile];
+renderTray();
+chips[chips.length - 1]._button.onclick();
+console.log(JSON.stringify({held: heldNames()}));
+"""
+    )
+    assert out["held"] == ["newer.txt", "keeper.txt"]
+
+
+def test_confirmed_delete_drops_only_the_ops_confirmed_at_the_start():
+    """A snapshot noted while delete is in flight belongs to a newer attempt."""
+    out = _run_node(
+        _delete_session_prelude()
+        + r"""
+const oldFile = {name:'old.txt', size:1, lastModified:1};
+const newer = {name:'newer.txt', size:2, lastModified:2};
+const keeper = {name:'keeper.txt', size:3, lastModified:3};
+const op1 = _claimDepartingUploadOp('sid-1');
+_noteDepartingUploadDraft('sid-1', 'old', [oldFile]);
+_releaseDepartingUploadOp(op1);
+const opK = _claimDepartingUploadOp('sid-2');
+_noteDepartingUploadDraft('sid-2', 'keep', [keeper]);
+_releaseDepartingUploadOp(opK);
+let resolveDelete = null;
+globalThis.showConfirmDialog = async () => true;
+globalThis.api = () => new Promise((resolve) => { resolveDelete = resolve; });
+(async () => {
+  const done = deleteSession('sid-1');
+  for (let i = 0; i < 10 && typeof resolveDelete !== 'function'; i++) await Promise.resolve();
+  if (typeof resolveDelete !== 'function') throw new Error('delete did not reach the request');
+  const op2 = _claimDepartingUploadOp('sid-1');
+  _noteDepartingUploadDraft('sid-1', 'newer', [newer]);
+  _releaseDepartingUploadOp(op2);
+  resolveDelete({});
+  const deleted = await done;
+  console.log(JSON.stringify({deleted, held: heldNames()}));
+})();
+"""
+    )
+    assert out["deleted"] is True
+    assert out["held"] == ["keeper.txt", "newer.txt"]
+
+
+def test_cancelled_or_failed_delete_keeps_the_departing_snapshot():
+    out = _run_node(
+        _delete_session_prelude()
+        + r"""
+const file = {name:'a.txt', size:1, lastModified:1};
+const op = _claimDepartingUploadOp('sid-1');
+_noteDepartingUploadDraft('sid-1', 'draft', [file]);
+_releaseDepartingUploadOp(op);
+globalThis.showConfirmDialog = async () => false;
+globalThis.api = async () => { throw new Error('should not be called'); };
+(async () => {
+  const cancelled = await deleteSession('sid-1');
+  globalThis.showConfirmDialog = async () => true;
+  globalThis.api = async () => { throw new Error('no'); };
+  const failed = await deleteSession('sid-1');
+  console.log(JSON.stringify({cancelled, failed, held: heldNames()}));
+})();
+"""
+    )
+    assert out["cancelled"] is False
+    assert out["failed"] is False
+    assert out["held"] == ["a.txt"]
+
+
+def test_successful_upload_drops_only_its_own_snapshot():
+    out = _run_node(
+        _restore_helper_source()
+        + _held_names_js()
+        + r"""
+const oldFile = {name:'old.txt', size:1, lastModified:1};
+const newer = {name:'newer.txt', size:2, lastModified:2};
+const op1 = _claimDepartingUploadOp('sid-1');
+_noteDepartingUploadDraft('sid-1', 'old', [oldFile]);
+const op2 = _claimDepartingUploadOp('sid-1');
+_noteDepartingUploadDraft('sid-1', 'newer', [newer]);
+_forgetDepartingUploadDraft('sid-1', op1);
+_releaseDepartingUploadOp(op1);
+const afterOld = heldNames();
+_forgetDepartingUploadDraft('sid-1', op2);
+_releaseDepartingUploadOp(op2);
+_noteDepartingUploadDraft('sid-1', 'after', [newer]);
+console.log(JSON.stringify({afterOld, afterNew: heldNames()}));
+"""
+    )
+    assert out["afterOld"] == ["newer.txt"]
+    assert out["afterNew"] == []
+
+
+def test_old_upload_settlement_keeps_a_newer_snapshot():
+    """The deferred persist of an older upload must not drop the next attempt's files."""
+    out = _run_node(
+        _restore_helper_source()
+        + _held_names_js()
+        + r"""
+const state = {input: {value: ''}, pendingFiles: [], saved: null};
+const $ = (id) => (id === 'msg' ? state.input : null);
+const S = {pendingFiles: [], session: {session_id: 'sid-2'}};
+function autoResize(){}
+function updateSendBtn(){}
+function renderTray(){}
+function _saveComposerDraftNow(sid, text, files, contId){
+  state.saved = {sid, text, files: files.map((f) => f.name), contId: contId || ''};
+}
+const a = {name:'a.txt', size:1, lastModified:1};
+const b = {name:'b.txt', size:2, lastModified:2};
+const c = {name:'c.txt', size:3, lastModified:3};
+const d = {name:'d.txt', size:4, lastModified:4};
+const op1 = _claimDepartingUploadOp('sid-1');
+let release;
+const clearPromise = new Promise((resolve) => { release = resolve; });
+_restoreComposerDraftAfterFailedSend('original', [a, b], 'sid-1', clearPromise, 'goal-1', {mergeLiveInput:true, uploadOpId: op1});
+_noteDepartingUploadDraft('sid-1', 'newer', [c]);
+const op2 = _claimDepartingUploadOp('sid-1');
+_noteDepartingUploadDraft('sid-1', 'second', [d]);
+release();
+(async () => {
+  await Promise.resolve();
+  _takeDepartingUploadDraft('sid-1', op1);
+  _forgetDepartingUploadDraft('sid-1', op1);
+  console.log(JSON.stringify({
+    saved: state.saved,
+    held: heldNames(),
+    visible: state.input.value,
+  }));
+})();
+"""
+    )
+    assert out["saved"]["sid"] == "sid-1"
+    assert out["saved"]["text"] == "original\n\nnewer", out
+    assert out["saved"]["files"] == ["a.txt", "b.txt", "c.txt"], out
+    assert out["saved"]["contId"] == "", "merged text must not keep the rejected continuation id"
+    assert out["held"] == ["d.txt"]
+    assert out["visible"] == ""

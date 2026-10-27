@@ -26514,6 +26514,7 @@ function renderTray(){ // non-media files use paperclip chip
       // Drop this File's upload result too, so a removed chip does not pin it.
       if(chip.dataset.blobUrl) URL.revokeObjectURL(chip.dataset.blobUrl);
       if(typeof _forgetUploadedFile==='function')_forgetUploadedFile(f);
+      if(typeof _forgetDepartingUploadDraftHoldingFile==='function')_forgetDepartingUploadDraftHoldingFile(S.session&&S.session.session_id,f);
       S.pendingFiles.splice(i,1);renderTray();
     };
     tray.appendChild(chip);

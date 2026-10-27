@@ -1436,26 +1436,62 @@ function _mergeRestoredDraftFiles(failedFiles, liveFiles){
   }
   return merged;
 }
-// Snapshot of the composer at the moment the user leaves a session. An upload
-// can still fail after that switch; the background persist must merge this
-// newer text and these files with the rejected submission instead of
-// replacing them. Cleared when a new send starts, and consumed by one persist.
-const _departingUploadDraftBySid=new Map();
+// One snapshot per in-flight upload, keyed by that attempt's op id. A failed
+// upload merges it with the rejected submission. Settlement deletes only that
+// id, so a late completion cannot drop a newer attempt's snapshot.
+const _departingUploadDraftByOp=new Map();
+let _departingUploadOpSeq=0;
+let _departingUploadOp=null;
+function _claimDepartingUploadOp(sid){
+  const opId=++_departingUploadOpSeq;
+  _departingUploadOp={opId, sid:String(sid||'')};
+  return opId;
+}
+function _releaseDepartingUploadOp(opId){
+  if(_departingUploadOp&&_departingUploadOp.opId===opId) _departingUploadOp=null;
+}
 function _noteDepartingUploadDraft(sid, text, files){
   if(!sid) return;
-  _departingUploadDraftBySid.set(String(sid),{
+  const op=_departingUploadOp;
+  // A switch with no upload in flight must not pin File objects.
+  if(!op||op.sid!==String(sid)) return;
+  _departingUploadDraftByOp.set(op.opId,{
+    sid:String(sid),
     text:String(text||''),
     files:Array.isArray(files)?files.filter(Boolean).slice():[],
+    opId:op.opId,
   });
 }
-function _forgetDepartingUploadDraft(sid){
-  if(sid) _departingUploadDraftBySid.delete(String(sid));
+function _forgetDepartingUploadDraft(sid, opId){
+  if(opId==null) return;
+  const snap=_departingUploadDraftByOp.get(opId);
+  if(!snap||(sid&&snap.sid!==String(sid))) return;
+  _departingUploadDraftByOp.delete(opId);
 }
-function _takeDepartingUploadDraft(sid){
-  const key=String(sid||'');
-  const snap=_departingUploadDraftBySid.get(key)||null;
-  _departingUploadDraftBySid.delete(key);
+function _takeDepartingUploadDraft(sid, opId){
+  if(opId==null) return null;
+  const snap=_departingUploadDraftByOp.get(opId)||null;
+  if(!snap||(sid&&snap.sid!==String(sid))) return null;
+  _departingUploadDraftByOp.delete(opId);
   return snap;
+}
+function _departingUploadDraftOps(sid){
+  const key=String(sid||'');
+  const ops=[];
+  _departingUploadDraftByOp.forEach((snap, opId)=>{
+    if(snap&&snap.sid===key) ops.push(opId);
+  });
+  return ops;
+}
+function _forgetDepartingUploadDraftHoldingFile(sid, file){
+  if(!sid||!file) return;
+  const key=String(sid);
+  const drop=[];
+  _departingUploadDraftByOp.forEach((snap, opId)=>{
+    if(!snap||snap.sid!==key||!Array.isArray(snap.files)) return;
+    if(snap.files.includes(file)) drop.push(opId);
+  });
+  drop.forEach((opId)=>_departingUploadDraftByOp.delete(opId));
 }
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId){
   // 6th argument: upload retries pass {mergeLiveInput:true}. The 5th stays the
@@ -1467,6 +1503,12 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // That path merges instead of dropping the newer input. The short window
   // after /api/chat/start keeps the original "don't clobber" behavior.
   const mergeLiveInput=!!(opts&&opts.mergeLiveInput);
+  // This attempt only. The deferred persist takes that id and leaves a newer one.
+  const uploadOpId=opts&&opts.uploadOpId!=null?opts.uploadOpId:null;
+  if(mergeLiveInput&&uploadOpId!=null&&!restore&&!files.length){
+    if(typeof _forgetDepartingUploadDraft==='function') _forgetDepartingUploadDraft(sid, uploadOpId);
+    if(typeof _releaseDepartingUploadOp==='function') _releaseDepartingUploadOp(uploadOpId);
+  }
   if(!restore&&!files.length) return false;
   // #7855: restore the continuation id with the text. The guard keeps an extracted harness runnable.
   const _restoreContId=(typeof _normalizeGoalContinuationId==='function')
@@ -1516,6 +1558,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
   // #7855: the continuation id is saved with that text, and only while it still matches.
   if(sid&&typeof _saveComposerDraftNow==='function'){
     const _persist=()=>{
+      // Take this attempt's snapshot only. A newer upload stores a different op id.
+      const departing=(mergeLiveInput&&typeof _takeDepartingUploadDraft==='function')?_takeDepartingUploadDraft(sid, uploadOpId):null;
+      if(mergeLiveInput&&uploadOpId!=null&&typeof _releaseDepartingUploadOp==='function') _releaseDepartingUploadOp(uploadOpId);
       let persistedText=restore;
       let persistedFiles=files;
       const stillVisible=(S.session&&S.session.session_id)===sid;
@@ -1535,16 +1580,13 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
         // staged after this send cleared the composer. Merge that snapshot
         // with the rejected submission; writing only the snapshot would drop
         // the newer draft (original + [a.txt, b.txt] over "newer" + [c.txt]).
-        if(mergeLiveInput){
-          const departing=_takeDepartingUploadDraft(sid);
-          if(departing){
-            const liveText=String(departing.text||'');
-            const liveFiles=Array.isArray(departing.files)?departing.files:[];
-            if(liveText.trim()&&liveText.trim()!==restore.trim()){
-              persistedText=restore.trim()?restore+'\n\n'+liveText:liveText;
-            }
-            persistedFiles=_mergeRestoredDraftFiles(files, liveFiles);
+        if(mergeLiveInput&&departing){
+          const liveText=String(departing.text||'');
+          const liveFiles=Array.isArray(departing.files)?departing.files:[];
+          if(liveText.trim()&&liveText.trim()!==restore.trim()){
+            persistedText=restore.trim()?restore+'\n\n'+liveText:liveText;
           }
+          persistedFiles=_mergeRestoredDraftFiles(files, liveFiles);
         }
       } else {
         return;
@@ -1565,6 +1607,9 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
     };
     if(clearPromise&&typeof clearPromise.then==='function') clearPromise.then(_persist,_persist).catch(()=>{});
     else _persist();
+  }else if(mergeLiveInput&&uploadOpId!=null){
+    if(typeof _forgetDepartingUploadDraft==='function') _forgetDepartingUploadDraft(sid, uploadOpId);
+    if(typeof _releaseDepartingUploadOp==='function') _releaseDepartingUploadOp(uploadOpId);
   }
 
   return restoredVisible;
@@ -1988,9 +2033,6 @@ async function send(){
   // #5472 failed-send restore can chain its re-persist after this clear resolves.
   let _composerDraftClearPromise=null;
   if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
-  // A note from an earlier visit must not merge into this send. The switch
-  // during the upload await records a fresh one.
-  if(typeof _forgetDepartingUploadDraft==='function') _forgetDepartingUploadDraft(activeSid);
 
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   // #8297: only upload what is not already on disk from an earlier attempt of
@@ -2003,26 +2045,39 @@ async function send(){
   const _filesToUpload=Array.isArray(_uploadSplit&&_uploadSplit.toUpload)?_uploadSplit.toUpload:_submittedFiles;
   const _uploadResultsByFile=(_uploadSplit&&_uploadSplit.results instanceof Map)?_uploadSplit.results:new Map();
   let uploaded=[];
-  try{uploaded=await uploadPendingFiles({files:_filesToUpload, sessionId:activeSid, clearPending:false, onFileUploaded:(file,result)=>{_uploadResultsByFile.set(file,result);if(typeof _rememberUploadResult==='function')_rememberUploadResult(file,activeSid,result);}});}
-  catch(e){
-    // Total failure: never start the agent with no attachments. Restore the
-    // draft + staged files so a one-key resend keeps them. Keep the continuation
-    // id; merge options are a separate argument.
-    _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise, _goalContinuationId, {mergeLiveInput:true});
-    setComposerStatus(`Upload error: ${e.message}`);
-    return;
-  }
-  uploaded=_submittedFiles.map((file)=>_uploadResultsByFile.get(file)).filter(Boolean);
-  // Partial failure: uploadPendingFiles returns the files that DID upload and
-  // only throws when every one failed. Starting the agent here would silently
-  // send the message with a subset of the staged attachments, so abort and
-  // restore the draft instead. Reuse the existing localized prefix so no new
-  // translation keys are needed.
-  if(_submittedFiles.length && uploaded.length<_submittedFiles.length){
-    const _partialMsg=`${t('upload_failed')}${uploaded.length}/${_submittedFiles.length}`;
-    setComposerStatus(_partialMsg);
-    _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise, _goalContinuationId, {mergeLiveInput:true});
-    return;
+  // Hold the departing snapshot until this attempt settles. Failure persist
+  // releases it; success drops it here. A later attempt has a new id.
+  let _uploadOp=0;
+  let _holdDepartingUploadOp=false;
+  try{
+    _uploadOp=_claimDepartingUploadOp(activeSid);
+    try{uploaded=await uploadPendingFiles({files:_filesToUpload, sessionId:activeSid, clearPending:false, onFileUploaded:(file,result)=>{_uploadResultsByFile.set(file,result);if(typeof _rememberUploadResult==='function')_rememberUploadResult(file,activeSid,result);}});}
+    catch(e){
+      // Total failure: never start the agent with no attachments. Restore the
+      // draft + staged files so a one-key resend keeps them. Keep the continuation
+      // id; merge options are a separate argument. The op stays live until the
+      // deferred persist takes this attempt's snapshot.
+      _holdDepartingUploadOp=true;
+      _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise, _goalContinuationId, {mergeLiveInput:true, uploadOpId:_uploadOp});
+      setComposerStatus(`Upload error: ${e.message}`);
+      return;
+    }
+    uploaded=_submittedFiles.map((file)=>_uploadResultsByFile.get(file)).filter(Boolean);
+    // Partial failure: uploadPendingFiles returns the files that DID upload and
+    // only throws when every one failed. Starting the agent here would silently
+    // send the message with a subset of the staged attachments, so abort and
+    // restore the draft instead. Reuse the existing localized prefix so no new
+    // translation keys are needed.
+    if(_submittedFiles.length && uploaded.length<_submittedFiles.length){
+      _holdDepartingUploadOp=true;
+      const _partialMsg=`${t('upload_failed')}${uploaded.length}/${_submittedFiles.length}`;
+      setComposerStatus(_partialMsg);
+      _restoreComposerDraftAfterFailedSend(_submittedDraftTextForClear, _submittedFiles, activeSid, _composerDraftClearPromise, _goalContinuationId, {mergeLiveInput:true, uploadOpId:_uploadOp});
+      return;
+    }
+    _forgetDepartingUploadDraft(activeSid, _uploadOp);
+  }finally{
+    if(!_holdDepartingUploadOp) _releaseDepartingUploadOp(_uploadOp);
   }
   // Clear the uploading status now that upload is done — if we don't clear here
   // it stays visible for the entire duration of the agent stream, since
