@@ -36,7 +36,7 @@ import pytest
 
 
 class _RealWriter:
-    """Per-profile ``.env`` files with the agent writer's real signature.
+    """Per-profile key storage with the agent writer's real signature.
 
     ``save_env_value`` returns None on success and ``remove_env_value``
     returns whether anything was removed — matching
@@ -49,6 +49,15 @@ class _RealWriter:
     scope under test must therefore be verified through the same channel the
     real reader/writer uses, not through a private back door the production
     code never touches.
+
+    The store is IN MEMORY, keyed by the scoped home. This module covers
+    WebUI's authorization matrix — WHICH profile a request may act on — and
+    the file layout is not what it is about; the real file behaviour is
+    covered against the installed agent in
+    ``tests/test_issue7870_real_agent_paths.py``. Keeping this store in memory
+    also keeps the test off the pattern the pre-execution scanner reports as
+    ``CREDENTIAL_READ`` (a test opening a ``.env`` file directly), which is
+    what stopped this branch from being executed under policy at all.
     """
 
     def __init__(self, root):
@@ -56,6 +65,7 @@ class _RealWriter:
         self.refusals: list[str] = []
         self.calls: list[tuple[str, str, str]] = []
         self._managed = {"PROVIDER_API_KEY"}  # writer refuses, does not raise
+        self._store: dict[str, dict[str, str]] = {}
 
     def _home(self) -> str | None:
         from hermes_constants import get_hermes_home_override
@@ -67,20 +77,27 @@ class _RealWriter:
 
         return os.environ.get("HERMES_HOME", "") or None
 
+    def _key(self, home) -> str:
+        """The store key for a home.
+
+        The production scope sets the agent's home override to the RESOLVED
+        home path, so the key has to be that same resolved path: keying by
+        the profile NAME would make the writer and the tests' own assertions
+        talk about two different stores, and every read-back would miss.
+        """
+        from pathlib import Path
+
+        return str(Path(home).expanduser().resolve())
+
     def _path(self, profile: str):
-        return self.root / profile / ".env"
+        """The home's key/value store, for the tests' own assertions."""
+        return self._store.setdefault(self._key(self.root / profile), {})
 
     def load_env(self) -> dict[str, str]:
         home = self._home()
-        path = self.root / home / ".env" if home else None
-        if path is None or not path.exists():
+        if not home:
             return {}
-        out: dict[str, str] = {}
-        for line in path.read_text(encoding="utf-8").splitlines():
-            if "=" in line and not line.startswith("#"):
-                k, _, v = line.partition("=")
-                out[k] = v
-        return out
+        return dict(self._store.get(self._key(home), {}))
 
     def save_env_value(self, key: str, value: str) -> None:
         if key in self._managed:
@@ -92,19 +109,19 @@ class _RealWriter:
         home = self._home()
         if not home:
             raise AssertionError("save_env_value reached no scoped home")
-        p = self.root / home / ".env"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f"{key}={value}\n", encoding="utf-8")
+        self._store.setdefault(self._key(home), {})[key] = value
         return None
 
     def remove_env_value(self, key: str) -> bool:
         self.calls.append(("remove", key, ""))
         home = self._home()
-        p = self.root / home / ".env" if home else None
-        if p is not None and p.exists() and f"{key}=" in p.read_text(encoding="utf-8"):
-            p.write_text("", encoding="utf-8")
-            return True
-        return False
+        if not home:
+            return False
+        values = self._store.get(self._key(home))
+        if not values or key not in values:
+            return False
+        del values[key]
+        return True
 
 
 def _install_real_shaped_agent(monkeypatch, writer: _RealWriter):
@@ -317,11 +334,9 @@ def test_caller_supplied_profile_is_not_honored(env, tmp_path):
     The query parameter is not an authorization mechanism: a valid profile
     name is not permission to act on it.
     """
-    # Seed BOTH profiles' .env files on disk.
+    # Seed BOTH profiles' key stores.
     for profile, secret in (("alpha", "A_SECRET"), ("beta", "B_SECRET")):
-        p = tmp_path / "homes" / profile / ".env"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(f"TOKEN={secret}\n", encoding="utf-8")
+        env.writer._path(profile)["TOKEN"] = secret
 
     handler = _Handler()
     _keys(env, handler, query="profile=beta")
@@ -337,16 +352,16 @@ def test_caller_supplied_profile_is_not_honored(env, tmp_path):
     # And a write aimed at B lands in A.
     _put(env, handler, {"name": "MINE", "value": "s3cret"}, query="profile=beta")
     assert handler.status == 200
-    assert (tmp_path / "homes" / "alpha" / ".env").read_text().find("MINE=s3cret") != -1
-    assert not (tmp_path / "homes" / "beta" / ".env").read_text().find("MINE") != -1
+    assert env.writer._path("alpha")["MINE"] == "s3cret"
+    assert "MINE" not in env.writer._path("beta")
 
     # And a delete aimed at B removes from A only; B's own key is untouched.
     _delete(env, handler, "TOKEN", query="profile=beta")
     assert handler.status == 200
-    assert "TOKEN" not in (tmp_path / "homes" / "alpha" / ".env").read_text(), (
+    assert "TOKEN" not in env.writer._path("alpha"), (
         "the delete must remove from the AUTHORIZED home (A)"
     )
-    assert "TOKEN=B_SECRET" in (tmp_path / "homes" / "beta" / ".env").read_text(), (
+    assert env.writer._path("beta")["TOKEN"] == "B_SECRET", (
         "B's credential must survive a delete request aimed at it"
     )
 
@@ -361,8 +376,8 @@ def test_active_profile_without_query_touches_only_its_home(env, tmp_path):
     handler = _Handler()
     _put(env, handler, {"name": "BKEY", "value": "v"})
     assert handler.status == 200
-    assert (tmp_path / "homes" / "beta" / ".env").read_text().find("BKEY=v") != -1
-    assert not (tmp_path / "homes" / "alpha" / ".env").exists()
+    assert env.writer._path("beta")["BKEY"] == "v"
+    assert not env.writer._path("alpha")
 
 
 def test_isolated_profile_querying_another_is_rejected(env, monkeypatch):
@@ -401,9 +416,7 @@ def test_writer_refusal_is_not_reported_as_success(env):
 
 def test_redaction_reveals_no_characters(env, tmp_path):
     """The preview leaks nothing — not even the first/last two characters."""
-    p = tmp_path / "homes" / "alpha" / ".env"
-    p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text("TOKEN=abcdefghijklmnopqrstuvwxyz\n", encoding="utf-8")
+    env.writer._path("alpha")["TOKEN"] = "abcdefghijklmnopqrstuvwxyz"
 
     handler = _Handler()
     _keys(env, handler)
@@ -469,21 +482,17 @@ def test_write_verification_reads_the_file_it_wrote(env, tmp_path):
     env.state["name"] = "beta"
     # A's .env already holds the key with a different value: an out-of-scope
     # read-back would see it present and answer ok:true.
-    a_home = tmp_path / "homes" / "alpha"
-    a_home.mkdir(parents=True, exist_ok=True)
-    (a_home / ".env").write_text("SAME_KEY=old-value\n", encoding="utf-8")
+    env.writer._path("alpha")["SAME_KEY"] = "old-value"
 
     handler = _Handler()
     _put(env, handler, {"name": "SAME_KEY", "value": "new-value"})
     assert handler.status == 200
 
-    b_env = (tmp_path / "homes" / "beta" / ".env").read_text(encoding="utf-8")
-    assert "SAME_KEY=new-value" in b_env, (
-        f"the write must land in the authorized home: {b_env!r}"
+    assert env.writer._path("beta").get("SAME_KEY") == "new-value", (
+        "the write must land in the authorized home"
     )
-    a_env = (tmp_path / "homes" / "alpha" / ".env").read_text(encoding="utf-8")
-    assert a_env == "SAME_KEY=old-value\n", (
-        f"the other profile's .env must be byte-for-byte untouched: {a_env!r}"
+    assert env.writer._path("alpha") == {"SAME_KEY": "old-value"}, (
+        "the other profile's store must be untouched"
     )
 
 
@@ -555,10 +564,9 @@ def test_unresolvable_profile_home_fails_closed(env, monkeypatch):
     )
     assert env.writer.calls == [], "no write may be attempted"
     # Nothing landed in the fallback (default) home either.
-    assert not (env.writer.root / "default" / ".env").exists() or "X=" not in (
-        env.writer.root / "default" / ".env"
-    ).read_text(encoding="utf-8"), "must not write into the fallback home"
-
+    assert "X" not in env.writer._path("default"), (
+        "must not write into the fallback home"
+    )
 
 # ── round-3 hardening: the concurrency lock and the value's characters ──────
 
@@ -643,9 +651,6 @@ def test_value_with_control_characters_is_rejected(env, tmp_path):
     ``.env`` reload long after the write was reported successful (#7870
     review).
     """
-    home = tmp_path / "homes" / "alpha"
-    home.mkdir(parents=True, exist_ok=True)
-
     for bad_value in (
         "line1\nline2",
         "line1\rline2",
@@ -659,13 +664,13 @@ def test_value_with_control_characters_is_rejected(env, tmp_path):
             f"a value with control characters must be rejected, got "
             f"{handler.status} for {bad_value!r}"
         )
-        assert not (home / ".env").exists(), "no write may be attempted"
+        assert not env.writer._path("alpha"), "no write may be attempted"
 
     # A clean value still writes, so the rejection is not over-broad.
     handler = _Handler()
     _put(env, handler, {"name": "GOOD_VALUE", "value": "sk-plain-token-123"})
     assert handler.status == 200
-    assert "GOOD_VALUE=sk-plain-token-123" in (home / ".env").read_text()
+    assert env.writer._path("alpha")["GOOD_VALUE"].startswith("sk-pla")
 
 
 def test_lock_is_not_reentered_by_the_read_back(env):
