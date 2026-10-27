@@ -56,6 +56,12 @@ The browser does not send an arbitrary repository path. Git requests carry a ses
 needed, workspace-relative file paths. The server resolves the session workspace, checks each path
 against that workspace, and then builds Git pathspecs from the checked paths.
 
+In a multi-container deployment the session's workspace carries the **agent-visible** path, while the
+Git commands run against the directory the **WebUI process** sees. A profile declares that
+correspondence in `webui.workspace_path_maps`; the translated root is then re-validated under the
+ordinary workspace trust rules, so a map entry can never widen trust. A profile without a map keeps
+the direct-path behaviour. See [`docs/workspace-path-maps.md`](workspace-path-maps.md).
+
 Git commands run through `subprocess.run` with `shell=False`. Local status and diff commands use a 5
 second timeout. Remote operations such as fetch, pull, and push use a 60 second timeout.
 

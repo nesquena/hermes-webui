@@ -17067,11 +17067,28 @@ def handle_get(handler, parsed) -> bool:
                 return j(handler, {"git": None})
             cli_profile = cli_meta.get("profile")
             try:
-                if cli_profile:
+                if cli_profile and workspace_translation_applies(
+                    cli_meta["workspace"], cli_profile
+                ):
                     from api.workspace import resolve_webui_workspace
-                    workspace = resolve_webui_workspace(cli_meta["workspace"], profile=cli_profile)
+                    workspace = resolve_webui_workspace(
+                        cli_meta["workspace"], profile=cli_profile
+                    )
                 else:
-                    workspace = resolve_trusted_workspace(cli_meta["workspace"])
+                    # No declared map translates this workspace: keep the
+                    # TRUSTED resolution. A CLI session's workspace is a host
+                    # path unless the owner profile declares a map, so a repo
+                    # outside the home (or revoked from the saved list) has to
+                    # be refused instead of inspected -- master resolved it
+                    # here too, and the profile-only arm answered it.
+                    try:
+                        workspace = resolve_trusted_workspace(
+                            cli_meta["workspace"], profile=cli_profile
+                        )
+                    except TypeError:
+                        # A resolver without a profile kwarg keeps the
+                        # pre-existing direct-path semantics.
+                        workspace = resolve_trusted_workspace(cli_meta["workspace"])
             except (FileNotFoundError, ValueError):
                 return j(handler, {"git": None})
         else:
@@ -30882,7 +30899,14 @@ def _handle_git_commit_message(handler, body):
     try:
         require(body, "session_id")
         session = get_session(body["session_id"])
-        workspace = Path(session.workspace)
+        if not getattr(session, "workspace", None):
+            return bad(handler, "Session has no workspace", 400)
+        # #7217: the local git readers work on the WebUI-local root, not on
+        # the agent-visible name -- the session object is never rewritten.
+        workspace = _git_local_workspace(handler, session)
+        if workspace is None:
+            # The translation tier refused the workspace and has answered.
+            return True
 
         prompt = staged_commit_message_prompt(workspace)
         message = clean_generated_commit_message(
@@ -30915,7 +30939,14 @@ def _handle_git_commit_message_selected(handler, body):
         require(body, "session_id")
         paths = _git_paths_from_body(body)
         session = get_session(body["session_id"])
-        workspace = Path(session.workspace)
+        if not getattr(session, "workspace", None):
+            return bad(handler, "Session has no workspace", 400)
+        # #7217: the local git readers work on the WebUI-local root, not on
+        # the agent-visible name -- the session object is never rewritten.
+        workspace = _git_local_workspace(handler, session)
+        if workspace is None:
+            # The translation tier refused the workspace and has answered.
+            return True
 
         prompt = selected_commit_message_prompt(workspace, paths)
         message = clean_generated_commit_message(
