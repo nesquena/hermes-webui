@@ -7713,28 +7713,48 @@ def _agent_state_db_path(*, profile=None) -> Path | None:
     return db_path
 
 
-def agent_session_rows_existing(
-    session_ids: list[str] | set[str] | frozenset[str],
-    *,
-    profile=None,
-) -> frozenset[str]:
-    """Return session ids confirmed present in the agent ``sessions`` table.
+def _strict_agent_state_db_path(*, profile=None) -> Path | None:
+    """Return only the state.db owned by *profile*, without fallback.
 
-    Used by the sidebar orphan-prune path (#3238) to batch existence probes
-    instead of opening one SQLite connection per candidate row.
-
-    Degrades safely to ``frozenset(wanted)`` (assume all present) on any error,
-    when the DB is missing, or when the ``sessions`` table is absent — matching
-    ``agent_session_row_exists()`` so a transient failure never causes pruning.
+    Destructive absence checks must not answer a named-profile query from the
+    active profile's database.  An unavailable explicit profile is therefore
+    unknown (``None``), not an invitation to consult another profile.
     """
-    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
-    if not wanted:
-        return frozenset()
     try:
-        import sqlite3
-    except ImportError:
-        return frozenset(wanted)
-    db_path = _agent_state_db_path(profile=profile)
+        if isinstance(profile, str) and profile:
+            from api.profiles import (
+                _is_isolated_profile_mode,
+                _isolated_profile_name,
+                _profiles_match,
+            )
+
+            # The generic resolver intentionally clamps every lookup to the
+            # pinned home in isolated mode.  That is safe for reads, but a
+            # destructive absence check must not mistake the pinned profile's
+            # DB for a foreign logical owner's DB.  Root aliases remain valid
+            # through the canonical profile matcher.
+            if _is_isolated_profile_mode() and not _profiles_match(
+                profile,
+                _isolated_profile_name(),
+            ):
+                return None
+            db_path = _get_profile_home(profile) / 'state.db'
+        else:
+            db_path = _strict_active_state_db_path()
+        # Inside the try: an inaccessible profile directory makes exists()
+        # raise PermissionError, which must fail closed (retain), never 500.
+        if db_path is None or not db_path.exists():
+            return None
+    except Exception:
+        return None
+    return db_path
+
+
+def _agent_session_rows_existing_at_path(
+    wanted: set[str],
+    db_path: Path | None,
+) -> frozenset[str]:
+    """Probe *wanted* at one authoritative path, failing closed."""
     if db_path is None:
         return frozenset(wanted)
     try:
@@ -7758,11 +7778,55 @@ def agent_session_rows_existing(
             return frozenset(existing)
     except Exception:
         logger.debug(
-            "agent_session_rows_existing probe failed for %d ids",
+            "agent session existence probe failed for %d ids",
             len(wanted),
             exc_info=True,
         )
         return frozenset(wanted)
+
+
+def agent_session_rows_existing(
+    session_ids: list[str] | set[str] | frozenset[str],
+    *,
+    profile=None,
+) -> frozenset[str]:
+    """Return session ids confirmed present in the agent ``sessions`` table.
+
+    Used by the sidebar orphan-prune path (#3238) to batch existence probes
+    instead of opening one SQLite connection per candidate row.
+
+    Degrades safely to ``frozenset(wanted)`` (assume all present) on any error,
+    when the DB is missing, or when the ``sessions`` table is absent — matching
+    ``agent_session_row_exists()`` so a transient failure never causes pruning.
+    """
+    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
+    if not wanted:
+        return frozenset()
+    return _agent_session_rows_existing_at_path(
+        wanted,
+        _agent_state_db_path(profile=profile),
+    )
+
+
+def agent_session_rows_existing_strict(
+    session_ids: list[str] | set[str] | frozenset[str],
+    *,
+    profile=None,
+) -> frozenset[str]:
+    """Return rows confirmed by the row-owning profile's state.db only.
+
+    This is the destructive-prune variant.  Missing, unreadable, or
+    unresolvable profile databases fail closed to "all present"; unlike the
+    legacy helper, a missing named-profile DB never falls back to the active
+    profile DB.
+    """
+    wanted = {str(sid).strip() for sid in (session_ids or []) if str(sid or "").strip()}
+    if not wanted:
+        return frozenset()
+    return _agent_session_rows_existing_at_path(
+        wanted,
+        _strict_agent_state_db_path(profile=profile),
+    )
 
 
 def agent_session_zero_message_sids(
