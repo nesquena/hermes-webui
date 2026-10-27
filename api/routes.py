@@ -16171,6 +16171,18 @@ def handle_get(handler, parsed) -> bool:
         stripped = parsed._replace(path=parsed.path[len("/session"):])
         return _serve_static(handler, stripped)
 
+    if parsed.path.startswith("/session/extensions/"):
+        # Same speculative-preload rescue as /session/static/ above. Injected
+        # extension tags are mount-relative (#8521), so on /session/<id> the
+        # browser's preload scanner resolves `extensions/app.js` against the
+        # page URL before the dynamic <base href> runs. Serve the real asset
+        # instead of the shell. Unlike /session/static/ this path is NOT
+        # auth-exempt: check_auth already gates it like /extensions/.
+        from api.extensions import serve_extension_static
+
+        stripped = parsed._replace(path=parsed.path[len("/session"):])
+        return serve_extension_static(handler, stripped)
+
     # Firefox Android resolves <link rel="manifest"> against the page URL
     # before the dynamic <base href> script runs when installing from
     # /session/<id>, producing requests like /session/manifest.json.

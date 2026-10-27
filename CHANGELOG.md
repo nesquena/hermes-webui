@@ -51,6 +51,12 @@
 
 ### Fixed
 
+- **Gateway delegation wake-up after a cut-off fan-out is neutral and conditional.** When a delegation batch that was cut off is delivered, the parent now gets one prompt to check the recovery evidence and re-dispatch only work it can verify is unfinished, instead of a prompt that assumed the owner had exited. Completed batches that merely quote the marker text are no longer treated as recovered. Thanks @carlotestor.
+
+- **Extensions load behind a reverse-proxy subpath mount.** Injected extension script and stylesheet tags are now mount-relative, so `<base href>` resolves them inside `https://host/hermes/` instead of the origin root. Requests the browser's preload scanner makes from a `/session/<id>` deep link (`/session/extensions/...`) now get the real asset instead of the page shell, behind the same auth as `/extensions/`. Thanks @rpodgorny.
+
+- **The workspace panel's background Git status no longer leaves a stale `index.lock` behind.** A `git status` killed at its timeout while refreshing the index could leave `.git/index.lock`, so the next commit from WebUI failed. Status now runs with `GIT_OPTIONAL_LOCKS=0`; writes keep normal locking. (#8520 partly: on a stale index the follow-up `git diff` can still take the lock.) Thanks @balabommablock-cpu.
+
 - **Docker: the WebUI container installs Agent v0.22.5 again.** Agent v0.22.5 pins Pillow 13 for its security fixes, while one of its own dependencies still pins Pillow 12.3. The Agent settles that with its `[tool.uv] override-dependencies`, which `uv pip install` never reads from an installed project. Every Docker setup that builds the WebUI venv from the Agent source (two- and three-container stacks) stopped at "requirements are unsatisfiable" and restarted forever. The container now passes the Agent's own overrides to uv, and keeps only entries that are plain requirements. If the overrides can't be prepared (no writable temp space, an older image), it falls back to the previous install and says so in the log. (#8544, fixes #8524)
 
 - **An OpenRouter model from the overflow list no longer appears twice in the model picker.** Restoring a model that lives past the shown rows (for example an ID ending in `:free`) in the composer or Settings picker used to add a second, ungrouped copy of it. It now shows once, in its provider group, stays selected, and the "(a of b)" count stays right, for new chats and for reopened ones. Thanks @starship-s.
@@ -302,6 +308,8 @@
 - **The busy-time send behavior is now called "Default message mode," and new installs default to Steer.** The Settings → Preferences control formerly labeled "Busy input mode" is renamed to "Default message mode," and a fresh install now defaults to **Steer** (inject a mid-turn correction without interrupting) instead of Queue. Your existing choice is preserved — if you ever saved settings, your current mode (Queue/Interrupt/Steer) is migrated as-is and unchanged; only never-configured installs pick up the new Steer default. The saved preference still survives a reload or a brief server outage (the localStorage mirror from the previous release is intact). Thanks @rodboev. (#5162, #5145)
 
 ### Internal
+
+- **CI lint gate:** the ruff diff gate keeps the full history when it fetches `origin/master`, so it diffs against the real merge-base instead of reporting upstream findings as introduced by the PR. Thanks @happy5318.
 
 - **The local full test suite passes in the release sandbox (test-only).** Twenty-one tests failed only because of the host: no package index, the worktree's git dir hidden from git, `HOME=/tmp`, unmapped supplementary groups, no network route for Chromium, a process-wide truststore injection, and two newer-Agent shape changes. They now pass there, or skip with the missing condition named (package index, spare group, Agent org skill mirror). No product code changes, and CI still runs the packaging tests.
 
