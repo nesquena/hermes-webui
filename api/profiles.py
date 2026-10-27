@@ -40,6 +40,37 @@ _CLONE_CONFIG_FILES = ['config.yaml', '.env', 'SOUL.md']
 # startup control: a pinned profile's .env may be loaded into live os.environ
 # later, but must not be able to change whether the process is isolated.
 _INITIAL_HERMES_HOME = os.getenv('HERMES_HOME', '').strip()
+# Launcher/deployment env before any profile .env is applied (init_profile_state
+# runs after this import). A root-profile read layers the root .env over this
+# instead of the live os.environ, which holds the switched-to profile's .env.
+_INITIAL_PROCESS_ENV = dict(os.environ)
+
+
+def _read_dotenv_values(env_path) -> dict[str, str]:
+    """KEY=VALUE pairs of a .env file as the launchers read it (``export`` prefix and quotes stripped); {} on error."""
+    values: dict[str, str] = {}
+    try:
+        text = Path(env_path).expanduser().read_text(encoding="utf-8")
+    except Exception:
+        return values
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith('#') or '=' not in line:
+            continue
+        key, value = line.split('=', 1)
+        key = key.strip()
+        if key.startswith('export '):
+            key = key[len('export '):].strip()
+        value = value.strip().strip('"').strip("'")
+        if key and value:
+            values[key] = value
+    return values
+
+
+# The launch home's .env as it was at startup. Shell launchers (ctl.sh) source $HERMES_HOME/.env before Python
+# starts, so for a NAMED profile home those values sit in os.environ looking like launcher exports; this snapshot
+# is the provenance record that tells them apart (#8432).
+_INITIAL_HERMES_HOME_DOTENV = _read_dotenv_values(Path(_INITIAL_HERMES_HOME) / '.env') if _INITIAL_HERMES_HOME else {}
 _INITIAL_ISOLATED_PROFILE_OPT_IN = os.getenv('HERMES_WEBUI_ISOLATED_PROFILE', '').strip().lower()
 _ISOLATED_SYMLINK_WARNING_EMITTED = False
 _ISOLATED_PROFILE_SHAPE_WITHOUT_OPT_IN_WARNING_EMITTED = False
@@ -1371,6 +1402,8 @@ def profile_env_for_thread_readonly(
     session,
     purpose: str = "thread-local read",
     logger_override: Optional[logging.Logger] = None,
+    *,
+    include_root: bool = False,
 ):
     """Bind a session profile's env to the CURRENT THREAD only.
 
@@ -1396,13 +1429,18 @@ def profile_env_for_thread_readonly(
     the literal.
 
     Accepts a session-like object with ``.profile`` or a profile name.
-    No-ops for default-profile sessions; on resolution failure it logs and
-    yields with the thread's current env state untouched.
+    No-ops for default-profile sessions unless ``include_root`` is set:
+    after a process-wide profile switch ``os.environ`` holds the switched-to
+    profile's ``.env``, so callers that must resolve a root session's own
+    ``${VAR}`` bind the root env explicitly: the launcher env captured at
+    import (``_INITIAL_PROCESS_ENV``) with the root home's runtime env over
+    it, matching what the root profile sees when it is active. On resolution
+    failure it logs and yields with the thread's current env state untouched.
     """
     log = logger_override or logger
     raw_profile = session if isinstance(session, str) else getattr(session, "profile", "")
     profile = str(raw_profile or "").strip()
-    if not profile or profile == "default":
+    if not profile or (profile == "default" and not include_root):
         yield
         return
 
@@ -1428,7 +1466,10 @@ def profile_env_for_thread_readonly(
     previous_env = getattr(_thread_ctx, "env", {})
     previous_env = dict(previous_env) if isinstance(previous_env, dict) else {}
     previous_block = bool(getattr(_thread_ctx, "block_process_env_fallback", False))
-    thread_env = dict(safe_runtime_env)
+    # Any name that resolves to the root home (the legacy "default" or a renamed root alias, #1612) layers
+    # the root .env over the launcher snapshot, exactly like "default".
+    thread_env = dict(_INITIAL_PROCESS_ENV) if _is_root_profile(profile) else {}
+    thread_env.update(safe_runtime_env)
     thread_env["HERMES_HOME"] = str(profile_home_path)
     try:
         _thread_ctx.env = thread_env

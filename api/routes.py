@@ -987,10 +987,20 @@ def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
     # Import routes create/claim sessions before normal ownership exists, and
     # chat/start has inline placeholder-retag rules that must run before the
     # generic request-session guard.
+    # #7731: /api/session/archive is exempt for the same reason, but for a
+    # different one. Archiving a session that lives in another profile publishes
+    # a sidecar owned by that profile, so the NEXT request (the restore) would
+    # hit the generic guard and be answered 409 session_profile_mismatch before
+    # the archive handler ever ran -- archiving a session would permanently
+    # brick its own restore. The archive handler therefore owns its profile
+    # boundary (see the /api/session/archive branch in handle_post): it accepts
+    # an explicitly supplied owning profile and keeps unqualified requests
+    # pinned to the active profile.
     return path in {
         "/api/session/import",
         "/api/session/import_cli",
         "/api/chat/start",
+        "/api/session/archive",
     }
 
 
@@ -1295,6 +1305,27 @@ def _normalize_disabled_set(values) -> set:
     return {str(v).strip() for v in values if str(v).strip()}
 
 
+def _skill_listing_order_key(skill: dict) -> tuple:
+    return (skill.get("category") or "", skill["name"])
+
+
+def _resolve_agent_sort_skills(skills_tool_module):
+    """Return the Agent's skill-listing order helper under whichever name it exports.
+
+    Agent commit 93fafc4d6ff (2026-10-18) renamed ``_sort_skills`` to
+    ``sort_skills`` with no underscore alias, while older Agents only export the
+    private name. WebUI runs against both, so resolve the helper by attribute
+    instead of importing one spelling (an ImportError here took down
+    ``/api/skills`` and ``/api/skills/usage`` on newer Agents). If neither name
+    exists, fall back to the same ``(category, name)`` order the helper uses.
+    """
+    for attr in ("sort_skills", "_sort_skills"):
+        candidate = getattr(skills_tool_module, attr, None)
+        if callable(candidate):
+            return candidate
+    return lambda skills: sorted(skills, key=_skill_listing_order_key)
+
+
 def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict:
     """List skills using an explicit local skills directory.
 
@@ -1302,14 +1333,17 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
     scan root explicit so per-client WebUI profile switches do not race on or
     leak through the skills tool's module-global ``SKILLS_DIR``.
     """
+    import importlib
+
     from agent.skill_utils import iter_skill_index_files
     from tools.skills_tool import (
         MAX_DESCRIPTION_LENGTH,
         _EXCLUDED_SKILL_DIRS,
         _parse_frontmatter,
-        _sort_skills,
         skill_matches_platform,
     )
+
+    sort_skills = _resolve_agent_sort_skills(importlib.import_module("tools.skills_tool"))
 
     if not skills_dir.exists():
         skills_dir.mkdir(parents=True, exist_ok=True)
@@ -1367,7 +1401,7 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
 
     if category:
         all_skills = [s for s in all_skills if s.get("category") == category]
-    all_skills = _sort_skills(all_skills)
+    all_skills = sort_skills(all_skills)
     categories = sorted(set(s.get("category") for s in all_skills if s.get("category")))
     result = {
         "success": True,
@@ -2465,6 +2499,71 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _prune_orphaned_desktop_sidecar_sessions(
+    rows,
+    *,
+    known_agent_ids=None,
+    diag_stage=None,
+):
+    """Prune Desktop sidecars only when their owning profile proves absence.
+
+    This pass is independent of ``show_cli_sessions``: the preference controls
+    CLI visibility, not whether stale Desktop sidecars are reconciled.  A
+    missing or unreadable profile DB is unknown and therefore retains the row.
+    """
+    if not rows:
+        return list(rows) if rows is not None else []
+    _diag = diag_stage if callable(diag_stage) else (lambda *_a, **_k: None)
+    known_ids = {
+        str(sid).strip() for sid in (known_agent_ids or set()) if str(sid or "").strip()
+    }
+    probe_rows = [
+        row for row in rows
+        if isinstance(row, dict)
+        and str(row.get("session_id") or "").strip()
+        and str(row.get("session_id") or "").strip() not in known_ids
+        and _is_desktop_sidecar_row(row)
+        and not _session_source_is_webui(row)
+    ]
+    if not probe_rows:
+        return list(rows)
+
+    rows_by_profile: dict[object, list[dict]] = defaultdict(list)
+    for row in probe_rows:
+        rows_by_profile[row.get("profile")].append(row)
+    missing_rows: set[tuple[object, str]] = set()
+    for profile_key, profile_rows in rows_by_profile.items():
+        probe_ids = [
+            str(row.get("session_id") or "").strip()
+            for row in profile_rows
+        ]
+        existing = agent_session_rows_existing_strict(
+            probe_ids,
+            profile=profile_key if isinstance(profile_key, str) and profile_key else None,
+        )
+        missing_rows.update(
+            (profile_key, sid) for sid in probe_ids if sid not in existing
+        )
+
+    kept = []
+    for row in rows:
+        sid = str(row.get("session_id") or "").strip() if isinstance(row, dict) else ""
+        profile_key = row.get("profile") if isinstance(row, dict) else None
+        if (profile_key, sid) not in missing_rows:
+            kept.append(row)
+            continue
+        try:
+            prune_session_from_index(sid)
+        except Exception:
+            logger.debug(
+                "Failed to prune orphaned Desktop sidecar %s",
+                sid,
+                exc_info=True,
+            )
+        _diag("prune_orphaned_desktop_sidecar")
+    return kept
+
+
 def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
     """#4985 second-pass orphan prune for native-WebUI rows whose ``state.db.messages`` is empty.
 
@@ -2765,6 +2864,11 @@ def _build_session_list_cache_payload(
             )
         diag_stage("merge_cli_sessions")
         cli_by_id = {s["session_id"]: s for s in cli}
+        webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
+            webui_sessions,
+            known_agent_ids=cli_by_id,
+            diag_stage=diag_stage,
+        )
         # #3238/#4591: reconcile orphaned imported sidecars. When a CLI or
         # API-server session is clicked in WebUI it gets a WebUI-owned sidecar
         # that all_sessions() returns independently of state.db. If the user
@@ -2794,7 +2898,10 @@ def _build_session_list_cache_payload(
             _sid = s.get("session_id")
             if (
                 _sid
-                and (is_cli_session_row(s) or _is_api_server_sidecar_row(s))
+                and (
+                    is_cli_session_row(s)
+                    or _is_api_server_sidecar_row(s)
+                )
                 and not _session_source_is_webui(s)
                 and _sid not in cli_by_id
             ):
@@ -2897,6 +3004,10 @@ def _build_session_list_cache_payload(
             source_filter=source_filter,
         )
     else:
+        webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
+            webui_sessions,
+            diag_stage=diag_stage,
+        )
         diag_stage("filter_webui_sessions")
         webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
         # #4985 second pass — see _prune_orphaned_webui_zero_message_sessions
@@ -2918,6 +3029,15 @@ def _build_session_list_cache_payload(
         key=lambda s: s.get("last_message_at") or s.get("updated_at", 0) or 0,
         reverse=True,
     )
+    # Each sidebar tab is loaded on its own, so a child can arrive without its parent's row.
+    # Stamp the parent's tab (the same classifier _filter_sidebar_source uses) on the child.
+    # Only within one profile: a parent in another profile is filtered out of this child's
+    # view, so its tab says nothing about where the child belongs — leave the hint unset.
+    _merged_by_id = {s.get("session_id"): s for s in merged if s.get("session_id")}
+    for s in merged:
+        _parent = _merged_by_id.get(s.get("parent_session_id"))
+        if _parent is not None and _profiles_match(_parent.get("profile"), s.get("profile")):
+            s["parent_is_cli_session"] = _is_cli_session_for_settings(_parent)
     # ── Profile scoping (#1611) ────────────────────────────────────────
     # Default: filter to the active profile. ?all_profiles=1 opts into
     # the aggregate view used by the "All profiles" sidebar toggle.
@@ -6270,8 +6390,13 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
     except KeyError:
         pass
 
-    # Fallback: try to materialize from CLI/agent session metadata
-    cli_meta = _lookup_cli_session_metadata(sid)
+    # Fallback: try to materialize from CLI/agent session metadata.
+    # Active-profile-only: this helper is the shared chokepoint for rename,
+    # regenerate, update, move, prompts, chat-start and anchor scenes.
+    # Opening all-profiles here would let profile A materialize and mutate
+    # profile B's sessions.  The archive handler has its own request-scoped
+    # all-profiles path (#7549, #7731).
+    cli_meta = _resolve_cli_import_metadata(sid)
 
     # Delegated subagent children (#5307) are view-only: their transcript lives
     # in state.db and ownership belongs to the delegate runner, not WebUI. They
@@ -6315,7 +6440,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         # Messaging sessions: lightweight Session with no messages (state.db is source of truth)
         s = Session(
             session_id=sid,
-            title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+            title=cli_meta.get("title") or title_from(get_cli_session_messages(sid, profile=cli_meta.get("profile")), "CLI Session"),
             workspace=get_last_workspace(),
             model=cli_meta.get("model") or "unknown",
             created_at=cli_meta.get("created_at"),
@@ -6325,7 +6450,7 @@ def _get_or_materialize_session(sid: str, *, refresh_cli_messages: bool = False)
         s.save(touch_updated_at=False)
     else:
         # Regular CLI/agent sessions: import full message history
-        msgs = get_cli_session_messages(sid)
+        msgs = get_cli_session_messages(sid, profile=cli_meta.get("profile"))
         if not msgs:
             raise KeyError(sid)
         s = import_cli_session(
@@ -6784,6 +6909,71 @@ def _check_csrf(handler) -> bool:
 _EXTENSION_SIDECAR_PROXY_RE = _re.compile(
     r"^/api/extensions/(?P<extension_id>[^/]+)/sidecar(?:/(?P<proxy_path>.*))?$"
 )
+_EXTENSION_SIDECAR_PROXY_RE_IC = _re.compile(
+    r"^/api/extensions/(?P<extension_id>[^/]+)/sidecar(?:/(?P<proxy_path>.*))?$",
+    _re.IGNORECASE,
+)
+
+
+def _original_api_path(handler, parsed):
+    """Return the request path exactly as received by the server.
+
+    server.py case-folds ``/api/*`` paths for case-insensitive route matching
+    and retains the original-case path on the handler (``_raw_api_path``).
+    Dynamic path captures — share tokens, MCP server names, sidecar proxy
+    paths, opaque IDs — are case-sensitive and must be extracted from the
+    original path, never from the folded matching path. Falls back to
+    ``parsed.path`` when the request did not pass through server.py's
+    normalization (e.g. direct unit-test calls).
+    """
+    raw = getattr(handler, "_raw_api_path", None)
+    return raw if isinstance(raw, str) else parsed.path
+
+
+def _match_api_segments(handler, parsed, template):
+    """Match a fixed-shape /api/ route case-insensitively and return the
+    dynamic capture sliced from the ORIGINAL-case path (#6589 re-gate).
+
+    ``template`` lists every server-owned segment, with ``None`` marking the
+    single dynamic slot that is a case-sensitive capture (session id, board
+    id, …): e.g. ``("api", "sessions", None, "events")``. Static segments are
+    compared case-insensitively, so ``/API/Sessions/AbC/events`` matches the
+    template while still returning ``AbC`` (never the case-folded ``abc``).
+    Returns None when the path shape does not match.
+    """
+    raw = _original_api_path(handler, parsed) or ""
+    parts = raw.strip("/").split("/")
+    if len(parts) != len(template):
+        return None
+    capture = None
+    for i, expected in enumerate(template):
+        if expected is None:
+            capture = parts[i]
+            continue
+        if parts[i].casefold() != str(expected).casefold():
+            return None
+    return capture or None
+
+
+def fold_api_path(handler, parsed):
+    """Case-fold ``/api/*`` paths for route matching; retain the original on the handler.
+
+    Only the *matching* path is folded (``/API/Settings`` dispatches like
+    ``/api/settings``). The original-case path is kept as ``handler._raw_api_path``
+    so handlers slice case-sensitive dynamic values (share tokens, MCP server
+    names, session ids) via ``_original_api_path`` / ``_match_api_segments``.
+    The handler instance is reused across HTTP/1.1 keep-alive requests, so the
+    retained path is reset for EVERY request: a non-API request must never see
+    a stale ``_raw_api_path`` left by an earlier /api/ request (#6589).
+    """
+    handler._raw_api_path = None
+    raw_path = parsed.path
+    if raw_path.casefold().startswith("/api/"):
+        handler._raw_api_path = raw_path
+        return parsed._replace(path=raw_path.casefold())
+    return parsed
+
+
 _HOP_BY_HOP_HEADERS = {
     "connection",
     "keep-alive",
@@ -6950,6 +7140,12 @@ def _handle_extension_sidecar_proxy(
     matched = _match_extension_sidecar_proxy_path(parsed.path)
     if matched is None:
         return False
+    # The sidecar extension id and proxy path are case-sensitive dynamic
+    # values: re-extract them from the original-case request path (see
+    # _original_api_path) instead of the case-folded matching path.
+    raw_matched = _EXTENSION_SIDECAR_PROXY_RE_IC.match(_original_api_path(handler, parsed) or "")
+    if raw_matched:
+        matched = (raw_matched.group("extension_id"), raw_matched.group("proxy_path") or "")
     # Require same-origin browser provenance on EVERY proxied method, not just
     # GET. Browser extensions (the only legitimate caller) always send Origin/
     # Referer/Sec-Fetch-Site, so this costs nothing on the real path while
@@ -7071,21 +7267,24 @@ def _ip_is_loopback_or_private(raw: str):
     return (True, bool(addr.is_loopback or addr.is_private))
 
 
-def _trusted_proxy_networks():
+def _trusted_proxy_networks(include_loopback: bool = True):
     """Networks whose socket peer is allowed to assert a forwarded client IP.
 
-    Loopback is ALWAYS trusted implicitly (the common same-host reverse-proxy
-    deployment). Operators fronting the WebUI with a LAN/remote proxy add its
-    address(es) via HERMES_WEBUI_TRUSTED_PROXY_CIDRS (comma-separated CIDRs or
-    bare IPs). Malformed entries are skipped, never widening trust.
+    Loopback is trusted implicitly (the common same-host reverse-proxy
+    deployment) unless ``include_loopback`` is False. Operators fronting the
+    WebUI with a LAN/remote proxy add its address(es) via
+    HERMES_WEBUI_TRUSTED_PROXY_CIDRS (comma-separated CIDRs or bare IPs).
+    Malformed entries are skipped, never widening trust.
     """
     import ipaddress
 
-    nets = [
-        ipaddress.ip_network("127.0.0.0/8"),
-        ipaddress.ip_network("::1/128"),
-        ipaddress.ip_network("::ffff:127.0.0.0/104"),
-    ]
+    nets = []
+    if include_loopback:
+        nets = [
+            ipaddress.ip_network("127.0.0.0/8"),
+            ipaddress.ip_network("::1/128"),
+            ipaddress.ip_network("::ffff:127.0.0.0/104"),
+        ]
     raw = os.getenv("HERMES_WEBUI_TRUSTED_PROXY_CIDRS", "") or ""
     for token in raw.replace(";", ",").split(","):
         token = token.strip()
@@ -7143,15 +7342,32 @@ def _raw_peer_is_trusted_proxy(handler) -> bool:
     return _ip_in_networks(addr, _trusted_proxy_networks())
 
 
-def _forwarded_client_ip_from_trusted_proxy(handler):
+def _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip: bool = True):
     """Resolve the real client IP from a chain fronted by a trusted proxy.
 
     Precondition: the caller has verified the raw socket peer is a trusted proxy.
     Consumes ALL X-Forwarded-For values (across repeated headers), preserves wire
     order, walks RIGHT-TO-LEFT skipping hops that are themselves trusted-proxy
-    addresses, and returns the first non-trusted (i.e. real-client) hop. Falls
-    back to X-Real-IP, then the raw socket peer. Returns None when the chain is
-    present-but-empty / malformed so the caller fails closed.
+    addresses, and returns the first non-trusted (i.e. real-client) hop. Both the
+    XFF walk's final candidate and the raw-peer fallback are validated with
+    ``ipaddress.ip_address`` and returned in canonical string form — never raw
+    header text.
+
+    ``consult_real_ip`` selects the no-XFF fallback:
+      * ``True`` (default, the plain master behaviour) falls back to ``X-Real-IP``
+        and then the raw peer. The local-origin gate, trusted-header SSO and other
+        consumers that predate #7863 keep exactly the resolution they had.
+      * ``False`` never reads ``X-Real-IP`` at all and goes straight to the raw
+        peer. This is the request-log path only: the structured log is a security
+        boundary (its ``forwarded_for`` feed fail2ban), and ``X-Real-IP`` is a
+        second client-writable header (nginx relays client-supplied values through
+        by default instead of overwriting it), so honoring it there would
+        reintroduce #7863 through a different header.
+
+    The XFF walk is identical either way — the right-most hop was appended by the
+    trusted peer itself, so it carries the same guarantee with or without the
+    fallback. Returns None when the chain is present-but-empty / malformed so
+    callers fail closed.
     """
     import ipaddress
 
@@ -7185,22 +7401,268 @@ def _forwarded_client_ip_from_trusted_proxy(handler):
                 # rather than skip past it (an attacker could inject blanks).
                 return None
             try:
-                ipaddress.ip_address(hop)
+                addr = ipaddress.ip_address(hop)
             except ValueError:
                 # Non-IP token in the chain → malformed → fail closed.
                 return None
             if _is_trusted_hop(hop):
                 continue
-            return hop
+            # Final candidate: canonicalize to its validated string form so the
+            # log's forwarded_for is a normalised address, not raw header text.
+            return str(addr)
         # Every hop was a trusted proxy → no distinct client; treat as the proxy
         # tier itself (loopback/private), i.e. resolve to the raw peer below.
         return _request_client_ip(handler)
 
-    real_ip = handler.headers.get("X-Real-IP", "").strip()
-    if real_ip:
-        return real_ip
-    # No forwarded header at all → the trusted proxy is speaking for itself.
+    # No X-Forwarded-For at all.
+    if consult_real_ip:
+        # Master behaviour, kept for the pre-#7863 consumers (local-origin
+        # gate, trusted-header SSO): a proxy that asserts X-Real-IP is honoured.
+        real_ip = handler.headers.get("X-Real-IP", "").strip()
+        if real_ip:
+            return real_ip
+    # Without a forwarded chain the trusted proxy is speaking for itself. On the
+    # request-log path (consult_real_ip=False) this is also the fail-closed
+    # fallback: no forwarded chain, no forwarded identity.
     return _request_client_ip(handler)
+
+
+def _login_client_ip(handler) -> str:
+    """Client IP that the login rate limiter keys on.
+
+    Behind a reverse proxy the raw socket peer is the proxy, so every user
+    would share one bucket. Consult the forwarded chain only when
+    HERMES_WEBUI_TRUST_FORWARDED_FOR=1 and the raw peer is listed in
+    HERMES_WEBUI_TRUSTED_PROXY_CIDRS. Implicit loopback trust is not enough:
+    a direct loopback or SSH-tunnel client could otherwise send a new
+    X-Forwarded-For on every attempt. Listing a loopback address in
+    HERMES_WEBUI_TRUSTED_PROXY_CIDRS trusts every local client (an SSH tunnel,
+    another local process) exactly like the proxy, because the address cannot
+    tell a same-host proxy from a same-host client.
+
+    When both X-Forwarded-For and X-Real-IP are present they must resolve to the
+    same address. Otherwise the proxy is passing the client's own
+    X-Forwarded-For through and the client could pick its bucket. Every field
+    of both headers is checked, as the resolver reads them all: fall back to the
+    raw peer when they differ, a field is empty, X-Real-IP is repeated with
+    different values, or a value is not an IP address.
+    """
+    import ipaddress
+
+    def _fields(name):
+        try:
+            return [str(v) for v in handler.headers.get_all(name) or []]
+        except AttributeError:
+            single = handler.headers.get(name)
+            return [single] if single is not None else []
+
+    if _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR"):
+        try:
+            peer = ipaddress.ip_address(_request_client_ip(handler))
+            if _ip_in_networks(peer, _trusted_proxy_networks(include_loopback=False)):
+                client = ipaddress.ip_address(_forwarded_client_ip_from_trusted_proxy(handler))
+                xff = _fields("X-Forwarded-For")
+                real_ips = {ipaddress.ip_address(v.strip()) for v in _fields("X-Real-IP")}
+                if all(v.strip() for v in xff) and real_ips <= {client}:
+                    return str(client)
+        except ValueError:
+            pass
+    return _client_ip_for_rate_limit(handler)
+
+
+_FORWARDED_HEADER_IGNORED_WARNED = False
+_FORWARDED_HEADER_IGNORED_LOCK = threading.Lock()
+
+
+def _has_forwarded_header(handler) -> bool:
+    """True when the request carries a non-blank ``X-Forwarded-For``.
+
+    #7864 round 4 (nesquena-hermes review): the one-shot operator warning is
+    process-wide, so it must be spent on the case it exists to explain — an
+    ``X-Forwarded-For`` that the request log stopped recording. That is the
+    ONLY header the log ever recorded, so it is the only one whose loss needs
+    announcing. Counting ``X-Real-IP`` here let a stray client, scanner or
+    misconfigured LB carrying only that header burn the single warning (and
+    mislabel it: no X-Forwarded-For was ever sent) while the operator's real
+    proxy request stayed silent. This path resolves with
+    ``consult_real_ip=False`` and never consults ``X-Real-IP`` at all, so the
+    header is not a signal for anything on the log path.
+
+    Repeated ``X-Forwarded-For`` headers all count (``get_all``), matching the
+    consumption in ``_forwarded_client_ip_from_trusted_proxy``: a proxy that
+    splits the chain across two headers has still lost the field, and the
+    resolver reads every one of them.
+
+    Presence check only — the value is never read, returned or logged here:
+    it is attacker-controlled text and this module must stay a
+    non-log-writing consumer of it.
+    """
+    try:
+        values = handler.headers.get_all("X-Forwarded-For") or []
+    except AttributeError:
+        # Test/lightweight handlers expose a plain mapping without get_all.
+        try:
+            single = handler.headers.get("X-Forwarded-For", "")
+        except AttributeError:
+            return False
+        values = [single] if single else []
+    for value in values:
+        if str(value or "").strip():
+            return True
+    return False
+
+
+def _warn_forwarded_header_ignored(handler) -> None:
+    """Emit ONE process-wide warning when an ``X-Forwarded-For`` is ignored.
+
+    #7864 round 3 (nesquena-hermes review): ignoring the untrusted header is
+    the correct security behaviour, but on the default deployment a reverse
+    proxy on a Docker bridge or a LAN address is NOT an allowlisted trusted
+    proxy — so ``forwarded_for`` silently disappears from the request log and a
+    fail2ban jail keyed on it stops matching with nothing in the log saying
+    why. The behaviour change is right; the silence is the bug.
+
+    So warn — but only once per process (rate-limited by construction) and
+    never echo the untrusted header value itself: it is attacker-controlled
+    text, and writing it to the log would be an unbounded log-write vector.
+    Name the peer address and the fix (``HERMES_WEBUI_TRUSTED_PROXY_CIDRS``,
+    plus ``HERMES_WEBUI_TRUST_FORWARDED_FOR`` when unset) instead.
+    """
+    global _FORWARDED_HEADER_IGNORED_WARNED
+    with _FORWARDED_HEADER_IGNORED_LOCK:
+        if _FORWARDED_HEADER_IGNORED_WARNED:
+            return
+        _FORWARDED_HEADER_IGNORED_WARNED = True
+    peer = _request_client_ip(handler) or "unknown"
+    trust_forwarded = _truthy_env("HERMES_WEBUI_TRUST_FORWARDED_FOR")
+    cure = "HERMES_WEBUI_TRUSTED_PROXY_CIDRS"
+    if not trust_forwarded:
+        cure = (
+            "HERMES_WEBUI_TRUST_FORWARDED_FOR=1 and "
+            "HERMES_WEBUI_TRUSTED_PROXY_CIDRS"
+        )
+    logger.warning(
+        "[webui] request-log: an X-Forwarded-For header from peer %s was "
+        "ignored (the header is not recorded). The peer is not a trusted "
+        "proxy, so the request log records no forwarded_for field for it. If "
+        "a proxy on this path should supply the client IP, add the peer "
+        "address to %s.",
+        peer,
+        cure,
+    )
+
+
+def request_log_forwarded_fields(handler) -> dict:
+    """Per-request log fields describing what the log did with X-Forwarded-For.
+
+    #7864 round 5 (nesquena-hermes review): the one-shot operator warning is
+    PROCESS-WIDE, so it can only ever explain ONE peer. On an exposed instance
+    any internet client can send its own ``X-Forwarded-For`` and spend it on
+    the first random request; the operator's unallowlisted proxy — the request
+    whose ``forwarded_for`` field actually disappeared — is then never named.
+    One warning line structurally cannot carry that.
+
+    So the warning stays, AND every structured record that dropped an XFF
+    carries ``forwarded_for_ignored: true``. A fail2ban jail or log query can
+    then see exactly which requests lost the field, per request.
+
+    CONTRACT:
+    * the value is a BOOLEAN signal only — the untrusted header text is never
+      read, returned or logged (attacker-controlled, and echoing it would be an
+      unbounded log-write vector). There is deliberately no way to recover the
+      dropped value from this module.
+    * ``forwarded_for`` is present (a validated client address) only when the
+      raw peer is a trusted proxy and the chain resolved; ``forwarded_for_ignored``
+      is present only when a non-blank XFF was seen and NOT recorded. They are
+      mutually exclusive: a resolved field is never also flagged as ignored.
+    * a direct client with no forwarded header gets NEITHER key, so the common
+      case stays byte-identical to master's log line.
+    * the flag is emitted from BOTH branches. Round 6 (nesquena-hermes review,
+      SILENT) covered only the untrusted-peer side; a TRUSTED proxy whose chain
+      does not resolve produced neither key just as silently. See the trusted
+      branch below for the cases.
+
+    Lives here (not inline in server.py) to keep the entrypoint under its
+    760-line guard — see tests/test_sprint10.py.
+    """
+    remote = _request_client_ip(handler)
+    if not _raw_peer_is_trusted_proxy(handler):
+        # #7864 round 3: an untrusted peer's forwarded header is ignored — the
+        # correct fail-closed outcome, but on the default deployment (a proxy
+        # on a Docker bridge / LAN address) it silently drops the log's
+        # forwarded_for field. Warn once per process so an operator whose
+        # fail2ban jail stops matching can see why; flag the record so the
+        # other peers that lose the field are still visible per request.
+        if not _has_forwarded_header(handler):
+            return {}
+        _warn_forwarded_header_ignored(handler)
+        return {"forwarded_for_ignored": True}
+    resolved = _forwarded_client_ip_from_trusted_proxy(handler, consult_real_ip=False)
+    # An IPv6 zone id ("fe80::1%eth0") is free-form text that ipaddress keeps
+    # verbatim and that means nothing off-host, so a scoped address would put
+    # header text in forwarded_for. Treat it as unresolved (flagged below).
+    if resolved and resolved != remote and "%" not in resolved:
+        return {"forwarded_for": resolved}
+    # #7864 round 6 (nesquena-hermes review, SILENT): the trusted branch used to
+    # return a bare {} here, so a TRUSTED proxy that produced no address emitted
+    # a record with NEITHER key — exactly the silence this function exists to
+    # prevent, one branch over. On master the first row of each pair below still
+    # logged a forwarded_for (master recorded the raw left-most XFF hop for any
+    # peer), so an operator's fail2ban jail keyed on that field silently stopped
+    # matching these requests with nothing to show for it:
+    #
+    #   XFF "198.51.100.23"      -> {'forwarded_for': '198.51.100.23'}   (resolves)
+    #   XFF "198.51.100.23,"     -> {}  -> now {'forwarded_for_ignored': True}
+    #   XFF "," or " , "         -> {}  -> now {'forwarded_for_ignored': True}
+    #   XFF "not-an-ip"          -> {}  -> now {'forwarded_for_ignored': True}
+    #   XFF "198.51.100.23, garbage" -> {} -> now {'forwarded_for_ignored': True}
+    #
+    # A trailing comma is a real-world proxy shape, so this is not a contrived
+    # input. The key is identical in both branches for the same reason: the
+    # BOOLEAN, never the value (it is attacker-controlled text either way — a
+    # trusted peer can relay a client's malformed chain verbatim).
+    if not _has_forwarded_header(handler):
+        # No XFF at all: nothing was dropped, so there is nothing to flag. This
+        # is the plain direct-to-proxy request that master recorded as one peer
+        # address, and it must stay byte-identical to master's line.
+        return {}
+    return {"forwarded_for_ignored": True}
+
+
+def trusted_forwarded_client_ip(handler) -> str | None:
+    """Resolved, validated client IP for the request log, or None.
+
+    Thin wrapper over :func:`request_log_forwarded_fields` for callers that
+    only want the address. ``log_request`` uses the dict form so a dropped
+    XFF is visible per request (#7864 round 5).
+
+    #7863: the structured request log must never record a spoofable client IP.
+    The left-most X-Forwarded-For hop is attacker-controlled, so a forwarded IP
+    is asserted only when the RAW socket peer is a trusted proxy (loopback or
+    allowlisted); the chain then resolves right-to-left. Direct clients fail
+    closed (no field at all), and a resolution that merely echoes the raw peer
+    is suppressed as redundant.
+
+    CONTRACT: the value written to the log's ``forwarded_for`` field is a
+    resolved, validated client address — canonical (``ipaddress.ip_address``
+    string form), NOT the raw left-most header text. It is derived
+    EXCLUSIVELY from the right-to-left X-Forwarded-For resolution: this path
+    resolves with ``consult_real_ip=False``, so the log never reads
+    ``X-Real-IP`` (any client can send it, and nginx relays it through by
+    default), and a trusted peer cannot smuggle an arbitrary address into the
+    log through that header, nor through any header-only path at all.
+    Malformed/incomplete XFF chains yield None (field omitted), so downstream
+    fail2ban-style consumers never see unvalidated or syntactically-invalid data.
+
+    Scope note: the XFF-only rule above is a property of THIS request-log
+    boundary, deliberately narrower than the shared resolver's default. Other
+    consumers (the local-origin gate, trusted-header auth) keep master's
+    ``X-Real-IP`` fallback via the default ``consult_real_ip=True``.
+
+    Kept here (not inline in server.py) so the process entrypoint stays under
+    its line guard — see tests/test_sprint10.py.
+    """
+    return request_log_forwarded_fields(handler).get("forwarded_for")
 
 
 def _onboarding_request_is_local(handler) -> bool:
@@ -8378,6 +8840,108 @@ def _ordered_custom_provider_model_ids(entry: dict) -> list[str]:
     return ordered
 
 
+def _custom_provider_allowlist_ids(_cp: dict) -> list[str]:
+    """Plural ``models`` list only — the explicit allowlist signal.
+
+    The singular ``model`` field is sticky/default metadata, NOT an
+    allowlist: it must not gate live-catalog filtering, otherwise a
+    provider configured with only ``model: assistant`` (no ``models``
+    list) would be collapsed to a single model.  Only an explicit
+    ``models`` allowlist expresses "show exactly these models".
+
+    An auto-discovered catalog is NOT an allowlist: when Hermes
+    persisted discovery results back into config (``models: {...}``
+    plus ``models_discovered: true``), that mapping is a snapshot
+    of what the gateway exposed at discovery time.  Gating on it
+    would permanently pin the live catalog to the first-discovery
+    set, silently dropping any model the user pulls in later
+    (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
+    is the shared predicate the ``/api/models`` path already uses;
+    when it says "discovered", return no allowlist and let the
+    live probe win.  An explicit ``discover_models: false`` opt-out
+    re-pins the catalog (the predicate accounts for it), so a
+    hand-pinned discovered catalog still filters.
+
+    A dict-shaped ``models`` mapping that is NOT marked discovered is
+    *per-model metadata* written by the Hermes Agent setup flow
+    (``hermes_cli/model_switch.py::_save_custom_provider`` and the
+    setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
+    not a catalog narrow: treating its keys as an allowlist would
+    collapse the live picker to the single saved default (keyless
+    Ollama) while the CLI live-probe shows the full catalog.  Only an
+    explicit ``discover_models: false`` opts into treating the dict
+    keys as a pinned allowlist.  List/JSON-array-string/Python-literal
+    shapes remain plain allowlists.
+
+    The plural value is decoded through ``_parse_config_string_list()``
+    because ``hermes config set`` / JSON-mode editor saves persist
+    lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
+    Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
+    made a serialized allowlist fall through to ``[]``, which the
+    caller reads as "no allowlist configured" and floods the picker
+    with the full upstream catalog — the same class of bug as the
+    ``skills.disabled`` regression (#7120 / #7134).
+    """
+    from api.config import (
+        _provider_discover_allowed,
+        _provider_models_are_discovered_catalog,
+    )
+
+    if _provider_models_are_discovered_catalog(_cp):
+        return []
+    _ids = []
+    _models = _cp.get("models")
+    # Serialized shapes only: ``hermes config set`` / JSON-mode
+    # editor saves persist lists as quoted JSON-array strings
+    # (``'["chat-a","chat-b"]'``) or Python literals
+    # (``"['chat-a']"``).  Decode the array itself (JSON first, then a
+    # Python literal) and walk it below, so mapping members keep their
+    # id|model|name metadata; the shared decoder str()-ifies members
+    # (``"{'id': 'a'}"``).  Anything else goes through
+    # ``_parse_config_string_list()`` as before.
+    if isinstance(_models, str):
+        import ast
+
+        _decoded = None
+        _stripped = _models.strip()
+        if _stripped.startswith("["):
+            try:
+                _decoded = json.loads(_stripped)
+            except ValueError:
+                try:
+                    _decoded = ast.literal_eval(_stripped)
+                except (ValueError, SyntaxError, TypeError, MemoryError, RecursionError):
+                    _decoded = None
+        if isinstance(_decoded, list):
+            _models = _decoded
+        else:
+            _models = _parse_config_string_list(_models)
+    if isinstance(_models, dict):
+        # A dict-shaped ``models`` is per-model metadata written by
+        # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
+        # ``discover_models: false`` opt-out treats the dict keys as a
+        # pinned allowlist; otherwise return the empty allowlist so the
+        # live probe returns the full catalog.
+        if _provider_discover_allowed(_cp):
+            return []
+        for _mid in _models:
+            # Pre-fix Hermes wrote these sentinels inside the mapping;
+            # skip them like the Agent's ``_declared_model_ids``.
+            if _mid in ("__explicit_model_allowlist__", "__discovered_model_catalog__"):
+                continue
+            if isinstance(_mid, str) and _mid.strip():
+                _ids.append(_mid.strip())
+    elif isinstance(_models, (list, tuple)):
+        for _item in _models:
+            if isinstance(_item, str) and _item.strip():
+                _ids.append(_item.strip())
+            elif isinstance(_item, dict):
+                _mid = _item.get("id") or _item.get("model") or _item.get("name")
+                if _mid and str(_mid).strip():
+                    _ids.append(str(_mid).strip())
+    return _ids
+
+
 def _repair_bare_custom_provider_model(
     bare_model: str,
     provider: str | None,
@@ -8440,6 +9004,91 @@ def _repair_bare_custom_provider_model(
         return None
 
 
+def _repair_removed_qualified_custom_provider_model(
+    model: str,
+    provider: str | None,
+    *,
+    config_obj: dict | None,
+    profile: str | None = None,
+) -> str | None:
+    """Move a removed named-custom model to that provider's pinned list.
+
+    The target is the configured default when it's in the pinned list,
+    otherwise the first pinned model. A session on the configured default
+    (``${VAR}`` expanded with ``profile``'s env) is kept even outside the
+    list, since the picker still offers it. Only a pinned allowlist (``_custom_provider_allowlist_ids``) can prove a
+    model was removed: a discovered catalog snapshot or dict-shaped metadata
+    may omit models the live probe still serves. Needs the session's own
+    profile config; ``None`` is ambiguous (no profile, unreadable profile, or
+    a caller that doesn't pass one) and the shared ``cfg`` may belong to
+    another profile, so it never repairs from it. Colliding slugs fail closed.
+    """
+    prov = _clean_session_model_provider(provider)
+    bare_model, qualified_provider = _split_provider_qualified_model(model)
+    if (
+        not isinstance(config_obj, dict)
+        or not prov
+        or not prov.startswith("custom:")
+        or qualified_provider != prov
+    ):
+        return None
+
+    from api.config import (
+        AmbiguousCustomProviderError,
+        _custom_provider_slug_key,
+        _unique_custom_provider_entry,
+    )
+
+    try:
+        entry = _unique_custom_provider_entry(
+            config_obj.get("custom_providers"),
+            _custom_provider_slug_key(prov),
+        )
+    except AmbiguousCustomProviderError:
+        return None
+    if not entry:
+        return None
+    pinned = _custom_provider_allowlist_ids(entry)
+    raw_models = entry.get("models")
+    if (
+        isinstance(raw_models, str)
+        and raw_models.strip().startswith("[")
+        and pinned == [raw_models.strip()]
+    ):
+        # Serialized list that failed to decode: not proof of anything.
+        # A plain single-model string is still a valid one-model allowlist.
+        return None
+    if any("${" in item for item in pinned):
+        # Unresolved env reference: the raw profile YAML isn't the real ID.
+        return None
+
+    def _own_bare(item: str) -> str:
+        # Unwrap only this provider's own wrapper; ``@safe:x`` is a real ID.
+        bare, item_provider = _split_provider_qualified_model(item)
+        return bare if item_provider == prov else item
+
+    pinned_bare = [_own_bare(item) for item in pinned]
+    if not pinned or bare_model in pinned_bare:
+        return None
+    default_raw = str(entry.get("model") or "").strip()
+    if "${" in default_raw:
+        # Expand with the session profile's env, root included (read-only,
+        # fail-closed); left unresolved, it falls back to the pinned list.
+        from api.config import _expand_env_vars
+        from api.profiles import profile_env_for_thread_readonly
+
+        with profile_env_for_thread_readonly(
+            profile or "", "custom provider default", include_root=True,
+        ):
+            default_raw = _expand_env_vars(default_raw).strip()
+    default_bare = _own_bare(default_raw)
+    # The singular default stays a picker entry even outside ``models``.
+    if bare_model == default_bare:
+        return None
+    replacement = default_bare if default_bare in pinned_bare else pinned_bare[0]
+    return f"@{prov}:{replacement}"
+
+
 def _moa_fast_path_model_state(model: str) -> tuple[str, str, bool]:
     """Strip an optional ``@moa:``/``moa/`` prefix from an MoA-routed model.
 
@@ -8466,6 +9115,7 @@ def _resolve_compatible_session_model_state(
     profile_config: dict | None = None,
     explicit_model_pick: bool = False,
     prefer_cached_catalog: bool = False,
+    profile: str | None = None,
 ) -> tuple[str, str | None, bool]:
     """Return (effective_model, effective_provider, model_was_normalized).
 
@@ -8503,6 +9153,25 @@ def _resolve_compatible_session_model_state(
     if model and requested_provider == "moa":
         return _moa_fast_path_model_state(model)
     if model and requested_provider and model.startswith(f"@{requested_provider}:"):
+        # A fresh explicit pick is never second-guessed as stale.
+        repaired_model = None if explicit_model_pick else _repair_removed_qualified_custom_provider_model(
+            model,
+            requested_provider,
+            config_obj=profile_config,
+            profile=profile,
+        )
+        if repaired_model:
+            return repaired_model, requested_provider, True
+        if (
+            requested_provider.startswith("custom:")
+            and _split_provider_qualified_model(model)[1] == requested_provider
+        ):
+            # Keeping a pick rewrites nothing, so a session without a profile
+            # config may check the active config (repair above may not).
+            from api.config import _named_custom_provider_slug_for_provider
+
+            if _named_custom_provider_slug_for_provider(requested_provider, profile_config):
+                return model, requested_provider, False
         try:
             from api.config import cfg as _active_cfg
 
@@ -8918,6 +9587,7 @@ def _resolve_effective_session_model_for_display(session) -> str:
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(session, "profile", None),
         # GET /api/session is a hot, side-effect-free per-tab/per-poll path.
         # It must never pay the cold live provider-catalog rebuild (a
         # botocore IMDS probe that cannot resolve on a non-AWS / WSL / corp
@@ -8942,6 +9612,7 @@ def _resolve_effective_session_model_provider_for_display(session) -> str | None
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(session, "profile", None),
         # See _resolve_effective_session_model_for_display: same hot
         # side-effect-free GET /api/session path; must not trigger the cold
         # live rebuild. prefer_cached_catalog resolves from warm/disk cache
@@ -9223,12 +9894,22 @@ def _lookup_gateway_session_identity(session_id: str) -> dict:
     return metadata if isinstance(metadata, dict) else {}
 
 
+# Sources kept out of the default projection with no bounded pass of their own.
+# A session the user explicitly opens from one of them is resolved by id, so it
+# stays reachable however many newer runs exist (#8265 review on #8349).
+_CLI_LOOKUP_FALLBACK_SOURCES = ("oneshot",)
+
+
 def _lookup_cli_session_metadata(session_id: str, *, all_profiles: bool = False) -> dict:
     if not session_id:
         return {}
     try:
         for row in get_cli_sessions(all_profiles=all_profiles):
             if row.get("session_id") == session_id:
+                return row
+        for source in _CLI_LOOKUP_FALLBACK_SOURCES:
+            row = get_cli_session_by_id(session_id, source, all_profiles=all_profiles)
+            if row:
                 return row
     except Exception:
         return {}
@@ -9332,6 +10013,62 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     session (#5307).
     """
     return _state_db_session_source(sid) == "subagent"
+
+
+def _project_session_draft_write(write: dict, current_draft: dict) -> dict:
+    """Apply a ``/api/session/draft`` write to the stored draft.
+
+    #7855 CORE (round 6): the goal-continuation token is PART of the draft, so
+    it is written and cleared by exactly the same rules as the text:
+
+    - a non-empty ``goal_continuation_id`` is stored alongside the text it
+      belongs to;
+    - an explicitly EMPTY string clears it (the draft was edited, abandoned or
+      submitted);
+    - an absent field (``None``) leaves the stored token alone, so a plain
+      keystroke auto-save does not drop it.
+
+    Persisting the text without this is what made a reload between a failed
+    continuation start and its retry restore the words and lose the token — the
+    retry then posted ``goal_continuation_id: None`` and start admission scored
+    it ``goal_related=false``.
+    """
+    next_draft = dict(current_draft or {})
+    text = write.get("text")
+    files = write.get("files")
+    token = write.get("goal_continuation_id")
+    if text is not None:
+        next_draft["text"] = text
+    if files is not None:
+        next_draft["files"] = files
+    if token is not None:
+        if token:
+            next_draft["goal_continuation_id"] = token
+        else:
+            next_draft.pop("goal_continuation_id", None)
+    else:
+        # #7855 CORE (round 7, MUST-FIX 1): a keystroke changes the text the
+        # token is bound to, so "the user has not touched the token" is not a
+        # reason to keep it. The keystroke autosave (static/boot.js -> static/
+        # sessions.js) and the session-switch save never send the field, and
+        # the old absent-field rule then stored the user's edited text next to
+        # the stale token. Restoring that pair on reload and sending it posted
+        # the edited text WITH the continuation id, so a genuine turn consumed
+        # the real continuation record (the #6885 bug this PR exists to fix).
+        #
+        # When the stored draft's text changed, the token no longer describes
+        # it: drop it. An unchanged text (a plain re-save of the same draft)
+        # keeps it, which is the case the absent-field rule was written for.
+        # Pending records have no TTL (api/goals.py), so nothing else expires
+        # the stale binding.
+        _stored_text = (current_draft or {}).get("text")
+        if (
+            "goal_continuation_id" in next_draft
+            and text is not None
+            and text != _stored_text
+        ):
+            next_draft.pop("goal_continuation_id", None)
+    return next_draft
 
 
 def _session_is_subagent_view_only(sid: str) -> bool:
@@ -11406,6 +12143,30 @@ def _is_api_server_sidecar_row(session: dict) -> bool:
     return bool(markers & {"api", "api_server"})
 
 
+def _is_desktop_sidecar_row(session: dict) -> bool:
+    """Return True for Desktop-origin sidecars that need orphan pruning.
+
+    A conversation created in Hermes Desktop gets a WebUI-owned sidecar the
+    first time it is opened in the WebUI. If the user later deletes it from the
+    Desktop app, the ``state.db`` row disappears but the sidecar stays, so the
+    row lingers in the sidebar forever.
+
+    Such a row matches neither ``is_cli_session_row()`` (Desktop is not CLI and
+    its source marker is not ``cli``/``tui``) nor ``_is_api_server_sidecar_row()``
+    (Desktop is not API-server), so the #3238 existence probe never inspected it
+    and no prune path could reach it. Existence is still decided by
+    ``agent_session_rows_existing()``, which fails closed to "all present", so a
+    transient ``state.db`` read error never prunes a live Desktop session.
+    """
+    if not isinstance(session, dict) or _session_source_is_webui(session):
+        return False
+    markers = {
+        _normalized_source_marker(session.get(key))
+        for key in ("source", "source_tag", "raw_source", "session_source", "source_label")
+    }
+    return "desktop" in markers
+
+
 def _session_lineage_ids(session: dict) -> set[str]:
     """Return known ids that identify one logical sidebar lineage."""
     if not isinstance(session, dict):
@@ -11777,6 +12538,7 @@ def _keep_latest_messaging_session_per_source(
 
 from api.models import (
     Session,
+    get_cli_session_by_id,
     get_session,
     get_session_profile_readonly,
     get_session_for_scan,
@@ -11815,16 +12577,20 @@ from api.models import (
     _session_messages_have_prefix,
     _session_message_visible_key,
     _message_timestamp_as_float,
+    _persisted_session_meta_prefix,
     _is_empty_partial_activity_message,
     _hide_from_default_sidebar,
     prune_session_from_index,
     agent_session_rows_existing,
+    agent_session_rows_existing_strict,
     agent_session_zero_message_sids,
     _load_webui_zero_message_orphan_tombstone,
     _record_webui_zero_message_orphan_tombstone,
     _clear_webui_zero_message_orphan_tombstone,
     _load_webui_deleted_session_tombstone,
     _record_webui_deleted_session_tombstone,
+    _save_session_draft,
+    _delete_session_draft,
     ensure_cron_project,
     _profile_has_user_projects,
     is_cron_session,
@@ -12016,6 +12782,81 @@ def _pre_compression_continuation_session_id(session) -> str | None:
     rows.extend(_child_rows_from_sidecars(memory_seen_ids))
     return _resolve_from_rows(rows)
 
+
+def _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile) -> bool:
+    """Confirm one bounded compression edge from current on-disk metadata."""
+    snapshot_meta = _persisted_session_meta_prefix(snapshot_sid)
+    continuation_meta = _persisted_session_meta_prefix(continuation_sid)
+    return bool(
+        snapshot_meta
+        and continuation_meta
+        and _profiles_match(snapshot_meta.get("profile"), request_profile)
+        and snapshot_meta.get("pre_compression_snapshot")
+        and _safe_first(snapshot_meta.get("pre_compression_continuation_session_id"))
+        == continuation_sid
+        and _profiles_match(continuation_meta.get("profile"), request_profile)
+        and _safe_first(continuation_meta.get("parent_session_id")) == snapshot_sid
+    )
+
+
+def _draft_pre_compression_continuation_session_authority(
+    session,
+    *,
+    request_profile,
+    seen_authority_sids: set[str],
+    validated_edges: list[tuple[str, str]] | None = None,
+) -> tuple[str | None, str]:
+    """Validate one authoritative compression transition from a snapshot.
+
+    Returns:
+        (next_session, next_sid) when a validated transition exists.
+        (None, best_known_sid) when authority cannot be confirmed.
+    """
+    snapshot_sid = _safe_first(getattr(session, "session_id", None))
+    if not snapshot_sid or not is_safe_session_id(snapshot_sid):
+        return None, snapshot_sid
+
+    continuation_sid = _safe_first(
+        getattr(session, "pre_compression_continuation_session_id", None)
+    )
+    if not continuation_sid or not is_safe_session_id(continuation_sid):
+        return None, snapshot_sid
+    if continuation_sid in seen_authority_sids:
+        return None, continuation_sid
+
+    # Cached session freshness is message-count based and can miss a
+    # profile- or parent-only edit. Check only the bounded metadata prefixes.
+    if not _draft_compression_edge_is_authorized(
+        snapshot_sid, continuation_sid, request_profile
+    ):
+        return None, continuation_sid
+
+    try:
+        continuation_session = get_session(continuation_sid)
+    except KeyError:
+        return None, continuation_sid
+
+    if not _profiles_match(
+        getattr(continuation_session, "profile", None), request_profile
+    ):
+        return None, continuation_sid
+
+    if _safe_first(getattr(continuation_session, "parent_session_id", None)) != snapshot_sid:
+        return None, continuation_sid
+
+    if validated_edges is not None:
+        validated_edges.append((snapshot_sid, continuation_sid))
+
+    return continuation_session, continuation_sid
+
+
+def _draft_compression_edges_still_authorized(edges, request_profile) -> bool:
+    """Recheck each bounded lineage edge after acquiring the final target lock."""
+    return all(
+        _draft_compression_edge_is_authorized(snapshot_sid, continuation_sid, request_profile)
+        for snapshot_sid, continuation_sid in edges
+    )
+
 from api.workspace import (
     load_workspaces,
     save_workspaces,
@@ -12066,6 +12907,7 @@ from api.streaming import (
     _sse_set_write_deadline,
     _run_agent_streaming,
     _provider_routing_kwargs_for_agent,
+    _producer_committed_compression,
     cancel_stream,
     _materialize_pending_user_turn_before_error,
     generate_session_title_for_session,
@@ -12080,11 +12922,14 @@ from api.run_journal import (
     bound_run_journal_snapshot_args,
     find_run_file,
     find_run_summary,
+    journal_replay_prompt_visible,
     journal_replay_visible,
     read_run_events,
     read_session_run_events,
     session_journal_fingerprint,
+    settled_prompt_events,
     stale_interrupted_event,
+    terminal_settled_prompt_events,
     SSE_RELAY_CLOSE_EVENTS,
 )
 from api.todo_state import attach_todo_state
@@ -12130,6 +12975,7 @@ from api.route_approvals import (  # noqa: F401 — re-exports for backward comp
     _approval_sse_notify_locked,
     _approval_sse_notify,
     _GATEWAY_AGENT_IDENTITY_V1,
+    _GATEWAY_EXECUTION_GENERATION,
     _GATEWAY_MIRROR_FLAG,
     _GATEWAY_MIRROR_TOKEN,
     _gateway_mirror_entry_token,
@@ -13189,21 +14035,355 @@ def _handle_llm_wiki_status(handler, parsed) -> bool:
 def _handle_insights(handler, parsed) -> bool:
     """Return usage analytics from local WebUI session data."""
     import collections
+    import math as _math
     import time as _time
+    from datetime import datetime as _datetime, timedelta as _timedelta
 
     from api.usage import prompt_cache_hit_percent
 
-    query = parse_qs(parsed.query)
-    try:
-        days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
-    except (ValueError, TypeError):
-        days = 30
+    # keep_blank_values: parse_qs() DROPS empty values by default, so a blank
+    # bound (`start=2026-05-01&end=`) looked ABSENT here and the documented
+    # fail-closed check below never saw it - the request was then served as a
+    # custom [start, now] window (the blank `end` silently defaulted to "now")
+    # instead of the trailing window a malformed input must fall back to.  With
+    # blanks preserved, `_window_ts` rejects them the same way it rejects an
+    # unparseable value, so BOTH bounds fall back together (Greptile P1
+    # 2026-10-10T03:29:18Z: "Blank bounds change the range").
+    query = parse_qs(parsed.query, keep_blank_values=True)
 
+    def _window_ts(vals):
+        # Parse one time-window endpoint.  Returns (kind, ts) where kind is
+        # 'date' (a YYYY-MM-DD calendar string, ts = local midnight of that
+        # day) or 'num' (Unix epoch seconds, ts = the exact float), or None
+        # when absent/invalid.  PROVENANCE MATTERS: a date string selects a
+        # whole calendar day (its bound is a local midnight), while a numeric
+        # endpoint is an EXACT point in time and must keep its precision -
+        # it is never rounded down to the day's midnight nor widened to the
+        # next one (Greptile P1: 'Numeric Unix endpoints retain precision
+        # only on one special date').
+        if not vals:
+            return None
+        v = vals[0]
+        if not isinstance(v, str):
+            return None
+        v = v.strip()
+        if not v:
+            return None
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            try:
+                y, mo, d = map(int, v.split("-"))
+                ts = _time.mktime((y, mo, d, 0, 0, 0, 0, 0, -1))
+                # Reject impossible calendar dates (e.g. 2026-02-31):
+                # mktime silently normalizes them to another day, which
+                # would return analytics for the wrong interval.  A
+                # round-trip must land back on the requested local
+                # midnight, otherwise the value is invalid -> fall back.
+                lt = _time.localtime(ts)
+                if (lt.tm_year, lt.tm_mon, lt.tm_mday) != (y, mo, d):
+                    return None
+                return ("date", ts)
+            except (OverflowError, ValueError, OSError):
+                return None
+        # Numeric epoch seconds.
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return None
+        if not _math.isfinite(f):
+            return None
+        return ("num", f)
+
+    # Absolute time-window mode: start/end Unix timestamps (seconds) or
+    # YYYY-MM-DD date strings.  end defaults to "now"; start defaults to 30
+    # days before end.  Falls back to trailing `days`-window mode when neither
+    # is present.
+    start_meta = _window_ts(query.get("start", []))
+    end_meta = _window_ts(query.get("end", []))
+    # A SUPPLIED-but-invalid endpoint must fail closed to the trailing
+    # window, not masquerade as an OMITTED one: `_window_ts` returns None
+    # for both absent and unparseable values, and the omitted-endpoint
+    # defaults (30 days before end; end = now) would fabricate a custom
+    # interval the caller never requested when the endpoint was actually
+    # supplied but unparseable (e.g. 2026-02-31, rejected by the calendar
+    # round-trip check).  This applies symmetrically to BOTH bounds: an
+    # invalid SUPPLIED start used to invent a 30-days-before-end window,
+    # and an invalid SUPPLIED end still widens a valid start through the
+    # current server time into a fabricated [start, now] interval (Greptile
+    # P1: "Invalid start invents custom range"; 2026-08-17 re-review: a
+    # valid start plus an impossible end).  Reject the whole custom request
+    # so the response reports the trailing window actually served.
+    if ("start" in query and start_meta is None) or ("end" in query and end_meta is None):
+        start_meta = None
+        end_meta = None
+    start_kind = start_meta[0] if start_meta else None
+    end_kind = end_meta[0] if end_meta else None
+    start_ts_v = start_meta[1] if start_meta else None
+    end_ts_v = end_meta[1] if end_meta else None
+    # Platform-range guard for SUPPLIED endpoints, BEFORE any calendar
+    # arithmetic runs.  A pre-epoch calendar date is a perfectly valid
+    # YYYY-MM-DD string (Chromium's <input type=date> submits 0001-01-15
+    # happily) and yields a huge negative epoch.  The end-only default below
+    # then evaluates `date - 30 days` from date.min and raises
+    # `OverflowError: date value out of range` -> HTTP 500.  Reject any
+    # supplied PRE-EPOCH endpoint here (no session predates 1970) and fail
+    # closed to the trailing `days` window - the same fallback an unparseable
+    # endpoint already gets - so no downstream localtime()/mktime()/date
+    # arithmetic can ever see a pre-epoch value.  A supplied endpoint ABOVE
+    # the ceiling is deliberately NOT rejected here: `min(end, now)` clamps a
+    # future end and the post-arithmetic range check below already falls back
+    # for an absurd start, so the documented "valid start + huge end" window
+    # (start..now) keeps working.
+    _PLATFORM_MIN_TS = 0           # 1970-01-01 local (no sessions predate it)
+    # The DERIVED start of an end-only DATE request needs the SAME guard.  An
+    # `end=1970-01-15` is itself >= 0, so the supplied-endpoint check below
+    # cannot see that its implicit `end - 30 calendar days` start lands on
+    # 1969-12-16 - and mktime() on that pre-epoch day raises on Windows BEFORE
+    # the post-arithmetic range check can fall back, so /api/insights answered
+    # HTTP 500 instead of the trailing window (Greptile P1: 'Derived start
+    # bypasses platform guard').  Probe the derivation the same way the real
+    # arithmetic will (a local-midnight mktime) rather than comparing against a
+    # hard-coded 1970-01-01: east-of-UTC zones make even local midnight
+    # 1970-01-01 pre-epoch, so the date comparison alone would still miss
+    # `end=1970-01-31` -> start 1970-01-01.  On any platform failure, fail
+    # closed to the trailing `days` window exactly like a pre-epoch supplied
+    # endpoint does.
+    derived_start_pre_epoch = False
+    if start_ts_v is None and end_kind == "date" and end_ts_v is not None:
+        try:
+            _end_day_v = _datetime.fromtimestamp(
+                min(end_ts_v, 4102444800)).date()
+            _time.mktime((_end_day_v - _timedelta(days=30)).timetuple())
+        except (OverflowError, ValueError, OSError):
+            derived_start_pre_epoch = True
+    if derived_start_pre_epoch \
+            or (start_ts_v is not None and start_ts_v < _PLATFORM_MIN_TS) \
+            or (end_ts_v is not None and end_ts_v < _PLATFORM_MIN_TS):
+        start_meta = None
+        end_meta = None
+        start_kind = None
+        end_kind = None
+        start_ts_v = None
+        end_ts_v = None
     now = _time.time()
-    today = _time.localtime(now)
-    today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, today.tm_wday, today.tm_yday, today.tm_isdst))
-    day_secs = 86400
-    first_day_ts = today_midnight - ((days - 1) * day_secs)
+    start_ts = None
+    end_ts = None
+
+    # end_from_clock: True when the EFFECTIVE end is the server clock because
+    # the caller did not pin it to a concrete timestamp - an omitted `end`, or
+    # an explicit endpoint the server clamped down to `now`.  An explicitly
+    # supplied numeric end is NOT clock-derived even when its value happens to
+    # equal `now`: the numeric contract is an exact [start, end) interval, so
+    # it must remain an EXCLUSIVE boundary (gate re-gate: 'explicit numeric
+    # boundaries lose provenance').  The flag is tracked through the swap and
+    # the future clamp below.
+    end_from_clock = False
+    if start_ts_v is not None or end_ts_v is not None:
+        if end_ts_v is not None:
+            end_ts = min(end_ts_v, now)
+            end_from_clock = end_ts_v > now
+            if start_ts_v is not None:
+                start_ts = start_ts_v
+            else:
+                # End-only with a calendar-date end: default the start to
+                # 30 calendar days before the end's local midnight (DST-safe).
+                # Using `end_ts - 30*86400` drifts by the DST offset and can
+                # fall on the wrong calendar date (see gate repro:
+                # end=2026-03-10 in America/New_York → elapsed gives 2026-02-07
+                # instead of the calendar 2026-02-08).  `end_ts` is guaranteed
+                # inside the platform window here (the guard above rejected any
+                # pre-epoch / out-of-range supplied endpoint AND any end-only
+                # DATE whose derived start would not survive mktime() on this
+                # platform), so neither fromtimestamp() nor the 30-day
+                # back-step can underflow.
+                if end_kind == "date":
+                    # Derive from the endpoint the CALLER sent, not from the
+                    # end already clamped to `now`: for a future `end` the
+                    # clamp must clamp the INTERVAL only, otherwise the whole
+                    # window shifts backwards and serves days outside the
+                    # requested [end - 30d, end] range (Greptile P1: 'Future
+                    # end shifts start').  The clamps below still keep every
+                    # served boundary at/behind the clock.
+                    end_day_tmp = _datetime.fromtimestamp(
+                        min(end_ts_v, 4102444800)).date()
+                    start_day_tmp = end_day_tmp - _timedelta(days=30)
+                    start_ts = _time.mktime(start_day_tmp.timetuple())
+                    start_kind = "date"
+                else:
+                    start_ts = end_ts_v - 30 * 86400
+        else:
+            start_ts = start_ts_v
+            end_ts = now
+            end_from_clock = True
+        # Reversal test.  A DATE `end` means the WHOLE calendar day and is
+        # served as an exclusive bound at the NEXT local midnight
+        # (``end_cutoff`` below), so the comparison must use that SAME resolved
+        # bound: measured against the date's local MIDNIGHT, a numeric start
+        # later the same day looked reversed and the swap served the day's
+        # EARLIER hours instead of the requested tail (Greptile P1
+        # 2026-10-10T02:20:04Z: start = May 2 noon with end = 2026-05-02
+        # returned midnight..noon).  Equality counts as reversed for a
+        # whole-day end - a start at exactly the end day's exclusive close
+        # means "all of that day", which is what the old swap produced.
+        _cmp_end = end_ts
+        _end_is_whole_day = False
+        if end_kind == "date" and end_ts is not None:
+            try:
+                _cmp_day = _datetime.fromtimestamp(end_ts).date()
+                _cmp_end = _time.mktime((_cmp_day + _timedelta(days=1)).timetuple())
+                _end_is_whole_day = True
+            except (OverflowError, ValueError, OSError):
+                _cmp_end = end_ts
+        if start_ts > _cmp_end or (_end_is_whole_day and start_ts == _cmp_end):
+            start_ts, end_ts = end_ts, start_ts
+            start_kind, end_kind = end_kind, start_kind
+            # The value that lands in the `end` slot is the OLD start, which is
+            # never clock-derived (it is either explicit, or derived from the
+            # end) - so the flag resets and is re-derived by the clamp below.
+            end_from_clock = False
+        # A custom window must never extend into the future.  An explicit
+        # future `end` is already clamped to now via min(end, now) above,
+        # but the swap can re-introduce a future value as the new end - e.g.
+        # a future `start` with no `end` becomes [now, future_start].
+        # Clamp the end to now again.
+        if end_ts > now:
+            end_ts = now
+            end_from_clock = True
+        # STRICT-future detection: a window whose effective START lies at or
+        # after the server clock is wholly in the future (every daily bucket
+        # zero-filled), so it fails closed to the trailing `days` fallback and
+        # the analytics window keeps ending at or before now.  The ONE exempt
+        # case is a zero-length window anchored exactly on the clock that the
+        # caller asked for directly - an explicit `start == now` with no future
+        # endpoint to clamp.  That is not a future request: it stays a custom
+        # (zero-length, therefore empty) interval instead of silently serving
+        # the trailing window (gate re-gate: 'explicit numeric boundaries lose
+        # provenance').  A strictly-future start - including a future start
+        # swapped against the implicit clock end - still falls back.
+        clock_zero_window = (
+            start_ts is not None and end_ts is not None
+            and start_ts >= now and end_ts >= now
+            and not (start_ts_v is not None and start_ts_v > now)
+            and not (end_ts_v is not None and end_ts_v > now)
+        )
+        if start_ts >= now and not clock_zero_window:
+            start_ts = None
+            end_ts = None
+        # Clamp both endpoints into the platform-safe localtime range so an
+        # absurd-but-finite timestamp (e.g. 1e20, -1e20) cannot reach
+        # localtime()/mktime() and return HTTP 500. Windows msvcrt localtime
+        # supports roughly 1970..~3000; 4102444800 = 2100-01-01 is a
+        # conservative upper bound, 0 = 1970-01-01 the lower bound (no
+        # sessions predate the Unix epoch). Out-of-range -> fail closed to
+        # the trailing `days` fallback.
+        if start_ts is not None and (not (0 <= start_ts <= 4102444800) or not (0 <= end_ts <= 4102444800)):
+            start_ts = None
+            end_ts = None
+        if start_ts is not None:
+            # Operate on local calendar dates (DST-safe), not fixed 86400s, so
+            # a spring-forward/fall-back day yields exactly one bucket and the
+            # daily series stays aligned with the filtered totals.
+            start_day = _datetime.fromtimestamp(start_ts).date()
+            end_day = _datetime.fromtimestamp(end_ts).date()
+            now_day = _datetime.fromtimestamp(now).date()
+            # Cap absurd custom windows at 5 CALENDAR years so the daily series
+            # cannot balloon into millions of buckets.  Walk end_day back 5
+            # calendar years instead of subtracting a fixed 5*365*86400 seconds:
+            # a valid five-calendar-year span containing a leap day (e.g.
+            # 2021-05-04..2026-05-04, 1826 days) would exceed the fixed-seconds
+            # cap and silently lose its first requested day (Greptile P1).
+            # The window is clamped BEFORE filtering so totals and the chart
+            # are always computed over the same interval.
+            try:
+                min_start = end_day.replace(year=end_day.year - 5)
+            except ValueError:
+                # Feb 29 in a non-leap target year -> Feb 28
+                min_start = end_day.replace(year=end_day.year - 5, day=28)
+            if start_day < min_start:
+                start_day = min_start
+                start_ts = _time.mktime(start_day.timetuple())
+            today_midnight = _time.mktime((now_day.year, now_day.month, now_day.day, 0, 0, 0, 0, 0, -1))
+            days = max((end_day - start_day).days + 1, 1)
+            # Admission cutoffs, end-exclusivity.  A DATE endpoint uses a
+            # calendar-day bound (local midnight); a NUMERIC endpoint keeps the
+            # exact [start, end) boundary on every date - never a rounded-down
+            # start nor a widened-to-next-midnight end.
+            if start_kind == "date":
+                cutoff = _time.mktime((start_day.year, start_day.month, start_day.day, 0, 0, 0, 0, 0, -1))
+            else:
+                cutoff = start_ts  # exact numeric (or 30-day-derived implicit) start
+            # Whether the effective `end` is the server clock.  PROVENANCE, not
+            # value equality: True only when the caller did NOT pin the end to
+            # a concrete timestamp (an omitted end, or one the server clamped
+            # down to now).  A clock-derived end is an inclusive "up to the
+            # server clock" bound (trailing-like): keep sessions at/behind now,
+            # exclude any stamped after.  An explicit NUMERIC end keeps its
+            # exact [start, end) contract even when its value equals now - a
+            # session stamped exactly at that boundary must stay out.
+            end_is_now = end_from_clock
+            if end_is_now:
+                end_cutoff = now
+                # A zero-length [now, now] window admits nothing (a half-open
+                # interval is empty): explicit `start == now` resolves to an
+                # EMPTY custom interval rather than leaking the trailing-like
+                # inclusive at-now session.
+                end_exclusive = (start_ts is not None and start_ts >= end_ts)
+            elif end_kind == "date":
+                # Whole calendar day: exclusive NEXT local midnight (DST-safe).
+                end_cutoff = _time.mktime((end_day + _timedelta(days=1)).timetuple())
+                end_exclusive = True
+                if end_day == now_day:
+                    # A whole-day "today" DATE selection: that day is not over
+                    # from the server's view, so clamp to now (inclusive) to
+                    # keep sessions stamped after the server clock out.
+                    end_cutoff = min(end_cutoff, now)
+                    end_exclusive = False
+            else:
+                # Exact NUMERIC end: keep the requested boundary as the
+                # exclusive stop.  This includes a numeric end earlier today
+                # (e.g. today 10:00 while now is 14:00 - the old code widened
+                # it to now) and a numeric end on a past date (the old code
+                # widened it to the following local midnight), both of which
+                # leaked sessions after the requested timestamp in.
+                end_cutoff = end_ts
+                end_exclusive = True
+            first_day_ts = cutoff
+            # Effective bounds (server-local calendar days actually queried),
+            # so the client footer always agrees with what was filtered even
+            # after the server clamps/swaps the input range.
+            effective_start = start_day.isoformat()
+            effective_end = end_day.isoformat()
+            mode = "custom"
+    if start_ts is None and end_ts is None:
+        # Trailing-window mode (legacy): last N calendar days up to today.
+        try:
+            days = min(max(int(query.get("days", ["30"])[0]), 1), 365)
+        except (ValueError, TypeError):
+            days = 30
+        end_cutoff = now
+        effective_start = None
+        effective_end = None
+        # Trailing mode: end_cutoff = now is INCLUSIVE - sessions stamped
+        # exactly at "now" belong to the current trailing window.
+        end_exclusive = False
+        # Explicit response mode: the client footer must know whether a
+        # custom-range request RESOLVED to a real custom window ("custom") or
+        # fell back to the trailing window ("trailing") - e.g. an all-future
+        # or fully-invalid custom request.  Without this a "custom" request
+        # that fell back would render the rejected raw inputs instead of the
+        # trailing window the server actually queried (Greptile P1: 'custom
+        # range that normalizes to trailing still displays the raw range').
+        mode = "trailing"
+
+        today = _time.localtime(now)
+        # Walk back by CALENDAR days, not fixed 86400s intervals: across a
+        # DST transition a fixed-step subtraction lands first_day_ts at
+        # 23:00/01:00 instead of local midnight, admitting or dropping the
+        # boundary hour while the daily series still advances by calendar
+        # dates (totals disagree with the series).  The absolute branch
+        # above uses the same calendar-day arithmetic; keep them aligned.
+        today_midnight = _time.mktime((today.tm_year, today.tm_mon, today.tm_mday, 0, 0, 0, 0, 0, -1))
+        start_day = _datetime.fromtimestamp(today_midnight).date() - _timedelta(days=days - 1)
+        first_day_ts = _time.mktime(start_day.timetuple())
     cutoff = first_day_ts
 
     def _safe_usage_int(value) -> int:
@@ -13239,10 +14419,20 @@ def _handle_insights(handler, parsed) -> bool:
         idx = []
 
     for entry in idx:
-        created = entry.get("created_at", 0) or 0
-        updated = entry.get("updated_at", 0) or 0
-        # Session is relevant if it was created or updated within the calendar window.
-        if max(created, updated) < cutoff:
+        # One canonical timestamp (updated_at or created_at) drives BOTH
+        # admission and daily attribution, so totals and the daily series
+        # always describe the same window.  Interval-overlap admission
+        # previously let a crossing session into totals while its daily
+        # bucket fell outside the returned series.
+        ts = _session_usage_ts(entry)
+        # Session whose usage ts falls entirely before the window
+        if ts < cutoff:
+            continue
+        # Session whose usage ts falls entirely after the window.
+        # end_cutoff is an exclusive upper bound in absolute mode (next
+        # local midnight) and an inclusive one in trailing mode (now):
+        # equality is only excluded when the bound itself is exclusive.
+        if ts > end_cutoff or (end_exclusive and ts == end_cutoff):
             continue
         sessions_data.append(entry)
 
@@ -13313,35 +14503,46 @@ def _handle_insights(handler, parsed) -> bool:
         from api.models import _active_state_db_path
         db_path = _active_state_db_path()
         if db_path and db_path.exists():
+            # end_cutoff is exclusive (absolute mode) or inclusive (trailing).
+            end_cmp = "<" if end_exclusive else "<="
             with closing(open_state_db_readonly(db_path)) as conn:
                 conn.row_factory = sqlite3.Row
                 cur = conn.cursor()
-                # cache_read_tokens may not exist on older agent state DBs;
-                # fall back to a query without it if the column is missing.
-                try:
-                    cur.execute("""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               COALESCE(cache_read_tokens, 0) AS cache_read_tokens,
-                               started_at, ended_at
-                        FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
-                except sqlite3.OperationalError:
-                    cur.execute("""
-                        SELECT id, model, message_count, input_tokens, output_tokens,
-                               estimated_cost_usd,
-                               0 AS cache_read_tokens,
-                               started_at, ended_at
-                        FROM sessions
-                        WHERE (started_at >= ? OR ended_at >= ?)
-                          AND COALESCE(source, '') != 'webui'
-                    """, (cutoff, cutoff))
+                # Older agent state DBs may lack either cache column, so pick
+                # each one on its own: a DB with reads but no writes still has
+                # useful reads.
+                _session_cols = {
+                    r[1] for r in cur.execute("PRAGMA table_info(sessions)").fetchall()
+                }
+
+                def _optional_token_col(name: str) -> str:
+                    if name in _session_cols:
+                        return f"COALESCE({name}, 0) AS {name}"
+                    return f"0 AS {name}"
+
+                cur.execute(f"""
+                    SELECT id, model, message_count, input_tokens, output_tokens,
+                           estimated_cost_usd,
+                           {_optional_token_col("cache_read_tokens")},
+                           {_optional_token_col("cache_write_tokens")},
+                           started_at, ended_at,
+                           COALESCE(ended_at, started_at, 0) AS usage_ts
+                    FROM sessions
+                    WHERE COALESCE(ended_at, started_at, 0) >= ?
+                      AND COALESCE(ended_at, started_at, 0) {end_cmp} ?
+                      AND COALESCE(source, '') != 'webui'
+                """, (cutoff, end_cutoff))
                 for row in cur.fetchall():
-                    _input = _safe_usage_int(row["input_tokens"])
-                    _output = _safe_usage_int(row["output_tokens"])
                     _cache_read = _safe_usage_int(row["cache_read_tokens"])
+                    # state.db input_tokens is uncached input only, while WebUI
+                    # sessions store the full prompt. Add the cache tokens so
+                    # both sources mean the same thing before they are summed.
+                    _input = (
+                        _safe_usage_int(row["input_tokens"])
+                        + _cache_read
+                        + _safe_usage_int(row["cache_write_tokens"])
+                    )
+                    _output = _safe_usage_int(row["output_tokens"])
                     _cost = _safe_cost_float(row["estimated_cost_usd"])
                     _msgs = _safe_usage_int(row["message_count"])
                     total_sessions += 1
@@ -13365,7 +14566,7 @@ def _handle_insights(handler, parsed) -> bool:
                     bucket["cache_read_tokens"] += _cache_read
                     bucket["cost"] += _cost
 
-                    _ts = row["started_at"] or row["ended_at"] or 0
+                    _ts = row["usage_ts"] or 0
                     if _ts:
                         _dt = _time.localtime(_ts)
                         _day_key = _time.strftime("%Y-%m-%d", _dt)
@@ -13393,13 +14594,13 @@ def _handle_insights(handler, parsed) -> bool:
         row_total_tokens = stats["input_tokens"] + stats["output_tokens"]
         row_cost = round(stats["cost"], 6)
         row_cache_read = stats["cache_read_tokens"]
-        # Bounded prompt-cache hit rate: cached reads over the FULL prompt total
-        # (ordinary input + cache reads), so it can never exceed 100%. Computing
-        # cache_read / input_tokens alone would overshoot 100% on cache-heavy
-        # sessions. prompt_cache_hit_percent clamps to [0,100] and returns None
-        # when there is nothing meaningful to display.
+        # Prompt-cache hit rate: cached reads over the full prompt total.
+        # input_tokens already includes cache reads and writes for both
+        # sources, so adding the reads again would cap the rate at 50%.
+        # prompt_cache_hit_percent clamps to [0,100] and returns None when
+        # there is nothing meaningful to display.
         row_cache_hit_percent = prompt_cache_hit_percent(
-            row_cache_read, stats["input_tokens"] + row_cache_read
+            row_cache_read, stats["input_tokens"]
         )
         models_breakdown.append({
             "model": model,
@@ -13418,8 +14619,8 @@ def _handle_insights(handler, parsed) -> bool:
 
     daily_series = []
     for i in range(days):
-        day_ts = first_day_ts + (i * day_secs)
-        day_key = _time.strftime("%Y-%m-%d", _time.localtime(day_ts))
+        day = start_day + _timedelta(days=i)
+        day_key = day.isoformat()
         bucket = daily_tokens.get(day_key, {
             "input_tokens": 0,
             "output_tokens": 0,
@@ -13445,15 +14646,27 @@ def _handle_insights(handler, parsed) -> bool:
 
     return j(handler, {
         "period_days": days,
+        # Explicit response mode: "custom" when a real absolute window was
+        # queried, "trailing" when the request fell back to the trailing
+        # days-window (all-future / fully-invalid custom input).  The client
+        # footer keys off this so a fell-back custom request is rendered as
+        # the trailing window actually served, never the rejected raw inputs.
+        "mode": mode,
+        # Effective server-local calendar range actually queried (after
+        # clamping, swap, and DST alignment).  ISO date strings, or None
+        # in trailing-window mode.  The client footer uses these instead
+        # of raw input values, never disagreeing with the filtered window.
+        "effective_start": effective_start,
+        "effective_end": effective_end,
         "total_sessions": total_sessions,
         "total_messages": total_messages,
         "total_input_tokens": total_input_tokens,
         "total_output_tokens": total_output_tokens,
         "total_cache_read_tokens": total_cache_read_tokens,
         # Aggregate prompt-cache hit rate, bounded 0-100% via the shared helper
-        # (cache_read over input + cache_read).
+        # (cache_read over the full prompt total in input_tokens).
         "total_cache_hit_percent": prompt_cache_hit_percent(
-            total_cache_read_tokens, total_input_tokens + total_cache_read_tokens
+            total_cache_read_tokens, total_input_tokens
         ),
         "total_tokens": total_tokens,
         "total_cost": round(total_cost, 6),
@@ -14933,7 +16146,8 @@ def _handle_session_get(handler, parsed) -> bool:
         # Always log when slow (>2s) so we don't need HERMES_DEBUG_SLOW env var
         # to diagnose latency regressions. Opt-in env var still forces
         # logging on every request for development.
-        if _debug_slow or _total_ms >= 2000:
+        _slow_print = getattr(handler, '_safe_webui_print', None)
+        if callable(_slow_print) and (_debug_slow or _total_ms >= 2000):
             # perf(webui/session-load-latency) tier2c: route the [SLOW] line
             # through handler._safe_webui_print() rather than logger.warning().
             # The WebUI process starts the root logger without any handler, so
@@ -14943,7 +16157,7 @@ def _handle_session_get(handler, parsed) -> bool:
             # _safe_webui_print writes to the systemd journal socket directly,
             # same as the per-request ms line — which is why THAT line keeps
             # working.
-            handler._safe_webui_print(
+            _slow_print(
                 "[SLOW] session_id=%s get_session=%.1fms model_resolve=%.1fms "
                 "compact=%.1fms redact=%.1fms json_write=%.1fms total=%.1fms" % (
                     sid,
@@ -15062,6 +16276,18 @@ def handle_get(handler, parsed) -> bool:
         # its own path-traversal sandbox via Path.resolve()+relative_to().
         stripped = parsed._replace(path=parsed.path[len("/session"):])
         return _serve_static(handler, stripped)
+
+    if parsed.path.startswith("/session/extensions/"):
+        # Same speculative-preload rescue as /session/static/ above. Injected
+        # extension tags are mount-relative (#8521), so on /session/<id> the
+        # browser's preload scanner resolves `extensions/app.js` against the
+        # page URL before the dynamic <base href> runs. Serve the real asset
+        # instead of the shell. Unlike /session/static/ this path is NOT
+        # auth-exempt: check_auth already gates it like /extensions/.
+        from api.extensions import serve_extension_static
+
+        stripped = parsed._replace(path=parsed.path[len("/session"):])
+        return serve_extension_static(handler, stripped)
 
     # Firefox Android resolves <link rel="manifest"> against the page URL
     # before the dynamic <base href> script runs when installing from
@@ -15301,7 +16527,10 @@ def handle_get(handler, parsed) -> bool:
         return j(handler, payload)
 
     if parsed.path.startswith("/api/share/"):
-        token = parsed.path[len("/api/share/"):].strip()
+        # Share tokens are case-sensitive (secrets.token_urlsafe), so the
+        # capture must come from the original-case path, not the folded
+        # matching path (server.py normalizes /api/ paths for matching).
+        token = _original_api_path(handler, parsed)[len("/api/share/"):].strip()
         share = load_share(token)
         if not share:
             return bad(handler, "Shared conversation not found", 404)
@@ -16089,7 +17318,9 @@ def handle_get(handler, parsed) -> bool:
     if parsed.path == '/api/sessions/events':
         return _handle_session_events_stream(handler)
 
-    session_events_session_id = _session_events_path_session_id(parsed.path)
+    session_events_session_id = _match_api_segments(
+        handler, parsed, ("api", "sessions", None, "events")
+    )
     if session_events_session_id is not None:
         return _handle_session_sse_stream_for_session(handler, parsed, session_events_session_id)
 
@@ -16438,6 +17669,12 @@ def handle_get(handler, parsed) -> bool:
 
     # ── Plugin static assets ──
     if parsed.path.startswith("/dashboard-plugins/"):
+        # Plugin names and asset paths are case-sensitive (config keys + disk
+        # paths). This route is NOT API-folded (server.py folds only /api/*),
+        # so parsed.path already carries the original case — and it must come
+        # from the CURRENT request: the handler is reused across keep-alive
+        # requests, so an API-only retained path (_raw_api_path) from an
+        # earlier request would be stale here (#6589 re-gate).
         parts = parsed.path.split("/", 3)
         if len(parts) >= 3:
             plugin_name = parts[2]
@@ -17630,6 +18867,31 @@ def handle_post(handler, parsed) -> bool:
             return bad(handler, "Subagent sessions are view-only and cannot store a draft from WebUI", 400)
         text = body.get("text")
         files = body.get("files")
+        # #7855 CORE (round 6): the goal-continuation token travels with the draft
+        # it belongs to. Persisting the text alone meant a reload between a failed
+        # continuation start and its retry restored the words and dropped the
+        # token, so the retry posted goal_continuation_id: None and start
+        # admission scored it goal_related=false.
+        goal_continuation_id = body.get("goal_continuation_id")
+        if goal_continuation_id is not None and not isinstance(goal_continuation_id, str):
+            goal_continuation_id = ""
+        if isinstance(goal_continuation_id, str):
+            goal_continuation_id = goal_continuation_id.strip()
+        # #7855 P1 (Greptile, round 7): unlike draft text, this field had no
+        # size or shape limit before it was persisted into the session JSON.
+        # An authenticated client could submit a value approaching the
+        # request-body limit on every keystroke, consuming storage and
+        # slowing session operations. The producer mints uuid4().hex
+        # (api/goals.py) and admission itself requires exactly 32 lowercase
+        # hex characters, so anything else can never match a pending record
+        # anyway — drop it here rather than store it.
+        if isinstance(goal_continuation_id, str) and goal_continuation_id:
+            _looks_like_cont_id = (
+                len(goal_continuation_id) == 32
+                and all(c in "0123456789abcdef" for c in goal_continuation_id.lower())
+            )
+            if not _looks_like_cont_id:
+                goal_continuation_id = ""
         # Stage-326 hardening (per Opus advisor): size + type validation on
         # the draft inputs. Without this, a misbehaving or malicious client
         # can persist multi-MB strings into the session JSON on every keystroke
@@ -17649,42 +18911,202 @@ def handle_post(handler, parsed) -> bool:
         except KeyError:
             return bad(handler, "Session not found", 404)
         _draft_mark("after_get_session")
+        # Optional compare-and-clear: only write when the stored draft still equals
+        # if_text (and if_files when given), so a stale retire keeps newer drafts.
+        if_text = body.get("if_text")
+        if_files = body.get("if_files")
         unchanged = False
-        with _get_session_agent_lock(sid):
-            _draft_mark("acquired_lock")
-            current_draft = dict(getattr(s, "composer_draft", {}) or {})
-            next_draft = dict(current_draft)
-            if text is not None:
-                next_draft["text"] = text
-            if files is not None:
-                next_draft["files"] = files
-            if next_draft == current_draft:
-                unchanged = True
-                saved_draft = current_draft
-            else:
-                s.composer_draft = next_draft
-                # Draft persistence is not conversation activity. Touching updated_at
-                # here makes the active-session external-refresh poll force-reload the
-                # current chat every few seconds while the user is typing, and that
-                # delayed reload can restore an older draft over newer local input.
-                _draft_mark("before_save")
-                s.save(touch_updated_at=False, skip_index=True)
-                _draft_mark("after_save")
-                saved_draft = s.composer_draft
+        request_sid = sid
+        request_session = s
+        request_profile = getattr(request_session, "profile", None)
+        authoritative_sid = request_sid
+        _MAX_DRAFT_AUTHORITY_HOPS = 4
+        _seen_authority_sids = {authoritative_sid}
+        _validated_compression_edges = []
+        resolved_once = False
+
+        def _draft_authority_unconfirmed():
+            return j(
+                handler,
+                {
+                    "ok": False,
+                    "error": "Draft authority could not be confirmed",
+                    "code": "draft_authority_unconfirmed",
+                },
+                status=409,
+            )
+
+        for _hop in range(_MAX_DRAFT_AUTHORITY_HOPS):
+            with _get_session_agent_lock(authoritative_sid):
+                _draft_mark("acquired_lock")
+                # A successful parent check releases that lock before this hop
+                # acquires the child lock. Revalidate every traversed edge here
+                # so a cleared/deleted snapshot cannot authorize the write.
+                if _validated_compression_edges and not _draft_compression_edges_still_authorized(
+                    _validated_compression_edges, request_profile
+                ):
+                    return _draft_authority_unconfirmed()
+                try:
+                    request_session = get_session(authoritative_sid)
+                except KeyError:
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "error": "Session no longer active",
+                            "session_id": authoritative_sid,
+                        },
+                        status=409,
+                    )
+
+                resolved_sid = str(getattr(request_session, "session_id", "") or "").strip()
+                if not resolved_sid or not is_safe_session_id(resolved_sid):
+                    return _draft_authority_unconfirmed()
+                if not _profiles_match(getattr(request_session, "profile", None), request_profile):
+                    return _draft_authority_unconfirmed()
+
+                if resolved_sid != authoritative_sid:
+                    if resolved_sid in _seen_authority_sids:
+                        return _draft_authority_unconfirmed()
+                    _seen_authority_sids.add(resolved_sid)
+                    authoritative_sid = resolved_sid
+                    continue
+
+                continuation_sid = None
+                if getattr(request_session, "pre_compression_snapshot", False):
+                    continuation_session, continuation_sid = (
+                        _draft_pre_compression_continuation_session_authority(
+                            request_session,
+                            request_profile=request_profile,
+                            seen_authority_sids=_seen_authority_sids,
+                            validated_edges=_validated_compression_edges,
+                        )
+                    )
+                    if not continuation_session:
+                        return _draft_authority_unconfirmed()
+                    request_session = continuation_session
+                    _seen_authority_sids.add(continuation_sid)
+                    authoritative_sid = continuation_sid
+                    continue
+
+                if authoritative_sid != request_sid:
+                    if (
+                        not _validated_compression_edges
+                        or not _draft_compression_edges_still_authorized(
+                            _validated_compression_edges, request_profile
+                        )
+                    ):
+                        return _draft_authority_unconfirmed()
+                    return j(
+                        handler,
+                        {
+                            "ok": False,
+                            "code": "session_moved",
+                            "session_id": authoritative_sid,
+                            "error": "Session moved",
+                        },
+                        status=409,
+                    )
+
+                # #7855 CORE (round 6): the goal-continuation token is part of
+                # the draft. Apply the write through the shared projection so
+                # the token follows exactly the same rules as the text: stored
+                # with the exact text it belongs to, dropped when the text is
+                # edited, cleared by an explicit empty string, and left alone
+                # by an absent field on an unchanged re-save. Master's inline
+                # text/files mutation (merged 2026-10-17) would preserve the
+                # stored token next to edited text and re-bind them on restore.
+                current_draft = dict(getattr(request_session, "composer_draft", {}) or {})
+                if isinstance(if_text, str) and (
+                    str(current_draft.get("text") or "") != if_text
+                    or (isinstance(if_files, list) and list(current_draft.get("files") or []) != if_files)
+                ):
+                    return j(handler, {"ok": True, "draft": current_draft, "unchanged": True, "mismatch": True})
+                next_draft = _project_session_draft_write(
+                    {"text": text, "files": files, "goal_continuation_id": goal_continuation_id},
+                    current_draft,
+                )
+                if next_draft == current_draft:
+                    unchanged = True
+                    saved_draft = current_draft
+                else:
+                    _draft_text = str(next_draft.get("text", "") or "")
+                    _draft_files = next_draft.get("files", []) or []
+                    _has_meaningful_draft = bool(_draft_text) or bool(_draft_files)
+                    if not (SESSION_DIR / f"{authoritative_sid}.json").exists() and _has_meaningful_draft:
+                        with LOCK:
+                            if SESSIONS.get(authoritative_sid) is not request_session:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if len(getattr(request_session, "messages", []) or []) != 0:
+                                return j(
+                                    handler,
+                                    {
+                                        "ok": False,
+                                        "error": "Session no longer active",
+                                        "session_id": authoritative_sid,
+                                    },
+                                    status=409,
+                                )
+                            if (SESSION_DIR / f"{authoritative_sid}.json").exists():
+                                # Owner appeared while acquiring the shared lock; skip
+                                # materialization and proceed with sidecar save only.
+                                pass
+                            else:
+                                # Publish the small owner record while cache state is locked
+                                # so deletion cannot race first-draft ownership.
+                                draft_session = copy.copy(request_session)
+                                draft_session.composer_draft = {}
+                                # LOCK is non-reentrant; indexing here would acquire it again.
+                                draft_session.save(
+                                    touch_updated_at=False,
+                                    skip_index=True,
+                                )
+                    # Draft persistence is not conversation activity. Touching updated_at
+                    # here makes the active-session external-refresh poll force-reload the
+                    # current chat every few seconds while the user is typing, and that
+                    # delayed reload can restore an older draft over newer local input.
+                    if _validated_compression_edges and not _draft_compression_edges_still_authorized(
+                        _validated_compression_edges, request_profile
+                    ):
+                        return _draft_authority_unconfirmed()
+                    _draft_mark("before_save")
+                    _save_session_draft(authoritative_sid, next_draft)
+                    _draft_mark("after_save")
+                    request_session.composer_draft = next_draft
+                    saved_draft = request_session.composer_draft
+                sid = authoritative_sid
+                resolved_once = True
+                break
+        if not resolved_once:
+            # A bounded walk can stop on another snapshot whose own continuation
+            # authority has not yet been checked; keep that SID out of client replay.
+            return _draft_authority_unconfirmed()
         _draft_mark("released_lock")
         payload = {"ok": True, "draft": saved_draft}
         if unchanged:
             payload["unchanged"] = True
+        payload["session_id"] = sid
         _draft_mark("before_json")
         j(handler, payload)
         _draft_mark("after_json")
         _draft_stages.append(("end", _draft_time.monotonic()))
-        if _draft_stages[-1][1] - _draft_t0 > 0.2:
+        # Diagnostics only, after the response is written: like every other [SLOW]
+        # site, tolerate a handler without _safe_webui_print instead of raising.
+        _slow_print = getattr(handler, '_safe_webui_print', None)
+        if callable(_slow_print) and _draft_stages[-1][1] - _draft_t0 > 0.2:
             parts = " ".join(
                 f"{n}={((t - prev[1]) * 1000):.1f}ms"
                 for (n, t), prev in zip(_draft_stages[1:], _draft_stages[:-1], strict=True)
             )
-            handler._safe_webui_print(
+            _slow_print(
                 "[SLOW] /api/session/draft total=%.1fms stages: %s" % (
                     (_draft_stages[-1][1] - _draft_t0) * 1000,
                     parts,
@@ -17791,25 +19213,111 @@ def handle_post(handler, parsed) -> bool:
         except Exception:
             logger.debug("Failed to resolve profile for deleted session %s", sid, exc_info=True)
             event_profile = None
+        try:
+            p = (SESSION_DIR / f"{sid}.json").resolve()
+            p.relative_to(SESSION_DIR.resolve())
+        except Exception:
+            return bad(handler, "Invalid session_id", 400)
+        # Evict outside the mutation lock: the lifecycle commit performs provider
+        # I/O (it can wait on another commit) and must not hold a per-session
+        # lock. It runs before the DB delete because that commit writes state.db
+        # and would otherwise recreate the session being deleted.
+        from api.config import _evict_session_agent
+        _evict_session_agent(sid)
         # Serialize with recovery, but bound contention so a browser timeout
         # cannot be followed by a delayed server-side delete.
         session_lock = _get_session_agent_lock(sid)
         if not session_lock.acquire(timeout=5):
             return bad(handler, "Session busy, try again", 503)
+        draft_delete_failed = False
         try:
+            # Delete state.db rows BEFORE any user-visible file. A refusal (live
+            # gateway work, unfenceable ledger) or a failed commit must leave the
+            # whole session intact instead of stranding an unrecoverable
+            # half-delete: the sidecar, index entry, backups and tombstone are
+            # not restored by the DB rollback.
+            state_db_cleanup_failed = False
+            delete_raised = False
+            if not is_messaging_session:
+                try:
+                    from api.models import SessionDeleteRefused, delete_cli_session
+
+                    state_db_cleanup_failed = not delete_cli_session(sid)
+                except SessionDeleteRefused as exc:
+                    return j(
+                        handler,
+                        {"ok": False, "error": exc.code, "action": "session_delete"},
+                        status=409,
+                    )
+                except Exception:
+                    state_db_cleanup_failed = True
+                    delete_raised = True
+                    logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
+                if state_db_cleanup_failed:
+                    # A False return covers an aborted transaction and a commit
+                    # whose artifact cleanup is still pending (its manifest
+                    # retries it). Only a surviving row proves nothing was
+                    # committed; then user files must stay. Otherwise the
+                    # conversation is already gone and the remaining cleanup
+                    # must still run, or the sidecar, index entry and tombstone
+                    # would strand a deleted session. An exception proves
+                    # nothing either way, so it keeps failing closed.
+                    from api.models import state_db_session_presence
+
+                    if delete_raised or state_db_session_presence(sid) is not False:
+                        return j(
+                            handler,
+                            {
+                                "ok": False,
+                                "error": "state_db_cleanup_failed",
+                                "action": "session_delete",
+                            },
+                            status=500,
+                        )
+                    logger.warning(
+                        "Session %s committed; transcript cleanup is still pending",
+                        sid,
+                    )
+            # Runtime cleanup only after the delete is durable: closing the
+            # terminal of a refused delete would kill the very work that made
+            # the Agent refuse it.
+            # Prune the completion-dedup entry too. The reaper sweeps it once the
+            # completion is delivered (drained from PENDING); a session deleted
+            # while a completion is still pending would otherwise keep its entry.
+            try:
+                from api.background_process import forget_bg_task_completion_dedup
+
+                forget_bg_task_completion_dedup(sid)
+            except Exception:
+                logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
+            # #6885 round 2 lifecycle: session retirement is a terminal path — a
+            # deleted session's pending continuation record (marker + prompt +
+            # expiry) must not survive the session itself.
+            try:
+                from api.goals import clear_pending_goal_continuation
+
+                clear_pending_goal_continuation(sid)
+            except Exception:
+                logger.debug("Failed to clear pending goal continuation for deleted session %s", sid, exc_info=True)
+            try:
+                from api.terminal import close_terminal
+                close_terminal(sid)
+            except Exception:
+                logger.debug("Failed to close workspace terminal for deleted session %s", sid)
+            sidecar_deleted = False
             with LOCK:
                 SESSIONS.pop(sid, None)
-            try:
-                p = (SESSION_DIR / f"{sid}.json").resolve()
-                p.relative_to(SESSION_DIR.resolve())
-            except Exception:
-                return bad(handler, "Invalid session_id", 400)
-            sidecar_deleted = False
-            try:
-                p.unlink(missing_ok=True)
-            except Exception:
-                logger.debug("Failed to unlink session file %s", p)
+                try:
+                    p.unlink(missing_ok=True)
+                except Exception:
+                    logger.debug("Failed to unlink session file %s", p)
             sidecar_deleted = not p.exists()
+            try:
+                draft_deleted = bool(_delete_session_draft(sid))
+            except Exception:
+                logger.debug("Failed to delete draft sidecar for session %s", sid, exc_info=True)
+                draft_deleted = False
+            draft_delete_failed = not draft_deleted
             try:
                 prune_session_from_index(sid)
             except Exception:
@@ -17825,10 +19333,6 @@ def handle_post(handler, parsed) -> bool:
                     logger.debug("Failed to tombstone deleted WebUI session %s", sid, exc_info=True)
         finally:
             session_lock.release()
-        # Evict outside the mutation lock: lifecycle commit may perform provider
-        # I/O and must not hold a per-session Session lock.
-        from api.config import _evict_session_agent
-        _evict_session_agent(sid)
         try:
             from api.upload import _session_attachment_dir
 
@@ -17854,40 +19358,19 @@ def handle_post(handler, parsed) -> bool:
             logger.debug("Failed to delete run journal for deleted session %s", sid)
         # The weak lock registry releases this entry automatically after all
         # holders and waiters drop their strong references.
-        # Prune the completion-dedup entry too. The reaper sweeps it once the
-        # completion is delivered (drained from PENDING); a session deleted
-        # while a completion is still pending would otherwise keep its entry.
-        try:
-            from api.background_process import forget_bg_task_completion_dedup
-
-            forget_bg_task_completion_dedup(sid)
-        except Exception:
-            logger.debug("Failed to prune bg-task dedup entry for deleted session %s", sid)
-        try:
-            from api.terminal import close_terminal
-            close_terminal(sid)
-        except Exception:
-            logger.debug("Failed to close workspace terminal for deleted session %s", sid)
-        # Also delete from CLI state.db for CLI sessions shown in sidebar,
-        # but never erase external messaging channel memory via WebUI delete.
-        state_db_cleanup_failed = False
-        if not is_messaging_session:
-            try:
-                from api.models import delete_cli_session
-
-                state_db_cleanup_failed = not delete_cli_session(sid)
-            except Exception:
-                state_db_cleanup_failed = True
-                logger.warning("Failed to delete CLI session %s", sid, exc_info=True)
         _publish_session_list_changed("session_delete", profile=event_profile)
-        return j(
-            handler,
-            {
-                "ok": True,
-                "state_db_cleanup_failed": state_db_cleanup_failed,
-                **worktree_retained,
-            },
-        )
+        response = {
+            "state_db_cleanup_failed": state_db_cleanup_failed,
+            **worktree_retained,
+        }
+        if draft_delete_failed:
+            response["draft_delete_failed"] = True
+            response.update(
+                {"ok": False, "error": "Failed to delete session draft"}
+            )
+            return j(handler, response, status=500)
+        response["ok"] = True
+        return j(handler, response)
 
     if parsed.path == "/api/session/clear":
         try:
@@ -18939,6 +20422,77 @@ def handle_post(handler, parsed) -> bool:
         except ValueError as e:
             return bad(handler, str(e))
         sid = body["session_id"]
+        # ── Request-scoped profile boundary (#7731) ──
+        # This route is exempt from _guard_request_session_visibility (see
+        # _request_session_visibility_exempt) so an archived foreign session can
+        # be restored; that makes THIS handler the owner of the boundary, for
+        # both the resident-session path and the CLI materialize fallback.
+        #
+        # Normalize the caller's claim BEFORE anything reads it. ``None`` means
+        # absent and ``''`` means present-but-malformed; neither may stand in for
+        # an owner. Mirrors the invariant _handle_session_import_cli already
+        # enforces for cross-profile import, so ``all_profiles: true`` can never
+        # widen the search without a claimed, validated owner.
+        _arch_allow_all = _request_wants_all_profiles_import(body)
+        _arch_profile = _normalize_import_profile_value((body or {}).get("profile"))
+        if _arch_profile == "":
+            return bad(handler, "invalid profile", 400)
+        if _arch_allow_all and not _arch_profile:
+            return bad(handler, "profile is required for all_profiles archive", 400)
+        if _arch_allow_all and _is_isolated_profile_mode():
+            # Isolated mode exposes exactly one profile, so a cross-profile
+            # lookup is meaningless there. The browser can still restore a saved
+            # all-profiles toggle (#7731 greptile), so rather than stranding the
+            # pinned profile's OWN sessions behind a 403, confirm the claim names
+            # that pinned profile and degrade to an ordinary active-profile
+            # archive. A claim naming any other profile is refused outright.
+            if not _profiles_match(_arch_profile, _get_active_profile_name()):
+                return bad(handler, "all_profiles archive is not allowed in isolated profile mode", 403)
+            _arch_allow_all = False
+        # #7731: apply the profile boundary for a session that ALREADY has a
+        # WebUI sidecar, BEFORE get_session() runs. get_session() repairs legacy
+        # sidecar layouts in place (#8094), so a request that is about to be
+        # refused must not touch the bytes — the generic guard this route is
+        # exempt from used to guarantee exactly that. The probe is the same
+        # read-only ownership read the guard used, so it neither repairs nor
+        # publishes a cache entry.
+        #
+        # A scoped request that explicitly names the owning profile may reach
+        # the session (that is what makes an archived foreign session
+        # restorable); an unqualified request stays pinned to the active
+        # profile, keeping the #7710 contract: a known other profile is a 409 so
+        # the frontend can offer a profile switch, and only an unknown/legacy
+        # None-profile sidecar 404s, so its stale-URL self-heal keeps firing.
+        if is_safe_session_id(sid):
+            _arch_owner_profile = None
+            _arch_owner_known = False
+            try:
+                _arch_owner_profile = get_session_profile_readonly(sid)
+                _arch_owner_known = True
+            except KeyError:
+                # No sidecar yet — the CLI materialize fallback below decides.
+                _arch_owner_known = False
+            except (OSError, ValueError, TypeError):
+                return bad(handler, "Session not found", 404)
+            if _arch_owner_known:
+                _arch_mismatch = (
+                    not _profiles_match(_arch_owner_profile, _arch_profile)
+                    if _arch_allow_all
+                    else not _profiles_match(_arch_owner_profile, _get_active_profile_name())
+                )
+                if _arch_mismatch:
+                    if _arch_owner_profile:
+                        return j(handler, {
+                            "error": "Session belongs to another profile",
+                            "code": "session_profile_mismatch",
+                            "session_id": sid,
+                            "profile": _arch_owner_profile,
+                        }, 409)
+                    return bad(handler, "Session not found", 404)
+        # Runs AFTER the profile boundary above, not before: the check calls
+        # get_session(), which repairs legacy sidecar layouts in place (#8094),
+        # so a request already destined for a 409/404 must not reach it. The
+        # generic guard this route is exempt from used to refuse first.
         if _session_is_subagent_view_only(sid):
             return bad(handler, "Subagent sessions are view-only and cannot be archived from WebUI", 400)
         # #7776 Finding 2: capture the CLI source identity BEFORE the lock so
@@ -18946,6 +20500,9 @@ def handle_post(handler, parsed) -> bool:
         # new WebUI session without the pre-lock CLI metadata) cannot drop it
         # on the way back to disk. The materialize path below also uses it.
         _archive_cli_meta = _lookup_cli_session_metadata(sid) or {}
+        # Set by the materialize fallback below; empty on the resident path,
+        # where _archive_cli_meta already holds the active-profile identity.
+        _archive_resolved_meta = {}
         try:
             s = get_session(sid)
             # #1558: save() refuses metadata-only session stubs because their
@@ -18959,9 +20516,51 @@ def handle_post(handler, parsed) -> bool:
                 with LOCK:
                     SESSIONS[sid] = s
         except KeyError:
-            cli_meta = _archive_cli_meta
+            # #7776: reuse the CLI identity captured before the lock — the
+            # lock-held reload can drop it. #7549/#7731: cross-profile archive
+            # is only allowed when the request explicitly carried
+            # all_profiles=true AND a validated profile, both normalized and
+            # validated above, so the shared materializer chokepoint cannot
+            # leak profile isolation.
+            cli_meta = _archive_cli_meta or _resolve_cli_import_metadata(
+                sid,
+                requested_profile=_arch_profile,
+                allow_all_profiles=_arch_allow_all,
+            )
             if not cli_meta:
+                # #7731: an empty result is ambiguous on its own. When the
+                # request scoped itself to a profile, re-probe WITHOUT that
+                # filter to tell a profile conflict apart from a missing
+                # session: the resolver above prefilters a mismatched owner to
+                # ``{}``, so without this probe the caller cannot tell
+                # "wrong profile" from "no such session" and both answered 404.
+                # Only an all-profiles request may probe other profiles: a request that carries ``profile`` without
+                # ``all_profiles`` is an active-profile archive and keeps master's 404 for a foreign session.
+                if _arch_allow_all and _arch_profile:
+                    _owner_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
+                    _owner_profile = (_owner_meta or {}).get("profile")
+                    if _owner_profile and not _profiles_match(_owner_profile, _arch_profile):
+                        return j(handler, {
+                            "error": "Session belongs to another profile",
+                            "code": "session_profile_mismatch",
+                            "session_id": sid,
+                            "profile": _owner_profile,
+                        }, 409)
                 return bad(handler, "Session not found", 404)
+            # When the request carries an explicit profile but the resolved
+            # session belongs to a different one, return the #7710 contract
+            # (409 session_profile_mismatch) so the frontend can surface the
+            # conflict rather than silently mutating a foreign session.
+            if _arch_allow_all and _arch_profile:
+                _resolved_profile = cli_meta.get("profile")
+                if _resolved_profile and not _profiles_match(_resolved_profile, _arch_profile):
+                    return j(handler, {"error": "Session belongs to another profile", "code": "session_profile_mismatch"}, 409)
+            # #7731: remember the resolved identity for the re-stamp after the
+            # lock-held reload below. ``_archive_cli_meta`` is captured from the
+            # ACTIVE profile only, so on the cross-profile path it is empty and
+            # the reload would persist a WebUI-native copy (is_cli_session=False
+            # plus null source fields) of a CLI-origin session.
+            _archive_resolved_meta = cli_meta
             if cli_meta.get("read_only"):
                 return bad(handler, "Read-only imported sessions cannot be archived from WebUI", 400)
             # Delegated subagent children (#5307) are view-only and owned by the
@@ -18975,7 +20574,7 @@ def handle_post(handler, parsed) -> bool:
                 _arch_profile = cli_meta.get("profile") or None
                 s = Session(
                     session_id=sid,
-                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid), "CLI Session"),
+                    title=cli_meta.get("title") or title_from(get_cli_session_messages(sid, profile=cli_meta.get("profile")), "CLI Session"),
                     workspace=get_last_workspace(profile=_arch_profile),
                     messages=[],
                     model=cli_meta.get("model") or "unknown",
@@ -18996,7 +20595,7 @@ def handle_post(handler, parsed) -> bool:
                 s.platform = cli_meta.get("platform")
                 s.save(touch_updated_at=False)
             else:
-                msgs = get_cli_session_messages(sid)
+                msgs = get_cli_session_messages(sid, profile=cli_meta.get("profile"))
                 if not msgs:
                     return bad(handler, "Session not found", 404)
                 s = import_cli_session(
@@ -19039,15 +20638,20 @@ def handle_post(handler, parsed) -> bool:
                 if latest is None:
                     return bad(handler, "Session not found", 404)
             s = _ensure_full_session_before_mutation(sid, latest)
-            # #7776 Finding 2: re-stamp CLI source identity on the freshly
-            # loaded session before mutating it. ``_archive_cli_meta`` was
-            # captured above (before the lock); for the regular CLI/agent
-            # materialize path the on-disk sidecar that Session.load(sid)
-            # just read is the import_cli_session save WITHOUT source meta,
-            # so without this re-stamp the save() below would persist a
-            # WebUI-native copy with is_cli_session=False + null source.
-            if _archive_cli_meta:
-                _apply_cli_source_meta_to_session(s, _archive_cli_meta)
+            # #7776 Finding 2 / #7731: re-stamp CLI source identity on the
+            # freshly loaded session before mutating it. ``_archive_cli_meta``
+            # was captured above (before the lock) from the ACTIVE profile;
+            # for the regular CLI/agent materialize path the on-disk sidecar
+            # that Session.load(sid) just read is the import_cli_session save
+            # WITHOUT source meta, so without this re-stamp the save() below
+            # would persist a WebUI-native copy with is_cli_session=False +
+            # null source. On the cross-profile path _archive_cli_meta is empty
+            # (the session is not in the active profile), so prefer the
+            # identity the fallback actually resolved — otherwise the archived
+            # foreign session is recorded as WebUI-native.
+            _archive_source_meta = _archive_cli_meta or _archive_resolved_meta
+            if _archive_source_meta:
+                _apply_cli_source_meta_to_session(s, _archive_source_meta)
             s.archived = bool(body.get("archived", True))
             s.save(touch_updated_at=False)
             with LOCK:
@@ -19759,7 +21363,7 @@ def handle_post(handler, parsed) -> bool:
 
         if not is_auth_enabled():
             return j(handler, {"ok": True, "message": "Auth not enabled"})
-        client_ip = handler.client_address[0]
+        client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(
                 handler,
@@ -19807,7 +21411,7 @@ def handle_post(handler, parsed) -> bool:
             return j(handler, {"error": "Passkey support is disabled."}, status=404)
         if not is_auth_enabled():
             return j(handler, {"error": "Auth not enabled"}, status=400)
-        client_ip = handler.client_address[0]
+        client_ip = _login_client_ip(handler)
         if not _check_login_rate(client_ip):
             return j(handler, {"error": "Too many attempts. Try again in a minute."}, status=429)
         try:
@@ -19947,7 +21551,9 @@ def handle_patch(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PATCH"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_toggle(handler, name, body)
     if parsed.path.startswith("/api/kanban/"):
         from api.kanban_bridge import handle_kanban_patch
@@ -19979,7 +21585,9 @@ def handle_delete(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="DELETE"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_delete(handler, name)
     if parsed.path == "/api/prompts":
         pid = str(body.get("id") or "").strip()
@@ -20019,7 +21627,9 @@ def handle_put(handler, parsed) -> bool:
     if not _guard_request_session_visibility(handler, parsed, body=body, method="PUT"):
         return True
     if parsed.path.startswith("/api/mcp/servers/"):
-        name = parsed.path[len("/api/mcp/servers/"):]
+        # MCP server names are case-sensitive config keys: capture from the
+        # original-case path, not the folded matching path.
+        name = _original_api_path(handler, parsed)[len("/api/mcp/servers/"):]
         return _handle_mcp_server_update(handler, name, body)
     return False
 
@@ -20064,8 +21674,13 @@ _STATIC_CACHE_LOCK = threading.Lock()
 
 def _serve_static(handler, parsed):
     static_root = api_config.get_static_root().resolve()
-    # Strip the leading '/static/' prefix, then resolve and sandbox
-    rel = parsed.path[len("/static/") :]
+    # Strip the leading '/static/' prefix, then resolve and sandbox. The
+    # server-owned prefix is matched case-insensitively upstream, but the file
+    # path is case-sensitive on disk. This route is NOT API-folded (server.py
+    # folds only /api/*), so parsed.path is the CURRENT request's original-case
+    # path — never an API-only retained path left behind by an earlier
+    # keep-alive request (#6589 re-gate).
+    rel = parsed.path[len("/static/"):]
     static_file = (static_root / rel).resolve()
     try:
         static_file.relative_to(static_root)
@@ -20353,18 +21968,22 @@ def _handle_list_dir(handler, parsed):
     if not sid:
         return bad(handler, "session_id is required")
     webui_session = None
+    cli_owner_profile = None
     try:
         s = get_session(sid)
         webui_session = s
         workspace = s.workspace
     except KeyError:
-        # Fallback for CLI sessions not loaded in WebUI memory
+        # Fallback for CLI sessions not loaded in WebUI memory. Resolved through
+        # the same lookup as open/pin/rename, so a session outside the default
+        # sidebar window (an opened one-shot run, #8265) is found too. The active
+        # profile is tried first; a session owned by another profile is checked
+        # against that profile's trusted workspaces.
         try:
-            cli_meta = None
-            for cs in get_cli_sessions():
-                if cs["session_id"] == sid:
-                    cli_meta = cs
-                    break
+            cli_meta = _lookup_cli_session_metadata(sid)
+            if not cli_meta:
+                cli_meta = _lookup_cli_session_metadata(sid, all_profiles=True)
+                cli_owner_profile = cli_meta.get("profile") if cli_meta else None
             if not cli_meta:
                 return bad(handler, "Session not found", 404)
             workspace = cli_meta.get("workspace", "")
@@ -20372,6 +21991,8 @@ def _handle_list_dir(handler, parsed):
             return bad(handler, "Session not found", 404)
     try:
         _list_profile = getattr(webui_session, "profile", None)
+        if webui_session is None and cli_owner_profile:
+            _list_profile = cli_owner_profile
         if webui_session is None:
             try:
                 workspace = resolve_trusted_workspace(workspace, profile=_list_profile)
@@ -20761,8 +22382,30 @@ def _replay_run_journal(
         after_seq=after_seq,
         max_seq=max_seq,
     )
-    for entry in journal.get("events") or []:
+    events = journal.get("events") or []
+    # Settled prompts (clarify already answered / timed out / cancelled — see
+    # settled_prompt_events; approvals + any prompt in an ended run — see
+    # terminal_settled_prompt_events) must not replay: a reconnecting tab
+    # would re-show the dead card, then the terminal event in the same batch
+    # force-hides it (flash-of-stale-card). Prescan is bounded by the same
+    # event list the emit loop walks; any prescan failure fails OPEN (prompt
+    # still replays).
+    try:
+        settled_prompts = settled_prompt_events(events)
+        terminal_settled = terminal_settled_prompt_events(events)
+    except Exception:
+        logger.debug("Prompt-settle prescan failed; replaying prompts unfiltered", exc_info=True)
+        settled_prompts = None
+        terminal_settled = None
+    for entry in events:
         if not journal_replay_visible(entry):
+            continue
+        if (
+            settled_prompts is not None
+            and not journal_replay_prompt_visible(
+                entry, settled_prompts, terminal_settled=terminal_settled
+            )
+        ):
             continue
         _sse_with_id(
             handler,
@@ -21296,8 +22939,26 @@ def _handle_session_run_journal_stream_for_session(handler, parsed, session_id):
         return queue_, stream, snapshot, stream_id
 
     def emit_replay(events, stream_id, cutoff_seq):
+        # Same settled-prompt guard as _replay_run_journal: a clarify whose
+        # tool call already completed — and any prompt (incl. approval) in an
+        # ended run — must not re-surface as a live card on this session
+        # stream. Fail open when the prescan misbehaves.
+        try:
+            settled_prompts = settled_prompt_events(events)
+            terminal_settled = terminal_settled_prompt_events(events)
+        except Exception:
+            logger.debug("Prompt-settle prescan failed; replaying prompts unfiltered", exc_info=True)
+            settled_prompts = None
+            terminal_settled = None
         for entry in events:
             if not journal_replay_visible(entry):
+                continue
+            if (
+                settled_prompts is not None
+                and not journal_replay_prompt_visible(
+                    entry, settled_prompts, terminal_settled=terminal_settled
+                )
+            ):
                 continue
             event_id = str(entry.get("event_id") or "")
             event_seq = _run_journal_same_run_seq(event_id, stream_id)
@@ -22944,6 +24605,43 @@ def _media_deny_reason(target: Path) -> str | None:
     return None
 
 
+# #8033: Windows drive-letter file:/// URIs arrive here as '/C:/Users/me/x' —
+# URL.pathname keeps the file-URI grammar's leading separator before the drive
+# letter, and Path('/C:/x') is root-relative on Windows (resolves to the wrong
+# location). Strip exactly that ONE URI-style separator when it sits
+# immediately before a drive letter — and ONLY on a Windows server. On a POSIX
+# server the conversion must never run: stripping '/C:/report.png' there turns
+# an absolute path into a cwd-relative 'C:/report.png' that can alias a file
+# inside an allowed workspace. Never a generic leading-slash removal: POSIX
+# ('/home/me/x') and UNC ('\\server\share\...') semantics differ and must stay
+# untouched.
+_WINDOWS_DRIVE_URI_LEAD_RE = re.compile(r"^[\\/]([A-Za-z]:[\\/])")
+
+
+def _is_windows_server() -> bool:
+    """True when this server resolves paths with Windows drive semantics."""
+    return os.name == "nt"
+
+
+def _normalize_media_request_path(raw_path: str) -> str:
+    """Return ``raw_path`` with the file-URI leading separator before a drive
+    letter removed (Windows drive-letter file:/// URIs), otherwise unchanged.
+
+    The drive-letter conversion is gated on the server being Windows
+    (``_is_windows_server``). On POSIX the leading separator is preserved so
+    ``/C:/report.png`` stays an absolute path and can never alias a
+    cwd-relative ``C:/report.png`` inside an allowed root.
+
+    Only a leading ``[\\/]`` immediately followed by ``[A-Za-z]:[\\/]``
+    matches; every other path (POSIX absolute, UNC, drive-relative ``C:foo``,
+    already-clean ``C:/x``) passes through untouched. Shape-only: no
+    percent-decoding, no existence checks.
+    """
+    if _is_windows_server() and _WINDOWS_DRIVE_URI_LEAD_RE.match(raw_path):
+        return raw_path[1:]
+    return raw_path
+
+
 def _handle_media(handler, parsed):
     """Serve a local file by absolute path for inline display in the chat.
 
@@ -22980,7 +24678,13 @@ def _handle_media(handler, parsed):
 
     # Resolve the path and check it is within an allowed root
     try:
-        target = Path(raw_path).resolve()
+        # #8033: Windows drive-letter file:/// URIs carry a URI-style leading
+        # separator ('/C:/Users/...'); the normalizer strips exactly that one
+        # separator, and ONLY on a Windows server. On POSIX it must not strip —
+        # '/C:/...' has to stay absolute so it can never alias a cwd-relative
+        # drive-shaped path inside an allowed workspace. POSIX and UNC paths
+        # are returned unchanged by the normalizer.
+        target = Path(_normalize_media_request_path(raw_path)).resolve()
     except Exception:
         return bad(handler, "Invalid path", 400)
 
@@ -23951,99 +25655,6 @@ def _handle_live_models(handler, parsed):
                 _env = str(_cp.get("key_env") or "").strip()
                 return os.getenv(_env, "").strip() if _env else ""
 
-            def _custom_provider_models_discover_is_false(_cp):
-                """True when ``discover_models`` is an explicit ``false`` opt-out.
-
-                Mirrors ``api.config._provider_discover_allowed`` / Hermes
-                Agent ``model_switch_providers._discover_flag``: ``discover_models``
-                defaults to True, and the string forms ``"false"``/``"no"``/``"0"``
-                (case-insensitive) mean False.  Used to decide whether a
-                dict-shaped ``models`` mapping is a hand-pinned allowlist (only
-                when discovery is off) rather than per-model metadata.
-                """
-                _discover = _cp.get("discover_models", True) if isinstance(_cp, dict) else True
-                if isinstance(_discover, str):
-                    return _discover.strip().lower() in {"false", "no", "0"}
-                return not bool(_discover)
-
-            def _custom_provider_allowlist_ids(_cp):
-                """Plural ``models`` list only — the explicit allowlist signal.
-
-                The singular ``model`` field is sticky/default metadata, NOT an
-                allowlist: it must not gate live-catalog filtering, otherwise a
-                provider configured with only ``model: assistant`` (no ``models``
-                list) would be collapsed to a single model.  Only an explicit
-                ``models`` allowlist expresses "show exactly these models".
-
-                An auto-discovered catalog is NOT an allowlist: when Hermes
-                persisted discovery results back into config (``models: {...}``
-                plus ``models_discovered: true``), that mapping is a snapshot
-                of what the gateway exposed at discovery time.  Gating on it
-                would permanently pin the live catalog to the first-discovery
-                set, silently dropping any model the user pulls in later
-                (LM Studio / Ollama).  ``_provider_models_are_discovered_catalog()``
-                is the shared predicate the ``/api/models`` path already uses;
-                when it says "discovered", return no allowlist and let the
-                live probe win.  An explicit ``discover_models: false`` opt-out
-                re-pins the catalog (the predicate accounts for it), so a
-                hand-pinned discovered catalog still filters.
-
-                A dict-shaped ``models`` mapping that is NOT marked discovered is
-                *per-model metadata* written by the Hermes Agent setup flow
-                (``hermes_cli/model_switch.py::_save_custom_provider`` and the
-                setup wizard) — e.g. ``{chat-a: {context_length: 128000}}``.  It is
-                not a catalog narrow: treating its keys as an allowlist would
-                collapse the live picker to the single saved default (keyless
-                Ollama) while the CLI live-probe shows the full catalog.  Only an
-                explicit ``discover_models: false`` opts into treating the dict
-                keys as a pinned allowlist.  List/JSON-array-string/Python-literal
-                shapes remain plain allowlists.
-
-                The plural value is decoded through ``_parse_config_string_list()``
-                because ``hermes config set`` / JSON-mode editor saves persist
-                lists as quoted JSON-array strings (``'["chat-a","chat-b"]'``) or
-                Python literals (``"['chat-a']"``).  Handling only ``dict``/``list``
-                made a serialized allowlist fall through to ``[]``, which the
-                caller reads as "no allowlist configured" and floods the picker
-                with the full upstream catalog — the same class of bug as the
-                ``skills.disabled`` regression (#7120 / #7134).
-                """
-                from api.config import _provider_models_are_discovered_catalog
-
-                if _provider_models_are_discovered_catalog(_cp):
-                    return []
-                _ids = []
-                _models = _cp.get("models")
-                # Serialized shapes only: ``hermes config set`` / JSON-mode
-                # editor saves persist lists as quoted JSON-array strings
-                # (``'["chat-a","chat-b"]'``) or Python literals
-                # (``"['chat-a']"``).  Decode those through the shared helper so
-                # they are honored; native dict/list values are walked below so
-                # dict *entries* keep their id|model|name metadata (the decoder
-                # str()-ifies list members, which would mangle them).
-                if isinstance(_models, str):
-                    _models = _parse_config_string_list(_models)
-                if isinstance(_models, dict):
-                    # A dict-shaped ``models`` is per-model metadata written by
-                    # the Hermes Agent setup flow, NOT a catalog narrow.  Only a
-                    # ``discover_models: false`` opt-out treats the dict keys as a
-                    # pinned allowlist; otherwise return the empty allowlist so the
-                    # live probe returns the full catalog.
-                    if not _custom_provider_models_discover_is_false(_cp):
-                        return []
-                    for _mid in _models:
-                        if isinstance(_mid, str) and _mid.strip():
-                            _ids.append(_mid.strip())
-                elif isinstance(_models, (list, tuple)):
-                    for _item in _models:
-                        if isinstance(_item, str) and _item.strip():
-                            _ids.append(_item.strip())
-                        elif isinstance(_item, dict):
-                            _mid = _item.get("id") or _item.get("model") or _item.get("name")
-                            if _mid and str(_mid).strip():
-                                _ids.append(str(_mid).strip())
-                return _ids
-
             # For 'custom' and 'custom:*' providers, provider_model_ids()
             # returns [] because they aren't real hermes_cli endpoints.
             # Fall back to the custom_providers entries from config.yaml so
@@ -24805,25 +26416,76 @@ def _handle_memory_read(handler, parsed=None):
 def _handle_sessions_cleanup(handler, body, zero_only=False):
     cleaned = 0
     phase1_removed_ids = set()
+    draft_delete_failed = False
 
     # Phase 1: Clean orphan session files (existing behavior).
     for p in SESSION_DIR.glob("*.json"):
         if p.name.startswith("_"):
             continue
         try:
-            s = Session.load(p.stem)
-            if zero_only:
-                should_delete = s and len(s.messages) == 0
-            else:
-                should_delete = s and s.title == "Untitled" and len(s.messages) == 0
-            if should_delete:
-                with LOCK:
-                    SESSIONS.pop(p.stem, None)
-                p.unlink(missing_ok=True)
-                cleaned += 1
-                phase1_removed_ids.add(p.stem)
+            session_lock = _get_session_agent_lock(p.stem)
+            if not session_lock.acquire(timeout=5):
+                logger.debug("Session %s is busy; leaving it for later cleanup", p.stem)
+                continue
+            try:
+                s = Session.load(p.stem)
+                if zero_only:
+                    should_delete = s and len(s.messages) == 0
+                else:
+                    should_delete = s and s.title == "Untitled" and len(s.messages) == 0
+                if should_delete:
+                    with LOCK:
+                        SESSIONS.pop(p.stem, None)
+                        p.unlink(missing_ok=True)
+                    session_deleted = not p.exists()
+                    if session_deleted:
+                        phase1_removed_ids.add(p.stem)
+                    try:
+                        draft_deleted = bool(_delete_session_draft(p.stem))
+                    except Exception:
+                        logger.debug("Failed to delete draft sidecar during cleanup for %s", p.stem, exc_info=True)
+                        draft_delete_failed = True
+                        draft_deleted = False
+                    if not draft_deleted:
+                        draft_delete_failed = True
+                    if session_deleted:
+                        cleaned += 1
+            finally:
+                session_lock.release()
         except Exception:
             logger.debug("Failed to clean up session file %s", p)
+
+    # Retry dedicated drafts whose owner sidecar was removed by an earlier
+    # cleanup attempt. Coordinate with draft writes before checking ownership.
+    try:
+        for draft_path in (SESSION_DIR / ".drafts").glob("*.json"):
+            sid = draft_path.stem
+            if not is_safe_session_id(sid) or sid in phase1_removed_ids:
+                continue
+            if (SESSION_DIR / f"{sid}.json").exists():
+                continue
+            try:
+                session_lock = _get_session_agent_lock(sid)
+                acquired = session_lock.acquire(timeout=5)
+            except Exception:
+                logger.debug("Failed to acquire session lock during draft cleanup for %s", sid, exc_info=True)
+                draft_delete_failed = True
+                continue
+            if not acquired:
+                logger.debug("Session %s is busy; leaving its orphan draft for retry", sid)
+                draft_delete_failed = True
+                continue
+            try:
+                if not (SESSION_DIR / f"{sid}.json").exists() and not _delete_session_draft(sid):
+                    draft_delete_failed = True
+            except Exception:
+                logger.debug("Failed to retry draft cleanup for %s", sid, exc_info=True)
+                draft_delete_failed = True
+            finally:
+                session_lock.release()
+    except Exception:
+        logger.debug("Failed to scan dedicated session drafts during cleanup", exc_info=True)
+        draft_delete_failed = True
 
     phase1_touched = bool(cleaned)
     phase2_rewrote_index = False
@@ -24902,6 +26564,17 @@ def _handle_sessions_cleanup(handler, body, zero_only=False):
     if phase1_touched and not phase2_rewrote_index and SESSION_INDEX_FILE.exists():
         SESSION_INDEX_FILE.unlink(missing_ok=True)
 
+    if draft_delete_failed:
+        return j(
+            handler,
+            {
+                "ok": False,
+                "error": "Failed to delete one or more session drafts",
+                "cleaned": cleaned,
+                "draft_delete_failed": True,
+            },
+            status=500,
+        )
     return j(handler, {"ok": True, "cleaned": cleaned})
 
 
@@ -25128,6 +26801,8 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
         str(getattr(s, "session_source", None) or "").strip().lower() == "fork"
     )
     existing = list(getattr(s, "messages", None) or [])
+    from api.process_event_utils import build_active_turn_token, stamp_message_source
+
     if existing:
         latest = existing[-1]
         if isinstance(latest, dict) and latest.get("role") == "user":
@@ -25135,11 +26810,25 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
             msg_text = " ".join(str(msg or "").split())
             if latest_text == msg_text:
                 if _checkpoint_source == "fork" or _fork_owned_wakeup:
+                    # Fork turns keep the copied-row identity: the branch
+                    # route copies transcript rows up to the fork point and
+                    # the re-sent prompt rides the copied row; the
+                    # `_fork_child_turn` marker stamps it (unchanged).
                     latest["_fork_child_turn"] = s.session_id
-                return
+                    return
+                # Text alone is not turn ownership (re-gate 2026-10-06 item
+                # 3): a second interrupt of the same prompt inside one second
+                # carries a DIFFERENT stream token and must checkpoint its
+                # own row instead of collapsing into the previous turn's.
+                # Token-less rows (legacy data) keep the established
+                # content check.
+                current_token = build_active_turn_token(
+                    getattr(s, "active_stream_id", None), started_at,
+                )
+                latest_token = latest.get("_active_turn_token")
+                if not (latest_token and current_token and latest_token != current_token):
+                    return
     user_msg = {"role": "user", "content": msg}
-    from api.process_event_utils import build_active_turn_token, stamp_message_source
-
     stamp_message_source(
         user_msg,
         source,
@@ -25296,6 +26985,7 @@ def _rearm_process_wakeup_after_launch_failure(
     wakeup_prompt,
     process_id: str = "",
     retry_attempt: int = 0,
+    consumed_claimed_by_dispatch: bool = False,
 ) -> None:
     """Re-arm the process-wakeup drain after a launch-failure abort (#7680).
 
@@ -25324,6 +27014,17 @@ def _rearm_process_wakeup_after_launch_failure(
     so by the time a failure inside that drain reaches here the registry is
     already empty and the coalesce guard cannot fire — without this marker a
     persistent launch failure spun a new timer every 2s forever.
+
+    ``consumed_claimed_by_dispatch`` is the transport-claim provenance of the
+    shared registry consumed key (claimed by ``_process_one``'s idle dispatch,
+    not by an agent read), threaded down from
+    ``_start_server_side_wakeup_turn``. It is recorded on the queued entry
+    BEFORE the retry timer is scheduled, and that ordering is load-bearing: the
+    abort's exception can take longer than the 2s delay to reach the
+    dispatcher's handler, so the timer-fired drain may run first. If that drain
+    finds an untagged entry whose key is set, it reads the dispatch's own claim
+    as an agent read and drops the retry — no timer is left afterwards, so the
+    wakeup is lost (#8363 review, maintainer's stalled-unwind ordering).
     """
     wakeup_prompt = str(wakeup_prompt or "").strip()
     if not wakeup_prompt:
@@ -25352,7 +27053,12 @@ def _rearm_process_wakeup_after_launch_failure(
             except Exception:
                 _process_id = ""
         try:
-            record_deferred_wakeup(sid, _process_id, wakeup_prompt)
+            record_deferred_wakeup(
+                sid,
+                _process_id,
+                wakeup_prompt,
+                consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+            )
         except Exception:
             logger.debug(
                 "Failed to record deferred wakeup for session %s", sid, exc_info=True,
@@ -25552,7 +27258,15 @@ def _restore_chat_start_entry_sidecar(provenance) -> None:
     if sidecar_bytes is None:
         sidecar_path.unlink(missing_ok=True)
     else:
-        _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
+        from api.models import _note_sidecar_write
+
+        # Count this replace like Session.save does (#8267), so a concurrent
+        # cold get_session() does not publish the pre-restore object.
+        _note_sidecar_write(sidecar_path.stem)
+        try:
+            _atomic_write_chat_start_bytes(sidecar_path, sidecar_bytes)
+        finally:
+            _note_sidecar_write(sidecar_path.stem)
 
 
 def _cleanup_chat_start_launch_failure(
@@ -26170,6 +27884,75 @@ def _agent_runtime_barrier_response(
     return None
 
 
+def _normalize_goal_continuation_id(raw) -> str:
+    """Coerce a client-supplied continuation ID to a safe token (#7855).
+
+    Rejects anything that is not a compact hex string so a malformed or
+    hostile value can never reach the matcher: returns "" (the "no ID"
+    signal, which keeps the turn a genuine user turn) for None, non-strings,
+    empty/whitespace, wrong length or non-hex characters.
+    """
+    if raw is None:
+        return ""
+    token = str(raw).strip().lower()
+    if not token:
+        return ""
+    if len(token) != 32 or any(c not in "0123456789abcdef" for c in token):
+        return ""
+    return token
+
+
+def _resolve_chat_start_goal_continuation_id(body: dict, session_id: str) -> str:
+    """Resolve the continuation ID for a /api/chat/start body (#7855).
+
+    Current clients always send the key: ``send()`` posts
+    ``goal_continuation_id: _goalContinuationId || ''``, so a genuine turn
+    carries the key with an EMPTY value and a continuation carries its ID. A
+    PRE-UPGRADE tab posts ``_goalContinuationId || undefined`` and
+    ``JSON.stringify`` drops the undefined key entirely, so its body has no
+    ``goal_continuation_id`` key at all. Those tabs must still get master's
+    marker admission: resolve the session's pending ID server-side and feed
+    it through the same ID admission (receipt/rollback intact). An explicit
+    empty string from a current client must NOT peek — that is the #6885
+    genuine-turn signal, and a key-presence legacy path would otherwise admit
+    every genuine turn again.
+    """
+    if "goal_continuation_id" not in body and body.get("regenerate") is not True:
+        from api.goals import peek_pending_goal_continuation_id
+
+        return _normalize_goal_continuation_id(peek_pending_goal_continuation_id(session_id))
+    return _normalize_goal_continuation_id(body.get("goal_continuation_id"))
+
+
+def _consume_pending_goal_continuation(session_id: str, msg: str) -> str | dict | bool | None:
+    """#7855 admission: consume the goal-continuation record only when the
+    incoming turn carries the matching continuation ID.
+
+    The marker is session-scoped (#1932) and set when goal_continue fires;
+    the ID is issued at the same moment and travels with the browser's queued
+    continuation. Without the ID match, a genuine user/queued turn arriving
+    before the browser's auto-dispatch would be misclassified as goal-related
+    and would inherit goal-continuation semantics. When the ID differs (or is
+    absent), the user turn keeps priority and the record is left in place for
+    the browser's actual continuation dispatch.
+
+    Admission is by ID, not text (#7855): the queue UI lets the user edit or
+    combine a queued entry, and there is no wall-clock expiry, so a late or
+    edited continuation is still admitted. Marker, prompt and ID are one
+    record in api.goals; the admission check delegates there so check + drop
+    stay atomic.
+
+    On a match the return value is the **rollback receipt**: the popped
+    record itself (marker + prompt + ID together). A rejected chat start must
+    restore both halves (#7249 rolls back rejected starts), so callers keep
+    the receipt rather than re-deriving what was consumed — restoring the
+    marker alone left the retry unmatchable (maintainer's #7862 repro).
+    """
+    from api.goals import consume_pending_goal_continuation
+
+    return consume_pending_goal_continuation(session_id, msg)
+
+
 def _start_chat_stream_for_session(
     s,
     *,
@@ -26183,6 +27966,7 @@ def _start_chat_stream_for_session(
     normalized_model: bool = False,
     diag=None,
     goal_related: bool = False,
+    goal_continuation_id: str = "",
     source: str = "webui",
     moa_config=None,
     external_runtime_owned: bool | None = None,
@@ -26190,8 +27974,15 @@ def _start_chat_stream_for_session(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    consumed_claimed_by_dispatch: bool = False,
+    on_admitted=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn.
+
+    ``on_admitted(session, stream_id)`` runs under the session lock once this
+    turn has won the active-stream check, before the pending state is saved, so
+    whatever it writes is published atomically with the admitted turn (and
+    rolled back with it if the launch fails).
 
     ``process_id``/``retry_attempt``/``rearm_deferred_wakeup`` are the
     process-wakeup delivery identity threaded down from
@@ -26200,6 +27991,13 @@ def _start_chat_stream_for_session(
     async-delegation completions share ``source="process_wakeup"`` but own a
     durable retry, so re-arming for them double-delivered one completion
     (#7680 CORE, maintainer 2026-10-01).
+
+    ``consumed_claimed_by_dispatch`` says the shared registry consumed key was
+    claimed by the DISPATCH that started this turn (transport dedupe), not by an
+    agent read. The launch-abort re-arm must record that provenance on the
+    retried entry, otherwise a timer-fired retry drains an untagged entry whose
+    key reads as "already read" and is dropped even though no process read and
+    no accepted turn happened (#8363 review).
     """
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
@@ -26234,20 +28032,43 @@ def _start_chat_stream_for_session(
 
     consumed_goal_continuation = False
     consumed_bg_task_completion = False
+    # #1932: this session may have a pending goal continuation. The streaming
+    # hook sets PENDING_GOAL_CONTINUATION when goal_continue fires, so the next
+    # chat/start for this session is automatically treated as goal-related.
+    # #6885 + #7855: the marker is consumed ONLY when the request carries the
+    # continuation ID the server issued at goal_continue time — a genuine
+    # user/queued turn (no ID) keeps priority and leaves the marker for the
+    # browser's auto-dispatch, while an edited / combined / late-sent
+    # continuation still carries its ID and keeps the goal.
+    #
+    # #7855 rebase compat (#7249): the admission runs INSIDE the session lock
+    # via consume_continuation_markers(), not up front. Admission pops BOTH
+    # halves (marker + prompt record, api/goals.py), so a rejected start must
+    # restore both; rolling back the marker alone left the retry unmatchable
+    # (maintainer's #7862 repro: consume -> rollback -> retry consume False).
+    # The popped record therefore travels as a rollback receipt and
+    # restore_consumed_continuation_markers() re-arms the pair — unless a
+    # newer continuation was armed for this session meanwhile.
+    consumed_goal_continuation_receipt = None
 
     def consume_continuation_markers() -> None:
         nonlocal goal_related, consumed_goal_continuation, consumed_bg_task_completion
-        if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
-            goal_related = True
-            PENDING_GOAL_CONTINUATION.discard(s.session_id)
-            consumed_goal_continuation = True
+        nonlocal consumed_goal_continuation_receipt
+        if not goal_related and goal_continuation_id:
+            receipt = _consume_pending_goal_continuation(s.session_id, goal_continuation_id)
+            if receipt:
+                goal_related = True
+                consumed_goal_continuation = True
+                consumed_goal_continuation_receipt = receipt
         if s.session_id in PENDING_BG_TASK_COMPLETIONS:
             PENDING_BG_TASK_COMPLETIONS.discard(s.session_id)
             consumed_bg_task_completion = True
 
     def restore_consumed_continuation_markers() -> None:
         if consumed_goal_continuation:
-            PENDING_GOAL_CONTINUATION.add(s.session_id)
+            from api.goals import restore_pending_goal_continuation
+
+            restore_pending_goal_continuation(s.session_id, consumed_goal_continuation_receipt)
         if consumed_bg_task_completion:
             PENDING_BG_TASK_COMPLETIONS.add(s.session_id)
 
@@ -26350,6 +28171,8 @@ def _start_chat_stream_for_session(
                 diag.stage("save_pending_state") if diag else None
                 was_hidden_empty_session = _is_hidden_empty_session(s)
                 try:
+                    if on_admitted is not None:
+                        on_admitted(s, stream_id)
                     _prepare_chat_start_session_for_stream(
                         s,
                         msg=msg,
@@ -26479,6 +28302,7 @@ def _start_chat_stream_for_session(
                             wakeup_prompt=msg,
                             process_id=process_id,
                             retry_attempt=retry_attempt,
+                            consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                         )
                     raise
                 break
@@ -26650,9 +28474,12 @@ def _start_run(
     gateway_chat_enabled: bool | None = None,
     regeneration=None,
     goal_related: bool = False,
+    goal_continuation_id: str = "",
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    consumed_claimed_by_dispatch: bool = False,
+    on_admitted=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
 
@@ -26666,6 +28493,11 @@ def _start_run(
     ``source`` is the StartRunRequest.source (``"webui"`` for browser POSTs,
     ``"process_wakeup"`` for the drain-thread wakeup). ``route`` is the
     metadata.route label that lands on the run record for observability.
+
+    ``process_id``/``retry_attempt``/``rearm_deferred_wakeup``/
+    ``consumed_claimed_by_dispatch`` are passed through unchanged to the
+    in-process start: they carry the process-wakeup delivery identity and the
+    transport-claim provenance into the launch-abort re-arm (#8363 review).
 
     Returns a dict with ``_status`` plus the legacy chat-start response
     fields (``stream_id``, ``session_id``, etc.). Adapter selection that
@@ -26737,9 +28569,12 @@ def _start_run(
                 goal_related=goal_related,
                 external_runtime_owned=gateway_chat_enabled,
                 regeneration=regeneration,
+                goal_continuation_id=goal_continuation_id,
                 process_id=process_id,
                 retry_attempt=retry_attempt,
                 rearm_deferred_wakeup=rearm_deferred_wakeup,
+                consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+                on_admitted=on_admitted,
             )
 
         def _legacy_adapter_factory():
@@ -26788,9 +28623,12 @@ def _start_run(
         goal_related=goal_related,
         external_runtime_owned=gateway_chat_enabled,
         regeneration=regeneration,
+        goal_continuation_id=goal_continuation_id,
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
+        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+        on_admitted=on_admitted,
     )
 
 
@@ -26853,8 +28691,17 @@ def start_session_turn(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    consumed_claimed_by_dispatch: bool = False,
+    on_admitted=None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
+
+    ``on_admitted`` is forwarded to ``_start_chat_stream_for_session``.
+
+    ``consumed_claimed_by_dispatch`` is forwarded too: the process-completion
+    dispatch claims the shared registry consumed key as a transport dedupe, and
+    a launch-abort re-arm must preserve that provenance so the retry is not
+    dropped as if the agent had read the completion (#8363 review).
 
     Option Z primary wakeup entrypoint. This is the minimal, HTTP-handler-free
     core that ``/api/chat/start`` already reaches via ``_handle_chat_start`` →
@@ -26926,6 +28773,7 @@ def start_session_turn(
         profile_provider=_pp_provider,
         profile_default_model=_pp_default,
         profile_config=_pp_cfg,
+        profile=getattr(s, "profile", None),
         prefer_cached_catalog=True,
     )
     _paused_wakeup_response = None
@@ -27053,6 +28901,8 @@ def start_session_turn(
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
+        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+        on_admitted=on_admitted,
     )
 
     # ── Defect B: live-view of server-initiated turns ──────────────────────
@@ -27360,6 +29210,7 @@ def _handle_goal_command(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
             explicit_model_pick=explicit_model_pick,
         )
         alias_refusal = _external_model_alias_lane_response(
@@ -27444,6 +29295,40 @@ def _handle_goal_command(handler, body):
             status = 409 if payload.get("error") == "agent_running" else 400
         return j(handler, payload, status=status)
 
+    # #6885 round 2 lifecycle: the /goal command is the natural traffic hook
+    # for record upkeep. A cleared/paused goal has no continuation coming, so
+    # any pending record for this session must not outlive it (an abandoned
+    # browser dispatch would otherwise keep the pair resident until expiry);
+    # sweeping expired/orphaned records here bounds the rest without a
+    # background timer.
+    # #7855 rebase compat (#7249): this hook must not fire for runner-owned
+    # goals. The runner does not drive the browser's queued continuation, so
+    # there is no record to clear, and the sweep below runs on the runner's
+    # traffic for goals it owns locally.
+    # #7855 re-gate CORE: only a CLEARED goal has no continuation coming. PAUSE
+    # keeps the goal (and its pending continuation) alive: pausing then resuming a
+    # deferred continuation used to delete the admission record here, and the
+    # resume path restored the active goal WITHOUT replacing the token — so the
+    # retry launched with `goal_related=false` and the goal loop silently stopped.
+    # Verified through real HTTP with the installed native GoalManager: master
+    # launches the retry with `goal_related=true`, this branch with `false`.
+    if not runner_goal_owned:
+        if goal_adapter_action == "clear":
+            from api.goals import clear_pending_goal_continuation
+
+            try:
+                clear_pending_goal_continuation(s.session_id)
+            except Exception:
+                logger.debug(
+                    "Failed to clear pending goal continuation for %s", s.session_id, exc_info=True
+                )
+        from api.goals import sweep_expired_goal_continuations
+
+        try:
+            sweep_expired_goal_continuations()
+        except Exception:
+            logger.debug("Failed to sweep expired goal continuations", exc_info=True)
+
     def _rollback_goal_after_failed_kickoff() -> None:
         restore_goal_state(s.session_id, previous_goal_state, profile_home=profile_home)
 
@@ -27471,6 +29356,7 @@ def _handle_goal_command(handler, body):
                 profile_provider=_pp_provider,
                 profile_default_model=_pp_default,
                 profile_config=_pp_cfg,
+                profile=getattr(s, "profile", None),
                 explicit_model_pick=explicit_model_pick,
             )
             # #6703 parity: same explicit-pick signature stamping on the
@@ -27774,6 +29660,7 @@ def _handle_chat_start(handler, body, diag=None):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
             explicit_model_pick=explicit_model_pick,
         )
         from api.runtime_adapter import runtime_adapter_runner_enabled
@@ -27866,6 +29753,20 @@ def _handle_chat_start(handler, body, diag=None):
             "diag": diag,
             "gateway_chat_enabled": gateway_chat_enabled,
             "regeneration": regeneration,
+            # #7855: the server-issued continuation ID travels with the browser's
+            # queued continuation through inline edits and combines; admission
+            # is by ID, never by text, so an edited/late/combined continuation
+            # keeps its goal semantics and a genuine user message (no ID) does
+            # not. Rejected as malformed here rather than by the matcher. A
+            # pre-upgrade tab omits the key entirely (its send() posts
+            # `_goalContinuationId || undefined` and JSON.stringify drops the
+            # undefined key), so the resolver peeks the session's pending ID
+            # for that wire shape — master's marker admission, receipt/rollback
+            # intact — while a current client's explicit empty string stays a
+            # genuine turn (#6885).
+            "goal_continuation_id": _resolve_chat_start_goal_continuation_id(
+                body, getattr(s, "session_id", "") or ""
+            ),
         }
         if not gateway_chat_enabled and moa_config is not None:
             start_run_kwargs["moa_config"] = moa_config
@@ -28045,6 +29946,7 @@ def _handle_chat_sync(handler, body):
             profile_provider=_pp_provider,
             profile_default_model=_pp_default,
             profile_config=_pp_cfg,
+            profile=getattr(s, "profile", None),
         )[:2]
         s.model = model
         s.model_provider = model_provider
@@ -28161,6 +30063,13 @@ def _handle_chat_sync(handler, body):
                 s, "sync provider routing", logger_override=logger,
             ):
                 _routing_kwargs = _sync_routing_kwargs(_pp_cfg, _sync_routing_params)
+            # #7237 review round-N+2 finding 2 (nesquena-hermes 2026-10-05):
+            # the sync path must derive wholesale-replacement authority from
+            # the PRODUCER, exactly like the streaming path. Capture the
+            # session id this turn opened with so a post-run compression
+            # rotation (agent.session_id advancing to a fresh continuation) is
+            # visible to the settle below.
+            _sync_session_id = s.session_id
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
@@ -28177,9 +30086,11 @@ def _handle_chat_sync(handler, body):
             )
             from api.streaming import (
                 _WEBUI_PROGRESS_PROMPT,
+                _add_supported_run_conversation_kwarg,
                 _active_turn_boundary,
                 _assign_stable_message_ids,
                 _dedupe_replayed_context_messages,
+                _deduplicate_context_messages,
                 _find_active_turn_checkpoint_index,
                 _merge_display_messages_after_agent_result,
                 _resolve_active_turn_authority,
@@ -28187,6 +30098,7 @@ def _handle_chat_sync(handler, body):
                 _restore_reasoning_metadata_before_boundary,
                 _settle_current_turn_boundary,
                 _sanitize_messages_for_agent,
+                _agent_replay_settle_projection,
                 _compact_session_image_parts_for_persistence,
                 _context_messages_for_new_turn,
                 _workspace_context_prefix,
@@ -28213,20 +30125,74 @@ def _handle_chat_sync(handler, body):
 
             _previous_messages = list(s.messages or [])
             _previous_context_messages = list(_context_messages_for_new_turn(s, msg))
+            # The EXACT projection handed to the Agent, threaded to the settle's
+            # replay dedupe. ``result["messages"]`` is the full conversation
+            # (this projection + the current turn), so without it the dedupe
+            # cannot prove which rows the current turn owns and could append
+            # sanitizer-rewritten historical rows beside the raw history
+            # (#7237 review data-regression finding, nesquena-hermes
+            # 2026-09-23).
+            # #7237 review round 3 finding 2 (nesquena-hermes 2026-10-06): the
+            # projection used to be passed BY REFERENCE and then reused for the
+            # prefix proof. The real Agent shallow-copies the list and performs
+            # its consecutive-user repair on the tail dict, so the same object
+            # the settle compares against had already been mutated. An
+            # unanswered-tail follow-up therefore lost its current user row.
+            #
+            # Take an INDEPENDENT deep snapshot here: the value handed to the
+            # Agent and the value compared at settle time must be two objects,
+            # or "what we sent" is a moving target.
+            #
+            # The sent projection keeps out-of-clock-order splice pairs
+            # separate (the boundary matrix pins the row-level prefix), so the
+            # settle proof compares the UNCONDITIONAL merge of the sent rows —
+            # the form the installed Agent actually returns.
+            _agent_replay_projection = _sanitize_messages_for_agent(
+                _previous_context_messages,
+                cfg=get_config(),
+                effective_model=_model,
+                effective_provider=_provider,
+                effective_base_url=_base_url,
+                # #7237 review round 3 finding 5 (nesquena-hermes
+                # 2026-10-06): same Agent-replay adjacency normalization the
+                # streaming path applies, so the sync settle models the
+                # Agent's merge of bare assistant rows instead of rejecting
+                # the changed prefix and dropping the exchange.
+                normalize_bare_assistant_adjacency=True,
+            )
+            _run_conversation_projected_history = _agent_replay_settle_projection(
+                _agent_replay_projection
+            )
 
-            result = agent.run_conversation(
+            _sync_run_kwargs = dict(
                 user_message=workspace_ctx + msg,
                 system_message=workspace_system_msg,
-                conversation_history=_sanitize_messages_for_agent(
-                    _previous_context_messages,
-                    cfg=get_config(),
-                    effective_model=_model,
-                    effective_provider=_provider,
-                    effective_base_url=_base_url,
-                ),
+                # Threaded to the settle's replay dedupe so only rows the
+                # current turn owns are appended when the replayed prefix
+                # diverges from the raw context (#7237 review
+                # data-regression finding).
+                # #7237 review blocker 1 (nesquena-hermes 2026-10-09): the
+                # proof snapshot above must stay an IMMUTABLE copy. The
+                # installed Agent shallow-copies the list it receives and
+                # performs its consecutive-user repair on the tail dict, so
+                # handing it the same object the settle compares against
+                # makes the prefix proof a moving target — the repair
+                # mutates the dict in place and the settle then rejects the
+                # changed prefix, dropping the follow-up's prompt and reply.
+                # A second deep copy here isolates the Agent's mutation. The
+                # Agent receives the SENT projection (splice pairs separate);
+                # only the settle proof uses the unconditional merge.
+                conversation_history=copy.deepcopy(_agent_replay_projection),
                 task_id=s.session_id,
                 persist_user_message=msg,
             )
+            # #8436 maintainer fold: the sync route calls run_conversation directly (not through
+            # _build_run_conversation_kwargs), so give it the same signature-gated title-only input:
+            # the Agent titles state.db from the submitted prompt, not the [Workspace::v1: ...] prefix.
+            _add_supported_run_conversation_kwarg(
+                agent.run_conversation, _sync_run_kwargs, "title_user_message", msg,
+            )
+            result = agent.run_conversation(**_sync_run_kwargs)
     finally:
         # Same as the streaming worker's teardown: mirror the workspace into the
         # Agent-created state.db row on every exit, including a raised turn.
@@ -28251,6 +30217,23 @@ def _handle_chat_sync(handler, body):
                 os.environ.pop("HERMES_SESSION_KEY", None)
             else:
                 os.environ["HERMES_SESSION_KEY"] = old_session_key
+    # #7237 review round-N+2 finding 2 (nesquena-hermes 2026-10-05): the sync
+    # path previously never passed ``compression_authorized`` to
+    # ``_dedupe_replayed_context_messages``, so every genuine compression was
+    # refused there and the persisted context kept only the old history. The
+    # producer signal is the same as the streaming path: the Agent rotating
+    # its own session_id inside this call proves the context layer really ran
+    # a compression turn.
+    # #7237 review round 3 (nesquena-hermes 2026-10-06): the installed Agent
+    # compresses IN PLACE by default — it keeps its session id and commits
+    # ``_last_compaction_in_place``. The previous proxy
+    # (``agent.session_id != _sync_session_id``) could only see a rotation, so
+    # the default case was treated as "no compression", the settle refused the
+    # compacted result, and the route kept the 24 old context rows without the
+    # current answer. Derive the authority from actual producer commitment via
+    # the shared predicate the streaming settle uses, so the two paths cannot
+    # drift apart again.
+    _compression_authorized = _producer_committed_compression(agent, _sync_session_id)
     with _get_session_agent_lock(s.session_id):
         _result_messages = result.get("messages") or _previous_context_messages
         # Active-turn boundary is fixed BEFORE any restoration (same as streaming),
@@ -28300,11 +30283,42 @@ def _handle_chat_sync(handler, body):
         _assign_stable_message_ids(
             _result_messages, _previous_messages, _previous_context_messages
         )
-        _next_context_messages = _dedupe_replayed_context_messages(
-            _previous_context_messages,
-            _next_context_messages,
-            msg,
-        )
+        if result.get("messages"):
+            # Call-scoped protection (#7237 review blocker 1,
+            # nesquena-hermes 2026-09-28): the dedupe RETURNS the protected
+            # rows it proved; the sync route consumes them in THIS call by
+            # passing them into the identity dedupe — the old module global
+            # was never read here, so a settle that proved current-turn rows
+            # could have them collapsed as duplicates on the sync path.
+            _next_context_messages, _proven_rows = _dedupe_replayed_context_messages(
+                _previous_context_messages,
+                _next_context_messages,
+                msg,
+                projected_history=_run_conversation_projected_history,
+                # #7237 review round-N+2 finding 2 (nesquena-hermes
+                # 2026-10-05): the sync path must grant wholesale-replacement
+                # authority when the producer actually rotated the session
+                # id, exactly like the streaming path — a genuine compression
+                # must persist the compacted list, not the old history.
+                compression_authorized=_compression_authorized,
+            )
+            s.context_messages = _deduplicate_context_messages(
+                _next_context_messages,
+                protected_rows=_proven_rows,
+            )
+        else:
+            # The Agent produced NO rows for this turn. The previous fallback
+            # (``result.get("messages") or _previous_context_messages``) left
+            # the raw pre-turn context substituted as the settle input; with
+            # the exact sent projection ``[]`` that whole substituted raw
+            # history was then treated as the current-turn output and the
+            # settle returned ``previous_context + previous_context``
+            # (#7237 review residual 2, nesquena-hermes 2026-09-27). Settle
+            # an empty Agent result as a no-op for model context — the same
+            # contract the streaming ``_settle_result_messages`` applies —
+            # keeping exactly one raw-history copy with no loss or
+            # duplication.
+            _next_context_messages = list(_previous_context_messages)
         if _active_turn_identity.get("token"):
             _next_context_messages = _settle_current_turn_boundary(
                 _previous_context_messages,
@@ -29866,6 +31880,71 @@ def _gateway_approval_failure(
     return payload, status
 
 
+_GATEWAY_PROMPT_REFRESH_TIMEOUT = 10.0
+
+
+def _gateway_run_prompt(
+    base_url: str,
+    api_key: str,
+    run_id: str,
+    approval_id: str,
+) -> tuple[str, tuple[str, int, list[str]] | None]:
+    """Read the prompt a run is currently waiting on, straight from the gateway.
+
+    Only used to verify an answer the gateway rejected. The read is bounded well
+    below the browser's own timeout because it happens on the request thread
+    while the relay owner claim is held.
+
+    Returns ``(outcome, prompt)`` where outcome is:
+
+    - ``"found"``: the run is parked on this exact prompt (``prompt`` is set);
+    - ``"superseded"``: the projection read fine and this prompt is gone — the
+      run parked nothing, or parked a different single prompt — so the card is
+      stale and must not answer that one;
+    - ``"ambiguous"``: several prompts are parked and none is this card's, a
+      parked prompt's generation cannot be read, or the projection carries no
+      ``pending_controls`` list at all — it cannot say whether this one was
+      answered;
+    - ``"failed"``: the projection could not be read at all.
+
+    Cross-prompt adoption is deliberately absent: a card may only answer its own
+    prompt id, or a stale card would approve a command the user never saw.
+    """
+    from api.runner_client import HttpRunnerClient
+
+    try:
+        run = HttpRunnerClient(base_url=base_url, api_key=api_key).get_run(
+            run_id, timeout=_GATEWAY_PROMPT_REFRESH_TIMEOUT
+        )
+    except Exception:  # noqa: BLE001 - a failed refresh must never break the relay
+        logger.debug("gateway run prompt refresh failed for %s", run_id, exc_info=True)
+        return "failed", None
+    controls = run.get("pending_controls") if isinstance(run, dict) else None
+    if not isinstance(controls, list):
+        # No pending_controls list (the Agent's legacy runs bridge projects
+        # ``approval`` instead, or a bare ``running`` status) cannot prove this
+        # prompt was answered, so keep the card rather than settle it.
+        return "ambiguous", None
+    approvals = [
+        prompt
+        for prompt in (controls or [])
+        if isinstance(prompt, dict) and prompt.get("kind") == "approval"
+    ]
+    prompts = [prompt for prompt in approvals if type(prompt.get("execution_generation")) is int]
+    match = next(
+        (prompt for prompt in prompts if str(prompt.get("prompt_id") or "") == approval_id),
+        None,
+    )
+    if match is None:
+        # A parked prompt whose generation cannot be read is not a prompt that
+        # is gone: only a readable projection that does not list it proves it
+        # was answered, so an older or mixed shape is ambiguous, not superseded.
+        unreadable = len(approvals) != len(prompts)
+        return ("ambiguous" if unreadable or len(prompts) > 1 else "superseded"), None
+    choices = [c for c in (match.get("choices") or []) if isinstance(c, str)]
+    return "found", (str(match.get("prompt_id") or ""), int(match["execution_generation"]), choices)
+
+
 def _relay_gateway_run_approval(
     sid: str,
     mirror: dict,
@@ -29879,7 +31958,6 @@ def _relay_gateway_run_approval(
     Both the approval-card endpoint and the ordinary session-YOLO endpoint use
     this chokepoint so one tab cannot retire another tab's parked remote run.
     """
-    from api.config import gateway_supports_approval_identity_v1
     from api.gateway_chat import gateway_run_endpoint
     from api.runner_client import HttpRunnerClient, RunnerClientError
 
@@ -29923,9 +32001,49 @@ def _relay_gateway_run_approval(
             )
 
         base_url, api_key = gateway_run_endpoint(run_id)
-        identity_v1 = bool(current_mirror.get(_GATEWAY_AGENT_IDENTITY_V1)) and (
-            gateway_supports_approval_identity_v1(base_url, api_key)
-        )
+        # The identity decision was made once, when the gateway's own payload
+        # was interpreted: a mirror flagged v1 either carried an exact
+        # per-prompt id plus its execution generation, or came from a gateway
+        # advertising the capability. Re-asking /v1/capabilities here would
+        # re-open the very gap this fixes (the capability is not published by
+        # gateways that do fence prompts by generation).
+        identity_v1 = bool(current_mirror.get(_GATEWAY_AGENT_IDENTITY_V1))
+        execution_generation = current_mirror.get(_GATEWAY_EXECUTION_GENERATION)
+        if type(execution_generation) is not int:
+            execution_generation = None
+        # A card carries its own identity: whatever published it stamped the
+        # prompt id, its generation and its choices — including a card rebuilt
+        # from durable run status, which is published with the run's pending
+        # controls. Nothing is resolved here, so a click on a legacy
+        # (no-generation) card posts immediately instead of blocking on a status
+        # read the browser gives up on first.
+        prompt_id = approval_id
+        choices = current_mirror.get("choices")
+        choices = [c for c in choices if isinstance(c, str)] if isinstance(choices, list) else []
+        if identity_v1 and choices and choice not in choices:
+            # The gateway offers fewer choices than the stale card shows;
+            # forwarding this one is a guaranteed 400 that hides its cause.
+            # WARNING, not INFO: the app configures no logging level, so INFO is
+            # dropped by the default root logger and a stuck click stays blind.
+            logger.warning(
+                "gateway approval relay rejected: run=%s prompt=%s choice=%s offered=%s",
+                run_id,
+                prompt_id,
+                choice,
+                ",".join(choices),
+            )
+            return _gateway_approval_failure(
+                sid,
+                choice,
+                code="approval_choice_not_offered",
+                error=(
+                    f"The gateway does not accept '{choice}' for this prompt "
+                    f"(offers: {', '.join(choices)}). Reload the session and answer "
+                    "the card that is currently shown."
+                ),
+                status=400,
+                enable_yolo=enable_yolo,
+            )
         if not identity_v1:
             run_head = gateway_pending_mirror(sid, run_id=run_id)
             if not run_head or str(run_head.get("approval_id") or "").strip() != approval_id:
@@ -29938,27 +32056,83 @@ def _relay_gateway_run_approval(
                     enable_yolo=enable_yolo,
                 )
 
+        def _respond(reply_prompt_id: str, reply_generation) -> Exception | None:
+            """Send one answer; return the rejection itself, never its message.
+
+            The caller branches on the gateway's structured ``code``, so the
+            decision must not depend on how the message happens to be worded.
+            """
+            try:
+                # Constructed per send: a misconfigured base must raise inside
+                # this try, or it escapes the relay and falls through to the
+                # legacy path as a false success.
+                HttpRunnerClient(base_url=base_url, api_key=api_key).respond_approval(
+                    run_id,
+                    reply_prompt_id if identity_v1 else "",
+                    choice,
+                    **(
+                        {"execution_generation": reply_generation}
+                        if identity_v1 and reply_generation is not None
+                        else {}
+                    ),
+                )
+                return None
+            except (RunnerClientError, ValueError) as exc:
+                return exc
+
         yolo_transition = begin_session_yolo_transition(sid) if enable_yolo else None
-        relay_error = None
         relay_succeeded = False
+        already_resolved = False
         try:
-            HttpRunnerClient(base_url=base_url, api_key=api_key).respond_approval(
-                run_id,
-                approval_id if identity_v1 else "",
-                choice,
-            )
-            relay_succeeded = True
-        except (RunnerClientError, ValueError) as exc:
-            relay_error = str(exc)
+            relay_error = _respond(prompt_id, execution_generation)
+            if getattr(relay_error, "code", "") == "approval_not_pending":
+                # The mirror outlived the prompt it was built from: the run has
+                # since answered it, or parked a newer one. Re-read the run's own
+                # pending_controls and act only on what they prove.
+                outcome, resolved = _gateway_run_prompt(base_url, api_key, run_id, approval_id)
+                if outcome == "found" and resolved is not None:
+                    live_prompt_id, live_generation, live_choices = resolved
+                    # The same prompt re-published at a newer generation: the
+                    # first POST was fenced to the dead one, so re-send against
+                    # the live generation. Never a different prompt id.
+                    if live_generation != execution_generation:
+                        prompt_id, execution_generation = live_prompt_id, live_generation
+                        identity_v1 = True
+                        choices = live_choices or choices
+                        relay_error = _respond(prompt_id, execution_generation)
+                elif outcome == "superseded":
+                    # The projection read fine and this card's prompt is gone.
+                    # The answer the user wanted is already in effect, so this is
+                    # an idempotent replay, not a failure — but only when the
+                    # refresh actually succeeded. An unreadable or ambiguous
+                    # projection keeps the mirror and reports the rejection.
+                    already_resolved = True
+            relay_succeeded = relay_error is None or already_resolved
         finally:
             finish_session_yolo_transition(sid, yolo_transition, succeeded=relay_succeeded)
 
-        if relay_error is not None:
+        # One line per relayed click: the body shape is what decides 200 vs 400,
+        # and the client never surfaced it, so a stuck 400 was undiagnosable.
+        logger.warning(
+            "gateway approval relay: run=%s prompt=%s choice=%s generation=%s "
+            "identity_v1=%s body=%s result=%s",
+            run_id,
+            prompt_id,
+            choice,
+            execution_generation,
+            identity_v1,
+            "request_id+execution_generation+choice"
+            if identity_v1 and execution_generation is not None
+            else "approval_id+choice",
+            relay_error or "ok",
+        )
+
+        if relay_error is not None and not already_resolved:
             return _gateway_approval_failure(
                 sid,
                 choice,
                 code="gateway_approval_relay_failed",
-                error=relay_error,
+                error=str(relay_error),
                 status=502,
                 enable_yolo=enable_yolo,
                 relayed=True,
@@ -29977,6 +32151,7 @@ def _relay_gateway_run_approval(
             "ok": True,
             "choice": choice,
             "relayed": True,
+            **({"already_resolved": True} if already_resolved else {}),
             **(
                 {"yolo_enabled": bool(is_session_yolo_enabled(sid))}
                 if enable_yolo

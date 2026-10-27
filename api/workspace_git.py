@@ -192,6 +192,11 @@ def _run_git(
 ) -> subprocess.CompletedProcess[str]:
     cwd = ctx_or_cwd.repo_root if isinstance(ctx_or_cwd, GitContext) else ctx_or_cwd
     run_env = _clean_git_env(env)
+    if args and args[0] == "status":
+        # Status is a read. Without this, Git may take .git/index.lock to
+        # refresh the index, and a status killed at its timeout can leave
+        # that lock behind and block the user's next commit (#8520).
+        run_env["GIT_OPTIONAL_LOCKS"] = "0"
     if repository_git_proxy_blocks(args, cwd, run_env):
         raise GitWorkspaceError(
             "Repository-configured core.gitProxy is not allowed for git:// remotes",

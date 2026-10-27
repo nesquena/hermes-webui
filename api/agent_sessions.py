@@ -435,6 +435,68 @@ def _branch_markers(row: dict | None) -> tuple[str, dict[str, str]]:
     return ('markers', markers) if markers else ('none', {})
 
 
+def _is_messaging_reset_successor(parent: dict | None, child: dict | None) -> bool:
+    """Return True when ``child`` is the next segment of the same messaging chat.
+
+    A Gateway ``session_reset`` keeps ``parent_session_id`` so the DM has a
+    lineage. That link is not a subagent or a fork: nesting the new segment
+    under the reset parent would sort it by the parent's old timestamp, so
+    today's chat disappears from the top of the sidebar. Same source plus the
+    same ``session_key`` (or the same chat and user, when no key is stored)
+    stays its own top-level row.
+    """
+    if not parent or not child:
+        return False
+    if str(parent.get('end_reason') or '').strip().lower() != 'session_reset':
+        return False
+    messaging = MESSAGING_SOURCES | {'signal', 'messaging'}
+    parent_source = _safe_lower(parent.get('source'))
+    child_source = _safe_lower(child.get('source'))
+    # Never collapse across surfaces: a WebUI continuation of a reset DM stays
+    # its own surface-owned conversation.
+    if parent_source not in messaging or parent_source != child_source:
+        return False
+    ended_at = parent.get('ended_at')
+    if ended_at is not None:
+        try:
+            if float(child.get('started_at') or 0) < float(ended_at):
+                return False
+        except (TypeError, ValueError):
+            return False
+    # An explicit branch or delegate of this parent is not the reset segment,
+    # even when it shares the chat key and starts after the reset. A WebUI
+    # fork and an unreadable marker fail closed the same way. ``_reset_from``
+    # naming this parent is the reset segment itself. A branch marker that
+    # names an earlier ancestor was inherited and does not block the exemption.
+    if str(child.get('session_source') or '').strip().lower() == 'fork':
+        return False
+    marker_state, child_markers = _branch_markers(child)
+    if marker_state == 'unknown':
+        return False
+    parent_id = str(parent.get('id') or '').strip()
+    if parent_id and child_markers.get('_branched_from') == parent_id:
+        return False
+    if parent_id and child_markers.get('_delegate_from') == parent_id:
+        return False
+    parent_key = str(parent.get('session_key') or '').strip()
+    child_key = str(child.get('session_key') or '').strip()
+    if parent_key and child_key:
+        return parent_key == child_key
+
+    def _chat_identity(row: dict) -> tuple[str, str, str]:
+        return (
+            str(row.get('chat_id') or row.get('origin_chat_id') or '').strip(),
+            str(row.get('user_id') or row.get('origin_user_id') or '').strip(),
+            str(row.get('thread_id') or '').strip(),
+        )
+
+    parent_ident = _chat_identity(parent)
+    # An empty chat/user is not evidence of "same chat" — fail closed.
+    if not parent_ident[0] or not parent_ident[1]:
+        return False
+    return parent_ident == _chat_identity(child)
+
+
 def _is_continuation_session(parent: dict | None, child: dict | None) -> bool:
     """Return True when ``child`` is the next segment of the same conversation.
 
@@ -543,6 +605,10 @@ def _project_agent_session_rows(rows: list[dict]) -> list[dict]:
         parent = rows_by_id.get(parent_id)
         if _is_continuation_session(parent, row):
             continuation_child_ids.add(row['id'])
+        elif _is_messaging_reset_successor(parent, row):
+            # A session_reset successor keeps its lineage link but stays a
+            # top-level row so it sorts by its own (fresh) timestamp.
+            continue
         else:
             row['relationship_type'] = 'child_session'
             row['parent_title'] = parent.get('title') if parent else None
@@ -690,6 +756,7 @@ def read_importable_agent_session_rows(
     project_assignment: str | None = None,
     project_ids: tuple[str, ...] | None = None,
     return_window_exhaustion: bool = False,
+    session_ids: tuple[str, ...] | None = None,
 ) -> list[dict] | tuple[list[dict], bool]:
     """Return agent sessions projected as importable conversations.
 
@@ -733,6 +800,10 @@ def read_importable_agent_session_rows(
     result can exceed ``limit`` by the number of such anchors. Callers must
     therefore iterate the result rather than assume ``len(rows) <= limit``.
 
+    ``session_ids`` narrows the query to exactly those rows, so a caller can
+    resolve a conversation the user asked for by id without depending on any
+    recency window. An empty narrowing selects nothing.
+
     ``return_window_exhaustion=True`` returns ``(rows, exhausted)`` instead of
     just ``rows``. ``exhausted`` is true only when the final bounded raw-candidate
     window was full while its logical projection still under-delivered ``limit``.
@@ -764,6 +835,13 @@ def read_importable_agent_session_rows(
         if not wanted_project_ids:
             # An empty narrowing selects nothing. Returning [] keeps that exact
             # instead of degrading to "every assigned conversation".
+            return _result([])
+    wanted_session_ids: tuple[str, ...] = ()
+    if session_ids is not None:
+        wanted_session_ids = tuple(
+            cleaned for value in session_ids if (cleaned := str(value or '').strip())
+        )
+        if not wanted_session_ids:
             return _result([])
     db_path = Path(db_path)
     if not db_path.exists():
@@ -869,6 +947,10 @@ def read_importable_agent_session_rows(
                 placeholders = ", ".join("?" for _ in excluded)
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
+        if wanted_session_ids:
+            placeholders = ", ".join("?" for _ in wanted_session_ids)
+            where_clauses.append(f"s.id IN ({placeholders})")
+            params.extend(wanted_session_ids)
         if project_assignment is not None:
             wanted = str(project_assignment).strip().lower()
             if wanted not in PROJECT_ASSIGNMENT_FILTERS:
@@ -1113,22 +1195,38 @@ def read_importable_agent_session_rows(
             # NOTE: this can return more than ``limit`` rows (see docstring).
             have = {row.get('id') for row in selected}
             by_id = {row.get('id'): row for row in projected if row.get('id')}
+            # A compressed parent is projected under its tip id; a child delegated before the
+            # compression names the old segment, so resolve it through the lineage root too.
+            by_root = {row['_lineage_root_id']: row for row in projected if row.get('_lineage_root_id')}
+            def _is_subagent(row):
+                return str(row.get('raw_source') or row.get('source') or '').strip().lower() == 'subagent'
+
+            def _parent_of(row):
+                parent_id = row.get('parent_session_id')
+                return by_id.get(parent_id) or by_root.get(row.get('_parent_lineage_root_id') or parent_id)
+
             pending = list(selected)
             while pending:
                 row = pending.pop()
-                if str(row.get('raw_source') or row.get('source') or '').strip().lower() != 'subagent':
+                if not _is_subagent(row) or not row.get('parent_session_id'):
                     continue
-                parent_id = row.get('parent_session_id')
-                if not parent_id or parent_id in have:
-                    continue
-                parent = by_id.get(parent_id)
-                if parent is None:
-                    continue
-                if str(parent.get('raw_source') or parent.get('source') or '').strip().lower() != 'subagent':
+                parent = _parent_of(row)
+                if parent is None or parent.get('id') in have or not _is_subagent(parent):
                     continue
                 selected.append(parent)
-                have.add(parent_id)
+                have.add(parent.get('id'))
                 pending.append(parent)
+            # The sidebar reads parent_source as "the parent is in this payload". A delegated child whose
+            # parent row is not returned here must not claim that, or the child vanishes. No WebUI exemption:
+            # a WebUI parent may have no sidecar; when it has one, the route stamps parent_is_cli_session
+            # from that row, which the client checks before parent_source.
+            for row in selected:
+                if not _is_subagent(row) or not row.get('parent_session_id'):
+                    continue
+                parent = _parent_of(row)
+                if parent is not None and parent.get('id') in have:
+                    continue
+                row['parent_source'] = None
             return _result(selected, window_exhausted)
 
         cur.execute(
@@ -1406,6 +1504,16 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
             source_expr = _optional_col('source', session_cols)
             model_config_expr = _optional_col('model_config', session_cols)
             message_count_expr = _optional_col('message_count', session_cols, '0')
+            # Identity columns let a session_reset successor stay a top-level
+            # sidebar row instead of being nested under its reset parent.
+            identity_exprs = ", ".join((
+                _optional_col('session_key', session_cols),
+                _optional_col('user_id', session_cols),
+                _optional_col('chat_id', session_cols),
+                _optional_col('thread_id', session_cols),
+                _optional_col('origin_chat_id', session_cols),
+                _optional_col('origin_user_id', session_cols),
+            ))
             # Scoped fetch via PRIMARY KEY + idx_sessions_parent rather than a
             # full table scan. The sessions table grows unbounded over time
             # (1000+ rows is normal, 10000+ for power users), and this function
@@ -1441,7 +1549,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}, {identity_exprs}
                         FROM sessions s
                         WHERE s.id IN ({placeholders})
                         """,
@@ -1470,7 +1578,7 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
                     placeholders = ','.join('?' * len(chunk))
                     cur.execute(
                         f"""
-                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}
+                        SELECT s.id, {source_expr}, {session_source_expr}, {model_config_expr}, s.title, s.started_at, s.parent_session_id, s.ended_at, s.end_reason, {message_count_expr}, {identity_exprs}
                         FROM sessions s
                         WHERE s.parent_session_id IN ({placeholders})
                         """,
@@ -1609,7 +1717,10 @@ def read_session_lineage_metadata(db_path: Path, session_ids: list[str] | set[st
         if parent_id and parent_row:
             entry = metadata.setdefault(sid, {})
             entry['parent_session_id'] = parent_id
-            if not _is_continuation_session(parent_row, row):
+            if (
+                not _is_continuation_session(parent_row, row)
+                and not _is_messaging_reset_successor(parent_row, row)
+            ):
                 entry['relationship_type'] = 'child_session'
                 entry['parent_title'] = parent_row.get('title')
                 entry['parent_source'] = parent_row.get('source')

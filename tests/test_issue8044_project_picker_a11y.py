@@ -539,7 +539,9 @@ def test_an_open_single_picker_is_placed_again_on_resize():
     show = _between(js, "function _showProjectPicker(session, anchorEl){", "\nfunction ")
     assert "_positionProjectPicker(picker,anchorEl);" in show
     assert "_wireProjectPickerKeys(picker,dismiss);" in show
-    assert "_openProjectPicker={picker,anchorEl,sessionId:session.session_id,dismiss};" in show
+    assert "_openProjectPicker={picker,anchorEl,sessionId:session.session_id,dismiss,openEpoch:pickerEpoch,refreshChoices,retarget:" in show
+    # The resize hook follows a repainted row through the retarget rebind.
+    assert "anchorEl=nextAnchor;" in show
     assert "picker.style.top=" not in show
     listener = _between(js, "let _openProjectPicker=null;", "// ── Project picker rows and keyboard")
     hook = listener[listener.index("window.addEventListener('resize',()=>{"):]
