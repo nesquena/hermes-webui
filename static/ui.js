@@ -4535,16 +4535,27 @@ function _formatQuotaPercentShort(value){
   if(!Number.isFinite(n)) return '';
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
 }
+// Which account window the chip shows (Settings: quota_chip_window). Providers list
+// windows shortest first (5-hour/rolling, weekly, monthly).
+function _normalizeQuotaChipWindow(value){
+  return value==='shortest'||value==='longest'?value:'most_constrained';
+}
+function _selectQuotaChipWindow(windows){
+  const valid=windows.filter(x=>x&&(typeof x.remaining_percent==='number'||(typeof x.remaining_percent==='string'&&x.remaining_percent.trim()!==''))&&Number.isFinite(Number(x.remaining_percent)));
+  if(!valid.length) return null;
+  const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
+  if(mode==='shortest') return valid[0];
+  if(mode==='longest') return valid[valid.length-1];
+  return valid.reduce((min,x)=>Number(x.remaining_percent)<Number(min.remaining_percent)?x:min);
+}
 function _providerQuotaIndicatorText(status){
   if(!status||status.status!=='available') return null;
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    // Multi-window providers (rolling/5-hour, weekly, monthly) show the most
-    // constrained window: the lowest remaining share is the limit hit first.
-    const w=accountLimits.windows
-      .filter(x=>x&&(typeof x.remaining_percent==='number'||(typeof x.remaining_percent==='string'&&x.remaining_percent.trim()!==''))&&Number.isFinite(Number(x.remaining_percent)))
-      .reduce((min,x)=>(!min||Number(x.remaining_percent)<Number(min.remaining_percent))?x:min,null);
+    // Multi-window providers (rolling/5-hour, weekly, monthly): by default the most
+    // constrained window, since the lowest remaining share is the limit hit first.
+    const w=_selectQuotaChipWindow(accountLimits.windows);
     const remaining=w?_formatQuotaPercentShort(w.remaining_percent):'';
     const windowLabel=w&&typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
     if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+windowLabel+remaining+' remaining'};
