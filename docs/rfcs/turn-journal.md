@@ -209,11 +209,14 @@ appending a duplicate. The matching rules are identity-scoped, not content-only:
   whether an existing interruption marker can stand in for the one it is about
   to write, `_marker_reuse_index()` requires the marker's recorded stream id
   (`_journal_retry_stream_id` or `_recovered_stream_id`) to equal
-  `str(stream_id)`. An identity-less marker — a legacy marker written before
-  stream tagging, or a demoted retry marker whose retry meta was stripped —
-  proves nothing about ownership, so reusing it for the current stream appended
-  no notice of its own and the user lost the only signal for THIS stream's
-  interruption.
+  `str(stream_id)`. Durable ownership is the `_journal_marker_stream_id`
+  contract: written unconditionally on every marker and kept after resolution,
+  so the marker's stream identity survives promotion — `_recovered_stream_id`
+  is a recovered-ROW provenance tag and must never appear on a marker. An
+  identity-less marker — a legacy marker written before stream tagging, or a
+  demoted retry marker whose retry meta was stripped — proves nothing about
+  ownership, so reusing it for the current stream appended no notice of its own
+  and the user lost the only signal for THIS stream's interruption.
 
 These rules exist to keep one assistant-turn owner per recovered turn: dedupe
 must never consume the current turn's recovered content, and failure to prove
