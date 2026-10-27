@@ -1,11 +1,12 @@
 """start.ps1 must hand its discovered hermes-agent dir to the child process.
 
 server.py calls activate_managed_agent() (managed_agent_startup.py) as its
-first Agent-related import, and that hook reads HERMES_WEBUI_AGENT_DIR only.
-start.ps1 bypasses bootstrap.py - the component that normally performs this
-export - so when the launcher keeps the discovered directory in a PowerShell
-variable, dependency activation silently no-ops and the next Agent import
-crashes on a module the managed environment already provides.
+first Agent-related import. That hook prefers HERMES_WEBUI_AGENT_DIR and only
+otherwise falls back to api.config's discovery, whose search order differs from
+start.ps1's. start.ps1 bypasses bootstrap.py - the component that normally
+performs this export - so when the launcher keeps the discovered directory in a
+PowerShell variable, the server can activate a different Agent (or none) than
+the one start.ps1 validated and picked the interpreter for.
 """
 from __future__ import annotations
 

@@ -559,14 +559,14 @@ the community ARM64-Android field report: [`docs/remote-access.md`](docs/remote-
 
 ### Manual launch (without start.sh)
 
-If you prefer to launch the server directly:
+If you prefer to launch the server directly (for example from your own systemd unit):
 
 ```bash
-cd /path/to/hermes-agent          # or wherever sys.path can find Hermes modules
-HERMES_WEBUI_PORT=8787 venv/bin/python /path/to/hermes-webui/server.py
+export HERMES_WEBUI_AGENT_DIR=/path/to/hermes-agent   # optional, see below
+HERMES_WEBUI_PORT=8787 python3 /path/to/hermes-webui/server.py
 ```
 
-Note: use the agent venv Python (or any Python environment that has the Hermes agent dependencies installed). System Python will be missing `openai`, `httpx`, and other required packages.
+Before importing anything else, `server.py` activates the Hermes Agent's dependency environment. It uses `HERMES_WEBUI_AGENT_DIR` when set, otherwise the same discovery `start.sh` uses (`$HERMES_HOME/hermes-agent`, `~/.hermes/hermes-agent`, the `hermes` launcher, …), so the export is only needed for an Agent installed somewhere else. A Hermes-managed Agent (v0.21.6 or newer, installed by the official installer or `hermes update`) then restarts the server in its own Python with its own dependencies, so the interpreter you launch with does not need the Agent's packages. An older Agent that keeps its dependencies in `venv/` or `.venv/` is not restarted: run `server.py` with that venv's Python instead (`/path/to/hermes-agent/venv/bin/python`). System Python on its own lacks `openai`, `httpx` and other required packages.
 
 Health check:
 

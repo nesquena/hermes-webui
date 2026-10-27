@@ -350,12 +350,12 @@ def _env_mb_bytes(name: str, default_mb: int) -> int:
 
 # ── Hermes agent directory discovery ─────────────────────────────────────────
 def _discovery_result():
-    return _startup._discover_agent_identity(
+    # Same helper managed_agent_startup uses to pick the Agent it activates, so
+    # startup activation and the runtime Agent cannot diverge (#8529).
+    return _startup.discover_runtime_agent_identity(
         repo_root=REPO_ROOT,
-        hermes_home=Path(os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))),
         default_hermes_home=_DEFAULT_HERMES_HOME,
         user_home=HOME,
-        python_exe=os.getenv("HERMES_WEBUI_PYTHON") or sys.executable,
     )
 
 
