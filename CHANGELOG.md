@@ -51,6 +51,8 @@
 
 ### Fixed
 
+- **Approvals on Gateway-backed runs answer the prompt you saw again.** Clicking Allow/Deny on a Runs API approval failed with `400 invalid_params` against current Agents. WebUI now answers with the generation-fenced body, so a stale card can never answer a newer prompt, and a click that cannot be verified (timeout, 404, 409, or a projection that does not list pending controls) keeps the card and reports the error instead of claiming success. Legacy approval bodies are unchanged. Thanks @Overview3833. (#8409)
+
 - **Gateway delegation wake-up after a cut-off fan-out is neutral and conditional.** When a delegation batch that was cut off is delivered, the parent now gets one prompt to check the recovery evidence and re-dispatch only work it can verify is unfinished, instead of a prompt that assumed the owner had exited. Completed batches that merely quote the marker text are no longer treated as recovered. Thanks @carlotestor.
 
 - **Extensions load behind a reverse-proxy subpath mount.** Injected extension script and stylesheet tags are now mount-relative, so `<base href>` resolves them inside `https://host/hermes/` instead of the origin root. Requests the browser's preload scanner makes from a `/session/<id>` deep link (`/session/extensions/...`) now get the real asset instead of the page shell, behind the same auth as `/extensions/`. Thanks @rpodgorny.
