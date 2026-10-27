@@ -594,6 +594,7 @@ def _project_default_workspace(proj) -> str | None:
 # alias, so every existing call site (and the tests that patch it) reads the
 # same object. Reentrant so a mutation may call helpers that take it again.
 from api.models import PROJECTS_CATALOG_LOCK as _PROJECTS_CATALOG_LOCK
+from api.models import update_session_share_fields as _update_session_share_fields
 
 
 # Bounded wait for a session lock while /api/projects/delete clears cached
@@ -6986,6 +6987,53 @@ def _mirror_share_fields_to_cached_session(sid: str, source) -> None:
             cached.share_created_at = getattr(source, "share_created_at", None)
     except Exception:
         logger.debug("Failed to mirror share fields for session %s", sid, exc_info=True)
+
+
+def _resident_share_token(sid: str) -> str:
+    """Token held by the resident session, when that entry is this session.
+
+    A streaming checkpoint can serialize the live object before a share request
+    set the token and commit after it, so the sidecar can come back without a
+    token while the published snapshot is still live. Reusing the resident token
+    keeps that link revocable instead of minting a second token that orphans it
+    (#8255 review, third round).
+
+    The check is identity, not freshness: the entry must be the session the
+    request is about, and a metadata-only stub cannot speak for share fields.
+    """
+    try:
+        with LOCK:
+            cached = SESSIONS.get(sid)
+    except Exception:
+        logger.debug("Failed to read resident session %s for its share token", sid, exc_info=True)
+        return ""
+    if cached is None:
+        return ""
+    if str(getattr(cached, "session_id", "") or "") != str(sid):
+        return ""
+    if getattr(cached, "_loaded_metadata_only", False):
+        return ""
+    return str(getattr(cached, "share_token", "") or "").strip()
+
+
+def _persist_share_fields(sid: str, session, *, share_token, share_created_at) -> None:
+    """Persist only the two share fields of ``sid``.
+
+    Saving the copy the handler resolved writes its conversation fields back over
+    any writer that finished since it was read, so the sidecar is patched in
+    place instead. ``session`` is saved only when no sidecar exists yet (a pure
+    external session), where there is no persisted conversation to revert
+    (#8255 review, third round).
+    """
+    if _update_session_share_fields(
+        sid,
+        share_token=share_token,
+        share_created_at=share_created_at,
+    ):
+        return
+    session.share_token = share_token
+    session.share_created_at = share_created_at
+    session.save(touch_updated_at=False)
 
 
 def _reconcile_stale_stream_state_for_session_rows(session_rows) -> bool:
@@ -18742,9 +18790,17 @@ def handle_post(handler, parsed) -> bool:
             # Create side of #8255: reuse the token the durable sidecar already
             # records instead of minting a new one, otherwise the previous snapshot
             # stays live and unreachable by revoke.
+            durable_token = str(getattr(persisted_session, "share_token", "") or "").strip()
+            if not durable_token:
+                # A checkpoint can commit the live session without a token after
+                # this request read the sidecar, while the published snapshot is
+                # still live. Reuse the resident token instead of minting a
+                # second one that would orphan that link (#8255 review, third
+                # round).
+                durable_token = _resident_share_token(sid)
             share_meta = write_share_snapshot(
                 snapshot,
-                token=str(getattr(persisted_session, "share_token", "") or ""),
+                token=durable_token,
                 source_session_id=sid,
             )
             persisted_session.share_token = share_meta["share_token"]
@@ -18755,7 +18811,16 @@ def handle_post(handler, parsed) -> bool:
             # ``share_token: None`` back over the sidecar, leaving a published
             # link that revoke can no longer reach.
             _mirror_share_fields_to_cached_session(sid, persisted_session)
-            persisted_session.save(touch_updated_at=False)
+            # Persist only the two share fields: saving this detached copy would
+            # restore the title and transcript it was built from, reverting a
+            # writer that finished while the snapshot was built (#8255 review,
+            # third round).
+            _persist_share_fields(
+                sid,
+                persisted_session,
+                share_token=share_meta["share_token"],
+                share_created_at=share_meta["share_created_at"],
+            )
         finally:
             share_lock.release()
         _publish_session_list_changed(
@@ -18844,7 +18909,15 @@ def handle_post(handler, parsed) -> bool:
             # streaming checkpoint in the save/mirror window would otherwise write
             # the live session's stale share fields back over the sidecar.
             _mirror_share_fields_to_cached_session(sid, target_session)
-            target_session.save(touch_updated_at=False)
+            # Clear only the share fields, so a conversation write that landed
+            # after the final re-read above is not reverted (#8255 review, third
+            # round).
+            _persist_share_fields(
+                sid,
+                target_session,
+                share_token=None,
+                share_created_at=None,
+            )
         finally:
             share_lock.release()
         _publish_session_list_changed(
