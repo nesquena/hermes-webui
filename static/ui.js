@@ -2234,6 +2234,13 @@ function _reconcilePreservedLiveTurn(inner, _preservedLiveTurn){
   // no live segment to swap into. No-op for a settled turn or when nothing was
   // streaming.
   if(_preservedLiveTurn){
+    // #7676: the transferred node may hold the final answer in a segment that
+    // the transparent live scene hides (`assistant-segment-worklog-source` +
+    // aria-hidden + hidden). If this node is about to become the pane's only
+    // copy of the reply, the reply would go blank — so normalize the retained
+    // prose FIRST, before any branch below re-attaches the node. Idempotent:
+    // a node already normalized by the renderMessages pass early-returns.
+    _normalizeTransferredLiveProse(_preservedLiveTurn);
     const _rebuilt=inner.querySelector('#liveAssistantTurn');
     // Pick the PARSER-OWNED live segment, not just the first one. On reconnect /
     // post-tool activity boundaries a live turn can carry MULTIPLE
@@ -19605,10 +19612,29 @@ function _transparentSettledTurnWouldBeCapped(inner, scene, rawIdx){
   try{ rows=_anchorSceneRowsForRendering(scene,{settled:true}); }catch(_e){ rows=null; }
   if(!Array.isArray(rows)) return true;
   if(rows.length<=_TRANSPARENT_SETTLED_ROW_CAP+_TRANSPARENT_SETTLED_ROW_CAP_SLACK) return false;
-  // #5966 reveal persistence is owned by scene-page state (_transparentScenePages):
-  // a rebuild re-derives revealed pages from scene ownership, so this helper stays
-  // fail-closed (an unreadable scene pays the second render) without consulting
-  // the retired module-level revealed set.
+  // #5966 Codex F3 (restored upstream contract): the persistent revealed set is
+  // authoritative — an already revealed turn is never re-capped by a rebuild.
+  // The DOM flag (data-transparent-earlier-revealed) is only the renderer's
+  // same-render fast path; ignoring it here fails toward the second render,
+  // i.e. the safe side. Guarded so harnesses without the stub stay fail-closed.
+  if(typeof _transparentRevealKey==='function'
+     &&typeof _transparentRevealedTurns!=='undefined'
+     &&_transparentRevealedTurns&&typeof _transparentRevealedTurns.has==='function'){
+    const session=(typeof S!=='undefined'&&S)?S.session:null;
+    if(_transparentRevealedTurns.has(_transparentRevealKey(session&&session.session_id, rawIdx))) return false;
+  }
+  // Scene-page paging (this PR): a scene whose page state is CURRENT (the rows
+  // identity recorded at render time is still the scene's own array) re-derives
+  // the IDENTICAL page on an unarmed rebuild — start/end come from
+  // _transparentScenePages, not from a fresh tail cap — so the rebuild cannot
+  // shrink the turn and the second render is redundant. A stale state (scene
+  // rows replaced / rehydrated scene object) fails CLOSED toward the second
+  // render, same as an unreadable row source.
+  if(typeof _transparentScenePages!=='undefined'
+     &&_transparentScenePages&&typeof _transparentScenePages.get==='function'){
+    const pageState=scene?_transparentScenePages.get(scene):null;
+    if(pageState&&pageState.rows===scene.activity_rows) return false;
+  }
   return true;
 }
 // #7677 (review P2 / r2 P1). STREAM_DONE's unarmed second render was also the

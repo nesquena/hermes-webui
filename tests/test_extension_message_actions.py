@@ -7,6 +7,7 @@ import textwrap
 
 import pytest
 
+from tests._owned_window_dom_harness import build_script, run_node
 
 ROOT = Path(__file__).parent.parent
 EXTENSION_SETTINGS_JS = ROOT / "static" / "extension_settings.js"
@@ -627,3 +628,139 @@ def test_owned_remount_populates_fresh_slots_with_current_invocation_identity():
         """
     )
     _run_node(script)
+
+
+_OWNED_ACTIONS_EXTRACTED = [
+    "_messageWindowNodeKey",
+    "_commitMessageWindow",
+    "_extensionMessageActionContext",
+    "_extensionMessageActionButtonHtml",
+    "_syncExtensionMessageActionSlots",
+    "invokeExtensionMessageAction",
+    "_messageSessionIndexBase",
+    "_messageSessionIndexForRawIdx",
+    "_messageRawIdxForSessionIndex",
+    "_initializeMessageWindowOwnership",
+]
+
+_OWNED_ACTIONS_STUBS = r"""
+const assert = require('assert');
+const invoked = [];
+const runtime = {
+  _hasMessageActions: () => true,
+  _messageActionsForContext: ctx => (ctx && ctx.role === 'assistant')
+    ? [{ extensionId: 'alpha.ext', id: 'pin', label: 'Pin', icon: 'pin', pressed: false, pending: false }]
+    : [],
+  _invokeMessageAction: (extensionId, actionId, context) => {
+    invoked.push({ extensionId, actionId, context });
+    return true;
+  },
+};
+const window = { HermesExtensionSettings: runtime };
+const S = { session: { session_id: 'session-1' }, messages: [{ role: 'assistant', content: 'persisted provider payload' }] };
+let _oldestIdx = 7;
+let _messageWindowRevision = 0;
+function _rememberMessageWindowReader(){}
+function _restoreMessageWindowReader(){}
+function esc(value){ return String(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('"', '&quot;'); }
+function li(icon){ return `<svg data-icon="${icon}"></svg>`; }
+const container = miniContainer('messages');
+const liveInner = miniContainer('msgInner');
+function $(id){ return id === 'messages' ? container : (id === 'msgInner' ? liveInner : null); }
+const frames = [];
+function requestAnimationFrame(cb){ frames.push(cb); return frames.length; }
+function rowHtml(rawIdx, role, text){
+  const abs = _messageSessionIndexForRawIdx(rawIdx);
+  return `<div class="msg-row" data-msg-idx="${rawIdx}" data-session-msg-idx="${abs}" data-raw-text="${text}">`
+    + `<div class="assistant-bubble" data-role="${role}">`
+    + `<div class="msg-content">${text}</div>`
+    + `<div class="msg-footer"><div class="msg-actions" data-extension-message-actions></div></div>`
+    + `</div></div>`;
+}
+"""
+
+
+def test_owned_commit_adoption_generates_and_invokes_connected_controls():
+    """Real-path mirror of the owned mount (gate-cert 6a351830 follow-up).
+
+    The unit-level test above calls the action helpers on plain objects and
+    hand-builds the button it invokes. This one drives the REAL owned-commit
+    pipeline through a mini DOM: the production `_commitMessageWindow` adopts
+    staged rows into the connected container (remount reuse, and the prepend
+    shape with reuse disabled), the production reconcile parses the generated
+    button HTML into a real connected element, and invocation runs through the
+    real `invokeExtensionMessageAction` against the CURRENT session/message
+    identity. Reader/scroll machinery is stubbed (not the subject); everything
+    between staging and invocation is production code.
+    """
+    ui_js = UI_JS.read_text(encoding="utf-8")
+    body = r"""
+// ── owned remount (windowOnly reuse): fresh slot → generated control → invoke ──
+let staged = new MiniEl('div');
+staged.innerHTML = rowHtml(0, 'assistant', 'Visible plain text');
+_commitMessageWindow(liveInner, staged, null, true);
+// Predecessor control (finding 1): without the owned-branch reconcile the fresh
+// slot stays empty — the population comes from the reconcile, not the staging.
+const slotBefore = liveInner.querySelector('[data-extension-message-actions]');
+if (!slotBefore || slotBefore.children.length !== 0) {
+  throw new Error('predecessor control failed: a fresh slot must be empty before the reconcile');
+}
+_syncExtensionMessageActionSlots(liveInner);
+const generatedSlot = liveInner.querySelector('[data-extension-message-actions]');
+const generated = generatedSlot && generatedSlot.querySelector('button');
+assert.ok(generated, 'the reconcile must generate a real connected control');
+assert.strictEqual(generated.getAttribute('data-extension-id'), 'alpha.ext');
+assert.strictEqual(generated.getAttribute('data-session-id'), 'session-1');
+assert.strictEqual(generated.getAttribute('data-message-index'), '7');
+assert.strictEqual(generated.getAttribute('data-message-role'), 'assistant');
+assert.ok(generated.closest('[data-msg-idx][data-session-msg-idx][data-raw-text]'),
+  'the generated control must resolve its row through the real closest() chain');
+assert.strictEqual(invokeExtensionMessageAction(generated), true);
+assert.deepStrictEqual(invoked[0].context, {
+  sessionId: 'session-1', messageIndex: 7, role: 'assistant', text: 'Visible plain text',
+});
+
+// ── identical remount under the same session: the reused row keeps ITS button ──
+const before = generated;
+staged = new MiniEl('div');
+staged.innerHTML = rowHtml(0, 'assistant', 'Visible plain text');
+_commitMessageWindow(liveInner, staged, null, true);
+_syncExtensionMessageActionSlots(liveInner);
+const after = generatedSlot.querySelector('button');
+assert.strictEqual(after, before,
+  'a reused row must keep its generated control (re-pointed in place, not replaced)');
+assert.strictEqual(invokeExtensionMessageAction(after), true);
+assert.strictEqual(invoked[invoked.length - 1].context.messageIndex, 7);
+
+// ── owned prepend with reuse disabled (the _ownedPrepend / virtualization-off shape) ──
+// Older history loads: the absolute identity base shifts 7 -> 6, every staged
+// row is fresh (no reuse), so every populated slot depends on the reconcile.
+S.messages = [
+  { role: 'user', content: 'question' },
+  { role: 'assistant', content: 'persisted provider payload' },
+];
+_oldestIdx = 6;
+staged = new MiniEl('div');
+staged.innerHTML = rowHtml(0, 'user', 'question') + rowHtml(1, 'assistant', 'Visible plain text');
+_commitMessageWindow(liveInner, staged, null, false);
+_syncExtensionMessageActionSlots(liveInner);
+const slots = liveInner.querySelectorAll('[data-extension-message-actions]');
+assert.strictEqual(slots.length, 2);
+const buttons = liveInner.querySelectorAll('button');
+assert.strictEqual(buttons.length, 1, 'role-filtered actions: the user row slot must stay empty');
+const assistantButton = buttons[0];
+assert.strictEqual(assistantButton.getAttribute('data-message-index'), '7',
+  'the assistant row keeps its ABSOLUTE session-relative identity across the prepend');
+assert.strictEqual(assistantButton.getAttribute('data-message-role'), 'assistant');
+assert.strictEqual(invokeExtensionMessageAction(assistantButton), true);
+assert.strictEqual(invoked[invoked.length - 1].context.sessionId, 'session-1');
+assert.strictEqual(invoked[invoked.length - 1].context.messageIndex, 7);
+
+// ── a stale session stamp is rejected against the CURRENT identity ──
+assistantButton.setAttribute('data-session-id', 'session-0');
+assert.strictEqual(invokeExtensionMessageAction(assistantButton), false);
+
+console.log(JSON.stringify({ ok: true }));
+"""
+    result = run_node(build_script(ui_js, _OWNED_ACTIONS_EXTRACTED, _OWNED_ACTIONS_STUBS, body))
+    assert result == {"ok": True}
