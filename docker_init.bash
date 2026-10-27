@@ -540,6 +540,45 @@ _agent_stage_prev=/app/hermes-agent-src.previous
 _agent_venv_journal=/app/.agent-venv-rebuild
 _venv_helper=/app/scripts/docker_venv_python.py
 
+# Install the staged hermes-agent (editable, every extra) into $VIRTUAL_ENV with
+# the agent's own `[tool.uv] override-dependencies` (#8524). `uv pip install`
+# never reads a project's [tool.uv] table, and since Agent v0.22.5 the agent's
+# requirements only resolve with those overrides (they lift a dependency's old
+# Pillow pin to take Pillow 13's security fixes), so a plain install exits with
+# "requirements are unsatisfiable". Anything that keeps the overrides file from
+# being produced falls back to that plain install, exactly as before.
+install_staged_agent() {
+  _isa_src="$1"
+  _isa_overrides=""
+  if [ -f "$_venv_helper" ] && [ -f "$_isa_src/pyproject.toml" ]; then
+    # TMPDIR first; then the stage's parent (/app, already written to here), for
+    # runtimes whose /tmp is not writable (#1470 read_only, #2010 userns).
+    _isa_overrides="$(mktemp "${TMPDIR:-/tmp}/hermes-agent-uv-overrides.XXXXXX" 2>/dev/null)" \
+      || _isa_overrides="$(mktemp "$(dirname "$_isa_src")/.hermes-agent-uv-overrides.XXXXXX" 2>/dev/null)" \
+      || _isa_overrides=""
+    if [ -z "$_isa_overrides" ]; then
+      echo "!! Could not create a temporary file for hermes-agent's uv overrides; installing without them"
+    elif ! python3 "$_venv_helper" --uv-overrides "$_isa_src/pyproject.toml" "$_isa_overrides"; then
+      echo "!! Could not read hermes-agent's [tool.uv] override-dependencies; installing without them"
+      rm -f "$_isa_overrides"
+      _isa_overrides=""
+    fi
+    if [ -n "$_isa_overrides" ] && [ ! -s "$_isa_overrides" ]; then
+      rm -f "$_isa_overrides"
+      _isa_overrides=""
+    fi
+  fi
+  if [ -n "$_isa_overrides" ]; then
+    echo "-- Applying hermes-agent's [tool.uv] override-dependencies ($(grep -c . "$_isa_overrides") entries)"
+    _isa_rc=0
+    uv pip install -e "$_isa_src[all]" --overrides "$_isa_overrides" \
+      --trusted-host pypi.org --trusted-host files.pythonhosted.org || _isa_rc=$?
+    rm -f "$_isa_overrides"
+    return "$_isa_rc"
+  fi
+  uv pip install -e "$_isa_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org
+}
+
 # Install WebUI's requirements and the staged agent into $VIRTUAL_ENV. Returns
 # non-zero on any failure instead of exiting, so a rebuild can roll back (a
 # normal install below still treats a failure as fatal). set -e does not apply
@@ -616,7 +655,7 @@ install_venv_dependencies() {
     # stage and falls back to the authorized Agent directory.
     write_agent_stage_manifest "$_agent_src" "$_stage_src" \
       || echo "!! WARNING: could not record which hermes-agent source was staged; the startup recovery installer will not use the staged copy"
-    uv pip install -e "$_stage_src[all]" --trusted-host pypi.org --trusted-host files.pythonhosted.org \
+    install_staged_agent "$_stage_src" \
       || { echo "!! Failed to install hermes-agent's requirements"; return 1; }
   else
     echo ""
