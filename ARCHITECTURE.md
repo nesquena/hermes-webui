@@ -290,6 +290,11 @@ passes so a high-volume worker source cannot consume that interactive window:
 - Cron: up to `CRON_PROJECT_CHIP_LIMIT` rows.
 - Webhook: up to `WEBHOOK_PROJECT_CHIP_LIMIT` rows.
 - Kanban: up to `KANBAN_PROJECT_CHIP_LIMIT` rows.
+- One-shot (`hermes -z`): kept out of the interactive window and its
+  unassigned refill, with no default pass of its own. They keep normal project
+  chips, so the assigned recovery pass still reaches one filed under a project.
+  An explicit `source_filter="oneshot"` lists the newest ones, and a session
+  the user opens by id resolves through `get_cli_session_by_id()`.
 
 Source-specific views still use their dedicated bounds, and the later sidebar
 visibility stage decides whether recovered background rows are shown. In

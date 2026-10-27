@@ -107,3 +107,61 @@ or VM host may be needed for longer-running sessions.
 > `HERMES_WEBUI_PASSWORD`.
 
 ---
+
+## Running behind a reverse proxy
+
+A reverse proxy on another host or container (a Docker bridge, a separate
+nginx box, a cloud load balancer) must be allowlisted before WebUI will honor
+any forwarded client-IP header from it. Set `HERMES_WEBUI_TRUSTED_PROXY_CIDRS`
+with the **exact** address(es) of your proxy, comma-separated as CIDRs or bare
+IPs:
+
+```bash
+HERMES_WEBUI_TRUSTED_PROXY_CIDRS=172.17.0.1,10.9.9.0/24 ./start.sh
+```
+
+Loopback (`127.0.0.0/8`, `::1`) is always trusted implicitly, so a proxy on the
+same host needs no configuration. Without a matching allowlist entry the proxy
+is treated as an ordinary client: forwarded headers are ignored, so the
+structured request log records no `forwarded_for` field for requests arriving
+through it and local-origin features (onboarding, passwordless terminal) do not
+treat it as local. That is deliberate — an unallowlisted peer must never be
+able to assert a client identity WebUI then trusts.
+
+The same allowlist governs the trusted identity-header SSO setup
+(`HERMES_WEBUI_TRUSTED_AUTH_HEADER`) described in `.env.example`.
+
+> **Note:** nginx relays client-supplied request headers through by default
+> (`proxy_pass_request_headers on`), which includes `X-Real-IP`. The request
+> log therefore never trusts `X-Real-IP` for its `forwarded_for` field (only
+> the right-to-left `X-Forwarded-For` walk is accepted, and only from an
+> allowlisted peer). The local-origin gate still honors `X-Real-IP` when the
+> peer is trusted and `HERMES_WEBUI_TRUST_FORWARDED_FOR=1` is set, as it did
+> before; configure your proxy to overwrite it
+> (`proxy_set_header X-Real-IP $remote_addr;`) to keep that path honest, or just
+> for your own logging. Trusted-header SSO reads neither header: it only checks
+> that the socket peer is an allowlisted proxy.
+
+### Client IP in the request log (fail2ban)
+
+Each structured request-log record always carries `remote`, the socket peer,
+and at most one forwarded client-IP field:
+
+- `forwarded_for`: the client address, present only when the socket peer is a
+  trusted proxy and the `X-Forwarded-For` chain resolves to a valid address
+  other than the peer itself. It is always a normalized address, never header
+  text. Key fail2ban jails on this field when WebUI runs behind a proxy.
+- `forwarded_for_ignored: true`: a forwarded header was present but WebUI did
+  not record it, because the peer is not a trusted proxy or because the chain
+  from a trusted proxy is empty or malformed, is an IPv6 address with a zone
+  id, or names no hop beyond the trusted proxies themselves.
+  The first such request from an untrusted peer also logs a one-time warning
+  naming the peer and the setting to change.
+
+Attribution relies on the proxy appending the address it received the request
+from to `X-Forwarded-For` (nginx: `proxy_set_header X-Forwarded-For
+$proxy_add_x_forwarded_for;`). A proxy that passes the client's own header
+through unchanged lets the client choose the right-most hop, and therefore the
+logged address.
+
+---
