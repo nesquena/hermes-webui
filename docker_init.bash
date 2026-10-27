@@ -651,6 +651,11 @@ install_venv_dependencies() {
     fi
     chmod -R u+w "$_stage_src" \
       || { echo "!! Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"; return 1; }
+    # rsync excluded .git; the cp -a fallback copied it, and only now (after the
+    # chmod: cp -a keeps a :ro mount's 0555 directories) can it be removed. A
+    # stage with .git is never run by select_staged_agent_for_git_checkout.
+    rm -rf "$_stage_src/.git" \
+      || echo "!! WARNING: could not drop .git from the staged hermes-agent copy; the mounted Agent will be run instead"
     # Never fatal: without the manifest the recovery path simply ignores the
     # stage and falls back to the authorized Agent directory.
     write_agent_stage_manifest "$_agent_src" "$_stage_src" \
@@ -925,6 +930,33 @@ if [ -n "$_agent_src" ] && [ -f /app/scripts/docker_venv_python.py ] && command 
     echo ""
   fi
 fi
+
+# #8529: server.py activates the Agent it discovers before importing anything
+# else. In the single-container stack that is the host's own checkout, mounted
+# at ~/.hermes/hermes-agent. A git checkout there is what a PM-managed Agent
+# (v0.21.6+) treats as a self-managed install: its bootstrap would sync
+# dependencies into the host's ~/.hermes/installs and re-exec WebUI into the
+# host's store Python, a binary built for the host OS. Run the staged copy
+# instead: it is the tree /app/venv's dependencies were installed from, and it
+# has no .git, so the Agent's bootstrap leaves the process alone. Agent images
+# ship without .git, so the two- and three-container stacks keep the mounted
+# Agent; a pre-PM Agent (no hermes_cli/venv_sync.py + pm/environments.py beside
+# its hermes_bootstrap.py) never relaunches, so it keeps the mounted checkout too; and an operator-set HERMES_WEBUI_AGENT_DIR
+# always wins. A blank or whitespace-only value is unset, as server.py and
+# api/config.py treat it.
+select_staged_agent_for_git_checkout() {
+  local _src="$1" _stage="$2" _override="${HERMES_WEBUI_AGENT_DIR:-}"
+  [ -z "${_override//[[:space:]]/}" ] || return 0
+  # Only a PM launcher (Agent v0.21.6+) re-execs WebUI: hermes_bootstrap.py alone
+  # is also in pre-PM Agents. managed_agent_startup._PM_LAUNCH_MARKERS lists the same files.
+  [ -n "$_src" ] && [ -e "$_src/.git" ] || return 0
+  [ -f "$_src/hermes_bootstrap.py" ] && [ -f "$_src/hermes_cli/venv_sync.py" ] \
+    && [ -f "$_src/pm/environments.py" ] || return 0
+  [ -f "$_stage/run_agent.py" ] && [ ! -e "$_stage/.git" ] || return 0
+  export HERMES_WEBUI_AGENT_DIR="$_stage"
+  echo "-- $_src is a git checkout; running the staged copy at $_stage"
+}
+select_staged_agent_for_git_checkout "$_agent_src" "$_agent_stage"
 
 echo ""; echo "== Running hermes-webui"
 cd /app; python server.py || error_exit "hermes-webui failed or exited with an error"
