@@ -350,6 +350,22 @@ Metering missed while disconnected is not recovered from the journal; fresh
 live updates remain available. This exception does not remove token, reasoning,
 tool, or terminal events from durable replay.
 
+A second replay-only omission covers settled prompts (#8533). Both emitters apply
+`journal_replay_prompt_visible()` and skip
+a `clarify` or `approval` row that is already settled, so a reconnecting tab does
+not re-show a card the user can no longer answer:
+
+- a `clarify` row is settled by a later `tool_complete` row of the same run whose
+  payload names a blocking prompt tool (`settled_prompt_events()`);
+- any prompt row, including `approval`, is settled when the same run later writes
+  a terminal row with `terminal: true` (`terminal_settled_prompt_events()`).
+
+A clarify completion is never evidence for an approval: approvals are a queue and
+the respond path writes no journal row, so an approval only settles through its
+run's terminal row. Prompt rows after the terminal row stay visible. Direct
+readers still return every prompt row, and the omission creates event-ID gaps in
+replay just like the metering exception.
+
 Coverage: `tests/test_run_journal.py`, `tests/test_run_journal_routes.py`,
 `tests/test_issue4812_session_sse_stream.py`, and
 `tests/test_stage364_opus_live_sse_event_id.py`.
