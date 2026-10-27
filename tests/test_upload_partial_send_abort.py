@@ -521,3 +521,63 @@ globalThis.api = async () => ({});
     assert out["good"] is None
     assert out["other"] is None
     assert out["keeper"]["path"] == "/up/keeper.txt"
+
+
+def test_session_switch_notes_the_departing_draft_before_saving_it():
+    start = SESSIONS_JS.find("const draftText = ($('msg') || {}).value || '';")
+    assert start != -1, "the session switch must read the departing composer"
+    window = SESSIONS_JS[start:start + 900]
+    note = window.find("_noteDepartingUploadDraft(currentSid, draftText, draftFiles)")
+    save = window.find("_saveComposerDraftNow(currentSid, draftText, draftFiles, _switchContId)")
+    assert note != -1, "leaving a session must keep the departing draft snapshot"
+    assert save != -1 and note < save, "the snapshot is taken before the switch save"
+
+
+def _failed_upload_after_session_switch(path):
+    """Send original+[a,b], type a newer draft+[c] while they upload, switch, then fail."""
+    helper = _restore_helper_source()
+    script = """
+const state = {input: {value: 'original'}, pendingFiles: [], saved: null};
+const $ = (id) => (id === 'msg' ? state.input : null);
+const S = {pendingFiles: [], session: {session_id: 'sid-1'}};
+function autoResize(){}
+function updateSendBtn(){}
+function renderTray(){}
+function _saveComposerDraftNow(sid, text, files, contId){
+  state.saved = {sid, text, files: files.map((f) => f.name), contId: contId || ''};
+}
+%s
+const a = {name:'a.txt', size:1, lastModified:1};
+const b = {name:'b.txt', size:2, lastModified:2};
+const c = {name:'c.txt', size:3, lastModified:3};
+// 1-2. The send already captured original + a.txt + b.txt and cleared the composer.
+//      While the upload runs the user types a newer draft and stages c.txt.
+state.input.value = 'newer';
+S.pendingFiles = [c];
+// 3. Switch to another session. The switch keeps this composer before saving it.
+_noteDepartingUploadDraft('sid-1', state.input.value, S.pendingFiles.slice());
+S.session = {session_id: 'sid-2'};
+state.input.value = '';
+S.pendingFiles = [];
+// 4. b.txt fails. Partial and total failure both restore with mergeLiveInput.
+_restoreComposerDraftAfterFailedSend('original', [a, b], 'sid-1', null, 'goal-1', {mergeLiveInput:true});
+console.log(JSON.stringify({
+  path: %s,
+  saved: state.saved,
+  visible: state.input.value,
+  pending: S.pendingFiles.map((f) => f.name),
+}));
+""" % (helper, json.dumps(path))
+    return _run_node(script)
+
+
+def test_partial_and_total_upload_failure_merge_the_departing_draft():
+    """A failed upload must not replace the draft the user saved by switching away."""
+    for path in ("partial", "total"):
+        out = _failed_upload_after_session_switch(path)
+        assert out["saved"]["sid"] == "sid-1"
+        assert out["saved"]["text"] == "original\n\nnewer", out
+        assert out["saved"]["files"] == ["a.txt", "b.txt", "c.txt"], out
+        assert out["saved"]["contId"] == "", "the merged newer text must not inherit the rejected continuation id"
+        assert out["visible"] == "", "the other session's composer stays untouched"
+        assert out["pending"] == []
