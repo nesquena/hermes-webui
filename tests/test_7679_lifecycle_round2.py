@@ -726,15 +726,15 @@ def test_the_rejection_path_has_an_epoch_guard():
     )
 
 
-def test_the_finally_path_has_an_epoch_guard():
+def test_the_finally_path_has_an_owner_guard():
     src = PANELS
     idx = src.find("async function checkUpdatesNow(")
     # #7679 round 4: the outer window must reach past the finally arm's
     # guard, not just its opening brace. The round-4 ownership comments
-    # above the reconciler call push ``_isUpdateCheckStale`` further from
-    # the function start, and the old 11000-byte window cut the body off
-    # before the guard — the pin then failed on a file whose guard was
-    # present and correct.
+    # above the reconciler call push the guard further from the function
+    # start, and the old 11000-byte window cut the body off before the
+    # guard — the pin then failed on a file whose guard was present and
+    # correct.
     body = src[idx : idx + 14000]
     finally_idx = body.find("} finally {")
     assert finally_idx > 0, "the check's finally arm is gone"
@@ -743,8 +743,13 @@ def test_the_finally_path_has_an_epoch_guard():
     # call push the guard past the old 700-byte window, which is why this
     # pin used to fail on a file whose guard was present and correct.
     finally_body = body[finally_idx : finally_idx + 1600]
-    assert "_isUpdateCheckStale" in finally_body, (
-        "the finally path restores the controls without an epoch guard, so a "
+    # #7679 (Greptile P1, 10-14): the guard is the SETTINGS-CONTROL owner,
+    # not the banner epoch. The banner epoch is advanced by every check,
+    # including the unattended boot-time one, which does not own the
+    # Settings panel: using it left the Check button disabled forever
+    # after a manual check lost the race with the boot check.
+    assert "_isUpdateSettingsCheckStale" in finally_body, (
+        "the finally path restores the controls without an owner guard, so a "
         "stale request re-enables Check mid-flight (#7679 finding 2)"
     )
 

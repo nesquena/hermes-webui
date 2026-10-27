@@ -356,6 +356,16 @@ def _build_vm(body: str) -> str:
     # by BRACES (not a blank-line marker): a marker cut the function short and
     # took the following declarations with it, which broke the other scenarios.
     ui_part += "\n" + _brace_block(UI, "async function forceUpdate(btn){")
+    # #7679 (maintainer 10-12 / Greptile P2 "Recovery tests skip real
+    # producers"): the successor recovery must be created by the REAL caller,
+    # not by the test writing the generation, the grant and the button state
+    # by hand. ``applyUpdates()`` is that caller, and ``_showUpdateError()``
+    # is what it calls when the server reports a conflict.
+    ui_part += "\n" + _brace_block(UI, "async function applyUpdates(){")
+    ui_part += "\n" + _brace_block(UI, "function _showUpdateError(target,res){")
+    # applyUpdates' failure path formats its message through these helpers.
+    ui_part += "\n" + _brace_block(UI, "function _isUpdateApplyNetworkError(error){")
+    ui_part += "\n" + _brace_block(UI, "function _formatUpdateApplyExceptionMessage(error){")
     panels_part = _extract(PANELS, "async function checkUpdatesNow(", "\n// ── Auxiliary Models")
     return f"""
 global.__I18N_SRC__ = {json.dumps(I18N)};
@@ -623,19 +633,39 @@ def test_the_rejected_check_preserves_a_successor_recovery_and_one_legitimate_po
   _showUpdateBanner(global.__nextApiResponse, null, 0);
 
   // 1) A Check starts. Its fetch is made to fail AFTER the newer recovery
-  //    lands, which is modelled by failing it on the second call.
+  //    lands: the check's request is gated on a promise that is released
+  //    once Apply has published, so the failure really happens after the
+  //    successor exists.
+  let __releaseCheck = null;
+  const __checkGate = new Promise((resolve) => { __releaseCheck = resolve; });
+  const __realApi = global.api;
+  global.api = async (url, opts) => {
+    if (url === '/api/updates/check') {
+      // The Check's own request: it waits for the successor to be published
+      // and then fails.
+      await __checkGate;
+      const e = new Error('boom');
+      e.response = JSON.stringify({ error: 'check failed' });
+      throw e;
+    }
+    return __realApi(url, opts);
+  };
   global.__nextApiResponse = null;
-  global.__nextApiError = 'boom';
-  global.__nextApiErrorBody = JSON.stringify({ error: 'check failed' });
   const checkPromise = checkUpdatesNow();
 
-  // 2) While the Check is in flight, applyUpdates() publishes generation 1
-  //    with a live Agent/stable grant — the successor.
-  global.window._updateRecoveryGeneration = 1;
-  _grantForceUpdate('agent', 'stable');
-  global.__state.btnForceUpdate.style.display = 'inline-block';
-  global.__state.btnForceUpdate.disabled = false;
-  global.__state.btnForceUpdate.dataset.target = 'agent';
+  // 2) While the Check is in flight, the REAL applyUpdates() reports an
+  //    Agent conflict. It is the production caller that creates the
+  //    successor: it publishes the recovery generation, arms the live
+  //    Agent/stable grant and shows the control. The test does NOT write
+  //    any of that by hand — that substitution is what the reviewer
+  //    flagged (maintainer 10-12, Greptile P2 "Recovery tests skip real
+  //    producers").
+  global.__nextApiResponse = { ok: false, conflict: true, message: 'merge conflict' };
+  global.window._updateData = { agent: { behind: 1, channel: 'stable' } };
+  await applyUpdates();
+  global.__nextApiResponse = null;
+  // The pending Check now fails — after the successor was published.
+  __releaseCheck();
 
   // 3) The pending Check is rejected; the catch reconciles by ownership.
   // checkUpdatesNow re-raises after its catch has reconciled, so the scenario
@@ -659,8 +689,6 @@ def test_the_rejected_check_preserves_a_successor_recovery_and_one_legitimate_po
   //    simulated outage — the scenario is about the OWNERSHIP of the click,
   //    not about a failing network.
   const btn = global.__state.btnForceUpdate;
-  global.__nextApiError = null;
-  global.__nextApiErrorBody = null;
   if (btn.style.display === 'inline-block' && !btn.disabled) {
     global.showConfirmDialog = async () => true;
     try { await forceUpdate(btn); out.clicked = true; }
@@ -693,16 +721,68 @@ def test_the_rejected_check_preserves_a_successor_recovery_and_one_legitimate_po
     assert payload["clicked"] is True, (
         f"the preserved control was not clickable: {payload!r}"
     )
-    assert len(payload["posts"]) == 1, (
-        f"expected exactly one legitimate POST, got {payload['posts']!r}"
+    # The successor was produced by the REAL applyUpdates(), so its own
+    # /api/updates/apply POST is part of the expected traffic. Exactly ONE
+    # /api/updates/force POST must follow — the legitimate one.
+    force_posts = [p for p in payload["posts"] if p["url"].endswith("/api/updates/force")]
+    assert len(force_posts) == 1, (
+        f"expected exactly one legitimate force POST, got {payload['posts']!r}"
     )
-    post = payload["posts"][0]
-    assert post["url"].endswith("/api/updates/force"), (
-        f"the POST did not target the force endpoint: {post!r}"
-    )
+    post = force_posts[0]
     assert post["body"].get("target") == "agent", (
         f"the POST did not carry the Agent target: {post!r}"
     )
     assert post["body"].get("channel") == "stable", (
         f"the POST did not carry the successor's channel: {post!r}"
+    )
+
+
+def test_the_rejected_check_retires_an_obsolete_recovery_when_no_successor_exists():
+    """The control for the previous round (maintainer 10-12).
+
+    Same schedule as the successor case, but NOTHING publishes a newer
+    recovery: the rejected Check must retire the now-obsolete control
+    instead of leaving a visible-but-dead button behind. This pins the
+    ownership rule in both directions.
+    """
+    body = r"""
+    (async () => {
+      const out = { posts: [], clicks: [] };
+      let release = null;
+      const gate = new Promise((resolve) => { release = resolve; });
+      const realApi = global.api;
+      global.api = async (url, opts) => {
+        if (url === '/api/updates/check') {
+          await gate;
+          const e = new Error('boom');
+          e.response = JSON.stringify({ error: 'check failed' });
+          throw e;
+        }
+        return realApi(url, opts);
+      };
+
+      // A Check starts and stays pending.
+      global.__nextApiResponse = null;
+      const checkPromise = checkUpdatesNow();
+
+      // The Check settles FIRST (no successor was ever published).
+      release();
+      try { await checkPromise; } catch (e) { out.err = String(e && e.message || e); }
+      await new Promise((r) => setTimeout(r, 0));
+
+      const btn = global.__state.btnForceUpdate;
+      out.display = btn.style.display;
+      out.disabled = btn.disabled;
+      out.target = btn.dataset.target;
+      out.grant = _forceUpdateGrant ? _forceUpdateGrant.target : null;
+      out.clicks.push(btn.dataset.target || '');
+      process.stdout.write(JSON.stringify(out));
+    })().catch(e => { process.stdout.write('THREW:' + e.message); process.exitCode = 1; });
+    """
+    out = _run_node(_build_vm(body))
+    assert out.returncode == 0, out.stderr
+    payload = json.loads(out.stdout.strip().splitlines()[-1])
+    # No successor → the control must not be left armed.
+    assert payload["grant"] is None, (
+        f"a rejected Check left a grant armed with no successor: {payload!r}"
     )

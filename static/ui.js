@@ -11987,6 +11987,89 @@ function _beginUpdateCheck(){
 function _isUpdateCheckStale(epoch){
   return typeof epoch === 'number' && epoch !== _updateCheckEpoch;
 }
+
+// #7679: the Settings Check controls (button / spinner / label) have their
+// OWN owner clock, separate from the banner epoch above.
+//
+// The banner epoch is advanced by EVERY check, including the unattended
+// boot-time one in boot.js. A manual Settings check that was already running
+// when the boot check started became "stale", so its ``finally`` skipped
+// restoring the Check button and spinner — while the boot check never
+// restored them either, because it does not own the Settings panel. The
+// button therefore stayed disabled until the page was reloaded (Greptile P1,
+// 10-14).
+//
+// A dedicated counter, advanced only by manual Settings checks, keeps the
+// controls' ownership independent of the banner's. It lives here (next to the
+// epoch it must not be confused with) so both the Settings panel and the
+// boot sequence can read it.
+let _updateSettingsCheckOwner = 0;
+function _beginUpdateSettingsCheck(){
+  _updateSettingsCheckOwner += 1;
+  // The boot-time check reads this to know a manual check already owns the
+  // Settings panel, so it does not steal the controls from it.
+  window._updateSettingsCheckStarted = true;
+  return _updateSettingsCheckOwner;
+}
+function _isUpdateSettingsCheckStale(owner){
+  return typeof owner === 'number' && owner !== _updateSettingsCheckOwner;
+}
+// #7679: a recovery CONTROL (Force or Clear-lock) needs its own ownership
+// clock, independent of the Force grant.
+//
+// The grant answers "may this control POST a destructive force update?". The
+// Clear-lock button answers a different question ("may this control clear a
+// git lock?"), has no grant of its own, and is created by the SAME
+// ``_showUpdateError()`` that creates the Force button. So a check that
+// started BEFORE an Apply reported a lock conflict must not retire the
+// Clear-lock action that Apply created afterwards (Greptile P1, 10-14): the
+// operator would have to retry Apply to get the action back.
+//
+// The mechanism: every recovery control records the generation in which it
+// was created. An observation that carries an OLDER generation than the
+// control's owner may not retire it, no matter what the observation says.
+// This is the same "two different clocks" rule the Force grant already
+// follows, applied to the control itself instead of only to the grant.
+//
+// ``window._updateControlGeneration`` is advanced whenever a recovery control
+// is created or re-armed. ``_controlOwnerGeneration(btn)`` reads the stamp a
+// control carries; a control with no stamp was created before this mechanism
+// and is treated as owned by generation 0 (i.e. any observation may retire
+// it, which is the historical behaviour).
+// The recovery generation is the ownership clock for recovery CONTROLS.
+//
+// It is advanced by ``_showUpdateError()`` whenever a recovery is actually
+// established (conflict / diverged / lock conflict), which is exactly when a
+// recovery control is created. A control therefore records the generation
+// that owns it, and an observation may only retire a control it owns: one
+// created no later than the observation itself.
+//
+// Why the control needs its own ownership stamp, separate from the Force
+// grant: the Clear-lock button has NO grant (it calls a different,
+// non-destructive endpoint), so a grant-based rule cannot tell an obsolete
+// pre-check control from a newer recovery for it. Without the stamp, a check
+// that was already pending when Apply reported the lock conflict erased the
+// Clear-lock action on its way out, and the operator had to retry Apply to
+// get the action back (Greptile P1, 10-14).
+function _stampControlOwner(btn){
+  if(!btn) return;
+  btn.dataset.ownerGeneration = String(Number(window._updateRecoveryGeneration)||0);
+}
+function _controlOwnerGeneration(btn){
+  if(!btn||!btn.dataset) return 0;
+  const raw = btn.dataset.ownerGeneration;
+  if(raw===undefined||raw===null||raw==='') return 0;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+function _controlIsNewerThan(btn, observationGeneration){
+  // True when the control was created AFTER the observation started, i.e. the
+  // observation does not own it and may not retire it.
+  if(observationGeneration===null||observationGeneration===undefined) return false;
+  const observed = Number(observationGeneration);
+  if(!Number.isFinite(observed)) return false;
+  return _controlOwnerGeneration(btn) > observed;
+}
 function _retireForceUpdate(){
   _forceUpdateGrant = null;
 }
@@ -12042,11 +12125,23 @@ function _reconcileObsoleteUpdateControls(data, recoveryGenerationAtCheck){
   const forceBtn=(typeof $==='function')?$('btnForceUpdate'):null;
   const clearLockBtn=(typeof $==='function')?$('btnClearUpdateLock'):null;
   const keepAgent=(btn)=>{
-    // Preserve an Agent recovery control a newer observation established: a
+    // Preserve an Agent recovery control a NEWER observation established: a
     // live target plus a recovery state that has not been proven gone.
     if(!btn||btn.dataset.target!=='agent') return false;
     if(btn.style.display!=='inline-block'||btn.disabled) return false;
-    return !mayRetire;
+    if(mayRetire) return false;
+    // #7679 (maintainer 10-12): OWNERSHIP, not visibility, decides. A control
+    // that PREDATES this check is obsolete: the check cleared its grant when
+    // it started, so it would stay visible and enabled while doing nothing
+    // (forceUpdate returns before the confirmation and the POST). Keeping it
+    // was the "visible/enabled but inert" defect.
+    //
+    // A control created AFTER this check started belongs to a newer recovery
+    // and survives; the successor's own grant is the authority that re-arms
+    // it below.
+    return (typeof _controlIsNewerThan==='function')
+      ? _controlIsNewerThan(btn, recoveryGenerationAtCheck)
+      : false;
   };
   const keepForce=keepAgent(forceBtn);
   const keepLock=keepAgent(clearLockBtn);
@@ -12085,7 +12180,12 @@ function _reconcileObsoleteUpdateControls(data, recoveryGenerationAtCheck){
       // No authoritative recovery state in this observation: renew the
       // successor's own grant exactly as it was armed, so the preserved
       // button keeps working for the recovery it was created for.
-      _grantForceUpdate('agent', _forceUpdateGrant.channel||null);
+      //
+      // The target comes from the GRANT, not from the button's dataset: a
+      // button's own target is not authority to arm a destructive action
+      // (maintainer 10-12: "Do not manufacture a grant from the button's
+      // target alone").
+      _grantForceUpdate(_forceUpdateGrant.target, _forceUpdateGrant.channel||null);
     }
   }
   return {keepForce:!!keepForce,keepLock:!!keepLock};
@@ -12290,16 +12390,50 @@ function _showUpdateBanner(data, epoch, recoveryGenerationAtCheck=null){
   const clearLockBtn=$('btnClearUpdateLock');
   // Same manual-update carve-out as the force button above (#8040).
   const _lockBtnManualAgentKeep=(webuiManual&&clearLockBtn&&clearLockBtn.dataset.target==='agent'&&clearLockBtn.style.display==='inline-block'&&!clearLockBtn.disabled);
-  if(clearLockBtn&&!forceable&&!_lockBtnManualAgentKeep){
+  // #7679 (Greptile P1, 10-14): the Clear-lock action is created by
+  // ``_showUpdateError()`` when Apply reports a lock conflict, and it is
+  // NOT backed by the Force grant. A check that was already pending when
+  // that happened must not erase it: the block below hid and cleared the
+  // button on the way out, so the operator had to retry Apply to get the
+  // action back.
+  //
+  // The control carries the generation that owns it (see _stampControlOwner).
+  // An observation may only retire a control it owns, i.e. one created no
+  // later than the observation itself. A control created after this
+  // observation started belongs to a newer recovery and survives.
+  const _lockBtnOwnedByNewerRecovery=(typeof _controlIsNewerThan==='function')
+    ? _controlIsNewerThan(clearLockBtn, recoveryGenerationAtCheck)
+    : false;
+  if(clearLockBtn&&!forceable&&!_lockBtnManualAgentKeep&&!_lockBtnOwnedByNewerRecovery){
     clearLockBtn.disabled=true;
     clearLockBtn.style.display='none';
     clearLockBtn.dataset.target='';
   }
+  // #7679: a recovery control that survives this render lives INSIDE the
+  // banner (index.html: btnForceUpdate / btnClearUpdateLock are children of
+  // #updateBanner). Hiding the banner therefore erases the recovery action
+  // the user still needs, even though the control itself was preserved
+  // (Greptile P1 "Agent recovery disappears", 10-10).
+  //
+  // So: when a preserved recovery control is still armed, the banner stays
+  // visible and carries recovery text instead of the empty-payload path.
+  const _forceBtn=$('btnForceUpdate');
+  const _lockBtn=$('btnClearUpdateLock');
+  const _recoveryControlSurvives=!!(
+    (_forceBtn&&_forceBtn.dataset.target==='agent'&&_forceBtn.style.display==='inline-block'&&!_forceBtn.disabled)
+    ||(_lockBtn&&_lockBtn.dataset.target==='agent'&&_lockBtn.style.display==='inline-block'&&!_lockBtn.disabled)
+  );
   if(!parts.length){
-    _renderUpdateWhatsNewLinks(data);
-    const staleBanner=$('updateBanner');
-    if(staleBanner) staleBanner.classList.remove('visible');
-    return;
+    if(_recoveryControlSurvives){
+      // Recovery text for a payload that carries no update status of its own.
+      // The banner hosts that control, so it must stay visible.
+      parts.push(t('update_recovery_pending','A recovery action is available above.'));
+    }else{
+      _renderUpdateWhatsNewLinks(data);
+      const staleBanner=$('updateBanner');
+      if(staleBanner) staleBanner.classList.remove('visible');
+      return;
+    }
   }
   const msg=$('updateMsg');
   if(msg){
@@ -12439,6 +12573,9 @@ function _showUpdateError(target,res){
     forceBtn.dataset.target=target;
     forceBtn.disabled=false;
     forceBtn.style.display='inline-block';
+    // #7679: stamp the control with the generation that owns it, so a
+    // check that started EARLIER cannot retire it (see _controlIsNewerThan).
+    if(typeof _stampControlOwner==='function') _stampControlOwner(forceBtn);
     // #7679 finding 1: armed from the check payload's channel; forceUpdate()
     // validates this grant (including that a newer check/retry hasn't retired
     // it) after the danger confirm.
@@ -12454,6 +12591,12 @@ function _showUpdateError(target,res){
     clearLockBtn.dataset.target=target;
     clearLockBtn.disabled=false;
     clearLockBtn.style.display='inline-block';
+    // #7679: the Clear-lock action is owned by the same observation that
+    // created it, independently of the Force grant. Without this stamp a
+    // check that was already pending when Apply reported the lock conflict
+    // erased the action on its way out, and the operator had to retry Apply
+    // to get it back (Greptile P1, 10-14).
+    if(typeof _stampControlOwner==='function') _stampControlOwner(clearLockBtn);
   }
 }
 async function applyClearUpdateLock(btn){

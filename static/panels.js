@@ -12440,6 +12440,9 @@ async function checkUpdatesNow(channelOverride){
   const spinner=$('checkUpdatesSpinner');
   const status=$('checkUpdatesStatus');
   if(!btn||!label) return;
+  // The Settings controls' owner token (defined in ui.js next to the banner
+  // epoch, but a SEPARATE clock — see the comment there).
+  const settingsOwner=(typeof _beginUpdateSettingsCheck==='function')?_beginUpdateSettingsCheck():null;
   // #7679 finding 2 (latest-owner): stamp this check with a fresh epoch so a
   // slower, older check that resolves AFTER a newer one never overwrites the
   // banner/status the newer check published (owner guard).
@@ -12613,7 +12616,11 @@ async function checkUpdatesNow(channelOverride){
     //
     // Only the latest owner may restore the controls; an older one leaves them
     // exactly as the newer request set them.
-    if(epoch!==null && typeof _isUpdateCheckStale==='function' && _isUpdateCheckStale(epoch)) return;
+    // Only the latest OWNER of the Settings controls may restore them. The
+    // banner epoch is NOT the right test here: the boot-time check advances
+    // it without ever touching these controls, and using it made a manual
+    // check leave the Check button disabled forever (Greptile P1, 10-14).
+    if(settingsOwner!==null && typeof _isUpdateSettingsCheckStale==='function' && _isUpdateSettingsCheckStale(settingsOwner)) return;
     btn.disabled=false;
     if(spinner) spinner.style.display='none';
     if(label) label.textContent=t('settings_check_now');
