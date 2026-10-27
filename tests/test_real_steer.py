@@ -395,9 +395,8 @@ class TestFrontendWiring:
         assert "function _steerSetComposerStatusForOwner" in steer_helpers
         assert "_steerSetComposerStatusForOwner(ownerSid,t('uploading')||'Uploading…')" in steer_helpers
         assert "_steerSetComposerStatusForOwner(ownerSid,'')" in steer_helpers
-        assert "function _steerIndicatorText" in steer_helpers
-        assert "_showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot))" in try_body, (
-            "visible steer indicator must use original text or a file-only display label, not attachment tool instructions"
+        assert "_showSteerIndicator(originalMsg,pendingFilesSnapshot)" in try_body, (
+            "live steer row must use the original text plus staged files as chips, not attachment tool instructions"
         )
         assert "_showSteerIndicator(steerText)" not in try_body
 
@@ -477,7 +476,8 @@ class TestFrontendWiring:
             function setComposerStatus(){{}}
             function showToast(){{}}
             function renderTray(){{}}
-            function _showSteerIndicator(text){{indicatorText = text;}}
+            let indicatorFiles = null;
+            function _showSteerIndicator(text, files){{indicatorText = text; indicatorFiles = files;}}
             function _showSteerRecovery(){{}}
             function _clearComposerDraft(){{}}
             async function uploadPendingFiles(){{return [{{path:'/tmp/a.pdf'}}];}}
@@ -490,7 +490,9 @@ class TestFrontendWiring:
             (async()=>{{
               const delivered = await _trySteer('', false);
               assert.strictEqual(delivered, true);
-              assert.strictEqual(indicatorText, 'Attached files: a.pdf');
+              // Attachment-only steer: no text; the staged files render as chips.
+              assert.strictEqual(indicatorText, '');
+              assert.deepStrictEqual(indicatorFiles.map(f=>f.name), ['a.pdf']);
               assert.ok(apiPayload.text.includes('[Attached files for this steer: /tmp/a.pdf]'));
               assert.ok(!indicatorText.includes('file tools/read_file'));
             }})().catch(err=>{{console.error(err); process.exit(1);}});

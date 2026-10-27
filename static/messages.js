@@ -7272,6 +7272,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           showToast(t('steer_leftover_queued'),3000);
         }
         if(typeof _steerReconcileLeftover==='function') _steerReconcileLeftover(sid,txt);
+        // Not consumed mid-run: it becomes the next turn's user message, so the
+        // in-turn live Steer row would misplace it.
+        if(typeof _clearLiveSteerRows==='function') _clearLiveSteerRows();
       }catch(_){}
     });
 

@@ -11335,6 +11335,54 @@ function _stripAttachedFilesMarkerForDisplay(text){
   return String(text||'').replace(/\n\n\[Attached files: [^\]]+\]$/,'').trim();
 }
 
+// ── Mid-turn Steer rows ─────────────────────────────────────────────────────
+// Hermes Agent persists a consumed /steer as its own typed row
+// ({role:'user', display_kind:'steer'}) right after the tool result where the
+// model received it. The row is display-only here: identity comes from the
+// Agent's typed discriminator, never from content sniffing, so a user who
+// pastes marker-like text into an ordinary message keeps an ordinary bubble.
+const _STEER_OOB_OPEN_RE=/^\s*\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)[^\]\n]*)?\]\s*\n/;
+const _STEER_OOB_CLOSE_RE=/\n\s*\[\/OUT-OF-BAND\s+USER\s+MESSAGE\]\s*$/;
+// Exact suffix composed by _steerTextWithPendingFiles (static/commands.js).
+const _STEER_ATTACH_NOTE_RE=/(?:^|\n\n)\[Attached files for this steer: ([^\]\n]+)\]\nUse the file tools\/read_file to inspect these documents if needed\.\s*$/;
+
+function _isSteerDisplayMessage(m){
+  return !!(m&&m.role==='user'&&m.display_kind==='steer');
+}
+
+// Split a steer row's stored content into the user's text and attachment
+// paths. Unwraps exactly one well-formed outer control frame (the Agent's
+// model-facing wrapper can still be on disk for rows persisted before the
+// WebUI scrub ran); anything else is left byte-for-byte as user text.
+function _steerDisplayParts(content){
+  let text=String(content||'');
+  const open=text.match(_STEER_OOB_OPEN_RE);
+  if(open&&_STEER_OOB_CLOSE_RE.test(text)){
+    text=text.slice(open[0].length).replace(_STEER_OOB_CLOSE_RE,'');
+  }
+  let files=[];
+  const note=text.match(_STEER_ATTACH_NOTE_RE);
+  if(note){
+    files=note[1].split(',').map(p=>p.trim()).filter(Boolean);
+    text=text.slice(0,note.index);
+  }
+  return {text:text.trim(),files};
+}
+
+function _steerRowInnerHtml(text, files, footHtml, sid){
+  let filesHtml='';
+  if(files&&files.length){
+    filesHtml=`<div class="msg-files">${files.map(p=>{
+      const fname=String(p).split('/').pop()||String(p);
+      const fileUrl='api/file/raw?session_id='+encodeURIComponent(sid||'')+'&path='+encodeURIComponent(fname);
+      return _renderAttachmentHtml(fname,fileUrl);
+    }).join('')}</div>`;
+  }
+  const label=`<div class="steer-row-label">${li('arrow-right',12)}<span>${esc(t('steer_row_label'))}</span></div>`;
+  const body=text?`<div class="msg-body">${_getCachedRender(text,true)}</div>`:'';
+  return `${label}${filesHtml}${body}${footHtml||''}`;
+}
+
 function setStatus(t){
   if(!t)return;
   showToast(t, 4000);
@@ -22319,7 +22367,7 @@ function renderMessages(options){
   if(preWindowInsertion.taskOwnerNode) preservedCompressionTaskOwnerNode=preWindowInsertion.taskOwnerNode;
   let lastUserRawIdx=-1;
   for(let i=visWithIdx.length-1;i>=0;i--){
-    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'){
+    if(visWithIdx[i].m&&visWithIdx[i].m.role==='user'&&!_isSteerDisplayMessage(visWithIdx[i].m)){
       lastUserRawIdx=visWithIdx[i].rawIdx;
       break;
     }
@@ -22360,7 +22408,8 @@ function renderMessages(options){
   const renderableRawIdxs=new Set(visWithIdx.map(e=>e.rawIdx));
   for(const entry of visWithIdx){
     const role=entry&&entry.m&&entry.m.role;
-    if(role==='user') lastQuestionRawIdx=entry.rawIdx;
+    // A mid-turn Steer is guidance inside the prompt's turn, not a new question.
+    if(role==='user'&&!_isSteerDisplayMessage(entry.m)) lastQuestionRawIdx=entry.rawIdx;
     else if(role==='assistant'&&renderedRawIdxs.has(entry.rawIdx)) questionRawIdxByAssistantRawIdx.set(entry.rawIdx,lastQuestionRawIdx);
   }
   const assistantRawIdxByQuestionRawIdx=new Map();
@@ -22645,6 +22694,35 @@ function renderMessages(options){
     const footHtml = `<div class="msg-foot">${timeHtml}<span class="msg-actions">${editBtn}${ttsBtn}${forkBtn}${copyBtn}${retryBtn}${extensionActionsSlot}</span>${questionJumpBtn}</div>`;
 
     if(_isContextCompactionMessage(m)){
+      continue;
+    }
+
+    if(_isSteerDisplayMessage(m)){
+      // Persisted mid-turn Steer: a user-authored control boundary rendered in
+      // place (after the tool result that delivered it). Same lifecycle as the
+      // process-wakeup row: it closes the current assistant container so the
+      // continuation renders below it, and carries no edit/retry actions.
+      currentAssistantTurn=null;
+      let row=_msgNodeRecycleEnabled?_recycleStash.get(rawIdx):null;
+      if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
+      const steerParts=_steerDisplayParts(msgContent(m));
+      const steerFootHtml=`<div class="msg-foot">${timeHtml}<span class="msg-actions">${copyBtn}</span></div>`;
+      const nextRowHtml=_steerRowInnerHtml(steerParts.text, steerParts.files, steerFootHtml, (S.session&&S.session.session_id)||'');
+      if(!row) row=document.createElement('div');
+      row.className='msg-row steer-row';
+      row.id=_userMessageDomId(rawIdx);
+      row.dataset.msgIdx=rawIdx;
+      row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+      row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
+      row.dataset.role='steer';
+      delete row.dataset.editing;
+      if(row.dataset.rawText!==steerParts.text||row._steerRenderedHtml!==nextRowHtml){
+        row.dataset.rawText=steerParts.text;
+        row._steerRenderedHtml=nextRowHtml;
+        row.innerHTML=nextRowHtml;
+      }
+      inner.appendChild(row);
+      userRows.set(rawIdx, row);
       continue;
     }
 

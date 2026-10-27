@@ -1766,24 +1766,38 @@ function _steerFailureMessageKey(fallback) {
     ? key : 'steer_fail_unknown';
 }
 
-function _showSteerIndicator(text){
+// Live (not-yet-settled) Steer row. Rendered with the same markup as the
+// persisted display_kind=steer row, placed inside the live assistant turn so
+// it sits where the guidance entered the run instead of trailing the stream.
+// It is browser-only and retired on terminal settlement; the Agent's persisted
+// row replaces it when the session reloads its settled messages.
+function _showSteerIndicator(text, files){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
-  // Remove any existing steer indicator
-  const old=inner.querySelector('.steer-indicator');
-  if(old) old.remove();
+  const body=String(text||'').trim();
+  const names=(Array.isArray(files)?files:[])
+    .map(f=>f&&(typeof f==='string'?f:(f.name||f.filename||f.path||'')))
+    .map(v=>String(v||'').trim()).filter(Boolean);
+  if(!body&&!names.length) return;
   const el=document.createElement('div');
-  el.className='steer-indicator';
-  const badge=document.createElement('span');
-  badge.className='steer-badge';
-  badge.textContent='Steer';
-  const body=document.createElement('span');
-  body.className='steer-body';
-  body.textContent=text.length>120?text.slice(0,117)+'…':text;
-  el.appendChild(badge);
-  el.appendChild(body);
-  inner.appendChild(el);
+  el.className='msg-row steer-row steer-row-live';
+  el.dataset.role='steer';
+  el.dataset.liveSteer='1';
+  el.dataset.rawText=body;
+  const sid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||'';
+  el.innerHTML=(typeof _steerRowInnerHtml==='function')
+    ? _steerRowInnerHtml(body,names,'',sid)
+    : `<div class="msg-body">${esc(body)}</div>`;
+  const turn=document.getElementById('liveAssistantTurn');
+  const blocks=turn&&typeof _assistantTurnBlocks==='function'?_assistantTurnBlocks(turn):null;
+  (blocks||inner).appendChild(el);
   if(typeof scrollToBottom==='function') scrollToBottom();
+}
+
+function _clearLiveSteerRows(){
+  const inner=document.getElementById('msgInner');
+  if(!inner) return;
+  for(const el of inner.querySelectorAll('[data-live-steer="1"]')) el.remove();
 }
 
 function _showSteerRecovery(msg, explicitSteer, fallback) {
@@ -1894,16 +1908,6 @@ function _steerSetComposerStatusForOwner(ownerSid,text){
 
 function _steerRestoreText(originalMsg, explicitSteer){
   return explicitSteer?`/steer ${originalMsg}`:originalMsg;
-}
-
-function _steerIndicatorText(originalMsg, filesSnapshot){
-  const text=String(originalMsg||'').trim();
-  if(text)return text;
-  const names=(Array.isArray(filesSnapshot)?filesSnapshot:[])
-    .map(f=>f&&(f.name||f.filename||f.path||''))
-    .map(v=>String(v||'').trim())
-    .filter(Boolean);
-  return names.length?`Attached files: ${names.join(', ')}`:'Attached files';
 }
 
 async function _steerPersistDraftForOwner(ownerSid, originalMsg, explicitSteer, filesSnapshot){
@@ -2038,6 +2042,7 @@ function _steerDraftRevision(sid){
 // this, so an undelivered settled record can never reconcile. Drop it.
 function _steerSettleTerminal(sid){
   _steerAcceptedBySid.delete(sid);
+  if(typeof _clearLiveSteerRows==="function"&&_steerOwnerIsCurrent(sid)) _clearLiveSteerRows();
   for(const entry of [...(_steerUncertainBySid.get(sid)||[])]){
     if(entry.settled)_steerUncertainDrop(sid,entry);
     else entry.ended=true;
@@ -2241,7 +2246,7 @@ async function _trySteer(msg, explicitSteer){
         const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
-      _showSteerIndicator(_steerIndicatorText(originalMsg,pendingFilesSnapshot));
+      _showSteerIndicator(originalMsg,pendingFilesSnapshot);
     }
     showToast(t('cmd_steer_delivered'),2500);
     return true;
