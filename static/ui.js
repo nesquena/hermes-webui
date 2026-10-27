@@ -4541,17 +4541,26 @@ function _formatQuotaPercentShort(value){
   const n=Number(value);
   return Math.max(0,Math.min(100,n)).toFixed(0)+'%';
 }
-// Which account window the chip shows (Settings: quota_chip_window). Providers list
-// windows shortest first (5-hour/rolling, weekly, monthly).
+// Which account window the chip shows (Settings: quota_chip_window). The fixed modes pick by
+// the window's limit_window_seconds, never by list position: providers do not order windows.
 function _normalizeQuotaChipWindow(value){
   return value==='shortest'||value==='longest'?value:'most_constrained';
+}
+function _quotaWindowSeconds(x){
+  return x&&_isQuotaMeasurement(x.limit_window_seconds)&&Number(x.limit_window_seconds)>0?Number(x.limit_window_seconds):null;
 }
 function _selectQuotaChipWindow(windows){
   const valid=windows.filter(x=>x&&_isQuotaMeasurement(x.remaining_percent));
   if(!valid.length) return null;
   const mode=_normalizeQuotaChipWindow(typeof window!=='undefined'?window._quotaChipWindow:undefined);
-  if(mode==='shortest') return valid[0];
-  if(mode==='longest') return valid[valid.length-1];
+  if(mode==='shortest'||mode==='longest'){
+    const timed=valid.filter(x=>_quotaWindowSeconds(x)!==null);
+    if(timed.length) return timed.reduce((best,x)=>{
+      const a=_quotaWindowSeconds(x),b=_quotaWindowSeconds(best);
+      return (mode==='shortest'?a<b:a>b)?x:best;
+    });
+    // No eligible window reports a valid positive duration: fall back to the most constrained one.
+  }
   return valid.reduce((min,x)=>Number(x.remaining_percent)<Number(min.remaining_percent)?x:min);
 }
 // Time left until a window resets, e.g. "2h 14m" / "3d 5h"; '' when unknown or past.
