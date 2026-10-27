@@ -362,23 +362,38 @@ def get_checkpoint_diff(workspace: str, checkpoint: str) -> dict[str, Any]:
     }
 
 
-def _restore_checkpoint_file(workspace_root: Path, rel_path: str, content: bytes, mode: int) -> None:
-    """Restore one checkpoint blob without following checkpoint or workspace symlinks."""
-    from api.workspace import open_anchored_create_fd, open_anchored_write_fd, safe_resolve_ws
+def _restore_checkpoint_file(root_fd: int, rel_path: str, content: bytes, mode: int) -> None:
+    """Restore a regular blob relative to the retained authorized directory."""
+    from pathlib import PurePosixPath
 
-    target = safe_resolve_ws(workspace_root, rel_path)
-    if target.exists():
-        fd = open_anchored_write_fd(workspace_root, target)
-    else:
-        fd = open_anchored_create_fd(workspace_root, target)
-
+    path = PurePosixPath(rel_path)
+    if path.is_absolute() or not path.parts or any(part in (".", "..") for part in path.parts):
+        raise ValueError(f"Path traversal blocked: {rel_path}")
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    parent_fd = os.dup(root_fd)
+    try:
+        for part in path.parts[:-1]:
+            try:
+                next_fd = os.open(part, flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                os.mkdir(part, 0o755, dir_fd=parent_fd)
+                next_fd = os.open(part, flags, dir_fd=parent_fd)
+            os.close(parent_fd)
+            parent_fd = next_fd
+        fd = os.open(path.parts[-1], os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                     0o644, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
     with os.fdopen(fd, "wb") as out:
+        if not stat.S_ISREG(os.fstat(out.fileno()).st_mode):
+            raise ValueError(f"Not a regular file: {rel_path}")
+        os.ftruncate(out.fileno(), 0)
         out.write(content)
         out.flush()
         try:
             os.fchmod(out.fileno(), mode & 0o777)
         except (AttributeError, OSError):
-            logger.debug("Failed to apply restored mode to %s", target, exc_info=True)
+            logger.debug("Failed to apply restored mode to %s", rel_path, exc_info=True)
 
 
 def restore_checkpoint(workspace: str, checkpoint: str) -> dict[str, Any]:
@@ -392,9 +407,21 @@ def restore_checkpoint(workspace: str, checkpoint: str) -> dict[str, Any]:
         files_restored: list of restored file paths
     """
     resolved = _resolve_workspace(workspace)
-    workspace_root = Path(resolved)
     checkpoint = _validate_checkpoint_id(checkpoint)
-    ws_hash = _workspace_hash(resolved)
+    if (os.open not in os.supports_dir_fd or os.mkdir not in os.supports_dir_fd
+            or not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY")):
+        raise ValueError("Checkpoint restore requires descriptor-relative filesystem support")
+    root_fd = os.open(resolved, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        return _restore_checkpoint_at_root(resolved, checkpoint, root_fd)
+    finally:
+        os.close(root_fd)
+
+
+def _restore_checkpoint_at_root(resolved: str, checkpoint: str, root_fd: int) -> dict[str, Any]:
+    # _resolve_workspace already canonicalized this string. Do not resolve it
+    # again after retaining the directory object used by every restore write.
+    ws_hash = hashlib.sha256(resolved.encode()).hexdigest()[:12]
     ckpt_dir = _checkpoint_root() / ws_hash / checkpoint
 
     if not ckpt_dir.is_dir():
@@ -421,7 +448,7 @@ def restore_checkpoint(workspace: str, checkpoint: str) -> dict[str, Any]:
             continue
 
         try:
-            _restore_checkpoint_file(workspace_root, rel_path, content, mode)
+            _restore_checkpoint_file(root_fd, rel_path, content, mode)
             restored.append(rel_path)
         except (OSError, ValueError) as e:
             errors.append({"file": rel_path, "error": str(e)})

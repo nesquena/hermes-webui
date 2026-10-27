@@ -68,6 +68,65 @@ def _commit_all(path, message="initial"):
     _git(path, "commit", "-m", message)
 
 
+@pytest.mark.parametrize("operation", ["stage", "commit_selected"])
+@pytest.mark.parametrize("dirname", [":(top,glob)**", "app[1]"])
+def test_selected_git_paths_are_literal(tmp_path, monkeypatch, operation, dirname):
+    from api import workspace_git
+
+    monkeypatch.setenv(workspace_git.WORKSPACE_GIT_DESTRUCTIVE_ENV, "1")
+    repo = _init_repo(tmp_path / "repo")
+    nested = repo / dirname
+    nested.mkdir()
+    sibling = repo / ("private" if dirname.startswith(":") else "app1")
+    sibling.mkdir()
+    for directory in (nested, sibling):
+        (directory / "item.txt").write_text("before\n")
+    _commit_all(repo)
+    for directory in (nested, sibling):
+        (directory / "item.txt").write_text("after\n")
+
+    if operation == "stage":
+        workspace_git.git_stage(nested, ["item.txt"])
+        changed = _git(repo, "diff", "--cached", "--name-only", "-z").split("\0")
+    else:
+        workspace_git.git_commit_selected(nested, "Selected only", ["item.txt"])
+        changed = _git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "HEAD").split("\0")
+    assert [path for path in changed if path] == [f"{dirname}/item.txt"]
+
+
+@pytest.mark.parametrize("initial", [False, True])
+@pytest.mark.parametrize("configured_hooks", [False, True])
+def test_selected_message_disables_index_hooks(tmp_path, monkeypatch, initial, configured_hooks):
+    import os
+    import shlex
+
+    if os.name == "nt":
+        pytest.skip("executable hook fixture requires POSIX")
+    from api import workspace_git
+
+    monkeypatch.delenv(workspace_git.WORKSPACE_GIT_DESTRUCTIVE_ENV, raising=False)
+    repo = _init_repo(tmp_path / "repo")
+    selected = repo / "selected.txt"
+    selected.write_text("before\n")
+    if not initial:
+        _commit_all(repo)
+    selected.write_text("after\n")
+    hooks = tmp_path / "hooks" if configured_hooks else repo / ".git" / "hooks"
+    hooks.mkdir(exist_ok=True)
+    if configured_hooks:
+        _git(repo, "config", "core.hooksPath", str(hooks))
+    marker = tmp_path / "index-hook-ran"
+    hook = hooks / "post-index-change"
+    hook.write_text("#!/bin/sh\nprintf ran > " + shlex.quote(str(marker)) + "\n")
+    hook.chmod(0o755)
+
+    prompt = workspace_git.selected_commit_message_prompt(repo, ["selected.txt"])
+
+    assert "+after" in prompt["user_prompt"]
+    assert not marker.exists(), "read-only message preparation ran a repository hook"
+    assert not list(pathlib.Path(os.environ["TMPDIR"]).glob("hermes-webui-git-index-*"))
+
+
 def _get(path):
     try:
         with urllib.request.urlopen(BASE + path, timeout=10) as r:

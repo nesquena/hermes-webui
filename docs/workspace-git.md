@@ -54,7 +54,10 @@ it.
 
 The browser does not send an arbitrary repository path. Git requests carry a session id and, when
 needed, workspace-relative file paths. The server resolves the session workspace, checks each path
-against that workspace, and then builds Git pathspecs from the checked paths.
+against that workspace, and then builds Git pathspecs from the checked paths. The Git wrapper uses
+explicit `:(literal)` pathspecs, so wildcard characters and `:(...)` in real directory or file names
+cannot broaden an explicitly selected operation. Inherited pathspec-mode environment overrides
+are removed before Git runs.
 
 Git commands run through `subprocess.run` with `shell=False`. Local status and diff commands use a 5
 second timeout. Remote operations such as fetch, pull, and push use a 60 second timeout.
@@ -89,12 +92,11 @@ that repository, the API returns `operation_in_progress`.
 
 ## Hook and remote behavior
 
-WebUI does not bypass Git hooks. Hook code may come from `.git/hooks/` or from a configured
-`core.hooksPath`.
-
-Commit actions run normal commit hooks such as `pre-commit`, `commit-msg`, and `post-commit`. Push can
-run `pre-push`. Pull uses `--ff-only`, so it does not create a merge commit, but it is still a Git
-operation running under the WebUI process.
+Read/status/fetch calls and the temporary-index preparation used for selected commit-message
+suggestions redirect `core.hooksPath` to an empty directory, including when destructive controls
+are disabled. Browser-admitted mutating operations also use the existing destructive hardening.
+This prevents repository hooks from turning an inspection or suggestion into host execution.
+Pull still uses `--ff-only`, so it does not create a merge commit.
 
 Push keeps Git's normal non-fast-forward protection and reports non-fast-forward rejection separately
 from general Git failures.
