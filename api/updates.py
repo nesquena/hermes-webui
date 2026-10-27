@@ -2056,15 +2056,19 @@ def _agent_update_refusal_state(exc=None) -> str | None:
     ``exc`` is the exception raised by an ``ensure_agent_runtime_current``
     check; its ``agent_update_state`` diagnostic is the freshest read, and the
     transaction is resampled when the exception carries none. A state of
-    ``active`` / ``incomplete`` / ``unknown`` means an update is in flight or
-    unverifiable, so the caller must fail closed instead of restarting.
+    ``active`` / ``stale_live`` / ``incomplete`` / ``unknown`` means an update
+    is in flight or unverifiable, so the caller must fail closed instead of
+    restarting.
     """
-    from api.agent_runtime import _agent_update_transaction_state
+    from api.agent_runtime import (
+        _AGENT_UPDATE_UNSAFE_STATES,
+        _agent_update_transaction_state,
+    )
 
     state = getattr(exc, 'agent_update_state', None)
     if state is None:
         state = _agent_update_transaction_state()
-    return state if state in ('active', 'incomplete', 'unknown') else None
+    return state if state in _AGENT_UPDATE_UNSAFE_STATES else None
 
 
 def _schedule_restart(delay: float = 2.0, *, transaction_guard: bool = False) -> None:
@@ -2460,8 +2464,11 @@ def restart_stale_runtime() -> dict:
     nothing more:
 
     * a current runtime is refused, so this is never a general restart button;
-    * an Agent update that is active, incomplete, or unreadable is refused
-      (an unverifiable marker fails closed with the in-flight update);
+    * an Agent update that is active, long-lived (a live owner past the
+      v1 ceiling or a surviving delegate), incomplete, or unreadable is
+      refused (an unverifiable marker fails closed with the in-flight
+      update); a crashed update's leftover (dead owner, no delegate)
+      stays recoverable so it cannot block the operator forever;
     * active chat work returns the shared restart-blocked response, exactly
       like ``/api/updates/apply``;
     * the stale check is repeated under ``_apply_lock`` so a runtime that
@@ -2472,6 +2479,7 @@ def restart_stale_runtime() -> dict:
       lock alone is not atomic exclusion of an external update.
     """
     from api.agent_runtime import (
+        _AGENT_UPDATE_UNSAFE_STATES,
         AgentRuntimeChangedError,
         _agent_update_transaction_state,
         agent_runtime_stale_payload,
@@ -2493,7 +2501,7 @@ def restart_stale_runtime() -> dict:
         }
 
     update_state = _agent_update_transaction_state()
-    if update_state in ('active', 'incomplete', 'unknown'):
+    if update_state in _AGENT_UPDATE_UNSAFE_STATES:
         refused = dict(stale_payload)
         refused['message'] = (
             'An Agent update is still running or did not finish '

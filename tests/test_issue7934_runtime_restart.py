@@ -16,6 +16,8 @@ shell, while every guard that keeps the restart manual stays fail-closed:
 from __future__ import annotations
 
 import os
+import subprocess
+import sys
 import time
 import types
 
@@ -667,3 +669,164 @@ def test_real_worker_skips_when_the_runtime_became_current(real_restart_env):
     checkout.workers[0]()
     assert env.destructive_total() == 0
     assert any("skipped" in i for i in env.logs.infos)
+
+
+# ── marker location: profile launches read the profile-tree root ──
+#
+# The installed Agent writes the update marker at the profile-tree ROOT
+# (marker v2, hermes_cli/update_lock.py ``update_marker_path``), while a
+# WebUI launched on a named profile has ``HERMES_HOME`` re-homed to
+# ``<root>/profiles/<p>``.  Reading only the captured home then sees
+# ``absent`` while an update is live — and an ``absent`` marker is what
+# authorizes the destructive restart.
+
+
+def _publish_over_age_live_marker(checkout):
+    """A live owner older than the v1 ceiling: the update is still running."""
+    marker = checkout.home / ".hermes-update-in-progress"
+    marker.write_text(
+        f"{os.getpid()}\n{time.time() - 86400}\n", encoding="utf-8"
+    )
+
+
+def _publish_live_delegate_marker(checkout):
+    """A dead owner with a live delegate: the update outlived its parent."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=10)
+    marker = checkout.home / ".hermes-update-in-progress"
+    marker.write_text(
+        f"{process.pid}\n{time.time()}\n"
+        f"delegate:{os.getpid()} ct:{time.time():.3f}\n",
+        encoding="utf-8",
+    )
+
+
+def _publish_dead_owner_marker(checkout):
+    """A dead owner and no delegate: a crashed update's leftover marker."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=10)
+    marker = checkout.home / ".hermes-update-in-progress"
+    marker.write_text(f"{process.pid}\n{time.time()}\n", encoding="utf-8")
+
+
+def _relaunch_under_profile(env, name="webui"):
+    """Re-point the captured ``HERMES_HOME`` at ``<root>/profiles/<name>``."""
+    root = env.checkout.home
+    profile_home = root / "profiles" / name
+    profile_home.mkdir(parents=True, exist_ok=True)
+    env.monkeypatch.setattr(env.agent_runtime, "_HERMES_HOME", profile_home)
+    return root, profile_home
+
+
+def test_real_marker_at_profile_tree_root_refuses_profile_launch(
+    real_restart_env,
+):
+    """Under a profile launch the marker lives at the profile-tree root.
+
+    The route must fold that root marker into its verdict: state ``active``,
+    restart refused, zero destructive calls.  Reading only the re-homed
+    profile home sees ``absent`` and would purge + execv mid-update.
+    """
+    env = real_restart_env
+    root, _profile_home = _relaunch_under_profile(env)
+    (root / ".hermes-update-in-progress").write_text(
+        f"{os.getpid()}\n{time.time()}\n", encoding="utf-8"
+    )
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "active"
+    assert result["restart_scheduled"] is False
+    assert env.destructive_total() == 0, (
+        "a live marker at the profile-tree root must abort the restart"
+    )
+
+
+def test_real_marker_at_root_refuses_root_launch_control(real_restart_env):
+    """Control: the same live marker with ``HERMES_HOME=<root>`` (no
+    profile) is refused with zero destructive calls on every head."""
+    env = real_restart_env
+    (env.checkout.home / ".hermes-update-in-progress").write_text(
+        f"{os.getpid()}\n{time.time()}\n", encoding="utf-8"
+    )
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["agent_update_state"] == "active"
+    assert env.destructive_total() == 0
+
+
+def test_real_marker_at_profile_home_still_refuses_legacy_location(
+    real_restart_env,
+):
+    """Legacy second candidate: a marker written at the profile home (the
+    pre-v2 Agent location) must still be detected under a profile launch."""
+    env = real_restart_env
+    _root, profile_home = _relaunch_under_profile(env)
+    (profile_home / ".hermes-update-in-progress").write_text(
+        f"{os.getpid()}\n{time.time()}\n", encoding="utf-8"
+    )
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["agent_update_state"] == "active"
+    assert env.destructive_total() == 0
+
+
+# ── live long-running updates must not read as a safe ``stale`` ──
+
+
+def test_real_over_age_live_owner_refuses_restart(real_restart_env):
+    """A live owner older than 20 minutes is still an update in flight.
+
+    v2 markers support long-lived owners; the 20-minute ceiling only ages
+    out v1 markers.  A process that still answers is never proof the
+    update finished, so the restart is refused instead of purging
+    mid-update.
+    """
+    env = real_restart_env
+    _publish_over_age_live_marker(env.checkout)
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "stale_live"
+    assert result["restart_scheduled"] is False
+    assert env.destructive_total() == 0
+
+
+def test_real_live_delegate_with_dead_owner_refuses_restart(real_restart_env):
+    """A surviving delegate keeps the update in flight after its parent
+    died; the marker must not read as a safe ``stale`` leftover."""
+    env = real_restart_env
+    _publish_live_delegate_marker(env.checkout)
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result.get("ok") is not True
+    assert result["type"] == "agent_runtime_stale"
+    assert result["agent_update_state"] == "active"
+    assert result["restart_scheduled"] is False
+    assert env.destructive_total() == 0
+
+
+def test_real_dead_owner_without_delegate_still_allows_restart(
+    real_restart_env,
+):
+    """Recovery control: a crashed update's leftover marker (dead owner,
+    no live delegate) must not block the operator's restart forever."""
+    env = real_restart_env
+    _publish_dead_owner_marker(env.checkout)
+
+    result = env.updates.restart_stale_runtime()
+
+    assert result["ok"] is True
+    assert result["restart_scheduled"] is True
+    assert len(env.checkout.workers) == 1
+    env.checkout.workers[0]()
+    assert len(env.destructive.execv) == 1

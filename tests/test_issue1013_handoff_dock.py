@@ -325,8 +325,8 @@ def test_stale_runtime_handoff_summary_returns_typed_409_without_persisting(monk
             "type": "agent_runtime_stale",
             "retryable": True,
             "restart_scheduled": False,
-
-            "restart_available": True,        },
+            "restart_available": True,
+        },
     }
 
 

@@ -12,6 +12,7 @@ import errno
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import subprocess
@@ -36,6 +37,23 @@ _RESTART_REQUIRED_MESSAGE = (
 _AGENT_UPDATE_MARKER = ".hermes-update-in-progress"
 _AGENT_RECOVERY_MARKERS = (".update-incomplete", ".lazy-refresh-incomplete")
 _AGENT_UPDATE_MAX_AGE_SECONDS = 20 * 60
+# Marker v2 (2026-10-03) carries an optional surviving-delegate line:
+# ``delegate:<pid> ct:<create time>``.  A delegate keeps the update in
+# flight after the owner process died, so the owner's death alone is not
+# proof the update finished.  Only the pid is needed here; the ct value
+# belongs to the Agent's own incarnation probe.
+_AGENT_DELEGATE_LINE = re.compile(
+    r"delegate:([0-9]+)\s+ct:[0-9]+(?:\.[0-9]+)?", re.ASCII
+)
+# Fold order across candidate marker homes and identity claims: an
+# unverifiable marker outranks an in-flight one, an in-flight one outranks
+# a leftover, and only an everywhere-absent marker reads as no update.
+_MARKER_STATE_PRECEDENCE = ("unknown", "active", "stale_live", "stale", "absent")
+# States a restart guard must refuse: an update in flight (a young owner or
+# a long-lived one past the v1 ceiling), an unverifiable marker, or an
+# incomplete environment.  A crashed update's leftover (``stale``) stays
+# recoverable so a dead owner cannot block the operator's restart forever.
+_AGENT_UPDATE_UNSAFE_STATES = ("active", "stale_live", "incomplete", "unknown")
 # Slow local Git reads must not look like source drift after just two seconds.
 # Share one total budget across all reads; unreadable revisions fail closed.
 _GIT_REVISION_TIMEOUT_SECONDS = 10
@@ -315,12 +333,51 @@ def _read_live_agent_update(marker: Path) -> str:
     age_seconds = time.time() - started_at
     if age_seconds < 0:
         return "unknown"
-    if age_seconds > _AGENT_UPDATE_MAX_AGE_SECONDS:
+
+    owner_state = _marker_identity_state(pid, age_seconds)
+    if owner_state == "unknown":
+        return "unknown"
+    if owner_state != "stale":
+        return owner_state
+
+    # The owner is gone.  A surviving delegate keeps the update in flight;
+    # without one the marker is a crashed update's leftover.
+    delegate_pid = _marker_delegate_pid(lines[2:])
+    if delegate_pid is None:
         return "stale"
+    delegate_state = _marker_identity_state(delegate_pid, age_seconds)
+    return "unknown" if delegate_state == "unknown" else delegate_state
+
+
+def _marker_identity_state(pid: int, age_seconds: float) -> str:
+    """Classify one marker identity by process liveness and claim age.
+
+    A process that still answers is never proof the update finished: v2
+    markers run long-lived owners past the 20-minute ceiling (the ceiling
+    only ages out v1 markers, which carry no creation time), and even a v1
+    claim whose pid is alive fails closed rather than authorising a
+    destructive restart.  Only a dead owner — with no live delegate — is a
+    leftover that reads ``stale``.
+    """
     alive = _pid_is_alive(pid)
     if alive is None:
         return "unknown"
-    return "active" if alive else "stale"
+    if not alive:
+        return "stale"
+    if age_seconds > _AGENT_UPDATE_MAX_AGE_SECONDS:
+        return "stale_live"
+    return "active"
+
+
+def _marker_delegate_pid(tagged_lines: list[str]) -> int | None:
+    """Return the first well-formed ``delegate:<pid> ct:<ct>`` line's pid."""
+    for line in tagged_lines:
+        match = _AGENT_DELEGATE_LINE.fullmatch(line.strip())
+        if match:
+            pid = int(match.group(1))
+            if pid > 0:
+                return pid
+    return None
 
 
 def _marker_presence(marker: Path) -> str:
@@ -358,13 +415,60 @@ def _agent_install_roots() -> tuple[Path, ...]:
     return tuple(roots)
 
 
+def _agent_update_marker_homes() -> tuple[Path, ...]:
+    """Return candidate homes for the shared Agent update marker.
+
+    The installed Agent (marker v2, ``hermes_cli/update_lock.py``) writes
+    the marker at the profile-tree ROOT via ``get_default_hermes_root()``,
+    while a WebUI launched on a named profile (``-p`` / sticky profile) has
+    its captured ``HERMES_HOME`` re-homed to ``<root>/profiles/<p>``.
+    Reading only the captured home then sees ``absent`` while an update is
+    live — and an absent marker is exactly what authorises the destructive
+    stale-runtime restart.  List the unwrapped base root first and keep the
+    captured profile home as the legacy second candidate.
+    """
+    homes: list[Path] = []
+    seen: set[str] = set()
+    for candidate in (_base_marker_home(), _HERMES_HOME):
+        key = os.path.normcase(os.path.abspath(str(candidate)))
+        if key not in seen:
+            seen.add(key)
+            homes.append(candidate)
+    return tuple(homes)
+
+
+def _base_marker_home() -> Path:
+    """Unwrap a profile-shaped ``HERMES_HOME`` to its profile-tree root."""
+    try:
+        from api.profiles import _unwrap_profile_home_to_base
+    except ImportError:  # pragma: no cover - profiles always ships with WebUI
+        return _HERMES_HOME
+    try:
+        return _unwrap_profile_home_to_base(_HERMES_HOME)
+    except (AttributeError, TypeError, ValueError):
+        return _HERMES_HOME
+
+
 def _agent_update_transaction_state() -> str:
     """Report marker diagnostics, never proof of successful completion.
 
     The Agent removes its active marker on failed/interrupted exits too. Neither
     its absence nor a stale PID proves the checkout or environment is healthy.
+    Candidate homes are folded with ``_MARKER_STATE_PRECEDENCE``: an
+    unverifiable marker anywhere outranks an in-flight one, an in-flight one
+    outranks a leftover, and only an everywhere-absent marker reads as no
+    update at all.
     """
-    live_state = _read_live_agent_update(_HERMES_HOME / _AGENT_UPDATE_MARKER)
+    live_states = [
+        _read_live_agent_update(home / _AGENT_UPDATE_MARKER)
+        for home in _agent_update_marker_homes()
+    ]
+    for state in _MARKER_STATE_PRECEDENCE:
+        if state in live_states:
+            live_state = state
+            break
+    else:  # pragma: no cover - defensive: an unclassified read fails closed
+        live_state = "unknown"
     if live_state == "unknown":
         return "unknown"
 
