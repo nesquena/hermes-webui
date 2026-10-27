@@ -175,8 +175,8 @@ def test_a_profile_home_override_makes_the_env_publish_a_noop(
     config, constants = real_agent
     from agent.secret_scope import serves_routed_profile
 
-    base_home = tmp_path / "homes" / "default"
-    profile_home = tmp_path / "homes" / "alpha"
+    base_home = tmp_path / "hermes"
+    profile_home = tmp_path / "hermes" / "profiles" / "alpha"
     profile_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", str(base_home))
 
@@ -231,8 +231,8 @@ def test_a_profile_delete_does_not_pop_a_launch_profile_value(
     """
     config, constants = real_agent
 
-    base_home = tmp_path / "homes" / "default"
-    profile_home = tmp_path / "homes" / "alpha"
+    base_home = tmp_path / "hermes"
+    profile_home = tmp_path / "hermes" / "profiles" / "alpha"
     base_home.mkdir(parents=True, exist_ok=True)
     profile_home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HERMES_HOME", str(base_home))
@@ -259,6 +259,153 @@ def test_a_profile_delete_does_not_pop_a_launch_profile_value(
     assert os.environ.get(probe) == "launch-value", (
         "a scoped delete popped the launch profile's live environment variable"
     )
+
+
+def test_the_default_profile_writes_to_the_default_home_through_the_real_writer(env):
+    """The DEFAULT (base) profile is its own path, and it must land in its own home.
+
+    The maintainer's matrix asks for the real installed writer against temp
+    profile homes, "default and named". The default home is not a variation of
+    the named one: ``_profile_scope`` applies the structural "the resolved
+    home must be this profile's own" check only to a NAMED profile, and the
+    agent's ``serves_routed_profile()`` is False for the launch home -- so the
+    default path skips the guard the named path relies on. That is correct
+    (the default profile IS the launch home), and it is exactly why it needs
+    its own proof: a resolver that mapped "default" onto a named profile's
+    directory would sail past the named-profile guard.
+
+    So: a write for the default profile lands in the default home's own
+    ``.env``, and in no named profile's home.
+    """
+    env.state["name"] = "default"
+
+    handler = _Handler()
+    _put(env, handler, {"name": "DEFAULT_KEY", "value": "default-value"})
+    assert handler.status == 200, handler.payload
+
+    assert (
+        _scoped_env(env.config, env.constants, env.homes).get("DEFAULT_KEY")
+        == "default-value"
+    )
+    for other in ("alpha", "beta"):
+        assert "DEFAULT_KEY" not in _scoped_env(
+            env.config, env.constants, env.homes / "profiles" / other
+        ), f"the default profile's key leaked into {other}'s home"
+
+    # The read-back through the same route sees it, from the same home.
+    _keys(env, handler)
+    assert handler.status == 200, handler.payload
+    names = [k["name"] for k in handler.payload["keys"]]
+    assert "DEFAULT_KEY" in names
+    assert "DEFAULT_KEY" not in [
+        k["name"]
+        for k in handler.payload["keys"]
+        if k["name"] == "DEFAULT_KEY" and k["managed_elsewhere"]
+    ], "a custom key must not be tagged as managed elsewhere"
+
+    _delete(env, handler, "DEFAULT_KEY")
+    assert handler.status == 200, handler.payload
+    assert "DEFAULT_KEY" not in _scoped_env(
+        env.config, env.constants, env.homes
+    )
+
+
+def test_the_default_profile_write_does_not_reach_a_named_profile_home(env):
+    """A default-profile write must not be redirected into a named home.
+
+    The structural guard covers named profiles only, so the default path's
+    protection is the resolver itself. This asserts the resolver's outcome:
+    the write lands in the default home even when a named home exists
+    alongside it.
+    """
+    env.state["name"] = "default"
+
+    # A named profile with the same key name, so a misrouted write would be
+    # visible rather than merely absent.
+    _write_scoped_env(
+        env.config, env.constants, env.homes / "profiles" / "alpha", "SHARED_NAME", "alpha-value"
+    )
+
+    handler = _Handler()
+    _put(env, handler, {"name": "SHARED_NAME", "value": "default-value"})
+    assert handler.status == 200, handler.payload
+
+    assert (
+        _scoped_env(env.config, env.constants, env.homes).get("SHARED_NAME")
+        == "default-value"
+    )
+    assert (
+        _scoped_env(env.config, env.constants, env.homes / "profiles" / "alpha").get("SHARED_NAME")
+        == "alpha-value"
+    ), "the named profile's own value was overwritten by the default profile's write"
+
+
+def test_a_default_profile_write_publishes_only_its_own_value(env):
+    """The launch profile's own value may reach the shared environment.
+
+    The agent's ``_publish_env_value`` writes into the shared ``os.environ``
+    when the write is NOT for a routed profile -- that is the launch profile's
+    OWN value, which is what the process should see. The named-profile case
+    (a different home than the one the process serves) is the one that must
+    NOT publish, and it has its own test above.
+
+    So the assertion here is about WHICH value publishes, not about whether
+    publishing happens at all: the default profile's value may appear, and no
+    other profile's value may.
+
+    The process home is pinned to the default home first, because that is the
+    production layout: WebUI pins the home it serves as its own
+    (``api/profiles._pin_process_profile_home``), and for a default-profile
+    deployment that home IS the default profile's home. Without the pin the
+    process would treat the default home as a routed one and publish nothing
+    -- which would make this test assert the wrong thing.
+    """
+    import hermes_constants
+
+    config, constants = env.config, env.constants
+    env.state["name"] = "default"
+
+    base_home = env.homes
+    # The production layout: the process serves the default profile's home.
+    # The PREVIOUS pin is saved and restored: it is process-global state
+    # that other tests' fixtures rely on, and clearing it here would leave
+    # the suite without an anchor.
+    previous_pin = getattr(hermes_constants, "_PINNED_PROCESS_HERMES_HOME", None)
+    hermes_constants.pin_process_hermes_home(str(base_home))
+    try:
+        probe = "WEBUI_DEFAULT_PUBLISH_PROBE"
+        other = "WEBUI_NAMED_PUBLISH_PROBE"
+        os.environ.pop(probe, None)
+        os.environ.pop(other, None)
+        before = dict(os.environ)
+        try:
+            handler = _Handler()
+            _put(env, handler, {"name": probe, "value": "published-value"})
+            assert handler.status == 200, handler.payload
+
+            # The value landed in the default profile's own .env ...
+            assert (
+                _scoped_env(config, constants, base_home).get(probe) == "published-value"
+            )
+            # ... and the launch profile's own value is what the process sees.
+            assert os.environ.get(probe) == "published-value", (
+                "the launch profile's own value is expected to be published into "
+                "the process environment; if the agent stopped doing that, this "
+                "test's expectation needs revisiting"
+            )
+            # A NAMED profile's value never reaches the shared environment.
+            assert other not in os.environ
+        finally:
+            # Restore the environment so the publish cannot leak into the
+            # rest of the suite.
+            for key in (probe, other):
+                os.environ.pop(key, None)
+            for key, value in before.items():
+                os.environ[key] = value
+            for key in set(os.environ) - set(before):
+                os.environ.pop(key, None)
+    finally:
+        hermes_constants.pin_process_hermes_home(previous_pin)
 
 
 # ── the reviewer's matrix, driven through the real writer ───────────────────
@@ -322,10 +469,19 @@ def env(monkeypatch, tmp_path, real_agent):
     import api.env_keys as env_keys
     import api.profiles as profiles
 
-    homes = tmp_path / "homes"
-    for name in ("default", "alpha", "beta"):
-        (homes / name).mkdir(parents=True, exist_ok=True)
-    monkeypatch.setenv("HERMES_HOME", str(homes / "default"))
+    # The PRODUCTION layout: the default profile's home is the base home
+    # (``~/.hermes``), whose last path component is not the profile name, and
+    # a named profile's home is ``<base>/profiles/<name>``. A fixture that
+    # named the base home "default" would make the named-profile-only
+    # structural guard look like a no-op for the default profile, which is
+    # exactly the case it is not.
+    base = tmp_path / "hermes"
+    profiles_dir = base / "profiles"
+    for name in ("alpha", "beta"):
+        (profiles_dir / name).mkdir(parents=True, exist_ok=True)
+    base.mkdir(parents=True, exist_ok=True)
+    homes = base
+    monkeypatch.setenv("HERMES_HOME", str(base))
 
     mod = importlib.reload(env_keys)
 
@@ -334,12 +490,12 @@ def env(monkeypatch, tmp_path, real_agent):
         profiles, "get_active_profile_name", lambda: state["name"], raising=False
     )
 
-    _known = {"alpha", "beta", "default"}
+    _known = {"alpha", "beta"}
 
     def _home_for(name):
         if not name or name not in _known:
-            return homes / "default"
-        return homes / name
+            return homes
+        return profiles_dir / name
 
     monkeypatch.setattr(
         profiles, "get_hermes_home_for_profile", _home_for, raising=False
@@ -377,7 +533,7 @@ def test_put_get_delete_round_trip_through_the_real_writer(env):
     _put(env, handler, {"name": "ROUND_TRIP", "value": "value-one"})
     assert handler.status == 200, handler.payload
     assert (
-        _scoped_env(env.config, env.constants, env.homes / "alpha").get("ROUND_TRIP")
+        _scoped_env(env.config, env.constants, env.homes / "profiles" / "alpha").get("ROUND_TRIP")
         == "value-one"
     )
 
@@ -391,7 +547,7 @@ def test_put_get_delete_round_trip_through_the_real_writer(env):
 
     _delete(env, handler, "ROUND_TRIP")
     assert handler.status == 200, handler.payload
-    assert "ROUND_TRIP" not in _scoped_env(env.config, env.constants, env.homes / "alpha")
+    assert "ROUND_TRIP" not in _scoped_env(env.config, env.constants, env.homes / "profiles" / "alpha")
 
 
 def test_refused_replace_returns_non_2xx_through_the_real_writer(env, monkeypatch):
@@ -405,7 +561,7 @@ def test_refused_replace_returns_non_2xx_through_the_real_writer(env, monkeypatc
     """
     handler = _Handler()
     _write_scoped_env(
-        env.config, env.constants, env.homes / "alpha", "PINNED_KEY", "old-value"
+        env.config, env.constants, env.homes / "profiles" / "alpha", "PINNED_KEY", "old-value"
     )
 
     real_config, _ = _import_real_agent()
@@ -424,7 +580,7 @@ def test_refused_replace_returns_non_2xx_through_the_real_writer(env, monkeypatc
     )
     # The old value is still what is on disk.
     assert (
-        _scoped_env(env.config, env.constants, env.homes / "alpha").get("PINNED_KEY")
+        _scoped_env(env.config, env.constants, env.homes / "profiles" / "alpha").get("PINNED_KEY")
         == "old-value"
     )
 
@@ -440,7 +596,7 @@ def test_silent_refusal_returns_409_through_the_real_writer(env, monkeypatch):
     """
     real_config, _ = _import_real_agent()
     _write_scoped_env(
-        env.config, env.constants, env.homes / "alpha", "DECLINED_KEY", "old-value"
+        env.config, env.constants, env.homes / "profiles" / "alpha", "DECLINED_KEY", "old-value"
     )
 
     def _decline(key, value):
@@ -455,7 +611,7 @@ def test_silent_refusal_returns_409_through_the_real_writer(env, monkeypatch):
         f"{handler.status}"
     )
     assert (
-        _scoped_env(env.config, env.constants, env.homes / "alpha").get("DECLINED_KEY")
+        _scoped_env(env.config, env.constants, env.homes / "profiles" / "alpha").get("DECLINED_KEY")
         == "old-value"
     )
 
@@ -489,16 +645,16 @@ def test_route_auth_uses_the_active_profile_not_the_query(env):
     in alpha and leave beta's file untouched.
     """
     _write_scoped_env(
-        env.config, env.constants, env.homes / "beta", "BETA_KEY", "beta-value"
+        env.config, env.constants, env.homes / "profiles" / "beta", "BETA_KEY", "beta-value"
     )
 
     handler = _Handler()
     _put(env, handler, {"name": "MINE", "value": "v"}, query="profile=beta")
     assert handler.status == 200, handler.payload
-    assert _scoped_env(env.config, env.constants, env.homes / "alpha").get("MINE") == "v"
-    assert "MINE" not in _scoped_env(env.config, env.constants, env.homes / "beta")
+    assert _scoped_env(env.config, env.constants, env.homes / "profiles" / "alpha").get("MINE") == "v"
+    assert "MINE" not in _scoped_env(env.config, env.constants, env.homes / "profiles" / "beta")
     assert (
-        _scoped_env(env.config, env.constants, env.homes / "beta").get("BETA_KEY")
+        _scoped_env(env.config, env.constants, env.homes / "profiles" / "beta").get("BETA_KEY")
         == "beta-value"
     )
 
