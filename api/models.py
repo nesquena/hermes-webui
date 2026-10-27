@@ -7761,6 +7761,87 @@ class WorkspaceBindingPersistenceError(ValueError):
 
 _EXPECTED_WORKSPACE_UNSET = object()
 
+_SHARE_FIELD_WRITE_ATTEMPTS = 5
+
+
+def update_session_share_fields(
+    session_id: str,
+    *,
+    share_token,
+    share_created_at,
+    attempts: int = _SHARE_FIELD_WRITE_ATTEMPTS,
+) -> bool:
+    """Atomically replace only the share fields of a session sidecar.
+
+    A share create/revoke must never persist conversation state. Saving a
+    detached Session object -- the copy a handler resolved, or one it reloaded
+    earlier in the request -- writes back the title and the transcript that copy
+    was built from, so a writer that finished while the share handler waited, or
+    between its last read and its save, is reverted (#8255 review, third round).
+
+    This patches the two share keys into the bytes on disk and replaces the
+    sidecar only if the file still holds the bytes it was built from. The extra
+    read immediately before the replace is the ordering primitive: a writer that
+    saved while the patch was being built owns the newest conversation state, so
+    the loop re-reads its bytes and patches those instead of reverting them.
+
+    A lock was considered and rejected: ``test_issue765_streaming_persistence``
+    requires two saves of the SAME session to reach ``os.replace`` concurrently,
+    so nothing may hold a lock across the writers' replace. Writers publish
+    through unique temp files, so the worst case here is a retry, never a torn
+    file.
+
+    Returns False only when the sidecar does not exist, so the caller can
+    materialize one from its own copy. Unreadable sidecars and I/O errors raise,
+    as they do for ``Session.save``.
+    """
+    sid = str(session_id or "").strip()
+    if not sid or not is_safe_session_id(sid):
+        return False
+    path = SESSION_DIR / f"{sid}.json"
+    for _ in range(max(1, attempts)):
+        try:
+            original = path.read_bytes()
+        except FileNotFoundError:
+            return False
+        payload = json.loads(original.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Session sidecar {sid!r} is not a JSON object")
+        payload["share_token"] = share_token
+        payload["share_created_at"] = share_created_at
+        tmp = path.with_suffix(
+            f".tmp.{os.getpid()}.{threading.current_thread().ident}"
+        )
+        try:
+            try:
+                body = json.dumps(payload, ensure_ascii=False, indent=2)
+                body.encode("utf-8")
+            except UnicodeEncodeError:
+                # Journal recovery can preserve a lone provider surrogate;
+                # escape it losslessly instead of failing the share write.
+                body = json.dumps(payload, ensure_ascii=True, indent=2)
+            with open(tmp, "w", encoding="utf-8") as handle:
+                handle.write(body)
+                handle.flush()
+                os.fsync(handle.fileno())
+            # Compare-and-swap: if a writer replaced the sidecar while this patch
+            # was built, its bytes win and the patch is rebuilt on top of them.
+            if path.read_bytes() != original:
+                continue
+            _replace_session_sidecar(tmp, path, sid)
+            return True
+        finally:
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
+    # Never fall back to a whole-session save here: the caller's copy is the
+    # state this helper exists to avoid writing back. Failing the request is
+    # the honest outcome.
+    raise RuntimeError(
+        f"Could not persist share fields for session {sid!r} after {attempts} attempts"
+    )
+
 
 def persist_recovered_workspace_binding(
     session,

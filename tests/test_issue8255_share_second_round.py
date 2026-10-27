@@ -312,12 +312,16 @@ def test_a_checkpoint_between_the_persist_and_the_mirror_keeps_the_token(
 def test_a_failed_sidecar_save_still_leaves_the_live_session_with_the_token(
     isolated_state, monkeypatch
 ):
-    """If the sidecar save raises, the live session must know the token.
+    """If the durable share write raises, the live session must know the token.
 
     Otherwise a later revoke finds no token, reports success, and the
     published link stays live.
+
+    The share fields are patched into the sidecar rather than saved with the
+    whole session (#8255 review, third round), so this fails the patch rather
+    than ``Session.save``: the invariant is the same one.
     """
-    import api.models as models
+    import api.routes as routes
     from api.models import Session
     from api.routes import SESSIONS
 
@@ -325,20 +329,13 @@ def test_a_failed_sidecar_save_still_leaves_the_live_session_with_the_token(
     live = Session.load(sid)
     SESSIONS[sid] = live
 
-    original_save = models.Session.save
+    def failing_patch(*args, **kwargs):
+        raise OSError("sidecar write failed")
 
-    def failing_save(self, *args, **kwargs):
-        if getattr(self, "session_id", None) == sid and not getattr(
-            live, "_share_save_failed", False
-        ):
-            live._share_save_failed = True
-            raise OSError("sidecar write failed")
-        return original_save(self, *args, **kwargs)
-
-    monkeypatch.setattr(models.Session, "save", failing_save)
+    monkeypatch.setattr(routes, "_update_session_share_fields", failing_patch)
 
     with pytest.raises(OSError):
         _post("/api/share/create", {"session_id": sid})
 
-    # The live copy was given the token before the failing save.
+    # The live copy was given the token before the failing write.
     assert live.share_token
