@@ -12532,6 +12532,60 @@ def _extract_tool_call_occurrences(messages):
     return counts, last_owner, owners
 
 
+def _tool_result_owners_by_tid(messages):
+    """Ordered assistant owners per tid that actually HAVE a resolved tool result.
+
+    #7653 re-gate round 14 (10-19 review, item 5): the settlement pairing
+    aligned the live mirror rows against every assistant row that EMITS a
+    tid, but an assistant row that only DECLARES a call and never receives
+    its result (an unfinished trailing call) occupies a rank in that list
+    and shifts every completed pairing by one — the reviewer's
+    ``[(1,false),(3,true)]`` where the truth is ``[(1,true),(3,false)]``.
+    Alignment must run against occurrences that HAVE a result.
+
+    Mirrors the id normalisation of ``_extract_tool_calls_from_messages``
+    (``call_id`` before ``id`` for ``tool_calls`` and for a ``tool_use``
+    content part; a tool row resolves through ``tool_call_id`` /
+    ``tool_use_id``) and returns the owners in message order, deduped per
+    owner (several result rows of one owner are one occurrence slot).
+    """
+    pending_owner = {}
+    result_owners = {}
+    for m_idx, m in enumerate(messages or []):
+        if not isinstance(m, dict):
+            continue
+        role = m.get('role')
+        if role == 'assistant':
+            tids = set()
+            content = m.get('content')
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get('type') == 'tool_use':
+                        _part_tid = part.get('call_id', '') or part.get('id', '')
+                        if _part_tid:
+                            tids.add(str(_part_tid))
+            for tc in m.get('tool_calls') or []:
+                if not isinstance(tc, dict):
+                    continue
+                _tc_tid = tc.get('call_id', '') or tc.get('id', '')
+                if _tc_tid:
+                    tids.add(str(_tc_tid))
+            for _tid in tids:
+                pending_owner[_tid] = m_idx
+        elif role == 'tool':
+            tid = m.get('tool_call_id') or m.get('tool_use_id', '')
+            if not tid:
+                continue
+            tid = str(tid)
+            owner = pending_owner.get(tid)
+            if owner is None:
+                continue
+            owners = result_owners.setdefault(tid, [])
+            if owner not in owners:
+                owners.append(owner)
+    return result_owners
+
+
 def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool_calls=None):
     """Build persisted tool-call summaries from final messages plus live progress fallback.
 
@@ -12570,6 +12624,10 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
     # occurrence of the same id. Scope the lookups below with the
     # occurrence counts + last-owner of each tid in THIS history.
     _occ_counts, _occ_last_owner, _occ_owners = _extract_tool_call_occurrences(messages)
+    # #7653 re-gate round 14 (10-19 review, item 5): the settlement pairing
+    # aligns live mirror rows against the occurrences that HAVE a result, so
+    # a declared-but-unfinished trailing call cannot shift completed ones.
+    _result_owners = _tool_result_owners_by_tid(messages)
     # #7358 round 10 (re-gate 10/01, reviewer Finding 2, SILENT): index
     # the prior verdicts PER OCCURRENCE (assistant_msg_idx, tid) as well
     # as by tid. Round 9's reused-tid blanket refusal discarded the
@@ -12691,10 +12749,18 @@ def _extract_tool_calls_from_messages(messages, live_tool_calls=None, prior_tool
                     # occurrence that never asked for them.
                     _occ_rows = live_by_tid.get(tid) or []
                     _n_rows = len(_occ_rows)
-                    _n_owners = _occ_counts.get(tid, 0)
                     _row_idx = -1
                     if _n_rows:
-                        _owners = _occ_owners.get(tid) or []
+                        # #7653 re-gate round 14 (10-19 review, item 5):
+                        # align against the occurrences that HAVE a result,
+                        # not every assistant row that emits the tid. An
+                        # assistant row that only DECLARES the call and never
+                        # receives its result (an unfinished trailing call)
+                        # used to occupy a rank in the owner list and shift
+                        # every completed pairing by one — the reviewer's
+                        # ``[(1,false),(3,true)]`` where the truth is
+                        # ``[(1,true),(3,false)]``.
+                        _owners = _result_owners.get(tid) or []
                         if _owner_idx in _owners:
                             _rank = _owners.index(_owner_idx)
                         elif not _owners:

@@ -219,21 +219,29 @@ def test_reused_tid_prior_merge_does_not_leak_across_turns(call_extract):
 
 def _sessions_sync_driver() -> str:
     src = (REPO_ROOT / "static" / "sessions.js").read_text(encoding="utf-8")
-    start = src.find("function _syncToolCallsForLoadedMessages(")
-    assert start != -1, "_syncToolCallsForLoadedMessages not found"
-    brace = src.find("{", start)
-    depth = 0
-    for idx in range(brace, len(src)):
-        if src[idx] == "{":
-            depth += 1
-        elif src[idx] == "}":
-            depth -= 1
-            if depth == 0:
-                fn = src[start:idx + 1]
-                break
-    else:
+
+    def _block(header: str) -> str:
+        start = src.find(header)
+        assert start != -1, f"{header} not found"
+        brace = src.find("{", start)
+        depth = 0
+        for idx in range(brace, len(src)):
+            if src[idx] == "{":
+                depth += 1
+            elif src[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    return src[start:idx + 1]
         raise AssertionError("did not close")
-    return fn
+
+    # #7653 round 14: the map builder is a separate module-level function the
+    # sync producer calls — extract it too or the harness throws
+    # ReferenceError.
+    return (
+        _block("function _buildSettledToolIsErrorMap(")
+        + "\n"
+        + _block("function _syncToolCallsForLoadedMessages(")
+    )
 
 
 def _run_sync(payload: dict, body: str) -> dict:

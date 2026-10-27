@@ -4930,10 +4930,66 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       const rows=byTid.get(t);
       if(rows&&rows.length&&count>rows.length) _skipLeadingByTid.set(t,count-rows.length);
     });
+    // #7653 re-gate round 14 (10-19 review, item 4): reserve the live rows
+    // for the EXPLICIT id/occurrence matches across ALL settled rows FIRST,
+    // then run the name fallback over the live rows that are left. The old
+    // single pass let an earlier row whose id has no live row (or no
+    // occurrence-exact match) consume a later row's own live row through the
+    // NAME fallback — the reviewer's recovery-metadata swap, reproduced even
+    // with distinct ids: settled [old@1, new@4], mirror holding only `new`,
+    // left `new` with null/null in both consumers.
+    //
+    // Two sub-passes guarantee an occurrence-exact match is never stolen by
+    // an earlier row's id-own reservation: first every occurrence-exact
+    // pairing, then each remaining row's id-own next-unused row (metadata
+    // reservation). The verdict upgrade stays gated on the occurrence-exact
+    // match (``exact``), never on the loosened id-own metadata match.
     const _seenByTid=new Map();
-    return (rawCalls||[]).map((raw,idx)=>{
+    const _rows=(rawCalls||[]).map((raw,idx)=>{
       const next={...(raw||{}),done:true};
       const tid=next.tid||next.id||next.tool_call_id||next.tool_use_id||next.call_id||'';
+      const _nextOwner=_ownerIdxOf(next);
+      const _seen=_seenByTid.get(tid)||0;
+      _seenByTid.set(tid,_seen+1);
+      const _skipLeading=(tid?_skipLeadingByTid.get(tid):0)||0;
+      // An indexless row inside the trailing-skip window takes NOTHING (not
+      // even the name fallback), so the occurrence that owns the live row
+      // can still claim it (round 11).
+      const _skipThisRow=(_nextOwner==null)&&(_seen<_skipLeading);
+      return {next,tid,owner:_nextOwner,skip:_skipThisRow};
+    });
+    const _reserved=new Map();
+    // Sub-pass 1a — occurrence-exact: the live row owning the SAME assistant index.
+    for(const r of _rows){
+      if(r.skip||r.owner==null) continue;
+      const idRows=r.tid?byTid.get(r.tid):null;
+      if(!idRows||!idRows.length) continue;
+      const owned=idRows.find(entry=>{
+        const v=entry&&entry.tc?entry.tc.assistant_msg_idx:undefined;
+        return (v!==undefined&&v!==null&&v!==''&&Number(v)===r.owner)&&!used.has(entry.idx);
+      });
+      if(owned){ used.add(owned.idx); _reserved.set(r,{tc:owned.tc,idx:owned.idx,exact:true}); }
+    }
+    // Sub-pass 1b — the id's own next-unused live row. A row whose id HAS
+    // its own live row must never be starved of it by an earlier row's name
+    // fallback. Verdict eligibility keeps the round-10/12 semantics: an
+    // INDEXLESS settled row (no owner to prove) keeps the next-unused
+    // verdict transfer; an OWNED row whose occurrence-exact match failed
+    // takes presentation keys only — the loosened metadata match must never
+    // repaint a row failed.
+    for(const r of _rows){
+      if(r.skip||_reserved.has(r)) continue;
+      const idRows=r.tid?byTid.get(r.tid):null;
+      if(!idRows||!idRows.length) continue;
+      const nextRow=idRows.find(entry=>!used.has(entry.idx));
+      if(nextRow){
+        used.add(nextRow.idx);
+        _reserved.set(r,{tc:nextRow.tc,idx:nextRow.idx,exact:r.owner==null});
+      }
+    }
+    return _rows.map((r)=>{
+      const next=r.next;
+      const tid=r.tid;
       // #7358 (re-gate 9/24): keep the id-map hit and the name fallback
       // distinguishable. The one-way ``is_error`` upgrade below may only
       // run off the id map: the name fallback can pair an older
@@ -4946,54 +5002,9 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
       // id per occurrence — the next unused live row of that tid. When
       // they are all consumed the ownership is ambiguous, so skip the
       // transfer instead of guessing.
-      const idRows=tid?byTid.get(tid):null;
-      let idMatchEntry=null;
-      // #7653 re-gate round 12 (finding 4, SILENT): live METADATA (burst /
-      // duration / started_at) is reserved for the explicit id's own rows
-      // before the name fallback. Stream-born live rows (upsertLiveToolCall)
-      // carry no assistant_msg_idx, so occurrence-exact fails even for a
-      // DISTINCT id; without this reservation the row fell through to the
-      // NAME fallback, which could consume an OLDER same-name live row
-      // (marking it used) and hand the current row that older row's
-      // duration/started_at — the recovery metadata swap the reviewer
-      // reproduced. The verdict upgrade below stays gated on the
-      // occurrence-exact ``idMatchEntry``, so the loosened metadata match
-      // never repaints a row failed.
-      let metadataEntry=null;
-      // #7653 re-gate round 11 (finding 2): the two rules from the block
-      // above. An indexless row inside the trailing-skip window takes
-      // NOTHING (not even the name fallback), so the occurrence that owns
-      // the live row can still claim it.
-      const _nextOwner=_ownerIdxOf(next);
-      const _seen=_seenByTid.get(tid)||0;
-      _seenByTid.set(tid,_seen+1);
-      const _skipLeading=(tid?_skipLeadingByTid.get(tid):0)||0;
-      const _skipThisRow=(_nextOwner==null)&&(_seen<_skipLeading);
-      if(!_skipThisRow){
-        if(idRows&&idRows.length){
-          if(_nextOwner!=null){
-            // Occurrence-exact: the live row owning the SAME assistant index.
-            const owned=idRows.find(entry=>{
-              const v=entry&&entry.tc?entry.tc.assistant_msg_idx:undefined;
-              return (v!==undefined&&v!==null&&v!==''&&Number(v)===_nextOwner);
-            });
-            if(owned) idMatchEntry=owned;
-            if(!idMatchEntry){
-              // Metadata reservation: the settled row names an index no live
-              // row owns (stream-born rows lack it) — pair metadata with the
-              // id's own next unused live row instead of borrowing a
-              // neighbour's via the name fallback.
-              const nextRow=idRows.find(entry=>!used.has(entry.idx));
-              if(nextRow) metadataEntry={tc:nextRow.tc,idx:nextRow.idx};
-            }
-          }else{
-            const nextRow=idRows.find(entry=>!used.has(entry.idx));
-            if(nextRow) idMatchEntry=nextRow;
-          }
-        }
-      }
-      let matchEntry=metadataEntry||idMatchEntry;
-      if(!matchEntry&&!_skipThisRow){
+      const idMatchEntry=(_reserved.get(r)&&_reserved.get(r).exact)?_reserved.get(r):null;
+      let matchEntry=_reserved.get(r)||null;
+      if(!matchEntry&&!r.skip){
         const name=next.name||((next.function||{}).name)||'';
         const matchIdx=liveCalls.findIndex((tc,i)=>tc&&!used.has(i)&&(!name||tc.name===name));
         if(matchIdx>=0) matchEntry={tc:liveCalls[matchIdx],idx:matchIdx};
@@ -5013,6 +5024,8 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
         // the live write matters is the missing-or-false summary.
         // #7358 (re-gate 9/24): the upgrade is gated on the id-map hit —
         // a name-fallback match must not inherit another call's failure.
+        // #7653 round 14 (item 4): the gate is the occurrence-EXACT match;
+        // the id-own metadata reservation transfers presentation keys only.
         if(idMatchEntry&&live.is_error===true&&next.is_error!==true){
           next.is_error=true;
         }
@@ -7153,6 +7166,15 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
             S.toolCalls=d.session.tool_calls.map(tc=>tc);
+            // #7653 re-gate round 14 (10-19 review, item 2): rebuild the
+            // persisted verdict map from THIS settlement's summary before the
+            // merge — the done path used to keep the map from the last load,
+            // so a reused id's stale verdict (a flat true, or a scoped entry
+            // from the reload window) kept painting the new successful
+            // occurrence red after `done`.
+            if(typeof _buildSettledToolIsErrorMap==='function'){
+              S._settledToolIsErrorByTid=_buildSettledToolIsErrorMap(d.session.tool_calls);
+            }
             S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(d.session.tool_calls);
           } else {
             if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));
@@ -8069,6 +8091,13 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           return hasTc||hasPartialTc||hasTu;
         });
         if(!hasMessageToolMetadata&&session.tool_calls&&session.tool_calls.length){
+          // #7653 re-gate round 14 (10-19 review, item 2): rebuild the verdict
+          // map from this recovery's summary before the merge — the recovery
+          // path used to keep the map from the last load, so a stale reused-id
+          // verdict survived the recovery and painted the wrong occurrence.
+          if(typeof _buildSettledToolIsErrorMap==='function'){
+            S._settledToolIsErrorByTid=_buildSettledToolIsErrorMap(session.tool_calls);
+          }
           S.toolCalls=_mergeSettledToolCallsWithLiveMetadata(session.tool_calls||[]);
         }else{
           if(hasMessageToolMetadata) S._settledLiveToolMetadata=S.toolCalls.map(tc=>({...tc,done:true}));

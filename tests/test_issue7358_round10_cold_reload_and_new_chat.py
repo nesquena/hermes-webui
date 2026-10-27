@@ -83,8 +83,17 @@ def _run_node(script: str, payload: dict) -> dict:
 
 
 def _sessions_producer() -> str:
-    return _function_block(
-        _read("static/sessions.js"), "function _syncToolCallsForLoadedMessages("
+    # #7653 round 14: the map builder is a separate module-level function the
+    # sync producer calls — extract it too or the harness throws
+    # ReferenceError.
+    return (
+        _function_block(
+            _read("static/sessions.js"), "function _buildSettledToolIsErrorMap("
+        )
+        + "\n"
+        + _function_block(
+            _read("static/sessions.js"), "function _syncToolCallsForLoadedMessages("
+        )
     )
 
 
@@ -342,5 +351,8 @@ const _A=S._settledToolIsErrorByTid;
 _syncToolCallsForLoadedMessages([], [], 'B');
 process.stdout.write(JSON.stringify({A:_A,B:S._settledToolIsErrorByTid}));
 """, {})
-    assert out["A"] and out["A"].get("call_0") is True, f"A map: {out}"
+    assert out["A"] and isinstance(out["A"].get("call_0"), dict), f"A map: {out}"
+    assert out["A"]["call_0"].get("is_error") is True, f"A map: {out}"
+    assert out["A"]["call_0"].get("assistant_msg_idx") == 1, f"A map: {out}"
+    assert out["B"] == {}, f"B map must be empty (rebuild from scratch): {out}"
     assert not out["B"], f"session B inherited session A's error map: {out}"

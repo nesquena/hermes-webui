@@ -87,8 +87,13 @@ def _owners_of(entry):
 
 
 def _producer_body() -> str:
+    # #7653 round 14: the map builder is a separate module-level function the
+    # sync producer calls — extract it too or the harness throws
+    # ReferenceError.
     return (
-        _function_block(_read("static/sessions.js"), "function _syncToolCallsForLoadedMessages(")
+        _function_block(_read("static/sessions.js"), "function _buildSettledToolIsErrorMap(")
+        + "\n"
+        + _function_block(_read("static/sessions.js"), "function _syncToolCallsForLoadedMessages(")
         + "\nconst _mkS=()=>({busy:false,activeStreamId:null,session:null,"
           "toolCalls:[],_settledToolIsErrorByTid:null});"
     )
@@ -209,13 +214,11 @@ def test_prepend_paging_merges_the_retained_verdicts_with_shifted_owners():
     )
 
 
-def test_prepend_paging_keeps_a_unique_retained_flat_verdict():
-    """Control: a retained unique-id flat verdict survives the merge.
-
-    A flat ``true`` from the retained transcript (a genuinely unique failed
-    id) is still unique once the older page (which does not mention the tid)
-    is prepended, so the flat form stays.
-    """
+def test_prepend_paging_keeps_a_unique_retained_owner_scoped_verdict():
+    """#7653 round 14 contract change: a retained unique-id failure survives
+    the prepend merge OWNER-SCOPED (no flat entries anywhere). The retained
+    rows moved down the combined array by the page length, so the owner
+    shifts by the page length; the older page does not mention the tid."""
     out = _build_map(
         [],
         owner_offset=6,
@@ -223,9 +226,15 @@ def test_prepend_paging_keeps_a_unique_retained_flat_verdict():
                   "assistant_msg_idx": 1, "snippet": "boom"}],
         merge_prev=True,
     )
-    assert out["final"].get("call_a") is True, (
-        "a unique retained failure keeps the flat verdict the render paths "
-        f"read: {out['final']!r}"
+    entry = out["final"].get("call_a")
+    assert entry is not True and isinstance(entry, dict), (
+        "the retained failure must stay owner-scoped, never flat: "
+        f"{out['final']!r}"
+    )
+    owners = set(entry.get("occurrences") or {})
+    owners.add(entry.get("assistant_msg_idx"))
+    assert 1 + 6 in owners, (
+        f"the retained failure must survive, shifted by the page length: {entry!r}"
     )
 
 

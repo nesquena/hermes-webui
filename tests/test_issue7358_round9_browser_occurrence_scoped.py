@@ -86,8 +86,17 @@ def _run_node(script: str, payload: dict) -> dict:
 
 
 def _sessions_producer() -> str:
-    return _function_block(
-        _read("static/sessions.js"), "function _syncToolCallsForLoadedMessages("
+    # #7653 round 14: the map builder is a separate module-level function the
+    # sync producer calls — extract it too or the harness throws
+    # ReferenceError.
+    return (
+        _function_block(
+            _read("static/sessions.js"), "function _buildSettledToolIsErrorMap("
+        )
+        + "\n"
+        + _function_block(
+            _read("static/sessions.js"), "function _syncToolCallsForLoadedMessages("
+        )
     )
 
 
@@ -258,15 +267,26 @@ process.stdout.write(JSON.stringify([
 # ── Control — unique ids still upgrade (rounds 3-8 behaviour unchanged) ────
 
 
-def test_unique_tid_producer_flat_true_preserved():
-    """Control: a genuinely unique failed id still lands as flat ``true`` so
-    the historical ``map[tid]===true`` lookups work unchanged."""
+def test_unique_tid_producer_is_owner_scoped():
+    """#7653 round 14 contract change: a genuinely unique failed id now lands
+    OWNER-SCOPED, not flat. The 10-19 review ordered no flat entries — a flat
+    ``true`` cannot distinguish two occurrences of a reused id, which is what
+    let a singleton failure paint a later successful reuse red. The render
+    consumers already resolve the owner through the group/payload fallback
+    chain, so a unique id keeps rendering red through its scoped entry."""
     out = _producer_map({
         "messages": [],
         "sessionToolCalls": [{"name": "terminal", "tid": "call_a", "is_error": True, "assistant_msg_idx": 1}],
     })
-    assert out["map"].get("call_a") is True, out["flat"]
-    assert len(out["flat"]) == 1 and out["flat"][0]["key"] == "call_a"
+    entry = out["map"].get("call_a")
+    assert entry is not True and isinstance(entry, dict), out["flat"]
+    assert entry.get("is_error") is True and entry.get("assistant_msg_idx") == 1, entry
+    # No tid-wide (owner-less) entry may exist for the id.
+    for e in out["flat"]:
+        if e["key"] == "call_a" and e["assistant_msg_idx"] is None:
+            raise AssertionError(
+                f"unique call_a still exposes a tid-wide verdict: {out['flat']}"
+            )
 
 
 def test_unique_tid_consumer_still_upgrades():

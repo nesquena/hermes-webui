@@ -114,7 +114,7 @@ def _ui_driver() -> str:
     src = (REPO_ROOT / "static" / "ui.js").read_text(encoding="utf-8")
     index_start = src.index("const liveMetadataByTid=new Map();")
     index_block = src[index_start : src.index("const usedLiveToolMetadata=new Set();", index_start) + len("const usedLiveToolMetadata=new Set();")]
-    fn = _function_block(src, "const copyLiveToolMetadata=(next,name,tid)=>{")
+    fn = _function_block(src, "const copyLiveToolMetadata=(next,name,tid,preserved)=>{")
     return f"""
 var PAYLOAD = JSON.parse(require('fs').readFileSync(0, 'utf8') || '{{}}');
 var liveToolMetadata = PAYLOAD.live;

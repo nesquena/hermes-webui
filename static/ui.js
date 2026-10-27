@@ -20279,6 +20279,51 @@ function _insertSegmentBlock(seg, html){
   }
   seg.insertAdjacentHTML('beforeend', html);
 }
+// #7653 re-gate round 14 (10-19 review, item 4): reserve the live mirror
+// rows for the EXPLICIT id/occurrence matches across ALL candidates before
+// any name fallback runs. The old per-row matching let an earlier candidate
+// whose id has no live row (or no occurrence-exact match) consume a later
+// row's own live row through the NAME fallback — the reviewer's
+// recovery-metadata starvation (``new`` left with null/null), reproduced
+// even with distinct ids.
+//
+// Two sub-passes guarantee an occurrence-exact match is never stolen by an
+// earlier row's id-own reservation: first every occurrence-exact pairing,
+// then each remaining row's id-own next-unused row. Verdict eligibility
+// keeps the round-10/12 semantics: an INDEXLESS candidate (no owner to
+// prove) keeps the next-unused verdict transfer; an OWNED candidate whose
+// occurrence-exact match failed takes presentation keys only — the loosened
+// metadata match never repaints a row failed.
+function _reserveLiveToolMetadataForCandidates(candidates, liveMetadataByTid, used){
+  const reserved=new Map();
+  const _ownerOf=(c)=>{
+    const v=c&&c.next?c.next.assistant_msg_idx:undefined;
+    return (v!==undefined&&v!==null&&v!==''&&Number.isFinite(Number(v)))?Number(v):null;
+  };
+  for(const c of candidates||[]){
+    const _owner=_ownerOf(c);
+    if(_owner==null) continue;
+    const idRows=c.tid?liveMetadataByTid.get(c.tid):null;
+    if(!idRows||!idRows.length) continue;
+    const owned=idRows.find(entry=>{
+      const v=entry&&entry.tc?entry.tc.assistant_msg_idx:undefined;
+      return (v!==undefined&&v!==null&&v!==''&&Number(v)===_owner)&&!used.has(entry.idx);
+    });
+    if(owned){ used.add(owned.idx); reserved.set(c,{tc:owned.tc,idx:owned.idx,exact:true}); }
+  }
+  for(const c of candidates||[]){
+    if(reserved.has(c)) continue;
+    const idRows=c.tid?liveMetadataByTid.get(c.tid):null;
+    if(!idRows||!idRows.length) continue;
+    const nextRow=idRows.find(entry=>!used.has(entry.idx));
+    if(nextRow){
+      used.add(nextRow.idx);
+      reserved.set(c,{tc:nextRow.tc,idx:nextRow.idx,exact:_ownerOf(c)==null});
+    }
+  }
+  return reserved;
+}
+
 function renderMessages(options){
   _lastMessageRenderAt=performance.now();
   // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
@@ -21338,6 +21383,14 @@ function renderMessages(options){
       }
     });
     const derived=[];
+    // #7653 re-gate round 14 (10-19 review, item 4): the fallback rows are
+    // collected first so the live mirror rows can be reserved for the
+    // EXPLICIT id/occurrence matches across ALL rows before any name
+    // fallback runs. The old per-row matching let an earlier row whose id
+    // has no live row consume a later row's own live row through the name
+    // fallback — the reviewer's recovery-metadata starvation (``new`` left
+    // with null/null), reproduced even with distinct ids.
+    const _fallbackCandidates=[];
     const liveToolMetadata=Array.isArray(S._settledLiveToolMetadata)
       ? S._settledLiveToolMetadata
       : (Array.isArray(S.toolCalls)?S.toolCalls:[]);
@@ -21372,7 +21425,14 @@ function renderMessages(options){
     // re-gate review). The merge is one-way: a missing-or-false row can
     // only be upgraded to ``true``; an already-true row is never cleared.
     const _persistedIsErrorByTid=(S&&S._settledToolIsErrorByTid&&typeof S._settledToolIsErrorByTid==='object')?S._settledToolIsErrorByTid:null;
-    const copyLiveToolMetadata=(next,name,tid)=>{
+    const copyLiveToolMetadata=(next,name,tid,preserved)=>{
+      // #7653 re-gate round 14 (10-19 review, item 4): ``preserved`` is the
+      // live entry the caller reserved for this row across ALL candidates
+      // BEFORE any name fallback ran (null = no explicit match). The old
+      // per-row matching let an earlier candidate whose id has no live row
+      // consume a later row's own live row through the NAME fallback — the
+      // reviewer's recovery-metadata starvation (``new`` left with
+      // null/null), reproduced even with distinct ids.
       // #7358 (re-gate 9/24): keep the id-map hit and the name fallback
       // distinct — the one-way is_error upgrade below may only run off the
       // id map. A name match can pair an older successful terminal call
@@ -21388,7 +21448,6 @@ function renderMessages(options){
       // server settled) — skip the transfer entirely rather than re-pair a
       // row and guess a verdict.
       const idRows=tid?liveMetadataByTid.get(tid):null;
-      let idMatchEntry=null;
       // #7653 re-gate round 11 (finding 2, SILENT): pair by OCCURRENCE, not
       // by consumption order — the same crossing the messages.js consumer
       // had. A settled row names its owning assistant index (top level, or
@@ -21402,7 +21461,16 @@ function renderMessages(options){
         :(next&&next.payload&&next.payload.assistant_msg_idx!=null&&next.payload.assistant_msg_idx!=='')?next.payload.assistant_msg_idx
         :null;
       const _nextOwnerIdx=(_nextOwnerAIdx!=null&&_nextOwnerAIdx!==''&&Number.isFinite(Number(_nextOwnerAIdx)))?Number(_nextOwnerAIdx):null;
-      if(idRows&&idRows.length){
+      let idMatchEntry=null;
+      let matchEntry=null;
+      if(preserved!==undefined){
+        // The caller reserved this row's live entry across all candidates.
+        // ``exact`` marks the occurrence-exact pairing — the only shape that
+        // may transfer a verdict; an id-own metadata reservation transfers
+        // the presentation keys only.
+        matchEntry=preserved||null;
+        if(preserved&&preserved.exact) idMatchEntry=preserved;
+      }else if(idRows&&idRows.length){
         if(_nextOwnerIdx!=null){
           const owned=idRows.find(entry=>{
             const v=entry&&entry.tc?entry.tc.assistant_msg_idx:undefined;
@@ -21413,8 +21481,8 @@ function renderMessages(options){
           const nextRow=idRows.find(entry=>!usedLiveToolMetadata.has(entry.idx));
           if(nextRow) idMatchEntry=nextRow;
         }
+        matchEntry=idMatchEntry;
       }
-      let matchEntry=idMatchEntry;
       if(!matchEntry){
         const matchIdx=liveToolMetadata.findIndex((tc,i)=>tc&&!usedLiveToolMetadata.has(i)&&(!name||tc.name===name));
         if(matchIdx>=0) matchEntry={tc:liveToolMetadata[matchIdx],idx:matchIdx};
@@ -21486,15 +21554,19 @@ function renderMessages(options){
         const patchSnippet=_cliPatchSnippetFromArgs(name,args);
         const resultSnippet=resultsByTid[tid]||persistedSnippetByTid[tid]||'';
         let argsSnap=_toolArgsSnapshot(args);
-        derived.push(copyLiveToolMetadata({
+        _fallbackCandidates.push({
+          next:{
+            name,
+            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+            tid,
+            assistant_msg_idx:assistantToolAnchorIdx,
+            args:argsSnap,
+            done:true,
+          },
           name,
-          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
-          assistant_msg_idx:assistantToolAnchorIdx,
-          args:argsSnap,
-          done:true,
-        }, name, tid));
+        });
       });
       // WebUI partial/live format: _partial_tool_calls snapshots survive
       // interrupted or adapter-shaped settles even when session.tool_calls is empty.
@@ -21520,16 +21592,20 @@ function renderMessages(options){
         // the rebuilt rows collapse to one key in the activity-scene dedup
         // and the second occurrence never renders.
         const occ=(tc.occurrence!==undefined&&tc.occurrence!==null&&tc.occurrence!=='')?tc.occurrence:null;
-        derived.push(copyLiveToolMetadata({
+        _fallbackCandidates.push({
+          next:{
+            name,
+            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+            tid,
+            assistant_msg_idx:assistantToolAnchorIdx,
+            ...(occ===null?{}:{occurrence:occ}),
+            args:argsSnap,
+            done:true,
+          },
           name,
-          snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-          is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
           tid,
-          assistant_msg_idx:assistantToolAnchorIdx,
-          ...(occ===null?{}:{occurrence:occ}),
-          args:argsSnap,
-          done:true,
-        }, name, tid));
+        });
       });
       // Anthropic format: tool_use blocks inside assistant content array
       if(Array.isArray(m.content)){
@@ -21541,15 +21617,19 @@ function renderMessages(options){
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=resultsByTid[tid]||persistedSnippetByTid[tid]||'';
           const argsSnap=_toolArgsSnapshot(args);
-          derived.push(copyLiveToolMetadata({
+          _fallbackCandidates.push({
+            next:{
+              name,
+              snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+              is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+              tid,
+              assistant_msg_idx:assistantToolAnchorIdx,
+              args:argsSnap,
+              done:true,
+            },
             name,
-            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
-            assistant_msg_idx:assistantToolAnchorIdx,
-            args:argsSnap,
-            done:true,
-          }, name, tid));
+          });
         });
       }
       // WebUI-internal partial tool calls captured on cancel/stop
@@ -21563,18 +21643,30 @@ function renderMessages(options){
           const patchSnippet=_cliPatchSnippetFromArgs(name,args);
           const resultSnippet=_cliToolResultSnippet(tc.snippet||tc.result||tc.output||tc.preview||'');
           const argsSnap=_toolArgsSnapshot(args,4);
-          derived.push(copyLiveToolMetadata({
+          _fallbackCandidates.push({
+            next:{
+              name,
+              snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
+              is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
+              tid,
+              assistant_msg_idx:assistantToolAnchorIdx,
+              args:argsSnap,
+              done:true,
+            },
             name,
-            snippet:_cliToolCardSnippet(resultSnippet,patchSnippet),
-            is_diff:_cliToolCardHasDiffSnippet(resultSnippet,patchSnippet),
             tid,
-            assistant_msg_idx:assistantToolAnchorIdx,
-            args:argsSnap,
-            done:true,
-          }, name, tid));
+          });
         });
       }
     });
+    // #7653 re-gate round 14 (item 4): reserve the live rows for the
+    // explicit id/occurrence matches across ALL candidates FIRST, then run
+    // the name fallback over what is left (the helper holds the two
+    // sub-passes and the verdict-eligibility rule).
+    const _reservedLive=_reserveLiveToolMetadataForCandidates(_fallbackCandidates, liveMetadataByTid, usedLiveToolMetadata);
+    for(const c of _fallbackCandidates){
+      derived.push(copyLiveToolMetadata(c.next, c.name, c.tid, _reservedLive.get(c)||null));
+    }
     if(derived.length) S.toolCalls=derived;
     if(S._settledLiveToolMetadata) S._settledLiveToolMetadata=null;
   }

@@ -428,9 +428,17 @@ def test_all_three_upgrade_sites_are_gated_on_the_id_match():
         "per occurrence"
     )
 
-    assert "const idRows=tid?byTid.get(tid):null;" in merge_body, (
+    assert "const idRows=r.tid?byTid.get(r.tid):null;" in merge_body, (
         "_mergeSettledToolCallsWithLiveMetadata must keep the per-tid map "
         "hit separate from the name fallback"
+    )
+    # #7653 re-gate round 14 (10-19 review, item 4): the map hit now runs in
+    # the reservation sub-passes (occurrence-exact first, then the id's own
+    # next-unused row) BEFORE any name fallback, so a later row's own live
+    # row can no longer be consumed by an earlier row's name match.
+    assert "if(r.skip||_reserved.has(r)) continue;" in merge_body, (
+        "the merge must reserve the id's own live rows for every settled "
+        "row before the name fallback runs (round-14 item 4)"
     )
     assert "if(idMatchEntry&&live.is_error===true" in merge_body, (
         "_mergeSettledToolCallsWithLiveMetadata's one-way is_error "

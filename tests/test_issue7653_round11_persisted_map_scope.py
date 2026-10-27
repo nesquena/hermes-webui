@@ -86,8 +86,13 @@ def _run_node(script: str, payload: dict) -> dict:
 
 
 def _producer_body() -> str:
+    # #7653 round 14: the map builder is a separate module-level function the
+    # sync producer calls — extract it too or the harness throws
+    # ReferenceError.
     return (
-        _function_block(_read("static/sessions.js"), "function _syncToolCallsForLoadedMessages(")
+        _function_block(_read("static/sessions.js"), "function _buildSettledToolIsErrorMap(")
+        + "\n"
+        + _function_block(_read("static/sessions.js"), "function _syncToolCallsForLoadedMessages(")
         + "\nconst _mkS=()=>({busy:false,activeStreamId:null,session:null,"
           "toolCalls:[],_settledToolIsErrorByTid:null});"
     )
@@ -145,15 +150,24 @@ def test_unowned_reused_id_entry_writes_no_flat_verdict():
     )
 
 
-def test_unique_id_failure_still_writes_the_flat_verdict():
-    """Control: a genuinely unique failed id keeps the rounds 3-8 flat true."""
+def test_unique_id_failure_is_owner_scoped():
+    """#7653 round 14 contract change: a unique failed id is owner-scoped now,
+    not flat. The 10-19 review ordered no flat entries, singletons included —
+    a flat ``true`` cannot distinguish two occurrences of a reused id, which
+    is the reload-then-reuse / older-page contamination. The render consumers
+    resolve the owner through the group/payload fallback chain, so the card
+    still renders red (see test_reused_id_failure_is_scoped_to_its_owner and
+    the round-14 end-to-end consumer tests)."""
     out = _build_map([
         {"name": "terminal", "tid": "call_a", "is_error": True,
          "assistant_msg_idx": 2, "snippet": "boom"},
     ])
-    assert out is not None and out.get("call_a") is True, (
-        "a unique failed id must keep the flat verdict the render paths read"
+    entry = out.get("call_a") if out else None
+    assert entry is not None and entry is not True, (
+        "a unique failed id must be owner-scoped, never flat"
     )
+    assert isinstance(entry, dict) and entry.get("is_error") is True, entry
+    assert entry.get("assistant_msg_idx") == 2, entry
 
 
 def test_reused_id_failure_is_scoped_to_its_owner():
