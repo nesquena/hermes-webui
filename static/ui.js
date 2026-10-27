@@ -4540,9 +4540,14 @@ function _providerQuotaIndicatorText(status){
   const provider=status.display_name||status.provider||'Provider';
   const accountLimits=status.account_limits||null;
   if(accountLimits&&Array.isArray(accountLimits.windows)&&accountLimits.windows.length){
-    const w=accountLimits.windows.find(x=>x&&Number.isFinite(Number(x.remaining_percent)))||accountLimits.windows[0];
-    const remaining=_formatQuotaPercentShort(w&&w.remaining_percent);
-    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+remaining+' remaining'};
+    // Multi-window providers (rolling/5-hour, weekly, monthly) show the most
+    // constrained window: the lowest remaining share is the limit hit first.
+    const w=accountLimits.windows
+      .filter(x=>x&&(typeof x.remaining_percent==='number'||(typeof x.remaining_percent==='string'&&x.remaining_percent.trim()!==''))&&Number.isFinite(Number(x.remaining_percent)))
+      .reduce((min,x)=>(!min||Number(x.remaining_percent)<Number(min.remaining_percent))?x:min,null);
+    const remaining=w?_formatQuotaPercentShort(w.remaining_percent):'';
+    const windowLabel=w&&typeof w.label==='string'&&w.label.trim()?w.label.trim()+': ':'';
+    if(remaining) return {label:remaining, title:provider+' — '+(status.message||'Provider usage loaded')+' — '+windowLabel+remaining+' remaining'};
   }
   const quota=status.quota||null;
   if(quota){
