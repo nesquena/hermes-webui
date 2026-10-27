@@ -41,6 +41,7 @@ _HARNESS_FUNCTIONS = (
     "_ensureMessagesLoaded",
     "_messageReloadLimitForSession",
     "_appendAnchorRowFingerprint",
+    "_syncToolCallsForLoadedMessages",
 )
 
 
@@ -135,16 +136,35 @@ let _loadSessionGeneration = null;
 let _sameSessionForceReloadHint = null;
 let _pendingCarryForwardSnapshot = null;
 let _messageRenderWindowSize = 200;
+// #7925 re-gate (2026-10-27, finding 4): the prefix digest the client holds
+// for its view, and the absolute held-end it covers. Seeded by runScenario
+// exactly like the load that established the view (the server mints the
+// digest over rows [0, coverage end) and the client stores it).
+let _sessionPrefixFp = '';
+let _sessionPrefixFpEnd = -1;
+// The prefix digest is server-private (the client only stores and echoes
+// it), so any deterministic function over the render-relevant fields of
+// rows [0, K) serves the harness — the coverage length rides along so two
+// different ranges can never collide.
+function _prefixFpFor(rows){
+  let h=0x811c9dc5>>>0;
+  const s=JSON.stringify(rows.map(r=>({role:r.role,content:r.content,reasoning:r.reasoning,attachments:r.attachments,tool_calls:r.tool_calls})));
+  for(let i=0;i<s.length;i++){ h=(h^s.charCodeAt(i))>>>0; h=(Math.imul(h,0x01000193))>>>0; }
+  return (h>>>0).toString(36).padStart(8,'0')+':'+rows.length;
+}
 const INFLIGHT = {};
 const window = globalThis;
 globalThis.window = window;
 
 function _clearSameSessionForceReloadHint(sid){ if(!_sameSessionForceReloadHint) return; if(!sid || _sameSessionForceReloadHint.session_id===sid) _sameSessionForceReloadHint=null; }
-function _syncToolCallsForLoadedMessages() {}
+// #7925 re-gate (2026-10-27, silent finding): the loaded card list kept
+// across loadSession's metadata replacement (the real _syncToolCallsFor-
+// LoadMessages is extracted, so the full merge→sync chain runs here).
+let _pendingSessionToolCalls = null;
 function clearLiveToolCards() {}
 function clearVisibleMessageRowCache() {}
 function _messageRenderableMessageCount(){ return S && Array.isArray(S.messages) ? S.messages.length : 0; }
-function _currentMessageRenderWindowSize(){ return 200; }
+function _currentMessageRenderWindowSize(){ return _messageRenderWindowSize; }
 const MESSAGE_RENDER_WINDOW_DEFAULT = 50;
 function _adoptRegenerationRevision() {}
 function _hydrateTodosFromSession() {}
@@ -169,18 +189,23 @@ function makeRows(n){
 }
 function isRenderable(r){ return !!r && (r.role==='user'||r.role==='assistant'); }
 function appendWindow(after, cap){
-  let first=-1;
-  for(let i=0;i<after.length;i++){ if(isRenderable(after[i])){ first=i; break; } }
-  if(first===-1) return {window:[], offset:after.length};
-  let last=first, count=0;
-  for(let i=first;i<after.length;i++){
+  // Mirror api/routes.py:_message_window_for_display(msg_after=...): the
+  // window is the CONTIGUOUS suffix starting at the anchor's NEXT row;
+  // renderable rows decide the budget, never where the window begins. The
+  // old shape scanned forward for the first renderable row and started
+  // there, dropping any tool-result row between the anchor and it — a tab
+  // loading mid-turn then never received that output (2026-10-27
+  // should-fix).
+  let last=-1, count=0;
+  for(let i=0;i<after.length;i++){
     if(isRenderable(after[i])){
       count++;
       last=i;  // the latest renderable row bounds the window even under the cap
       if(count>=cap){ break; }
     }
   }
-  return {window:after.slice(first,last+1), offset:first};
+  if(last===-1) return {window:[], offset:after.length};
+  return {window:after.slice(0,last+1), offset:0};
 }
 function tailWindow(rows, limit){
   let start=0, count=0;
@@ -204,30 +229,40 @@ function makeFakeServer(state){
       // The real server fingerprints the row's PUBLIC projection; these test
       // rows have no internal fields and nothing to redact, so the projection
       // is identity and the client fingerprint compares equal.
+      // #7925 re-gate (2026-10-27, finding 4): the append must also carry the
+      // prefix digest over [0, afterIdx+1) — a missing or stale digest is
+      // refused exactly like a generation or anchor mismatch.
+      const pfRaw=q.get('prefix_fp');
       const ok=(gen===state.generation && anchor && typeof anchor==='object'
-                && q.get('anchor_fp')===_appendAnchorRowFingerprint(anchor));
+                && q.get('anchor_fp')===_appendAnchorRowFingerprint(anchor)
+                && pfRaw!==null && pfRaw===_prefixFpFor(state.rows.slice(0, afterIdx+1)));
       if(ok){
         const aw=appendWindow(state.rows.slice(afterIdx+1), limit===null?500:limit);
         const offset=afterIdx+1+aw.offset;
         state.rowsReturned+=aw.window.length;
         return {session:{...base, messages:aw.window, _messages_offset:offset,
-                         _messages_truncated:(offset+aw.window.length)<state.rows.length, _append_only:true}};
+                         _messages_truncated:(offset+aw.window.length)<state.rows.length, _append_only:true,
+                         tool_calls:state.appendToolCalls.slice(),
+                         prefix_fp:_prefixFpFor(state.rows.slice(0, offset+aw.window.length))}};
       }
       state.rowsReturned+=state.rows.length;
-      return {session:{...base, messages:state.rows.slice(), _messages_offset:0, _messages_truncated:false}};
+      return {session:{...base, messages:state.rows.slice(), _messages_offset:0, _messages_truncated:false,
+                       prefix_fp:_prefixFpFor(state.rows)}};
     }
     if(limit===null){
       state.rowsReturned+=state.rows.length;
-      return {session:{...base, messages:state.rows.slice(), _messages_offset:0, _messages_truncated:false}};
+      return {session:{...base, messages:state.rows.slice(), _messages_offset:0, _messages_truncated:false,
+                       prefix_fp:_prefixFpFor(state.rows)}};
     }
     const tw=tailWindow(state.rows, limit);
     state.rowsReturned+=tw.window.length;
-    return {session:{...base, messages:tw.window, _messages_offset:tw.offset, _messages_truncated:tw.offset>0}};
+    return {session:{...base, messages:tw.window, _messages_offset:tw.offset, _messages_truncated:tw.offset>0,
+                     prefix_fp:_prefixFpFor(state.rows.slice(0, tw.offset+tw.window.length))}};
   };
 }
 
 async function runScenario(sc){
-  const state={rows:sc.serverRows, generation:sc.generation, requests:[], rowsReturned:0};
+  const state={rows:sc.serverRows, generation:sc.generation, requests:[], rowsReturned:0, appendToolCalls:sc.appendToolCalls||[]};
   globalThis.api=makeFakeServer(state);
   S={messages:(sc.clientRows||[]).slice(), session:{session_id:'s1',
       transcript_generation:sc.clientGeneration!==undefined?sc.clientGeneration:sc.generation,
@@ -238,13 +273,37 @@ async function runScenario(sc){
   _messagesTruncated=sc.truncated!==undefined?sc.truncated:false;
   _msgLimitMax=500;
   _sameSessionForceReloadHint=sc.hint||null;
+  _messageRenderWindowSize=sc.renderWindowSize!==undefined?sc.renderWindowSize:200;
+  // #7925 re-gate (2026-10-27, finding 4): seed the client's held prefix
+  // digest exactly like the load that established its view did — minted by
+  // the server over rows [0, held end). A paged view's digest still covers
+  // [0, held end): the append vouches for the whole prefix, not just the
+  // rows on screen. Bare identifiers: the harness shares one script scope
+  // with the extracted helpers (globalThis.* would not reach the `let`).
+  const _heldEnd=_oldestIdx+(sc.clientRows||[]).length;
+  _sessionPrefixFp=_prefixFpFor(sc.serverRows.slice(0,_heldEnd));
+  _sessionPrefixFpEnd=_heldEnd;
+  // A non-destructive server-side edit that lands AFTER the client's view
+  // was established (settled-reasoning backfill, saved attachments): same
+  // generation, anchor row untouched — only the prefix digest catches it.
+  if(sc.editRow && typeof sc.editRow.index==='number' && state.rows[sc.editRow.index]){
+    Object.assign(state.rows[sc.editRow.index], sc.editRow.fields||{});
+  }
+  // #7925 re-gate (2026-10-27, silent finding): what loadSession's metadata
+  // adoption leaves on S.session (the messages=0 response's empty list) and
+  // the loaded card list kept across that replacement.
+  if(S.session){ S.session.tool_calls = sc.sessionToolCalls || []; }
+  _pendingSessionToolCalls = (sc.heldToolCalls||[]).map(tc=>({...tc}));
   await _ensureMessagesLoaded('s1', {force:true});
   const last=(Array.isArray(S.messages)&&S.messages.length)?S.messages[S.messages.length-1]:null;
   return {requests:state.requests, rowsReturned:state.rowsReturned,
           messagesLen:Array.isArray(S.messages)?S.messages.length:0,
+          messages:Array.isArray(S.messages)?S.messages:[],
+          toolCalls:(S.session&&Array.isArray(S.session.tool_calls))?S.session.tool_calls:[],
           firstContent:(Array.isArray(S.messages)&&S.messages.length)?S.messages[0].content:null,
           lastContent:last?last.content:null,
-          oldestIdx:_oldestIdx, truncated:_messagesTruncated};
+          oldestIdx:_oldestIdx, truncated:_messagesTruncated,
+          renderWindowSize:_messageRenderWindowSize};
 }
 """
 
@@ -439,6 +498,151 @@ class TestAppendOnlyFastPath:
         assert result["rowsReturned"] == 500, result
         assert result["messagesLen"] == 500, result
         assert result["lastContent"] == "m499", result
+
+
+    def test_paged_append_carries_the_prefix_digest(self, tmp_path):
+        # #7925 re-gate (2026-10-27, finding 4): a paged view's digest still
+        # covers [0, held end) — the append vouches for the whole prefix, not
+        # just the rows on screen. The request must carry it and the append
+        # must still fetch only the new row.
+        rows = make_rows_json(2001)
+        scenario = {
+            "serverRows": rows,
+            "clientRows": rows[1500:2000],
+            "oldestIdx": 1500,
+            "truncated": True,
+            "generation": 0,
+            "hint": _hint(500, 2000, True),
+            "sessionMessageCount": 2001,
+        }
+        result = _run_harness(json.dumps(scenario), tmp_path)
+        assert "prefix_fp=" in result["requests"][0], result["requests"]
+        assert result["rowsReturned"] == 1, result
+        assert result["messagesLen"] == 501, result
+        assert result["lastContent"] == "m2000", result
+
+    def test_nondestructive_earlier_row_edit_forces_the_full_fetch(self, tmp_path):
+        # #7925 re-gate (2026-10-27, finding 4): a settled-reasoning backfill
+        # lands on row 100 — a row this paged client does NOT even hold, but
+        # inside the [0, 2000) prefix its digest vouches for. No generation
+        # bump, the anchor row untouched: only the prefix digest catches it,
+        # and the client must take the authoritative full fetch (which also
+        # delivers the backfilled reasoning).
+        rows = make_rows_json(2001)
+        scenario = {
+            "serverRows": rows,
+            "clientRows": rows[1500:2000],
+            "oldestIdx": 1500,
+            "truncated": True,
+            "generation": 0,
+            "hint": _hint(500, 2000, True),
+            "sessionMessageCount": 2001,
+            "editRow": {"index": 100, "fields": {"reasoning": "backfilled"}},
+        }
+        result = _run_harness(json.dumps(scenario), tmp_path)
+        assert "prefix_fp=" in result["requests"][0], result["requests"]
+        assert result["rowsReturned"] == 2001, result
+        assert result["messagesLen"] == 2001, result
+        assert any(m.get("reasoning") == "backfilled" for m in result["messages"]), (
+            "the full fetch must deliver the edited row"
+        )
+
+    def test_append_reexpands_the_render_window(self, tmp_path):
+        # 2026-10-27 should-fix: the append path returned without re-expanding
+        # the render window (only the replace path did), so after an append
+        # the hidden-rows affordance still described the pre-append window —
+        # it read 551 where master's replace reads 401. The append now runs
+        # the same bounded expansion as the replace path.
+        rows = make_rows_json(2001)
+        scenario = {
+            "serverRows": rows,
+            "clientRows": rows[1500:2000],
+            "oldestIdx": 1500,
+            "truncated": True,
+            "generation": 0,
+            "hint": _hint(500, 2000, True),
+            "sessionMessageCount": 2001,
+            "renderWindowSize": 50,
+        }
+        result = _run_harness(json.dumps(scenario), tmp_path)
+        assert result["rowsReturned"] == 1, result
+        # min(501 loaded rows, 4 × the 50-row default) = 200 — the replace
+        # path's #6999-capped expansion, now applied on the append path too.
+        assert result["renderWindowSize"] == 200, result
+
+    def test_append_keeps_older_session_tool_cards(self, tmp_path):
+        # 2026-10-27 silent finding: loadSession's metadata adoption empties
+        # S.session.tool_calls (the messages=0 response carries []), and the
+        # append response then carries ONLY the new owners — merging into the
+        # emptied list dropped every older card, so after appending a new
+        # reply `older-card` was gone (maintainer's Chromium repro through
+        # the real loadSession). The loaded list is now kept across the
+        # metadata replacement and the new owner merges into it, rebased
+        # into the combined transcript's coordinate space.
+        rows = make_rows_json(2001)
+        scenario = {
+            "serverRows": rows,
+            "clientRows": rows[1500:2000],
+            "oldestIdx": 1500,
+            "truncated": True,
+            "generation": 0,
+            "hint": _hint(500, 2000, True),
+            "sessionMessageCount": 2001,
+            # What the metadata adoption leaves on S.session …
+            "sessionToolCalls": [],
+            # … and the loaded list kept across that replacement.
+            "heldToolCalls": [{"tid": "tc-old", "assistant_msg_idx": 100, "name": "old"}],
+            # The append window's own card, window-relative.
+            "appendToolCalls": [{"tid": "tc-new", "assistant_msg_idx": 0, "name": "new"}],
+        }
+        result = _run_harness(json.dumps(scenario), tmp_path)
+        tids = [tc.get("tid") for tc in result["toolCalls"]]
+        assert "tc-old" in tids, result["toolCalls"]
+        assert "tc-new" in tids, result["toolCalls"]
+        new_card = next(tc for tc in result["toolCalls"] if tc.get("tid") == "tc-new")
+        # _messages_offset 2000 - _oldestIdx 1500 = 500 shift onto the
+        # combined transcript's coordinate space.
+        assert new_card.get("assistant_msg_idx") == 500, new_card
+        old_card = next(tc for tc in result["toolCalls"] if tc.get("tid") == "tc-old")
+        assert old_card.get("assistant_msg_idx") == 100, old_card
+
+    def test_append_window_keeps_tool_rows_after_the_anchor(self, tmp_path):
+        # 2026-10-27 should-fix: the fake server used to skip to the first
+        # renderable row, dropping any tool-result row between the anchor and
+        # it. The real server keeps the CONTIGUOUS suffix after the anchor —
+        # a tab that captured its anchor before the tool result was saved
+        # must still receive that output.
+        rows = make_rows_json(501)
+        rows[500] = {
+            "role": "assistant",
+            "content": "calling",
+            "timestamp": 1700000500,
+            "tool_calls": [{"id": "t1"}],
+        }
+        rows.append(
+            {"role": "tool", "tool_call_id": "t1", "content": "the tool output",
+             "timestamp": 1700000501}
+        )
+        rows.append(
+            {"role": "assistant", "content": "after the tool", "timestamp": 1700000502}
+        )
+        scenario = {
+            "serverRows": rows,
+            "clientRows": rows[:501],
+            "oldestIdx": 0,
+            "generation": 0,
+            "hint": _hint(501, 503, False),
+            "sessionMessageCount": 503,
+        }
+        result = _run_harness(json.dumps(scenario), tmp_path)
+        assert "prefix_fp=" in result["requests"][0], result["requests"]
+        # The tool row travels with the window: 2 new rows, not 1.
+        assert result["rowsReturned"] == 2, result
+        assert result["messagesLen"] == 503, result
+        assert any(m.get("content") == "the tool output" for m in result["messages"]), (
+            "the tool-result row after the anchor was dropped"
+        )
+        assert result["lastContent"] == "after the tool", result
 
 
 def make_rows_json(n: int) -> list:

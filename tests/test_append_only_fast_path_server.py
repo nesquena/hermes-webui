@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from api.helpers import _public_message_projection
-from api.routes import _append_anchor_fingerprint, _append_fast_path_anchor, _message_window_for_display
+from api.routes import (
+    _append_anchor_fingerprint,
+    _append_fast_path_anchor,
+    _display_prefix_fingerprint,
+    _message_window_for_display,
+)
 
 
 def _make_rows(n: int) -> list:
@@ -66,23 +71,76 @@ def test_msg_after_window_keeps_anchor_trailing_tool_rows():
     assert window[1]["content"] == "m12", window[:2]
 
 
+def test_prefix_fingerprint_refuses_a_nondestructive_earlier_row_edit():
+    """2026-10-27 review, finding 4 (design directive): the append contract
+    only transported rows after the anchor and every DESTRUCTIVE rewrite was
+    already covered by the generation bump. The remaining hole was a
+    NON-destructive server-side edit of an earlier row (settled-reasoning
+    backfill, saved attachments) that bumps no generation: the anchor row is
+    untouched, both existing checks pass, and the client stitches a stale
+    prefix onto the fresh tail. The server-computed prefix fingerprint closes
+    it — a digest over the render-relevant fields of rows [0, msg_after+1),
+    minted on every load and re-checked on every append.
+    """
+    rows = _make_rows(2001)
+    # The client's view: rows [0, 2000) — its anchor is row 1999, so the
+    # digest it holds covers exactly [0, msg_after + 1) = [0, 2000).
+    held_fp = _display_prefix_fingerprint(rows, 2000)
+    assert held_fp and held_fp != _display_prefix_fingerprint(rows, 1999)
+
+    # A non-destructive edit lands on row 500: NO generation bump, and the
+    # anchor row (1999) is byte-identical, so both pre-existing checks pass.
+    edited = [dict(r) for r in rows]
+    edited[500]["reasoning"] = "backfilled reasoning text"
+    s = _FakeSession(generation=0)
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(edited[1999], _enabled=True)
+    )
+    assert _append_fast_path_anchor(s, edited, "1999", anchor_fp, "0", held_fp) is None
+
+    # Control: the same digest over the unchanged document is accepted.
+    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", held_fp) == 1999
+    # A missing digest fails closed: an older client loses only the fast path
+    # and takes the authoritative full fetch — master's behaviour.
+    assert _append_fast_path_anchor(s, rows, "1999", anchor_fp, "0", None) is None
+    # The digest covers the RENDER-RELEVANT fields, not the whole row: an
+    # internal-field-only change is not a rendered difference.
+    internal = [dict(r) for r in rows]
+    internal[500]["_internal_note"] = "not rendered"
+    assert _append_fast_path_anchor(s, internal, "1999", anchor_fp, "0", held_fp) == 1999
+    # An attachment edit is render-relevant and must refuse.
+    attachments = [dict(r) for r in rows]
+    attachments[500]["attachments"] = [{"id": "a1", "name": "saved.png"}]
+    assert (
+        _append_fast_path_anchor(s, attachments, "1999", anchor_fp, "0", held_fp)
+        is None
+    )
+
+
 def test_append_fast_path_anchor_validates_generation_fingerprint_and_range():
     rows = _make_rows(2001)
     projected = _public_message_projection(rows[1999], _enabled=True)
     fp = _append_anchor_fingerprint(projected)
     assert fp and len(fp) == 26
+    # The client holds rows [0, 2000): its prefix digest covers [0, 2000).
+    pfp = _display_prefix_fingerprint(rows, 2000)
     s = _FakeSession(generation=0)
-    assert _append_fast_path_anchor(s, rows, "1999", fp, "0") == 1999
+    assert _append_fast_path_anchor(s, rows, "1999", fp, "0", pfp) == 1999
     # generation changed → None (fall back to the authoritative full fetch)
-    assert _append_fast_path_anchor(s, rows, "1999", fp, "1") is None
+    assert _append_fast_path_anchor(s, rows, "1999", fp, "1", pfp) is None
     # anchor fingerprint mismatch → None
-    assert _append_fast_path_anchor(s, rows, "1999", "x" * 26, "0") is None
+    assert _append_fast_path_anchor(s, rows, "1999", "x" * 26, "0", pfp) is None
     # anchor out of range → None
-    assert _append_fast_path_anchor(s, rows, "999999", fp, "0") is None
+    assert _append_fast_path_anchor(s, rows, "999999", fp, "0", pfp) is None
     # unparsable index → None
-    assert _append_fast_path_anchor(s, rows, "abc", fp, "0") is None
+    assert _append_fast_path_anchor(s, rows, "abc", fp, "0", pfp) is None
     # missing fingerprint → None
-    assert _append_fast_path_anchor(s, rows, "1999", None, "0") is None
+    assert _append_fast_path_anchor(s, rows, "1999", None, "0", pfp) is None
+    # missing prefix digest → None (fail closed; an older client loses only
+    # the fast path and takes master's authoritative full fetch)
+    assert _append_fast_path_anchor(s, rows, "1999", fp, "0", None) is None
+    # prefix digest over the wrong coverage → None
+    assert _append_fast_path_anchor(s, rows, "1999", fp, "0", _display_prefix_fingerprint(rows, 1999)) is None
 
 
 def test_append_fast_path_anchor_detects_rewritten_seam_row():
@@ -96,8 +154,9 @@ def test_append_fast_path_anchor_detects_rewritten_seam_row():
     client_fp = _append_anchor_fingerprint(
         _public_message_projection(rows[1999], _enabled=True)
     )
+    client_pfp = _display_prefix_fingerprint(rows, 2000)
     assert client_fp != fp
-    assert _append_fast_path_anchor(s, rewritten, "1999", client_fp, "0") is None
+    assert _append_fast_path_anchor(s, rewritten, "1999", client_fp, "0", client_pfp) is None
 
 
 def test_msg_after_window_delivers_a_lone_tool_result_after_the_anchor():
@@ -221,13 +280,18 @@ def test_continuation_append_refusal_returns_the_merged_transcript(monkeypatch, 
         monkeypatch, tmp_path, parent_rows, child_rows
     )
 
-    # The client rendered all 601 parent rows; its anchor is the last one.
+    # The client rendered all 601 parent rows; its anchor is the last one and
+    # its prefix digest covers [0, 601) of the merged document.
+    from api.routes import _display_prefix_fingerprint
+
     anchor_row = _public_message_projection(parent_rows[600], _enabled=False)
     anchor_fp = _append_anchor_fingerprint(anchor_row)
+    prefix_fp = _display_prefix_fingerprint(parent_rows, 601)
     query = (
         "session_id=cont-child&messages=1&resolve_model=0"
         "&msg_after=600"
         f"&anchor_fp={anchor_fp}"
+        f"&prefix_fp={prefix_fp}"
         "&transcript_generation=0"
         "&msg_limit=500&expand_renderable=1"
     )
@@ -249,6 +313,143 @@ def test_continuation_append_refusal_returns_the_merged_transcript(monkeypatch, 
     )
     assert [m.get("content") for m in messages] == ["child question"], messages
     assert session.get("_messages_offset") == 601, session.get("_messages_offset")
+
+
+# ── Handler-level: warm display cache must not starve the append merge ──
+# 2026-10-27 review (CORE): the finding-1 fix routes append requests down
+# the full display merge branch, but the state.db loader above it still
+# keyed on `msg_limit is not None` while the append request carries
+# `msg_limit=500` (it bounds the RETURNED window only). On a display-cache
+# hit the loader set `state_db_messages = []`, so the full branch merged
+# the sidecar with nothing: a 601-sidecar + 602-state.db session answered
+# a focus reload with 601 rows and a reply already on screen disappeared
+# (master keeps 602; cold cache gave 602 on both). The append must see the
+# full merged document exactly like master's bare GET.
+
+
+def _warm_cache_append_harness(monkeypatch, tmp_path, sidecar_rows, state_db_rows):
+    """601-ish sidecar rows + one state.db-only reply, cache pre-warmed."""
+    from tests.test_webui_state_db_reconciliation import _make_state_db
+
+    routes, captured = _continuation_handler_harness(
+        monkeypatch, tmp_path, [], sidecar_rows
+    )
+    _make_state_db(tmp_path / "state.db", "cont-child", state_db_rows)
+    routes._display_merge_cache.clear()
+    return routes, captured
+
+
+def _warm_display_cache(routes):
+    """The real initial `msg_limit=30` load: populates the merge cache."""
+    import types
+
+    routes._handle_session_get(
+        None,
+        types.SimpleNamespace(
+            path="/api/session",
+            query="session_id=cont-child&messages=1&resolve_model=0&msg_limit=30&expand_renderable=1",
+        ),
+    )
+
+
+def _append_get(routes, *, msg_after, anchor_row, prefix_fp=None, generation=0):
+    import types
+
+    from api.helpers import _public_message_projection
+    from api.routes import _append_anchor_fingerprint
+
+    anchor_fp = _append_anchor_fingerprint(
+        _public_message_projection(anchor_row, _enabled=False)
+    )
+    captured = {}
+    routes.j = lambda _h, payload, status=200, **_k: (
+        captured.__setitem__("payload", payload),
+        captured.__setitem__("status", status),
+        payload,
+    )[-1]
+    query = (
+        "session_id=cont-child&messages=1&resolve_model=0"
+        f"&msg_after={msg_after}"
+        f"&anchor_fp={anchor_fp}"
+        f"&transcript_generation={generation}"
+        "&msg_limit=500&expand_renderable=1"
+    )
+    if prefix_fp is not None:
+        query += f"&prefix_fp={prefix_fp}"
+    routes._handle_session_get(
+        None, types.SimpleNamespace(path="/api/session", query=query)
+    )
+    return captured["payload"]["session"]
+
+
+def _state_db_only_reply():
+    return {
+        "role": "assistant",
+        "content": "state-db-only reply",
+        "timestamp": 1700000900,
+    }
+
+
+def test_warm_cache_append_with_no_new_rows_keeps_every_row(monkeypatch, tmp_path):
+    """Maintainer's exact repro: the client holds all 602 rows (its anchor is
+    the state.db-only reply); a warm-cache focus reload must not answer with
+    the 601-row sidecar-only document and drop the reply on screen."""
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    state_db = sidecar + [_state_db_only_reply()]
+
+    routes, _ = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+    _warm_display_cache(routes)
+    # Premise: the cache really is warm for this session (the probe would hit).
+    import api.models as models
+
+    probe = routes._display_merge_cached_messages(models.get_session("cont-child"), None)
+    assert probe is not None and len(probe) == 602, (
+        "cache did not warm — the repro needs a live cache entry"
+    )
+
+    session = _append_get(
+        routes,
+        msg_after=601,
+        anchor_row=_state_db_only_reply(),
+        prefix_fp=_display_prefix_fingerprint(state_db, 602),
+    )
+    assert session.get("message_count") == 602, (
+        "warm-cache append answered with the sidecar-only document — a reply "
+        "already on screen would be dropped (maintainer's CORE finding)"
+    )
+    assert session.get("_append_only") is True, session.get("_append_only")
+    assert session.get("messages") == [], session.get("messages")
+    assert session.get("_messages_offset") == 602, session.get("_messages_offset")
+
+
+def test_warm_cache_append_with_one_new_row_fetches_it(monkeypatch, tmp_path):
+    """The second warm-cache shape: the client holds the 601 sidecar rows and
+    the state.db-only reply must travel with the append window instead of
+    being silently starved by the cache-hit empty load."""
+    sidecar = [
+        {"role": "user" if i % 2 == 0 else "assistant", "content": f"p{i}",
+         "timestamp": 1700000000 + i}
+        for i in range(601)
+    ]
+    state_db = sidecar + [_state_db_only_reply()]
+
+    routes, _ = _warm_cache_append_harness(monkeypatch, tmp_path, sidecar, state_db)
+    _warm_display_cache(routes)
+
+    session = _append_get(
+        routes,
+        msg_after=600,
+        anchor_row=sidecar[600],
+        prefix_fp=_display_prefix_fingerprint(sidecar, 601),
+    )
+    assert session.get("_append_only") is True, session.get("_append_only")
+    messages = session.get("messages") or []
+    assert [m.get("content") for m in messages] == ["state-db-only reply"], messages
+    assert session.get("message_count") == 602, session.get("message_count")
 
 
 def test_append_window_clipped_tool_diff_signals_truncation(monkeypatch, tmp_path):
@@ -295,10 +496,15 @@ def test_append_window_clipped_tool_diff_signals_truncation(monkeypatch, tmp_pat
     anchor_fp = _append_anchor_fingerprint(
         _public_message_projection(anchor, _enabled=False)
     )
+    from api.routes import _display_prefix_fingerprint
+
+    # The client holds rows [0, 601): its digest covers [0, msg_after + 1).
+    prefix_fp = _display_prefix_fingerprint(rows, 601)
     query = (
         "session_id=cont-child&messages=1&resolve_model=0"
         "&msg_after=600"
         f"&anchor_fp={anchor_fp}"
+        f"&prefix_fp={prefix_fp}"
         "&transcript_generation=0"
         "&msg_limit=500&expand_renderable=1"
     )

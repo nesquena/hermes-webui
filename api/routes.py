@@ -10607,10 +10607,15 @@ def _resolve_effective_msg_limit(raw_limit):
 # the prefix is unchanged by sending:
 #   - transcript_generation: bumped ONLY on destructive rewrites
 #     (truncate/retry/undo via _stamp_intentional_shrink_generation), so an
-#     append leaves it unchanged while compaction/undo/edits change it; and
+#     append leaves it unchanged while compaction/undo/edits change it;
 #   - anchor_fp: an FNV-1a digest of the client's last rendered row, so a
 #     rewrite that touched the seam row (or a redaction/internal-field change
-#     that altered its public projection) is detected.
+#     that altered its public projection) is detected; and
+#   - prefix_fp (2026-10-27 finding 4): the server-computed digest over rows
+#     [0, N+1) the load response carried, so a NON-destructive edit of an
+#     earlier row (settled reasoning backfill, saved attachments) that bumps
+#     no generation is detected too. Complete by construction; a missing
+#     digest fails closed.
 # Any check that fails falls back to the authoritative full fetch — exactly
 # what master does today — so the fast path can never serve stale rows.
 _BASE36_DIGITS = "0123456789abcdefghijklmnopqrstuvwxyz"
@@ -10724,7 +10729,60 @@ def _append_anchor_fingerprint(row) -> str:
     return _base36_fixed_width(hash_value)
 
 
-def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw) -> "int | None":
+# Fields whose rendered form the prefix fingerprint covers (#7925 re-gate,
+# 2026-10-27 review, finding 4). The maintainer's directive: role, content,
+# reasoning, attachments, tool_calls and their ids — everything the browser
+# renders from a row. Internal/ephemeral fields are deliberately excluded:
+# they change without any rendered difference and must not force a full
+# fetch.
+_PREFIX_FP_FIELDS = ("role", "content", "reasoning", "attachments", "tool_calls")
+
+
+def _display_prefix_fingerprint(messages, count) -> str:
+    """Server-computed digest over rows ``[0, count)`` of a display document.
+
+    Returned as ``prefix_fp`` on every full or limited load; an append-only
+    fast-path request echoes the digest it holds and the server recomputes
+    over ``[0, msg_after + 1)``, refusing the append on any mismatch
+    (alongside the ``transcript_generation`` check).
+
+    Why a fingerprint rather than a revision counter: it is complete by
+    construction. A counter must be bumped by every writer that touches an
+    earlier row (settled reasoning, saved attachments, anything added later),
+    and one missed writer means silently stale rows. Hashing the prefix costs
+    milliseconds — far less than resending the rows it protects.
+
+    Both minting and verification happen server-side over the same merged
+    document, so no browser-side re-derivation (and no JS/Python byte-parity
+    constraint, unlike the single-row anchor digest) is required.
+    """
+    try:
+        total = int(count)
+    except (TypeError, ValueError):
+        return ""
+    digest = hashlib.blake2b(digest_size=20)
+    rows = list(messages or [])
+    if total < 0:
+        total = 0
+    for row in rows[:total]:
+        if not isinstance(row, dict):
+            # Deterministic stand-in: a non-dict row still occupies a slot.
+            digest.update(b"\x00<non-dict-row>\x00")
+            continue
+        digest.update(
+            json.dumps(
+                {field: row.get(field) for field in _PREFIX_FP_FIELDS},
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        )
+        digest.update(b"\x1f")
+    return digest.hexdigest()
+
+
+def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, generation_raw, prefix_fp_raw=None) -> "int | None":
     """Validate an append-only fast-path request.
 
     Returns the validated anchor index (the client's last rendered absolute
@@ -10740,6 +10798,12 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
        projection — the exact bytes the client rendered (internal fields
        stripped, content redacted), so a rewrite of the seam row or a change
        in what the client would render is detected.
+    4. ``prefix_fp`` matches a fresh digest over rows ``[0, after_idx + 1)``
+       of the merged display document (#7925 re-gate, 2026-10-27 finding 4).
+       The generation bump only reports DESTRUCTIVE rewrites; this digest
+       also catches a non-destructive edit of an earlier row (settled
+       reasoning backfill, saved attachments) that no writer reports. A
+       missing digest fails closed — an older client loses only the fast path.
     """
     try:
         after_idx = int(msg_after_raw)
@@ -10759,11 +10823,15 @@ def _append_fast_path_anchor(s, all_messages, msg_after_raw, anchor_fp_raw, gene
         return None
     if not anchor_fp_raw:
         return None
+    if not prefix_fp_raw:
+        return None
     from api.config import load_settings
     from api.helpers import _public_message_projection
     _redact_enabled = bool(load_settings().get("api_redact_enabled", True))
     projected = _public_message_projection(anchor_row, _enabled=_redact_enabled)
     if _append_anchor_fingerprint(projected) != str(anchor_fp_raw):
+        return None
+    if _display_prefix_fingerprint(all_messages, after_idx + 1) != str(prefix_fp_raw):
         return None
     return after_idx
 
@@ -15581,9 +15649,29 @@ def _handle_session_get(handler, parsed) -> bool:
     _msg_after = query.get("msg_after", [None])[0]
     _anchor_fp = query.get("anchor_fp", [None])[0]
     _transcript_generation = query.get("transcript_generation", [None])[0]
+    # #7925 re-gate (2026-10-27 finding 4): the digest the client holds over
+    # rows [0, msg_after+1) of the merged display document, minted by the
+    # load that established its view. The server recomputes it over the
+    # current document and refuses the append on mismatch, so a
+    # non-destructive edit of an earlier row (settled reasoning, saved
+    # attachments) cannot survive as a stale prefix.
+    _prefix_fp = query.get("prefix_fp", [None])[0]
     msg_limit, _msg_limit_explicit_all = _resolve_effective_msg_limit(
         _raw_msg_limit,
     )
+    # #7925 re-gate (2026-10-27 review, CORE): an append-only fast-path
+    # request carries msg_limit ONLY to bound the returned window; its anchor
+    # validation runs against the FULL display document. The state.db loader
+    # and the display-merge cache above still keyed on
+    # ``msg_limit is not None``, so an append (msg_limit=500) took the
+    # limited-display branch: on a cache hit the loader emptied
+    # ``state_db_messages`` and the full merge branch merged the sidecar with
+    # nothing — a 601-sidecar + 602-state.db session answered a focus reload
+    # with 601 rows and dropped a reply already on screen. One predicate now
+    # separates "the caller accepts a windowed document" from "the caller
+    # needs the full document"; appends run like master's bare GET.
+    _append_request = _msg_after is not None and msg_before is None
+    _limited_display_request = msg_limit is not None and not _append_request
     # ?expand_renderable=1 is retained for compatibility with older
     # frontends. msg_limit now counts visible transcript rows by default, so
     # the flag no longer changes the server-side pagination semantics.
@@ -15632,7 +15720,7 @@ def _handle_session_get(handler, parsed) -> bool:
         if is_messaging_session:
             cli_messages = get_cli_session_messages(sid)
         elif load_messages:
-            if msg_limit is not None:
+            if _limited_display_request:
                 (
                     state_db_since_timestamp,
                     limited_sidecar_messages,
@@ -15670,7 +15758,7 @@ def _handle_session_get(handler, parsed) -> bool:
             # work that would have produced an identical merged result.
             _display_cache_hit = None
             if (
-                msg_limit is not None
+                _limited_display_request
                 and not getattr(s, "active_stream_id", None)
                 and not getattr(s, "pending_user_message", None)
             ):
@@ -15684,7 +15772,7 @@ def _handle_session_get(handler, parsed) -> bool:
                 state_db_messages = []
             else:
                 if (
-                    msg_limit is not None
+                    _limited_display_request
                     and not getattr(s, "active_stream_id", None)
                     and not getattr(s, "pending_user_message", None)
                 ):
@@ -15832,7 +15920,12 @@ def _handle_session_get(handler, parsed) -> bool:
             _summary_last_message_at = None
         _display_tool_calls = getattr(s, "tool_calls", []) if load_messages else []
         if _display_owner_positions is not None:
-            if msg_limit is None:
+            # #7925 re-gate (2026-10-27 review): an append request needs the
+            # exact owner positions computed from the full merged document,
+            # exactly like master's bare GET (msg_limit=all); only a genuine
+            # limited-display request takes the rebased positions from its
+            # windowed merge helper.
+            if not _limited_display_request:
                 _display_owner_positions.update(_display_exact_owner_positions(s, _all_msgs))
             _display_tool_calls = _display_rebased_tool_calls(
                 _display_tool_calls, _display_owner_positions
@@ -15854,6 +15947,7 @@ def _handle_session_get(handler, parsed) -> bool:
                     _msg_after,
                     _anchor_fp,
                     _transcript_generation,
+                    _prefix_fp,
                 )
                 if _append_mode_anchor is not None:
                     _window_limit = msg_limit if msg_limit is not None else _MAX_MSG_LIMIT
@@ -16084,6 +16178,16 @@ def _handle_session_get(handler, parsed) -> bool:
         raw["_msg_limit_max"] = _MAX_MSG_LIMIT
         if _append_mode_anchor is not None:
             raw["_append_only"] = True
+        # #7925 re-gate (2026-10-27 review, finding 4): mint the prefix
+        # fingerprint over rows [0, K) of the merged display document, where
+        # K is the absolute index just past this response's coverage (a full
+        # load covers [0, len); a windowed or append load covers [0,
+        # offset+len)). The client stores it with its view and echoes it on
+        # the next append request. Contract: docs/CONTRACTS.md.
+        if load_messages and _all_msgs:
+            raw["prefix_fp"] = _display_prefix_fingerprint(
+                _all_msgs, _messages_offset + len(_truncated_msgs)
+            )
         _t4 = _time.monotonic()
         if _diag: _diag.stage("t4_after_compact_and_merge")
         if effective_model:

@@ -288,6 +288,15 @@ function createEnvironment() {
   globalThis._loadingOlder = false;
   globalThis._loadSessionGeneration = 0;
   globalThis._pendingCarryForwardSnapshot = null;
+  // #7925 re-gate (2026-10-27): module-level state the extracted
+  // loadSession/_ensureMessagesLoaded now reference. The harness injects only
+  // the extracted functions, not the module-level lets — declare them here or
+  // the reads throw ReferenceError inside the load flow. Empty digest ⇒ the
+  // append-only fast path is skipped and every reload takes the bounded
+  // replace / full fetch this harness already asserts on.
+  globalThis._sessionPrefixFp = '';
+  globalThis._sessionPrefixFpEnd = -1;
+  globalThis._pendingSessionToolCalls = null;
   globalThis._messagesTruncated = false;
   globalThis._oldestIdx = 0;
   globalThis._messageRenderWindowSize = 0;

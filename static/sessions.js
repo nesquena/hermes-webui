@@ -31,6 +31,26 @@ let _loadSessionGeneration = 0;
 // _statusCard, _anchor_stream_id) survive the wholesale replace. null when there is nothing
 // to carry forward (initial load, switch-to-different-session, etc.).
 let _pendingCarryForwardSnapshot = null;
+// #7925 re-gate (2026-10-27, silent finding): the loaded session-level tool
+// card list, kept across loadSession's metadata adoption. The messages=0
+// metadata response carries ``tool_calls: []`` and replacing S.session with
+// it empties the list; on the append-only fast path the messages=1 response
+// then carries ONLY the new owners, so merging into the emptied list drops
+// every older card (the maintainer's ``older-card`` regression, reproduced
+// through the real loadSession + Chromium). Consumed by the append branch;
+// discarded by every other path.
+let _pendingSessionToolCalls = null;
+// #7925 re-gate (2026-10-27 review, finding 4): the server-computed prefix
+// digest the client holds for its current view, plus the absolute row count
+// that digest covers (the view's held end). Every full/limited/append load
+// response mints `prefix_fp` over rows [0, coverage end); the client stores
+// it with the view and echoes it on the next append-only fast-path request,
+// where the server recomputes over [0, msg_after + 1) and refuses on
+// mismatch — closing the non-destructive earlier-row edit hole that no
+// generation bump reports. Empty/invalid ⇒ the fast path is skipped and the
+// reload takes the authoritative full fetch (master's behaviour).
+let _sessionPrefixFp = '';
+let _sessionPrefixFpEnd = -1;
 
 // ── Composer draft persistence ────────────────────────────────────────────────
 
@@ -2515,6 +2535,8 @@ async function newSession(flash, options={}){
       _clearEmptyComposerModelOverride();
     }
     S.session=data.session;if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);S.messages=data.session.messages||[];
+    // A brand-new session has no rendered prefix to vouch for.
+    _sessionPrefixFp='';_sessionPrefixFpEnd=-1;
     // #7855: a brand-new session starts with no restored-continuation draft.
     if(typeof _clearRestoredGoalContinuationDraft==='function') _clearRestoredGoalContinuationDraft();
     S._pendingSessionToolsets=null;
@@ -2920,6 +2942,12 @@ async function loadSession(sid){
       S.toolCalls = [];
       _messagesTruncated = false;
       _oldestIdx = 0;
+      // The held view (and the prefix digest vouching for it) is gone: the
+      // next reload must re-establish both through a full fetch. The
+      // keep-stale-until-loaded path deliberately keeps them — the append
+      // fast path still describes the transcript on screen.
+      _sessionPrefixFp = '';
+      _sessionPrefixFpEnd = -1;
     }
     // Close live SSE streams from the session we're leaving. The error
     // handler checks _isSessionActivelyViewed() and won't auto-reconnect
@@ -3096,6 +3124,15 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
+  // #7925 re-gate (2026-10-27, silent finding): keep the loaded card list
+  // across this metadata replacement — same-session reloads only (a switch
+  // must not inherit the previous session's cards). The append branch of
+  // _ensureMessagesLoaded merges the response's new owners into it; every
+  // other path discards it.
+  _pendingSessionToolCalls =
+    currentSid === sid && S.session && Array.isArray(S.session.tool_calls) && S.session.tool_calls.length
+      ? S.session.tool_calls.map(tc => (tc && typeof tc === 'object' ? {...tc} : tc))
+      : null;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
@@ -4391,7 +4428,13 @@ async function _ensureMessagesLoaded(sid, opts) {
   const _appendFastPath =
     _reloadWidthExceedsCeiling &&
     Array.isArray(S.messages) && S.messages.length > 0 &&
-    Number.isFinite(Number(S.session && S.session.transcript_generation));
+    Number.isFinite(Number(S.session && S.session.transcript_generation)) &&
+    // #7925 re-gate (2026-10-27, finding 4): the append must also vouch for
+    // the PREFIX it holds. The stored digest has to cover exactly the view's
+    // held end ([0, _oldestIdx + length)); any drift (a paged view, a stale
+    // digest) skips the fast path rather than sending an unprovable claim.
+    _sessionPrefixFp !== '' &&
+    _sessionPrefixFpEnd === _oldestIdx + S.messages.length;
   let appendParam = '';
   // #7925 re-gate (2026-10-21, finding 2): rows can land locally while the
   // append fetch is in flight (a streaming turn appending to S.messages, a
@@ -4414,6 +4457,7 @@ async function _ensureMessagesLoaded(sid, opts) {
         `&msg_after=${lastRenderedIdx}` +
         `&anchor_fp=${encodeURIComponent(anchorFp)}` +
         `&transcript_generation=${Number(S.session.transcript_generation)}` +
+        `&prefix_fp=${encodeURIComponent(_sessionPrefixFp)}` +
         `&msg_limit=${_msgLimitMax}`;
       // The append request carries its own bounded msg_limit; drop the
       // `all` width (a duplicate msg_limit would make parse_qs take the
@@ -4478,31 +4522,53 @@ async function _ensureMessagesLoaded(sid, opts) {
       // coordinates into the returned window) into the combined transcript's
       // coordinate space, then run the existing sync over the combined
       // transcript — the same contract the replace path below upholds.
-      if (S.session && S.session.session_id === sid && Array.isArray(data.session.tool_calls) && data.session.tool_calls.length) {
-        const _appendIdxShift = (Number(data.session._messages_offset) || 0) - _oldestIdx;
-        const _cards = Array.isArray(S.session.tool_calls) ? S.session.tool_calls : [];
-        const _byTid = new Map();
-        for (const tc of _cards) {
-          if (tc && typeof tc === 'object') _byTid.set(tc.tid !== undefined ? tc.tid : tc.id, tc);
-        }
-        for (const tc of data.session.tool_calls) {
-          if (!tc || typeof tc !== 'object') continue;
-          const _idx = Number(tc.assistant_msg_idx);
-          const _rebased = Number.isFinite(_idx)
-            ? Object.assign({}, tc, {assistant_msg_idx: _idx + _appendIdxShift})
-            : Object.assign({}, tc);
-          const _key = _rebased.tid !== undefined ? _rebased.tid : _rebased.id;
-          if (_key !== undefined && _byTid.has(_key)) {
-            const _at = _cards.indexOf(_byTid.get(_key));
-            if (_at >= 0) _cards[_at] = Object.assign({}, _byTid.get(_key), _rebased);
-          } else {
-            _cards.push(_rebased);
+      //
+      // #7925 re-gate (2026-10-27, silent finding): merge into the list kept
+      // across loadSession's metadata replacement (_pendingSessionToolCalls),
+      // not the emptied S.session.tool_calls — and restore it even when this
+      // response carries no new cards, or the older cards stay dropped.
+      if (S.session && S.session.session_id === sid) {
+        const _cards = (Array.isArray(_pendingSessionToolCalls) && _pendingSessionToolCalls.length)
+          ? _pendingSessionToolCalls
+          : (Array.isArray(S.session.tool_calls) ? S.session.tool_calls : []);
+        if (Array.isArray(data.session.tool_calls) && data.session.tool_calls.length) {
+          const _appendIdxShift = (Number(data.session._messages_offset) || 0) - _oldestIdx;
+          const _byTid = new Map();
+          for (const tc of _cards) {
+            if (tc && typeof tc === 'object') _byTid.set(tc.tid !== undefined ? tc.tid : tc.id, tc);
+          }
+          for (const tc of data.session.tool_calls) {
+            if (!tc || typeof tc !== 'object') continue;
+            const _idx = Number(tc.assistant_msg_idx);
+            const _rebased = Number.isFinite(_idx)
+              ? Object.assign({}, tc, {assistant_msg_idx: _idx + _appendIdxShift})
+              : Object.assign({}, tc);
+            const _key = _rebased.tid !== undefined ? _rebased.tid : _rebased.id;
+            if (_key !== undefined && _byTid.has(_key)) {
+              const _at = _cards.indexOf(_byTid.get(_key));
+              if (_at >= 0) _cards[_at] = Object.assign({}, _byTid.get(_key), _rebased);
+            } else {
+              _cards.push(_rebased);
+            }
           }
         }
         S.session.tool_calls = _cards;
       }
+      _pendingSessionToolCalls = null;
       if (!(typeof INFLIGHT !== 'undefined' && INFLIGHT && INFLIGHT[sid])) {
         _syncToolCallsForLoadedMessages(S.messages, S.session && S.session.tool_calls);
+      }
+      // #7925 re-gate (2026-10-27, finding 4): the append response minted a
+      // fresh prefix digest over [0, the extended held end) — adopt it so the
+      // NEXT append vouches for the longer prefix. A response without one
+      // (older server) invalidates the stored digest: the next reload takes
+      // the authoritative full fetch instead of an unprovable append.
+      if (data.session.prefix_fp) {
+        _sessionPrefixFp = String(data.session.prefix_fp);
+        _sessionPrefixFpEnd = _oldestIdx + S.messages.length;
+      } else {
+        _sessionPrefixFp = '';
+        _sessionPrefixFpEnd = -1;
       }
       // Clean append: the new rows are all there is — refresh the session
       // metadata that every transcript landing must update, then finish. The
@@ -4537,6 +4603,18 @@ async function _ensureMessagesLoaded(sid, opts) {
         }
         if(typeof syncTopbar==='function') syncTopbar();
       }
+      // #7925 re-gate (2026-10-27, should-fix): the replace path below
+      // re-expands the render window to cover the loaded transcript, but the
+      // append path returned without it — after an append the hidden-rows
+      // affordance still described the pre-append window (it read 551 where
+      // master's replace reads 401). Same bounded expansion as the replace
+      // path (#6999 cap included).
+      if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){
+        _messageRenderWindowSize=Math.max(
+          _currentMessageRenderWindowSize(),
+          Math.min(_messageRenderableMessageCount(), (typeof MESSAGE_RENDER_WINDOW_DEFAULT==='number'?MESSAGE_RENDER_WINDOW_DEFAULT:50)*4)
+        );
+      }
       return;
     }
     // The capped append window could not cover every new row (>msg_limit rows
@@ -4557,6 +4635,10 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   _messagesTruncated = !!data.session._messages_truncated;
   _oldestIdx = data.session._messages_offset || 0;
+  // The append fast path was not taken (or was refused): the snapshot kept
+  // across the metadata replacement is not needed — this response carries
+  // the window's own card list, which the sync below adopts wholesale.
+  _pendingSessionToolCalls = null;
   // #3162: `msgs` is reassigned below by the #3018 ephemeral-field carry-forward,
   // so it must be `let`, not `const`. The `const` form threw a TypeError inside
   // _ensureMessagesLoaded() that surfaced as a "Failed to load conversation messages"
@@ -4585,6 +4667,13 @@ async function _ensureMessagesLoaded(sid, opts) {
   }
   if(typeof clearVisibleMessageRowCache==='function') clearVisibleMessageRowCache();
   S.messages = msgs;
+  // #7925 re-gate (2026-10-27, finding 4): every load response mints the
+  // prefix digest over rows [0, coverage end) — store it with the view this
+  // response established so the next append-only fast-path request can vouch
+  // for the prefix. A response without one invalidates the stored digest
+  // (the fast path is skipped, the reload already took the full fetch).
+  _sessionPrefixFp = data.session.prefix_fp ? String(data.session.prefix_fp) : '';
+  _sessionPrefixFpEnd = _oldestIdx + (Array.isArray(S.messages) ? S.messages.length : 0);
   // Expand render window to cover all loaded messages so the next
   // renderMessages() doesn't hide most of them behind a tiny window.
   if(typeof _messageRenderableMessageCount==='function'&&typeof _currentMessageRenderWindowSize==='function'){

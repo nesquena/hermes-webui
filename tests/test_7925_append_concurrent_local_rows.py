@@ -111,6 +111,17 @@ let _oldestIdx = 0;
 let _messagesTruncated = false;
 let _msgLimitMax = 500;
 let _pendingCarryForwardSnapshot = null;
+// #7925 re-gate (2026-10-27, finding 4): the prefix digest the client holds
+// for its view and the held end it covers — seeded below exactly like the
+// load that established the 601-row view.
+let _sessionPrefixFp = '';
+let _sessionPrefixFpEnd = -1;
+// #7925 re-gate (2026-10-27, silent finding): the loaded card list kept
+// across loadSession's metadata replacement (null here: this harness drives
+// _ensureMessagesLoaded directly, so the merge sources S.session.tool_calls).
+let _pendingSessionToolCalls = null;
+// Render-window state (the append path re-expands it since 2026-10-27).
+let _messageRenderWindowSize = 50;
 const INFLIGHT = {};
 const MESSAGE_RENDER_WINDOW_DEFAULT = 50;
 const apiCalls = [];
@@ -160,6 +171,7 @@ async function api(url) {
       message_count: 602,
       visible_message_count: 602,
       messages: [{role: 'assistant', content: 'streamed answer'}],
+      prefix_fp: 'fp-after-append',
       tool_calls: """
         + cards_json
         + r""",
@@ -182,6 +194,10 @@ async function api(url) {
         + _fn("_ensureMessagesLoaded")
         + r"""
 (async () => {
+  // The client holds rows [0, 601): its digest covers [0, held end), exactly
+  // like the load that established the view minted it.
+  _sessionPrefixFp = 'fp-held-601';
+  _sessionPrefixFpEnd = 601;
   await _ensureMessagesLoaded('sid-7925-f2', {loadGeneration: 1});
   const contents = S.messages.map(m => m.content);
   const dupes = contents.filter((c, i) => contents.indexOf(c) !== i);
