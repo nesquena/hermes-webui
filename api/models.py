@@ -6191,10 +6191,17 @@ def _pending_turn_marker_present(session, stream_id) -> bool:
     or before the marker is what distinguishes "this turn was already
     recovered" from "an older turn with the same text was".
 
-    Text-only matching is safe here *because* it is anchored to the marker:
-    the gate can only ever suppress a prompt whose row sits inside a turn this
-    stream already closed, and the alternative — a dangling prompt after the
-    marker — is the bug being fixed.
+    Text-only matching is safe here *only* for identity-less legacy pending
+    state (neither ``pending_started_at`` nor an active-turn token was ever
+    persisted): the gate can then only suppress a prompt whose row sits
+    inside a turn this stream already closed. Once the pending turn carries
+    a token/timestamp identity, text equality can match an OLDER turn that
+    reused the same prompt (CORE #7167 review 2026-10-27) — the current
+    prompt and its attachment are then never materialized and pending state
+    is cleared, losing the prompt across a cold reload. Identity-bearing
+    pending state therefore requires ``_message_owns_current_turn``
+    (token equality, else full checkpoint identity) instead of pure text
+    equality.
     """
     marker_idx = _marker_reuse_index(session, stream_id)
     if marker_idx is None:
@@ -6202,10 +6209,25 @@ def _pending_turn_marker_present(session, stream_id) -> bool:
     pending_text = getattr(session, 'pending_user_message', None)
     if not pending_text:
         return False
+    # #7167 review (2026-10-27): text equality alone cannot tell the current
+    # turn from an OLDER turn that reused the same prompt. When the pending
+    # turn carries an identity (active-turn token or pending_started_at),
+    # require the row to OWN the current turn instead: token equality first,
+    # then the full pending-checkpoint identity (text + timestamp + source +
+    # attachments). An identity-less legacy dead-stream sidecar (neither
+    # field persisted) keeps the pure-text fallback so old behaviour is
+    # preserved.
+    has_turn_identity = (
+        _current_turn_token(session) is not None
+        or getattr(session, 'pending_started_at', None) is not None
+    )
     for message in (session.messages or [])[: marker_idx + 1]:
         if not isinstance(message, dict) or message.get('role') != 'user':
             continue
-        if _message_matches_pending_text(message, pending_text):
+        if has_turn_identity:
+            if _message_owns_current_turn(message, session):
+                return True
+        elif _message_matches_pending_text(message, pending_text):
             return True
     return False
 
