@@ -1436,6 +1436,27 @@ function _mergeRestoredDraftFiles(failedFiles, liveFiles){
   }
   return merged;
 }
+// Snapshot of the composer at the moment the user leaves a session. An upload
+// can still fail after that switch; the background persist must merge this
+// newer text and these files with the rejected submission instead of
+// replacing them. Cleared when a new send starts, and consumed by one persist.
+const _departingUploadDraftBySid=new Map();
+function _noteDepartingUploadDraft(sid, text, files){
+  if(!sid) return;
+  _departingUploadDraftBySid.set(String(sid),{
+    text:String(text||''),
+    files:Array.isArray(files)?files.filter(Boolean).slice():[],
+  });
+}
+function _forgetDepartingUploadDraft(sid){
+  if(sid) _departingUploadDraftBySid.delete(String(sid));
+}
+function _takeDepartingUploadDraft(sid){
+  const key=String(sid||'');
+  const snap=_departingUploadDraftBySid.get(key)||null;
+  _departingUploadDraftBySid.delete(key);
+  return snap;
+}
 function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, clearPromise, goalContinuationId){
   // 6th argument: upload retries pass {mergeLiveInput:true}. The 5th stays the
   // continuation id; never treat an options object as that id.
@@ -1510,6 +1531,21 @@ function _restoreComposerDraftAfterFailedSend(draftText, filesSnapshot, sid, cle
       } else if(!restoredVisible){
         persistedText=restore;
         persistedFiles=files;
+        // The session-switch save already stored whatever the user typed and
+        // staged after this send cleared the composer. Merge that snapshot
+        // with the rejected submission; writing only the snapshot would drop
+        // the newer draft (original + [a.txt, b.txt] over "newer" + [c.txt]).
+        if(mergeLiveInput){
+          const departing=_takeDepartingUploadDraft(sid);
+          if(departing){
+            const liveText=String(departing.text||'');
+            const liveFiles=Array.isArray(departing.files)?departing.files:[];
+            if(liveText.trim()&&liveText.trim()!==restore.trim()){
+              persistedText=restore.trim()?restore+'\n\n'+liveText:liveText;
+            }
+            persistedFiles=_mergeRestoredDraftFiles(files, liveFiles);
+          }
+        }
       } else {
         return;
       }
@@ -1952,6 +1988,9 @@ async function send(){
   // #5472 failed-send restore can chain its re-persist after this clear resolves.
   let _composerDraftClearPromise=null;
   if (activeSid && typeof _clearComposerDraft === 'function') _composerDraftClearPromise=_clearComposerDraft(activeSid,_submittedDraftTextForClear,_submittedDraftFilesForClear);
+  // A note from an earlier visit must not merge into this send. The switch
+  // during the upload await records a fresh one.
+  if(typeof _forgetDepartingUploadDraft==='function') _forgetDepartingUploadDraft(activeSid);
 
   setComposerStatus(_submittedFiles.length?'Uploading…':'');
   // #8297: only upload what is not already on disk from an earlier attempt of

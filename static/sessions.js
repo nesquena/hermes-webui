@@ -2841,6 +2841,9 @@ async function loadSession(sid){
     if(typeof _clearQueueCardDisplay==='function') _clearQueueCardDisplay(currentSid);
     const draftText = ($('msg') || {}).value || '';
     const draftFiles = S.pendingFiles ? [...S.pendingFiles] : [];
+    // Keep the composer the user is leaving. A failed upload of the send that
+    // was already in flight merges this snapshot back instead of overwriting it.
+    if (typeof _noteDepartingUploadDraft === 'function') _noteDepartingUploadDraft(currentSid, draftText, draftFiles);
     try {
       // #7855 (round 7): the departing session's restored continuation token
       // must travel with the exact text it belongs to, or a return to this
