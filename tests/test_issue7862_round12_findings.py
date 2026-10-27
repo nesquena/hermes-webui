@@ -351,11 +351,35 @@ class TestResumeReturnsAndBindsTheContinuationToken:
         src = (Path(__file__).resolve().parents[1] / "static" / "commands.js").read_text(
             encoding="utf-8"
         )
+        # #7862 re-gate (2026-10-27, SILENT): the resume token must SURVIVE a
+        # ``/goal status`` between the resume and the continue. The old pin
+        # bound the setter to the raw ``r.continuation_id`` expression, which
+        # every /goal response used to re-set (a status payload has none, so
+        # it blanked the token). The binding now routes through
+        # ``_resumeToken`` and is conditional: update when the response
+        # returns an id, clear only for a retiring action.
         assert _re.search(
-            r"_setResumeGoalContinuationToken\(activeSid\s*,\s*r\s*&&\s*r\.continuation_id", src
+            r"_resumeToken\s*=\s*r\s*&&\s*r\.continuation_id\s*\?"
+            r"\s*String\(\s*r\.continuation_id\s*\)\s*:\s*''",
+            src,
         ), (
-            "cmdGoal does not store the resume-returned continuation token "
-            "(finding 1)"
+            "cmdGoal does not read the resume-returned continuation token "
+            "into _resumeToken (finding 1)"
+        )
+        assert _re.search(
+            r"_setResumeGoalContinuationToken\(\s*activeSid\s*,\s*_resumeToken\s*\)",
+            src,
+        ), (
+            "cmdGoal does not bind the resume-returned continuation token "
+            "per session (finding 1)"
+        )
+        # The token is cleared ONLY for a retiring action.
+        assert _re.search(
+            r"String\(\s*\(?\s*r\s*&&\s*r\.action\s*\)?\s*\|\|\s*''\s*\)\s*===\s*'clear'",
+            src,
+        ), (
+            "the resume token is not cleared exclusively for the retiring "
+            "clear action; /goal status would blank it again (2026-10-27)"
         )
         # The setter is shared (defined in ui.js); the call above is the binding.
         assert "_setResumeGoalContinuationToken" in src

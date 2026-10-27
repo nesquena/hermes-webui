@@ -96,6 +96,12 @@ def test_routes_consumer_discards_atomically_on_read():
     under ONE module-level RLock. That is strictly tighter than the previous
     "check, set, discard" sequence, so the invariant this guard protects is
     unchanged -- only its shape moved.
+
+    #7862 re-gate (2026-10-27): the gate also requires a non-empty RESOLVED
+    ``goal_continuation_id`` (a tokenless regenerate must not spend the next
+    queued continuation), and the store's transaction now takes a
+    cross-process file lock. Both are the reviewer-requested shape; the pin
+    below carries the token term.
     """
     src = _read_routes()
 
@@ -105,7 +111,8 @@ def test_routes_consumer_discards_atomically_on_read():
     # consume_continuation_markers() — never up front — so a rejected start
     # rolls back the whole admission (see the receipt guards below).
     m = re.search(
-        r"if not goal_related and s\.session_id in PENDING_GOAL_CONTINUATION:.*?"
+        r"if not goal_related and goal_continuation_id and "
+        r"s\.session_id in PENDING_GOAL_CONTINUATION:.*?"
         r"consume_pending_goal_continuation\(\s*"
         r"s\.session_id,\s*msg,\s*goal_continuation_id\s*"
         r",\s*goal_continuation_attempt_id\s*,?"

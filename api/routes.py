@@ -19229,9 +19229,17 @@ def handle_post(handler, parsed) -> bool:
             sidecar_deleted = not p.exists()
             # #6885 slice 2a: a deleted session must not leave stale durable
             # intent that a later boot/repair would re-arm as a continuation.
+            # #7862 re-gate (2026-10-27, SILENT): the retirement's RETURN VALUE
+            # decides the delete's honesty — a False (snapshot not committed,
+            # e.g. ENOSPC) leaves the continuation prompt claimable on disk and
+            # a cold restore recovers the deleted intent, so the failure is
+            # surfaced like every other non-durable delete step.
             try:
-                retire_pending_goal_continuation(sid, reason="deleted")
+                continuation_retired = retire_pending_goal_continuation(
+                    sid, reason="deleted"
+                )
             except Exception:
+                continuation_retired = False
                 logger.debug("Failed to retire pending goal continuation for deleted session %s", sid)
             try:
                 draft_deleted = bool(_delete_session_draft(sid))
@@ -19288,6 +19296,21 @@ def handle_post(handler, parsed) -> bool:
             response["draft_delete_failed"] = True
             response.update(
                 {"ok": False, "error": "Failed to delete session draft"}
+            )
+            return j(handler, response, status=500)
+        if not continuation_retired:
+            # #7862 re-gate (2026-10-27, SILENT): the delete is NOT durable
+            # while the continuation prompt stays claimable on disk.
+            response["continuation_retire_failed"] = True
+            response.update(
+                {
+                    "ok": False,
+                    "error": (
+                        "Failed to retire the pending goal continuation for the "
+                        "deleted session; it may resume after a restart. Retry "
+                        "the delete."
+                    ),
+                }
             )
             return j(handler, response, status=500)
         response["ok"] = True
@@ -27949,7 +27972,19 @@ def _start_chat_stream_for_session(
         # outcome unchanged); this side only certifies that the session's
         # goal really is active, which is what makes the control legitimate
         # rather than a text-match bypass.
-        if not goal_related and s.session_id in PENDING_GOAL_CONTINUATION:
+        # #7862 re-gate (2026-10-27, CORE): consumption requires a NON-EMPTY
+        # RESOLVED continuation id. Native continuation prompts repeat, so a
+        # tokenless regenerate of that text used to text-match the record and
+        # spend the NEXT queued continuation (the reviewer's new path: the
+        # browser's regenerate posts no token, and the resolver answers ""
+        # for an explicit regenerate). The legacy key-omission shape is
+        # unaffected: a pre-upgrade tab that omits the key entirely is
+        # resolved server-side by
+        # ``_resolve_chat_start_goal_continuation_id`` (it peeks the
+        # session's pending id), so its request still carries a token here.
+        # A server-initiated turn (``start_session_turn``) never carries one
+        # and therefore never swallows a browser continuation by text.
+        if not goal_related and goal_continuation_id and s.session_id in PENDING_GOAL_CONTINUATION:
             _explicit_continue = False
             _goal_is_active = False
             if normalize_continuation_text(msg) == _CONTINUE_CONTROL:
