@@ -756,6 +756,7 @@ def read_importable_agent_session_rows(
     project_assignment: str | None = None,
     project_ids: tuple[str, ...] | None = None,
     return_window_exhaustion: bool = False,
+    session_ids: tuple[str, ...] | None = None,
 ) -> list[dict] | tuple[list[dict], bool]:
     """Return agent sessions projected as importable conversations.
 
@@ -799,6 +800,10 @@ def read_importable_agent_session_rows(
     result can exceed ``limit`` by the number of such anchors. Callers must
     therefore iterate the result rather than assume ``len(rows) <= limit``.
 
+    ``session_ids`` narrows the query to exactly those rows, so a caller can
+    resolve a conversation the user asked for by id without depending on any
+    recency window. An empty narrowing selects nothing.
+
     ``return_window_exhaustion=True`` returns ``(rows, exhausted)`` instead of
     just ``rows``. ``exhausted`` is true only when the final bounded raw-candidate
     window was full while its logical projection still under-delivered ``limit``.
@@ -830,6 +835,13 @@ def read_importable_agent_session_rows(
         if not wanted_project_ids:
             # An empty narrowing selects nothing. Returning [] keeps that exact
             # instead of degrading to "every assigned conversation".
+            return _result([])
+    wanted_session_ids: tuple[str, ...] = ()
+    if session_ids is not None:
+        wanted_session_ids = tuple(
+            cleaned for value in session_ids if (cleaned := str(value or '').strip())
+        )
+        if not wanted_session_ids:
             return _result([])
     db_path = Path(db_path)
     if not db_path.exists():
@@ -935,6 +947,10 @@ def read_importable_agent_session_rows(
                 placeholders = ", ".join("?" for _ in excluded)
                 where_clauses.append(f"s.source NOT IN ({placeholders})")
                 params.extend(excluded)
+        if wanted_session_ids:
+            placeholders = ", ".join("?" for _ in wanted_session_ids)
+            where_clauses.append(f"s.id IN ({placeholders})")
+            params.extend(wanted_session_ids)
         if project_assignment is not None:
             wanted = str(project_assignment).strip().lower()
             if wanted not in PROJECT_ASSIGNMENT_FILTERS:
