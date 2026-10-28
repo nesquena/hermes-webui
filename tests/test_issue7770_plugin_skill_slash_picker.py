@@ -34,20 +34,14 @@ import tempfile
 import textwrap
 from pathlib import Path
 
-# Pin #7770 coverage to environments where the hermes-agent module is
-# importable: ``api/routes.py:_skills_list_from_dir`` (the source of the
-# /api/skills payload the picker reflects) imports from
-# ``agent.skill_utils`` / ``tools.skills_tool`` and the conftest's
-# ``pytest_collection_modifyitems`` skip list does not enumerate these
-# new test names. Without this marker the tests run in CI shards and
-# explode with ``ModuleNotFoundError: No module named 'tools.skills_tool'``
-# on the first /api/skills code path. (CI: 15/24 test jobs FAILED on
-# this exact class.) The commands.js / node-vm harness itself does not
-# need the agent module, but every other WebUI test in the same shard
-# does — a module-level skip keeps the whole file clean.
-from tests.conftest import requires_agent_modules
-
-pytestmark = requires_agent_modules
+# No ``requires_agent_modules`` marker here on purpose: this harness runs
+# the real ``static/commands.js`` in a node ``vm`` with a mocked
+# ``/api/skills`` payload and never imports agent code, so the coverage
+# must stay unconditionally runnable (the same posture as
+# ``test_issue7509_disabled_skills_slash_picker.py``). An earlier round
+# pinned the whole file behind the marker, which silently skipped these
+# frontend tests on every agent-less CI job — a frontend regression could
+# pass untested (#7781 greptile review).
 
 ROOT = Path(__file__).resolve().parent.parent
 COMMANDS_JS = (ROOT / "static" / "commands.js").read_text(encoding="utf-8")
