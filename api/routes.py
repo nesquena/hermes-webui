@@ -25236,6 +25236,13 @@ def _handle_approval_inject(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     key = qs.get("pattern_key", ["test_pattern"])[0]
     cmd = qs.get("command", ["rm -rf /tmp/test"])[0]
+    desc = qs.get("description", ["test pattern"])[0]
+    # The core stamps exactly one stable `request_id` per approval entry
+    # (`_ApprovalEntry.__init__`), and the frontend's logical identity requires a
+    # non-empty stable id. Mirror that contract here so seeded approvals carry
+    # the same identity as production ones; tests that need to model two
+    # identical-content approvals pass an explicit distinct `request_id`.
+    request_id = (qs.get("request_id", [""])[0] or "").strip() or uuid.uuid4().hex
     if sid:
         submit_pending(
             sid,
@@ -25243,10 +25250,11 @@ def _handle_approval_inject(handler, parsed):
                 "command": cmd,
                 "pattern_key": key,
                 "pattern_keys": [key],
-                "description": "test pattern",
+                "description": desc,
+                "request_id": request_id,
             },
         )
-        return j(handler, {"ok": True, "session_id": sid})
+        return j(handler, {"ok": True, "session_id": sid, "request_id": request_id})
     return j(handler, {"error": "session_id required"}, status=400)
 
 
