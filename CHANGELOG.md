@@ -55,6 +55,8 @@
 
 ### Fixed
 
+- **The approval card answers on the first click.** The card now checks the server's pending approval before it responds, so a stale id no longer swallows the first click (or the X), and a click is never moved onto a different queued approval, even one with identical text: that approval is shown for a fresh click instead. (#7144 by @BBaFSE, fixes #7091)
+
 - **Slash autocomplete treats `_` and `-` as the same command.** A command or skill named with one separator can now be found by typing the other: `/knowledge_loop` finds `knowledge-loop`, and the reverse. Menu selection and direct submission both send the command's real name with the arguments kept. When both spellings exist, the one you typed comes first, and plain prefix typing keeps its usual order. (#8143, #8203)
 
 - **A failed browser dictation no longer pins the mic to server recording forever.** When browser speech recognition fails (network, permission, audio capture), the mic remembers to use server recording on the next reload. That preference used to never expire, so one VPN hiccup or a since-fixed browser kept the device on server recording for good. It now expires after 24 hours, and a preference saved by an older release gets a 24-hour window from its first read. The fallback within the same session is still immediate. Thanks @solarmaster961. (#8295)
