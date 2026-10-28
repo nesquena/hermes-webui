@@ -211,14 +211,55 @@ function _isWebuiDispatchableAgentCommand(cmd){
   return String(cmd&&cmd.category||'').trim()==='Plugin';
 }
 
+// `-` and `_` are equivalent for slash-command slugs. The agent-side resolver
+// (`resolve_bundle_command_key`) documents this equivalence — Telegram rewrites
+// hyphens — so a user typing the underscore spelling must find and resolve the
+// canonical hyphenated command instead of falling through to chat (#8143).
+//
+// Deliberately NOT the full _skillCommandSlug(): that strips trailing separators
+// ('knowledge_' -> 'knowledge') and folds spaces/punctuation, which would blur
+// prefix boundaries and overmatch neighbours such as 'knowledgebase'. Folding
+// only the separator keeps the typed query's trailing separator intact, and
+// normalising *both* comparison keys (rather than generating spelling variants)
+// also matches names that mix separators, e.g. 'plugin-review_v2'.
+function _slashCommandCompareKey(value){
+  return String(value==null?'':value).toLowerCase().replace(/_/g,'-');
+}
+function _slashCommandMatchesPrefix(name,prefix){
+  const q=_slashCommandCompareKey(prefix);
+  if(!q)return true;
+  return _slashCommandCompareKey(name).startsWith(q);
+}
+// Skills are substring-matched rather than prefix-matched, so the alias has to
+// apply to the name half of the search as well.
+function _slashCommandNameIncludes(name,q){
+  return _slashCommandCompareKey(name).includes(_slashCommandCompareKey(q));
+}
+// Enter dispatches row zero, so when both spellings of a command are registered
+// the exact spelling typed must rank ahead of the alias-only match. Alias
+// matching and registry order within each rank are otherwise unchanged.
+function _rankLiteralPrefixMatchesFirst(matches,q){
+  const literal=String(q||'').toLowerCase();
+  if(!literal||matches.length<2)return matches;
+  return matches
+    .map((row,index)=>({row,index}))
+    .sort((a,b)=>{
+      const aLiteral=String(a.row&&a.row.name||'').toLowerCase().startsWith(literal)?0:1;
+      const bLiteral=String(b.row&&b.row.name||'').toLowerCase().startsWith(literal)?0:1;
+      if(aLiteral!==bLiteral)return aLiteral-bLiteral;
+      return a.index-b.index;
+    })
+    .map(entry=>entry.row);
+}
+
 function getMatchingCommands(prefix){
-  const q=prefix.toLowerCase();
-  const matches=COMMANDS.filter(c=>c.name.startsWith(q)).map(c=>({...c,source:'builtin'}));
+  const q=String(prefix||'').toLowerCase();
+  const matches=COMMANDS.filter(c=>_slashCommandMatchesPrefix(c.name,q)).map(c=>({...c,source:'builtin'}));
   const seen=new Set(matches.map(c=>c.name));
   const reserved=_getReservedSlashCommandSlugs();
   const bundleSlugs=new Set(_bundleCommandCache.map(bundle=>bundle.name));
   for(const [name, spec] of Object.entries(SLASH_SUBARG_SOURCES)){
-    if(!name.startsWith(q)||seen.has(name))continue;
+    if(!_slashCommandMatchesPrefix(name,q)||seen.has(name))continue;
     matches.push({
       name,
       desc:spec.desc,
@@ -227,7 +268,7 @@ function getMatchingCommands(prefix){
     });
     seen.add(name);
   }
-  if('pet'.startsWith(q)&&!seen.has('pet')){
+  if(_slashCommandMatchesPrefix('pet',q)&&!seen.has('pet')){
     const petMeta=Array.isArray(_agentCommandCache)
       ? _agentCommandCache.find(cmd=>String(cmd&&cmd.name||'').toLowerCase()==='pet')
       : null;
@@ -241,7 +282,7 @@ function getMatchingCommands(prefix){
   // Include agent/plugin commands from /api/commands metadata
   for(const cmd of (_agentCommandCache||[])){
     const name=String(cmd&&cmd.name||'').toLowerCase();
-    if(!name.startsWith(q)||seen.has(name))continue;
+    if(!_slashCommandMatchesPrefix(name,q)||seen.has(name))continue;
     if(cmd.cli_only&&name!=='pet')continue;
     // #6951: only announce commands send() actually dispatches -- anything
     // else would silently fall through to the normal chat path as plain text.
@@ -257,7 +298,7 @@ function getMatchingCommands(prefix){
   }
   if(_agentCommandCacheReady){
     for(const bundle of _bundleCommandCache){
-      if(!bundle.name.startsWith(q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
+      if(!_slashCommandMatchesPrefix(bundle.name,q)||seen.has(bundle.name)||reserved.has(bundle.name))continue;
       matches.push(bundle);
       seen.add(bundle.name);
     }
@@ -265,15 +306,15 @@ function getMatchingCommands(prefix){
   // A same-slug bundle owns dispatch. Hold plain skills until the independent
   // bundle metadata request settles so a slow bundle response cannot briefly
   // expose a selectable, shadowed skill.
-  if(!_bundleCommandCacheReady)return matches;
+  if(!_bundleCommandCacheReady)return _rankLiteralPrefixMatchesFirst(matches,q);
   for(const skill of _skillCommandCache){
     const name=String(skill&&skill.name||'').toLowerCase();
     const description=String(skill&&skill.desc||'').toLowerCase();
-    if((!name.includes(q)&&!description.includes(q))||seen.has(name)||reserved.has(name)||bundleSlugs.has(name))continue;
+    if((!_slashCommandNameIncludes(name,q)&&!description.includes(q))||seen.has(name)||reserved.has(name)||bundleSlugs.has(name))continue;
     matches.push(skill);
     seen.add(name);
   }
-  return matches;
+  return _rankLiteralPrefixMatchesFirst(matches,q);
 }
 
 let _forcedSkillDirectivePending=null;
@@ -471,9 +512,21 @@ async function getAgentCommandMetadata(name){
   const needle=String(name||'').trim().toLowerCase();
   if(!needle) return null;
   const commands=await loadAgentCommandMetadata();
-  return commands.find(cmd=>{
+  const matchesLiteral=cmd=>{
     if(String(cmd&&cmd.name||'').toLowerCase()===needle) return true;
     return Array.isArray(cmd&&cmd.aliases)&&cmd.aliases.some(a=>String(a||'').toLowerCase()===needle);
+  };
+  // Exact name/alias first so a command registered under the typed spelling
+  // always wins over an alias-only equivalent.
+  const literal=commands.find(matchesLiteral);
+  if(literal) return literal;
+  // `_` ≡ `-` (#8143): the registry is not required to declare an underscore
+  // alias, so without this an autocomplete row suggested by the alias-aware
+  // matcher would miss the dispatch lookup and fall through to chat.
+  const alias=_slashCommandCompareKey(needle);
+  return commands.find(cmd=>{
+    if(_slashCommandCompareKey(cmd&&cmd.name)===alias) return true;
+    return Array.isArray(cmd&&cmd.aliases)&&cmd.aliases.some(a=>_slashCommandCompareKey(a)===alias);
   })||null;
 }
 
@@ -2563,7 +2616,13 @@ async function getBundleCommandMetadata(name){
   const needle=String(name||'').trim().toLowerCase();
   if(!needle) return null;
   const bundles=await loadBundleCommands();
-  return bundles.find(bundle=>String(bundle&&bundle.name||'').toLowerCase()===needle)||null;
+  const literal=bundles.find(bundle=>String(bundle&&bundle.name||'').toLowerCase()===needle);
+  if(literal) return literal;
+  // `_` ≡ `-` (#8143): the server-side resolver folds the spelling, so the
+  // client gate has to as well — otherwise the typed underscore form misses the
+  // bundle intercept and send() posts it to the model as plain chat.
+  const alias=_slashCommandCompareKey(needle);
+  return bundles.find(bundle=>_slashCommandCompareKey(bundle&&bundle.name)===alias)||null;
 }
 // The composer text the user last closed the list on, by picking a command or pressing
 // Escape. A refresh that was not caused by typing (a slash-command loader landing late,

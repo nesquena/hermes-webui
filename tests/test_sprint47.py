@@ -65,7 +65,9 @@ def test_builtin_commands_take_precedence_over_skill_slug_collisions():
     assert "if(_getReservedSlashCommandSlugs().has(slug)) return null;" in COMMANDS_JS
     command_matching = _function_body(COMMANDS_JS, "getMatchingCommands")
     assert "reserved.has(name)" in command_matching
-    assert "!name.includes(q)&&!description.includes(q)" in command_matching
+    # Skill search is still a name-or-description match and description text keeps
+    # the raw query; only the name half is alias-aware (`_` ≡ `-`, #8143).
+    assert "!_slashCommandNameIncludes(name,q)&&!description.includes(q)" in command_matching
 
 
 def test_bundle_entries_merge_before_plain_skill_entries():
