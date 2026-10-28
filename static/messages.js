@@ -1843,6 +1843,36 @@ async function send(){
           $('msg').value='';autoResize();hideCmdDropdown();return;
         }
       }
+      // Plugin skills surface in the slash picker as qualified
+      // `/namespace:skill` names (#7770). No COMMANDS entry or bundle handles
+      // them, so send() used to forward the literal text as a chat message and
+      // the skill body never reached the agent. Resolve qualified names here:
+      // match the plugin row in /api/skills, load its content, and feed it to
+      // the same forced-skill-directive mechanism /use relies on so the body
+      // rides on this turn's message — keeping whatever the user typed after
+      // the command. Non-plugin qualified commands fall through unchanged.
+      if(_parsedCmd.name.includes(':')&&!_bundleCmd){
+        try{
+          let _match=null;
+          const _skillsData=await api('/api/skills');
+          _match=(Array.isArray(_skillsData&&_skillsData.skills)?_skillsData.skills:[])
+            .find(s=>String(s.name||'').toLowerCase()===_parsedCmd.name.toLowerCase()&&s.source==='plugin')||null;
+          if(_match){
+            const _detail=await api('/api/skills/content?name='+encodeURIComponent(_match.name));
+            const _content=_detail&&typeof _detail.content==='string'?_detail.content.trim():'';
+            if(!_content) throw new Error(`Skill \`${_match.name}\` has no readable content.`);
+            _forcedSkillDirectivePending={sessionId:S.session&&S.session.session_id||null,promise:Promise.resolve({name:_match.name,directive:`[USER OVERRIDE] You MUST follow the skill '${_match.name}' content provided below before responding to the next message.`,content:_content})};
+            _slashDisplayTextOverride=text;
+            text=_parsedCmd.args||'';
+          }
+        }catch(e){
+          if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
+          S.messages.push({role:'user',content:text,_ts:Date.now()/1000});
+          S.messages.push({role:'assistant',content:`Plugin skill error: ${e&&e.message||e}`,_ts:Date.now()/1000});
+          renderMessages();
+          $('msg').value='';autoResize();hideCmdDropdown();return;
+        }
+      }
     }
   }
   if(!S.session){await newSession(false,{pickerClaimEpoch:_sendProjectPickerClaim});}
