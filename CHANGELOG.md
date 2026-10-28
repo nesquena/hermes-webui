@@ -51,6 +51,10 @@
 
 ### Fixed
 
+- **A failed browser dictation no longer pins the mic to server recording forever.** When browser speech recognition fails (network, permission, audio capture), the mic remembers to use server recording on the next reload. That preference used to never expire, so one VPN hiccup or a since-fixed browser kept the device on server recording for good. It now expires after 24 hours, and a preference saved by an older release gets a 24-hour window from its first read. The fallback within the same session is still immediate. Thanks @solarmaster961. (#8295)
+
+- **Custom providers that share one `base_url` route to the right entry.** When two `custom_providers` entries use the same URL, the entry that declares the configured default model now wins over declaration order, and each entry's live model list is probed with its own key. Without a declaring entry, the old first-match behaviour stands. Existing sessions keep their saved provider; re-pick the model once to switch. Thanks @RajPabnani03. (#7176)
+
 - **The workspace preview stops asking to discard edits you can't see.** Dirtiness is derived from an on-screen editor whose text differs from what was loaded or saved, so closing the Files panel, hiding the editor, or typing back to the original text no longer triggers the discard prompt, and switching workspaces no longer closes the panel or carries one workspace's unsaved text into another's file. Thanks @fedebyes. (#8515, fixes #8514)
 
 - **New Chat no longer shows the previous session's transcript.** Clicking New Chat while another session was still loading could let that load's response land in the new pane. The transcript commit point now also checks that the session it loaded is still the current one, and New Chat invalidates the in-flight load. Thanks @happy5318. (#8356)

@@ -107,8 +107,47 @@ class _SyncThread:
         return None
 
 
+@pytest.fixture(autouse=True)
+def _restore_session_registries():
+    """Put the process-wide session registries back after every test here.
+
+    Several tests clear ``SESSIONS`` (one OrderedDict shared by api.config,
+    api.models and api.routes) and the writeback/stream owner maps, then seed
+    them with stand-ins. Left in place, a stand-in outlives its test: any later
+    ``Session.save()`` that takes ``_write_session_index``'s full-rebuild path
+    (no index file yet) calls ``compact()`` on every ``SESSIONS`` value, and an
+    unrelated test fails with "'SimpleNamespace' object has no attribute
+    'compact'" depending only on test order.
+    """
+    sessions = list(config.SESSIONS.items())
+    writeback = dict(config.SESSION_WRITEBACK_OWNERS)
+    stream_owners = dict(config.STREAM_SESSION_OWNERS)
+    with config.STREAMS_LOCK:
+        streams = dict(config.STREAMS)
+    try:
+        yield
+    finally:
+        config.SESSIONS.clear()
+        config.SESSIONS.update(sessions)
+        config.SESSION_WRITEBACK_OWNERS.clear()
+        config.SESSION_WRITEBACK_OWNERS.update(writeback)
+        config.STREAM_SESSION_OWNERS.clear()
+        config.STREAM_SESSION_OWNERS.update(stream_owners)
+        with config.STREAMS_LOCK:
+            config.STREAMS.clear()
+            config.STREAMS.update(streams)
+
+
 def _make_session(session_id: str) -> SimpleNamespace:
+    # A stand-in placed in SESSIONS must honour the contract every SESSIONS value
+    # has: the session index's full rebuild calls compact() on each of them.
     return SimpleNamespace(
+        compact=lambda *a, **kw: {
+            "session_id": session_id,
+            "title": "Existing",
+            "message_count": 0,
+            "updated_at": 0,
+        },
         session_id=session_id,
         title="Existing",
         active_stream_id=None,
