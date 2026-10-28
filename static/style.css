@@ -4356,6 +4356,11 @@ body.resizing .sidebar{transition:none!important;}
 .tool-card-detail-lead{padding:9px 12px 0;}
 .tool-card-detail-lead-label{color:var(--muted);font-family:inherit;font-size:var(--message-body-font-size);line-height:1.35;margin-bottom:5px;opacity:.72;}
 .tool-card-detail-lead pre{margin:0;color:var(--text);font-family:var(--font-mono);font-size:var(--message-code-font-size);line-height:1.55;white-space:pre-wrap;word-break:break-word;}
+/* vision_analyze: the analyzed image, aligned with the args below it and kept
+   small enough that the 320px detail still shows the question and result. */
+.tool-card-image-preview{padding:6px 0 0;margin-bottom:6px;box-sizing:border-box;max-width:100%;}
+.tool-card-image-preview .msg-artifact-image{margin:0;max-width:min(320px,100%);}
+.tool-card-image-preview .msg-media-img{display:block;width:auto;height:auto;max-width:min(320px,100%);max-height:180px;margin:0;object-fit:contain;}
 .tool-card-args{margin-bottom:6px;}
 .tool-card-args div{font-size:var(--message-code-font-size);line-height:1.6;}
 .tool-arg-key{color:var(--blue);font-family:var(--font-mono);font-size:var(--message-code-font-size);display:block;margin-bottom:2px;}
@@ -4671,8 +4676,11 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row .tool-card-detail > *,
 .transparent-event-row .thinking-card-body > *{min-height:0;}
 .transparent-event-row .tool-card-args,
+.transparent-event-row .tool-card-image-preview,
 .transparent-event-row .tool-card-result{padding:4px 7px 4px 9px;}
-.transparent-event-row .tool-card-detail[data-transparent-detail-mode="output"] .tool-card-args{display:none;}
+.transparent-event-row .tool-card-image-preview{margin-bottom:0;}
+.transparent-event-row .tool-card-detail[data-transparent-detail-mode="output"] .tool-card-args,
+.transparent-event-row .tool-card-detail[data-transparent-detail-mode="output"] .tool-card-image-preview{display:none;}
 .transparent-event-row .tool-card-args{margin-bottom:0;}
 /* Compact inline args: key beside value (not stacked), no per-pair rules — the
    stacked column layout made offset=735 consume two ruled lines and read like a

@@ -12142,9 +12142,11 @@ _TOOL_RESULT_SNIPPET_MAX = 4000
 # These must not be capped to the short incidental-arg limit (#4928), or long
 # commands/paths get cut and recovery-rebuilt diffs (built from old_string/
 # new_string/patch) break. Matched case-insensitively against the arg key.
+# ``image_url`` is the vision_analyze image the tool card previews; a capped
+# screenshot path would point nowhere after a reload.
 _TOOL_ARG_CONTENT_KEYS = frozenset({
     'command', 'cmd', 'script', 'code', 'patch', 'diff',
-    'old_string', 'new_string', 'content', 'path', 'file_path',
+    'old_string', 'new_string', 'content', 'path', 'file_path', 'image_url',
 })
 _TOOL_ARG_CONTENT_CAP = _TOOL_RESULT_SNIPPET_MAX
 
