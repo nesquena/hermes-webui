@@ -4299,6 +4299,17 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             for key in _RUN_JOURNAL_TOOL_ID_KEYS:
                 if payload.get(key):
                     call[key] = str(payload.get(key))
+            # #7653 re-gate round 14 (10-19 review, item 3): carry the
+            # OCCURRENCE from the event payload. The live ``tool.started``
+            # event emits it (round 11), but the journal replay rebuilt the
+            # call from the id keys alone, so a reused id's second occurrence
+            # replayed as an occurrence-less row and every
+            # occurrence-aware consumer (the client's
+            # ``_anchorSceneToolRowLogicalKey`` dedup key) fell back to the
+            # bare tid — the reviewer's "same-id cards collapse" surviving
+            # a journal replay.
+            if payload.get("occurrence") is not None:
+                call["occurrence"] = payload["occurrence"]
             if boundary_id:
                 call["activityBurstId"] = boundary_id
                 call["activitySegmentSeq"] = boundary_id
@@ -4464,6 +4475,11 @@ def _run_journal_live_snapshot(stream_id: str | None, *, handler=None) -> dict |
             "activitySegmentSeq": segment_seq,
             "activityBurstId": burst_id or 0,
         }
+        # #7653 re-gate round 14 (10-19 review, item 3): carry the occurrence so
+        # a reused id's second occurrence survives the journal replay as its own
+        # row instead of an occurrence-less one.
+        if call.get("occurrence") is not None:
+            payload["occurrence"] = call["occurrence"]
         return {
             "row_id": row_id,
             "order_index": len(anchor_activity_rows),
@@ -5324,6 +5340,12 @@ def _anchor_scene_tool_row(tool, order_index, message_index, stream_id=""):
         "signature": f"{name}|{tid}|{json.dumps(args, sort_keys=True, default=str)}",
     }
     row["payload"].update({"tid": tid, "id": tid, "name": name, "args": args, "preview": preview, "snippet": snippet})
+    # #7653 re-gate round 14 (10-19 review, item 3): carry the occurrence onto
+    # the row so a reused id's second occurrence survives the journal replay as
+    # its own row (every occurrence-aware consumer reads it from the payload).
+    occurrence = (tool or {}).get("occurrence")
+    if occurrence is not None:
+        row["payload"]["occurrence"] = occurrence
     return row
 
 
@@ -5614,12 +5636,69 @@ def _anchor_scene_row_durable_identity(row) -> str:
     return ""
 
 
+def _anchor_scene_row_owner_index(row) -> int | None:
+    """The owning assistant message index of a hydrated row, if it names one.
+
+    A hydrated tool row carries its owner in three places (the row base sets
+    ``group.assistant_msg_idx`` and ``payload.assistant_msg_idx``; the
+    external summary rows also set it top level), and every server-side row
+    builder goes through ``_anchor_scene_row_base``, so a well-formed row
+    always names its owner.
+    """
+    if not isinstance(row, dict):
+        return None
+    candidates = [row.get("assistant_msg_idx")]
+    group = row.get("group")
+    if isinstance(group, dict):
+        candidates.append(group.get("assistant_msg_idx"))
+    payload = row.get("payload")
+    if isinstance(payload, dict):
+        candidates.append(payload.get("assistant_msg_idx"))
+    for value in candidates:
+        if isinstance(value, bool) or value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _anchor_scene_row_tid_fallback_index(key: str, seen: dict) -> int | None:
+    """Merge target for a tool row whose exact key missed, via the bare-tid chain.
+
+    #7653 re-gate round 14 (10-19 review, item 3): the runtime journal's
+    persisted rows carry no owning assistant index (the stream never learned
+    one), while the hydration rebuild always names it, so the two spellings of
+    the SAME occurrence never share a key. The bridge only connects a BARE row
+    to an owner-scoped one (or the reverse) and only when the tid has exactly
+    one such entry in ``seen`` — two DIFFERENT owner-scoped occurrences of one
+    tid are exactly what the owner scoping exists to keep apart.
+    """
+    if not key or not key.startswith("tool:"):
+        return None
+    tid, _, key_owner = key[len("tool:") :].partition("@")
+    if not tid:
+        return None
+    matches = []
+    for seen_key, index in seen.items():
+        if not seen_key.startswith("tool:"):
+            continue
+        seen_tid, _, seen_owner = seen_key[len("tool:") :].partition("@")
+        if seen_tid != tid:
+            continue
+        if key_owner and seen_owner:
+            continue  # two distinct owner-scoped occurrences: never merge
+        matches.append(index)
+    return matches[0] if len(matches) == 1 else None
+
+
 def _anchor_scene_row_key(row) -> str:
     if not isinstance(row, dict):
         return ""
     if row.get("role") == "tool":
         tool = row.get("tool") if isinstance(row.get("tool"), dict) else {}
-        return "tool:" + str(
+        tid = str(
             row.get("tool_call_id")
             or tool.get("id")
             or tool.get("tid")
@@ -5629,6 +5708,19 @@ def _anchor_scene_row_key(row) -> str:
             or row.get("row_id")
             or ""
         )
+        # #7653 re-gate round 14 (10-19 review, item 3): scope the key by the
+        # OWNING ASSISTANT MESSAGE, not the tid alone. Two occurrences of a
+        # reused id (the reviewer's ``echo FIRST`` then ``exit 3`` on one
+        # ``call_0``) own DIFFERENT assistant rows, so a tid-only key merged
+        # the second occurrence into the first card and the verdict upgrade
+        # then marked the kept row failed. A row that names no owner keeps
+        # the bare tid key, so legacy rows and genuine duplicates (the same
+        # occurrence seen twice, same owner) still collapse exactly as
+        # before.
+        owner = _anchor_scene_row_owner_index(row)
+        if owner is not None:
+            return "tool:" + tid + "@" + str(owner)
+        return "tool:" + tid
     if row.get("role") in ("prose", "thinking"):
         durable_identity = _anchor_scene_row_durable_identity(row)
         if durable_identity:
@@ -5940,9 +6032,12 @@ def _complete_hydrated_anchor_scene(messages, scene, message_index, *, message_o
         ):
             return
         key = _anchor_scene_row_key(row)
-        if key and key in seen:
+        merge_index = seen.get(key) if key else None
+        if merge_index is None and key and key.startswith("tool:"):
+            merge_index = _anchor_scene_row_tid_fallback_index(key, seen)
+        if key and merge_index is not None:
             if key.startswith("tool:"):
-                index = seen[key]
+                index = merge_index
                 rows[index] = merge_duplicate_tool_row(
                     rows[index],
                     row,

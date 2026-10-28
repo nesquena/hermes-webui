@@ -21663,7 +21663,10 @@ function renderMessages(options){
     // explicit id/occurrence matches across ALL candidates FIRST, then run
     // the name fallback over what is left (the helper holds the two
     // sub-passes and the verdict-eligibility rule).
-    const _reservedLive=_reserveLiveToolMetadataForCandidates(_fallbackCandidates, liveMetadataByTid, usedLiveToolMetadata);
+    // typeof guard: node harnesses extract renderMessages() without its helpers (#6717).
+    const _reservedLive=(typeof _reserveLiveToolMetadataForCandidates==='function')
+      ?_reserveLiveToolMetadataForCandidates(_fallbackCandidates, liveMetadataByTid, usedLiveToolMetadata)
+      :new Map();
     for(const c of _fallbackCandidates){
       derived.push(copyLiveToolMetadata(c.next, c.name, c.tid, _reservedLive.get(c)||null));
     }

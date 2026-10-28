@@ -7166,12 +7166,7 @@ function attachLiveStream(activeSid, streamId, uploaded=[], options={}){
           });
           if(!hasMessageToolMetadata&&d.session.tool_calls&&d.session.tool_calls.length){
             S.toolCalls=d.session.tool_calls.map(tc=>tc);
-            // #7653 re-gate round 14 (10-19 review, item 2): rebuild the
-            // persisted verdict map from THIS settlement's summary before the
-            // merge — the done path used to keep the map from the last load,
-            // so a reused id's stale verdict (a flat true, or a scoped entry
-            // from the reload window) kept painting the new successful
-            // occurrence red after `done`.
+            // #7653 r14 (item 2): rebuild the verdict map from THIS settlement before the merge — the stale reload map repainted reused ids red after `done`.
             if(typeof _buildSettledToolIsErrorMap==='function'){
               S._settledToolIsErrorByTid=_buildSettledToolIsErrorMap(d.session.tool_calls);
             }

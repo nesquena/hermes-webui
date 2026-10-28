@@ -4262,40 +4262,6 @@ function _messageReloadLimitForSession(sid){
   return _INITIAL_MSG_LIMIT;
 }
 
-// #7653 re-gate round 14 (10-19 review, item 2): the shared verdict-map
-// builder. Every verdict is scoped to a VERIFIED owning assistant message
-// index — no flat entries, singletons included. A flat ``true`` cannot
-// distinguish two occurrences of a reused id, so a singleton failure painted
-// a later successful reuse red (reload-then-reuse) and an older successful
-// page red (prepend). An entry whose owner cannot be proven writes NOTHING:
-// the render paths fail closed (a row without a verdict renders from its own
-// data). Called from _syncToolCallsForLoadedMessages (every load) and from
-// the done / recovery paths in static/messages.js (a settlement that arrives
-// without a full load must rebuild the map too — the reviewer's case A, where
-// the stale reload map kept painting the new successful occurrence red).
-function _buildSettledToolIsErrorMap(sessionToolCalls){
-  const map=Object.create(null);
-  if(!Array.isArray(sessionToolCalls)) return map;
-  for(const tc of sessionToolCalls){
-    if(!tc||typeof tc!=='object') continue;
-    if(tc.is_error!==true) continue;
-    const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
-    if(!tid) continue;
-    const raw=tc.assistant_msg_idx;
-    const owner=(raw!=null&&raw!==''&&Number.isFinite(Number(raw)))?Number(raw):null;
-    if(owner==null) continue; // unprovable owner: no verdict (fail closed)
-    const existing=map[tid];
-    if(!existing||typeof existing!=='object'){
-      map[tid]={assistant_msg_idx:owner,is_error:true};
-    }else{
-      if(!existing.occurrences) existing.occurrences={};
-      existing.occurrences[owner]=true;
-      existing.is_error=true;
-    }
-  }
-  return map;
-}
-
 function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, ownerOffset, mergePrevMap){
   const msgs=Array.isArray(messages)?messages:[];
   // #7653 re-gate round 12 (finding 1, SILENT): the server already rebases
@@ -4394,6 +4360,41 @@ function _syncToolCallsForLoadedMessages(messages, sessionToolCalls, sessionId, 
     S.toolCalls=[];
   }
 }
+
+// #7653 re-gate round 14 (10-19 review, item 2): the shared verdict-map
+// builder. Every verdict is scoped to a VERIFIED owning assistant message
+// index — no flat entries, singletons included. A flat ``true`` cannot
+// distinguish two occurrences of a reused id, so a singleton failure painted
+// a later successful reuse red (reload-then-reuse) and an older successful
+// page red (prepend). An entry whose owner cannot be proven writes NOTHING:
+// the render paths fail closed (a row without a verdict renders from its own
+// data). Called from _syncToolCallsForLoadedMessages (every load) and from
+// the done / recovery paths in static/messages.js (a settlement that arrives
+// without a full load must rebuild the map too — the reviewer's case A, where
+// the stale reload map kept painting the new successful occurrence red).
+function _buildSettledToolIsErrorMap(sessionToolCalls){
+  const map=Object.create(null);
+  if(!Array.isArray(sessionToolCalls)) return map;
+  for(const tc of sessionToolCalls){
+    if(!tc||typeof tc!=='object') continue;
+    if(tc.is_error!==true) continue;
+    const tid=tc.tid||tc.id||tc.tool_call_id||tc.call_id||'';
+    if(!tid) continue;
+    const raw=tc.assistant_msg_idx;
+    const owner=(raw!=null&&raw!==''&&Number.isFinite(Number(raw)))?Number(raw):null;
+    if(owner==null) continue; // unprovable owner: no verdict (fail closed)
+    const existing=map[tid];
+    if(!existing||typeof existing!=='object'){
+      map[tid]={assistant_msg_idx:owner,is_error:true};
+    }else{
+      if(!existing.occurrences) existing.occurrences={};
+      existing.occurrences[owner]=true;
+      existing.is_error=true;
+    }
+  }
+  return map;
+}
+
 
 async function _ensureMessagesLoaded(sid, opts) {
   // `opts` is an explicit named parameter (vs loadSession's arguments[1]
