@@ -7014,6 +7014,7 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 }
 .insights-card{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:16px;}
 .wiki-status-card{margin-bottom:16px;}
+#llmWikiStatusCard{display:none;}
 .wiki-status-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:10px;}
 .wiki-status-sub{font-size:11px;color:var(--muted);margin-top:-4px;}
 .wiki-status-badge{display:inline-flex;align-items:center;border-radius:999px;padding:3px 8px;font-size:11px;font-weight:700;border:1px solid var(--border);color:var(--muted);background:var(--surface);}
@@ -7077,6 +7078,17 @@ main.main.showing-insights > #mainInsights{display:flex;overflow-y:auto;}
 .insights-token-value{font-weight:600;}
 
 /* ── Mobile layout for Token Breakdown + Models (issue #2104) ───────────── */
+.insights-traffic-section{display:flex;flex-direction:column;gap:12px;margin-bottom:16px;}
+.insights-traffic-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;}
+.insights-traffic-card{background:var(--surface-2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:0;}
+.insights-traffic-table{width:100%;font-size:12px;}
+.insights-traffic-table .insights-table-head{grid-template-columns:36px minmax(0,1.5fr) 60px;gap:6px;}
+.insights-traffic-table .insights-table-row{grid-template-columns:36px minmax(0,1.5fr) 60px;gap:6px;}
+.insights-address-cell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--text);}
+.insights-address-cell:hover{text-decoration:underline;text-decoration-style:dotted;}
+@media (max-width: 640px) {
+  .insights-traffic-row{grid-template-columns:1fr;}
+}
 @media (max-width: 640px) {
   .insights-usage-grid {
     grid-template-columns: 1fr;
