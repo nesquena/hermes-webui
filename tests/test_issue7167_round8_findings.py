@@ -53,14 +53,24 @@ def hermes_home(tmp_path, monkeypatch):
     return home
 
 
-def _marker(stream_id):
-    return {
-        "role": "assistant",
-        "content": "Response interrupted",
-        "_pending_journal_recovery": True,
-        "_journal_marker_stream_id": stream_id,
-        "_journal_retry_stream_id": stream_id,
-    }
+def _marker(stream_id, pending_started_at=None):
+    """Seed the armed marker through the production builder.
+
+    The real marker carries ``type='interrupted'`` and ``_error`` alongside
+    the retry-hook fields, so after a resolved pass strips the retry meta
+    (``_strip_journal_retry_meta``) the marker is STILL recognised by
+    ``_marker_reuse_index`` and a re-armed cycle reuses it instead of
+    stacking a second marker. The previous hand-written fake lacked both
+    fields and silently vanished from recognition after promotion (#7167
+    review 2026-10-27, should-fix).
+    """
+    from api.models import _build_recovery_marker_with_retry_hook
+
+    return _build_recovery_marker_with_retry_hook(
+        recovered_output=False,
+        stream_id=stream_id,
+        pending_started_at=pending_started_at,
+    )
 
 
 def _current_user_rows(session):
@@ -98,7 +108,7 @@ def test_repeated_prompt_with_attachment_survives_two_cold_cycles(hermes_home):
         messages=[
             {"role": "user", "content": "run the check", "timestamp": 100},
             {"role": "assistant", "content": "old answer", "timestamp": 200},
-            _marker(stream_id),
+            _marker(stream_id, started_at),
         ],
         pending_user_message="run the check",
         pending_started_at=started_at,
@@ -265,4 +275,49 @@ def test_identity_less_legacy_gate_keeps_text_fallback(hermes_home):
     user_rows = [m for m in session.messages if m.get("role") == "user"]
     assert len(user_rows) == 1, (
         "the historical same-text row is the only user row in the legacy shape"
+    )
+
+
+def test_malformed_pending_started_at_is_not_turn_identity(hermes_home):
+    """A hand-edited ``pending_started_at: 0`` is malformed authority, not
+    turn identity (#7167 review 2026-10-27, should-fix): the gate must fall
+    back to the legacy text-equality rule instead of demanding an ownership
+    no row can ever prove. Pre-fix, the 0 was honoured as identity, the
+    gate refused to suppress, and the repair appended the prompt AGAIN
+    after the marker with the answer below the notice.
+    """
+    sid = "r8_malformed_started_at"
+    stream_id = "stream-r8-malformed"
+    append_run_event(sid, stream_id, "token", {"text": "new answer"})
+
+    session = Session(
+        session_id=sid,
+        title="r8 malformed pending_started_at falls back to text gate",
+        messages=[
+            {"role": "user", "content": "run the check", "timestamp": 100},
+            {"role": "assistant", "content": "old answer", "timestamp": 200},
+            _marker(stream_id),
+        ],
+        pending_user_message="run the check",
+        pending_started_at=0,
+        pending_attachments=[],
+        pending_user_source="webui",
+        active_stream_id=stream_id,
+    )
+    session.save()
+
+    assert _apply_core_sync_or_error_marker(
+        session,
+        hermes_home / "sessions" / f"session_{sid}.json",
+        stream_id_for_recheck=stream_id,
+    ) is True
+
+    # The malformed 0 must not be treated as identity: the same-text row at
+    # or before the marker still proves the turn was already recovered
+    # there, so no duplicate same-text user row is materialized.
+    user_rows = [m for m in session.messages if m.get("role") == "user"]
+    assert len(user_rows) == 1, (
+        "pending_started_at=0 is malformed authority — the text-equality "
+        "gate must apply, got a duplicate prompt row: "
+        f"{[str(m.get('content'))[:24] for m in session.messages]!r}"
     )

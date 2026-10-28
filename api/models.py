@@ -4273,10 +4273,17 @@ def _append_journaled_partial_output(
     # each existing tool card counts once, so N identical journaled tool
     # events need N distinct persisted cards.
     consumed_tool_card_indexes: set[int] = set()
-    # Indexes into ``session.tool_calls`` that were REUSED (deduped) on this
-    # pass. A later ``tool_complete`` must complete them too, not only the
-    # cards freshly appended this pass.
-    reused_tool_cards: list[int] = []
+    # Tool cards this pass claimed, in JOURNAL START ORDER — reused (deduped)
+    # persisted cards AND freshly built cards alike, one per replayed ``tool``
+    # start event, appended as each start is replayed. A later
+    # ``tool_complete`` must complete reused cards too, not only the cards
+    # freshly appended this pass, and an id-less completion has no identity
+    # to match with, so the journal's start order is the only ordering signal
+    # it has. Pooling every reused card ahead of every fresh one regardless
+    # of start order let a later-started reused tool consume the earlier
+    # tool's completion (#7167 review 2026-10-27, SILENT: two same-name
+    # id-less tools swapped results after a cold reload).
+    journaled_tool_cards: list[dict] = []
 
     messages_list = session.messages or []
     current_turn_min_idx = 0
@@ -4842,7 +4849,7 @@ def _append_journaled_partial_output(
                 # result-less forever, because the completion handler only
                 # walked ``recovered_tool_calls``.
                 if isinstance(session.tool_calls, list) and 0 <= tool_match_idx < len(session.tool_calls):
-                    reused_tool_cards.append(tool_match_idx)
+                    journaled_tool_cards.append(session.tool_calls[tool_match_idx])
                 continue
             if anchor_idx is None:
                 anchor_idx = ensure_assistant_anchor(created_at)
@@ -4864,6 +4871,7 @@ def _append_journaled_partial_output(
             if _event_id:
                 _tool_card['_recovered_event_id'] = _event_id
             recovered_tool_calls.append(_tool_card)
+            journaled_tool_cards.append(_tool_card)
             appended_any = True
             output_accounted_for = True
             current_assistant_idx = anchor_idx
@@ -4877,15 +4885,14 @@ def _append_journaled_partial_output(
             completion_tool_id = str(
                 payload.get('tid') or payload.get('tool_call_id') or ''
             ).strip()
-            # Walk the pool in journal start order (reused cards first: they
-            # were started on an earlier pass), matching by tool id first.
-            if isinstance(session.tool_calls, list):
-                _pool = [
-                    session.tool_calls[_i] for _i in reused_tool_cards
-                    if 0 <= _i < len(session.tool_calls)
-                ] + list(recovered_tool_calls)
-            else:
-                _pool = list(recovered_tool_calls)
+            # Walk the pool in JOURNAL START ORDER — reused and freshly
+            # created cards interleaved exactly as the journal's ``tool``
+            # start events replayed — matching by exact tool id first. The
+            # journal's start order is the only ordering signal an id-less
+            # completion has: pooling every reused card ahead of every fresh
+            # one reversed a same-name pair and attached each tool's result
+            # to the other tool's card (#7167 review 2026-10-27, SILENT).
+            _pool = list(journaled_tool_cards)
             unfinished = [call for call in _pool if not call.get('done')]
             matched_tool = None
             if completion_tool_id:
@@ -6217,9 +6224,20 @@ def _pending_turn_marker_present(session, stream_id) -> bool:
     # attachments). An identity-less legacy dead-stream sidecar (neither
     # field persisted) keeps the pure-text fallback so old behaviour is
     # preserved.
+    # ``pending_started_at`` only counts as turn identity when it is a
+    # finite positive number: 0, a negative, NaN/inf or a string is
+    # malformed authority that no row can ever own, and honouring it would
+    # suppress the current prompt forever (#7167 review 2026-10-27,
+    # should-fix).
+    _pending_started = getattr(session, 'pending_started_at', None)
     has_turn_identity = (
         _current_turn_token(session) is not None
-        or getattr(session, 'pending_started_at', None) is not None
+        or (
+            isinstance(_pending_started, (int, float))
+            and not isinstance(_pending_started, bool)
+            and math.isfinite(_pending_started)
+            and _pending_started > 0
+        )
     )
     for message in (session.messages or [])[: marker_idx + 1]:
         if not isinstance(message, dict) or message.get('role') != 'user':
