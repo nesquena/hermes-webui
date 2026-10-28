@@ -58,9 +58,9 @@ def test_only_background_refreshes_defer_while_sidebar_is_interacting():
     gateway_poll_block = _block("function startGatewayPollFallback", "function stopGatewayPollFallback")
     gateway_sse_block = _block("function startGatewaySSE", "function stopGatewaySSE")
 
-    assert "renderSessionList({deferWhileInteracting:true})" in streaming_poll_block
-    assert "renderSessionList({deferWhileInteracting:true})" in gateway_poll_block
-    assert "renderSessionList({deferWhileInteracting:true}); // re-fetch and re-render" in gateway_sse_block
+    assert "_refreshSidebarForBackgroundChurn()" in streaming_poll_block
+    assert "_refreshSidebarForBackgroundChurn()" in gateway_poll_block
+    assert "_refreshSidebarForBackgroundChurn(); // re-fetch and re-render" in gateway_sse_block
     assert "pfToggle.onclick=()=>{_setShowAllProfiles(true);renderSessionList({deferWhileInteracting:false});};" in SESSIONS_JS
     assert "pfToggle.onclick=()=>{_setShowAllProfiles(false);renderSessionList({deferWhileInteracting:false});};" in SESSIONS_JS
 
@@ -70,7 +70,7 @@ def test_session_list_pointer_hover_and_scroll_activity_are_tracked():
     ensure_block = _block("function _ensureSessionVirtualScrollHandler", "function renderSessionListFromCache")
 
     assert "list.matches(':hover')" in interaction_block
-    assert "list.matches(':focus-within')" in interaction_block
+    assert "list.matches(':has(:focus-visible)')" in interaction_block
     assert "_sessionListLastScrollAt=Date.now();" in schedule_block
     for event_name in ["pointerdown", "pointerup", "pointercancel", "pointerleave"]:
         assert event_name in ensure_block
@@ -83,4 +83,4 @@ def test_virtual_scroll_skips_dom_rebuild_when_window_is_unchanged():
     assert "nextWindow.start===currentStart" in schedule_block
     assert "nextWindow.end===currentEnd" in schedule_block
     assert "return;" in schedule_block
-    assert "renderSessionListFromCache();" in schedule_block
+    assert "_repaintSidebarForBackgroundChurn();" in schedule_block

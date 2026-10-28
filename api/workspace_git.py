@@ -149,6 +149,11 @@ def _classify_git_error(message: str, args: list[str] | None = None) -> str:
         or "permission denied" in text
         or "could not read username" in text
         or "unable to get password from user" in text
+        # Git Credential Manager on Windows refuses to prompt when interaction is
+        # disabled (GCM_INTERACTIVE=never / credential.interactive=false): git then
+        # reports "Cannot prompt because user interactivity has been disabled."
+        # That is still an authentication failure, not a generic git failure.
+        or "cannot prompt because user interactivity has been disabled" in text
     ):
         return "auth_failed"
     if "no upstream" in text or "no configured push destination" in text or "has no upstream branch" in text:
@@ -187,6 +192,11 @@ def _run_git(
 ) -> subprocess.CompletedProcess[str]:
     cwd = ctx_or_cwd.repo_root if isinstance(ctx_or_cwd, GitContext) else ctx_or_cwd
     run_env = _clean_git_env(env)
+    if args and args[0] == "status":
+        # Status is a read. Without this, Git may take .git/index.lock to
+        # refresh the index, and a status killed at its timeout can leave
+        # that lock behind and block the user's next commit (#8520).
+        run_env["GIT_OPTIONAL_LOCKS"] = "0"
     if repository_git_proxy_blocks(args, cwd, run_env):
         raise GitWorkspaceError(
             "Repository-configured core.gitProxy is not allowed for git:// remotes",
