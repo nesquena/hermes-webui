@@ -6788,6 +6788,38 @@ async function promptWorkspacePath(){
   }
 }
 
+// #8514 (review): one place decides what a workspace transition does to the open
+// preview, and it answers with unsaved TEXT rather than with what is on screen.
+// `_previewDirty` is deliberately false for a closed panel, so gating a
+// transition on it let a hidden edit cross into another workspace, where the
+// session's next Save resolved its relative path against the new tree and wrote
+// A's text into B's same-named file.
+//   - different workspace + unsaved text  → ask, and honour Cancel before the
+//     session workspace is mutated or a new chat is created;
+//   - different workspace + clean editor  → drop the editor silently (it belongs
+//     to the tree we are leaving, so it must not stay savable);
+//   - same workspace (in-place refresh / directory navigation) → leave the
+//     preview alone: loadDir() preserves its hidden edits, nothing to warn about.
+async function _settlePreviewForWorkspaceSwitch(targetWs){
+  const cur=(S.session&&S.session.workspace)||'';
+  const target=targetWs||cur;
+  if(!cur||!target||String(target)===String(cur)) return true;
+  if(typeof _previewNeedsDiscardPrompt==='function'&&_previewNeedsDiscardPrompt()){
+    const discard=await showConfirmDialog({
+      title:t('discard_file_edits_title'),
+      message:t('discard_file_edits_message'),
+      confirmLabel:t('discard'),
+      danger:true
+    });
+    if(!discard) return false;
+  }
+  if(typeof _previewBelongsToWorkspace==='function'&&!_previewBelongsToWorkspace(target)){
+    if(typeof cancelEditMode==='function')cancelEditMode();
+    if(typeof clearPreview==='function')clearPreview({keepPanelOpen:true});
+  }
+  return true;
+}
+
 async function switchToWorkspace(path,name){
   // Opus review Q6: if called from blank page, auto-create a session bound to
   // the requested workspace so the switch doesn't silently no-op.
@@ -6819,17 +6851,8 @@ async function switchToWorkspace(path,name){
     S.session && S.session.workspace && path && path!==S.session.workspace &&
     Array.isArray(S.messages) && S.messages.length>0
   ){
-    if(typeof _previewDirty!=='undefined'&&_previewDirty){
-      const discard=await showConfirmDialog({
-        title:t('discard_file_edits_title'),
-        message:t('discard_file_edits_message'),
-        confirmLabel:t('discard'),
-        danger:true
-      });
-      if(!discard)return;
-      if(typeof cancelEditMode==='function')cancelEditMode();
-      if(typeof clearPreview==='function')clearPreview();
-    }
+    if(typeof _settlePreviewForWorkspaceSwitch==='function'
+       && !(await _settlePreviewForWorkspaceSwitch(path))) return;
     closeWsDropdown();
     // Bind the new chat to the selected workspace via the one-shot flag newSession() reads.
     S._profileSwitchWorkspace=path;
@@ -6842,17 +6865,8 @@ async function switchToWorkspace(path,name){
     showToast(t('workspace_switched_new_chat',name||getWorkspaceFriendlyName(path)));
     return;
   }
-  if(typeof _previewDirty!=='undefined'&&_previewDirty){
-    const discard=await showConfirmDialog({
-      title:t('discard_file_edits_title'),
-      message:t('discard_file_edits_message'),
-      confirmLabel:t('discard'),
-      danger:true
-    });
-    if(!discard)return;
-    if(typeof cancelEditMode==='function')cancelEditMode();
-    if(typeof clearPreview==='function')clearPreview();
-  }
+  if(typeof _settlePreviewForWorkspaceSwitch==='function'
+     && !(await _settlePreviewForWorkspaceSwitch(path))) return;
   const composerDd=(typeof $==='function')?$('composerWsDropdown'):null;
   const restoreComposerFocusTarget=(composerDd&&composerDd.classList.contains('open')&&typeof _getComposerWorkspaceFocusTarget==='function')
     ? _getComposerWorkspaceFocusTarget()
