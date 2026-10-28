@@ -11381,10 +11381,13 @@ function _steerDisplayParts(content){
 function _steerRowInnerHtml(text, files, footHtml, sid){
   let filesHtml='';
   if(files&&files.length){
-    filesHtml=`<div class="msg-files">${files.map(p=>{
-      const fname=String(p).split('/').pop()||String(p);
+    filesHtml=`<div class="msg-files">${files.map(file=>{
+      const path=typeof file==='string'?file:String((file&&file.path)||'');
+      if(!path)return '';
+      const fname=path.split('/').pop()||path;
+      const label=typeof file==='string'?fname:String(file.name||fname);
       const fileUrl='api/file/raw?session_id='+encodeURIComponent(sid||'')+'&path='+encodeURIComponent(fname);
-      return _renderAttachmentHtml(fname,fileUrl);
+      return _renderAttachmentHtml(label,fileUrl);
     }).join('')}</div>`;
   }
   const label=`<div class="steer-row-label">${li('arrow-right',12)}<span>${esc(t('steer_row_label'))}</span></div>`;

@@ -41,8 +41,8 @@ def test_request_owned_destinations_survive_sanitization_collision_partial_and_r
       const assert = require('node:assert/strict');
       let uploadedCalls = 0;
       let uploads = [
-        {path:'/s/report_1.pdf'},  // 'report.pdf' collided on disk
-        {path:'/s/unsafe_name.txt'}, // '../unsafe name.txt' was sanitized
+        {path:'/s/report_1.pdf',name:'Original report'},  // 'report.pdf' collided on disk
+        {path:'/s/unsafe_name.txt',name:'Sanitized upload'}, // '../unsafe name.txt' was sanitized
       ];
       const staged = [{name:'report.pdf',size:1},{name:'../unsafe name.txt',size:2}];
       const t = x=>x;
@@ -62,21 +62,24 @@ def test_request_owned_destinations_survive_sanitization_collision_partial_and_r
       (async()=>{
         let live = null;
         const enriched = await _steerTextWithPendingFiles('choose B','sid',staged,p=>{live=p;});
-        assert.deepEqual(live,['/s/report_1.pdf','/s/unsafe_name.txt']);
+        assert.deepEqual(live,[{path:'/s/report_1.pdf',name:'Original report'},
+                               {path:'/s/unsafe_name.txt',name:'Sanitized upload'}]);
         assert.match(enriched,/report_1.pdf, \/s\/unsafe_name.txt/);
         const html = _steerRowInnerHtml('choose B',live,'','sid');
         assert.match(html,/path=report_1.pdf/);
         assert.match(html,/path=unsafe_name.txt/);
-        assert.doesNotMatch(html,/path=report.pdf|path=unsafe%20name.txt/);
+        assert.match(html,/>Original report<|>Sanitized upload</);
+        assert.doesNotMatch(html,/path=Original|path=Sanitized|path=report.pdf|path=unsafe%20name.txt/);
         const retry = await _steerTextWithPendingFiles('choose B','sid',staged,p=>{live=p;});
         assert.equal(retry,enriched);
         assert.equal(uploadedCalls,1,'retry must use the same upload destinations');
-        assert.deepEqual(live,['/s/report_1.pdf','/s/unsafe_name.txt']);
+        assert.deepEqual(live,[{path:'/s/report_1.pdf',name:'Original report'},
+                               {path:'/s/unsafe_name.txt',name:'Sanitized upload'}]);
 
         _steerUploadCache=null;
         uploads=[{path:'/s/report_2.pdf'},{name:'unsafe name.txt'}]; // partial upload: a pathless result cannot supply a link
         const partial = await _steerTextWithPendingFiles('choose B','sid',staged,p=>{live=p;});
-        assert.deepEqual(live,['/s/report_2.pdf']);
+        assert.deepEqual(live,[{path:'/s/report_2.pdf',name:'report_2.pdf'}]);
         assert.doesNotMatch(partial,/unsafe_name/);
         assert.doesNotMatch(_steerRowInnerHtml('choose B',live,'','sid'),/unsafe_name/);
         _steerUploadCache=null;
