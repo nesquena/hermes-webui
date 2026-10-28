@@ -668,7 +668,6 @@ class TestTokenlessRegenerationStaysOrdinary:
         from api import goals
         from api.config import PENDING_GOAL_CONTINUATION_RECORDS
 
-        store = clean_registry
         sid = "sess-r14-regen-control"
         cont_id = goals.register_pending_goal_continuation(sid, PROMPT)
         session = _make_session(sid, tmp_path)
