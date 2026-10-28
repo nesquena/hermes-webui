@@ -117,6 +117,25 @@ def test_prefix_fingerprint_refuses_a_nondestructive_earlier_row_edit():
     )
 
 
+def test_prefix_fingerprint_digests_lone_surrogate_rows():
+    """2026-10-28 CI re-gate: a crashed stream can persist a lone surrogate
+    (half a pair split mid-token — see tests/test_recovered_surrogate_http.py).
+    The strict utf-8 encode in the digest raised UnicodeEncodeError, so every
+    GET /api/session on such a session answered 500. The digest must stay total
+    over any persisted content: it encodes with surrogatepass, stays
+    deterministic, and still discriminates content.
+    """
+    rows = _make_rows(50)
+    rows[10]["content"] = "prefix\ud83d"  # lone high surrogate
+    rows[11]["content"] = "prefix\udc00"  # lone low surrogate
+    fp = _display_prefix_fingerprint(rows, 50)
+    assert fp and fp == _display_prefix_fingerprint(rows, 50)  # deterministic
+    assert fp != _display_prefix_fingerprint(rows, 49)  # still discriminates
+    edited = [dict(r) for r in rows]
+    edited[10]["content"] = "prefix\ude42"
+    assert _display_prefix_fingerprint(edited, 50) != fp
+
+
 def test_append_fast_path_anchor_validates_generation_fingerprint_and_range():
     rows = _make_rows(2001)
     projected = _public_message_projection(rows[1999], _enabled=True)

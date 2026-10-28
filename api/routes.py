@@ -10776,7 +10776,10 @@ def _display_prefix_fingerprint(messages, count) -> str:
                 ensure_ascii=False,
                 separators=(",", ":"),
                 default=str,
-            ).encode("utf-8")
+            # surrogatepass: a crashed stream can persist a lone surrogate
+            # (half a pair split mid-token); strict utf-8 refuses to encode it
+            # and the digest must stay total over any persisted content.
+            ).encode("utf-8", "surrogatepass")
         )
         digest.update(b"\x1f")
     return digest.hexdigest()
