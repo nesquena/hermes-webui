@@ -95,6 +95,17 @@ class _FakePluginManager:
             raise RuntimeError("simulated find_plugin_skill failure")
         return self._find_paths.get(qualified_name)
 
+    def list_plugin_skills(self, plugin_name):
+        """Mirror the real PluginManager: sorted bare names registered by
+        *plugin_name* (the bare-content fallback calls this as its namespace
+        existence check)."""
+        prefix = f"{plugin_name}:"
+        return sorted(
+            name[len(prefix):]
+            for name in self._find_paths
+            if name.startswith(prefix)
+        )
+
 
 def _write_local_skill(skills_dir: Path, *, name, description="local desc") -> Path:
     skill_dir = skills_dir / name
@@ -365,9 +376,16 @@ class TestPluginSkillContentLookup:
 
 
 class TestListPluginSkillsForResponse:
-    def _call(self, manager):
+    def _call(self, manager, disabled=None):
         import api.routes as routes
-        return routes._list_plugin_skills_for_response(manager=manager)
+        # Isolate the disabled-set lookup from the machine's real profile
+        # config: the entry shape under test must not depend on whatever
+        # ~/.hermes/config.yaml happens to disable.
+        with patch(
+            "api.routes._get_disabled_skill_names_for_profile",
+            return_value=set(disabled or ()),
+        ):
+            return routes._list_plugin_skills_for_response(manager=manager)
 
     def test_returns_qualified_entries_with_namespace_and_source_marker(self):
         manager = _FakePluginManager(skills=[
@@ -599,3 +617,339 @@ class TestPluginSkillsSurfaceWhenLocalDirMissing:
         # Backward-compat: dir is created even when no plugin manager is
         # reachable, so a fresh host can still drop skills in via the UI.
         assert nonexistent_dir.exists()
+
+
+# ── Round-3 review findings (PR #7781 re-gate) ─────────────────────────────
+
+
+class _HomeRecordingPluginManager(_FakePluginManager):
+    """Fake manager that records the agent-side Hermes home visible at each
+    call, so a test can prove the request's active home was bound around
+    the plugin-manager calls (finding 1) and restored afterwards."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.seen_homes: list = []
+
+    def _record(self):
+        from hermes_constants import get_hermes_home
+
+        self.seen_homes.append(Path(get_hermes_home()))
+
+    def discover_and_load(self, force: bool = False) -> None:
+        self._record()
+        super().discover_and_load(force)
+
+    def list_plugin_skill_metadata(self):
+        self._record()
+        return super().list_plugin_skill_metadata()
+
+    def find_plugin_skill(self, qualified_name):
+        self._record()
+        return super().find_plugin_skill(qualified_name)
+
+    def list_plugin_skills(self, plugin_name):
+        self._record()
+        return super().list_plugin_skills(plugin_name)
+
+
+class TestPluginManagerProfileHomeBinding:
+    """Finding 1 (CORE): ``get_plugin_manager()`` keys its manager by the
+    agent-side Hermes home, not by the WebUI's thread-local active profile.
+    Every plugin-manager call in the request path must run inside the
+    request's active-home context, or one WebUI process serving several
+    profiles leaks profile A's plugin skills into profile B's responses.
+    """
+
+    def test_listing_binds_request_active_home_around_manager_calls(self, tmp_path):
+        from hermes_constants import get_hermes_home, set_hermes_home_override
+
+        import api.routes as routes
+
+        profile_a_home = (tmp_path / "profile-a").resolve()
+        profile_b_home = (tmp_path / "profile-b").resolve()
+        profile_a_home.mkdir()
+        profile_b_home.mkdir()
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        _write_local_skill(skills_dir, name="local-alpha")
+        manager = _HomeRecordingPluginManager(
+            skills=[{"name": "demo:skill", "description": "profile-B plugin skill"}],
+        )
+        captured = {}
+
+        def fake_j(handler, payload, status=200, extra_headers=None):
+            captured["payload"] = payload
+            captured["status"] = status
+            return True
+
+        handler = MagicMock()
+        # The ambient agent-side home is profile A (e.g. a previous request
+        # or agent turn on another profile); the request's active WebUI
+        # profile is B. Capture the ambient value first so the post-request
+        # assertion proves the override was RESET (not left dangling).
+        ambient_before = Path(get_hermes_home())
+        token = set_hermes_home_override(profile_a_home)
+        try:
+            with patch("api.routes.j", side_effect=fake_j), \
+                 patch("api.routes._active_skills_dir", return_value=skills_dir), \
+                 patch("api.routes._active_skill_search_dirs", return_value=[skills_dir]), \
+                 patch("api.routes._get_plugin_manager_for_visibility", return_value=manager), \
+                 patch("api.profiles.get_active_hermes_home", return_value=str(profile_b_home)):
+                handled = routes.handle_get(handler, urlparse("/api/skills"))
+        finally:
+            from hermes_constants import reset_hermes_home_override
+
+            reset_hermes_home_override(token)
+        assert handled is True
+        assert captured.get("status") == 200
+        names = sorted(s["name"] for s in captured["payload"]["skills"])
+        assert names == ["demo:skill", "local-alpha"], names
+        # Both manager calls (discover + list) saw profile B's home, not
+        # the ambient profile A home.
+        assert manager.seen_homes, manager.seen_homes
+        assert all(h == profile_b_home for h in manager.seen_homes), manager.seen_homes
+        # The override is reset after the request so the ambient home (and
+        # any later request on another profile) is unaffected.
+        assert Path(get_hermes_home()) == ambient_before
+
+    def test_file_content_lookup_binds_request_active_home(self, tmp_path):
+        from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+        import api.routes as routes
+
+        profile_a_home = (tmp_path / "profile-a").resolve()
+        profile_b_home = (tmp_path / "profile-b").resolve()
+        profile_a_home.mkdir()
+        profile_b_home.mkdir()
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        skill_md = _write_plugin_skill(tmp_path, qualified_name="demo:skill")
+        (skill_md.parent / "extra.md").write_text("linked", encoding="utf-8")
+        manager = _HomeRecordingPluginManager(find_paths={"demo:skill": skill_md})
+        captured = {}
+
+        def fake_j(handler, payload, status=200, extra_headers=None):
+            captured["payload"] = payload
+            captured["status"] = status
+            return True
+
+        def fake_bad(handler, msg, status):
+            captured["payload"] = {"error": msg}
+            captured["status"] = status
+            return True
+
+        handler = MagicMock()
+        ambient_before = Path(get_hermes_home())
+        token = set_hermes_home_override(profile_a_home)
+        try:
+            with patch("api.routes.j", side_effect=fake_j), \
+                 patch("api.routes.bad", side_effect=fake_bad), \
+                 patch("api.routes._get_plugin_manager_for_visibility", return_value=manager), \
+                 patch("api.routes._active_skills_dir", return_value=skills_dir), \
+                 patch("api.routes._active_skill_search_dirs", return_value=[skills_dir]), \
+                 patch("api.profiles.get_active_hermes_home", return_value=str(profile_b_home)):
+                handled = routes.handle_get(
+                    handler,
+                    urlparse("/api/skills/content?name=demo:skill&file=extra.md"),
+                )
+        finally:
+            reset_hermes_home_override(token)
+        assert handled is True
+        assert captured.get("status") == 200, captured
+        assert captured["payload"]["content"] == "linked"
+        assert manager.seen_homes == [profile_b_home], manager.seen_homes
+        assert Path(get_hermes_home()) == ambient_before
+
+    def test_bare_content_lookup_binds_request_active_home(self, tmp_path):
+        from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+        import api.routes as routes
+
+        profile_a_home = (tmp_path / "profile-a").resolve()
+        profile_b_home = (tmp_path / "profile-b").resolve()
+        profile_a_home.mkdir()
+        profile_b_home.mkdir()
+        skills_dir = tmp_path / "skills"
+        skills_dir.mkdir()
+        skill_md = _write_plugin_skill(tmp_path, qualified_name="demo:skill")
+        manager = _HomeRecordingPluginManager(find_paths={"demo:skill": skill_md})
+        captured = {}
+
+        def fake_j(handler, payload, status=200, extra_headers=None):
+            captured["payload"] = payload
+            captured["status"] = status
+            return True
+
+        handler = MagicMock()
+        ambient_before = Path(get_hermes_home())
+        token = set_hermes_home_override(profile_a_home)
+        try:
+            with patch("api.routes.j", side_effect=fake_j), \
+                 patch("api.routes._active_skills_dir", return_value=skills_dir), \
+                 patch("api.routes._active_skill_search_dirs", return_value=[skills_dir]), \
+                 patch("api.routes._find_skill_in_dirs", return_value=(None, None)), \
+                 patch("hermes_cli.plugins.discover_plugins"), \
+                 patch("hermes_cli.plugins.get_plugin_manager", return_value=manager), \
+                 patch("tools.skills_tool.skill_view",
+                       return_value='{"success": true, "content": "demo skill body"}'), \
+                 patch("api.profiles.get_active_hermes_home", return_value=str(profile_b_home)):
+                handled = routes.handle_get(
+                    handler, urlparse("/api/skills/content?name=demo:skill")
+                )
+        finally:
+            reset_hermes_home_override(token)
+        assert handled is True
+        assert captured.get("status") == 200, captured
+        assert captured["payload"].get("content") == "demo skill body", captured
+        # The bare-content fallback resolves the plugin skill through the
+        # manager (find) and the namespace check (list_plugin_skills) —
+        # both must see profile B's home, and the agent's own skill_view
+        # call runs inside the same binding.
+        assert manager.seen_homes, manager.seen_homes
+        assert all(h == profile_b_home for h in manager.seen_homes), manager.seen_homes
+        assert Path(get_hermes_home()) == ambient_before
+
+
+class TestPluginSkillDisabledAndPlatformFilters:
+    """Finding 4 (SILENT): disabled and platform-incompatible plugin skills
+    came back as enabled. The agent's own listing (tools/skills_tool.py
+    ``skills_list``) omits platform-incompatible rows and marks disabled
+    ones from the active profile's set; /api/skills must mirror that."""
+
+    @pytest.fixture
+    def skills_dir(self, tmp_path):
+        d = tmp_path / "skills"
+        d.mkdir()
+        return d
+
+    def _capture_listing(self, skills_dir, *, manager, category=None, disabled=()):
+        import api.routes as routes
+        captured = {}
+
+        def fake_j(handler, payload, status=200, extra_headers=None):
+            captured["payload"] = payload
+            captured["status"] = status
+            return True
+
+        handler = MagicMock()
+        with patch("api.routes.j", side_effect=fake_j), \
+             patch("api.routes._active_skills_dir", return_value=skills_dir), \
+             patch("api.routes._active_skill_search_dirs", return_value=[skills_dir]), \
+             patch("api.routes._get_plugin_manager_for_visibility", return_value=manager), \
+             patch("api.routes._get_disabled_skill_names_for_profile",
+                   return_value=set(disabled)):
+            qs = f"?category={category}" if category else ""
+            handled = routes.handle_get(handler, urlparse(f"/api/skills{qs}"))
+        assert handled is True
+        assert captured.get("status") == 200
+        return captured.get("payload", {})
+
+    def test_platform_incompatible_rows_are_omitted(self, skills_dir):
+        # A skill restricted to a foreign OS must not be listed at all —
+        # the agent never offers it either.
+        import sys
+
+        foreign_os = "linux" if sys.platform != "linux" else "win32"
+        manager = _FakePluginManager(skills=[
+            {"name": "demo:foreign", "description": "other OS",
+             "frontmatter": {"platforms": [foreign_os]}},
+            {"name": "demo:any", "description": "all platforms"},
+        ])
+        payload = self._capture_listing(skills_dir, manager=manager)
+        names = [s["name"] for s in payload["skills"]]
+        assert "demo:foreign" not in names, names
+        assert "demo:any" in names, names
+
+    def test_disabled_rows_are_marked_from_active_profile_set(self, skills_dir):
+        manager = _FakePluginManager(skills=[
+            {"name": "demo:on", "description": "enabled"},
+            {"name": "demo:off", "description": "disabled in active profile"},
+        ])
+        payload = self._capture_listing(
+            skills_dir, manager=manager, disabled={"demo:off"}
+        )
+        by_name = {s["name"]: s for s in payload["skills"]}
+        assert by_name["demo:on"]["disabled"] is False, by_name
+        assert by_name["demo:off"]["disabled"] is True, by_name
+
+    def test_helper_marks_disabled_and_skips_incompatible(self):
+        import sys
+
+        foreign_os = "linux" if sys.platform != "linux" else "win32"
+        manager = _FakePluginManager(skills=[
+            {"name": "demo:on", "description": "enabled"},
+            {"name": "demo:off", "description": "disabled"},
+            {"name": "demo:foreign", "description": "other OS",
+             "frontmatter": {"platforms": [foreign_os]}},
+        ])
+        entries = TestListPluginSkillsForResponse()._call(
+            manager, disabled={"demo:off"}
+        )
+        by_name = {e["name"]: e for e in entries}
+        assert set(by_name) == {"demo:on", "demo:off"}, by_name
+        assert by_name["demo:on"]["disabled"] is False
+        assert by_name["demo:off"]["disabled"] is True
+
+
+class TestCategoryPluginBucketReservedForPluginManager:
+    """Greptile finding (P2): plugin entries share the ``plugin`` category
+    value a directory skill can acquire from a top-level ``plugin/``
+    directory, so ``?category=plugin`` must discriminate on the source
+    marker — otherwise the plugin-only bucket mixes directory skills in."""
+
+    @pytest.fixture
+    def skills_dir(self, tmp_path):
+        d = tmp_path / "skills"
+        d.mkdir()
+        return d
+
+    def _capture_listing(self, skills_dir, *, manager, category=None):
+        import api.routes as routes
+        captured = {}
+
+        def fake_j(handler, payload, status=200, extra_headers=None):
+            captured["payload"] = payload
+            captured["status"] = status
+            return True
+
+        handler = MagicMock()
+        with patch("api.routes.j", side_effect=fake_j), \
+             patch("api.routes._active_skills_dir", return_value=skills_dir), \
+             patch("api.routes._active_skill_search_dirs", return_value=[skills_dir]), \
+             patch("api.routes._get_plugin_manager_for_visibility", return_value=manager):
+            qs = f"?category={category}" if category else ""
+            handled = routes.handle_get(handler, urlparse(f"/api/skills{qs}"))
+        assert handled is True
+        assert captured.get("status") == 200
+        return captured.get("payload", {})
+
+    def test_category_plugin_excludes_directory_skills_in_plugin_dir(self, skills_dir):
+        # A directory skill at <skills>/plugin/<name>/SKILL.md> carries
+        # category "plugin" from its path; it must not land in the
+        # plugin-manager bucket.
+        dir_skill = skills_dir / "plugin" / "dir-skill"
+        dir_skill.mkdir(parents=True)
+        (dir_skill / "SKILL.md").write_text(
+            "---\nname: dir-skill\ndescription: directory skill in plugin/ category\n---\n\nbody\n",
+            encoding="utf-8",
+        )
+        manager = _FakePluginManager(
+            skills=[{"name": "demo:real", "description": "plugin-manager skill"}],
+        )
+        payload = self._capture_listing(skills_dir, manager=manager, category="plugin")
+        names = [s["name"] for s in payload["skills"]]
+        assert names == ["demo:real"], names
+        # The unfiltered listing still shows both — only the bucket filter
+        # discriminates.
+        payload_all = self._capture_listing(skills_dir, manager=manager)
+        assert sorted(s["name"] for s in payload_all["skills"]) == [
+            "demo:real", "dir-skill"
+        ], payload_all
+
+    def test_non_plugin_category_still_excludes_plugin_entries(self, skills_dir):
+        manager = _FakePluginManager(
+            skills=[{"name": "demo:real", "description": "plugin-manager skill"}],
+        )
+        payload = self._capture_listing(skills_dir, manager=manager, category="user")
+        assert payload["skills"] == [], payload

@@ -31,7 +31,7 @@ import http.client
 import socket as _socket
 from collections import defaultdict, deque, OrderedDict
 from pathlib import Path
-from contextlib import closing
+from contextlib import closing, contextmanager
 from urllib.parse import parse_qs, quote, unquote, urljoin, urlsplit
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, HTTPSHandler, ProxyHandler, Request, build_opener
@@ -1435,7 +1435,22 @@ def _skills_list_from_dir(skills_dir: Path, category: str | None = None) -> dict
         all_skills.append(plugin_entry)
 
     if category:
-        all_skills = [s for s in all_skills if s.get("category") == category]
+        if category == "plugin":
+            # The plugin bucket is reserved for plugin-manager entries. A
+            # directory skill can also carry category "plugin" (a top-level
+            # plugin/ directory, or a /api/skills/save with that category),
+            # and the source marker is the only reliable discriminator —
+            # without it ?category=plugin mixes directory skills into the
+            # plugin-only result and the bucket is unreliable (#7781
+            # greptile review). Non-plugin categories keep the plain filter:
+            # plugin entries always carry category=="plugin" and are
+            # excluded by every other value.
+            all_skills = [
+                s for s in all_skills
+                if s.get("source") == "plugin" and s.get("category") == category
+            ]
+        else:
+            all_skills = [s for s in all_skills if s.get("category") == category]
     all_skills = sort_skills(all_skills)
     categories = sorted(set(s.get("category") for s in all_skills if s.get("category")))
     result = {
@@ -1621,11 +1636,17 @@ def _skill_view_from_active_dir(name: str) -> dict:
 
                 namespace, _bare = parse_qualified_name(name)
                 if is_valid_namespace(namespace):
-                    discover_plugins()
-                    pm = get_plugin_manager()
-                    if pm.find_plugin_skill(name) is not None or pm.list_plugin_skills(namespace):
-                        raw = _skill_view(name)
-                        return json.loads(raw) if isinstance(raw, str) else raw
+                    # Bind the request's active Hermes home so the manager
+                    # (and the agent's own skill_view, which reads the same
+                    # registry) resolves THIS profile's plugin skills
+                    # instead of whichever profile the agent side last
+                    # touched (PR #7781 review, finding 1).
+                    with _plugin_manager_home_context():
+                        discover_plugins()
+                        pm = get_plugin_manager()
+                        if pm.find_plugin_skill(name) is not None or pm.list_plugin_skills(namespace):
+                            raw = _skill_view(name)
+                            return json.loads(raw) if isinstance(raw, str) else raw
             except Exception:
                 pass
         return _skill_not_found_payload(name, skills_dir)
@@ -15273,6 +15294,51 @@ def _get_plugin_manager_for_visibility():
     return get_plugin_manager()
 
 
+@contextmanager
+def _plugin_manager_home_context():
+    """Bind the request's active Hermes home around plugin-manager calls.
+
+    ``hermes_cli.plugins.get_plugin_manager()`` keys its manager by the
+    agent-side Hermes home (``hermes_constants.get_hermes_home()``), NOT by
+    the WebUI's thread-local active profile. One WebUI process serves
+    several profiles, so without this binding a GET for profile B resolves
+    whichever profile's manager the agent side last touched and leaks
+    profile A's plugin skills into profile B's listing (PR #7781 review,
+    finding 1). Binding the request's active home around discovery,
+    listing, and both content-lookup paths — the same pattern
+    ``api/profiles.py`` uses for its profile-scoped agent calls — scopes
+    the manager to the requesting profile and restores the previous home
+    afterwards, so a later request on another profile is unaffected.
+
+    Fail-soft by design: when the agent modules are unavailable (isolated
+    WebUI) the context yields without binding and callers proceed with
+    their existing best-effort handling.
+    """
+    try:
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
+        )
+    except Exception:
+        yield None
+        return
+    try:
+        from api.profiles import get_active_hermes_home
+
+        home = Path(get_active_hermes_home()).expanduser().resolve()
+        token = set_hermes_home_override(home)
+    except Exception:
+        yield None
+        return
+    try:
+        yield home
+    finally:
+        try:
+            reset_hermes_home_override(token)
+        except Exception:
+            pass
+
+
 def _list_plugin_skills_for_response(manager=None) -> list:
     """Return plugin-registered skills formatted for the WebUI skill listing.
 
@@ -15282,6 +15348,17 @@ def _list_plugin_skills_for_response(manager=None) -> list:
     path. The qualified ``name`` (``plugin_namespace:skill``) is preserved so
     the slash-command autocomplete can round-trip it losslessly (#7770).
 
+    The manager calls run inside ``_plugin_manager_home_context()`` so the
+    registry resolved — and therefore the skills listed — belongs to the
+    requesting profile's Hermes home, not whichever profile the agent side
+    last touched (PR #7781 review, finding 1).
+
+    The disabled/platform filters mirror the agent's own plugin-skill
+    listing (``tools/skills_tool.py: skills_list``): a row whose
+    ``platforms:`` frontmatter excludes the current OS is omitted, and
+    ``disabled`` reflects the ACTIVE PROFILE's disabled set instead of a
+    hardcoded ``False`` (PR #7781 review, finding 4).
+
     Isolated WebUI deployments (no Hermes Agent import path) MUST NOT crash;
     every failure path returns an empty list and lets the directory-based
     listing proceed unchanged. The same fail-soft posture as
@@ -15290,33 +15367,31 @@ def _list_plugin_skills_for_response(manager=None) -> list:
     """
     try:
         from agent.skill_utils import is_valid_namespace, parse_qualified_name
+        from tools.skills_tool import skill_matches_platform
     except Exception:
         return []
     try:
-        pm = manager if manager is not None else _get_plugin_manager_for_visibility()
-    except Exception:
-        return []
-    # Mirror ``_plugin_visibility_payload`` at api/routes.py:12885: a fresh
-    # WebUI process that has not yet driven an agent turn (or opened the
-    # Settings → Plugins tab) sits on an empty ``_plugin_skills`` registry
-    # because the agent's contract only populates it during discovery. The
-    # visibility panel therefore explicitly calls
-    # ``manager.discover_and_load(force=False)`` before reading the registry.
-    # /api/skills must do the same so a cold-start tab does not silently drop
-    # plugin-registered skills (e.g. obra/superpowers) from both the listing
-    # AND the slash-command autocomplete (#7770). The call is best-effort: a
-    # discovery failure must not 500 /api/skills — the same fail-soft posture
-    # the rest of this helper already enforces.
-    try:
-        pm.discover_and_load(force=False)
-    except Exception:
-        pass
-    try:
-        entries = pm.list_plugin_skill_metadata() or []
+        with _plugin_manager_home_context():
+            pm = manager if manager is not None else _get_plugin_manager_for_visibility()
+            # Mirror ``_plugin_visibility_payload``: a fresh WebUI process
+            # that has not yet driven an agent turn (or opened the Settings
+            # → Plugins tab) sits on an empty ``_plugin_skills`` registry
+            # because the agent's contract only populates it during
+            # discovery, so explicitly discover before reading it. The call
+            # is best-effort: a discovery failure must not 500 /api/skills.
+            try:
+                pm.discover_and_load(force=False)
+            except Exception:
+                pass
+            try:
+                entries = pm.list_plugin_skill_metadata() or []
+            except Exception:
+                return []
     except Exception:
         return []
     if not isinstance(entries, list):
         return []
+    disabled = _get_disabled_skill_names_for_profile()
     out: list = []
     for entry in entries:
         if not isinstance(entry, dict):
@@ -15332,6 +15407,15 @@ def _list_plugin_skills_for_response(manager=None) -> list:
         namespace, bare = parse_qualified_name(raw_name)
         if not is_valid_namespace(namespace) or not bare:
             continue
+        frontmatter = entry.get("frontmatter")
+        if not isinstance(frontmatter, dict):
+            frontmatter = {}
+        # Mirror the agent's own plugin-skill listing: a platform-incompatible
+        # row is omitted entirely (the agent never offers it), and a disabled
+        # row is MARKED — not omitted — so the Skills panel can render the
+        # toggle state the same way it does for directory skills.
+        if not skill_matches_platform(frontmatter):
+            continue
         out.append(
             {
                 "name": raw_name,
@@ -15339,7 +15423,7 @@ def _list_plugin_skills_for_response(manager=None) -> list:
                 "category": "plugin",
                 "plugin": namespace,
                 "source": "plugin",
-                "disabled": False,
+                "disabled": raw_name in disabled,
             }
         )
     return out
@@ -17646,10 +17730,13 @@ def handle_get(handler, parsed) -> bool:
                 # Plugin-registered skills live outside the local skills
                 # tree but expose the same SKILL.md / references / templates
                 # layout, so resolve the parent directory through the plugin
-                # manager before giving up (#7770).
+                # manager before giving up (#7770). The lookup runs inside
+                # the request's active-Hermes-home context so the manager
+                # resolved is this profile's (PR #7781 review, finding 1).
                 try:
-                    pm = _get_plugin_manager_for_visibility()
-                    plugin_path = pm.find_plugin_skill(name)
+                    with _plugin_manager_home_context():
+                        pm = _get_plugin_manager_for_visibility()
+                        plugin_path = pm.find_plugin_skill(name)
                 except Exception:
                     plugin_path = None
                 if plugin_path is not None:
@@ -34164,7 +34251,22 @@ def _handle_skill_toggle(handler, body):
     search_dirs = _active_skill_search_dirs(skills_dir)
     skill_dir, skill_md = _find_skill_in_dirs(name, search_dirs)
     if not skill_md:
-        return bad(handler, f"Skill '{name}' not found", 404)
+        # Plugin-registered skills live outside the local skills tree, so
+        # the directory scan misses them and the toggle used to 404 on a
+        # plugin row (PR #7781 review, finding 3). Accept them for the
+        # ACTIVE PROFILE: the toggle writes the qualified name into that
+        # profile's disabled set, which the agent's own listing honors, so
+        # the panel row and the agent stay in sync. The lookup runs inside
+        # the request's active-Hermes-home context so the manager resolved
+        # belongs to this profile.
+        try:
+            with _plugin_manager_home_context():
+                pm = _get_plugin_manager_for_visibility()
+                plugin_path = pm.find_plugin_skill(name)
+        except Exception:
+            plugin_path = None
+        if plugin_path is None:
+            return bad(handler, f"Skill '{name}' not found", 404)
 
     config_path = _active_profile_config_path()
     with _cfg_lock:

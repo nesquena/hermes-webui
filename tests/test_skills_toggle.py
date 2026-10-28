@@ -237,3 +237,81 @@ def test_toggle_preserves_json_array_string_entries(tmp_path, monkeypatch):
     _handle_skill_toggle(handler, {"name": "skill-a", "enabled": True})
     cfg_after2 = _load_yaml_config_file(config_path)
     assert cfg_after2["skills"]["disabled"] == ["skill-b", "skill-c"]
+
+
+class _FakePluginSkillManager:
+    """Minimal plugin-manager double for the toggle's plugin fallback.
+
+    Only the surface ``_handle_skill_toggle`` touches is implemented:
+    ``find_plugin_skill(qualified_name)`` returning the SKILL.md path or None.
+    """
+
+    def __init__(self, find_paths=None):
+        self._find_paths = dict(find_paths or {})
+
+    def find_plugin_skill(self, qualified_name):
+        return self._find_paths.get(qualified_name)
+
+
+def test_toggle_accepts_plugin_registered_skill(tmp_path, monkeypatch):
+    """PR #7781 review finding 3 (CORE): the Skills-panel toggle on a plugin
+    row used to 404 because the route only accepted directory skills.
+    Plugin-registered skills must be accepted for the active profile so the
+    toggle writes the qualified name into that profile's disabled set (which
+    the agent's own listing honors) instead of failing."""
+    from unittest.mock import MagicMock
+    from api.routes import _handle_skill_toggle
+    from api.config import _load_yaml_config_file
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("skills:\n  disabled: []\n", encoding="utf-8")
+
+    # The directory scan misses the qualified name — plugin skills live
+    # outside the local skills tree.
+    monkeypatch.setattr("api.routes._find_skill_in_dirs", lambda name, dirs: (None, None))
+    plugin_md = tmp_path / "plugin-skills" / "demo" / "skill" / "SKILL.md"
+    plugin_md.parent.mkdir(parents=True, exist_ok=True)
+    plugin_md.write_text("---\nname: demo:skill\n---\nPlugin body", encoding="utf-8")
+    monkeypatch.setattr(
+        "api.routes._get_plugin_manager_for_visibility",
+        lambda: _FakePluginSkillManager({"demo:skill": plugin_md}),
+    )
+
+    handler = MagicMock()
+    _handle_skill_toggle(handler, {"name": "demo:skill", "enabled": False})
+    cfg_after = _load_yaml_config_file(config_path)
+    assert "demo:skill" in cfg_after["skills"]["disabled"]
+
+    # And back on: the round-trip must remove exactly the qualified name.
+    _handle_skill_toggle(handler, {"name": "demo:skill", "enabled": True})
+    cfg_after2 = _load_yaml_config_file(config_path)
+    assert "demo:skill" not in cfg_after2["skills"]["disabled"]
+
+
+def test_toggle_still_404s_for_unknown_plugin_skill(tmp_path, monkeypatch):
+    """Control: a name that is neither a directory skill nor a registered
+    plugin skill must still 404 — the plugin fallback must not turn the
+    toggle into a write-anything endpoint."""
+    from unittest.mock import MagicMock
+    from api.routes import _handle_skill_toggle, bad
+
+    config_path = tmp_path / "config.yaml"
+    monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
+    monkeypatch.setattr("api.routes._find_skill_in_dirs", lambda name, dirs: (None, None))
+    monkeypatch.setattr(
+        "api.routes._get_plugin_manager_for_visibility",
+        lambda: _FakePluginSkillManager({}),
+    )
+    captured = {}
+
+    def fake_bad(handler, msg, status):
+        captured["msg"] = msg
+        captured["status"] = status
+        return True
+
+    monkeypatch.setattr("api.routes.bad", fake_bad)
+    handler = MagicMock()
+    _handle_skill_toggle(handler, {"name": "demo:nope", "enabled": False})
+    assert captured["status"] == 404, captured
