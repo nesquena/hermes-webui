@@ -2447,7 +2447,17 @@ async function newSession(flash, options={}){
     }else if(window._defaultModel){
       // Configured default wins over stale picker/persisted state even with no
       // loaded session (deleting the last session left S.session null + stale picker) (#4728).
-      newModelState={model:window._defaultModel,model_provider:null};
+      // #8527: keep the configured PAIR — populateModelDropdown hydrates
+      // _activeProvider and _defaultModel together from the /api/models payload
+      // (and panels.js refreshes the provider on config saves), so the
+      // configured default's own provider must travel with its model. Dropping
+      // it left a slash-qualified default (e.g. anthropic/claude-sonnet-5.5
+      // served by a named provider sharing the openrouter endpoint) with no
+      // provider on the wire — the fallback below only covers unqualified
+      // models — so the server fell back to the built-in route and the turn
+      // was billed to the shared key. Sharing an endpoint is not sharing
+      // provider identity or credentials.
+      newModelState={model:window._defaultModel,model_provider:window._activeProvider||null};
       usingConfiguredDefault=true;
     }else if(modelSelForNew&&modelSelForNew.value&&typeof _modelStateForSelect==='function'){
       newModelState=_modelStateForSelect(modelSelForNew,modelSelForNew.value);
