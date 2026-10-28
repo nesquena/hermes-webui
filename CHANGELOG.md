@@ -13,6 +13,8 @@
 
 ### Performance
 
+- **Opening a session reads the model catalog from disk once instead of twice.** The freshness check on a session visit parsed the whole models cache to read its build time, and the loader then parsed the same file again. The visit now parses it once and hands that copy to the loader; an invalidation, an atomic rewrite or a second concurrent reader always gets a fresh parse instead of a stale or shared copy. On a 5,000-model catalog that is one fewer ~675 KB JSON parse per session open. (#8302 by @MuhammadUsamaMX, follow-up to #7932, closes #7723)
+
 - **Profile skill counts no longer re-walk the skill tree on every request.** On a large skill library the per-profile skill stats probe stat()-ed every file on each `/api/profiles` call (about 17 ms per call at 200 skills). The counts are now served from cache for a short window and refreshed in the background, with one refresh per profile at a time. Saving, deleting or toggling a skill invalidates them at once, including while a refresh is running, so a change is never overwritten by an older count. Thanks @RajPabnani03. (#7940)
 
 - **Fork a scheduled-job (cron) conversation into your own editable chat.** Cron-run sessions are read-only (the scheduler owns them), so you couldn't continue one. You can now branch/fork a cron session into a new WebUI-owned conversation — the original read-only session is never modified, and the fork picks up its history so you can carry on. Only genuine cron sessions qualify (verified by the server-side source, not a guessable id), and every other read-only session stays unbranchable. Thanks @rodboev. (#5555, #5477)
