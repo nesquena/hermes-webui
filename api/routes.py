@@ -30319,10 +30319,6 @@ def _handle_chat_sync(handler, body):
                 # must persist the compacted list, not the old history.
                 compression_authorized=_compression_authorized,
             )
-            s.context_messages = _deduplicate_context_messages(
-                _next_context_messages,
-                protected_rows=_proven_rows,
-            )
         else:
             # The Agent produced NO rows for this turn. The previous fallback
             # (``result.get("messages") or _previous_context_messages``) left
@@ -30336,15 +30332,32 @@ def _handle_chat_sync(handler, body):
             # keeping exactly one raw-history copy with no loss or
             # duplication.
             _next_context_messages = list(_previous_context_messages)
-        if _active_turn_identity.get("token"):
-            _next_context_messages = _settle_current_turn_boundary(
-                _previous_context_messages,
+            _proven_rows = None
+        # #6310 residual (nesquena-hermes 2026-10-27): the identity dedup is
+        # the FINAL persistence step here, exactly like the streaming settle
+        # (``api/streaming.py``) applies it. This block used to compute the
+        # dedup and then be overwritten by the raw ``_next_context_messages``
+        # below, so a previous context carrying a duplicate pair (same-id
+        # replay pollution or id-less legacy rows) persisted the duplicate
+        # into the model-facing context while the display merge collapsed it
+        # — the model was sent rows the transcript had already reconciled
+        # away. One retained ownership set, one dedup site, then settle.
+        s.context_messages = (
+            _deduplicate_context_messages(
                 _next_context_messages,
+                protected_rows=_proven_rows,
+            )
+            if result.get("messages")
+            else list(_next_context_messages)
+        )
+        if _active_turn_identity.get("token"):
+            s.context_messages = _settle_current_turn_boundary(
+                _previous_context_messages,
+                s.context_messages,
                 _active_turn_identity,
                 msg,
                 getattr(s, "pending_user_source", None) or "webui",
             )
-        s.context_messages = _next_context_messages
         s.messages = _merge_display_messages_after_agent_result(
             _previous_messages,
             _previous_context_messages,
