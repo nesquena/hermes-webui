@@ -3978,11 +3978,13 @@ def _reset_turn_session_identity(tokens) -> None:
 #
 # The mirror therefore tracks a publisher stack:
 #   * the ambient value is captured when the FIRST publisher arrives;
-#   * every exit re-publishes the most recent REMAINING publisher, so the
-#     slot always names a LIVE turn;
-#   * when the most recent remaining publisher resolved no profile (or none
-#     remains), the slot falls back to the captured ambient value — absent
-#     stays absent, an inherited value is never masked or deleted;
+#   * every exit re-publishes the most recent REMAINING publisher that
+#     resolved a profile, so the slot always names a LIVE turn — a
+#     profile-less owner in between (e.g. a background-worker scope whose
+#     .env sets no HERMES_SESSION_PROFILE) cannot hide it;
+#   * when no remaining publisher resolved a profile (or none remains), the
+#     slot falls back to the captured ambient value — absent stays absent,
+#     an inherited value is never masked or deleted;
 #   * only the LAST exit leaves the ambient value in place for good.
 # Two invariants fall out: after every turn finishes the fallback is exactly
 # the ambient value again, and a completed turn's profile is never what a
@@ -4051,13 +4053,21 @@ def _release_turn_session_profile(token) -> None:
                 break
         else:
             return  # unknown token: not ours to restore
-        if _PROFILE_MIRROR_PUBLISHERS and _PROFILE_MIRROR_PUBLISHERS[-1][1] is not None:
-            # A concurrent turn is still running: re-publish the most recent
-            # REMAINING owner's value — never a completed turn's.
-            os.environ[_PROFILE_MIRROR_KEY] = _PROFILE_MIRROR_PUBLISHERS[-1][1]
+        for _remaining_token, remaining_profile in reversed(
+            _PROFILE_MIRROR_PUBLISHERS
+        ):
+            if remaining_profile is not None:
+                # A concurrent turn is still running: re-publish the most
+                # recent REMAINING owner that resolved a profile — never a
+                # completed turn's. Profile-less owners in between (a
+                # background-worker scope whose profile's .env sets no
+                # HERMES_SESSION_PROFILE) register as None and must not hide
+                # the live turn's value from context-less readers.
+                os.environ[_PROFILE_MIRROR_KEY] = remaining_profile
+                break
         else:
-            # Either the last publisher left, or the most recent remaining
-            # one resolved no profile: fall back to the ambient value exactly
+            # Either the last publisher left, or no remaining publisher
+            # resolved a profile: fall back to the ambient value exactly
             # as it was before any turn touched it — absent stays absent, and
             # an inherited value is never masked (a profile-less turn must
             # not delete it either).

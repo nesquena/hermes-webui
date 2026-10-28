@@ -1267,6 +1267,57 @@ def test_profile_mirror_unknown_token_is_a_no_op(monkeypatch):
     assert os.environ[key] == "inherited-ambient"
 
 
+def test_profile_mirror_profile_less_worker_scope_never_hides_a_live_turn(monkeypatch):
+    """A profile-less background-worker scope must not mask a live turn.
+
+    Review round 4 (2026-10-27): every ``profile_env_for_background_worker``
+    scope for a non-default profile registers on the mirror as ``None`` when
+    that profile's ``.env`` sets no ``HERMES_SESSION_PROFILE`` (the common
+    case). The A/B/C sequence below used to empty the slot after C's exit,
+    because the release looked only at the TOP of the stack (the profile-less
+    worker B) and fell back to the ambient. Turn A was still live, so
+    context-less threads and pre-ContextVar Agents read the gap. The release
+    now re-publishes the most recent REMAINING publisher that resolved a
+    profile — the installed Agent injects the ContextVars into child envs,
+    but the process slot itself must also keep naming a live turn.
+    """
+    streaming = _streaming()
+    key = "HERMES_SESSION_PROFILE"
+
+    for ambient in (None, "inherited-ambient"):
+        monkeypatch.delenv(key, raising=False)
+        if ambient is not None:
+            os.environ[key] = ambient
+
+        # A: a turn under a named profile publishes its profile.
+        token_a = streaming._publish_turn_session_profile("work")
+        assert os.environ[key] == "work"
+        # B: a background-worker scope whose profile's .env sets no
+        # HERMES_SESSION_PROFILE registers on the mirror exactly like this.
+        token_b = streaming._publish_turn_session_profile(None)
+        assert os.environ[key] == "work"
+        # C: another named-profile turn publishes on top.
+        token_c = streaming._publish_turn_session_profile("play2")
+        assert os.environ[key] == "play2"
+        # C exits while A and B are still live: the slot must name A — the
+        # most recent REMAINING publisher with a profile — not fall back to
+        # the ambient because the profile-less worker B sits on top.
+        streaming._release_turn_session_profile(token_c)
+        assert os.environ[key] == "work", (
+            f"ambient={ambient!r}: turn C's exit left the slot "
+            f"{os.environ[key]!r} while turn A was still live — a "
+            "profile-less worker scope must not hide a live turn's profile"
+        )
+        # The worker leaves, then A: the ambient returns for good.
+        streaming._release_turn_session_profile(token_b)
+        assert os.environ[key] == "work"
+        streaming._release_turn_session_profile(token_a)
+        assert os.environ.get(key) == ambient, (
+            f"ambient={ambient!r}: the mirror must restore the ambient value "
+            f"once every publisher has left, got {os.environ.get(key)!r}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Real .env loader → worker → cleanup: a profile .env's HERMES_SESSION_PROFILE
 # is TURN-LOCAL. It must never become the mirror's ambient, and it must never
@@ -1549,7 +1600,7 @@ def test_background_title_worker_overlap_never_leaks_the_turns_profile(
     """
     from types import SimpleNamespace
 
-    sc = _session_context(monkeypatch)
+    _session_context(monkeypatch)
     monkeypatch.delenv("HERMES_SESSION_PROFILE", raising=False)
 
     from api import profiles as profiles_api
