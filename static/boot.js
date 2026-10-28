@@ -415,6 +415,10 @@ function _setWorkspacePanelMode(mode, returnFocusTo){
   }else{
     panel.classList.remove('mobile-open');
   }
+  // Closing the panel leaves the preview (and its editor) mounted, so the
+  // derived dirty state must be recomputed: a hidden editor is not unsaved work
+  // the user can be asked about (#8514).
+  if(typeof _syncPreviewDirty==='function') _syncPreviewDirty();
   syncWorkspacePanelUI();
 }
 
@@ -652,7 +656,7 @@ function _isPwaStandalone(){
 }
 
 function _isInteractiveSwipeTarget(target){
-  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel'));}
+  try{return !!(target&&target.closest&&target.closest('input,textarea,select,button,a,[contenteditable="true"],.topbar-chips,.composer-left,.sidebar,.rightpanel,.img-lightbox'));}
   catch(_){return false;}
 }
 
@@ -1100,7 +1104,44 @@ function _micToastKeyForRecognitionError(error){
 
   // Persist SR failure across reloads (e.g. Tailscale/network error)
   const _micForceMediaRecorderKey='mic_force_mediarecorder';
-  const _micForceMediaRecorderStored=localStorage.getItem(_micForceMediaRecorderKey);
+  const _micForceMediaRecorderExpiryKey='mic_force_mediarecorder_expires';
+  const _MIC_FORCE_MR_TTL_MS=24*60*60*1000;
+  // A persisted SR failure auto-expires after 24h: a transient outage (or a
+  // browser update that fixes SR) should not pin this device to MediaRecorder
+  // forever.
+  function _getMicForceMediaRecorderStored(){
+    try{
+      const exp=localStorage.getItem(_micForceMediaRecorderExpiryKey);
+      const stored=localStorage.getItem(_micForceMediaRecorderKey);
+      if(exp){
+        const expMs=parseInt(exp,10);
+        // A garbled expiry counts as expired too: a value that never parses
+        // would otherwise pin this device forever.
+        if(!Number.isFinite(expMs)||Date.now()>expMs){
+          localStorage.removeItem(_micForceMediaRecorderKey);
+          localStorage.removeItem(_micForceMediaRecorderExpiryKey);
+          return null;
+        }
+      }else if(stored==='0'||stored==='1'){
+        // Values saved before the expiry key existed would otherwise pin this
+        // device forever. Start the 24h window on the first read after upgrade.
+        // A full or read-only store must not discard the readable preference.
+        try{
+          localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+        }catch(_){}
+      }
+      return stored;
+    }catch(_){
+      return null;
+    }
+  }
+  function _setMicForceMediaRecorder(value){
+    try{
+      localStorage.setItem(_micForceMediaRecorderKey,String(value));
+      localStorage.setItem(_micForceMediaRecorderExpiryKey,String(Date.now()+_MIC_FORCE_MR_TTL_MS));
+    }catch(_){}
+  }
+  const _micForceMediaRecorderStored=_getMicForceMediaRecorderStored();
   // Prefer Hermes server-side STT (MediaRecorder -> /api/transcribe) only
   // after the server confirms an STT provider is available. No stored key must
   // keep browser SpeechRecognition as the first-click default until then; that
@@ -1264,7 +1305,7 @@ function _micToastKeyForRecognitionError(error){
   }
 
   function _allowBrowserSttFallback(){
-    return !!(SpeechRecognition&&localStorage.getItem(_micForceMediaRecorderKey)!=='1');
+    return !!(SpeechRecognition&&_getMicForceMediaRecorderStored()!=='1');
   }
 
   async function _transcribeBlob(blob, prefixSnapshot){
@@ -1286,7 +1327,7 @@ function _micToastKeyForRecognitionError(error){
     }catch(err){
       if(_isServerSttUnavailable(err)&&_allowBrowserSttFallback()){
         window._micPendingSend=false;
-        localStorage.setItem(_micForceMediaRecorderKey,'0');
+        _setMicForceMediaRecorder('0');
         _forceMediaRecorder=false;
         recognition=_ensureSpeechRecognition();
         showToast(err.message||t('mic_network'));
@@ -1490,7 +1531,7 @@ function _micToastKeyForRecognitionError(error){
       if(event.error==='network'||event.error==='not-allowed'
           ||event.error==='service-not-allowed'||event.error==='audio-capture'){
         // Persist SR failure: next reload will skip SpeechRecognition
-        localStorage.setItem(_micForceMediaRecorderKey,'1');
+        _setMicForceMediaRecorder('1');
         _forceMediaRecorder=true;
         recognition=null;
       }
@@ -1530,7 +1571,7 @@ function _micToastKeyForRecognitionError(error){
   // persisted '0' is respected and not re-flipped.
   function _applyDeferredServerSttFlip(){
     if(_serverSttAvailable&&!_forceMediaRecorder&&!window._micActive
-        &&localStorage.getItem(_micForceMediaRecorderKey)===null){
+        &&_getMicForceMediaRecorderStored()===null){
       _forceMediaRecorder=true;
       recognition=null;
     }
@@ -2771,7 +2812,10 @@ function clearPreview(opts={}){
   const pc=$('previewCode');if(pc)pc.textContent='';
   const pp=$('previewPathText');if(pp)pp.textContent='';
   const ft=$('fileTree');if(ft)ft.style.display='';
-  _previewCurrentPath='';_previewCurrentMode='';_previewDirty=false;
+  _previewCurrentPath='';_previewCurrentMode='';
+  // Reset the editor baseline as well, so a later preview cannot inherit a
+  // stale "unsaved" comparison from the file that was just closed (#8514).
+  if(typeof _resetPreviewDirty==='function') _resetPreviewDirty(); else _previewDirty=false;
   if(typeof _previewOpenGen==='number') _previewOpenGen++;
   // #6710: retire any in-flight preview open (guarded so harnesses that extract
   // this function alone keep working).
@@ -2836,6 +2880,7 @@ $('modelSelect').onchange=async()=>{
   }
   if(!S.session){
     if(typeof _rememberEmptyComposerModelOverride==='function') _rememberEmptyComposerModelOverride(modelState.model,modelState.model_provider);
+    if(typeof _syncProviderQuotaForActiveContext==='function') _syncProviderQuotaForActiveContext();
     if(typeof syncModelChip==='function') syncModelChip();
     if(typeof syncReasoningChip==='function') syncReasoningChip();
     return;
@@ -4430,7 +4475,11 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   // re-run when the browser restores the page from bfcache.
   const _srch = document.getElementById('sessionSearch'); if (_srch) _srch.value = '';
   if (typeof syncSessionSearchClear === 'function') syncSessionSearchClear();
-  if(typeof refreshProviderQuotaIndicator==='function') refreshProviderQuotaIndicator();
+  const _syncQuotaForBootContext=()=>{
+    if(typeof _syncProviderQuotaForActiveContext==='function'){
+      _syncProviderQuotaForActiveContext();
+    }
+  };
   const urlSession=(typeof _sessionIdFromLocation==='function')?_sessionIdFromLocation():null;
   const pwaLaunchAction=(window.HermesPWA&&typeof window.HermesPWA.launchAction==='function')
     ? window.HermesPWA.launchAction()
@@ -4501,6 +4550,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           try{localStorage.removeItem('hermes-webui-session');}catch(_){}
         }
         S.session=null; S.messages=[]; S.activeStreamId=null; S.busy=false;
+        _syncQuotaForBootContext();
         S._bootReady=true;
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
@@ -4515,6 +4565,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+        _syncQuotaForBootContext();
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -4554,6 +4605,9 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
         : [];
       const _restoredHasDraft = !!(_restoredDraftText || _restoredDraftFiles.length);
       if(S.session && (S.session.message_count||0) === 0 && !_restoredInFlight && !_restoredHasDraft){
+        if(typeof _rememberEmptyComposerModelOverride==='function'){
+          _rememberEmptyComposerModelOverride(S.session.model, S.session.model_provider);
+        }
         S.session=null; S.messages=[];
         S._bootReady=true;
         // Restore panel pref before syncing so the workspace panel stays visible
@@ -4562,6 +4616,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
           || localStorage.getItem('hermes-webui-workspace-panel')==='open';
         if(_ephPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
         await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+        _syncQuotaForBootContext();
         syncTopbar();syncWorkspacePanelState();
         $('emptyState').style.display='';
         await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);if(typeof startGatewaySSE==='function')startGatewaySSE();
@@ -4593,6 +4648,7 @@ window._mirrorSpeechSettingsFromServer=_mirrorSpeechSettingsFromServer;
   if(_freshPanelPref&&!_isCompactWorkspaceViewport()) _workspacePanelMode='browse';
   // A route-only 404 can leave another saved session available for the next boot.
   if(!localStorage.getItem('hermes-webui-session')) await _maybeBindFreshDefaultWorkspaceSession(prefillIntent);
+  _syncQuotaForBootContext();
   syncWorkspacePanelState();
   $('emptyState').style.display='';
   await renderSessionList();await _finalizeComposerPrefillOnBoot(prefillIntent);

@@ -128,10 +128,31 @@ import tempfile as _tempfile
 _TEST_STATE_ROOT = pathlib.Path(
     os.getenv('HERMES_WEBUI_TEST_STATE_ROOT', _tempfile.gettempdir())
 ) / 'hermes-webui-tests'
-TEST_STATE_DIR = pathlib.Path(os.getenv(
-    'HERMES_WEBUI_TEST_STATE_DIR',
-    str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT, TEST_PORT))
-)).resolve()
+# ``os.getenv(name, default)`` returns "" (not the default) when the variable is
+# exported but empty, and ``Path("").resolve()`` is the CURRENT DIRECTORY — so a
+# bare ``HERMES_WEBUI_TEST_STATE_DIR=`` pointed the test state dir at the checkout
+# and teardown rmtree'd the repo. Treat an empty (or whitespace-only) value as
+# unset; a non-blank value is used exactly as given (a directory name may end in
+# a space, and stripping it would select, then clean, the parent directory).
+_TEST_STATE_DIR_RAW = os.getenv('HERMES_WEBUI_TEST_STATE_DIR') or ''
+TEST_STATE_DIR = pathlib.Path(
+    _TEST_STATE_DIR_RAW if _TEST_STATE_DIR_RAW.strip()
+    else str(_TEST_STATE_ROOT / _auto_state_dir_name(REPO_ROOT, TEST_PORT))
+).resolve()
+
+# Belt and braces for an explicit value: never let the session fixture (which
+# rmtrees the state dir at setup and teardown) delete the checkout, anything
+# above it, or anything inside it (``tests``, ``static``, a relative path).
+if (TEST_STATE_DIR == REPO_ROOT
+        or TEST_STATE_DIR in REPO_ROOT.parents
+        or REPO_ROOT in TEST_STATE_DIR.parents):
+    raise RuntimeError(
+        f"REFUSING TO RUN: test state dir {TEST_STATE_DIR} is the repo checkout "
+        f"({REPO_ROOT}), one of its parents, or a directory inside it, so the "
+        f"state-dir cleanup would delete repository files. Unset "
+        f"HERMES_WEBUI_TEST_STATE_DIR (defaults to a temp dir) or point it "
+        f"outside the checkout."
+    )
 
 # Production-proximity guard: refuse to run if the resolved test state dir lands
 # inside the REAL Hermes home tree — a misconfigured HERMES_WEBUI_TEST_STATE_DIR
@@ -642,9 +663,13 @@ os.execv = _pytest_session_safe_execv
 #
 # This module-level monkey-patch wraps socket.create_connection so any
 # non-loopback / non-RFC1918 / non-link-local / non-TEST-NET destination
-# raises OSError("hermes test network isolation").  Tests that deliberately
-# attempt outbound (only test_dns_resolution_failure today) opt back in
-# explicitly via the `allow_outbound_network` fixture below.
+# raises OSError("hermes test network isolation"). It also wraps
+# socket.getaddrinfo: DNS is network, and an unbounded lookup on a slow CI
+# resolver is as harmful as a connect. Only IP literals and localhost resolve;
+# every other name fails at once with socket.gaierror, the way an unresolvable
+# name does. Only the isolation tests themselves (test_conftest_network_isolation.py,
+# test_conftest_dns_isolation.py) opt back in, via the `allow_outbound_network`
+# fixture below; everything else mocks the network.
 #
 # Allowed destinations (silent pass-through):
 #   - 127.0.0.0/8     loopback
@@ -658,12 +683,16 @@ os.execv = _pytest_session_safe_execv
 #   - 203.0.113.0/24  RFC5737 TEST-NET-3 (used as documentation IPs in tests)
 #   - hostnames `localhost`, `*.local`, `*.test`, `*.example`, `*.example.com`
 #     `*.example.net`, `*.example.org`, `*.invalid` (RFC2606/6761 reserved)
+#     at the connect layer. Under the DNS guard only `localhost` and
+#     `*.localhost` (and IP literals) resolve: a test that connects to one of
+#     the other reserved names must stub socket.getaddrinfo itself.
 #
 # A test that opts in via the `allow_outbound_network` fixture sees the real
-# socket.create_connection.
+# socket.create_connection, socket.socket.connect and socket.getaddrinfo.
 import socket as _hermes_test_socket
 _REAL_CREATE_CONNECTION = _hermes_test_socket.create_connection
 _REAL_SOCKET_CONNECT = _hermes_test_socket.socket.connect
+_REAL_GETADDRINFO = _hermes_test_socket.getaddrinfo
 
 
 def _hermes_addr_is_local(host: str) -> bool:
@@ -741,26 +770,66 @@ def _hermes_blocked_socket_connect(self, address):
     )
 
 
+def _hermes_dns_free_host(host) -> bool:
+    """True when getaddrinfo() can answer without a DNS query: no host, an IP literal or localhost."""
+    if host is None:
+        return True
+    if isinstance(host, (bytes, bytearray)):
+        host = bytes(host).decode("ascii", "ignore")
+    h = str(host).strip().strip("[]").lower()
+    if not h or h == "localhost" or h.endswith(".localhost"):
+        return True
+    import ipaddress as _ipaddress
+    try:
+        _ipaddress.ip_address(h.split("%", 1)[0])
+        return True
+    except ValueError:
+        if h.count(".") == 3 and all(c in "0123456789." for c in h):
+            try:
+                _hermes_test_socket.inet_aton(h)
+                return True
+            except OSError:
+                pass
+        return False
+
+
+def _hermes_blocked_getaddrinfo(host, *a, **kw):
+    # DNS is network too. Blocking only connects left real lookups in place: a code path that resolves a
+    # hostname before connecting (the custom-provider SSRF pre-check does) waited on the runner's resolver,
+    # with no timeout, and a slow CI resolver pushed the model-catalog rebuild past its 4 s budget, so
+    # tests saw the budget fallback (test_credential_pool_providers, CI shard 4). Answer at once, the way an
+    # unresolvable name answers; IP literals and localhost need no DNS and pass through.
+    if _hermes_dns_free_host(host):
+        return _REAL_GETADDRINFO(host, *a, **kw)
+    raise _hermes_test_socket.gaierror(
+        _hermes_test_socket.EAI_NONAME,
+        f"hermes test network isolation: DNS lookup of {host!r} is blocked. "
+        f"Mock socket.getaddrinfo, or request the allow_outbound_network fixture.",
+    )
+
+
 _hermes_test_socket.create_connection = _hermes_blocked_create_connection
 _hermes_test_socket.socket.connect = _hermes_blocked_socket_connect
+_hermes_test_socket.getaddrinfo = _hermes_blocked_getaddrinfo
 
 
 @pytest.fixture
 def allow_outbound_network(monkeypatch):
     """Opt-in to real outbound network for the duration of one test.
 
-    Swaps `socket.create_connection` and `socket.socket.connect` back to the
-    real (unwrapped) implementations for this test only, then monkeypatch
+    Swaps `socket.create_connection`, `socket.socket.connect` and
+    `socket.getaddrinfo` back to the real (unwrapped) implementations for this test only, then monkeypatch
     teardown restores the wrapped versions. Direct swap is more reliable
     than a module-global toggle on CI runners where wrapper-closure
     lookup semantics can surprise.
 
-    Use sparingly. Today zero tests in the repo call this — the previous
+    Use sparingly. Only the isolation tests themselves use it; the previous
     test_dns_resolution_failure case was rewritten to mock socket.getaddrinfo
     instead, which is fully hermetic.
     """
     monkeypatch.setattr(_hermes_test_socket, "create_connection", _REAL_CREATE_CONNECTION)
     monkeypatch.setattr(_hermes_test_socket.socket, "connect", _REAL_SOCKET_CONNECT)
+    monkeypatch.setattr(_hermes_test_socket, "getaddrinfo", _REAL_GETADDRINFO)
     yield
 
 

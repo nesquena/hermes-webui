@@ -350,12 +350,12 @@ def _env_mb_bytes(name: str, default_mb: int) -> int:
 
 # ── Hermes agent directory discovery ─────────────────────────────────────────
 def _discovery_result():
-    return _startup._discover_agent_identity(
+    # Same helper managed_agent_startup uses to pick the Agent it activates, so
+    # startup activation and the runtime Agent cannot diverge (#8529).
+    return _startup.discover_runtime_agent_identity(
         repo_root=REPO_ROOT,
-        hermes_home=Path(os.getenv("HERMES_HOME", str(_DEFAULT_HERMES_HOME))),
         default_hermes_home=_DEFAULT_HERMES_HOME,
         user_home=HOME,
-        python_exe=os.getenv("HERMES_WEBUI_PYTHON") or sys.executable,
     )
 
 
@@ -1711,6 +1711,7 @@ def _resolve_configured_provider_id(
     *,
     base_url: object = None,
     resolve_alias: bool = True,
+    model_id: str | None = None,
 ) -> str:
     """Normalize a configured provider id.
 
@@ -1733,7 +1734,9 @@ def _resolve_configured_provider_id(
     if not resolve_alias:
         raw = str(provider or "").strip().lower()
         if base_url and raw == "custom":
-            by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+            by_base_url = _named_custom_provider_slug_for_base_url(
+                base_url, config_obj, model_id=model_id
+            )
             if by_base_url:
                 return by_base_url
         return str(provider or "")
@@ -1743,7 +1746,9 @@ def _resolve_configured_provider_id(
         base_url
         and str(resolved or "").strip().lower() == "custom"
     ):
-        by_base_url = _named_custom_provider_slug_for_base_url(base_url, config_obj)
+        by_base_url = _named_custom_provider_slug_for_base_url(
+            base_url, config_obj, model_id=model_id
+        )
         if by_base_url:
             return by_base_url
 
@@ -1875,19 +1880,54 @@ def _lookup_custom_api_key_env(provider_id: object) -> str | None:
     return None
 
 
+def _custom_provider_entry_owns_model(entry: dict, model_id: str) -> bool:
+    """True when a ``custom_providers[]`` entry declares ``model_id`` itself.
+
+    Ownership is by declaration, not substring: an exact ``model:`` match or a
+    listed id in a pinned ``models:`` allowlist (all shapes via
+    ``_configured_model_ids``). A live discovered catalog is metadata, not a
+    declaration. Used to disambiguate several entries sharing one ``base_url``
+    (#7176): the declaring owner outranks declaration order, and among several
+    declaring owners the first-declared one wins.
+    """
+    model = str(model_id or "").strip()
+    if not model or not isinstance(entry, dict):
+        return False
+    if str(entry.get("model") or "").strip() == model:
+        return True
+    if _provider_models_are_discovered_catalog(entry):
+        return False
+    return model in _configured_model_ids(entry.get("models"))
+
+
 def _named_custom_provider_slug_for_base_url(
     base_url: object,
     config_obj: dict | None = None,
+    model_id: str | None = None,
 ) -> str:
+    """Slug of the custom_providers[] entry for ``base_url``.
+
+    Several entries may share one ``base_url`` (a gateway fronting several
+    APIs on one host, one entry per ``api_mode`` — #7176). A plain first-match
+    then routes every model through the FIRST-declared entry, producing an
+    opaque 401 for models owned by later entries. When ``model_id`` is given,
+    the entry that declares the model outranks declaration order; otherwise
+    (or when no entry declares it) the historical first-match stands.
+    """
     target = _normalize_base_url_for_match(base_url)
     if not target:
         return ""
+    fallback = ""
     for entry in _custom_provider_entries(config_obj):
         entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
         if entry_base_url != target:
             continue
-        return _custom_provider_slug_from_name(entry.get("name")) or "custom"
-    return ""
+        slug = _custom_provider_slug_from_name(entry.get("name")) or "custom"
+        if not fallback:
+            fallback = slug
+        if model_id and _custom_provider_entry_owns_model(entry, model_id):
+            return slug
+    return fallback
 
 
 def _provider_is_known_or_configured(
@@ -3047,6 +3087,7 @@ def resolve_model_provider(model_id: str, *, explicitly_picked: bool = False) ->
             cfg,
             base_url=config_base_url,
             resolve_alias=False,
+            model_id=model_id,
         )
 
     # Heal legacy ``provider: local`` entries (written by WebUI < v0.50.252)
@@ -7473,10 +7514,13 @@ def _minimal_static_models_catalog() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        # Resolved before provider detection so the shared-base_url
+        # disambiguation (#7176) can prefer the entry that owns this model.
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
-                    active_provider, cfg, base_url=cfg_base_url
+                    active_provider, cfg, base_url=cfg_base_url, model_id=default_model
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -7487,13 +7531,13 @@ def _minimal_static_models_catalog() -> dict:
                     _store = json.loads(_ap.read_text(encoding="utf-8"))
                     active_provider = (
                         _resolve_configured_provider_id(
-                            _store.get("active_provider"), cfg, base_url=cfg_base_url
+                            _store.get("active_provider"), cfg,
+                            base_url=cfg_base_url, model_id=default_model,
                         )
                         or None
                     )
             except Exception:
                 pass
-        default_model = get_effective_default_model(cfg)
         groups: list[dict] = []
         if default_model:
             try:
@@ -7536,12 +7580,16 @@ def _static_models_catalog_without_live_probes() -> dict:
         if isinstance(model_cfg, dict):
             active_provider = model_cfg.get("provider")
             cfg_base_url = model_cfg.get("base_url", "") or ""
+        # Resolved before provider detection so the shared-base_url
+        # disambiguation (#7176) can prefer the entry that owns this model.
+        default_model = get_effective_default_model(cfg)
         if active_provider:
             try:
                 active_provider = _resolve_configured_provider_id(
                     active_provider,
                     cfg,
                     base_url=cfg_base_url,
+                    model_id=default_model,
                 )
             except Exception:
                 active_provider = str(active_provider or "").strip() or None
@@ -7557,13 +7605,13 @@ def _static_models_catalog_without_live_probes() -> dict:
                             auth_store.get("active_provider"),
                             cfg,
                             base_url=cfg_base_url,
+                            model_id=default_model,
                         )
                         or None
                     )
         except Exception:
             logger.debug("Failed to load auth store for static models catalog", exc_info=True)
 
-        default_model = get_effective_default_model(cfg)
         detected_providers: set[str] = set()
         configured_model_ids: dict[str, list[str]] = {}
         named_custom_groups: dict[str, dict[str, object]] = {}
@@ -7691,7 +7739,9 @@ def _static_models_catalog_without_live_probes() -> dict:
 
         if cfg_base_url:
             detected_providers.add(
-                _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+                _named_custom_provider_slug_for_base_url(
+                    cfg_base_url, cfg, model_id=default_model
+                )
                 or active_provider
                 or "custom"
             )
@@ -9839,6 +9889,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 active_provider,
                 cfg,
                 base_url=cfg_base_url,
+                model_id=default_model,
             )
 
         # 2. Read auth store (active_provider fallback + credential_pool inspection)
@@ -9854,6 +9905,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         auth_store.get("active_provider"),
                         cfg,
                         base_url=cfg_base_url,
+                        model_id=default_model,
                     )
             except Exception:
                 logger.debug("Failed to load auth store from %s", auth_store_path)
@@ -10149,6 +10201,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         model_cfg.get("provider"),
                         cfg,
                         base_url=base_url,
+                        model_id=default_model,
                     )
                     if provider_hint:
                         return str(provider_hint).strip().lower()
@@ -10166,20 +10219,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         if provider_hint:
                             return str(provider_hint).strip().lower()
 
-            custom_providers_cfg = cfg.get("custom_providers", [])
-            if isinstance(custom_providers_cfg, list):
-                for entry in custom_providers_cfg:
-                    if not isinstance(entry, dict):
-                        continue
-                    entry_base_url = _normalize_base_url_for_match(entry.get("base_url"))
-                    if entry_base_url != target:
-                        continue
-                    entry_name = str(entry.get("name") or "").strip()
-                    if entry_name:
-                        return _custom_provider_slug_from_name(entry_name)
-                    return "custom"
-
-            return ""
+            return _named_custom_provider_slug_for_base_url(
+                base_url, cfg, model_id=default_model
+            )
 
         def _models_endpoint_for_base_url(base_url: str) -> str:
             base = str(base_url or "").strip().rstrip("/")
@@ -10437,6 +10479,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # 4. Fetch models from custom endpoint if base_url is configured
         auto_detected_models = []
         auto_detected_models_by_provider: dict[str, list[dict]] = {}
+        _active_probe_owner = None
         if cfg_base_url:
             base_url = cfg_base_url.strip()
             configured_provider = _configured_provider_for_base_url(base_url)
@@ -10515,6 +10558,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 provider_key = provider.lower()
                 auto_detected_models_by_provider.setdefault(provider_key, []).append(auto_model)
                 detected_providers.add(provider_key)
+            _active_probe_owner = (provider.lower(), str(api_key or "").strip())
 
         _custom_providers_cfg = cfg.get("custom_providers", [])
         _named_custom_groups: dict = {}
@@ -10565,6 +10609,14 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                         isinstance(_cp_configured_models, (dict, list))
                         and len(_cp_configured_models) > 0
                     )
+                    if (
+                        _active_probe_owner
+                        and _active_probe_owner[0] == _slug
+                        and str(_cp_api_key or "").strip() != _active_probe_owner[1]
+                    ):
+                        # #7176: a shared-URL entry whose credential (even none)
+                        # differs must not inherit the active probe's catalog.
+                        auto_detected_models_by_provider.pop(_slug, None)
                     _live_models = auto_detected_models_by_provider.get(_slug)
                     _live_error = None
                     if _cp_has_configured_models:
@@ -10644,7 +10696,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
                 detected_providers.discard("custom")
 
         _named_custom_slugs = _named_custom_provider_slugs(cfg)
-        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(cfg_base_url, cfg)
+        _base_matched_named_slug = _named_custom_provider_slug_for_base_url(
+            cfg_base_url, cfg, model_id=default_model
+        )
         if _base_matched_named_slug and _named_custom_slugs:
             for _pid in list(detected_providers):
                 _pid_norm = str(_pid or "").strip().lower()
@@ -12536,6 +12590,27 @@ STREAM_LIVE_TOOL_CALLS: dict = {}  # stream_id -> live tool calls accumulated du
 STREAM_GOAL_RELATED: dict = {}  # stream_id -> bool: only evaluate goal for goal-related turns (#1932)
 STREAM_LAST_EVENT_ID: dict = {}  # stream_id -> latest journal event_id for `id:` field on live SSE frames (stage-364)
 PENDING_GOAL_CONTINUATION: set = set()  # session_ids awaiting a goal continuation turn (#1932)
+# #6885 admission correction (round 2, maintainer review): marker and prompt
+# are ONE record so the two collections cannot drift apart. Value shape:
+#   {"prompt": str, "continuation_id": str}
+# #7855: the routes.py consumer admits the turn by "continuation_id" — the
+# token the server issues here and carries on the goal_continue SSE event,
+# which the browser keeps on the queued entry through inline edits and
+# combines. A genuine user/queued turn carries no ID, so it keeps user
+# priority and the record stays for the real continuation dispatch.
+# Written atomically next to the set add in streaming/gateway goal_continue
+# paths; consumed together with the marker by
+# _consume_pending_goal_continuation.
+# There is deliberately no wall-clock expiry: the browser keeps a queued
+# continuation across refreshes and restores it into the composer for a
+# later send, so a TTL retired perfectly usable records (#7855 blocker 1).
+# A record lives until it is consumed or explicitly retired (goal clear /
+# session retirement, plus an orphan sweep for broken halves). Pause does
+# NOT retire it: a paused goal is resumed with the same pending
+# continuation, so clearing it on pause broke the resume retry
+# (test_7855_regate_behaviour CORE 2).
+PENDING_GOAL_CONTINUATION_PROMPTS: dict = {}
+PENDING_GOAL_CONTINUATION_LOCK = threading.Lock()
 
 # ── THE list of per-stream registries (#7302 re-gate) ───────────────────────
 # Every registry a stream owns. Both the local worker teardown (api/streaming.py)
@@ -13300,6 +13375,14 @@ _SETTINGS_DEFAULTS = {
     "project_quick_create_buttons": False,  # opt-in: show per-project "+" quick-create buttons on sidebar project chips (#4676)
     "structured_code_default_view": "auto",  # JSON/YAML fenced-block default render: auto | on | off (#484 follow-up). auto => Tree when line count >= structured_code_auto_tree_lines, else Raw.
     "structured_code_auto_tree_lines": 10,  # in 'auto' mode, minimum line count to default a JSON/YAML block to Tree view (preserves the original hardcoded >=10 behavior)
+    # Run-journal retention caps (#7613). 0 disables an individual cap. The sweep
+    # ARCHIVES eligible runs (compresses + moves them to _run_journal_archive/)
+    # rather than deleting, so these caps only decide when a run leaves the live
+    # directory; reads fall back to the archive. Defaults mirror api.run_journal.
+    "run_journal_retention_ttl_days": 14,  # archived once the run file is N days old
+    "run_journal_retention_max_runs_per_session": 40,  # keep at most N newest runs live per session
+    "run_journal_retention_max_bytes_per_session": 256 * 1024 * 1024,  # per-session live byte budget
+    "run_journal_archive_ttl_days": 0,  # delete ARCHIVES older than N days; 0 = never (keep forever)
     "session_endless_scroll": False,  # auto-load older transcript pages while scrolling upward
     "chat_activity_display_mode": "compact_worklog",  # compact_worklog | transparent_stream | hide_all_activity
     "transparent_stream_event_timestamps": True,  # show per-event timestamp chips inside Transparent Stream
@@ -13622,10 +13705,14 @@ _SETTINGS_INT_RANGES = {
     "inflight_state_max_json_chars": (100000, 4000000),
     "structured_code_auto_tree_lines": (1, 1000),
     "voice_silence_ms": (200, 60000),
+    "run_journal_retention_max_runs_per_session": (0, 100_000),
+    "run_journal_retention_max_bytes_per_session": (0, 100 * 1024 * 1024 * 1024),
 }
 _SETTINGS_FLOAT_RANGES = {
     "tts_rate": (0.5, 2.0),
     "tts_pitch": (0.0, 2.0),
+    "run_journal_retention_ttl_days": (0.0, 3650.0),
+    "run_journal_archive_ttl_days": (0.0, 3650.0),
 }
 _SETTINGS_BOOL_KEYS = {
     "onboarding_completed",

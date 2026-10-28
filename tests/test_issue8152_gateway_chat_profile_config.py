@@ -2025,3 +2025,48 @@ class TestReviewRound7TheOneResolver:
         chat = _chat(requests)
         assert chat["url"] == "http://launcher-gateway.test/v1/chat/completions"
         assert chat["authorization"] == "Bearer launcher-key"
+
+
+
+class TestANamedProfileWithNoConfig:
+    """A named profile with no config of its own gets no settings, not the
+    process profile's: the ``or get_config()`` fallback named on #8152
+    (2026-10-28). ``get_config_for_profile_home`` returns ``{}`` for a home
+    that does not exist (profiles-are-islands), and ``{}`` is falsy."""
+
+    GONE = "gone8152"
+
+    @pytest.fixture
+    def process_settings(self, profiles_on_disk, monkeypatch):
+        import api.config as config
+        import api.profiles as profiles
+
+        assert not profiles.get_hermes_home_for_profile(self.GONE).exists()
+        monkeypatch.setitem(config.get_config(), "agent", {"reasoning_effort": "high"})
+        monkeypatch.setitem(config.get_config(), "webui", {"pass_session_id": True})
+
+    def test_the_process_profiles_reasoning_effort_does_not_leak_in(
+        self, process_settings, tmp_path, monkeypatch
+    ):
+        _, requests, _ = _send(self.GONE, tmp_path, monkeypatch)
+
+        assert "reasoning_effort" not in _chat(requests)["body"]
+
+    def test_nor_its_prompt_setting(self, process_settings, tmp_path, monkeypatch):
+        session, requests, _ = _send(self.GONE, tmp_path, monkeypatch)
+
+        system = _chat(requests)["body"]["messages"][0]["content"]
+        assert session.session_id not in system
+
+    def test_an_empty_config_file_is_the_profiles_too(
+        self, process_settings, profiles_on_disk, tmp_path, monkeypatch
+    ):
+        """Control: an existing home with an empty ``config.yaml`` reads as defaults."""
+        (profiles_on_disk[OTHER_PROFILE] / "config.yaml").write_text("", encoding="utf-8")
+        (profiles_on_disk[OTHER_PROFILE] / ".env").write_text("", encoding="utf-8")
+
+        session, requests, _ = _send(OTHER_PROFILE, tmp_path, monkeypatch)
+
+        body = _chat(requests)["body"]
+        assert "reasoning_effort" not in body
+        assert session.session_id not in body["messages"][0]["content"]
