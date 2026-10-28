@@ -11341,8 +11341,10 @@ function _stripAttachedFilesMarkerForDisplay(text){
 // model received it. The row is display-only here: identity comes from the
 // Agent's typed discriminator, never from content sniffing, so a user who
 // pastes marker-like text into an ordinary message keeps an ordinary bubble.
-const _STEER_OOB_OPEN_RE=/^\s*\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)[^\]\n]*)?\]\s*\n/;
-const _STEER_OOB_CLOSE_RE=/\n\s*\[\/OUT-OF-BAND\s+USER\s+MESSAGE\]\s*$/;
+const _STEER_OOB_OPEN_RE=/^\s*\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)[^\]\n]*)?\]\s*\n/i;
+const _STEER_OOB_CLOSE_RE=/\n\s*\[\/OUT-OF-BAND\s+USER\s+MESSAGE\]\s*$/i;
+const _STEER_OOB_ANY_OPEN_RE=/\[OUT-OF-BAND\s+USER\s+MESSAGE(?:\s*(?:—|-)[^\]\n]*)?\]/gi;
+const _STEER_OOB_ANY_CLOSE_RE=/\[\/OUT-OF-BAND\s+USER\s+MESSAGE\]/gi;
 // Exact suffix composed by _steerTextWithPendingFiles (static/commands.js).
 const _STEER_ATTACH_NOTE_RE=/(?:^|\n\n)\[Attached files for this steer: ([^\]\n]+)\]\nUse the file tools\/read_file to inspect these documents if needed\.\s*$/;
 
@@ -11356,8 +11358,15 @@ function _isSteerDisplayMessage(m){
 // WebUI scrub ran); anything else is left byte-for-byte as user text.
 function _steerDisplayParts(content){
   let text=String(content||'');
-  const open=text.match(_STEER_OOB_OPEN_RE);
-  if(open&&_STEER_OOB_CLOSE_RE.test(text)){
+  const opens=text.match(_STEER_OOB_ANY_OPEN_RE)||[];
+  const closes=text.match(_STEER_OOB_ANY_CLOSE_RE)||[];
+  // Match the backend's exactly-one-frame rule. Ambiguous authored text is
+  // displayed intact, including any suffix that might otherwise look generated.
+  if(opens.length||closes.length){
+    const open=text.match(_STEER_OOB_OPEN_RE);
+    if(opens.length!==1||closes.length!==1||!open||!_STEER_OOB_CLOSE_RE.test(text)){
+      return {text,files:[]};
+    }
     text=text.slice(open[0].length).replace(_STEER_OOB_CLOSE_RE,'');
   }
   let files=[];

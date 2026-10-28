@@ -1775,8 +1775,10 @@ function _showSteerIndicator(text, files){
   const inner=document.getElementById('msgInner');
   if(!inner) return;
   const body=String(text||'').trim();
+  // Only successful upload destinations are passed here, never staged File.name.
+  // File.name may be sanitized or collision-renamed on disk.
   const names=(Array.isArray(files)?files:[])
-    .map(f=>f&&(typeof f==='string'?f:(f.name||f.filename||f.path||'')))
+    .map(f=>f&&(typeof f==='string'?f:(f.path||'')))
     .map(v=>String(v||'').trim()).filter(Boolean);
   if(!body&&!names.length) return;
   const el=document.createElement('div');
@@ -1859,7 +1861,8 @@ function _steerUploadedAttachmentPaths(uploaded){
   return uploaded.map(u=>{
     if(!u)return'';
     if(typeof u==='string')return u;
-    return u.path||u.name||u.filename||'';
+    // A staged/original name is not proof that a file was stored there.
+    return u.path||'';
   }).map(v=>String(v||'').trim()).filter(Boolean);
 }
 
@@ -2115,7 +2118,7 @@ function _steerFilesSignature(files){
   }catch(_){return String(Date.now());}
 }
 
-async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
+async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot, captureUploadedPaths){
   const base=String(msg||'').trim();
   const pendingFiles=Array.isArray(filesSnapshot)?filesSnapshot.filter(Boolean):[];
   if(!pendingFiles.length)return base;
@@ -2140,6 +2143,9 @@ async function _steerTextWithPendingFiles(msg, ownerSid, filesSnapshot){
     if(paths.length) _steerUploadCache={sid:ownerSid,sig,paths};
   }
   if(!paths||!paths.length)return base;
+  // Snapshot the successful upload identities for this request before acceptance
+  // clears the retry cache. Partial uploads contribute only successful paths.
+  if(typeof captureUploadedPaths==='function')captureUploadedPaths([...paths]);
   const note=`[Attached files for this steer: ${paths.join(', ')}]\nUse the file tools/read_file to inspect these documents if needed.`;
   return base?`${base}\n\n${note}`:note;
 }
@@ -2156,8 +2162,9 @@ async function _trySteer(msg, explicitSteer){
     : {model:(typeof S!=='undefined'&&S.session&&S.session.model)||'',model_provider:(typeof S!=='undefined'&&S.session&&S.session.model_provider)||''};
   if(!ownerSid){showToast(t('no_active_session'));return false;}
   let steerText=originalMsg;
+  let steerUploadedPaths=[];
   try{
-    steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot);
+    steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot,paths=>{steerUploadedPaths=paths;});
   }catch(e){
     if(_steerOwnerIsCurrent(ownerSid)){
       const inp=$('msg');
@@ -2246,7 +2253,7 @@ async function _trySteer(msg, explicitSteer){
         const _remaining=S.pendingFiles.filter(f=>!_delivered.has(f));
         if(_remaining.length!==S.pendingFiles.length){S.pendingFiles=_remaining;if(typeof renderTray==='function')renderTray();}
       }
-      _showSteerIndicator(originalMsg,pendingFilesSnapshot);
+      _showSteerIndicator(originalMsg,steerUploadedPaths);
     }
     showToast(t('cmd_steer_delivered'),2500);
     return true;

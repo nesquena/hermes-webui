@@ -631,6 +631,7 @@ def _render_messages_harness() -> str:
         function _messageSessionIndexForRawIdx(rawIdx) {{ return rawIdx; }}
         function _messageViewportAnchorKeyForMessage() {{ return 'k'; }}
         function _stripAttachedFilesMarkerForDisplay(value) {{ return String(value || ''); }}
+        function _isSteerDisplayMessage() {{ return false; }}
         function _stripWorkspaceDisplayPrefix(value) {{ return String(value || ''); }}
         function _stripLeadingAssistantThinkingMarkup(value) {{ return String(value || ''); }}
         function _getCachedRender(value) {{ return String(value || ''); }}

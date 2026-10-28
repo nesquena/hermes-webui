@@ -362,7 +362,7 @@ class TestFrontendWiring:
         body = _source_between(cmds, "async function _trySteer(", "\nasync function cmdTitle")
         assert "const ownerSid=(typeof S!=='undefined'&&S.session&&S.session.session_id)||null;" in body
         assert "const pendingFilesSnapshot=typeof S!=='undefined'&&Array.isArray(S.pendingFiles)?[...S.pendingFiles]:[];" in body
-        assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot)" in body
+        assert "steerText=await _steerTextWithPendingFiles(originalMsg,ownerSid,pendingFilesSnapshot,paths=>{steerUploadedPaths=paths;})" in body
         assert "body:JSON.stringify({session_id:ownerSid,text:steerText})" in body, (
             "steer endpoint must receive the captured owner session id and attachment-enriched text"
         )
@@ -395,8 +395,8 @@ class TestFrontendWiring:
         assert "function _steerSetComposerStatusForOwner" in steer_helpers
         assert "_steerSetComposerStatusForOwner(ownerSid,t('uploading')||'Uploading…')" in steer_helpers
         assert "_steerSetComposerStatusForOwner(ownerSid,'')" in steer_helpers
-        assert "_showSteerIndicator(originalMsg,pendingFilesSnapshot)" in try_body, (
-            "live steer row must use the original text plus staged files as chips, not attachment tool instructions"
+        assert "_showSteerIndicator(originalMsg,steerUploadedPaths)" in try_body, (
+            "live steer row must use the original text plus successful uploaded paths, not staged names or attachment tool instructions"
         )
         assert "_showSteerIndicator(steerText)" not in try_body
 
@@ -492,7 +492,7 @@ class TestFrontendWiring:
               assert.strictEqual(delivered, true);
               // Attachment-only steer: no text; the staged files render as chips.
               assert.strictEqual(indicatorText, '');
-              assert.deepStrictEqual(indicatorFiles.map(f=>f.name), ['a.pdf']);
+              assert.deepStrictEqual(indicatorFiles, ['/tmp/a.pdf']);
               assert.ok(apiPayload.text.includes('[Attached files for this steer: /tmp/a.pdf]'));
               assert.ok(!indicatorText.includes('file tools/read_file'));
             }})().catch(err=>{{console.error(err); process.exit(1);}});
