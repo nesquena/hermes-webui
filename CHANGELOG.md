@@ -55,6 +55,8 @@
 
 ### Fixed
 
+- **Slash autocomplete treats `_` and `-` as the same command.** A command or skill named with one separator can now be found by typing the other: `/knowledge_loop` finds `knowledge-loop`, and the reverse. Menu selection and direct submission both send the command's real name with the arguments kept. When both spellings exist, the one you typed comes first, and plain prefix typing keeps its usual order. (#8143, #8203)
+
 - **A failed browser dictation no longer pins the mic to server recording forever.** When browser speech recognition fails (network, permission, audio capture), the mic remembers to use server recording on the next reload. That preference used to never expire, so one VPN hiccup or a since-fixed browser kept the device on server recording for good. It now expires after 24 hours, and a preference saved by an older release gets a 24-hour window from its first read. The fallback within the same session is still immediate. Thanks @solarmaster961. (#8295)
 
 - **Custom providers that share one `base_url` route to the right entry.** When two `custom_providers` entries use the same URL, the entry that declares the configured default model now wins over declaration order, and each entry's live model list is probed with its own key. Without a declaring entry, the old first-match behaviour stands. Existing sessions keep their saved provider; re-pick the model once to switch. Thanks @RajPabnani03. (#7176)
@@ -318,6 +320,8 @@
 - **Manual title regeneration honors your configured auxiliary title-generation timeout.** The manual "regenerate title" action used the frontend's default 30s request timeout, so a slow-but-valid generation timed out on the client when `auxiliary.title_generation.timeout` was set higher. It now fetches the current timeout fresh per regen (no stale cache across profile switches) and applies it only when valid, falling back to the 30s default on any fetch failure. Thanks @Stacey2911. (#5374)
 
 ### Documentation
+
+- **Reverse-proxy docs: a same-host proxy needs an explicit opt-in.** `docs/remote-access.md` now explains per-client login rate-limit buckets behind a proxy, and that a loopback proxy is trusted for the forwarded client address, while the local-origin check reads that address only with `HERMES_WEBUI_TRUST_FORWARDED_FOR=1`. Without it, every request through a same-host proxy counts as local, which matters on an instance with no password. (#8545)
 
 - **Documented the reverse-proxy basic-auth caveat for installed PWAs.** README, onboarding, and troubleshooting now explain that proxy basic auth can block the same-origin service-worker/shell update fetches an installed PWA needs (leaving it on a blank screen after an update), and give recovery steps — prefer WebUI's built-in password, or scope proxy auth so `sw.js`/manifest/shell requests complete. Thanks @rodboev. (#5673, #2781)
 
