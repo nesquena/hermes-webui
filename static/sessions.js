@@ -3124,20 +3124,22 @@ async function loadSession(sid){
     return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
   S.session=data.session;
-  // #7925 re-gate (2026-10-27, silent finding): keep the loaded card list
-  // across this metadata replacement — same-session reloads only (a switch
-  // must not inherit the previous session's cards). The append branch of
-  // _ensureMessagesLoaded merges the response's new owners into it; every
-  // other path discards it.
-  _pendingSessionToolCalls =
-    currentSid === sid && S.session && Array.isArray(S.session.tool_calls) && S.session.tool_calls.length
-      ? S.session.tool_calls.map(tc => (tc && typeof tc === 'object' ? {...tc} : tc))
-      : null;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
   // Loading a real existing session abandons any pre-session toolset override
   // staged on the empty composer before any deferred refresh work runs.
   S._pendingSessionToolsets=null;
+  // #7925 re-gate (2026-10-27, silent finding): keep the loaded card list
+  // across this metadata replacement — same-session reloads only (a switch
+  // must not inherit the previous session's cards). The append branch of
+  // _ensureMessagesLoaded merges the response's new owners into it; every
+  // other path discards it. Placed after the toolsets clear so the
+  // `S.session=data.session` → `S._pendingSessionToolsets=null` adjacency
+  // (asserted by tests/test_issue4490_presession_toolsets.py) survives.
+  _pendingSessionToolCalls =
+    currentSid === sid && S.session && Array.isArray(S.session.tool_calls) && S.session.tool_calls.length
+      ? S.session.tool_calls.map(tc => (tc && typeof tc === 'object' ? {...tc} : tc))
+      : null;
   // #7855: a session switch is a hard context boundary — drop any restored
   // goal-continuation draft left over from the previous session (restored but
   // never sent, or abandoned mid-settle) so it cannot attach to the next send.
