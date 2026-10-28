@@ -5,11 +5,15 @@
 
 ### Added
 
+- **A read-only endpoint reports a session's background delegations.** `GET /api/session/delegations?session_id=...` returns how many delegated tasks are still running and how many have finished but not yet been delivered, so a client can warn before switching away. It reads counts only (no prompts or results), stays inside the session's own profile, and answers `unknown` rather than zero when the ledger can't be read. Thanks @happy5318. (Refs #8019)
+
 - **Pinch, pan and zoom in the image lightbox.** An enlarged chat image can now be pinched to zoom and panned with two fingers on touch screens, zoomed with the mouse wheel at the cursor and dragged on desktop, and zoomed or reset with `+`, `-` and `F` on the keyboard. A Fit button next to close returns it to fit, the zoom carries across previous/next images, and the image can no longer be dragged out of view. An edge swipe inside the open lightbox no longer opens the session drawer behind it, and keyboard focus now moves into the dialog. A maintainer fold makes both buttons 44×44 on touch screens with a gap between them, gives them a hover state you can see over the dark backdrop and over bright images (the close button in the diagram lightbox included), and keeps Tab order in visual order. Thanks @silent-reader-cn. (#6896)
 
 - **Native OIDC login works with identity providers that accept only HTTP Basic client authentication.** WebUI always sent the client secret in the token request body (`client_secret_post`), which providers that support only `client_secret_basic` reject. In the default `auto` mode it now switches to Basic only when the provider's discovery document says `client_secret_post` is not supported, so existing deployments send byte-for-byte the same request; `webui_oidc.token_auth_method` (or `HERMES_WEBUI_OIDC_TOKEN_AUTH_METHOD`) can force either method. Basic credentials are form-encoded first as RFC 6749 section 2.3.1 requires, and an unsupported configured value is logged once instead of on every auth check. Thanks @chesterXalan. (#6471)
 
 ### Performance
+
+- **Profile skill counts no longer re-walk the skill tree on every request.** On a large skill library the per-profile skill stats probe stat()-ed every file on each `/api/profiles` call (about 17 ms per call at 200 skills). The counts are now served from cache for a short window and refreshed in the background, with one refresh per profile at a time. Saving, deleting or toggling a skill invalidates them at once, including while a refresh is running, so a change is never overwritten by an older count. Thanks @RajPabnani03. (#7940)
 
 - **Fork a scheduled-job (cron) conversation into your own editable chat.** Cron-run sessions are read-only (the scheduler owns them), so you couldn't continue one. You can now branch/fork a cron session into a new WebUI-owned conversation — the original read-only session is never modified, and the fork picks up its history so you can carry on. Only genuine cron sessions qualify (verified by the server-side source, not a guessable id), and every other read-only session stays unbranchable. Thanks @rodboev. (#5555, #5477)
 
