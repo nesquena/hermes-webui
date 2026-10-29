@@ -364,95 +364,114 @@ def _provider_error_lineage_sessions(session) -> list:
 
 def _provider_error_owner_entries(session, *, projection_cache: bool = False) -> tuple[list[dict], str]:
     owners = _provider_error_lineage_sessions(session)
-    if projection_cache and any(hasattr(owner, "path") for owner in owners):
-        try:
-            from api.models import Session
-
-            persisted_owners = []
-            for owner in owners:
-                persisted = Session.load(str(getattr(owner, "session_id", "") or ""))
-                if persisted is None:
-                    raise ProviderErrorDismissalUnavailable("owner_unavailable", 409)
-                persisted_owners.append(persisted)
-            owners = persisted_owners
-        except ProviderErrorDismissalUnavailable:
-            raise
-        except (KeyError, OSError, TypeError, ValueError) as exc:
-            raise ProviderErrorDismissalUnavailable("owner_unavailable", 409) from exc
-    cache_key = None
     cache_requires_signature = projection_cache and any(
         hasattr(owner, "path") for owner in owners
     )
-    if projection_cache:
-        try:
-            from api.models import _sidecar_stat_signature
 
-            owner_signatures = []
-            for owner in owners:
-                sidecar_path = owner.path
+    def entries_for(owner_rows):
+        entries = []
+        for owner in owner_rows:
+            rows = getattr(owner, "messages", None)
+            if not isinstance(rows, list):
+                raise ProviderErrorDismissalUnavailable("noncanonical_transcript", 409)
+            for owner_index, row in enumerate(rows):
+                entries.append(
+                    {
+                        "session": owner,
+                        "session_id": str(getattr(owner, "session_id", "") or ""),
+                        "index": owner_index,
+                        "row": row,
+                        "stable_id": _provider_error_stable_id(row),
+                        "row_digest": _provider_error_reference_digest(row),
+                    }
+                )
+        revision_payload = [
+            {
+                "session_id": entry["session_id"],
+                "index": entry["index"],
+                "stable_id": entry["stable_id"],
+                "row_digest": entry["row_digest"],
+            }
+            for entry in entries
+        ]
+        revision = _provider_error_row_digest(
+            {
+                "viewed_session_id": str(getattr(session, "session_id", "") or ""),
+                "entries": revision_payload,
+            }
+        )
+        return entries, revision
+
+    if cache_requires_signature:
+        try:
+            from api.models import Session, _sidecar_stat_signature
+
+            owner_files = [
+                (
+                    str(getattr(owner, "session_id", "") or ""),
+                    owner.path,
+                )
+                for owner in owners
+            ]
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
+            raise ProviderErrorDismissalUnavailable("owner_unavailable", 409) from exc
+
+        def owner_signatures():
+            signatures = []
+            for owner_id, sidecar_path in owner_files:
                 signature = _sidecar_stat_signature(sidecar_path)
                 if signature is None:
                     raise ValueError("sidecar signature unavailable")
-                owner_signatures.append(
-                    (
-                        str(getattr(owner, "session_id", "") or ""),
-                        tuple(signature),
-                        len(getattr(owner, "messages", None) or []),
-                    )
+                signatures.append((owner_id, tuple(signature)))
+            return tuple(signatures)
+
+        # A dismissal can replace a sidecar while Session.load() is reading it.
+        # Bind the rows and any cache hit to the generation observed on both
+        # sides of that read, then check once more before publishing the result.
+        for _attempt in range(2):
+            try:
+                before = owner_signatures()
+                cache_key = (
+                    str(getattr(session, "session_id", "") or ""),
+                    before,
                 )
-            cache_key = (
-                str(getattr(session, "session_id", "") or ""),
-                tuple(owner_signatures),
-            )
-            with _PROVIDER_ERROR_PROJECTION_CACHE_LOCK:
-                cached = _PROVIDER_ERROR_PROJECTION_CACHE.get(cache_key)
-            if cached is not None:
-                return copy.deepcopy(cached[0]), cached[1]
-        except (AttributeError, OSError, TypeError, ValueError) as exc:
-            if cache_requires_signature:
+                with _PROVIDER_ERROR_PROJECTION_CACHE_LOCK:
+                    cached = _PROVIDER_ERROR_PROJECTION_CACHE.get(cache_key)
+                if cached is not None:
+                    if owner_signatures() == before:
+                        return copy.deepcopy(cached[0]), cached[1]
+                    continue
+
+                persisted_owners = []
+                for owner_id, _sidecar_path in owner_files:
+                    persisted = Session.load(owner_id)
+                    if persisted is None:
+                        raise ProviderErrorDismissalUnavailable("owner_unavailable", 409)
+                    persisted_owners.append(persisted)
+                if owner_signatures() != before:
+                    continue
+
+                entries, revision = entries_for(persisted_owners)
+            except ProviderErrorDismissalUnavailable:
+                raise
+            except (AttributeError, KeyError, OSError, TypeError, ValueError) as exc:
                 raise ProviderErrorDismissalUnavailable("owner_unavailable", 409) from exc
-            cache_key = None
-    entries = []
-    for owner in owners:
-        rows = getattr(owner, "messages", None)
-        if not isinstance(rows, list):
-            raise ProviderErrorDismissalUnavailable("noncanonical_transcript", 409)
-        for owner_index, row in enumerate(rows):
-            entries.append(
-                {
-                    "session": owner,
-                    "session_id": str(getattr(owner, "session_id", "") or ""),
-                    "index": owner_index,
-                    "row": row,
-                    "stable_id": _provider_error_stable_id(row),
-                    "row_digest": _provider_error_reference_digest(row),
-                }
-            )
-    revision_payload = [
-        {
-            "session_id": entry["session_id"],
-            "index": entry["index"],
-            "stable_id": entry["stable_id"],
-            "row_digest": entry["row_digest"],
-        }
-        for entry in entries
-    ]
-    revision = _provider_error_row_digest(
-        {
-            "viewed_session_id": str(getattr(session, "session_id", "") or ""),
-            "entries": revision_payload,
-        }
-    )
-    if cache_key is not None:
-        cached_entries = [
-            dict(entry, row=copy.deepcopy(entry["row"]))
-            for entry in entries
-        ]
-        with _PROVIDER_ERROR_PROJECTION_CACHE_LOCK:
-            _PROVIDER_ERROR_PROJECTION_CACHE[cache_key] = (cached_entries, revision)
-            while len(_PROVIDER_ERROR_PROJECTION_CACHE) > _PROVIDER_ERROR_PROJECTION_CACHE_MAX:
-                _PROVIDER_ERROR_PROJECTION_CACHE.pop(next(iter(_PROVIDER_ERROR_PROJECTION_CACHE)))
-    return entries, revision
+
+            cached_entries = [
+                dict(entry, row=copy.deepcopy(entry["row"]))
+                for entry in entries
+            ]
+            if owner_signatures() != before:
+                continue
+            with _PROVIDER_ERROR_PROJECTION_CACHE_LOCK:
+                _PROVIDER_ERROR_PROJECTION_CACHE[cache_key] = (cached_entries, revision)
+                while len(_PROVIDER_ERROR_PROJECTION_CACHE) > _PROVIDER_ERROR_PROJECTION_CACHE_MAX:
+                    _PROVIDER_ERROR_PROJECTION_CACHE.pop(next(iter(_PROVIDER_ERROR_PROJECTION_CACHE)))
+            return entries, revision
+
+        raise ProviderErrorDismissalUnavailable("owner_unavailable", 409)
+
+    return entries_for(owners)
 
 
 def _provider_error_reference_payload(viewed_session_id, owner_session_id, revision, stable_id, owner_index, row_digest):

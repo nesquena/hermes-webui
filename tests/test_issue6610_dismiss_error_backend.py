@@ -363,6 +363,87 @@ def test_unsaved_dismissed_marker_is_not_projected(tmp_path, monkeypatch):
     assert projected["messages"][0]["_provider_error_dismiss_ref"]
 
 
+def test_fresh_get_keeps_dismissal_when_projection_read_overlaps_commit(
+    tmp_path, monkeypatch, request
+):
+    from api import models, routes
+    from api.session_ops import apply_provider_error_dismissal, provider_error_dismissal_plan
+
+    monkeypatch.setattr(models, "SESSION_DIR", tmp_path)
+    monkeypatch.setattr(models, "SESSION_INDEX_FILE", tmp_path / "index.json")
+    sid = "issue6610-projection-generation-race"
+    session = models.Session(
+        session_id=sid,
+        workspace=tmp_path,
+        messages=[_message(id="projection-generation-race")],
+        source_tag="webui",
+        raw_source="webui",
+        session_source="webui",
+        context_length=8192,
+    )
+    session.save(touch_updated_at=False, skip_index=True)
+    with models.LOCK:
+        models.SESSIONS.pop(sid, None)
+
+    def clear_cached_session():
+        with models.LOCK:
+            models.SESSIONS.pop(sid, None)
+
+    request.addfinalizer(clear_cached_session)
+
+    original_load = models.Session.load
+    owner_reads = 0
+    dismissal_committed = False
+
+    def load_with_dismissal_after_projection_read(cls, requested_sid):
+        nonlocal owner_reads, dismissal_committed
+        loaded = original_load(requested_sid)
+        if requested_sid == sid:
+            owner_reads += 1
+            if owner_reads == 2:
+                writer = original_load(requested_sid)
+                plan = provider_error_dismissal_plan(writer, 0)
+                apply_provider_error_dismissal(writer, plan.dismiss_ref)
+                assert loaded.messages[0].get("_dismissed") is None
+                dismissal_committed = True
+        return loaded
+
+    monkeypatch.setattr(
+        models.Session,
+        "load",
+        classmethod(load_with_dismissal_after_projection_read),
+    )
+    handler = SimpleNamespace(headers={})
+    parsed = urlparse(f"/api/session?session_id={sid}&resolve_model=0")
+
+    def get_session_payload():
+        captured = {}
+
+        def capture_json(_handler, data, status=200, **_kwargs):
+            captured.update(data=data, status=status)
+            return True
+
+        with patch.object(routes, "j", side_effect=capture_json), patch.object(
+            routes, "_session_visible_to_active_profile", return_value=True
+        ), patch.object(
+            routes,
+            "get_session",
+            side_effect=lambda requested_sid, **_kwargs: models.Session.load(requested_sid),
+        ):
+            assert routes._handle_session_get(handler, parsed) is True
+        assert captured["status"] == 200
+        return captured["data"]["session"]
+
+    get_session_payload()
+    assert dismissal_committed
+    assert models.Session.load(sid).messages[0]["_dismissed"] is True
+
+    with models.LOCK:
+        models.SESSIONS.pop(sid, None)
+    fresh = get_session_payload()
+    assert fresh["messages"][0]["_dismissed"] is True
+
+
 def test_compression_lineage_projects_and_mutates_the_physical_owner():
     from api.session_ops import apply_provider_error_dismissal, project_provider_error_dismissal_capabilities
 
