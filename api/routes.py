@@ -965,14 +965,48 @@ def _is_profile_agnostic_foreign_session(cli_meta) -> bool:
         str(cli_meta.get("raw_source") or "").strip().lower(),
     }
     # Profile-less external-agent rows that live outside the Hermes profile tree.
-    # Claude Code: scanned from ~/.claude/projects; Codex: scanned from ~/.codex/
-    profile_agnostic_sources = {CLAUDE_CODE_SOURCE}
+    # Claude Code: scanned from ~/.claude/projects; Aider: scanned from the
+    # workspace git root. Both are global rather than profile-owned, so the
+    # detail-load profile gate must not 404 them on a named profile.
+    profile_agnostic_sources = {CLAUDE_CODE_SOURCE, AIDER_SOURCE}
     try:
         from api.codex_sessions import CODEX_SOURCE
         profile_agnostic_sources.add(CODEX_SOURCE)
     except ImportError:
         pass
     return bool(sources & profile_agnostic_sources)
+
+
+def _is_active_profile_aider_row(row) -> bool:
+    """Return whether an Aider row belongs to the ACTIVE profile.
+
+    Aider has no global store: the bridge scans exactly ONE bounded root,
+    resolved from the ACTIVE profile's own ``last_workspace`` git root
+    (``get_aider_sessions``). Every Aider row in a payload therefore belongs
+    to the active profile BY CONSTRUCTION, even though the row itself carries
+    ``profile: None`` -- the transcript lives in a git root, not inside a
+    Hermes profile tree, which is what makes the ``aider_`` id prefix the
+    read-only identity.
+
+    ``_profiles_match`` coerces a missing profile to ``'default'``, so the
+    sidebar scope filter dropped every Aider row under a named (non-root)
+    active profile and "Show Aider sessions" showed nothing at all. Exempt
+    these rows from the LIST scope filter; the detail-load gate keeps its own
+    exemption in ``_is_profile_agnostic_foreign_session``.
+
+    Only Aider is exempt here. Claude Code rows are profile-less too, but
+    their store is GLOBAL (``~/.claude/projects``), not profile-bound, so
+    they keep the upstream behaviour unchanged.
+    """
+    if not isinstance(row, dict):
+        return False
+    if row.get("profile"):
+        return False
+    sources = {
+        str(row.get("source_tag") or "").strip().lower(),
+        str(row.get("raw_source") or "").strip().lower(),
+    }
+    return AIDER_SOURCE in sources
 
 
 def _request_session_visibility_exempt(method: str, path: str | None) -> bool:
@@ -2453,6 +2487,18 @@ def _callable_accepts_kwarg(callable_obj, kwarg_name: str) -> bool:
     )
 
 
+def _aider_include_kwargs(show_aider_sessions: bool) -> dict:
+    """Thread ``include_aider`` only when the installed models.py understands it.
+
+    Same defensive shape as the ``include_claude_code`` branch above: focused
+    tests monkeypatch ``routes.get_cli_sessions`` with narrower signatures, and a
+    stale/older models module must not break the sidebar route.
+    """
+    if _callable_accepts_kwarg(get_cli_sessions, "include_aider"):
+        return {"include_aider": bool(show_aider_sessions)}
+    return {}
+
+
 def _session_list_cache_key(
     active_profile: str | None,
     all_profiles: bool,
@@ -2469,6 +2515,7 @@ def _session_list_cache_key(
     archived_limit: int | None = None,
     archived_offset: int = 0,
     show_claude_code_sessions: bool = True,
+    show_aider_sessions: bool = True,
 ) -> tuple:
     return _route_session_list_cache_key(
         active_profile=active_profile,
@@ -2485,7 +2532,7 @@ def _session_list_cache_key(
         sidebar_source=sidebar_source,
         archived_limit=archived_limit,
         archived_offset=archived_offset,
-    ) + (bool(show_claude_code_sessions),)
+    ) + (bool(show_claude_code_sessions), bool(show_aider_sessions))
 
 _ROUTE_SESSION_LIST_CACHE_DYNAMIC_EXPORTS = {
     "_SESSIONS_CACHE_ALL_PROFILES_INVALIDATION_VERSION",
@@ -2787,6 +2834,7 @@ def _build_session_list_cache_payload(
     show_previous_messaging_sessions: bool,
     show_cron_sessions: bool,
     show_claude_code_sessions: bool = True,
+    show_aider_sessions: bool = True,
     include_archived: bool = False,
     exclude_hidden: bool = False,
     visible_only: bool = False,
@@ -2855,6 +2903,7 @@ def _build_session_list_cache_payload(
                 source_filter=source_filter,
                 all_profiles=all_profiles,
                 include_claude_code=show_claude_code_sessions,
+                **_aider_include_kwargs(show_aider_sessions),
             )
         else:
             # Focused tests sometimes monkeypatch routes.get_cli_sessions with
@@ -3058,7 +3107,18 @@ def _build_session_list_cache_payload(
         scoped = merged
         other_profile_count = 0
     else:
-        scoped = [s for s in merged if _profiles_match(s.get("profile"), active_profile)]
+        # Aider rows are profile-less by design (the transcript lives in a git
+        # root, not a Hermes profile tree), but the bridge scans exactly ONE
+        # bounded root resolved from the ACTIVE profile's own workspace -- so
+        # every Aider row belongs to the active profile by construction.
+        # _profiles_match coerces the missing profile to 'default', which
+        # dropped every Aider row under a named (non-root) active profile and
+        # left "Show Aider sessions" showing nothing at all.
+        scoped = [
+            s for s in merged
+            if _profiles_match(s.get("profile"), active_profile)
+            or _is_active_profile_aider_row(s)
+        ]
         other_profile_count = 0 if _is_isolated_profile_mode() else len(merged) - len(scoped)
     diag_stage("messaging_dedupe")
     archived_scoped = _keep_latest_messaging_session_per_source(
@@ -3178,6 +3238,7 @@ def _build_session_list_cache_payload(
             "show_previous_messaging_sessions": show_previous_messaging_sessions,
             "show_cron_sessions": show_cron_sessions,
             "show_claude_code_sessions": show_claude_code_sessions if show_cli_sessions else False,
+            "show_aider_sessions": show_aider_sessions if show_cli_sessions else False,
             "show_webhook_sessions": show_webhook_sessions,
             "show_kanban_sessions": show_kanban_sessions,
         },
@@ -10016,6 +10077,46 @@ def _is_subagent_child_session_id(sid: str) -> bool:
     return _state_db_session_source(sid) == "subagent"
 
 
+def _is_aider_session_id(sid: str) -> bool:
+    """Return True when ``sid`` is an Aider chat-history import id (#674).
+
+    Aider conversations are bridged READ-ONLY: the WebUI renders a transcript
+    parsed out of a ``.aider.chat.history.md`` file that the user owns
+    independently of this app. Materializing one as a writable WebUI session
+    would let a composer turn take ownership of a conversation that is still
+    live in Aider, so the id prefix is the external read-only identity -- it
+    cannot be laundered by a metadata lookup that happens to miss.
+    """
+    return str(sid or "").startswith(f"{AIDER_SOURCE}_")
+
+
+def _is_claude_code_session_id(sid: str) -> bool:
+    """Return True when ``sid`` is a Claude Code external-agent import id.
+
+    Same reasoning as the Aider prefix above, and the same shipped intent:
+    ``get_claude_code_sessions()`` already stamps ``read_only: True`` on every
+    row it builds (api/models.py), because the transcript is read straight out
+    of ``~/.claude/projects`` and the WebUI does not own it. That flag lives in
+    the list metadata, though, so it is only as strong as the lookup that
+    produced it -- and a metadata MISS (all-profiles resolve, evicted cache,
+    another profile's binding) would otherwise drop through to
+    ``import_cli_session`` and mint a writable sidecar for a conversation that
+    is still live in Claude Code.
+    """
+    return str(sid or "").startswith(f"{CLAUDE_CODE_SOURCE}_")
+
+
+def _is_external_read_only_session_id(sid: str) -> bool:
+    """Return True for an id that is external read-only by PREFIX.
+
+    The prefix is the authority precisely because it cannot be laundered by a
+    metadata lookup that misses. Every id whose source stamps ``read_only: True``
+    belongs here; an id that does not (ordinary CLI/messaging/cron sessions) is
+    untouched, so ordinary profile-ownership checks are not weakened.
+    """
+    return _is_aider_session_id(sid) or _is_claude_code_session_id(sid)
+
+
 def _project_session_draft_write(write: dict, current_draft: dict) -> dict:
     """Apply a ``/api/session/draft`` write to the stored draft.
 
@@ -12556,6 +12657,7 @@ from api.models import (
     save_projects,
     import_cli_session,
     CLAUDE_CODE_SOURCE,
+    AIDER_SOURCE,
     get_cli_sessions,
     get_cli_session_messages,
     get_state_db_session_messages,
@@ -16991,6 +17093,7 @@ def handle_get(handler, parsed) -> bool:
             settings = load_settings()
             show_cli_sessions = bool(settings.get("show_cli_sessions"))
             show_claude_code_sessions = bool(settings.get("show_claude_code_sessions"))
+            show_aider_sessions = bool(settings.get("show_aider_sessions"))
             show_previous_messaging_sessions = bool(
                 settings.get("show_previous_messaging_sessions")
             )
@@ -17014,6 +17117,7 @@ def handle_get(handler, parsed) -> bool:
                 all_profiles=all_profiles,
                 show_cli_sessions=show_cli_sessions,
                 show_claude_code_sessions=show_claude_code_sessions,
+                show_aider_sessions=show_aider_sessions,
                 show_previous_messaging_sessions=show_previous_messaging_sessions,
                 show_cron_sessions=show_cron_sessions,
                 include_archived=include_archived,
@@ -17037,6 +17141,7 @@ def handle_get(handler, parsed) -> bool:
                     all_profiles=all_profiles,
                     show_cli_sessions=show_cli_sessions,
                     show_claude_code_sessions=show_claude_code_sessions,
+                    show_aider_sessions=show_aider_sessions,
                     show_previous_messaging_sessions=show_previous_messaging_sessions,
                     show_cron_sessions=show_cron_sessions,
                     include_archived=include_archived,
@@ -20215,6 +20320,7 @@ def handle_post(handler, parsed) -> bool:
             for k in (
                 "show_cli_sessions",
                 "show_claude_code_sessions",
+                "show_aider_sessions",
                 "show_cron_sessions",
                 "show_webhook_sessions",
                 "show_kanban_sessions",
@@ -34339,6 +34445,13 @@ def _handle_session_import_cli(handler, body):
                 (existing.source_tag or existing.raw_source or "").strip().lower() == "subagent"
                 or _is_subagent_child_session_id(sid)
             )
+            # #674: a metadata MISS on the refresh path must not launder an
+            # external Aider conversation back into a writable session either.
+            # Without the coercion below, a stale writable sidecar imported
+            # before the read-only gate survives a refresh unchanged.
+            if _is_external_read_only_session_id(sid) and not getattr(existing, "read_only", False):
+                existing.read_only = True
+                changed = True
         if changed:
             existing.save(touch_updated_at=False)
             publish_session_list_changed(
@@ -34408,7 +34521,16 @@ def _handle_session_import_cli(handler, body):
     # can miss it (#5307 cross-profile edge).
     _cli_sa = (cli_source_tag or cli_raw_source or "").strip().lower() == "subagent"
     _sa_child = _sa_child or _cli_sa
-    _read_only_view = cli_read_only or _sa_child
+    # #674: an external-agent id is read-only BY PREFIX. Both bridges stamp
+    # ``read_only: True`` on every list row they build (get_aider_sessions /
+    # get_claude_code_sessions in api/models.py), so this is the shipped intent
+    # restated where it cannot be laundered: Aider list metadata carries
+    # ``profile: None``, so an all-profiles resolve can miss and return {} while
+    # the profile-aware message lookup still succeeds -- which previously let a
+    # real CLI import run and mint a writable sidecar for a conversation that is
+    # still live in the other agent. Claude Code misses the same way.
+    _external_ro = _is_external_read_only_session_id(sid)
+    _read_only_view = cli_read_only or _sa_child or _external_ro
 
     # Use the CLI session title if available (e.g., cron job name), otherwise derive from messages
     title = cli_title or title_from(msgs, "CLI Session")
