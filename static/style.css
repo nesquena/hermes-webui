@@ -3658,6 +3658,7 @@
 .ws-drag-handle:active{cursor:grabbing;}
 .ws-row.dragging{opacity:.35;border:1px dashed var(--accent-bg-strong);}
 .ws-row.drag-over{border-color:var(--accent-text);background:var(--accent-bg);}
+.workspaces-list{flex:1;overflow-y:auto;padding:8px;min-height:0;}
 .ws-action-btn{padding:4px 8px;border-radius:6px;font-size:11px;font-weight:600;border:1px solid var(--border2);background:rgba(255,255,255,.05);color:var(--muted);cursor:pointer;transition:all .15s;white-space:nowrap;}
 .ws-action-btn:hover{background:rgba(255,255,255,.1);color:var(--text);}
 /* ── Profile dropdown + management panel ── */
@@ -3845,7 +3846,8 @@ body.tts-enabled .msg-tts-btn{display:inline-flex;align-items:center;}
   display:flex;align-items:center;justify-content:center;
   line-height:1;
 }
-.file-item:hover .file-del-btn{ width:16px;opacity:1;margin-left:2px; }
+.file-item:hover .file-del-btn,.file-item:focus-visible .file-del-btn{ width:16px;opacity:1;margin-left:2px; }
+.file-item:focus-visible{ outline:2px solid var(--accent);outline-offset:-2px; }
 .file-del-btn:hover{ color:var(--accent); }
 
 /* file-name must be a flex child that can shrink to zero */
@@ -4414,6 +4416,11 @@ body.resizing .sidebar{transition:none!important;}
 .transparent-event-row:focus-within{
   border-color:var(--border-subtle);
   background:color-mix(in srgb,var(--surface-subtle) 48%,transparent);
+}
+/* Hover on an open row should brighten it, not fade it back below its open tint (62%). */
+.transparent-event-row[data-expanded="1"]:hover,
+.transparent-event-row[data-expanded="1"]:focus-within{
+  background:color-mix(in srgb,var(--surface-subtle) 72%,transparent);
 }
 /* Transparent Stream: both tool AND thinking inner cards must reset to a flat,
    transparent row. The thinking-card previously kept its base accent-bg/border/

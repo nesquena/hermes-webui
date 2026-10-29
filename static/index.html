@@ -310,7 +310,7 @@
         </div>
       </div>
       <div class="panel-head-sub" data-i18n="workspace_desc">Add and switch workspaces for your sessions.</div>
-      <div style="flex:1;overflow-y:auto;padding:8px" id="workspacesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
+      <div class="workspaces-list" id="workspacesPanel"><div style="color:var(--muted);font-size:12px" data-i18n="loading">Loading...</div></div>
     </div>
     <!-- Profiles panel -->
     <div class="panel-view" id="panelProfiles">
@@ -1375,6 +1375,13 @@
               </label>
               <div style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_fade_text_effect">Fade newly streamed words in while the assistant is responding. Similar to OpenWebUI; off by default for maximum performance. Transparent Stream always fades prose as part of that mode, regardless of this setting.</div>
             </div>
+            <div class="settings-field" data-settings-search="accessibility a11y screen reader assistive NVDA JAWS VoiceOver Narrator TalkBack terminal">
+              <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+                <input type="checkbox" id="settingsScreenReaderMode" aria-describedby="settingsScreenReaderModeDesc" style="width:15px;height:15px;accent-color:var(--accent)">
+                <span data-i18n="settings_label_screen_reader_mode">Screen reader mode</span>
+              </label>
+              <div id="settingsScreenReaderModeDesc" style="font-size:11px;color:var(--muted);margin-top:4px" data-i18n="settings_desc_screen_reader_mode">Optimizes parts of the interface for screen readers. Currently makes terminal output readable and announces new output. Off by default.</div>
+            </div>
             <div class="settings-field">
               <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
                 <input type="checkbox" id="settingsTerminalAutoExpand" style="width:15px;height:15px;accent-color:var(--accent)">
@@ -1826,6 +1833,7 @@
 <script src="static/i18n.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/icons.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/assistant_turn_anchors.js?v=__WEBUI_VERSION__" defer></script>
+<script src="static/a11y-helpers.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/ui.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/workspace.js?v=__WEBUI_VERSION__" defer></script>
 <script src="static/terminal.js?v=__WEBUI_VERSION__" defer></script>

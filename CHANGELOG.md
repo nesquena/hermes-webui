@@ -5,6 +5,8 @@
 
 ### Added
 
+- **Opt-in Screen reader mode, enabled for the terminal.** A Settings toggle (also found by Settings search) makes the terminal readable by screen readers. Off by default. Thanks @grzezlo. (#8305)
+
 - **A read-only endpoint reports a session's background delegations.** `GET /api/session/delegations?session_id=...` returns how many delegated tasks are still running and how many have finished but not yet been delivered, so a client can warn before switching away. It reads counts only (no prompts or results), stays inside the session's own profile, and answers `unknown` rather than zero when the ledger can't be read. Thanks @happy5318. (Refs #8019)
 
 - **Pinch, pan and zoom in the image lightbox.** An enlarged chat image can now be pinched to zoom and panned with two fingers on touch screens, zoomed with the mouse wheel at the cursor and dragged on desktop, and zoomed or reset with `+`, `-` and `F` on the keyboard. A Fit button next to close returns it to fit, the zoom carries across previous/next images, and the image can no longer be dragged out of view. An edge swipe inside the open lightbox no longer opens the session drawer behind it, and keyboard focus now moves into the dialog. A maintainer fold makes both buttons 44×44 on touch screens with a gap between them, gives them a hover state you can see over the dark backdrop and over bright images (the close button in the diagram lightbox included), and keeps Tab order in visual order. Thanks @silent-reader-cn. (#6896)
@@ -60,6 +62,18 @@
   exactly as before. Thanks @ybai08. (#8138, fixes #8126)
 
 ### Fixed
+
+- **The workspace file tree works with the keyboard and screen readers.** Its rows are named for screen readers and reachable and operable from the keyboard; before, the Files pane could not be reached by keyboard at all. Thanks @grzezlo, building on @michaldziwisz's #7258. (#8384)
+
+- **Right-clicking a sidebar conversation opens its menu at the pointer.** The ⋮ button, keyboard and touch still open it at the button. Thanks @solarmaster961. (#8294)
+
+- **The Spaces list no longer ends in a clipped path-validation note.** The hint stays on the Add Space form, where it applies. Thanks @RajPabnani03. (#7467)
+
+- **An expanded Transparent Stream row now brightens on hover and focus instead of dimming.** The difference is invisible in the default skins and visible in the opaque-surface ones. Thanks @balabommablock-cpu. (#8508, part of #8506)
+
+- **Older conversations no longer show a turn's tool activity under the previous turn.** Legacy tool anchors are now bounded to the user turn they belong to. Thanks @Jmars321. (#8440, fixes #8427)
+
+- **Folding or unfolding a dual-screen phone no longer blanks the chat.** During the fold transition some devices (Surface Duo) report a garbage `visualViewport.height`; WebUI used it to compute the keyboard inset and pushed the chat out of view until the phone was rotated or the page reloaded. Implausible heights are now rejected before the inset is computed. Thanks @CharlesMcquade. (#8536, fixes #8531)
 
 - **A flaky worker-slot test no longer fails CI at random.** `test_worker_slot_releases_after_request_finishes` sent its next request as soon as the held one's response arrived, but the server gives the slot back only after the socket is shut down, so a loaded runner could see the overflow 503. It now waits for the release, as its sibling test already did; it still fails if a slot is never released. Test-only. (#8599)
 
@@ -354,6 +368,8 @@
 - **Documented the gateway approval-runs API opt-in.** `docs/advanced-chat-setup.md` and `docs/docker.md` now explain how to enable and use the gateway approval-runs API. Thanks @rodboev. (#5549, #5269)
 
 ### Changed
+
+- **German: 208 strings that still showed English are translated.** MCP (37), Settings and composer (116) and slash commands (55). Thanks @solarmaster961. (#8291, #8292, #8293)
 
 - **Keyboard and screen reader users can reach conversations in the sidebar directly.** Conversation titles are now real buttons (the open one is marked as the current page), the Chat label is a heading, and a keyboard-focused row shows a clear focus ring, including in forced-colours mode and the Geist Contrast skin. Focus stays on the same conversation when the list refreshes, J/K navigation keeps working after a mouse click, and opening a conversation closes any open project or model menu. On touch screens, the first tap on a tag filters by it, a long press on a tag still opens the conversation's actions, and a swipe that starts on a tag still swipes. (#7049, thanks @sheldon-im)
 

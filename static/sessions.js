@@ -6293,7 +6293,21 @@ function _sessionActionMenuShouldRepositionOnScroll(target){
 function _positionSessionActionMenu(anchorEl){
   if(!_sessionActionMenu || !anchorEl) return;
   let rect=anchorEl.getBoundingClientRect();
-  if(!rect.width||!rect.height){
+  // A menu opened from `contextmenu` (flagged at open) sits at the pointer the
+  // user invoked it at. The point is the project picker's recorded context
+  // point — the only pointer evidence in this file — and its rowOffsetX/Y keep
+  // the menu glued to the same spot in its row when a sidebar scroll or a
+  // resize repositions it here. The row lookup mirrors _projectPickerAnchorRect,
+  // which stays untouched and keeps owning the zero-sized-anchor fallback.
+  const contextPoint=anchorEl._projectPickerContextPoint;
+  const atPointer=!!(_sessionActionMenu._pointAnchoredFromPointer&&contextPoint&&Number.isFinite(contextPoint.clientX));
+  if(atPointer){
+    const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
+    const rowRect=row&&row.isConnected!==false?row.getBoundingClientRect():null;
+    const pointX=rowRect&&Number.isFinite(contextPoint.rowOffsetX)?rowRect.left+contextPoint.rowOffsetX:contextPoint.clientX;
+    const pointY=rowRect&&Number.isFinite(contextPoint.rowOffsetY)?rowRect.top+contextPoint.rowOffsetY:contextPoint.clientY;
+    rect={top:pointY,bottom:pointY+1,left:pointX,right:pointX+1,width:1,height:1,pointAnchored:true};
+  } else if(!rect.width||!rect.height){
     // A zero-sized anchor — coarse-pointer CSS hides `.session-actions`, or a
     // repaint left a stale trigger — borrows the geometry the project picker
     // places from: the recorded context-menu point, else the visible row.
@@ -6852,8 +6866,15 @@ function _openSessionActionMenu(session, anchorEl){
   if(!handoff) return;
   session=handoff.session;
   anchorEl=handoff.anchorEl;
+  // A context-menu point recorded moments ago is fresh evidence of where the
+  // user invoked this menu: _positionSessionActionMenu places it at the
+  // pointer and keeps it glued to that spot in the row. Consuming the flag
+  // anchors the next ⋮-open back on its button.
+  const contextPoint=anchorEl._projectPickerContextPoint;
+  const openAtContextPoint=!!(contextPoint&&contextPoint.freshMenuAnchor);
+  if(contextPoint) delete contextPoint.freshMenuAnchor;
   const isReadOnly = _isReadOnlySession(session);
-  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl){
+  if(_sessionActionMenu && _sessionActionSessionId===session.session_id && _sessionActionAnchor===anchorEl && !openAtContextPoint){
     closeSessionActionMenu();
     return;
   }
@@ -6866,6 +6887,7 @@ function _openSessionActionMenu(session, anchorEl){
   menu.id='sessionActionMenu-'+(++_sessionActionMenuId);
   menu.setAttribute('role','menu');
   menu.setAttribute('aria-label', 'Conversation actions');
+  menu._pointAnchoredFromPointer=openAtContextPoint;
   _appendSessionCopyLinkAction(menu, session);
   if(isReadOnly){
     _appendSessionExportHtmlAction(menu, session);
@@ -11928,6 +11950,7 @@ async function deleteSession(sid, beforeDelete=null){
       const _tm=$('topbarMeta');if(_tm)_tm.textContent='Start a new conversation';
       $('msgInner').innerHTML='';
       $('emptyState').style.display='';
+      if(typeof a11yTreeReset==='function') a11yTreeReset($('fileTree'), {focusTo: $('workspaceFilesTab')});
       $('fileTree').innerHTML='';
       if(typeof S!=='undefined') S.session=null;
       if(typeof syncAppTitlebar==='function') syncAppTitlebar();
@@ -12669,7 +12692,19 @@ function _positionProjectPicker(picker, anchorEl){
 
 function _recordProjectPickerContextPoint(anchorEl,event){
   if(!anchorEl||!Number.isFinite(event&&event.clientX)||!Number.isFinite(event&&event.clientY)) return;
+  // freshMenuAnchor marks the point as the spot a menu was just invoked from.
+  // _openSessionActionMenu consumes the flag and _positionSessionActionMenu
+  // places a context-menu-opened action menu there (and follows the row).
+  // The point itself is always recorded (the project picker reads it), but only
+  // a pointer right-click on the row is a place to open the menu at. A keyboard
+  // open (Shift+F10 or the ContextMenu key: button -1, fired at the focused
+  // trigger's centre) and a right-click on the trigger itself open on the
+  // button, exactly as a click on it does.
+  const target=event.target;
+  const onTrigger=!!(target&&target.closest&&target.closest('.session-actions-trigger'));
+  const fromKeyboard=event.button<0;
   const point={clientX:event.clientX,clientY:event.clientY};
+  if(!onTrigger&&!fromKeyboard) point.freshMenuAnchor=true;
   const row=anchorEl.closest&&anchorEl.closest('.session-child-session-fork,.session-item');
   if(row&&row.isConnected!==false){
     const rowRect=row.getBoundingClientRect();
@@ -12766,13 +12801,23 @@ function _projectPickerAnchorRect(anchorEl, bounds){
 // Fixed coordinates and getBoundingClientRect use the layout viewport. The
 // visible part can be smaller AND offset (keyboard, browser chrome, zoom).
 function _projectPickerVisibleBounds(){
+  // Validated read (#8531): garbage fold-transition geometry (observed on the
+  // iPhone Duo standalone PWA: height -33554432 = -2^25) must fall back to
+  // window dimensions, not invert the picker's visible bounds. Inlined and
+  // self-contained: this function is extracted into a Node test harness that
+  // does not load boot.js, so it must not reach across files.
   const vv=window.visualViewport;
-  const top=vv?vv.offsetTop:0;
-  const left=vv?vv.offsetLeft:0;
+  const vvOk=vv
+    &&Number.isFinite(Number(vv.height))&&Number(vv.height)>0&&Number(vv.height)<=window.innerHeight*1.5
+    &&Number.isFinite(Number(vv.width))&&Number(vv.width)>0&&Number(vv.width)<=window.innerWidth*1.5
+    ?{height:Number(vv.height),width:Number(vv.width),offsetTop:Math.max(0,Number(vv.offsetTop)||0),offsetLeft:Math.max(0,Number(vv.offsetLeft)||0)}
+    :null;
+  const top=vvOk?vvOk.offsetTop:0;
+  const left=vvOk?vvOk.offsetLeft:0;
   return {
     top,left,
-    bottom:top+(vv?vv.height:window.innerHeight),
-    right:left+(vv?vv.width:window.innerWidth),
+    bottom:top+(vvOk?vvOk.height:window.innerHeight),
+    right:left+(vvOk?vvOk.width:window.innerWidth),
   };
 }
 

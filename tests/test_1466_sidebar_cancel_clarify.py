@@ -18,23 +18,23 @@ def _function_body(src: str, name: str, window: int = 1800) -> str:
     return src[idx : idx + window]
 
 
+def _open_session_action_menu_body(src: str) -> str:
+    """Slice the menu builder through the listener that follows it.
+
+    A fixed character window ends before later actions once the menu grows.
+    Stop/Delete and the optimistic beforeDelete hook sit near the end.
+    """
+    start = src.find("function _openSessionActionMenu(")
+    assert start >= 0, "_openSessionActionMenu not found"
+    end = src.find("document.addEventListener('click'", start)
+    assert end > start, "click listener after _openSessionActionMenu not found"
+    return src[start:end]
+
+
 class TestSidebarCancelAction:
     def test_running_sidebar_sessions_get_stop_action(self):
         """Running sessions need a context-menu cancel action even when not active pane."""
-        # Window bumped from 3200 → 4400 in #1764 to accommodate the new
-        # Rename action item, then to 5200 in #2111 for response-aware archive
-        # toast handling, then to 6400 in #2294 for the new "Hide from list"
-        # action prepended for external sessions, then to 7600 in #3106 for
-        # manual title regeneration controls, then to 8000 in #7731 for the
-        # all-profiles archive payload.
-        # The `session.active_stream_id` / cancelSessionStream / delete checks
-        # are positional further down in the function, so growing the prefix
-        # required growing this read window; where the completion repaints route
-        # through the picker-aware wrappers added the last few bytes (#6713).
-        # #7731 keeps 8000 over #6713's 7900: the window is a prefix read, so
-        # the larger value is a superset that still covers the all-profiles
-        # archive payload this test needs to see.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8000)
+        body = _open_session_action_menu_body(SESSIONS_JS)
         assert "session.active_stream_id" in body, (
             "sidebar action menu must detect per-session active_stream_id instead of S.activeStreamId"
         )
@@ -81,13 +81,7 @@ class TestSidebarCancelAction:
 
     def test_cli_sessions_hide_duplicate_and_delete_in_action_menu(self):
         """Session action menu should hide duplicate/delete for CLI-origin sessions."""
-        # Window bumped 3600 → 4800 in #1764 (Rename action prepended), then
-        # to 5200 in #2111 for response-aware archive toast handling, then
-        # to 6400 in #2294 for the "Hide from list" action on external sessions,
-        # then to 7200 in #3223 for the "Regenerate title" action (gated on
-        # !session.is_imported) added between Stop-response and the worktree/delete block,
-        # then to 8000 in #3199 for the manual status picker before the danger block.
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8000)
+        body = _open_session_action_menu_body(SESSIONS_JS)
         assert "const isCliSession = _isCliSession(session);" in body
         assert "const isExternalSession = isMessagingSession || isCliSession;" in body
         assert "if(!isExternalSession)" in body
@@ -99,7 +93,7 @@ class TestSidebarCancelAction:
 
     def test_menu_delete_optimistically_removes_sidebar_row_before_backend_cleanup(self):
         """Context-menu Delete should not keep the row visible while slow DELETE cleanup runs."""
-        body = _function_body(SESSIONS_JS, "_openSessionActionMenu", 8400)
+        body = _open_session_action_menu_body(SESSIONS_JS)
         compact_body = "".join(body.split())
         assert "awaitdeleteSession(session.session_id,()=>Promise.resolve())" in compact_body, (
             "menu Delete must pass an immediate beforeDelete hook so deleteSession() "
