@@ -481,6 +481,7 @@ from api.profiles import (  # noqa: F401, E402  (re-export)
     _is_root_profile,
     _root_profile_names_snapshot,
     _SKILLS_STATS_CACHE,
+    invalidate_profile_skills_stats,
     get_active_profile_name,
     get_active_profile_name as _get_active_profile_name,
     get_active_hermes_home,
@@ -2499,6 +2500,71 @@ def __getattr__(name):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _prune_orphaned_desktop_sidecar_sessions(
+    rows,
+    *,
+    known_agent_ids=None,
+    diag_stage=None,
+):
+    """Prune Desktop sidecars only when their owning profile proves absence.
+
+    This pass is independent of ``show_cli_sessions``: the preference controls
+    CLI visibility, not whether stale Desktop sidecars are reconciled.  A
+    missing or unreadable profile DB is unknown and therefore retains the row.
+    """
+    if not rows:
+        return list(rows) if rows is not None else []
+    _diag = diag_stage if callable(diag_stage) else (lambda *_a, **_k: None)
+    known_ids = {
+        str(sid).strip() for sid in (known_agent_ids or set()) if str(sid or "").strip()
+    }
+    probe_rows = [
+        row for row in rows
+        if isinstance(row, dict)
+        and str(row.get("session_id") or "").strip()
+        and str(row.get("session_id") or "").strip() not in known_ids
+        and _is_desktop_sidecar_row(row)
+        and not _session_source_is_webui(row)
+    ]
+    if not probe_rows:
+        return list(rows)
+
+    rows_by_profile: dict[object, list[dict]] = defaultdict(list)
+    for row in probe_rows:
+        rows_by_profile[row.get("profile")].append(row)
+    missing_rows: set[tuple[object, str]] = set()
+    for profile_key, profile_rows in rows_by_profile.items():
+        probe_ids = [
+            str(row.get("session_id") or "").strip()
+            for row in profile_rows
+        ]
+        existing = agent_session_rows_existing_strict(
+            probe_ids,
+            profile=profile_key if isinstance(profile_key, str) and profile_key else None,
+        )
+        missing_rows.update(
+            (profile_key, sid) for sid in probe_ids if sid not in existing
+        )
+
+    kept = []
+    for row in rows:
+        sid = str(row.get("session_id") or "").strip() if isinstance(row, dict) else ""
+        profile_key = row.get("profile") if isinstance(row, dict) else None
+        if (profile_key, sid) not in missing_rows:
+            kept.append(row)
+            continue
+        try:
+            prune_session_from_index(sid)
+        except Exception:
+            logger.debug(
+                "Failed to prune orphaned Desktop sidecar %s",
+                sid,
+                exc_info=True,
+            )
+        _diag("prune_orphaned_desktop_sidecar")
+    return kept
+
+
 def _prune_orphaned_webui_zero_message_sessions(rows, *, diag_stage=None):
     """#4985 second-pass orphan prune for native-WebUI rows whose ``state.db.messages`` is empty.
 
@@ -2799,6 +2865,11 @@ def _build_session_list_cache_payload(
             )
         diag_stage("merge_cli_sessions")
         cli_by_id = {s["session_id"]: s for s in cli}
+        webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
+            webui_sessions,
+            known_agent_ids=cli_by_id,
+            diag_stage=diag_stage,
+        )
         # #3238/#4591: reconcile orphaned imported sidecars. When a CLI or
         # API-server session is clicked in WebUI it gets a WebUI-owned sidecar
         # that all_sessions() returns independently of state.db. If the user
@@ -2828,7 +2899,10 @@ def _build_session_list_cache_payload(
             _sid = s.get("session_id")
             if (
                 _sid
-                and (is_cli_session_row(s) or _is_api_server_sidecar_row(s))
+                and (
+                    is_cli_session_row(s)
+                    or _is_api_server_sidecar_row(s)
+                )
                 and not _session_source_is_webui(s)
                 and _sid not in cli_by_id
             ):
@@ -2931,6 +3005,10 @@ def _build_session_list_cache_payload(
             source_filter=source_filter,
         )
     else:
+        webui_sessions = _prune_orphaned_desktop_sidecar_sessions(
+            webui_sessions,
+            diag_stage=diag_stage,
+        )
         diag_stage("filter_webui_sessions")
         webui_sessions = [s for s in webui_sessions if not _is_cli_session_for_settings(s)]
         # #4985 second pass — see _prune_orphaned_webui_zero_message_sessions
@@ -12066,6 +12144,30 @@ def _is_api_server_sidecar_row(session: dict) -> bool:
     return bool(markers & {"api", "api_server"})
 
 
+def _is_desktop_sidecar_row(session: dict) -> bool:
+    """Return True for Desktop-origin sidecars that need orphan pruning.
+
+    A conversation created in Hermes Desktop gets a WebUI-owned sidecar the
+    first time it is opened in the WebUI. If the user later deletes it from the
+    Desktop app, the ``state.db`` row disappears but the sidecar stays, so the
+    row lingers in the sidebar forever.
+
+    Such a row matches neither ``is_cli_session_row()`` (Desktop is not CLI and
+    its source marker is not ``cli``/``tui``) nor ``_is_api_server_sidecar_row()``
+    (Desktop is not API-server), so the #3238 existence probe never inspected it
+    and no prune path could reach it. Existence is still decided by
+    ``agent_session_rows_existing()``, which fails closed to "all present", so a
+    transient ``state.db`` read error never prunes a live Desktop session.
+    """
+    if not isinstance(session, dict) or _session_source_is_webui(session):
+        return False
+    markers = {
+        _normalized_source_marker(session.get(key))
+        for key in ("source", "source_tag", "raw_source", "session_source", "source_label")
+    }
+    return "desktop" in markers
+
+
 def _session_lineage_ids(session: dict) -> set[str]:
     """Return known ids that identify one logical sidebar lineage."""
     if not isinstance(session, dict):
@@ -12481,6 +12583,7 @@ from api.models import (
     _hide_from_default_sidebar,
     prune_session_from_index,
     agent_session_rows_existing,
+    agent_session_rows_existing_strict,
     agent_session_zero_message_sids,
     _load_webui_zero_message_orphan_tombstone,
     _record_webui_zero_message_orphan_tombstone,
@@ -16839,6 +16942,22 @@ def handle_get(handler, parsed) -> bool:
             return j(handler, session_status(sid))
         except KeyError:
             return bad(handler, "Session not found", 404)
+
+    if parsed.path == "/api/session/delegations":
+        # #8019: advisory read-only live-delegation snapshot for one session.
+        # Counts only; an unreadable ledger is reported as unknown, never zero,
+        # so a pre-switch guard cannot mistake "could not check" for "safe".
+        sid = parse_qs(parsed.query).get("session_id", [""])[0]
+        if not sid:
+            return bad(handler, "Missing session_id")
+        from api.delegation_status import session_delegation_status
+        try:
+            profile = get_session_profile_readonly(sid)
+        except Exception:
+            # Unknown ownership falls back to the active profile's ledger; the
+            # result stays advisory either way.
+            profile = None
+        return j(handler, session_delegation_status(sid, profile=profile))
 
     if parsed.path == "/api/session/yolo":
         sid = parse_qs(parsed.query).get("session_id", [""])[0]
@@ -25117,6 +25236,13 @@ def _handle_approval_inject(handler, parsed):
     sid = qs.get("session_id", [""])[0]
     key = qs.get("pattern_key", ["test_pattern"])[0]
     cmd = qs.get("command", ["rm -rf /tmp/test"])[0]
+    desc = qs.get("description", ["test pattern"])[0]
+    # The core stamps exactly one stable `request_id` per approval entry
+    # (`_ApprovalEntry.__init__`), and the frontend's logical identity requires a
+    # non-empty stable id. Mirror that contract here so seeded approvals carry
+    # the same identity as production ones; tests that need to model two
+    # identical-content approvals pass an explicit distinct `request_id`.
+    request_id = (qs.get("request_id", [""])[0] or "").strip() or uuid.uuid4().hex
     if sid:
         submit_pending(
             sid,
@@ -25124,10 +25250,11 @@ def _handle_approval_inject(handler, parsed):
                 "command": cmd,
                 "pattern_key": key,
                 "pattern_keys": [key],
-                "description": "test pattern",
+                "description": desc,
+                "request_id": request_id,
             },
         )
-        return j(handler, {"ok": True, "session_id": sid})
+        return j(handler, {"ok": True, "session_id": sid, "request_id": request_id})
     return j(handler, {"error": "session_id required"}, status=400)
 
 
@@ -26739,6 +26866,22 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     if attachments:
         user_msg["attachments"] = list(attachments)
     s.messages.append(user_msg)
+    # #7882 cap follow-up: record the exact start timestamp of the row that
+    # materialises the CURRENT pending hidden turn. The sidebar overlay's
+    # capped-out branch cannot re-walk the transcript, so this is the only
+    # trusted evidence that the row it would discount is already excluded by the
+    # sidecar's own visible count. Bound to the turn, not to the text: a later
+    # same-text row (or a previous turn's row) carries a different timestamp and
+    # cannot vouch. Session.save re-validates it against the transcript and
+    # writes it into the metadata prefix.
+    if _checkpoint_source == "delegation_wakeup":
+        _materialized_at = user_msg.get("timestamp")
+        s._pending_hidden_wakeup_at = (
+            float(_materialized_at)
+            if isinstance(_materialized_at, (int, float))
+            and not isinstance(_materialized_at, bool)
+            else None
+        )
     # The new user turn is now committed to messages (#3831): advance the
     # truncation watermark to the new message's timestamp so that
     # merge_session_messages_append_only() still filters out replaced
@@ -26883,6 +27026,7 @@ def _rearm_process_wakeup_after_launch_failure(
     wakeup_prompt,
     process_id: str = "",
     retry_attempt: int = 0,
+    consumed_claimed_by_dispatch: bool = False,
 ) -> None:
     """Re-arm the process-wakeup drain after a launch-failure abort (#7680).
 
@@ -26911,6 +27055,17 @@ def _rearm_process_wakeup_after_launch_failure(
     so by the time a failure inside that drain reaches here the registry is
     already empty and the coalesce guard cannot fire — without this marker a
     persistent launch failure spun a new timer every 2s forever.
+
+    ``consumed_claimed_by_dispatch`` is the transport-claim provenance of the
+    shared registry consumed key (claimed by ``_process_one``'s idle dispatch,
+    not by an agent read), threaded down from
+    ``_start_server_side_wakeup_turn``. It is recorded on the queued entry
+    BEFORE the retry timer is scheduled, and that ordering is load-bearing: the
+    abort's exception can take longer than the 2s delay to reach the
+    dispatcher's handler, so the timer-fired drain may run first. If that drain
+    finds an untagged entry whose key is set, it reads the dispatch's own claim
+    as an agent read and drops the retry — no timer is left afterwards, so the
+    wakeup is lost (#8363 review, maintainer's stalled-unwind ordering).
     """
     wakeup_prompt = str(wakeup_prompt or "").strip()
     if not wakeup_prompt:
@@ -26939,7 +27094,12 @@ def _rearm_process_wakeup_after_launch_failure(
             except Exception:
                 _process_id = ""
         try:
-            record_deferred_wakeup(sid, _process_id, wakeup_prompt)
+            record_deferred_wakeup(
+                sid,
+                _process_id,
+                wakeup_prompt,
+                consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
+            )
         except Exception:
             logger.debug(
                 "Failed to record deferred wakeup for session %s", sid, exc_info=True,
@@ -27855,6 +28015,7 @@ def _start_chat_stream_for_session(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    consumed_claimed_by_dispatch: bool = False,
     on_admitted=None,
 ):
     """Persist pending state, register an SSE channel, and start an agent turn.
@@ -27871,6 +28032,13 @@ def _start_chat_stream_for_session(
     async-delegation completions share ``source="process_wakeup"`` but own a
     durable retry, so re-arming for them double-delivered one completion
     (#7680 CORE, maintainer 2026-10-01).
+
+    ``consumed_claimed_by_dispatch`` says the shared registry consumed key was
+    claimed by the DISPATCH that started this turn (transport dedupe), not by an
+    agent read. The launch-abort re-arm must record that provenance on the
+    retried entry, otherwise a timer-fired retry drains an untagged entry whose
+    key reads as "already read" and is dropped even though no process read and
+    no accepted turn happened (#8363 review).
     """
     if external_runtime_owned is None:
         external_runtime_owned = webui_gateway_chat_enabled(get_config())
@@ -28175,6 +28343,7 @@ def _start_chat_stream_for_session(
                             wakeup_prompt=msg,
                             process_id=process_id,
                             retry_attempt=retry_attempt,
+                            consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                         )
                     raise
                 break
@@ -28350,6 +28519,7 @@ def _start_run(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    consumed_claimed_by_dispatch: bool = False,
     on_admitted=None,
 ):
     """Shared start-run helper for /api/chat/start and start_session_turn.
@@ -28364,6 +28534,11 @@ def _start_run(
     ``source`` is the StartRunRequest.source (``"webui"`` for browser POSTs,
     ``"process_wakeup"`` for the drain-thread wakeup). ``route`` is the
     metadata.route label that lands on the run record for observability.
+
+    ``process_id``/``retry_attempt``/``rearm_deferred_wakeup``/
+    ``consumed_claimed_by_dispatch`` are passed through unchanged to the
+    in-process start: they carry the process-wakeup delivery identity and the
+    transport-claim provenance into the launch-abort re-arm (#8363 review).
 
     Returns a dict with ``_status`` plus the legacy chat-start response
     fields (``stream_id``, ``session_id``, etc.). Adapter selection that
@@ -28439,6 +28614,7 @@ def _start_run(
                 process_id=process_id,
                 retry_attempt=retry_attempt,
                 rearm_deferred_wakeup=rearm_deferred_wakeup,
+                consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
                 on_admitted=on_admitted,
             )
 
@@ -28492,6 +28668,7 @@ def _start_run(
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
+        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
         on_admitted=on_admitted,
     )
 
@@ -28555,11 +28732,17 @@ def start_session_turn(
     process_id: str = "",
     retry_attempt: int = 0,
     rearm_deferred_wakeup: bool = False,
+    consumed_claimed_by_dispatch: bool = False,
     on_admitted=None,
 ):
     """Start a server-side agent turn for ``session_id`` with ``message``.
 
     ``on_admitted`` is forwarded to ``_start_chat_stream_for_session``.
+
+    ``consumed_claimed_by_dispatch`` is forwarded too: the process-completion
+    dispatch claims the shared registry consumed key as a transport dedupe, and
+    a launch-abort re-arm must preserve that provenance so the retry is not
+    dropped as if the agent had read the completion (#8363 review).
 
     Option Z primary wakeup entrypoint. This is the minimal, HTTP-handler-free
     core that ``/api/chat/start`` already reaches via ``_handle_chat_start`` →
@@ -28759,6 +28942,7 @@ def start_session_turn(
         process_id=process_id,
         retry_attempt=retry_attempt,
         rearm_deferred_wakeup=rearm_deferred_wakeup,
+        consumed_claimed_by_dispatch=consumed_claimed_by_dispatch,
         on_admitted=on_admitted,
     )
 
@@ -33813,7 +33997,7 @@ def _handle_skill_save(handler, body):
     if skill_file.is_symlink():
         return bad(handler, "Cannot save to a symlinked skill file")
     skill_file.write_text(body["content"], encoding="utf-8")
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     return j(handler, {"ok": True, "name": skill_name, "path": str(skill_file)})
 
 
@@ -33833,7 +34017,7 @@ def _handle_skill_delete(handler, body):
         return bad(handler, "Skill not found", 404)
     skill_dir = matches[0].parent
     shutil.rmtree(str(skill_dir))
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     return j(handler, {"ok": True, "name": body["name"]})
 
 
@@ -33908,7 +34092,7 @@ def _handle_skill_toggle(handler, body):
         _save_yaml_config_file(config_path, cfg)
 
     reload_config()  # outside with block — reload_config() acquires the lock itself
-    _SKILLS_STATS_CACHE.clear()
+    invalidate_profile_skills_stats()
     return j(handler, {"ok": True, "name": name, "enabled": enabled})
 
 

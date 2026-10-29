@@ -651,6 +651,11 @@ install_venv_dependencies() {
     fi
     chmod -R u+w "$_stage_src" \
       || { echo "!! Failed to make staged hermes-agent source writable (rsync/cp preserved :ro mount perms)"; return 1; }
+    # rsync excluded .git; the cp -a fallback copied it, and only now (after the
+    # chmod: cp -a keeps a :ro mount's 0555 directories) can it be removed. A
+    # stage with .git is never run by select_staged_agent_for_git_checkout.
+    rm -rf "$_stage_src/.git" \
+      || echo "!! WARNING: could not drop .git from the staged hermes-agent copy; the mounted Agent will be run instead"
     # Never fatal: without the manifest the recovery path simply ignores the
     # stage and falls back to the authorized Agent directory.
     write_agent_stage_manifest "$_agent_src" "$_stage_src" \
@@ -925,6 +930,90 @@ if [ -n "$_agent_src" ] && [ -f /app/scripts/docker_venv_python.py ] && command 
     echo ""
   fi
 fi
+
+# #8529: server.py activates the Agent it discovers before importing anything
+# else. In the single-container stack that is the host's own checkout, mounted
+# at ~/.hermes/hermes-agent. A git checkout there is what a PM-managed Agent
+# (v0.21.6+) treats as a self-managed install: its bootstrap would sync
+# dependencies into the host's ~/.hermes/installs and re-exec WebUI into the
+# host's store Python, a binary built for the host OS. Run the staged copy
+# instead: it is the tree /app/venv's dependencies were installed from, and it
+# has no .git, so the Agent's bootstrap leaves the process alone. Agent images
+# ship without .git, so the two- and three-container stacks keep the mounted
+# Agent; a pre-PM Agent (no hermes_cli/venv_sync.py + pm/environments.py beside
+# its hermes_bootstrap.py) never relaunches, so it keeps the mounted checkout too; and an operator-set HERMES_WEBUI_AGENT_DIR
+# always wins. A blank or whitespace-only value is unset, as server.py and
+# api/config.py treat it.
+select_staged_agent_for_git_checkout() {
+  local _src="$1" _stage="$2" _override="${HERMES_WEBUI_AGENT_DIR:-}" _mech _out _stamp _timeout
+  local _lazy="${HERMES_DISABLE_LAZY_INSTALLS:-}"
+  [ -z "${_override//[[:space:]]/}" ] || return 0
+  # Only a PM launcher (Agent v0.21.6+) re-execs WebUI: hermes_bootstrap.py alone
+  # is also in pre-PM Agents. managed_agent_startup._PM_LAUNCH_MARKERS lists the same files.
+  [ -n "$_src" ] && [ -e "$_src/.git" ] || return 0
+  [ -f "$_src/hermes_bootstrap.py" ] && [ -f "$_src/hermes_cli/venv_sync.py" ] \
+    && [ -f "$_src/pm/environments.py" ] || return 0
+  # #8581: and only when that Agent's bootstrap would actually relaunch. Mirror
+  # hermes_cli/venv_sync.py prepare_launch(): it never does with
+  # HERMES_DISABLE_LAZY_INSTALLS set to 1/true/yes (lowercased, not trimmed),
+  # without pyproject.toml, or when an install-stamp.json exists whose
+  # updateMechanism is not "self" (a malformed stamp reads as {} and is not
+  # adopted). A missing stamp is adopted as self. In those cases the mounted
+  # checkout runs exactly as on v0.52.544, keeping its .git for the in-app
+  # Agent update and taking mount edits on restart.
+  # Case-insensitive POSIX patterns rather than ${_lazy,,}: that expansion needs
+  # bash 4 (macOS /bin/bash is 3.2, so the test harness there died with "bad
+  # substitution"), and a command substitution would strip a trailing newline
+  # the Agent keeps (a "1\n" from a --from-file ConfigMap is not "disabled" to
+  # the Agent, so it relaunches: keep the stage).
+  case "$_lazy" in
+    1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]) return 0 ;;
+  esac
+  [ -f "$_src/pyproject.toml" ] || return 0
+  # The Agent reads the stamp of the tree it runs from at $HERMES_INSTALL_ROOT when
+  # that is non-empty (pm/paths.py install_root), else beside the checkout.
+  _stamp="${HERMES_INSTALL_ROOT:-$_src}/install-stamp.json"
+  if [ -e "$_stamp" ] || [ -L "$_stamp" ]; then
+    # Read only a regular file of at most 64 KiB, with python3, within 5 s. The
+    # Agent's reader turns a malformed or non-object stamp into {} (no relaunch:
+    # keep the mount). Anything this cannot read safely (a FIFO or other
+    # non-regular file, an oversized or unreadable file, no python3, a reader that
+    # fails or times out) prefers the stage. That is fail-closed, not a guess
+    # about the Agent: it runs as this same user and would read an unreadable
+    # stamp as {} and not relaunch, but the selector cannot prove what the Agent
+    # will see. Keeping a mount that does relaunch crash-loops (#8529); an
+    # unneeded stage only costs the in-app Agent update.
+    _mech="<unread>"
+    if [ -f "$_stamp" ] && command -v python3 >/dev/null 2>&1 \
+        && [ "$({ wc -c < "$_stamp"; } 2>/dev/null | tr -d '[:space:]')" -le 65536 ] 2>/dev/null; then
+      _timeout=""
+      command -v timeout >/dev/null 2>&1 && _timeout="timeout 5"
+      if _out="$($_timeout python3 -I -c 'import json, sys
+try:
+    with open(sys.argv[1], "rb") as f:
+        raw = f.read(65537)
+except OSError:
+    sys.exit(3)
+try:
+    d = json.loads(raw.decode("utf-8-sig"))
+except ValueError:
+    d = {}
+print(d.get("updateMechanism", "") if isinstance(d, dict) else "")' "$_stamp" 2>/dev/null)"; then
+        _mech="$_out"
+      fi
+    fi
+    if [ "$_mech" != "<unread>" ] && [ "$_mech" != "self" ]; then
+      return 0
+    fi
+  fi
+  [ -f "$_stage/run_agent.py" ] && [ ! -e "$_stage/.git" ] || return 0
+  export HERMES_WEBUI_AGENT_DIR="$_stage"
+  if [ "${_mech:-}" = "<unread>" ]; then
+    echo "-- could not read $_stamp safely; treating the Agent as self-updating"
+  fi
+  echo "-- $_src is a git checkout; running the staged copy at $_stage"
+}
+select_staged_agent_for_git_checkout "$_agent_src" "$_agent_stage"
 
 echo ""; echo "== Running hermes-webui"
 cd /app; python server.py || error_exit "hermes-webui failed or exited with an error"
