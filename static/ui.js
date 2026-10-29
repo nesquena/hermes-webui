@@ -1197,25 +1197,109 @@ function _messageSessionIndexBase(){
   const n=Number(typeof _oldestIdx!=='undefined'?_oldestIdx:0);
   return Number.isFinite(n)?Math.max(0,n):0;
 }
+// A prompt recovered from the live tail / pending cache while the loaded
+// transcript is a TAIL window sits OUTSIDE the canonical window (or is not
+// persisted yet): it is a DISPLAY-ONLY row. It renders like any other row, but
+// it must not shift the absolute index of the real window rows — fork, edit,
+// regenerate and the older-page cursor all derive `_oldestIdx + raw` from them.
+// Counting display-only rows out of the raw->absolute mapping keeps a window
+// that starts at absolute 31 on 31 instead of looking like 32 (fork sends 33).
+function _displayOnlyIndexState(){
+  const root=(typeof globalThis!=='undefined')?globalThis:(typeof window!=='undefined'?window:null);
+  if(!root) return null;
+  if(!root.__hermesDisplayOnlyIndexState){
+    root.__hermesDisplayOnlyIndexState={seen:false,cache:null,src:null,len:-1};
+  }
+  return root.__hermesDisplayOnlyIndexState;
+}
+function _markDisplayOnlyRow(row){
+  if(!row||typeof row!=='object') return row;
+  row._displayOnlyRow=true;
+  const state=_displayOnlyIndexState();
+  if(state){
+    state.seen=true;
+    state.cache=null;
+    state.src=null;
+    state.len=-1;
+  }
+  return row;
+}
+function _displayOnlyRawIndices(){
+  const state=_displayOnlyIndexState();
+  if(!state||!state.seen) return [];
+  const arr=(typeof S!=='undefined'&&S&&Array.isArray(S.messages))?S.messages:[];
+  if(state.cache&&state.src===arr&&state.len===arr.length) return state.cache;
+  const idxs=[];
+  for(let i=0;i<arr.length;i++){
+    if(arr[i]&&arr[i]._displayOnlyRow) idxs.push(i);
+  }
+  state.cache=idxs;
+  state.src=arr;
+  state.len=arr.length;
+  state.seen=idxs.length>0;
+  return idxs;
+}
+function _displayOnlyCountBefore(rawIdx){
+  const idxs=_displayOnlyRawIndices();
+  if(!idxs.length) return 0;
+  let count=0;
+  for(let i=0;i<idxs.length;i++){
+    if(idxs[i]<rawIdx) count++;
+    else break;
+  }
+  return count;
+}
+function _displayOnlyRowAt(rawIdx){
+  const idxs=_displayOnlyRawIndices();
+  if(!idxs.length) return false;
+  return idxs.indexOf(Number(rawIdx))!==-1;
+}
 function _messageSessionIndexForRawIdx(rawIdx){
   const n=Number(rawIdx);
-  if(!Number.isFinite(n)) return null;
-  return _messageSessionIndexBase()+n;
+  if(!Number.isFinite(n)||n<0) return null;
+  // Display-only rows have no canonical position: any value here would be a
+  // fabricated index that fork/edit/regenerate could act on.
+  const hasDisplayOnlyHelpers=typeof _displayOnlyRowAt==='function'&&typeof _displayOnlyCountBefore==='function';
+  if(!hasDisplayOnlyHelpers) return _messageSessionIndexBase()+n;
+  if(_displayOnlyRowAt(n)) return null;
+  const shiftedBy=_displayOnlyCountBefore(n);
+  if(!shiftedBy) return _messageSessionIndexBase()+n;
+  return _messageSessionIndexBase()+n-shiftedBy;
 }
 function _messageRawIdxForSessionIndex(sessionIdx){
   const n=Number(sessionIdx);
   if(!Number.isFinite(n)) return null;
+  let raw=n-_messageSessionIndexBase();
+  const idxs=typeof _displayOnlyRawIndices==='function'?_displayOnlyRawIndices():[];
+  if(raw<0||!idxs.length) return raw;
+  // Invert the counting: every display-only row at/before the candidate pushes
+  // the array position one slot further right.
+  for(let i=0;i<idxs.length;i++){
+    if(idxs[i]<=raw) raw++;
+    else break;
+  }
+  return raw;
+}
+// Window-relative index for keep_count math: `_oldestIdx + raw` must stay the
+// CANONICAL absolute index, so display-only rows are never counted here.
+function _canonicalRawIdxForSessionIndex(sessionIdx){
+  const n=Number(sessionIdx);
+  if(!Number.isFinite(n)) return null;
   return n-_messageSessionIndexBase();
 }
-// Current S.messages index of the message a rendered row shows. data-msg-idx is
-// relative to the _oldestIdx at render time and goes stale when full history
-// loads without a re-render (opening the outline does that); the row's
-// data-session-msg-idx is absolute and does not. Edit, regenerate and fork turn
-// this into an absolute keep_count (#2184), so a stale value truncated or forked
-// at the wrong turn.
+// Current canonical (window-relative) index of the message a rendered row
+// shows. data-msg-idx is relative to the _oldestIdx at render time and goes
+// stale when full history loads without a re-render (opening the outline does
+// that); the row's data-session-msg-idx is absolute and does not. Edit,
+// regenerate and fork turn this into an absolute keep_count (#2184), so a stale
+// value truncated or forked at the wrong turn.
 function _rowCurrentRawIdx(row, fallback){
   const abs=row&&row.dataset?Number(row.dataset.sessionMsgIdx):NaN;
-  const raw=Number.isSafeInteger(abs)&&abs>=0?_messageRawIdxForSessionIndex(abs):null;
+  const raw=Number.isSafeInteger(abs)&&abs>=0
+    ?(typeof _canonicalRawIdxForSessionIndex==='function'
+      ?_canonicalRawIdxForSessionIndex(abs)
+      :abs-_messageSessionIndexBase())
+    :null;
   return Number.isSafeInteger(raw)&&raw>=0?raw:fallback;
 }
 function _messageVirtualScrollTopForVisibleIdx(visWithIdx, visibleIdx, container){
@@ -21781,8 +21865,12 @@ function renderMessages(options){
     const recoveryHtml=recoveryPayload ? _compressionRecoveryHtml(recoveryPayload, (S.session&&S.session.session_id)||'') : '';
     if(recoveryHtml) bodyHtml += recoveryHtml;
     const statusHtml = (!isUser&&m._statusCard) ? _statusCardHtml(m._statusCard) : '';
+    const isDisplayOnlyRow=!!(m&&m._displayOnlyRow);
     const isEditableUser=isUser&&rawIdx===lastUserRawIdx;
-    const editBtn  = isEditableUser ? `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>` : '';
+    // Display-only rows have no canonical index, so a keep_count derived from
+    // them would truncate/fork the wrong point: keep the row's actions off
+    // until the transcript row it mirrors actually lands.
+    const editBtn  = isEditableUser ? (isDisplayOnlyRow ? '' : `<button class="msg-action-btn" title="${t('edit_message')}" onclick="editMessage(this)">${li('pencil',13)}</button>`) : '';
     const undoBtn  = isLastAssistant ? `<button class="msg-action-btn" title="${t('undo_exchange')}" onclick="undoLastExchange()">${li('undo',13)}</button>` : '';
     const retryBtn = isLastAssistant ? `<button class="msg-action-btn" title="${t('regenerate')}" onclick="regenerateResponse(this)">${li('rotate-ccw',13)}</button>` : '';
     const copyBtn  = `<button class="msg-copy-btn msg-action-btn" title="${t('copy')}" onclick="copyMsg(this)">${li('copy',13)}</button>`;
@@ -21792,7 +21880,11 @@ function renderMessages(options){
     const branchableReadOnlySession=typeof _isBranchableReadOnlySession==='function'
       ? _isBranchableReadOnlySession(S.session)
       : false;
-    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1},this)">${li('git-branch',13)}</button>`;
+    // Display-only rows carry no canonical index, so fork/edit cannot compute a
+    // safe keep_count for them: hide the actions until the transcript row lands.
+    // Keep the read-only suppressor as the leading condition (test_465 pins that
+    // expression); display-only rows are suppressed in the same ternary's result.
+    const forkBtn  = (readOnlySession&&!branchableReadOnlySession) ? '' : (isDisplayOnlyRow ? '' : `<button class="msg-action-btn" title="${t('fork_from_here')}" onclick="forkFromMessage(${rawIdx+1},this)">${li('git-branch',13)}</button>`);
     const ttsBtn   = !isUser ? `<button class="msg-action-btn msg-tts-btn" title="${t('tts_listen')||'Listen'}" onclick="speakMessage(this)">${li('volume-2',13)}</button>` : '';
     const tsVal=m._ts||m.timestamp;
     // _formatInServerTz handles fractional-hour offsets (India +0530 etc.)
@@ -21888,13 +21980,15 @@ function renderMessages(options){
       if(row&&(!row.classList.contains('msg-row')||row.classList.contains('assistant-turn'))) row=null;
       const newRawText=String(displayContent).trim();
       const nextRowHtml=`${filesHtml}<div class="msg-body">${bodyHtml}</div>${footHtml}`;
+      const userSessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
       if(row){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.sessionMsgIdx=userSessionMsgIdx===null?'':userSessionMsgIdx;
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
+        if(isDisplayOnlyRow) row.dataset.displayOnly='1'; else delete row.dataset.displayOnly;
         delete row.dataset.editing;
         if(row.dataset.rawText!==newRawText||row.innerHTML!==nextRowHtml){
           row.dataset.rawText=newRawText;
@@ -21905,9 +21999,10 @@ function renderMessages(options){
         row.className='msg-row';
         row.id=_userMessageDomId(rawIdx);
         row.dataset.msgIdx=rawIdx;
-        row.dataset.sessionMsgIdx=_messageSessionIndexForRawIdx(rawIdx);
+        row.dataset.sessionMsgIdx=userSessionMsgIdx===null?'':userSessionMsgIdx;
         row.dataset.messageAnchorKey=_messageViewportAnchorKeyForMessage(m);
         row.dataset.role='user';
+        if(isDisplayOnlyRow) row.dataset.displayOnly='1'; else delete row.dataset.displayOnly;
         row.dataset.rawText=newRawText;
         row.innerHTML=nextRowHtml;
       }

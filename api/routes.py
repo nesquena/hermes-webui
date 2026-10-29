@@ -26866,6 +26866,22 @@ def _checkpoint_user_message_for_eager_session_save(s, msg: str, attachments, st
     if attachments:
         user_msg["attachments"] = list(attachments)
     s.messages.append(user_msg)
+    # #7882 cap follow-up: record the exact start timestamp of the row that
+    # materialises the CURRENT pending hidden turn. The sidebar overlay's
+    # capped-out branch cannot re-walk the transcript, so this is the only
+    # trusted evidence that the row it would discount is already excluded by the
+    # sidecar's own visible count. Bound to the turn, not to the text: a later
+    # same-text row (or a previous turn's row) carries a different timestamp and
+    # cannot vouch. Session.save re-validates it against the transcript and
+    # writes it into the metadata prefix.
+    if _checkpoint_source == "delegation_wakeup":
+        _materialized_at = user_msg.get("timestamp")
+        s._pending_hidden_wakeup_at = (
+            float(_materialized_at)
+            if isinstance(_materialized_at, (int, float))
+            and not isinstance(_materialized_at, bool)
+            else None
+        )
     # The new user turn is now committed to messages (#3831): advance the
     # truncation watermark to the new message's timestamp so that
     # merge_session_messages_append_only() still filters out replaced
