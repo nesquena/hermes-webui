@@ -103,6 +103,13 @@ def _new_entry() -> dict:
         "agent": None,
         "in_flight": False,
         "segments": [],
+        # Release-authorizing acknowledgement debt: latched by a require_ack
+        # commit whose delivery nothing confirmed.  Deliberately separate from
+        # the legacy committed_generation ledger — an ordinary commit (the New
+        # Chat background worker, a boundary drain) cannot acknowledge, so it
+        # must not erase an obligation the release gate refused.  Only an
+        # acknowledged delivery for the same owner/generation clears it.
+        "unacked": None,
     }
 
 
@@ -127,22 +134,34 @@ def register_agent(session_id: str, agent) -> None:
         _condition.notify_all()
 
 
-def unregister_agent(session_id: str) -> None:
+def unregister_agent(session_id: str, agent=None) -> None:
     """Clear the current future-generation agent handle.
 
     Dirty segment owners are intentionally preserved so failed work remains
     retryable even if the cache drops the current agent reference.
+
+    ``agent`` makes the clear conditional on ownership: a same-session request
+    can register a replacement agent between the cache pop and the eviction
+    teardown, and the outgoing agent's cleanup must not drop the replacement's
+    freshly registered handle.  A handle that is already clear (``None``) is
+    not "someone else's", so the conditional form still clears it.  Callers
+    without an agent identity (session delete / clear / model switch) omit it
+    and keep the unconditional behavior.
     """
     if not session_id:
         return
     with _condition:
         entry = _sessions.get(session_id)
         if entry is not None:
+            owner = entry["agent"]
+            if agent is not None and owner is not None and owner is not agent:
+                # A replacement agent owns this entry now — leave it alone.
+                return
             entry["agent"] = None
         _condition.notify_all()
 
 
-def discard_session(session_id: str) -> bool:
+def discard_session(session_id: str, agent=None) -> bool:
     """Permanently drop a session's lifecycle entry to bound memory growth.
 
     The ``_sessions`` dict is process-global and historically only ever grew:
@@ -159,6 +178,14 @@ def discard_session(session_id: str) -> bool:
 
     Returns True when the entry was removed (or was already absent), False when
     it was retained because work is still pending.
+
+    ``agent`` adds an ownership precondition: when a replacement agent has
+    registered itself for this session (the cache pop and the eviction teardown
+    are not atomic), the entry belongs to that replacement and is retained
+    instead of deleted.  A handle that is already clear (``None``) does not
+    block removal, so the two-step eviction path (unregister, then discard)
+    still bounds the dict.  Callers without an agent identity omit it and keep
+    the unconditional behavior.
     """
     if not session_id:
         return False
@@ -166,6 +193,9 @@ def discard_session(session_id: str) -> bool:
         entry = _sessions.get(session_id)
         if entry is None:
             return True
+        owner = entry["agent"]
+        if agent is not None and owner is not None and owner is not agent:
+            return False  # a replacement agent owns this entry now
         if entry["in_flight"]:
             return False
         if entry["generation"] > entry["committed_generation"]:
@@ -212,7 +242,65 @@ def _first_uncommitted_segment(entry: dict) -> dict | None:
     return None
 
 
-def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, timeout: float | None = None) -> bool:
+def _selected_transcript(owner) -> list | None:
+    """Snapshot the transcript belonging to the segment's OWNER.
+
+    The payload must come from the agent that owns the segment being committed.
+    The caller's cached agent is whoever is in the cache NOW, which is not
+    necessarily the dirty owner — a rebuild leaves the older handle owning its
+    earlier dirty generation — and delivering the replacement's transcript to
+    the older owner commits that generation with the wrong payload.  An owner
+    with no resident transcript yields None (no payload) rather than someone
+    else's messages: a wrong payload is worse than an empty one, because it
+    writes another generation's conversation into this one's memories.
+    """
+    messages = getattr(owner, "_session_messages", None)
+    if not isinstance(messages, list) or not messages:
+        return None
+    return list(messages)
+
+
+def _deliver_commit_messages(agent, messages, ack_sink: dict | None = None) -> None:
+    """Deliver an explicit transcript to the agent's commit hook.
+
+    ``AIAgent.commit_memory_session(messages=None)`` forwards its argument to
+    the memory provider's ``on_session_end``; a caller that omits it hands the
+    provider ``[]`` and batch-extraction providers with empty-input guards skip
+    extraction entirely.  Passing the captured transcript is what makes the
+    pre-release commit actually extract instead of silently doing nothing.
+
+    ``ack_sink`` (optional) is a dict this function sets ``acknowledged=True``
+    in when the hook returned a truthy value.  The installed agent returns
+    ``None`` and wraps provider I/O in its own swallow-all helper, so real
+    failures (and successes) are invisible from here: a normal return is NOT
+    proof that extraction ran, and only an explicit acknowledgement may
+    authorize clearing a transcript.  A hook that cannot accept the transcript
+    raises TypeError, which the caller turns into a failed commit so the
+    transcript is retained for a later retry.
+    """
+    if messages is None:
+        agent.commit_memory_session()
+        return
+    acknowledged = agent.commit_memory_session(list(messages))
+    if ack_sink is not None and acknowledged:
+        ack_sink["acknowledged"] = True
+
+
+def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, timeout: float | None = None,
+                          ack_sink: dict | None = None, require_ack: bool = False) -> bool:
+    """Commit the earliest uncommitted segment for a session.
+
+    The provider payload is the selected OWNER's retained transcript (see
+    ``_selected_transcript``), delivered instead of an empty list so a
+    batch-extraction provider's empty-input guard cannot skip the work.
+
+    ``ack_sink`` collects whether that delivery was acknowledged.  With
+    ``require_ack=True`` an unacknowledged delivery does NOT advance
+    ``committed_generation``: the generation stays dirty, keeping the obligation
+    visible to the next caller (same owner/generation, retried) instead of
+    turning into "nothing pending" — which would let a later pass clear the
+    transcript without a further extraction attempt.
+    """
     if not session_id:
         return False
     deadline = time.monotonic() + timeout if timeout is not None else None
@@ -248,8 +336,12 @@ def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, ti
         captured_generation = segment["end"]
         entry["in_flight"] = True
 
+    # The payload belongs to the selected owner/generation, not to whichever
+    # agent happens to be cached now.
+    payload = _selected_transcript(effective_agent)
+    ack_state = ack_sink if ack_sink is not None else {}
     try:
-        effective_agent.commit_memory_session()
+        _deliver_commit_messages(effective_agent, payload, ack_state)
     except Exception:
         logger.exception("commit_memory_session() failed for session %s", session_id)
         with _condition:
@@ -259,10 +351,32 @@ def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, ti
             _condition.notify_all()
         return False
 
+    if require_ack and not ack_state.get("acknowledged"):
+        # The delivery ran but nothing confirmed it (the installed agent returns
+        # None and swallows provider errors).  Two things keep that refusal from
+        # being undone later: the generation stays dirty (so the next caller
+        # retries instead of taking the "nothing pending" shortcut), and the
+        # obligation is latched as a debt with its own owner/generation/payload
+        # (so an ordinary commit — which cannot acknowledge — cannot erase it and
+        # authorise a release on the following pass).
+        with _condition:
+            re_entry = _sessions.get(session_id)
+            if re_entry is not None:
+                re_entry["in_flight"] = False
+                re_entry["unacked"] = {
+                    "owner": effective_agent,
+                    "generation": captured_generation,
+                    "messages": payload,
+                }
+            _condition.notify_all()
+        return False
+
     with _condition:
         re_entry = _sessions.get(session_id)
         if re_entry is not None:
             re_entry["in_flight"] = False
+            if ack_state.get("acknowledged"):
+                _clear_release_debt(re_entry, effective_agent, captured_generation)
             if captured_generation > re_entry["committed_generation"]:
                 re_entry["committed_generation"] = captured_generation
             committed = re_entry["committed_generation"]
@@ -273,6 +387,108 @@ def commit_session_memory(session_id: str, agent=None, *, wait: bool = False, ti
                 segments[0]["start"] = committed + 1
         _condition.notify_all()
     return True
+
+
+def _clear_release_debt(entry: dict, owner, generation: int) -> None:
+    """Drop the debt only for the EXACT owner/generation it was latched to.
+
+    A later generation's acknowledgement does not confirm an earlier one, and an
+    unacknowledged commit (the ordinary paths cannot acknowledge) never clears
+    it — that is the whole point of the latch.
+    """
+    debt = entry.get("unacked")
+    if debt is not None and debt.get("owner") is owner and debt.get("generation") == generation:
+        entry["unacked"] = None
+
+
+def _release_debt(session_id: str) -> dict | None:
+    with _lock:
+        entry = _sessions.get(session_id)
+        return (entry or {}).get("unacked")
+
+
+def has_release_debt(session_id: str) -> bool:
+    """True when a refused release still awaits an acknowledgement.
+
+    The debt is latched per owner/generation and lives outside
+    ``committed_generation``, so an ordinary commit (the New Chat background
+    worker at api/routes.py, a boundary drain) cannot erase an obligation the
+    release gate refused and thereby authorise the next release.  Callers that
+    decide whether a transcript may be cleared must consult this alongside
+    ``has_uncommitted_work``.
+    """
+    return _release_debt(session_id) is not None
+
+
+def _retry_release_debt(session_id: str, debt: dict) -> bool:
+    """Re-deliver a latched obligation from its own owner/payload.
+
+    Used when the dirty segment the debt was latched to is already gone (an
+    ordinary commit advanced it), so the debt's retained state is the only
+    retry route left.  Returns True only when an acknowledgement cleared it.
+    """
+    ack: dict = {"acknowledged": False}
+    try:
+        _deliver_commit_messages(debt.get("owner"), debt.get("messages"), ack)
+    except Exception:
+        logger.debug("release-debt retry failed for session %s", session_id, exc_info=True)
+        return False
+    if not ack.get("acknowledged"):
+        return False
+    with _condition:
+        entry = _sessions.get(session_id)
+        if entry is not None and entry.get("unacked") is debt:
+            entry["unacked"] = None
+        _condition.notify_all()
+    return True
+
+
+def commit_pending_for_release(session_id: str, agent) -> bool:
+    """Commit pending memory work before a caller clears a session's transcript.
+
+    Used by the agent-cache pressure governor, which is about to empty the
+    agent's transcript.  The transcript must not be dropped while work that
+    depends on it is uncommitted, and the commit must deliver the payload
+    itself (providers with empty-input guards skip extraction otherwise).
+
+    Returns True only when the release is safe:
+
+    * nothing is pending — the transcript is free to drop;
+    * or the commit ran for the selected owner/generation, the delivery was
+      acknowledged, and nothing newer (including work a successor stream
+      registered during the commit I/O) still depends on it.
+
+    A False return means "keep the transcript", and the refusal is durable in
+    two independent ways: the generation stays dirty (so a later pass retries
+    the same owner/generation instead of taking the "nothing pending" shortcut)
+    AND the obligation is latched as a release debt (so an ordinary commit — the
+    New Chat background worker, a boundary drain, a shutdown pass, none of which
+    can acknowledge — cannot erase it and authorise the next release).  On the
+    installed agent, whose ``commit_memory_session()`` returns None and swallows
+    provider exceptions, that means retention rather than a release the runtime
+    cannot back up.
+    """
+    if not session_id:
+        return False
+    debt = _release_debt(session_id)
+    if debt is not None and not has_uncommitted_work(session_id):
+        # The dirty segment this debt was latched to is gone (an ordinary commit
+        # advanced it), so the debt's own retained owner/payload is the only
+        # retry route left.
+        if not _retry_release_debt(session_id, debt):
+            return False
+    if has_uncommitted_work(session_id):
+        ack: dict = {"acknowledged": False}
+        if not commit_session_memory(session_id, agent=agent, wait=False,
+                                     ack_sink=ack, require_ack=True):
+            return False  # in-flight elsewhere, raised, or not acknowledged
+        if has_uncommitted_work(session_id):
+            # A successor registered (or completed) work while the commit I/O ran
+            # outside the cache lock; that work still needs this transcript.
+            return False
+    # A debt for an earlier generation still blocks the release: only an
+    # acknowledged delivery for that exact owner/generation clears it.
+    return _release_debt(session_id) is None
 
 
 def drain_all_on_shutdown(deadline: float = 30.0) -> None:

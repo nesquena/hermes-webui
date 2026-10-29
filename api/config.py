@@ -13322,7 +13322,32 @@ def register_active_run(stream_id: str, **metadata) -> None:
     entry.setdefault("stream_id", stream_id)
     entry.setdefault("started_at", now)
     entry.setdefault("phase", "running")
+    # Per-entry turn lease: the agent-cache governor treats the cached agent's
+    # lease as the authoritative mid-turn signal, so publish the lease BEFORE
+    # the registry row becomes visible — and publish BOTH under one
+    # ACTIVE_RUNS_LOCK critical section.  The governor reads the lease under
+    # SESSION_AGENT_CACHE_LOCK, so a pass landing between the two writes would
+    # otherwise see a registered turn whose lease is still the previous turn's
+    # False, and could idle-evict an agent that has just started its next turn
+    # (the request then misses the cache and rebuilds the agent, losing
+    # cache-resident state such as _user_turn_count).  Lease-first inverts that
+    # window into the safe direction: a lease that reads True a moment early
+    # only delays an eviction by one pass.
+    #
+    # The lock is what makes the pair atomic with RETIREMENT.  A successor that
+    # wrote its lease and had not yet published its row was invisible to a
+    # finishing stream, whose late False then landed on the successor's live
+    # turn — registry_B=True with lease=False, and the idle governor really
+    # does evict that live agent.  Serialised by the lock, both orders are
+    # correct: a successor that wins the section publishes True + its row
+    # before the finishing stream recomputes, and a finishing stream that wins
+    # sees no successor row and writes False while no successor row exists yet.
+    # The runs→cache nesting is the audited safe direction (streaming.py
+    # snapshots ACTIVE_RUNS before taking the cache lock, and no path nests the
+    # reverse).  The agent may not be in the cache yet (it is inserted later in
+    # the turn); insertion initializes the lease, see streaming.py.
     with ACTIVE_RUNS_LOCK:
+        _set_agent_cache_turn_lease(entry.get("session_id"), True)
         ACTIVE_RUNS[stream_id] = entry
 
 
@@ -13342,9 +13367,60 @@ def unregister_active_run(stream_id: str) -> None:
         return
     global LAST_RUN_FINISHED_AT
     with ACTIVE_RUNS_LOCK:
-        ACTIVE_RUNS.pop(stream_id, None)
+        entry = ACTIVE_RUNS.pop(stream_id, None)
+        # Clear the lease under the session's *cache* key: compression
+        # rotation records the moved key as ``lease_session_id`` while the
+        # row keeps the original ``session_id`` (steer/ownership reads it).
+        # Without this the clear would land on old_sid — a key that no
+        # longer holds a cache entry — and the agent under new_sid would
+        # keep _turn_active True forever.
+        session_id = ((entry or {}).get("lease_session_id")
+                      or (entry or {}).get("session_id"))
         LAST_RUN_FINISHED_AT = time.time()
+        if session_id:
+            # A different stream may still be running for the same session
+            # (cancel/reconnect): keep the lease until the LAST stream ends.
+            # Match either spelling so a parallel stream that rotated (or
+            # has not yet) still counts.
+            still_active = any(
+                isinstance(e, dict) and session_id in (
+                    e.get("session_id"), e.get("lease_session_id"),
+                )
+                for e in ACTIVE_RUNS.values()
+            )
+            # Write the lease INSIDE the registry lock so the recompute and
+            # the write are atomic.  Writing it after releasing the lock
+            # opens a race: a successor stream can register between the pop
+            # and the write, and this finishing stream's late False would
+            # overwrite the successor's True — the governor then reads a
+            # live turn as idle and can evict the agent mid-turn.  The
+            # runs→cache lock nesting here is the safe direction (the
+            # governor snapshots ACTIVE_RUNS before taking the cache lock,
+            # and no path nests the reverse).
+            _set_agent_cache_turn_lease(session_id, still_active)
     unregister_stream_owner(stream_id)
+
+
+def _set_agent_cache_turn_lease(session_id, active: bool) -> None:
+    """Update a cached agent's per-entry turn lease at a turn boundary.
+
+    The governor reads this inside SESSION_AGENT_CACHE_LOCK at release time,
+    so liveness is atomic with the entry it guards (the plan-time snapshot
+    alone can go stale between planning and release).  Best-effort: a missing
+    cache entry (agent not inserted yet, already evicted) is a no-op.
+    """
+    if not session_id:
+        return
+    try:
+        with SESSION_AGENT_CACHE_LOCK:
+            entry = SESSION_AGENT_CACHE.get(session_id)
+            if not entry:
+                return
+            agent = entry[0] if isinstance(entry, tuple) and entry else entry
+            if agent is not None:
+                agent._turn_active = bool(active)
+    except Exception:
+        logger.debug("turn-lease update failed for session %s", session_id, exc_info=True)
 
 
 def unregister_active_run_if_owned(stream_id: str, *, claim_token: str | None = None) -> bool:
@@ -13375,6 +13451,21 @@ def unregister_active_run_if_owned(stream_id: str, *, claim_token: str | None = 
                 return False
         ACTIVE_RUNS.pop(stream_id, None)
         LAST_RUN_FINISHED_AT = time.time()
+        # Clear the per-entry turn lease for the retired claim -- but only
+        # when no other run for the same session is still active.  Without
+        # this an early-cancelled claim would leave _turn_active True forever
+        # and both governor passes would skip the agent permanently.  Mirror
+        # of unregister_active_run (including its lease-key spelling); the
+        # runs->cache nesting is the audited safe direction.
+        session_id = ((entry or {}).get("lease_session_id")
+                      or (entry or {}).get("session_id"))
+        still_active = any(
+            isinstance(e, dict) and session_id in (
+                e.get("session_id"), e.get("lease_session_id"),
+            )
+            for e in ACTIVE_RUNS.values()
+        )
+        _set_agent_cache_turn_lease(session_id, still_active)
     return True
 
 # Agent cache: reuse AIAgent across messages in the same WebUI session so that
@@ -13392,6 +13483,44 @@ SESSION_AGENT_CACHE: collections.OrderedDict = collections.OrderedDict()  # LRU 
 # tune it via HERMES_WEBUI_AGENT_CACHE_MAX without editing source.
 SESSION_AGENT_CACHE_MAX = _env_int("HERMES_WEBUI_AGENT_CACHE_MAX", 25)
 SESSION_AGENT_CACHE_LOCK = threading.Lock()
+
+# ── Agent-cache governance (port of gateway agent_cache_pressure, #80764) ─────
+# The LRU cap above bounds the *number* of cached agents; each agent pins a full
+# live transcript (_session_messages) in RAM, so on a long-running WebUI the
+# process still grows without bound as warm sessions churn.  The gateway solved
+# the same problem with three valves (config_defaults.py agent_cache):
+#   1. idle_ttl_secs  — evict agents that have been idle past the TTL;
+#   2. memory_high_mb — soft-evict LRU transcripts when anonymous RSS crosses a
+#                       budget, dropping _session_messages so the heap shrinks
+#                       and the transcript rebuilds from the persisted session
+#                       on the next turn;
+#   3. protect_recent — MRU sessions the pressure pass never touches.
+# WebUI mirrors those with env-tunable defaults identical to the gateway's.
+# 0 disables the valve (parity with gateway semantics where 0/off switches the
+# pass off).  memory_high_mb accepts an MB number or "auto" (derived from the
+# cgroup memory limit, falling back to total RAM).
+_SESSION_AGENT_CACHE_IDLE_TTL_DEFAULT = 3600
+SESSION_AGENT_CACHE_IDLE_TTL = _env_int(
+    "HERMES_WEBUI_AGENT_CACHE_IDLE_TTL",
+    _SESSION_AGENT_CACHE_IDLE_TTL_DEFAULT,
+    minimum=0,
+)
+SESSION_AGENT_CACHE_MEMORY_HIGH_MB = os.getenv(
+    "HERMES_WEBUI_AGENT_CACHE_MEMORY_HIGH_MB", "auto"
+).strip()
+_SESSION_AGENT_CACHE_PROTECT_RECENT_DEFAULT = 8
+SESSION_AGENT_CACHE_PROTECT_RECENT = _env_int(
+    "HERMES_WEBUI_AGENT_CACHE_PROTECT_RECENT",
+    _SESSION_AGENT_CACHE_PROTECT_RECENT_DEFAULT,
+    minimum=0,
+)
+# Seconds between governance passes (idle TTL + memory pressure sweep).
+_SESSION_AGENT_CACHE_GOVERN_INTERVAL_DEFAULT = 60
+SESSION_AGENT_CACHE_GOVERN_INTERVAL = _env_int(
+    "HERMES_WEBUI_AGENT_CACHE_GOVERN_INTERVAL",
+    _SESSION_AGENT_CACHE_GOVERN_INTERVAL_DEFAULT,
+    minimum=0,
+)
 
 
 def _evict_session_agent(session_id: str) -> None:

@@ -13530,16 +13530,28 @@ def _lifecycle_has_uncommitted_work(session_id: str) -> bool:
     return has_uncommitted_work(session_id)
 
 
-def _lifecycle_unregister_agent(session_id: str) -> None:
+def _lifecycle_commit_pending_for_release(session_id: str, agent) -> bool:
+    from api.session_lifecycle import commit_pending_for_release
+
+    return commit_pending_for_release(session_id, agent)
+
+
+def _lifecycle_has_release_debt(session_id: str) -> bool:
+    from api.session_lifecycle import has_release_debt
+
+    return has_release_debt(session_id)
+
+
+def _lifecycle_unregister_agent(session_id: str, *, agent=None) -> None:
     from api.session_lifecycle import unregister_agent
 
-    unregister_agent(session_id)
+    unregister_agent(session_id, agent=agent)
 
 
-def _lifecycle_discard_session(session_id: str) -> bool:
+def _lifecycle_discard_session(session_id: str, *, agent=None) -> bool:
     from api.session_lifecycle import discard_session
 
-    return discard_session(session_id)
+    return discard_session(session_id, agent=agent)
 
 
 def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
@@ -13560,11 +13572,19 @@ def _close_evicted_agent_at_session_boundary(session_id: str, agent) -> bool:
     try:
         _lifecycle_commit_session_memory(session_id, agent=agent, wait=True)
         if not _lifecycle_has_uncommitted_work(session_id):
-            _lifecycle_unregister_agent(session_id)
+            # Ownership-conditional release: the cache pop above and this
+            # teardown are not atomic, so a same-session request may already
+            # have rebuilt the agent and registered itself for this session.
+            # The lifecycle entry is keyed by session id alone, so an
+            # unconditional unregister/discard here would drop the
+            # replacement's freshly registered handle (and any generation it
+            # owns), losing pending memory work.  Both calls are no-ops when a
+            # replacement owns the entry.
+            _lifecycle_unregister_agent(session_id, agent=agent)
             # Drop the lifecycle dict entry now that the LRU-evicted agent is
             # gone and no uncommitted work remains, so the dict tracks only live
             # sessions instead of growing unbounded (issue #3506).
-            _lifecycle_discard_session(session_id)
+            _lifecycle_discard_session(session_id, agent=agent)
         else:
             should_close_evicted_agent = False
     except Exception:
@@ -14314,6 +14334,12 @@ def _run_agent_streaming(
                 if cache_signature is not None:
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
                     with SESSION_AGENT_CACHE_LOCK:
+                        # Initialize the per-entry turn lease: insertion happens
+                        # on the turn path, so the fresh entry is live.  The
+                        # governor revalidates mid-turn state from this lease at
+                        # release time; unregister_active_run clears it when the
+                        # turn ends.
+                        candidate._turn_active = True
                         SESSION_AGENT_CACHE[session_id] = (candidate, cache_signature)
                         SESSION_AGENT_CACHE.move_to_end(session_id)
                 if not ephemeral:
@@ -16417,6 +16443,18 @@ def _run_agent_streaming(
                         raise RuntimeError(
                             f"Failed to migrate compressed-session ownership: {old_sid}->{new_sid}",
                         )
+                    # Record the lease's new cache key for the active-run
+                    # registry: the final unregister_active_run clears the
+                    # turn lease under the row's lease key.  Keeping old_sid
+                    # would make that unregister clear a lease under a key
+                    # that no longer holds a cache entry (the entry is moved
+                    # to new_sid below), leaving the agent under new_sid with
+                    # _turn_active True forever — both governor passes would
+                    # skip it permanently.  The row's session_id itself is
+                    # deliberately left untouched: steer/ownership checks
+                    # read it as the stream's owning session and must keep
+                    # seeing the original for already-resolved requests.
+                    update_active_run(stream_id, lease_session_id=new_sid)
                     # Migrate cached agent to the new session ID so the turn
                     # count survives context compression.
                     from api.config import SESSION_AGENT_CACHE, SESSION_AGENT_CACHE_LOCK
