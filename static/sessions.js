@@ -3136,6 +3136,18 @@ async function loadSession(sid){
     _loadingSessionId=null;
     return loadSession(continuationSid,{...opts,_continuationParentSid:sid,skipLineageResolve:true,skipContinuationResolve:true,force:true,_preloadNotified:true});
   }
+  // #7925 re-gate (2026-10-29, silent finding 1): the metadata response
+  // carries `tool_calls: []`, so the card list must be snapshotted BEFORE
+  // `S.session=data.session` replaces the live session — after the
+  // replacement the previous cards are already gone and the capture below
+  // always sees an empty list, so a same-session reload dropped the older
+  // session-level cards. Snapshot the prior list here, then hand it to the
+  // capture site after the toolsets clear (which keeps the
+  // `S.session=data.session` → `S._pendingSessionToolsets=null` adjacency
+  // asserted by tests/test_issue4490_presession_toolsets.py intact).
+  const _priorSessionToolCalls = (currentSid === sid && S.session && Array.isArray(S.session.tool_calls) && S.session.tool_calls.length)
+    ? S.session.tool_calls.map(tc => (tc && typeof tc === 'object' ? {...tc} : tc))
+    : null;
   S.session=data.session;
   if(typeof _adoptRegenerationRevision==='function') _adoptRegenerationRevision(data.session);
   if(typeof _clearEmptyComposerModelOverride==='function') _clearEmptyComposerModelOverride();
@@ -3149,10 +3161,7 @@ async function loadSession(sid){
   // other path discards it. Placed after the toolsets clear so the
   // `S.session=data.session` → `S._pendingSessionToolsets=null` adjacency
   // (asserted by tests/test_issue4490_presession_toolsets.py) survives.
-  _pendingSessionToolCalls =
-    currentSid === sid && S.session && Array.isArray(S.session.tool_calls) && S.session.tool_calls.length
-      ? S.session.tool_calls.map(tc => (tc && typeof tc === 'object' ? {...tc} : tc))
-      : null;
+  _pendingSessionToolCalls = _priorSessionToolCalls;
   // #7855: a session switch is a hard context boundary — drop any restored
   // goal-continuation draft left over from the previous session (restored but
   // never sent, or abandoned mid-settle) so it cannot attach to the next send.
