@@ -206,6 +206,9 @@ for (const name of ['_profileMatchesActiveProfile', '_archiveBatchOwnerForRow',
 
 // The row predicates the owner resolver consults.
 global._isWebUiSourceSession = (snap) => snap && snap.__webui === true;
+// #7826 re-gate CORE: the read-only predicate the preflight now consults
+// (a read-only row must not veto the writable rows in the selection).
+global._isReadOnlySession = (snap) => !!(snap && (snap.read_only || snap.is_read_only));
 
 const byId = new Map(payload.rows.map(r => [r.sid, r]));
 const out = {};
@@ -229,12 +232,14 @@ def _run_preflight(payload: dict) -> dict:
     return _run_js(_PREFLIGHT_DRIVER, payload, _SESSIONS_JS)
 
 
-def _row(sid, profile=None, webui=False):
+def _row(sid, profile=None, webui=False, read_only=False):
     row = {"sid": sid}
     if profile is not None:
         row["profile"] = profile
     if webui:
         row["__webui"] = True
+    if read_only:
+        row["read_only"] = True
     return row
 
 
@@ -302,6 +307,46 @@ def test_the_active_profile_is_the_server_side_benchmark():
         "instead of the active profile"
     )
     assert out["ownerCount"] > 0, "a row owned by the active profile was rejected"
+
+
+def test_preflight_readonly_row_does_not_veto_writable_rows():
+    """Re-gate CORE (maintainer finding 2026-10-29): "Select all" -> Archive
+    must not stop archiving writable conversations just because a read-only
+    row (Claude Code import, ``read_only: true``, ``profile: null``) is in
+    the selection. The read-only row can never be archived and carries no
+    owner, so it must be skipped when the preflight decides whether the
+    selection mixes owners — the per-row refusal in _archiveBatchSessions
+    reports it instead. Before the fix the whole selection failed closed
+    with ``session_batch_archive_mixed_profiles`` and zero requests went out.
+    """
+    out = _run_preflight({
+        "activeProfile": "default",
+        "activeProfileIsDefault": True,
+        "ids": ["ro", "w"],
+        "rows": [_row("ro", read_only=True), _row("w", profile="default")],
+    })
+    assert out["ownerCount"] > 0, (
+        f"a read-only row vetoed the writable rows (reason={out['reason']!r}) — "
+        "Select all -> Archive must still reach the writable row"
+    )
+    assert not out["reason"], (
+        f"the preflight rejected a writable selection because of a read-only "
+        f"row: {out['reason']!r}"
+    )
+
+
+def test_preflight_readonly_only_selection_stays_rejected():
+    """Control: a selection of ONLY read-only rows has nothing archivable
+    and keeps failing closed (nothing to veto, nothing to archive)."""
+    out = _run_preflight({
+        "activeProfile": "default",
+        "activeProfileIsDefault": True,
+        "ids": ["ro1", "ro2"],
+        "rows": [_row("ro1", read_only=True), _row("ro2", read_only=True)],
+    })
+    assert out["ownerCount"] == 0, (
+        f"an all-read-only selection must stay rejected (reason={out['reason']!r})"
+    )
 
 
 # ── 3. SILENT: a failed preflight must not discard the selection ─────────────

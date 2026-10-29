@@ -345,10 +345,11 @@ async function api(path, opts){
 }""",
     }[scenario]
     rows_js = ", ".join(
-        "{ session_id: '%s', profile: %s, session_source: %s }" % (
+        "{ session_id: '%s', profile: %s, session_source: %s, read_only: %s }" % (
             s["id"],
             "null" if s.get("profile") is None else ("%r" % s["profile"]),
             "%r" % ('webui' if s.get("webui", True) else 'cli'),
+            'true' if s.get("read_only") else 'false',
         )
         for s in rows)
     open_sid = next((s["id"] for s in rows if s.get("open")), None) or open_session
@@ -376,6 +377,11 @@ function _sessionResponseRetainsWorktree(response, session){{
 function _isWebUiSourceSession(session){{
   if(!session) return false;
   return String(session.session_source || session.raw_source || session.source_tag || session.source || '').toLowerCase() === 'webui';
+}}
+// #7826 re-gate CORE: the read-only predicate the preflight and the batch
+// executor now consult (a read-only row must not veto the writable rows).
+function _isReadOnlySession(session){{
+  return !!(session && (session.read_only || session.is_read_only));
 }}
 function _profileMatchesActiveProfile(profile, activeProfile){{
   const eventName = (typeof profile === 'string' && profile.trim()) ? profile.trim() : 'default';
@@ -551,6 +557,57 @@ def test_batch_unknown_cli_row_still_fails_closed():
     assert data["switchCalls"] == 0, data
 
 
+def test_batch_readonly_row_refused_per_row_writable_row_archives():
+    """Re-gate CORE (maintainer finding 2026-10-29): "Select all" -> Archive
+    with a read-only Claude Code row (``read_only: true``, ``profile: null``)
+    plus a writable row must still archive the writable row. The preflight
+    skips the read-only row for the owner-mix decision; the executor refuses
+    it PER ROW — no request (the server refuses read-only rows by contract) —
+    and keeps archiving the writable rows, master's shape (writable 200,
+    read-only named in the failure envelope). Before the fix the selection
+    failed closed with zero requests and nothing archived."""
+    if NODE is None:
+        return
+    rows = [
+        {"id": "ro", "profile": None, "webui": False, "read_only": True},
+        {"id": "w1", "profile": "default"},
+    ]
+    data = _run_batch("all-ok", rows)
+    # The preflight must pass: the read-only row has nothing to veto.
+    assert data["preflight"]["owners"], data
+    assert not data["preflight"].get("reason"), data
+    # Exactly one request, for the writable row, under its own profile.
+    assert data["archivedSids"] == ["w1"], data
+    assert data["apiCalls"] == 1, (
+        f"the read-only row must be refused without a request: {data}")
+    assert data["requests"] == [
+        {"session_id": "w1", "archived": True, "profile": "default"}
+    ], data
+    # The read-only row is reported, not silently dropped.
+    assert data["outcome"]["ok"] is False, data
+    assert "batch-partial-failure:ro" in data["outcome"]["error"], data
+    assert data["outcome"]["archivedCount"] == 1, data
+    assert data["outcome"]["totalCount"] == 2, data
+    assert data["switchCalls"] == 0, data
+
+
+def test_batch_readonly_row_after_writable_row_does_not_stop_loop():
+    """Order control: the read-only refusal must not stop the sequential
+    loop. [writable, read-only] must archive the writable row exactly like
+    [read-only, writable] — the per-row refusal is not a mid-batch failure."""
+    if NODE is None:
+        return
+    rows = [
+        {"id": "w1", "profile": "default"},
+        {"id": "ro", "profile": None, "webui": False, "read_only": True},
+    ]
+    data = _run_batch("all-ok", rows)
+    assert data["archivedSids"] == ["w1"], data
+    assert data["apiCalls"] == 1, data
+    assert "batch-partial-failure:ro" in data["outcome"]["error"], data
+    assert data["outcome"]["archivedCount"] == 1, data
+
+
 def test_batch_legacy_root_owned_rows_send_default_profile():
     """Legacy root-owned WebUI rows (profile null on snapshot, the sidebar row
     says default) must resolve to owner 'default' and archive with the
@@ -651,6 +708,77 @@ _renderBatchActionBar();
     assert data["activeProfile"] == "default", data
     assert data["defaultModel"] == "root-model", data
     assert data["activeProvider"] == "root-provider", data
+
+
+def test_batch_archive_button_readonly_row_keeps_writable_row_archiving():
+    """Re-gate CORE: the real archive button handler, "Select all" selection
+    holding a read-only Claude Code row (``read_only: true``, ``profile:
+    null``) and a writable row. The preflight must pass (the read-only row
+    has nothing to veto), the confirm dialog must open, and exactly ONE
+    request must go out — for the writable row. The read-only row is refused
+    per row and named in the partial-failure toast (master refuses it with a
+    400 and still archives the writable row)."""
+    if NODE is None:
+        return
+    render_body = _extract_function(SESSIONS_JS, "_renderBatchActionBar")
+    owners_body = _extract_function(SESSIONS_JS, "_archiveBatchOwners")
+    owner_row_body = _extract_function(SESSIONS_JS, "_archiveBatchOwnerForRow")
+    match_body = _extract_function(SESSIONS_JS, "_archiveBatchOwnersMatch")
+    batch_body = _extract_async_function(SESSIONS_JS, "_archiveBatchSessions")
+    script = f"""
+const events=[]; const archivedSids=[]; const requests=[];
+const rows=[{{session_id:'ro',profile:null,session_source:'cli',read_only:true}},{{session_id:'w1',profile:'default',session_source:'webui'}}];
+const sessionsById=new Map(rows.map(r=>[r.session_id,r]));
+const _allSessions=rows; const _selectedSessions=new Set(['ro','w1']);
+const S={{session:{{session_id:'root-chat'}},activeProfile:'default',activeProfileIsDefault:true}};
+const window={{_defaultModel:'root-model',_activeProvider:'root-provider'}};
+const _showArchived=false; const _sessionSwipeReturnOffsets={{set(){{}}}};
+let _pendingSessionReflowPositions=null;
+const bar={{style:{{}},children:[],appendChild(node){{this.children.push(node);}}}};
+function $(id){{return id==='batchActionBar'?bar:null;}}
+const document={{createElement(tag){{return {{tag,style:{{}},className:'',textContent:'',appendChild(){{}},onclick:null}};}}}};
+function t(key){{return key;}} function _worktreeSessionCount(){{return 0;}}
+function _sessionSnapshotById(sid){{return sessionsById.get(sid)||null;}}
+function showConfirmDialog(){{events.push('confirm');return Promise.resolve(true);}}
+function exitSessionSelectMode(){{events.push('exit');}} function showToast(msg){{events.push('toast:'+msg);}}
+function renderSessionList(){{}} function _sessionPrefersReducedMotion(){{return false;}}
+function _sessionResponseRetainsWorktree(){{return false;}}
+function _profileMatchesActiveProfile(profile,active){{return profile===active;}}
+function _isReadOnlySession(session){{return !!(session&&(session.read_only||session.is_read_only));}}
+let switchCalls=0;
+async function _switchProfileForSessionLoad(profile){{switchCalls++;S.activeProfile=profile;S.activeProfileIsDefault=false;window._defaultModel=profile+'-model';window._activeProvider=profile+'-provider';}}
+async function api(path,opts){{
+  const body=JSON.parse(opts.body);
+  requests.push(body);
+  archivedSids.push(body.session_id);
+  return {{worktree_retained:false}};
+}}
+{owners_body}
+{owner_row_body}
+{match_body}
+{batch_body}
+{render_body}
+_renderBatchActionBar();
+(async()=>{{const button=bar.children.find(node=>node.textContent==='session_batch_archive');if(!button)throw new Error('no archive button');await button.onclick();console.log(JSON.stringify({{events,archivedSids,switchCalls,requests,activeProfile:S.activeProfile,defaultModel:window._defaultModel,activeProvider:window._activeProvider}}));}})();
+"""
+    data = json.loads(_run_node(script))
+    # The writable row archives; the read-only row is refused per row.
+    assert data["archivedSids"] == ["w1"], (
+        f"the writable row must archive even with a read-only row selected: {data}")
+    assert data["requests"] == [
+        {"session_id": "w1", "archived": True, "profile": "default"}
+    ], data
+    assert "confirm" in data["events"], (
+        f"an eligible selection must open the confirm dialog: {data}")
+    assert "toast:session_batch_archive_mixed_profiles" not in data["events"], (
+        f"the read-only row must not veto the batch with the mixed-profiles "
+        f"toast: {data}")
+    toast = next((e for e in data["events"] if e.startswith("toast:")), "")
+    assert "batch-partial-failure:ro" in toast, (
+        f"the refusal must name the read-only row: {toast!r}")
+    assert data["switchCalls"] == 0, (
+        f"the batch button handler must never switch profiles: {data}")
+    assert data["activeProfile"] == "default", data
 
 
 def test_batch_archive_content_search_row_archives():
