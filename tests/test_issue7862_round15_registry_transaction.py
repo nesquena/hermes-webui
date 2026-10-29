@@ -53,9 +53,7 @@ import errno
 import fcntl
 import json
 import os
-import threading
 import time
-from pathlib import Path
 
 import pytest
 
@@ -235,7 +233,6 @@ class TestBrokenRegistryLockDoesNotBreakChatStart:
         in a session with NO goal still returns 200 and launches its worker."""
         import api.routes as routes
 
-        store = clean_registry
         sid = "sess-r15-brick-ordinary"
 
         def _broken_flock(fd, op, *args):
