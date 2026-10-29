@@ -7654,8 +7654,43 @@ html[data-conversation-outline="enabled"] #outlineToggleBtn:not([hidden]){displa
   100%{background:transparent;}
 }
 .outline-jump-flash{animation:outline-flash 1.2s ease-out forwards;}
+/* Narrow viewports: the outline stays available, re-shaped as a bottom sheet.
+   A 320px floating side panel has nowhere to sit over a phone-width
+   transcript, so below the same 900px breakpoint (the one outline.js keys on
+   via _outlineIsCompact) the wrapper becomes a full-width sheet anchored to
+   the bottom edge. outline.js adds .outline-backdrop behind it, marks the
+   wrapper as a modal dialog (focus in, Tab contained, Escape to close), yields
+   the sheet to an incoming approval/clarification, and collapses it after a
+   jump. The desktop panel stays non-modal and untouched. */
 @media(max-width:900px){
-  #outlineToggleBtn,#outlinePanelWrapper{display:none!important;}
+  #outlinePanelWrapper{
+    left:0;right:0;bottom:0;width:auto;
+    max-height:min(70vh,calc(100% - 96px));
+    padding-bottom:env(safe-area-inset-bottom,0px);
+    border-radius:14px 14px 0 0;
+    border-left:none;border-right:none;border-bottom:none;
+    box-shadow:0 -10px 30px rgba(0,0,0,.35);
+  }
+  .outline-header{padding:10px 12px 8px;}
+  /* Touch targets: the toggle is the only way into the sheet on a phone, so it
+     meets the same ≥44px bar as the sheet's own controls (desktop keeps 38px,
+     where a pointer is exact). */
+  #outlineToggleBtn{width:44px;height:44px;font-size:18px;}
+  /* Touch targets: the sheet's own controls are ≥44px, unlike the desktop
+     panel where a pointer is exact. */
+  .outline-close-btn{
+    min-width:44px;min-height:44px;font-size:22px;line-height:1;
+    display:flex;align-items:center;justify-content:center;
+  }
+  #outlinePanel{overscroll-behavior:contain;}
+  .outline-entry{padding:12px 16px;}
+  .outline-entry-num{font-size:12px;min-width:20px;}
+  .outline-entry-text{font-size:14px;}
+  .outline-backdrop{
+    position:fixed;inset:0;z-index:9997;
+    background:rgba(0,0,0,.45);
+    -webkit-tap-highlight-color:transparent;
+  }
 }
 
 /* Settings search */

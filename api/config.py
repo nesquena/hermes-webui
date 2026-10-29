@@ -13523,7 +13523,7 @@ _SETTINGS_DEFAULTS = {
     "send_key": "enter",  # 'enter', 'ctrl+enter', or 'shift+enter'
     "show_token_usage": False,  # show input/output token badge below assistant messages
     "show_quota_chip": False,  # show ambient provider quota chip in composer footer (default off; wide desktop only when enabled, see style.css @media)
-    "show_conversation_outline": False,  # show opt-in desktop jump-to-question outline panel
+    "show_conversation_outline": False,  # show opt-in jump-to-question outline (side panel on desktop, bottom sheet on narrow viewports)
     "show_busy_placeholder_hint": False,  # opt-in busy composer placeholder hint
     "hide_empty_state_suggestions": False,  # hide the default new-chat suggestion buttons
     "hide_empty_state_panel": False,  # hide the complete new-chat welcome panel
