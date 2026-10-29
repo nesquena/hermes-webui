@@ -11420,7 +11420,7 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # the WebUI calls this from the new-chat path with a 30s browser
             # abort, so a 60s follower wait leaves "New conversation" hanging.
             if prefer_cache and _cache_build_in_progress:
-                return _follower_last_known(minimal=True)
+                return _follower_last_known(minimal=False)
             wait_timeout = 60.0
             if force_refresh and force_refresh_started_at is not None:
                 if _LIVE_REBUILD_BUDGET_SECONDS <= 0:
@@ -11534,8 +11534,9 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
         # chat/start indefinitely. A wakeup turn does NOT need the full live
         # catalog — _resolve_compatible_session_model_state only needs
         # default_model/active_provider and trusts the persisted session
-        # model. Serve a network-free minimal catalog instead and let a later
-        # human request do the real live rebuild.
+        # model. Serve the network-free static catalog (configured providers,
+        # no live probes) instead of the one-model emergency catalog, and let
+        # a later human request do the real live rebuild.
         if prefer_cache:
             # NOTE (Greptile P1): do NOT touch _cache_build_in_progress here.
             # This branch never set the flag (only the cold path below does),
@@ -11544,8 +11545,8 @@ def get_available_models(*, prefer_cache: bool = False, force_refresh: bool = Fa
             # sample but before we acquire the lock; clearing it here would
             # prematurely release that rebuild's serialization, waking waiters
             # to an empty cache and triggering a second live rebuild. Just
-            # serve the network-free minimal catalog and leave the flag alone.
-            return copy.deepcopy(_minimal_static_models_catalog())
+            # serve the network-free static catalog and leave the flag alone.
+            return copy.deepcopy(_static_models_catalog_without_live_probes())
 
         # Cold path: full rebuild — only one thread reaches here at a time
         with _cache_build_cv:

@@ -149,7 +149,7 @@ same for every caller:
 |---|---|---|
 | `prefer_cache=True` (new-chat path) | **none** — answers immediately | n/a |
 | `force_refresh=True` | the remaining live-rebuild budget | stale disk, else static catalog |
-| plain follower | the full 60s follower wait | best catalog it already knows (resident → disk → stale disk → static) |
+| plain follower | the full 60s follower wait | best catalog it already knows (resident → disk → stale disk → static), only while the rebuild budget is positive. `HERMES_WEBUI_MODELS_REBUILD_BUDGET=0` still falls through to the legacy cold path |
 
 The `prefer_cache` rule exists because `POST /api/session/new` runs behind a 30s
 browser abort: a follower that waits out someone else's rebuild makes "New
@@ -158,8 +158,12 @@ serves the resident cache while its fingerprint still matches, then disk, then a
 network-free static catalog — and never clears the builder's
 `_cache_build_in_progress` flag, which belongs to the rebuild that owns the slot.
 
-A follower whose wait runs out serves that same "best known" answer instead of
-falling through into the cold path, so a rebuild that overruns its wait cannot
+A model known only from a live probe of a custom endpoint still cannot be confirmed on that cold static catalog.
+
+A plain follower whose wait runs out serves that same "best known" answer instead of
+falling through into the cold path only when the live-rebuild budget is positive.
+`HERMES_WEBUI_MODELS_REBUILD_BUDGET=0` leaves the legacy cold path after the 60s
+wait. While the budget is positive, a rebuild that overruns its wait cannot
 stack a second set of live probes behind it.
 
 A **plain** follower deliberately keeps the full wait for the slot owner:

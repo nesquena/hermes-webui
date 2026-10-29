@@ -14,8 +14,10 @@ does not travel in this change.
 """
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -191,3 +193,221 @@ def test_session_model_state_forwards_prefer_cached_catalog(monkeypatch):
     )
     assert (model, provider) == ("cached-model", None)
     assert seen.get("prefer_cached_catalog") is True
+
+
+_CHOSEN_MODEL = "@anthropic:claude-sonnet-4.6"
+_DEFAULT_MODEL = "gpt-5.4-mini"
+
+
+def _one_model_trap() -> dict:
+    """The emergency catalog: only the default model, so membership swaps."""
+    return {
+        "active_provider": "openai",
+        "default_model": _DEFAULT_MODEL,
+        "configured_model_badges": {},
+        "groups": [
+            {
+                "provider": "OpenAI",
+                "provider_id": "openai",
+                "models": [{"id": _DEFAULT_MODEL, "label": "GPT-5.4 Mini"}],
+            }
+        ],
+        "aliases": {},
+    }
+
+
+def _model_ids(catalog: dict) -> set[str]:
+    found: set[str] = set()
+    for group in catalog.get("groups") or []:
+        if not isinstance(group, dict):
+            continue
+        for bucket in ("models", "extra_models"):
+            for entry in group.get(bucket) or []:
+                if isinstance(entry, dict) and entry.get("id"):
+                    found.add(str(entry["id"]))
+    return found
+
+
+def _arm_cold_fingerprint_miss(monkeypatch, tmp_path: Path):
+    """Resident, disk, and stale all fail the source fingerprint.
+
+    The planted snapshots contain only the default model. Serving any of
+    them would make New Chat store that default. Anthropic is configured
+    by env key only, not under ``providers:``, so the ``@anthropic:`` pick
+    cannot take the providers-dict fast path and has to be found in the
+    catalog.
+    """
+    import api.config as cfg
+    import api.profiles as profiles
+
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    config_path = home / "config.yaml"
+    config_path.write_text(
+        "model:\n  provider: openai\n  default: gpt-5.4-mini\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(profiles, "get_active_hermes_home", lambda: home)
+    monkeypatch.delenv("HERMES_CONFIG_PATH", raising=False)
+    monkeypatch.delenv("HERMES_MODEL", raising=False)
+    monkeypatch.delenv("OPENAI_MODEL", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-anthropic-key")
+
+    monkeypatch.setattr(cfg, "_get_config_path", lambda: config_path)
+    monkeypatch.setattr(cfg, "_cfg_path", config_path, raising=False)
+    monkeypatch.setattr(cfg, "_cfg_mtime", config_path.stat().st_mtime, raising=False)
+    monkeypatch.setattr(cfg, "_models_cache_path", tmp_path / "models_cache.json")
+    monkeypatch.setattr(
+        cfg, "_models_cache_provenance", cfg._models_cache_provenance, raising=False
+    )
+
+    saved_cfg = dict(cfg.cfg)
+    cfg.cfg.clear()
+    cfg.cfg["model"] = {"provider": "openai", "default": _DEFAULT_MODEL}
+
+    trap = _one_model_trap()
+    disk = {
+        **trap,
+        "_schema_version": cfg._MODELS_CACHE_SCHEMA_VERSION,
+        "_source_fingerprint": {"rejected": "fingerprint"},
+    }
+    runtime_version = cfg._current_webui_version()
+    if runtime_version is not None:
+        disk["_webui_version"] = runtime_version
+    (tmp_path / "models_cache.json").write_text(json.dumps(disk), encoding="utf-8")
+
+    # Fresh TTL, so the resident snapshot is dropped for the fingerprint and
+    # not because it is older than the cache window.
+    monkeypatch.setattr(cfg, "_available_models_cache", trap, raising=False)
+    monkeypatch.setattr(cfg, "_available_models_cache_ts", time.monotonic(), raising=False)
+    monkeypatch.setattr(cfg, "_available_models_live_rebuild_ts", 0.0, raising=False)
+    monkeypatch.setattr(
+        cfg,
+        "_available_models_cache_source_fingerprint",
+        {"rejected": "fingerprint"},
+        raising=False,
+    )
+    monkeypatch.setattr(cfg, "_cache_build_in_progress", False, raising=False)
+
+    def _no_live(*_args, **_kwargs):
+        raise AssertionError("cold prefer_cache must not run a live provider probe")
+
+    monkeypatch.setattr(cfg, "_invoke_models_rebuild", _no_live)
+    monkeypatch.setattr(cfg, "_read_live_provider_model_ids", _no_live)
+
+    assert cfg._load_models_cache_from_disk() is None
+    assert cfg._load_stale_models_cache_from_disk() is None
+    assert (
+        cfg._available_models_cache_source_fingerprint
+        != cfg._models_cache_source_fingerprint()
+    )
+
+    def _restore() -> None:
+        cfg.cfg.clear()
+        cfg.cfg.update(saved_cfg)
+
+    return cfg, _restore
+
+
+def test_new_chat_keeps_configured_provider_model_when_catalog_cache_is_cold(
+    tmp_path, monkeypatch
+):
+    """Fingerprint-cold caches must not replace a configured pick with the default.
+
+    Resident, disk, and stale each hold only the default model and fail the
+    source fingerprint. New Chat asks for a model of another configured
+    provider. The static catalog (no live probes) still lists it, so the
+    new session keeps it.
+    """
+    import api.routes as routes
+
+    cfg, restore = _arm_cold_fingerprint_miss(monkeypatch, tmp_path)
+    try:
+        def _must_not_wait(*_args, **_kwargs):
+            raise AssertionError("prefer_cache must not wait on an in-flight rebuild")
+
+        _patch_catalog_cv_wait(monkeypatch, cfg, _must_not_wait)
+
+        created: list[dict] = []
+
+        class _Sess:
+            session_id = "s_cold_catalog"
+            messages: list = []
+            profile = "default"
+
+            def compact(self):
+                return {"session_id": self.session_id}
+
+        def _fake_new_session(**kw):
+            created.append(dict(kw))
+            return _Sess()
+
+        monkeypatch.setattr(routes, "_check_csrf", lambda handler: True)
+        monkeypatch.setattr(routes, "_resolve_new_session_workspace", lambda *a, **k: "/tmp/ws")
+        monkeypatch.setattr(routes, "new_session", _fake_new_session)
+        monkeypatch.setattr(routes, "public_session_projection", lambda row: row)
+        monkeypatch.setattr(routes, "read_body", lambda handler: handler._body)
+        responses: list[dict] = []
+        monkeypatch.setattr(
+            routes,
+            "j",
+            lambda handler, payload, status=200, extra_headers=None, **kw: responses.append(
+                {"payload": payload, "status": status}
+            )
+            or True,
+        )
+        monkeypatch.setattr(
+            routes,
+            "bad",
+            lambda handler, msg, status=400, **kw: responses.append(
+                {"error": msg, "status": status}
+            )
+            or True,
+        )
+
+        handler = SimpleNamespace(
+            command="POST",
+            _body={
+                "model": _CHOSEN_MODEL,
+                "worktree": False,
+                "workspace": "/tmp/ws",
+            },
+        )
+        routes.handle_post(handler, SimpleNamespace(path="/api/session/new", query=""))
+
+        assert responses and responses[-1].get("status") == 200, responses
+        assert created, responses
+        assert created[-1]["model"] == _CHOSEN_MODEL
+        assert created[-1]["model_provider"] == "anthropic"
+        assert cfg._cache_build_in_progress is False
+    finally:
+        restore()
+
+
+def test_prefer_cache_inflight_miss_serves_static_catalog_not_one_model(
+    tmp_path, monkeypatch
+):
+    """An in-flight prefer_cache miss still does not wait, and is not one model.
+
+    Option A keeps the no-wait rule. With resident, disk, and stale rejected
+    by fingerprint, the follower serves the static catalog without live probes,
+    which still contains the configured non-default model.
+    """
+    cfg, restore = _arm_cold_fingerprint_miss(monkeypatch, tmp_path)
+    try:
+        monkeypatch.setattr(cfg, "_cache_build_in_progress", True, raising=False)
+
+        def _must_not_wait(*_args, **_kwargs):
+            raise AssertionError("prefer_cache must not wait on an in-flight rebuild")
+
+        _patch_catalog_cv_wait(monkeypatch, cfg, _must_not_wait)
+
+        result = cfg.get_available_models(prefer_cache=True)
+        ids = _model_ids(result)
+        assert _CHOSEN_MODEL in ids
+        assert _DEFAULT_MODEL in ids
+        assert len(ids) > 1
+        assert cfg._cache_build_in_progress is True
+    finally:
+        restore()
