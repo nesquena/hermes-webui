@@ -4284,6 +4284,17 @@ def _append_journaled_partial_output(
     # tool's completion (#7167 review 2026-10-27, SILENT: two same-name
     # id-less tools swapped results after a cold reload).
     journaled_tool_cards: list[dict] = []
+    # Indexes into ``journaled_tool_cards`` that a ``tool_complete`` event has
+    # already consumed during THIS replay. Consumption must be tracked here,
+    # not inferred from the card's persisted ``done`` flag: a card can be
+    # already done before the replay reaches its completion (a previous pass
+    # completed it and the start still deduped against it). Filtering the
+    # completion pool by ``not done`` then retargeted that completion onto the
+    # next unfinished card and discarded the later one (#7167 review
+    # 2026-10-28, SILENT: journal [start 1, start 2, complete 1, complete 2]
+    # with card 1 persisted done and card 2 unfinished showed command 1's
+    # output under command 2).
+    completion_consumed_cards: set[int] = set()
 
     messages_list = session.messages or []
     current_turn_min_idx = 0
@@ -4892,27 +4903,44 @@ def _append_journaled_partial_output(
             # completion has: pooling every reused card ahead of every fresh
             # one reversed a same-name pair and attached each tool's result
             # to the other tool's card (#7167 review 2026-10-27, SILENT).
-            _pool = list(journaled_tool_cards)
-            unfinished = [call for call in _pool if not call.get('done')]
+            #
+            # Candidates are filtered by what THIS replay already consumed,
+            # never by the card's persisted ``done`` flag: a start can dedupe
+            # against an already-completed card, and filtering on ``done``
+            # retargeted its completion onto the next unfinished card
+            # (#7167 review 2026-10-28, SILENT). A matched done card is
+            # consumed without rewriting its already-final result.
+            _candidates = [
+                (idx, call)
+                for idx, call in enumerate(journaled_tool_cards)
+                if idx not in completion_consumed_cards
+            ]
+            matched_idx = None
             matched_tool = None
             if completion_tool_id:
-                matched_tool = next((
-                    call for call in unfinished
-                    if str(call.get('tid') or '') == completion_tool_id
-                ), None)
+                for idx, call in _candidates:
+                    if str(call.get('tid') or '') == completion_tool_id:
+                        matched_idx, matched_tool = idx, call
+                        break
                 if matched_tool is None:
-                    matched_tool = next((
-                        call for call in unfinished
+                    for idx, call in _candidates:
                         if (call.get('_journal_synthetic_tid')
-                            or str(call.get('tid') or '').startswith('journal-'))
-                        and name and call.get('name') == name
-                    ), None)
+                                or str(call.get('tid') or '').startswith('journal-')) \
+                                and name and call.get('name') == name:
+                            matched_idx, matched_tool = idx, call
+                            break
             else:
-                matched_tool = next((
-                    call for call in unfinished
-                    if not name or call.get('name') == name
-                ), None)
-            if matched_tool is not None:
+                for idx, call in _candidates:
+                    if not name or call.get('name') == name:
+                        matched_idx, matched_tool = idx, call
+                        break
+            if matched_tool is not None and matched_idx is not None:
+                completion_consumed_cards.add(matched_idx)
+                if matched_tool.get('done'):
+                    # The card's result was final before this replay. Consume
+                    # the completion so the NEXT id-less completion cannot
+                    # retarget onto it, but keep the persisted result.
+                    continue
                 tool_call = matched_tool
                 tool_call['done'] = True
                 if payload.get('preview'):
