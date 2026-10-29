@@ -851,7 +851,7 @@ def _install_gemini_request_boundary_wrapper() -> None:
     global _GEMINI_REQUEST_BOUNDARY_WRAPPER_INSTALLED
     with _GEMINI_REQUEST_BOUNDARY_WRAPPER_LOCK:
         try:
-            from agent import conversation_loop
+            from agent import conversation_loop, turn_context
 
             current_build_turn_context = conversation_loop.build_turn_context
             if not getattr(current_build_turn_context, "_webui_gemini_request_boundary_wrapper", False):
@@ -870,7 +870,7 @@ def _install_gemini_request_boundary_wrapper() -> None:
                 _wrapped_build_turn_context.__dict__["_webui_original_build_turn_context"] = original_build_turn_context
                 conversation_loop.build_turn_context = _wrapped_build_turn_context
 
-            current_reanchor = conversation_loop.reanchor_current_turn_user_idx
+            current_reanchor = turn_context.reanchor_current_turn_user_idx
             if not getattr(current_reanchor, "_webui_gemini_request_boundary_wrapper", False):
                 original_reanchor = current_reanchor
 
@@ -883,7 +883,7 @@ def _install_gemini_request_boundary_wrapper() -> None:
 
                 _wrapped_reanchor.__dict__["_webui_gemini_request_boundary_wrapper"] = True
                 _wrapped_reanchor.__dict__["_webui_original_reanchor"] = original_reanchor
-                conversation_loop.reanchor_current_turn_user_idx = _wrapped_reanchor
+                turn_context.reanchor_current_turn_user_idx = _wrapped_reanchor
         except Exception:
             logger.debug("gemini request-boundary wrapper: Agent hooks unavailable", exc_info=True)
 
