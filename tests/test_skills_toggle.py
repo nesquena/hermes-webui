@@ -326,7 +326,7 @@ def test_toggle_still_404s_for_unknown_plugin_skill(tmp_path, monkeypatch):
     plugin skill must still 404 — the plugin fallback must not turn the
     toggle into a write-anything endpoint."""
     from unittest.mock import MagicMock
-    from api.routes import _handle_skill_toggle, bad
+    from api.routes import _handle_skill_toggle
 
     config_path = tmp_path / "config.yaml"
     monkeypatch.setattr("api.routes._get_config_path", lambda: config_path)
