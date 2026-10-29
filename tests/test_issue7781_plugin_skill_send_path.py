@@ -47,6 +47,18 @@ PLUGIN_ROW = {
     "disabled": False,
 }
 
+# The plugin manager also accepts underscore-qualified names. The picker
+# must insert this exact registered spelling (PR #7781 re-gate finding 1),
+# and send() resolves qualified names verbatim against the registry.
+UNDERSCORE_ROW = {
+    "name": "reviewdemo:under_score",
+    "description": "An underscore-qualified plugin skill",
+    "category": "plugin",
+    "plugin": "reviewdemo",
+    "source": "plugin",
+    "disabled": False,
+}
+
 DIRECTORY_ROW = {
     "name": "local-skill",
     "description": "A directory-installed skill",
@@ -198,9 +210,28 @@ vm.runInContext(__MESSAGES_JS__, ctx);
           composerAfter: __composer(),
         };
       };
+      const _positive = await run('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' });
+      const _negative = await run('/demo:skill', [__DIRECTORY_ROW__], {});
+      // PR #7781 re-gate finding 1 controls: canonical underscore spelling
+      // must dispatch with the skill body; the ordinary hyphen spelling and
+      // an unknown qualified command must fall through unchanged (no fetch,
+      // no directive) because neither is a registered identity.
+      const _underscore = await run('/reviewdemo:under_score do X', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' });
+      const _hyphen = await run('/reviewdemo:under-score do X', [__UNDERSCORE_ROW__], {});
+      const _unknown = await run('/reviewdemo:missing do X', [__UNDERSCORE_ROW__], {});
+      // Full picker-entry -> send() chain: the entry the picker would build
+      // for the underscore row supplies the composer text inserted on pick,
+      // and that exact text must resolve back to the registered skill.
+      const _pickedEntry = _buildSkillCommandEntry(__UNDERSCORE_ROW__);
+      const _entryName = _pickedEntry && _pickedEntry.name;
+      const _picked = await run('/' + _entryName + ' do Y', [__UNDERSCORE_ROW__], { 'reviewdemo:under_score': 'UNDERSCORE SKILL BODY' });
       return {
-        positive: await run('/demo:skill do X', [__PLUGIN_ROW__], { 'demo:skill': 'DEMO SKILL BODY' }),
-        negative: await run('/demo:skill', [__DIRECTORY_ROW__], {}),
+        positive: _positive,
+        negative: _negative,
+        underscore: _underscore,
+        hyphen: _hyphen,
+        unknown: _unknown,
+        picked: { entryName: _entryName, run: _picked },
       };
     })()`, ctx);
     process.stdout.write(JSON.stringify(result), () => process.exit(0));
@@ -217,6 +248,7 @@ def _run_send_harness() -> dict:
         _HARNESS.replace("__COMMANDS_JS__", json.dumps(COMMANDS_JS, ensure_ascii=False))
         .replace("__MESSAGES_JS__", json.dumps(MESSAGES_JS, ensure_ascii=False))
         .replace("__PLUGIN_ROW__", json.dumps(PLUGIN_ROW))
+        .replace("__UNDERSCORE_ROW__", json.dumps(UNDERSCORE_ROW))
         .replace("__DIRECTORY_ROW__", json.dumps(DIRECTORY_ROW))
     )
     with tempfile.NamedTemporaryFile("w", suffix=".js", encoding="utf-8", delete=False) as handle:
@@ -266,3 +298,61 @@ def test_qualified_command_without_plugin_row_falls_through_unchanged():
     assert "DEMO SKILL BODY" not in result["startBody"]["message"], result
     assert result["contentFetches"] == [], result
     assert result["userMessage"] is not None and result["userMessage"]["content"] == "/demo:skill", result
+
+
+def test_canonical_underscore_qualified_name_dispatches_with_skill_body():
+    """Control (canonical underscore): send('/reviewdemo:under_score do X')
+    with the underscore-qualified row registered must attach the skill body —
+    the picker's inserted text resolves because it matches the registry name
+    verbatim (PR #7781 re-gate finding 1)."""
+    result = _run_send_harness()["underscore"]
+    assert result["startBody"] is not None, result
+    message = result["startBody"]["message"]
+    assert "UNDERSCORE SKILL BODY" in message, result
+    assert "do X" in message, result
+    assert "[USER OVERRIDE]" in message, result
+    assert "You MUST follow the skill 'reviewdemo:under_score' content provided below" in message, result
+    # The content fetch must target the canonical underscore identity.
+    assert result["contentFetches"] == ["/api/skills/content?name=reviewdemo%3Aunder_score"], result
+
+
+def test_ordinary_hyphen_spelling_falls_through_unchanged():
+    """Control (ordinary hyphen): send('/reviewdemo:under-score do X') must NOT
+    resolve to the registered 'reviewdemo:under_score' — a hyphen spelling is
+    not a registry identity. It falls through as literal chat: no fetch, no
+    directive (PR #7781 re-gate finding 1)."""
+    result = _run_send_harness()["hyphen"]
+    assert result["startBody"] is not None, result
+    assert result["startBody"]["message"] == "/reviewdemo:under-score do X", result
+    assert "UNDERSCORE SKILL BODY" not in result["startBody"]["message"], result
+    assert result["contentFetches"] == [], result
+    assert result["userMessage"] is not None and result["userMessage"]["content"] == "/reviewdemo:under-score do X", result
+
+
+def test_unknown_qualified_command_falls_through_unchanged():
+    """Control (unknown command): send('/reviewdemo:missing do X') with no
+    matching row must forward the literal text and fetch nothing — the plugin
+    lookup must never rewrite unknown qualified commands."""
+    result = _run_send_harness()["unknown"]
+    assert result["startBody"] is not None, result
+    assert result["startBody"]["message"] == "/reviewdemo:missing do X", result
+    assert result["contentFetches"] == [], result
+    assert result["userMessage"] is not None and result["userMessage"]["content"] == "/reviewdemo:missing do X", result
+
+
+def test_picker_entry_for_underscore_name_feeds_send_verbatim():
+    """Full picker-entry -> send() chain: _buildSkillCommandEntry must emit
+    the registered underscore identity as the entry name (the composer text a
+    pick inserts is '/<entry.name>'), and sending that exact text must resolve
+    back to the plugin skill and attach its body (PR #7781 re-gate finding 1)."""
+    result = _run_send_harness()["picked"]
+    assert result["entryName"] == "reviewdemo:under_score", result
+    run_result = result["run"]
+    assert run_result["startBody"] is not None, result
+    message = run_result["startBody"]["message"]
+    assert "UNDERSCORE SKILL BODY" in message, result
+    assert "do Y" in message, result
+    assert "[USER OVERRIDE]" in message, result
+    assert run_result["contentFetches"] == ["/api/skills/content?name=reviewdemo%3Aunder_score"], result
+    # The user-message echo keeps the ORIGINAL composer text (with underscore).
+    assert run_result["userMessage"] is not None and run_result["userMessage"]["content"] == "/reviewdemo:under_score do Y", result

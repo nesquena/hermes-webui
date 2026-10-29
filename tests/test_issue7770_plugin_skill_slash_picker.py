@@ -128,6 +128,17 @@ PLUGIN_SKILLS = [
         "source": "plugin",
         "disabled": False,
     },
+    {
+        # The plugin manager accepts underscore-qualified names; the picker
+        # must treat the registered spelling as the canonical identity
+        # instead of slug-normalizing it to a hyphen (PR #7781 re-gate).
+        "name": "reviewdemo:under_score",
+        "description": "Underscore-qualified plugin skill",
+        "category": "plugin",
+        "plugin": "reviewdemo",
+        "source": "plugin",
+        "disabled": False,
+    },
 ]
 
 
@@ -257,3 +268,64 @@ def test_qualified_name_does_not_collide_with_reserved_slash_command():
     )
     assert "superpowers:brainstorming" in result["offered"], result
     assert "superpowers:writing-plans" in result["offered"], result
+
+
+def test_underscore_qualified_name_preserved_verbatim_in_picker():
+    """The installed registry accepts ``reviewdemo:under_score``; the picker
+    must offer that EXACT qualified identity as the entry name, never the
+    slug-normalized ``reviewdemo:under-score`` (PR #7781 re-gate finding 1).
+    send() matches the typed name verbatim against the /api/skills rows, so a
+    hyphen-rewritten entry would dispatch a literal that no plugin row
+    resolves and the skill body never reached the agent."""
+    result = _run_commands_js(
+        """
+        await loadPicker();
+        const all = await getSlashAutocompleteMatches('/reviewdemo:under');
+        return {
+          offered: skillsOffered(all),
+          entries: skillEntries(all),
+        };
+        """,
+        PLUGIN_SKILLS,
+    )
+    assert result["offered"] == ["reviewdemo:under_score"], result
+    # The slugified spelling must NOT be offered — it is not a registry name.
+    assert "reviewdemo:under-score" not in result["offered"], result
+    entries_by_name = {e["name"]: e for e in result["entries"]}
+    assert entries_by_name["reviewdemo:under_score"]["skillName"] == "reviewdemo:under_score"
+    assert entries_by_name["reviewdemo:under_score"]["plugin"] == "reviewdemo"
+
+
+def test_underscore_qualified_name_matches_both_typed_spellings():
+    """Typing either separator spelling must still surface the canonical
+    underscore entry: the autocomplete matcher treats ``_`` ≡ ``-`` for
+    prefix matching, but the ENTRY NAME (what a pick inserts into the
+    composer) must stay the registry-qualified underscore identity."""
+    result = _run_commands_js(
+        """
+        await loadPicker();
+        return {
+          underscore_typed: skillsOffered(await getSlashAutocompleteMatches('/reviewdemo:under_')),
+          hyphen_typed: skillsOffered(await getSlashAutocompleteMatches('/reviewdemo:under-')),
+        };
+        """,
+        PLUGIN_SKILLS,
+    )
+    assert result["underscore_typed"] == ["reviewdemo:under_score"], result
+    assert result["hyphen_typed"] == ["reviewdemo:under_score"], result
+
+
+def test_use_subargs_preserve_underscore_qualified_name():
+    """The /use sub-arg surface feeds cmdUse, which matches skill names
+    verbatim — so the qualified name must also arrive with its underscore
+    intact there (both selection paths round-trip the registry identity)."""
+    result = _run_commands_js(
+        """
+        await loadPicker();
+        const use_subargs = subArgsOffered(await getSlashAutocompleteMatches('/use reviewdemo:under'));
+        return { use_subargs };
+        """,
+        PLUGIN_SKILLS,
+    )
+    assert "reviewdemo:under_score" in result["use_subargs"], result
+    assert "reviewdemo:under-score" not in result["use_subargs"], result

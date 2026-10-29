@@ -2590,12 +2590,22 @@ function _buildSkillCommandEntry(skill){
   const slug=_skillCommandSlug(skillName);
   if(!slug)return null;
   if(_getReservedSlashCommandSlugs().has(slug)) return null;
+  // Registry-qualified names (``namespace:skill``) are the plugin manager's
+  // canonical identity: send() and cmdUse() match them verbatim against the
+  // /api/skills rows, so the picker must insert the qualified name EXACTLY
+  // as registered. Slug-normalization (``_``→``-``, char stripping) applies
+  // to directory-skill names only — applying it to a qualified name rewrote
+  // ``reviewdemo:under_score`` into a ``reviewdemo:under-score`` entry whose
+  // pick dispatched a literal no plugin row resolves, so the skill body
+  // never reached the agent (PR #7781 re-gate). The typed autocomplete still
+  // matches either separator spelling via _slashCommandSlugVariants.
+  const entryName=skillName.includes(':')?skillName:slug;
   // Carry the plugin namespace through so the picker can render a
   // ``Plugin: <namespace>`` hint and the dropdown labels plugin skills
   // distinctly. The ``source`` field stays ``"skill"`` (the picker badge
   // renders the same way for directory and plugin skills), while
   // ``plugin`` is the namespace extracted from the qualified name (#7770).
-  const entry={name:slug,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
+  const entry={name:entryName,desc:String(skill&&skill.description||'').trim()||t('slash_skill_desc'),source:'skill',skillName};
   if(skill&&skill.source==='plugin'&&skill.plugin){
     entry.plugin=String(skill.plugin);
   }else if(skillName.includes(':')){
