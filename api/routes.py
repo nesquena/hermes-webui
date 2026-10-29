@@ -30111,6 +30111,13 @@ def _handle_chat_sync(handler, body):
             # rotation (agent.session_id advancing to a fresh continuation) is
             # visible to the settle below.
             _sync_session_id = s.session_id
+            try:
+                from api.config import register_profile_hooks as _sync_register_profile_hooks
+                from api.profiles import get_hermes_home_for_profile as _sync_get_home
+                _sync_profile_home = _sync_get_home(getattr(s, "profile", None))
+                _sync_register_profile_hooks(_pp_cfg, profile_home=_sync_profile_home)
+            except Exception:
+                pass
             agent = AIAgent(
                 model=_model,
                 provider=_provider,
