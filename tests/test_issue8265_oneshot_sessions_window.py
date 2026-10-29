@@ -186,12 +186,12 @@ def _list_dir_payload(monkeypatch, tmp_path, sid):
     def _get_session(_sid, **_kwargs):
         raise KeyError(_sid)
 
-    def _list(workspace_path, _rel):
+    def _list_page(workspace_path, _rel, cursor=None):
         listed["workspace"] = workspace_path
-        return []
+        return {"entries": [], "has_more": False, "cursor": None}
 
     monkeypatch.setattr(routes, "get_session", _get_session)
-    monkeypatch.setattr(routes, "list_dir", _list)
+    monkeypatch.setattr(routes, "list_dir_page", _list_page)
     monkeypatch.setattr(routes, "dir_signature", lambda *_args: "sig")
     monkeypatch.setattr(routes, "j", lambda _handler, payload, **_kwargs: payload)
     monkeypatch.setattr(
