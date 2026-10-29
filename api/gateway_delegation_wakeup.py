@@ -42,8 +42,12 @@ POLL_INTERVAL_S = 5.0
 BACKOFF_MAX_S = 300.0
 RESERVATION_OWNER = "hermes-webui"
 RESERVATION_TTL_S = 120.0
-WAKE_PROMPT = ("[IMPORTANT: A delegated subagent finished. Its result is already in your "
-               "conversation history above; review it and continue the task.]")
+WAKE_PROMPT = ("[IMPORTANT: A delegated subagent is reporting back. Its result is already in your "
+               "conversation history above; review it and continue the task. If that result carries "
+               "recovery evidence (an owner exit, a \"Last persisted unit status\" line, a RE-DISPATCH "
+               "list), read it first: keep the results it recorded, resume only the work it lists as "
+               "unfinished, starting each from its transcript tail and existing worktree, and do not "
+               "retry a side effect whose outcome is unrecorded.]")
 _LEASE_API = ("reserve_caller_history_deliveries", "commit_caller_history_deliveries",
                  "release_caller_history_deliveries")
 # Rows older than this at first sight are left for the next user turn to fold.
