@@ -6732,6 +6732,15 @@ function _archiveBatchOwners(ids, sessionsById){
   const activeProfile=(S&&typeof S.activeProfile==='string'&&S.activeProfile.trim())
     ?S.activeProfile.trim():'default';
   for(const sid of ids){
+    const snap=(sessionsById&&sessionsById.get)?sessionsById.get(sid):null;
+    // #7826 re-gate CORE: a read-only row (e.g. a Claude Code import,
+    // read_only: true, profile: null) can never be archived and carries no
+    // owner. Skip it when deciding whether the selection mixes owners — it
+    // must not veto the writable rows; the per-row refusal in
+    // _archiveBatchSessions reports it. The typeof guard keeps isolated
+    // node-harness extractions (which mock this predicate per scenario)
+    // from throwing ReferenceError.
+    if(snap&&typeof _isReadOnlySession==='function'&&_isReadOnlySession(snap)) continue;
     const resolved=_archiveBatchOwnerForRow(sid,sessionsById);
     if(!resolved.owner) return {owner:null, owners:[], reason:resolved.reason};
     if(!allProfilesOn&&!_archiveBatchOwnersMatch(resolved.owner, activeProfile)){
@@ -6772,8 +6781,22 @@ async function _archiveBatchSessions(ids, sessionsById){
   // Resolve EVERY row's owner before the first request: an unowned row must
   // fail the batch closed with zero archive requests (the server 404s
   // profile-less metadata rows by contract), not after earlier rows landed.
+  // Read-only rows are exempt from the owner probe: they can never be
+  // archived (the server refuses them by contract), so they are marked
+  // with a null owner below and refused per row WITHOUT a request.
   const resolvedOwners=[];
   for(const sid of ids){
+    const session=(sessionsById&&sessionsById.get)?sessionsById.get(sid):null;
+    // #7826 re-gate CORE: per-row refusal marker. A read-only row (e.g. a
+    // Claude Code import) cannot be archived at all — no request, reported
+    // in the failure envelope, and the loop CONTINUES so the writable rows
+    // in the selection still archive (master's shape: the writable row 200s
+    // and the toast names the read-only row). The typeof guard keeps
+    // isolated node-harness extractions from throwing ReferenceError.
+    if(session&&typeof _isReadOnlySession==='function'&&_isReadOnlySession(session)){
+      resolvedOwners.push(null);
+      continue;
+    }
     const resolved=_archiveBatchOwnerForRow(sid,sessionsById);
     if(!(resolved&&resolved.owner)){
       return {ok:false,error:(resolved&&resolved.reason)||'unowned-row'};
@@ -6791,6 +6814,12 @@ async function _archiveBatchSessions(ids, sessionsById){
     const sid=ids[i];
     const owner=resolvedOwners[i];
     const session=(sessionsById&&sessionsById.get)?sessionsById.get(sid):null;
+    // #7826 re-gate CORE: a null owner here marks a read-only row refused
+    // per row — no request, reported like any failed sid, loop continues.
+    if(owner===null){
+      failedSids.push(sid);
+      continue;
+    }
     try{
       const response=await api('/api/session/archive',{method:'POST',body:JSON.stringify({session_id:sid,archived:true,profile:owner,...(allProfilesOn?{all_profiles:true}:{})})});
       if(session) session.archived=true;
